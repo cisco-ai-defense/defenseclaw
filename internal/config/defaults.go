@@ -51,6 +51,28 @@ func DetectEnvironment() Environment {
 	return EnvLinux
 }
 
+func DefaultSkillWatchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return []string{
+		filepath.Join(home, ".openclaw", "skills"),
+		filepath.Join(home, ".openclaw", "agents"),
+	}
+}
+
+func DefaultMCPWatchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	return []string{
+		filepath.Join(home, ".openclaw", "mcp-servers"),
+		filepath.Join(home, ".openclaw", "mcps"),
+	}
+}
+
 func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
 	return &Config{
@@ -69,6 +91,12 @@ func DefaultConfig() *Config {
 		OpenShell: OpenShellConfig{
 			Binary:    "openshell",
 			PolicyDir: "/etc/openshell/policies",
+		},
+		Watch: WatchConfig{
+			SkillDirs:  DefaultSkillWatchPaths(),
+			MCPDirs:    DefaultMCPWatchPaths(),
+			DebounceMs: 500,
+			AutoBlock:  true,
 		},
 	}
 }

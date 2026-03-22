@@ -18,6 +18,14 @@ type Config struct {
 	Environment   string          `mapstructure:"environment"    yaml:"environment"`
 	Scanners      ScannersConfig  `mapstructure:"scanners"       yaml:"scanners"`
 	OpenShell     OpenShellConfig `mapstructure:"openshell"      yaml:"openshell"`
+	Watch         WatchConfig     `mapstructure:"watch"          yaml:"watch"`
+}
+
+type WatchConfig struct {
+	SkillDirs    []string `mapstructure:"skill_dirs"    yaml:"skill_dirs"`
+	MCPDirs      []string `mapstructure:"mcp_dirs"      yaml:"mcp_dirs"`
+	DebounceMs   int      `mapstructure:"debounce_ms"   yaml:"debounce_ms"`
+	AutoBlock    bool     `mapstructure:"auto_block"     yaml:"auto_block"`
 }
 
 type ScannersConfig struct {
@@ -80,4 +88,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
 	viper.SetDefault("openshell.binary", "openshell")
 	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
+
+	viper.SetDefault("watch.skill_dirs", DefaultSkillWatchPaths())
+	viper.SetDefault("watch.mcp_dirs", DefaultMCPWatchPaths())
+	viper.SetDefault("watch.debounce_ms", 500)
+	viper.SetDefault("watch.auto_block", true)
 }
