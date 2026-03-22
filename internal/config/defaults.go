@@ -98,6 +98,11 @@ func DefaultConfig() *Config {
 			DebounceMs: 500,
 			AutoBlock:  true,
 		},
+		Firewall: FirewallConfig{
+			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),
+			RulesFile:  filepath.Join(dataDir, "firewall.pf.conf"),
+			AnchorName: "com.defenseclaw",
+		},
 		Splunk: SplunkConfig{
 			HECEndpoint:   "https://localhost:8088/services/collector/event",
 			Index:         "defenseclaw",

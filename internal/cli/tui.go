@@ -21,7 +21,7 @@ func init() {
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
-	model := tui.New(auditStore, cfg.OpenShell.Binary)
+	model := tui.New(auditStore, cfg.OpenShell.Binary, cfg.Firewall.AnchorName)
 
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {

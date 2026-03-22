@@ -1,0 +1,73 @@
+# DefenseClaw egress firewall — deny-by-default template
+#
+# This file is a starting point. Copy it to ~/.defenseclaw/firewall.yaml,
+# edit the allowlist to match your environment, then activate:
+#
+#   defenseclaw firewall generate
+#   sudo pfctl -a com.defenseclaw -f ~/.defenseclaw/firewall.pf.conf && sudo pfctl -e
+#
+# Or use `defenseclaw firewall init --observe` to auto-detect active connections.
+
+version: "1.0"
+
+# deny  — block all outbound traffic not explicitly allowed (recommended)
+# allow — permit all traffic except explicitly denied rules
+default_action: deny
+
+rules:
+  # Always block cloud metadata endpoints — prevents SSRF to instance credentials.
+  - name: block-cloud-metadata
+    direction: outbound
+    protocol: tcp
+    destination: 169.254.169.254
+    action: deny
+
+  # Block link-local AWS extended metadata endpoint.
+  - name: block-cloud-metadata-v6
+    direction: outbound
+    protocol: tcp
+    destination: fd00:ec2::254
+    action: deny
+
+allowlist:
+  # Domains resolved to IPs at rule-generation time.
+  # Add any API endpoints your skills or MCP servers need.
+  domains:
+    # Anthropic / Claude API
+    - api.anthropic.com
+
+    # OpenAI API (if used)
+    # - api.openai.com
+
+    # GitHub (skill installs, git operations)
+    - api.github.com
+    - github.com
+    - objects.githubusercontent.com
+
+    # Go module proxy (go get, go install)
+    - proxy.golang.org
+    - sum.golang.org
+
+    # npm registry (Node.js MCP servers)
+    - registry.npmjs.org
+
+    # PyPI (Python MCP servers / skill-scanner)
+    - pypi.org
+    - files.pythonhosted.org
+
+  # Explicit IP allowlist (CIDR or single address).
+  # Use sparingly — prefer domains when possible.
+  ips: []
+
+  # Restrict allowlisted destinations to these ports only.
+  # Leave empty to allow any port to the listed IPs/domains.
+  ports:
+    - 443   # HTTPS
+    - 80    # HTTP (redirect to HTTPS)
+
+logging:
+  enabled: true
+  # Rate-limit log entries to avoid log flooding.
+  rate_limit: "5/min"
+  # Prefix for syslog / kernel log messages.
+  prefix: "[DEFENSECLAW-BLOCKED]"

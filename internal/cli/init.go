@@ -76,6 +76,11 @@ func runInit(_ *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println("\nDefenseClaw initialized. Run 'defenseclaw scan' to start scanning.")
+
+	fmt.Println()
+	fmt.Println("  Egress firewall (optional):")
+	fmt.Printf("    defenseclaw firewall init          # generate deny-by-default config\n")
+	fmt.Printf("    defenseclaw firewall init --observe # auto-detect active connections first\n")
 	return nil
 }
 

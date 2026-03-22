@@ -37,9 +37,10 @@ type Model struct {
 
 	store           *audit.Store
 	openshellBinary string
+	anchorName      string
 }
 
-func New(store *audit.Store, openshellBinary string) Model {
+func New(store *audit.Store, openshellBinary, anchorName string) Model {
 	m := Model{
 		alerts:          NewAlertsPanel(store),
 		skills:          NewSkillsPanel(store),
@@ -48,6 +49,7 @@ func New(store *audit.Store, openshellBinary string) Model {
 		statusBar:       NewStatusBar(),
 		store:           store,
 		openshellBinary: openshellBinary,
+		anchorName:      anchorName,
 	}
 	return m
 }
@@ -189,6 +191,7 @@ func (m *Model) refresh() {
 		m.mcps.BlockedCount(),
 	)
 	m.statusBar.DetectSandbox(m.openshellBinary)
+	m.statusBar.DetectFirewall(m.anchorName)
 }
 
 func (m *Model) cursorUp() {

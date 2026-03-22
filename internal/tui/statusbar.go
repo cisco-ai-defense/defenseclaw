@@ -6,21 +6,25 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/defenseclaw/defenseclaw/internal/firewall"
+	"github.com/defenseclaw/defenseclaw/internal/firewall/platform"
 )
 
 type StatusBar struct {
-	width         int
-	alertCount    int
-	skillCount    int
-	blockedSkills int
-	mcpCount      int
-	blockedMCPs   int
-	sandboxStatus string
-	message       string
+	width          int
+	alertCount     int
+	skillCount     int
+	blockedSkills  int
+	mcpCount       int
+	blockedMCPs    int
+	sandboxStatus  string
+	firewallStatus string // "active", "inactive", "unknown"
+	message        string
 }
 
 func NewStatusBar() StatusBar {
-	return StatusBar{sandboxStatus: "unknown"}
+	return StatusBar{sandboxStatus: "unknown", firewallStatus: "unknown"}
 }
 
 func (s *StatusBar) SetSize(w int) {
@@ -40,6 +44,19 @@ func (s *StatusBar) DetectSandbox(openshellBinary string) {
 		s.sandboxStatus = "active"
 	} else {
 		s.sandboxStatus = "inactive"
+	}
+}
+
+// DetectFirewall checks whether the DefenseClaw firewall anchor is loaded.
+func (s *StatusBar) DetectFirewall(anchorName string) {
+	compiler := platform.NewCompiler()
+	status := firewall.GetStatus(compiler, anchorName)
+	if status.Error != "" {
+		s.firewallStatus = "unknown"
+	} else if status.Active {
+		s.firewallStatus = "active"
+	} else {
+		s.firewallStatus = "inactive"
 	}
 }
 
@@ -65,7 +82,17 @@ func (s *StatusBar) View() string {
 		sandboxSeg = StyleInfo.Render(sandboxSeg)
 	}
 
-	sections := left + alertSeg + skillSeg + mcpSeg + sandboxSeg
+	fwSeg := " Firewall: " + s.firewallStatus + " "
+	switch s.firewallStatus {
+	case "active":
+		fwSeg = StyleAllowed.Render(fwSeg)
+	case "inactive":
+		fwSeg = StyleHigh.Render(fwSeg)
+	default:
+		fwSeg = StyleInfo.Render(fwSeg)
+	}
+
+	sections := left + alertSeg + skillSeg + mcpSeg + sandboxSeg + fwSeg
 
 	if s.message != "" {
 		sections += "  " + lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("228")).Render(s.message)

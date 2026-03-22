@@ -19,7 +19,14 @@ type Config struct {
 	Scanners      ScannersConfig  `mapstructure:"scanners"       yaml:"scanners"`
 	OpenShell     OpenShellConfig `mapstructure:"openshell"      yaml:"openshell"`
 	Watch         WatchConfig     `mapstructure:"watch"          yaml:"watch"`
+	Firewall      FirewallConfig  `mapstructure:"firewall"       yaml:"firewall"`
 	Splunk        SplunkConfig    `mapstructure:"splunk"         yaml:"splunk"`
+}
+
+type FirewallConfig struct {
+	ConfigFile string `mapstructure:"config_file" yaml:"config_file"`
+	RulesFile  string `mapstructure:"rules_file"  yaml:"rules_file"`
+	AnchorName string `mapstructure:"anchor_name" yaml:"anchor_name"`
 }
 
 type SplunkConfig struct {

@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/firewall"
+	"github.com/defenseclaw/defenseclaw/internal/firewall/platform"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -49,12 +51,20 @@ var scanCodeCmd = &cobra.Command{
 	RunE:  runScanCode,
 }
 
+var scanClawShieldCmd = &cobra.Command{
+	Use:   "clawshield [path]",
+	Short: "Scan with ClawShield: injection, PII, secrets, vulns, and malware indicators",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  runScanClawShield,
+}
+
 func init() {
 	rootCmd.AddCommand(scanCmd)
 	scanCmd.AddCommand(scanSkillCmd)
 	scanCmd.AddCommand(scanMCPCmd)
 	scanCmd.AddCommand(scanAIBOMCmd)
 	scanCmd.AddCommand(scanCodeCmd)
+	scanCmd.AddCommand(scanClawShieldCmd)
 }
 
 func runScanSkill(cmd *cobra.Command, args []string) error {
@@ -99,6 +109,30 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 	return execScanner(cmd.Context(), s, args[0])
 }
 
+func runScanClawShield(cmd *cobra.Command, args []string) error {
+	target := "."
+	if len(args) > 0 {
+		target = args[0]
+	}
+	scanners := []scanner.Scanner{
+		scanner.NewClawShieldInjectionScanner(),
+		scanner.NewClawShieldPIIScanner(),
+		scanner.NewClawShieldSecretsScanner(),
+		scanner.NewClawShieldVulnScanner(),
+		scanner.NewClawShieldMalwareScanner(),
+	}
+	var errs []string
+	for _, s := range scanners {
+		if err := execScanner(cmd.Context(), s, target); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", s.Name(), err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("scan errors:\n  %s", strings.Join(errs, "\n  "))
+	}
+	return nil
+}
+
 func runScanAll(cmd *cobra.Command, args []string) error {
 	target := "."
 	if len(args) > 0 {
@@ -110,6 +144,11 @@ func runScanAll(cmd *cobra.Command, args []string) error {
 		scanner.NewMCPScanner(cfg.Scanners.MCPScanner),
 		scanner.NewAIBOMScanner(cfg.Scanners.AIBOM),
 		scanner.NewCodeGuardScanner(cfg.Scanners.CodeGuard),
+		scanner.NewClawShieldInjectionScanner(),
+		scanner.NewClawShieldPIIScanner(),
+		scanner.NewClawShieldSecretsScanner(),
+		scanner.NewClawShieldVulnScanner(),
+		scanner.NewClawShieldMalwareScanner(),
 	}
 
 	var errs []string
@@ -122,7 +161,28 @@ func runScanAll(cmd *cobra.Command, args []string) error {
 	if len(errs) > 0 {
 		return fmt.Errorf("scan errors:\n  %s", strings.Join(errs, "\n  "))
 	}
+
+	warnFirewallDrift()
 	return nil
+}
+
+func warnFirewallDrift() {
+	if cfg == nil || cfg.Firewall.ConfigFile == "" {
+		return
+	}
+	// Only warn if firewall.yaml exists (user has opted in).
+	if _, err := os.Stat(cfg.Firewall.ConfigFile); err != nil {
+		return
+	}
+	compiler := platform.NewCompiler()
+	status := firewall.GetStatus(compiler, cfg.Firewall.AnchorName)
+	if status.Error != "" || status.Active {
+		return
+	}
+	fmt.Println()
+	fmt.Println("  ⚠  Firewall config exists but rules are not loaded.")
+	fmt.Printf("     Run: defenseclaw firewall generate\n")
+	fmt.Printf("     Then: %s\n", compiler.ApplyCommand(cfg.Firewall.RulesFile))
 }
 
 func checkAdmissionGate(targetType, target string) (bool, string) {
