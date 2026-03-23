@@ -32,7 +32,7 @@ internal/
   enforce/              Block/allow engine, quarantine, OpenShell policy sync
   tui/                  Bubbletea TUI (four panels: Alerts, Skills, MCP, Status)
   audit/                SQLite audit store + event logger + export + Splunk HEC
-  config/               Viper config loader + defaults + environment detection
+  config/               Viper config loader + defaults + environment detection + claw mode
   inventory/            AIBOM integration
   sandbox/              OpenShell CLI wrapper + policy generation
 plugins/                Plugin interface, registry, examples
@@ -49,7 +49,20 @@ test/                   E2E tests, unit tests, fixtures
 - `internal/scanner/result.go` — ScanResult + Finding types (unified output)
 - `internal/audit/store.go` — SQLite schema and operations
 - `internal/enforce/policy.go` — Admission gate (block -> allow -> scan)
+- `internal/config/claw.go` — Claw mode resolver (skill dirs, MCP dirs per framework)
 - `internal/tui/app.go` — TUI root model
+
+## Claw Mode
+
+DefenseClaw supports multiple agent frameworks via `claw.mode` in config.
+Currently: `openclaw`. Future: `nemoclaw`, `opencode`, `claudecode`.
+
+All skill/MCP directory resolution derives from the active mode
+(`internal/config/claw.go`). OpenClaw skill resolution order:
+
+1. `~/.openclaw/workspace/skills/` — workspace/project skills
+2. Custom `skills_dir` from `~/.openclaw/openclaw.json` — user-configured path
+3. `~/.openclaw/skills/` — global user skills
 
 ## Conventions
 

@@ -51,30 +51,21 @@ func DetectEnvironment() Environment {
 	return EnvLinux
 }
 
+// DefaultSkillWatchPaths returns skill directories for the default claw mode.
+// Prefer SkillDirsForMode when a config is available.
 func DefaultSkillWatchPaths() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return []string{
-		filepath.Join(home, ".openclaw", "skills"),
-		filepath.Join(home, ".openclaw", "agents"),
-	}
+	return SkillDirsForMode(ClawOpenClaw, "")
 }
 
+// DefaultMCPWatchPaths returns MCP directories for the default claw mode.
+// Prefer MCPDirsForMode when a config is available.
 func DefaultMCPWatchPaths() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return []string{
-		filepath.Join(home, ".openclaw", "mcp-servers"),
-		filepath.Join(home, ".openclaw", "mcps"),
-	}
+	return MCPDirsForMode(ClawOpenClaw, "")
 }
 
 func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
+	clawMode := ClawOpenClaw
 	return &Config{
 		DataDir:       dataDir,
 		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
@@ -82,19 +73,24 @@ func DefaultConfig() *Config {
 		PluginDir:     filepath.Join(dataDir, "plugins"),
 		PolicyDir:     filepath.Join(dataDir, "policies"),
 		Environment:   string(DetectEnvironment()),
+		Claw: ClawConfig{
+			Mode:       clawMode,
+			HomeDir:    "~/.openclaw",
+			ConfigFile: "~/.openclaw/openclaw.json",
+		},
 		Scanners: ScannersConfig{
-			SkillScanner: "skill-scanner",
-			MCPScanner:   "mcp-scanner",
-			AIBOM:        "cisco-aibom",
-			CodeGuard:    filepath.Join(dataDir, "codeguard-rules"),
+			SkillScanner: SkillScannerConfig{
+				Binary: "skill-scanner",
+			},
+			MCPScanner: "mcp-scanner",
+			AIBOM:      "cisco-aibom",
+			CodeGuard:  filepath.Join(dataDir, "codeguard-rules"),
 		},
 		OpenShell: OpenShellConfig{
 			Binary:    "openshell",
 			PolicyDir: "/etc/openshell/policies",
 		},
 		Watch: WatchConfig{
-			SkillDirs:  DefaultSkillWatchPaths(),
-			MCPDirs:    DefaultMCPWatchPaths(),
 			DebounceMs: 500,
 			AutoBlock:  true,
 		},
@@ -113,5 +109,15 @@ func DefaultConfig() *Config {
 			BatchSize:     50,
 			FlushInterval: 5,
 		},
+		Gateway: GatewayConfig{
+			Host:            "127.0.0.1",
+			Port:            18789,
+			DeviceKeyFile:   filepath.Join(dataDir, "device.key"),
+			AutoApprove:     false,
+			ReconnectMs:     800,
+			MaxReconnectMs:  15000,
+			ApprovalTimeout: 30,
+		},
+		SkillActions: DefaultSkillActions(),
 	}
 }

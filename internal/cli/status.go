@@ -46,7 +46,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println("  Scanners:")
 	scannerBins := []struct{ name, bin string }{
-		{"skill-scanner", cfg.Scanners.SkillScanner},
+		{"skill-scanner", cfg.Scanners.SkillScanner.Binary},
 		{"mcp-scanner", cfg.Scanners.MCPScanner},
 		{"cisco-aibom", cfg.Scanners.AIBOM},
 		{"codeguard", "built-in"},

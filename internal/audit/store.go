@@ -500,6 +500,46 @@ func (s *Store) GetCounts() (Counts, error) {
 	return c, nil
 }
 
+type LatestScanInfo struct {
+	ID           string
+	Target       string
+	Timestamp    time.Time
+	FindingCount int
+	MaxSeverity  string
+	RawJSON      string
+}
+
+func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
+	rows, err := s.db.Query(`
+		SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
+		FROM scan_results sr
+		INNER JOIN (
+			SELECT target, MAX(timestamp) as max_ts
+			FROM scan_results
+			WHERE scanner = ?
+			GROUP BY target
+		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
+		WHERE sr.scanner = ?
+	`, scannerName, scannerName)
+	if err != nil {
+		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
+	}
+	defer rows.Close()
+
+	var results []LatestScanInfo
+	for rows.Next() {
+		var r LatestScanInfo
+		var maxSev, rawJSON sql.NullString
+		if err := rows.Scan(&r.ID, &r.Target, &r.Timestamp, &r.FindingCount, &maxSev, &rawJSON); err != nil {
+			return nil, fmt.Errorf("audit: scan latest row: %w", err)
+		}
+		r.MaxSeverity = maxSev.String
+		r.RawJSON = rawJSON.String
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }

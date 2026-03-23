@@ -5,16 +5,26 @@ description: Maximum security policy for high-risk environments
 
 admission:
   scan_on_install: true
-  block_severity:
-    - CRITICAL
-    - HIGH
-    - MEDIUM
-  warn_severity:
-    - LOW
   allow_list_bypass_scan: false
 
+skill_actions:
+  critical:
+    runtime: block
+    file: quarantine
+  high:
+    runtime: block
+    file: quarantine
+  medium:
+    runtime: block
+    file: quarantine
+  low:
+    runtime: allow
+    file: none
+  info:
+    runtime: allow
+    file: none
+
 enforcement:
-  quarantine_on_block: true
   update_sandbox_policy: true
   max_enforcement_delay_seconds: 1
 

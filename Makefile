@@ -1,8 +1,9 @@
-BINARY    := defenseclaw
-VERSION   := 0.1.0
-GOFLAGS   := -ldflags "-X main.version=$(VERSION)"
+BINARY      := defenseclaw
+VERSION     := 0.2.0
+GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
+INSTALL_DIR := $(HOME)/.local/bin
 
-.PHONY: build build-all build-linux-arm64 build-linux-amd64 build-darwin-arm64 build-darwin-amd64 test lint clean
+.PHONY: build build-all build-linux-arm64 build-linux-amd64 build-darwin-arm64 build-darwin-amd64 test lint clean vet install
 
 build:
 	go build $(GOFLAGS) -o $(BINARY) ./cmd/defenseclaw
@@ -24,8 +25,21 @@ build-darwin-amd64:
 test:
 	go test -race ./...
 
+vet:
+	go vet ./...
+
 lint:
 	golangci-lint run
 
 clean:
 	rm -f $(BINARY) $(BINARY)-*
+
+install: build
+	@mkdir -p $(INSTALL_DIR)
+	@cp $(BINARY) $(INSTALL_DIR)/$(BINARY)
+	@echo "Installed $(BINARY) to $(INSTALL_DIR)"
+	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
+		echo ""; \
+		echo "Add $(INSTALL_DIR) to your PATH:"; \
+		echo "  export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
+	fi

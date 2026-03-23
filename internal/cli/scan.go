@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/firewall/platform"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+var scanJSON bool
 
 var scanCmd = &cobra.Command{
 	Use:   "scan [path]",
@@ -59,6 +62,7 @@ var scanClawShieldCmd = &cobra.Command{
 }
 
 func init() {
+	scanCmd.PersistentFlags().BoolVar(&scanJSON, "json", false, "Output results as JSON")
 	rootCmd.AddCommand(scanCmd)
 	scanCmd.AddCommand(scanSkillCmd)
 	scanCmd.AddCommand(scanMCPCmd)
@@ -121,11 +125,21 @@ func runScanClawShield(cmd *cobra.Command, args []string) error {
 		scanner.NewClawShieldVulnScanner(),
 		scanner.NewClawShieldMalwareScanner(),
 	}
+	var allResults []*scanner.ScanResult
 	var errs []string
 	for _, s := range scanners {
-		if err := execScanner(cmd.Context(), s, target); err != nil {
+		result, err := execScannerCollect(cmd.Context(), s, target)
+		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", s.Name(), err))
+			continue
 		}
+		if result != nil {
+			allResults = append(allResults, result)
+		}
+	}
+	if scanJSON {
+		emitScanResultsJSON(allResults, errs)
+		return nil
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("scan errors:\n  %s", strings.Join(errs, "\n  "))
@@ -134,9 +148,22 @@ func runScanClawShield(cmd *cobra.Command, args []string) error {
 }
 
 func runScanAll(cmd *cobra.Command, args []string) error {
-	target := "."
+	// When no explicit target is given, scan all skill directories from
+	// the active claw mode instead of just the CWD.
+	targets := []string{"."}
 	if len(args) > 0 {
-		target = args[0]
+		targets = []string{args[0]}
+	} else if cfg != nil {
+		skillDirs := cfg.SkillDirs()
+		existing := make([]string, 0, len(skillDirs))
+		for _, dir := range skillDirs {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				existing = append(existing, dir)
+			}
+		}
+		if len(existing) > 0 {
+			targets = existing
+		}
 	}
 
 	scanners := []scanner.Scanner{
@@ -151,18 +178,33 @@ func runScanAll(cmd *cobra.Command, args []string) error {
 		scanner.NewClawShieldMalwareScanner(),
 	}
 
+	var allResults []*scanner.ScanResult
 	var errs []string
-	for _, s := range scanners {
-		if err := execScanner(cmd.Context(), s, target); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", s.Name(), err))
+	for _, target := range targets {
+		if !scanJSON {
+			fmt.Printf("\n[scan] scanning %s\n", target)
+		}
+		for _, s := range scanners {
+			result, err := execScannerCollect(cmd.Context(), s, target)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s (%s): %v", s.Name(), target, err))
+				continue
+			}
+			if result != nil {
+				allResults = append(allResults, result)
+			}
 		}
 	}
 
-	if len(errs) > 0 {
+	if scanJSON {
+		emitScanResultsJSON(allResults, errs)
+	} else if len(errs) > 0 {
 		return fmt.Errorf("scan errors:\n  %s", strings.Join(errs, "\n  "))
 	}
 
-	warnFirewallDrift()
+	if !scanJSON {
+		warnFirewallDrift()
+	}
 	return nil
 }
 
@@ -209,14 +251,27 @@ func checkAdmissionGate(targetType, target string) (bool, string) {
 }
 
 func execScanner(ctx context.Context, s scanner.Scanner, target string) error {
-	fmt.Printf("[scan] %s -> %s\n", s.Name(), target)
+	result, err := execScannerCollect(ctx, s, target)
+	if err != nil {
+		return err
+	}
+	if scanJSON && result != nil {
+		return emitSingleScanResultJSON(result)
+	}
+	return nil
+}
+
+func execScannerCollect(ctx context.Context, s scanner.Scanner, target string) (*scanner.ScanResult, error) {
+	if !scanJSON {
+		fmt.Printf("[scan] %s -> %s\n", s.Name(), target)
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	result, err := s.Scan(ctx, target)
 	if err != nil {
-		return fmt.Errorf("scan: %w", err)
+		return nil, fmt.Errorf("scan: %w", err)
 	}
 
 	if auditLog != nil {
@@ -225,7 +280,51 @@ func execScanner(ctx context.Context, s scanner.Scanner, target string) error {
 		}
 	}
 
-	printScanResult(result)
+	if !scanJSON {
+		printScanResult(result)
+	}
+	return result, nil
+}
+
+type scanReport struct {
+	Results     []*scanner.ScanResult `json:"results"`
+	MaxSeverity scanner.Severity      `json:"max_severity"`
+	TotalCount  int                   `json:"total_findings"`
+	Clean       bool                  `json:"clean"`
+	Errors      []string              `json:"errors,omitempty"`
+}
+
+func emitScanResultsJSON(results []*scanner.ScanResult, errs []string) {
+	report := scanReport{
+		Results: results,
+		Clean:   true,
+		Errors:  errs,
+	}
+	maxRank := 0
+	for _, r := range results {
+		report.TotalCount += len(r.Findings)
+		if !r.IsClean() {
+			report.Clean = false
+		}
+		sev := r.MaxSeverity()
+		if scanner.CompareSeverity(sev, report.MaxSeverity) > 0 {
+			report.MaxSeverity = sev
+		}
+		_ = maxRank
+	}
+	if report.MaxSeverity == "" {
+		report.MaxSeverity = scanner.SeverityInfo
+	}
+	data, _ := json.MarshalIndent(report, "", "  ")
+	fmt.Println(string(data))
+}
+
+func emitSingleScanResultJSON(r *scanner.ScanResult) error {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return fmt.Errorf("scan: json marshal: %w", err)
+	}
+	fmt.Println(string(data))
 	return nil
 }
 

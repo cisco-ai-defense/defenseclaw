@@ -32,8 +32,17 @@ func runInit(_ *cobra.Command, _ []string) error {
 	fmt.Printf("  Environment: %s\n", env)
 
 	defaults := config.DefaultConfig()
+	fmt.Printf("  Claw mode:   %s\n", defaults.Claw.Mode)
+	fmt.Printf("  Claw home:   %s\n", defaults.ClawHomeDir())
 
 	dirs := []string{defaults.DataDir, defaults.QuarantineDir, defaults.PluginDir, defaults.PolicyDir}
+	// Ensure claw-mode skill directories exist
+	for _, d := range defaults.SkillDirs() {
+		dirs = append(dirs, d)
+	}
+	for _, d := range defaults.MCPDirs() {
+		dirs = append(dirs, d)
+	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("init: create %s: %w", dir, err)
@@ -99,7 +108,7 @@ func installScanners(defaults *config.Config, logger *audit.Logger) {
 	}
 
 	deps := []dep{
-		{"skill-scanner", defaults.Scanners.SkillScanner, "cisco-ai-skill-scanner"},
+		{"skill-scanner", defaults.Scanners.SkillScanner.Binary, "cisco-ai-skill-scanner"},
 		{"mcp-scanner", defaults.Scanners.MCPScanner, "cisco-ai-mcp-scanner"},
 		{"cisco-aibom", defaults.Scanners.AIBOM, "cisco-aibom"},
 	}

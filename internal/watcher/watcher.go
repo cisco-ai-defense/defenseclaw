@@ -59,30 +59,34 @@ type OnAdmission func(AdmissionResult)
 // InstallWatcher monitors OpenClaw skill and MCP directories for new installs
 // and runs the admission gate (block → allow → scan) on each detection.
 type InstallWatcher struct {
-	cfg        *config.Config
-	store      *audit.Store
-	logger     *audit.Logger
-	shell      *sandbox.OpenShell
-	debounce   time.Duration
-	onAdmit    OnAdmission
+	cfg       *config.Config
+	skillDirs []string
+	mcpDirs   []string
+	store     *audit.Store
+	logger    *audit.Logger
+	shell     *sandbox.OpenShell
+	debounce  time.Duration
+	onAdmit   OnAdmission
 
-	mu       sync.Mutex
-	pending  map[string]time.Time // path → first-seen, for debounce
+	mu      sync.Mutex
+	pending map[string]time.Time // path → first-seen, for debounce
 }
 
-func New(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, onAdmit OnAdmission) *InstallWatcher {
+func New(cfg *config.Config, skillDirs, mcpDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
 	}
 	return &InstallWatcher{
-		cfg:      cfg,
-		store:    store,
-		logger:   logger,
-		shell:    shell,
-		debounce: debounce,
-		onAdmit:  onAdmit,
-		pending:  make(map[string]time.Time),
+		cfg:       cfg,
+		skillDirs: skillDirs,
+		mcpDirs:   mcpDirs,
+		store:     store,
+		logger:    logger,
+		shell:     shell,
+		debounce:  debounce,
+		onAdmit:   onAdmit,
+		pending:   make(map[string]time.Time),
 	}
 }
 
@@ -95,7 +99,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	defer fsw.Close()
 
 	watched := 0
-	for _, dir := range w.cfg.Watch.SkillDirs {
+	for _, dir := range w.skillDirs {
 		if err := ensureAndWatch(fsw, dir); err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (skipping)\n", dir, err)
 			continue
@@ -103,7 +107,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		watched++
 		fmt.Printf("[watch] monitoring skill dir: %s\n", dir)
 	}
-	for _, dir := range w.cfg.Watch.MCPDirs {
+	for _, dir := range w.mcpDirs {
 		if err := ensureAndWatch(fsw, dir); err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] mcp dir %s: %v (skipping)\n", dir, err)
 			continue
@@ -113,7 +117,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 
 	if watched == 0 {
-		return fmt.Errorf("watcher: no directories to watch — configure watch.skill_dirs or watch.mcp_dirs")
+		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
 	}
 
 	_ = w.logger.LogAction("watch-start", "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
@@ -186,7 +190,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	installType := InstallSkill
-	for _, dir := range w.cfg.Watch.MCPDirs {
+	for _, dir := range w.mcpDirs {
 		abs, _ := filepath.Abs(dir)
 		pathAbs, _ := filepath.Abs(path)
 		if strings.HasPrefix(pathAbs, abs) {

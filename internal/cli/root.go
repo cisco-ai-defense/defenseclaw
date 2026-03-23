@@ -16,6 +16,10 @@ var (
 	auditLog   *audit.Logger
 )
 
+func SetVersion(v string) {
+	rootCmd.Version = v
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "defenseclaw",
 	Short: "Enterprise governance layer for OpenClaw",

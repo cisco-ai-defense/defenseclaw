@@ -5,16 +5,26 @@ description: Balanced security policy for standard deployments
 
 admission:
   scan_on_install: true
-  block_severity:
-    - CRITICAL
-    - HIGH
-  warn_severity:
-    - MEDIUM
-    - LOW
   allow_list_bypass_scan: true
 
+skill_actions:
+  critical:
+    runtime: block
+    file: quarantine
+  high:
+    runtime: block
+    file: quarantine
+  medium:
+    runtime: allow
+    file: none
+  low:
+    runtime: allow
+    file: none
+  info:
+    runtime: allow
+    file: none
+
 enforcement:
-  quarantine_on_block: true
   update_sandbox_policy: true
   max_enforcement_delay_seconds: 2
 

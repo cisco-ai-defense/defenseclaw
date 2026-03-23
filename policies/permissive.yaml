@@ -5,16 +5,26 @@ description: Permissive policy for development and testing
 
 admission:
   scan_on_install: true
-  block_severity:
-    - CRITICAL
-  warn_severity:
-    - HIGH
-    - MEDIUM
-    - LOW
   allow_list_bypass_scan: true
 
+skill_actions:
+  critical:
+    runtime: block
+    file: quarantine
+  high:
+    runtime: allow
+    file: none
+  medium:
+    runtime: allow
+    file: none
+  low:
+    runtime: allow
+    file: none
+  info:
+    runtime: allow
+    file: none
+
 enforcement:
-  quarantine_on_block: true
   update_sandbox_policy: false
   max_enforcement_delay_seconds: 5
 

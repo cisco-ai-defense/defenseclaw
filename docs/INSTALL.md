@@ -636,7 +636,7 @@ After installation, your system has:
 
 ```
 ~/.defenseclaw/
-├── config.yaml          # DefenseClaw configuration
+├── config.yaml          # DefenseClaw configuration (includes claw mode)
 ├── audit.db             # SQLite audit log + scan results + block/allow lists
 ├── quarantine/          # Blocked skill files (moved here on block)
 │   └── skills/
@@ -644,12 +644,29 @@ After installation, your system has:
 ├── policies/            # Sandbox policy files (fallback location)
 └── codeguard-rules/     # CodeGuard security rules
 
-~/.openclaw/             # OpenClaw configuration (separate from DefenseClaw)
+~/.openclaw/             # OpenClaw home (default, configurable via claw.home_dir)
+├── openclaw.json        # OpenClaw config — custom skills_dir read by DefenseClaw
 ├── config.yaml
-└── skills/
+├── workspace/
+│   └── skills/          # Workspace/project-specific skills (priority 1)
+├── skills/              # Global user-installed skills (priority 3)
+├── mcp-servers/         # MCP server configs
+└── mcps/                # MCP server configs (alt)
 
 /etc/openshell/policies/ # OpenShell policy directory (DGX Spark, if writable)
 └── defenseclaw-policy.yaml
 ```
 
-DefenseClaw reads from `~/.openclaw/` but never modifies it directly. It writes sandbox policy to OpenShell and manages its own state in `~/.defenseclaw/`.
+DefenseClaw reads from the claw home directory (e.g. `~/.openclaw/`) but never modifies it directly. It writes sandbox policy to OpenShell and manages its own state in `~/.defenseclaw/`.
+
+### Claw Mode Configuration
+
+DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defenseclaw/config.yaml`:
+
+```yaml
+claw:
+  mode: openclaw        # openclaw (default) | nemoclaw | opencode | claudecode (future)
+  home_dir: ""          # auto-detected; override to use a custom path
+```
+
+The claw mode determines which skill and MCP directories are watched, scanned, and used for install resolution. Adding a new framework only requires a new case in the config resolver.

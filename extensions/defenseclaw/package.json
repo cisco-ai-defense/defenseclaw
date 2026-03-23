@@ -1,0 +1,19 @@
+{
+  "name": "@defenseclaw/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for DefenseClaw — scan skills, enforce policy, monitor runtime",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "@openclaw/plugin-sdk": ">=1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@openclaw/plugin-sdk": "latest"
+  },
+  "license": "Apache-2.0"
+}

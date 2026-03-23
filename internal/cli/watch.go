@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,10 +17,11 @@ import (
 )
 
 var (
-	watchSkillDirs []string
-	watchMCPDirs   []string
-	watchDebounce  int
-	watchNoBlock   bool
+	watchSkillDirs  []string
+	watchMCPDirs    []string
+	watchDebounce   int
+	watchNoBlock    bool
+	watchJSONEvents bool
 )
 
 var watchCmd = &cobra.Command{
@@ -32,8 +34,8 @@ admission gate (block list → allow list → scan) in real time.
 HIGH/CRITICAL findings are auto-blocked and quarantined unless --no-auto-block
 is set. The watcher logs all events to the audit store.
 
-Override watched directories with flags or configure permanently in
-~/.defenseclaw/config.yaml under the "watch" section.`,
+Watch directories are derived from claw.mode (default: openclaw). Override
+with --skill-dirs and --mcp-dirs flags, or change claw.mode in config.`,
 	RunE: runWatch,
 }
 
@@ -42,16 +44,11 @@ func init() {
 	watchCmd.Flags().StringSliceVar(&watchMCPDirs, "mcp-dirs", nil, "Override MCP directories to watch (comma-separated)")
 	watchCmd.Flags().IntVar(&watchDebounce, "debounce", 0, "Debounce interval in milliseconds (default: from config)")
 	watchCmd.Flags().BoolVar(&watchNoBlock, "no-auto-block", false, "Disable auto-blocking of HIGH/CRITICAL findings")
+	watchCmd.Flags().BoolVar(&watchJSONEvents, "json-events", false, "Emit admission results as NDJSON (one JSON object per line)")
 	rootCmd.AddCommand(watchCmd)
 }
 
 func runWatch(_ *cobra.Command, _ []string) error {
-	if len(watchSkillDirs) > 0 {
-		cfg.Watch.SkillDirs = watchSkillDirs
-	}
-	if len(watchMCPDirs) > 0 {
-		cfg.Watch.MCPDirs = watchMCPDirs
-	}
 	if watchDebounce > 0 {
 		cfg.Watch.DebounceMs = watchDebounce
 	}
@@ -59,15 +56,29 @@ func runWatch(_ *cobra.Command, _ []string) error {
 		cfg.Watch.AutoBlock = false
 	}
 
-	allDirs := append(cfg.Watch.SkillDirs, cfg.Watch.MCPDirs...)
+	// Use claw-mode-aware directories, with flag overrides
+	skillDirs := cfg.SkillDirs()
+	if len(watchSkillDirs) > 0 {
+		skillDirs = watchSkillDirs
+	}
+	mcpDirs := cfg.MCPDirs()
+	if len(watchMCPDirs) > 0 {
+		mcpDirs = watchMCPDirs
+	}
+
+	allDirs := append(skillDirs, mcpDirs...)
 	if len(allDirs) == 0 {
-		return fmt.Errorf("no directories configured — set watch.skill_dirs or watch.mcp_dirs in config")
+		return fmt.Errorf("no directories configured — check claw.mode and claw.home_dir in config")
 	}
 
 	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
 
-	w := watcher.New(cfg, auditStore, auditLog, shell, func(r watcher.AdmissionResult) {
-		printAdmissionResult(r)
+	w := watcher.New(cfg, skillDirs, mcpDirs, auditStore, auditLog, shell, func(r watcher.AdmissionResult) {
+		if watchJSONEvents {
+			emitAdmissionJSON(r)
+		} else {
+			printAdmissionResult(r)
+		}
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,21 +88,48 @@ func runWatch(_ *cobra.Command, _ []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Println("\n[watch] shutting down...")
+		if !watchJSONEvents {
+			fmt.Println("\n[watch] shutting down...")
+		}
 		cancel()
 	}()
 
-	fmt.Println("╔══════════════════════════════════════════════╗")
-	fmt.Println("║       DefenseClaw Install Watcher            ║")
-	fmt.Println("╚══════════════════════════════════════════════╝")
-	fmt.Println()
-	fmt.Printf("  Auto-block:  %v\n", cfg.Watch.AutoBlock)
-	fmt.Printf("  Debounce:    %dms\n", cfg.Watch.DebounceMs)
-	fmt.Printf("  Skill dirs:  %s\n", strings.Join(cfg.Watch.SkillDirs, ", "))
-	fmt.Printf("  MCP dirs:    %s\n", strings.Join(cfg.Watch.MCPDirs, ", "))
-	fmt.Println()
+	if !watchJSONEvents {
+		fmt.Println("╔══════════════════════════════════════════════╗")
+		fmt.Println("║       DefenseClaw Install Watcher            ║")
+		fmt.Println("╚══════════════════════════════════════════════╝")
+		fmt.Println()
+		fmt.Printf("  Claw mode:   %s\n", cfg.Claw.Mode)
+		fmt.Printf("  Auto-block:  %v\n", cfg.Watch.AutoBlock)
+		fmt.Printf("  Debounce:    %dms\n", cfg.Watch.DebounceMs)
+		fmt.Printf("  Skill dirs:  %s\n", strings.Join(skillDirs, ", "))
+		fmt.Printf("  MCP dirs:    %s\n", strings.Join(mcpDirs, ", "))
+		fmt.Println()
+	}
 
 	return w.Run(ctx)
+}
+
+type admissionEvent struct {
+	Timestamp string `json:"timestamp"`
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Verdict   string `json:"verdict"`
+	Reason    string `json:"reason"`
+}
+
+func emitAdmissionJSON(r watcher.AdmissionResult) {
+	evt := admissionEvent{
+		Timestamp: r.Event.Timestamp.Format(time.RFC3339),
+		Type:      string(r.Event.Type),
+		Name:      r.Event.Name,
+		Path:      r.Event.Path,
+		Verdict:   string(r.Verdict),
+		Reason:    r.Reason,
+	}
+	data, _ := json.Marshal(evt)
+	fmt.Println(string(data))
 }
 
 func printAdmissionResult(r watcher.AdmissionResult) {

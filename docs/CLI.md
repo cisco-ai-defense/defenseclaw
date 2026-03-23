@@ -11,7 +11,11 @@ All subcommands are registered on `defenseclaw`. Use `defenseclaw help <command>
 | `scan mcp <path-or-url>` | Run mcp-scanner on MCP manifest or endpoint | 1 |
 | `scan aibom <path>` | Run aibom inventory on a project path | 1 |
 | `scan code <path>` | Run CodeGuard security rules on code files | 4 |
-| `scan [path]` | Run all scanners against a target | 1 |
+| `scan [path]` | Run all scanners against a target (scans all claw skill dirs when no path given) | 1 |
+| `skill install <name>` | Scan → enforce block/allow list → install if clean | 2 |
+| `skill scan <path>` | Run all scanners against a skill and report verdict | 2 |
+| `skill disable <key>` | Disable a skill via gateway RPC and add to block list | 4 |
+| `skill enable <key>` | Re-enable a previously disabled skill | 4 |
 | `deploy [path]` | Full orchestrated deploy: init → scan → block → policy → sandbox | 4 |
 | `block skill <id>` | Add a skill to the block list | 2 |
 | `block mcp <id>` | Add an MCP server to the block list | 2 |

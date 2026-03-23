@@ -64,7 +64,7 @@ func runFirewallInit(_ *cobra.Command, _ []string) error {
 
 	if fwObserve {
 		fmt.Println("  Observing active connections and scanning skills...")
-		result, err := firewall.Observe(context.Background(), cfg.Watch.SkillDirs)
+		result, err := firewall.Observe(context.Background(), cfg.SkillDirs())
 		if err != nil {
 			return fmt.Errorf("firewall init: observe: %w", err)
 		}
