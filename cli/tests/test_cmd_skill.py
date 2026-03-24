@@ -424,21 +424,19 @@ class TestSkillScanURL(SkillCommandTestBase):
         self.assertFalse(_is_url_target("my-skill"))
         self.assertFalse(_is_url_target("/path/to/skill"))
 
-    def test_resolve_clawhub_url(self):
-        from defenseclaw.commands.cmd_skill import _resolve_clawhub_url
+    def test_parse_clawhub_uri(self):
+        from defenseclaw.commands.cmd_skill import _parse_clawhub_uri
 
-        self.assertEqual(
-            _resolve_clawhub_url("clawhub://my-skill@1.2.3"),
-            "https://clawhub.ai/api/skills/my-skill/1.2.3/download",
-        )
+        name, version = _parse_clawhub_uri("clawhub://my-skill@1.2.3")
+        self.assertEqual(name, "my-skill")
+        self.assertEqual(version, "1.2.3")
 
-    def test_resolve_clawhub_url_latest(self):
-        from defenseclaw.commands.cmd_skill import _resolve_clawhub_url
+    def test_parse_clawhub_uri_latest(self):
+        from defenseclaw.commands.cmd_skill import _parse_clawhub_uri
 
-        self.assertEqual(
-            _resolve_clawhub_url("clawhub://my-skill"),
-            "https://clawhub.ai/api/skills/my-skill/latest/download",
-        )
+        name, version = _parse_clawhub_uri("clawhub://my-skill")
+        self.assertEqual(name, "my-skill")
+        self.assertIsNone(version)
 
     @patch("requests.get")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
