@@ -5,7 +5,10 @@ GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 INSTALL_DIR := $(HOME)/.local/bin
 
-.PHONY: pycli gateway gateway-install test test-verbose test-file lint clean
+.PHONY: dev-install pycli gateway gateway-install test cli-test gateway-test test-verbose test-file lint clean
+
+dev-install:
+	@./scripts/install-dev.sh
 
 pycli:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
@@ -28,6 +31,10 @@ gateway-run: gateway
 gateway-install: gateway
 	@mkdir -p $(INSTALL_DIR)
 	@cp $(GATEWAY) $(INSTALL_DIR)/$(GATEWAY)
+	@# Re-sign on macOS (copying invalidates adhoc signature)
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY) 2>/dev/null || true; \
+	fi
 	@echo "Installed $(GATEWAY) to $(INSTALL_DIR)"
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
@@ -35,8 +42,13 @@ gateway-install: gateway
 		echo "  export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
 	fi
 
-test:
+test: cli-test gateway-test
+
+cli-test:
 	$(VENV)/bin/python -m unittest discover -s cli/tests -v
+
+gateway-test:
+	go test -race ./internal/gateway/ ./test/... -v
 
 test-verbose:
 	$(VENV)/bin/python -m unittest discover -s cli/tests -v --failfast
