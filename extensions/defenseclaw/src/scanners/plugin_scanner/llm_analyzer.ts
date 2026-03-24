@@ -279,7 +279,12 @@ interface MetaLLMResult {
 export async function runMetaLLM(
   config: LLMConfig,
   ctx: ScanContext,
-): Promise<{ newFindings: Finding[]; falsePositiveRuleIds: string[] }> {
+): Promise<{
+  newFindings: Finding[];
+  falsePositiveRuleIds: string[];
+  overallAssessment: string | null;
+  priorityOrder: string[] | null;
+}> {
   const messages: LLMMessage[] = [
     { role: "system", content: buildMetaSystemPrompt() },
     { role: "user", content: buildMetaUserPrompt(ctx) },
@@ -294,7 +299,7 @@ export async function runMetaLLM(
   const response = await callLLM(metaConfig, messages);
 
   if (response.error) {
-    return { newFindings: [], falsePositiveRuleIds: [] };
+    return { newFindings: [], falsePositiveRuleIds: [], overallAssessment: null, priorityOrder: null };
   }
 
   let result: MetaLLMResult;
@@ -305,7 +310,7 @@ export async function runMetaLLM(
     }
     result = JSON.parse(jsonStr);
   } catch {
-    return { newFindings: [], falsePositiveRuleIds: [] };
+    return { newFindings: [], falsePositiveRuleIds: [], overallAssessment: null, priorityOrder: null };
   }
 
   const newFindings: Finding[] = [];
@@ -324,15 +329,20 @@ export async function runMetaLLM(
     }
   }
 
-  // Correlations become new META findings
+  // Correlations become new META findings with referenced finding IDs
   if (Array.isArray(result.correlations)) {
     for (const corr of result.correlations) {
+      const refIds = (corr.finding_ids ?? []).join(", ");
+      const desc = refIds
+        ? `${corr.description}\n\nCorrelated findings: ${refIds}`
+        : corr.description;
+
       newFindings.push(makeFinding(ctx.findingCounter.value++, {
         rule_id: `META-LLM-CORR`,
         severity: (corr.severity as Severity) ?? "HIGH",
         confidence: 0.85,
         title: `Attack chain: ${corr.name}`,
-        description: corr.description,
+        description: desc,
         tags: ["llm-detected", "correlation"],
       }));
     }
@@ -341,5 +351,10 @@ export async function runMetaLLM(
   // False positives to filter
   const falsePositiveRuleIds = (result.false_positives ?? []).map((fp) => fp.rule_id);
 
-  return { newFindings, falsePositiveRuleIds };
+  return {
+    newFindings,
+    falsePositiveRuleIds,
+    overallAssessment: result.overall_assessment ?? null,
+    priorityOrder: result.priority_order ?? null,
+  };
 }

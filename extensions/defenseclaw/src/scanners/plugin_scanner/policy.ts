@@ -232,14 +232,9 @@ export function fromPreset(name: string): PluginScanPolicy {
  * Only fields present in the YAML override the defaults.
  */
 export async function fromYaml(path: string): Promise<PluginScanPolicy> {
-  // Dynamic import to avoid hard dependency on yaml parser at module level
-  let parseYaml: (input: string) => unknown;
-  try {
-    const yamlMod = await import("yaml");
-    parseYaml = yamlMod.parse ?? yamlMod.default?.parse;
-  } catch {
-    throw new Error("yaml package not installed. Install with: npm install yaml");
-  }
+  // js-yaml is already a dependency of the extension
+  const jsYaml = await import("js-yaml");
+  const parseYaml = (jsYaml.load ?? (jsYaml as { default: { load: (s: string) => unknown } }).default.load) as (s: string) => unknown;
 
   const raw = await readFile(path, "utf-8");
   const data = parseYaml(raw) as Record<string, unknown>;
@@ -274,7 +269,7 @@ function mergePolicy(
     result.analyzers = { ...base.analyzers };
     for (const [key, val] of Object.entries(a)) {
       if (key in result.analyzers && typeof val === "boolean") {
-        (result.analyzers as Record<string, boolean>)[key] = val;
+        (result.analyzers as unknown as Record<string, boolean>)[key] = val;
       }
     }
   }
@@ -336,7 +331,7 @@ export function disabledAnalyzerNames(policy: PluginScanPolicy): string[] {
   };
 
   for (const [key, analyzerName] of Object.entries(map)) {
-    if (!(policy.analyzers as Record<string, boolean>)[key]) {
+    if (!(policy.analyzers as unknown as Record<string, boolean>)[key]) {
       disabled.push(analyzerName);
     }
   }
@@ -356,11 +351,14 @@ export function applySeverityOverride(
   }
 }
 
-/** Check if a finding should be suppressed by policy. */
+/** Check if a finding should be suppressed by policy or meta-analysis. */
 export function isSuppressed(
-  finding: { rule_id?: string; confidence?: number },
+  finding: { rule_id?: string; confidence?: number; suppressed?: boolean },
   policy: PluginScanPolicy,
 ): boolean {
+  if (finding.suppressed) {
+    return true;
+  }
   if (finding.rule_id && policy.disabled_rules.includes(finding.rule_id)) {
     return true;
   }

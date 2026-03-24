@@ -7,10 +7,7 @@
  * The bridge is at cli/defenseclaw/llm.py and accepts JSON on stdin,
  * returns JSON on stdout.
  */
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { execSync } from "node:child_process";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,14 +65,10 @@ export async function callLLM(
   const input = JSON.stringify(request);
 
   try {
-    const { stdout, stderr } = await execFileAsync(
-      python, ["-m", "defenseclaw.llm"],
-      { input, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 },
+    const stdout = execSync(
+      `${python} -m defenseclaw.llm`,
+      { input, timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: "utf-8" },
     );
-
-    if (stderr.trim()) {
-      // litellm logs to stderr — ignore unless it's an error
-    }
 
     const response = JSON.parse(stdout) as LLMResponse;
     return response;
