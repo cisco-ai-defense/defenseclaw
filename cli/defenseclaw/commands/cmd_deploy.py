@@ -29,14 +29,6 @@ def deploy(app: AppContext, path: str, skip_init: bool) -> None:
       5. Start sandbox
       6. Print summary
     """
-    from defenseclaw.config import config_path, default_config
-    from defenseclaw.db import Store
-    from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.logger import Logger
-    from defenseclaw.scanner.skill import SkillScannerWrapper
-    from defenseclaw.scanner.mcp import MCPScannerWrapper
-    from defenseclaw.scanner.aibom import AIBOMScannerWrapper
-
     start = time.monotonic()
 
     click.echo("╔══════════════════════════════════════════════╗")
@@ -97,6 +89,7 @@ def deploy(app: AppContext, path: str, skip_init: bool) -> None:
 
 def _ensure_init(app: AppContext) -> None:
     import os
+
     from defenseclaw.config import config_path, default_config
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
@@ -120,9 +113,9 @@ def _ensure_init(app: AppContext) -> None:
 
 
 def _run_all_scanners(app: AppContext, target: str) -> list[tuple[str, str, ScanResult | None, str]]:
-    from defenseclaw.scanner.skill import SkillScannerWrapper
-    from defenseclaw.scanner.mcp import MCPScannerWrapper
     from defenseclaw.scanner.aibom import AIBOMScannerWrapper
+    from defenseclaw.scanner.mcp import MCPScannerWrapper
+    from defenseclaw.scanner.skill import SkillScannerWrapper
 
     scanners = [
         SkillScannerWrapper(app.cfg.scanners.skill_scanner),
@@ -146,7 +139,7 @@ def _run_all_scanners(app: AppContext, target: str) -> list[tuple[str, str, Scan
                 app.logger.log_scan(result)
             runs.append((s.name(), target, result, ""))
         except SystemExit:
-            click.echo(f"    Skipped (not installed)")
+            click.echo("    Skipped (not installed)")
             runs.append((s.name(), target, None, "not installed"))
         except Exception as exc:
             click.echo(f"    Error: {exc}")
@@ -159,10 +152,10 @@ def _auto_block(
     app: AppContext,
     runs: list[tuple[str, str, ScanResult | None, str]],
 ) -> int:
+    from defenseclaw.enforce import PolicyEngine
+
     if not app.store:
         return 0
-
-    from defenseclaw.enforce import PolicyEngine
     pe = PolicyEngine(app.store)
     blocked = 0
 

@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -65,6 +66,7 @@ type InstallWatcher struct {
 	store     *audit.Store
 	logger    *audit.Logger
 	shell     *sandbox.OpenShell
+	opa       *policy.Engine
 	debounce  time.Duration
 	onAdmit   OnAdmission
 
@@ -72,7 +74,9 @@ type InstallWatcher struct {
 	pending map[string]time.Time // path → first-seen, for debounce
 }
 
-func New(cfg *config.Config, skillDirs, mcpDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, onAdmit OnAdmission) *InstallWatcher {
+// New creates an InstallWatcher. The opa parameter may be nil to fall back
+// to the built-in Go admission logic.
+func New(cfg *config.Config, skillDirs, mcpDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -84,6 +88,7 @@ func New(cfg *config.Config, skillDirs, mcpDirs []string, store *audit.Store, lo
 		store:     store,
 		logger:    logger,
 		shell:     shell,
+		opa:       opa,
 		debounce:  debounce,
 		onAdmit:   onAdmit,
 		pending:   make(map[string]time.Time),
@@ -205,6 +210,8 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 }
 
 // runAdmission applies the full admission gate: block → allow → scan.
+// When the OPA engine is available it delegates the verdict decision to
+// Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) AdmissionResult {
 	pe := enforce.NewPolicyEngine(w.store)
 	targetType := string(evt.Type)
@@ -212,26 +219,56 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 	_ = w.logger.LogAction("install-detected", evt.Path,
 		fmt.Sprintf("type=%s name=%s", targetType, evt.Name))
 
-	// 1. Block list check
-	blocked, err := pe.IsBlocked(targetType, evt.Name)
-	if err == nil && blocked {
-		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
-		_ = w.logger.LogAction("install-rejected", evt.Path,
-			fmt.Sprintf("type=%s reason=blocked", targetType))
-		w.enforceBlock(evt)
-		return AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: reason}
+	// Build block/allow lists from the SQLite store for the OPA input.
+	blockList := w.buildListEntries(pe, "block")
+	allowList := w.buildListEntries(pe, "allow")
+
+	// Phase 1: pre-scan OPA evaluation (no scan_result yet).
+	if w.opa != nil {
+		input := policy.AdmissionInput{
+			TargetType: targetType,
+			TargetName: evt.Name,
+			Path:       evt.Path,
+			BlockList:  blockList,
+			AllowList:  allowList,
+		}
+		out, err := w.opa.Evaluate(ctx, input)
+		if err == nil {
+			switch out.Verdict {
+			case "blocked":
+				_ = w.logger.LogAction("install-rejected", evt.Path,
+					fmt.Sprintf("type=%s reason=blocked", targetType))
+				w.enforceBlock(evt)
+				return AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
+			case "allowed":
+				_ = w.logger.LogAction("install-allowed", evt.Path,
+					fmt.Sprintf("type=%s reason=allow-listed", targetType))
+				return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
+			}
+			// verdict == "scan" → proceed to scanning below
+		}
+		// On OPA error fall through to scan (best-effort).
+	} else {
+		// Fallback: built-in Go block/allow check when OPA is unavailable.
+		blocked, err := pe.IsBlocked(targetType, evt.Name)
+		if err == nil && blocked {
+			reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
+			_ = w.logger.LogAction("install-rejected", evt.Path,
+				fmt.Sprintf("type=%s reason=blocked", targetType))
+			w.enforceBlock(evt)
+			return AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: reason}
+		}
+
+		allowed, err := pe.IsAllowed(targetType, evt.Name)
+		if err == nil && allowed {
+			reason := fmt.Sprintf("%s %q is on the allow list — skipping scan", targetType, evt.Name)
+			_ = w.logger.LogAction("install-allowed", evt.Path,
+				fmt.Sprintf("type=%s reason=allow-listed", targetType))
+			return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: reason}
+		}
 	}
 
-	// 2. Allow list check
-	allowed, err := pe.IsAllowed(targetType, evt.Name)
-	if err == nil && allowed {
-		reason := fmt.Sprintf("%s %q is on the allow list — skipping scan", targetType, evt.Name)
-		_ = w.logger.LogAction("install-allowed", evt.Path,
-			fmt.Sprintf("type=%s reason=allow-listed", targetType))
-		return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: reason}
-	}
-
-	// 3. Scan
+	// Phase 2: Scan.
 	s := w.scannerFor(evt)
 	if s == nil {
 		return AdmissionResult{Event: evt, Verdict: VerdictScanError, Reason: "no scanner available"}
@@ -249,6 +286,29 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 
 	_ = w.logger.LogScan(result)
 
+	// Phase 3: post-scan OPA evaluation with scan_result.
+	if w.opa != nil {
+		scanInput := &policy.ScanResultInput{
+			MaxSeverity:   string(result.MaxSeverity()),
+			TotalFindings: len(result.Findings),
+		}
+		input := policy.AdmissionInput{
+			TargetType: targetType,
+			TargetName: evt.Name,
+			Path:       evt.Path,
+			BlockList:  blockList,
+			AllowList:  allowList,
+			ScanResult: scanInput,
+		}
+		out, evalErr := w.opa.Evaluate(ctx, input)
+		if evalErr == nil {
+			w.applyPostScanEnforcement(pe, out, evt, targetType, result, s.Name())
+			return AdmissionResult{Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason}
+		}
+		// On OPA error, fall through to built-in logic.
+	}
+
+	// Fallback: built-in Go post-scan logic.
 	if result.IsClean() {
 		_ = w.logger.LogAction("install-clean", evt.Path,
 			fmt.Sprintf("type=%s scanner=%s", targetType, s.Name()))
@@ -279,11 +339,80 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		return AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: reason}
 	}
 
-	// MEDIUM/LOW: install with warning
 	reason := fmt.Sprintf("scan found %s findings — installed with warning", maxSev)
 	_ = w.logger.LogAction("install-warning", evt.Path,
 		fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, maxSev, s.Name()))
 	return AdmissionResult{Event: evt, Verdict: VerdictWarning, Reason: reason}
+}
+
+// applyPostScanEnforcement takes the OPA verdict after scanning and executes
+// the enforcement side-effects (block, quarantine, disable) that OPA cannot
+// perform itself.
+func (w *InstallWatcher) applyPostScanEnforcement(pe *enforce.PolicyEngine, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
+	switch out.Verdict {
+	case "clean":
+		_ = w.logger.LogAction("install-clean", evt.Path,
+			fmt.Sprintf("type=%s scanner=%s", targetType, scannerName))
+	case "rejected":
+		_ = w.logger.LogAction("install-rejected", evt.Path,
+			fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, result.MaxSeverity(), scannerName))
+
+		if w.cfg.Watch.AutoBlock {
+			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
+			_ = pe.Block(targetType, evt.Name, blockReason)
+			pe.SetSourcePath(targetType, evt.Name, evt.Path)
+
+			if out.FileAction == "quarantine" {
+				_ = pe.Quarantine(targetType, evt.Name, blockReason)
+			}
+			_ = pe.Disable(targetType, evt.Name, blockReason)
+			w.enforceBlock(evt)
+		}
+	case "warning":
+		_ = w.logger.LogAction("install-warning", evt.Path,
+			fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, result.MaxSeverity(), scannerName))
+	}
+}
+
+// buildListEntries queries the SQLite store for block or allow entries.
+func (w *InstallWatcher) buildListEntries(pe *enforce.PolicyEngine, action string) []policy.ListEntry {
+	var entries []audit.ActionEntry
+	var err error
+	switch action {
+	case "block":
+		entries, err = pe.ListBlocked()
+	case "allow":
+		entries, err = pe.ListAllowed()
+	}
+	if err != nil || entries == nil {
+		return nil
+	}
+	out := make([]policy.ListEntry, len(entries))
+	for i, e := range entries {
+		out[i] = policy.ListEntry{
+			TargetType: e.TargetType,
+			TargetName: e.TargetName,
+			Reason:     e.Reason,
+		}
+	}
+	return out
+}
+
+func toVerdict(s string) Verdict {
+	switch s {
+	case "blocked":
+		return VerdictBlocked
+	case "allowed":
+		return VerdictAllowed
+	case "clean":
+		return VerdictClean
+	case "rejected":
+		return VerdictRejected
+	case "warning":
+		return VerdictWarning
+	default:
+		return VerdictScanError
+	}
 }
 
 func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {

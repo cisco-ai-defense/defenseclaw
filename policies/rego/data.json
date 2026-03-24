@@ -1,0 +1,51 @@
+{
+  "config": {
+    "policy_name": "default",
+    "allow_list_bypass_scan": true,
+    "scan_on_install": true,
+    "update_sandbox_policy": true,
+    "max_enforcement_delay_seconds": 2
+  },
+  "actions": {
+    "CRITICAL": { "runtime": "block", "file": "quarantine" },
+    "HIGH": { "runtime": "block", "file": "quarantine" },
+    "MEDIUM": { "runtime": "allow", "file": "none" },
+    "LOW": { "runtime": "allow", "file": "none" },
+    "INFO": { "runtime": "allow", "file": "none" }
+  },
+  "severity_ranking": {
+    "CRITICAL": 5,
+    "HIGH": 4,
+    "MEDIUM": 3,
+    "LOW": 2,
+    "INFO": 1
+  },
+  "audit": {
+    "retention_days": 90,
+    "log_all_actions": true,
+    "log_scan_results": true
+  },
+  "firewall": {
+    "default_action": "deny",
+    "blocked_destinations": [
+      "169.254.169.254",
+      "fd00:ec2::254"
+    ],
+    "allowed_domains": [
+      "api.anthropic.com",
+      "api.github.com",
+      "github.com",
+      "objects.githubusercontent.com",
+      "proxy.golang.org",
+      "sum.golang.org",
+      "registry.npmjs.org",
+      "pypi.org",
+      "files.pythonhosted.org"
+    ],
+    "allowed_ports": [443, 80]
+  },
+  "sandbox": {
+    "default_permissions": [],
+    "denied_endpoints_global": []
+  }
+}

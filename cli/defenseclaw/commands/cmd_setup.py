@@ -6,7 +6,7 @@ Mirrors internal/cli/setup.go.
 from __future__ import annotations
 
 import os
-import sys
+import subprocess
 
 import click
 
@@ -189,4 +189,161 @@ def _print_summary(sc) -> None:
 
     for key, val in rows:
         click.echo(f"    scanners.skill_scanner.{key + ':':<22s} {val}")
+    click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup gateway
+# ---------------------------------------------------------------------------
+
+@setup.command("gateway")
+@click.option("--remote", is_flag=True, help="Configure for a remote OpenClaw gateway (requires auth token)")
+@click.option("--host", default=None, help="Gateway host")
+@click.option("--port", type=int, default=None, help="Gateway WebSocket port")
+@click.option("--api-port", type=int, default=None, help="Sidecar REST API port")
+@click.option("--token", default=None, help="Gateway auth token")
+@click.option("--ssm-param", default=None, help="AWS SSM parameter name for token")
+@click.option("--ssm-region", default=None, help="AWS region for SSM")
+@click.option("--ssm-profile", default=None, help="AWS CLI profile for SSM")
+@click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
+@pass_ctx
+def setup_gateway(
+    app: AppContext,
+    remote: bool,
+    host, port, api_port, token,
+    ssm_param, ssm_region, ssm_profile,
+    non_interactive: bool,
+) -> None:
+    """Configure gateway connection for the DefenseClaw sidecar.
+
+    By default configures for a local OpenClaw instance (no token needed).
+    Use --remote to configure for a remote gateway that requires an auth token,
+    optionally fetched from AWS SSM Parameter Store.
+    """
+    gw = app.cfg.gateway
+
+    if non_interactive:
+        if host is not None:
+            gw.host = host
+        if port is not None:
+            gw.port = port
+        if api_port is not None:
+            gw.api_port = api_port
+        if token is not None:
+            gw.token = token
+        elif ssm_param:
+            fetched = _fetch_ssm_token(ssm_param, ssm_region or "us-east-1", ssm_profile)
+            if fetched:
+                gw.token = fetched
+            else:
+                click.echo("error: failed to fetch token from SSM", err=True)
+                raise SystemExit(1)
+    elif remote:
+        _interactive_gateway_remote(gw)
+    else:
+        _interactive_gateway_local(gw)
+
+    app.cfg.save()
+    _print_gateway_summary(gw)
+
+    if app.logger:
+        mode = "remote" if (remote or gw.token) else "local"
+        app.logger.log_action("setup-gateway", "config", f"mode={mode} host={gw.host} port={gw.port}")
+
+
+def _interactive_gateway_local(gw) -> None:
+    click.echo()
+    click.echo("  Gateway Configuration (local)")
+    click.echo("  ─────────────────────────────")
+    click.echo()
+
+    gw.host = click.prompt("  Gateway host", default=gw.host)
+    gw.port = click.prompt("  Gateway port", default=gw.port, type=int)
+    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=int)
+    gw.token = ""
+    click.echo()
+    click.echo("  Local mode: no auth token needed.")
+
+
+def _interactive_gateway_remote(gw) -> None:
+    click.echo()
+    click.echo("  Gateway Configuration (remote)")
+    click.echo("  ──────────────────────────────")
+    click.echo()
+
+    gw.host = click.prompt("  Gateway host", default=gw.host)
+    gw.port = click.prompt("  Gateway port", default=gw.port, type=int)
+    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=int)
+
+    click.echo()
+    use_ssm = click.confirm("  Fetch token from AWS SSM Parameter Store?", default=True)
+
+    if use_ssm:
+        param = click.prompt(
+            "  SSM parameter name",
+            default="/openclaw/openclaw-bedrock/gateway-token",
+        )
+        region = click.prompt("  AWS region", default="us-east-1")
+        profile = click.prompt("  AWS CLI profile", default="devops")
+
+        click.echo("  Fetching token from SSM...", nl=False)
+        fetched = _fetch_ssm_token(param, region, profile)
+        if fetched:
+            gw.token = fetched
+            click.echo(f" ok ({_mask(fetched)})")
+        else:
+            click.echo(" failed")
+            click.echo("  Falling back to manual entry.")
+            gw.token = _prompt_secret("OPENCLAW_GATEWAY_TOKEN", gw.token)
+    else:
+        gw.token = _prompt_secret("OPENCLAW_GATEWAY_TOKEN", gw.token)
+
+    if not gw.token:
+        click.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
+
+
+def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None:
+    cmd = [
+        "aws", "ssm", "get-parameter",
+        "--name", param,
+        "--with-decryption",
+        "--query", "Parameter.Value",
+        "--output", "text",
+        "--region", region,
+    ]
+    if profile:
+        cmd.extend(["--profile", profile])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _print_gateway_summary(gw) -> None:
+    click.echo()
+    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    click.echo()
+
+    rows = [
+        ("host", gw.host),
+        ("port", str(gw.port)),
+        ("api_port", str(gw.api_port)),
+        ("token", _mask(gw.token) if gw.token else "(none — local mode)"),
+    ]
+
+    for key, val in rows:
+        click.echo(f"    gateway.{key + ':':<12s} {val}")
+    click.echo()
+
+    if gw.token:
+        click.echo("  Start the sidecar with:")
+        click.echo("    defenseclaw-gateway")
+    else:
+        click.echo("  Start the sidecar with:")
+        click.echo("    defenseclaw-gateway")
+        click.echo("  (local mode — ensure OpenClaw is running on this machine)")
     click.echo()

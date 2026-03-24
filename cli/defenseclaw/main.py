@@ -11,18 +11,17 @@ import sys
 import click
 
 from defenseclaw import __version__
-from defenseclaw.context import AppContext
-from defenseclaw.commands.cmd_init import init_cmd
-from defenseclaw.commands.cmd_setup import setup
+from defenseclaw.commands.cmd_aibom import aibom
+from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_deploy import deploy
+from defenseclaw.commands.cmd_init import init_cmd
+from defenseclaw.commands.cmd_mcp import mcp
+from defenseclaw.commands.cmd_plugin import plugin
+from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_sidecar import sidecar
 from defenseclaw.commands.cmd_skill import skill
-from defenseclaw.commands.cmd_plugin import plugin
-from defenseclaw.commands.cmd_mcp import mcp
-from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_status import status
-from defenseclaw.commands.cmd_alerts import alerts
-
+from defenseclaw.context import AppContext
 
 SKIP_LOAD_COMMANDS = {"init"}
 

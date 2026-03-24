@@ -1,8 +1,10 @@
 version: 2
+
 project_name: defenseclaw
 
 builds:
-  - main: ./cmd/defenseclaw
+  - id: defenseclaw
+    main: ./cmd/defenseclaw
     binary: defenseclaw
     env:
       - CGO_ENABLED=0
@@ -13,28 +15,51 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
 archives:
-  - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
-  name_template: checksums.txt
+  name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
+    cmd: syft
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
 
 brews:
   - repository:
       owner: defenseclaw
       name: homebrew-tap
-    homepage: https://github.com/defenseclaw/defenseclaw
-    description: Enterprise governance layer for OpenClaw
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    name: defenseclaw
+    homepage: "https://github.com/defenseclaw/defenseclaw"
+    description: "Enterprise governance layer for OpenClaw"
     install: |
       bin.install "defenseclaw"
+    test: |
+      system "#{bin}/defenseclaw", "--version"

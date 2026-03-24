@@ -3,10 +3,12 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
+  id-token: write
+  packages: write
 
 jobs:
   release:
@@ -15,12 +17,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
+
+      - uses: sigstore/cosign-installer@v3
+
+      - uses: anchore/sbom-action/download-syft@v0
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign checksums
+        run: cosign sign-blob --yes checksums.txt --output-signature checksums.txt.sig --output-certificate checksums.txt.pem
+        working-directory: dist
+
+      - name: Attach signatures to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release upload "$tag" dist/checksums.txt.sig dist/checksums.txt.pem

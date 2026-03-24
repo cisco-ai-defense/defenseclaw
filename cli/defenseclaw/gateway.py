@@ -53,6 +53,16 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def list_skills(self) -> dict[str, Any]:
+        resp = requests.get(f"{self.base_url}/skills", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_tools_catalog(self) -> dict[str, Any]:
+        resp = requests.get(f"{self.base_url}/tools/catalog", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
     def is_running(self) -> bool:
         try:
             self.health()

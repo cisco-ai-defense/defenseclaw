@@ -41,6 +41,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/config/patch", a.handleConfigPatch)
+	mux.HandleFunc("/skills", a.handleSkills)
+	mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -208,6 +210,56 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 
 	_ = a.logger.LogAction("api-config-patch", req.Path, fmt.Sprintf("patched via REST API value=%v", req.Value))
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
+}
+
+func (a *APIServer) handleSkills(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if a.client == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	data, err := a.client.GetSkillsStatus(ctx)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if a.client == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	data, err := a.client.GetToolsCatalog(ctx)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (a *APIServer) writeJSON(w http.ResponseWriter, status int, v interface{}) {

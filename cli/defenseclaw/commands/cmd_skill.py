@@ -9,8 +9,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
-from pathlib import Path
 from typing import Any
 
 import click
@@ -24,7 +22,7 @@ def skill() -> None:
 
 
 # ---------------------------------------------------------------------------
-# OpenClaw helpers (mirror listOpenclawSkillsFull / getOpenclawSkillInfo)
+# OpenClaw helpers — sidecar API first, local `openclaw` binary as fallback
 # ---------------------------------------------------------------------------
 
 def _run_openclaw(*args: str) -> str | None:
@@ -41,7 +39,34 @@ def _run_openclaw(*args: str) -> str | None:
     return None
 
 
-def _list_openclaw_skills_full() -> dict[str, Any] | None:
+def _sidecar_client(app: AppContext):
+    """Build an OrchestratorClient from the app's gateway config."""
+    from defenseclaw.gateway import OrchestratorClient
+
+    return OrchestratorClient(
+        host=app.cfg.gateway.host,
+        port=app.cfg.gateway.api_port,
+    )
+
+
+def _list_skills_via_sidecar(app: AppContext) -> dict[str, Any] | None:
+    """Fetch skills from the sidecar REST API (GET /skills)."""
+    try:
+        data = _sidecar_client(app).list_skills()
+        if isinstance(data, dict):
+            return data
+        return None
+    except Exception:
+        return None
+
+
+def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] | None:
+    """Get the full skill list — tries sidecar API first, then local binary."""
+    if app is not None:
+        result = _list_skills_via_sidecar(app)
+        if result is not None:
+            return result
+
     out = _run_openclaw("skills", "list", "--json")
     if out is None:
         return None
@@ -51,7 +76,15 @@ def _list_openclaw_skills_full() -> dict[str, Any] | None:
         return None
 
 
-def _get_openclaw_skill_info(name: str) -> dict[str, Any] | None:
+def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[str, Any] | None:
+    """Get info for a single skill — tries sidecar first, then local binary."""
+    if app is not None:
+        full = _list_skills_via_sidecar(app)
+        if full is not None:
+            for s in full.get("skills", []):
+                if s.get("name") == name:
+                    return s
+
     out = _run_openclaw("skills", "info", name, "--json")
     if out is None:
         return None
@@ -129,12 +162,8 @@ def _skill_status_display(s: dict[str, Any]) -> str:
 @pass_ctx
 def list_skills(app: AppContext, as_json: bool) -> None:
     """List all OpenClaw skills with their latest scan severity."""
-    from rich.console import Console
-    from rich.table import Table
 
-    from defenseclaw.enforce import PolicyEngine
-
-    oc_list = _list_openclaw_skills_full()
+    oc_list = _list_openclaw_skills_full(app)
     skills = oc_list.get("skills", []) if oc_list else []
 
     scan_map = _build_scan_map(app.store)
@@ -285,8 +314,7 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str) -> None:
     # Resolve scan directory
     scan_dir = scan_path
     if not scan_dir:
-        # Try openclaw skills info first
-        info = _get_openclaw_skill_info(target)
+        info = _get_openclaw_skill_info(target, app)
         if info and info.get("baseDir"):
             scan_dir = info["baseDir"]
         else:
@@ -328,8 +356,7 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str) -> None:
 
 
 def _scan_all(app: AppContext, scanner, as_json: bool) -> None:
-    # Try openclaw skills list first
-    oc_list = _list_openclaw_skills_full()
+    oc_list = _list_openclaw_skills_full(app)
     if oc_list and oc_list.get("skills"):
         skill_names = [s["name"] for s in oc_list["skills"]]
     else:
@@ -341,7 +368,7 @@ def _scan_all(app: AppContext, scanner, as_json: bool) -> None:
         if not as_json:
             click.echo(f"[scan] found {len(skill_names)} skills to scan\n")
         for name in skill_names:
-            info = _get_openclaw_skill_info(name)
+            info = _get_openclaw_skill_info(name, app)
             if not info or not info.get("baseDir"):
                 click.echo(f"[scan] warning: no baseDir for {name}", err=True)
                 continue
@@ -692,7 +719,7 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
     """
     skill_name = os.path.basename(name)
 
-    info_map = _get_openclaw_skill_info(skill_name)
+    info_map = _get_openclaw_skill_info(skill_name, app)
     if info_map is None:
         info_map = {"name": skill_name}
 
@@ -732,7 +759,9 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
         if scan_data.get("clean"):
             click.secho("  Verdict:  CLEAN", fg="green")
         else:
-            click.echo(f"  Verdict:  {scan_data.get('total_findings', 0)} {scan_data.get('max_severity', 'INFO')} findings")
+            n = scan_data.get("total_findings", 0)
+            sev = scan_data.get("max_severity", "INFO")
+            click.echo(f"  Verdict:  {n} {sev} findings")
         click.echo(f"  Target:   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
@@ -774,7 +803,11 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
     if pe.is_blocked("skill", skill_name):
         if app.logger:
             app.logger.log_action("install-rejected", skill_name, "reason=blocked")
-        click.echo(f"error: skill {skill_name!r} is on the block list — run 'defenseclaw skill allow {skill_name}' to unblock", err=True)
+        click.echo(
+            f"error: skill {skill_name!r} is on the block list"
+            f" — run 'defenseclaw skill allow {skill_name}' to unblock",
+            err=True,
+        )
         raise SystemExit(1)
 
     # Allow list check — skip scan

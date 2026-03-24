@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from defenseclaw.models import Finding, ScanResult
 

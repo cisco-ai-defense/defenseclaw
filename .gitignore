@@ -8,6 +8,8 @@
 # Editor and IDE metadata
 .idea/
 .vscode/
+.cursor/
+.windsurf/
 *.swp
 *.swo
 *~
@@ -20,6 +22,8 @@ coverage.out
 cover.out
 *.coverprofile
 *.test
+.gocache/
+.gomodcache/
 
 # Python cache
 __pycache__/
@@ -33,3 +37,26 @@ __pycache__/
 # Local binaries
 /defenseclaw
 /defenseclaw-*
+/custom-scanner
+
+# Node.js
+node_modules/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Archive (historical snapshots — not maintained)
+/_archive/
+
+# Private keys and certificates — NEVER commit
+*.pem
+*.key
+*.p12
+*.pfx

@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -159,8 +158,12 @@ class SeverityAction:
 
 @dataclass
 class SkillActionsConfig:
-    critical: SeverityAction = field(default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"))
-    high: SeverityAction = field(default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"))
+    critical: SeverityAction = field(
+        default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"),
+    )
+    high: SeverityAction = field(
+        default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"),
+    )
     medium: SeverityAction = field(default_factory=SeverityAction)
     low: SeverityAction = field(default_factory=SeverityAction)
     info: SeverityAction = field(default_factory=SeverityAction)

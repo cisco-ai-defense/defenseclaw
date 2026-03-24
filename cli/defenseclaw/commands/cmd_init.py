@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 
 import click
 
@@ -24,7 +23,7 @@ def init_cmd(app: AppContext, skip_install: bool) -> None:
     Creates ~/.defenseclaw/, default config, SQLite database,
     and installs scanner dependencies.
     """
-    from defenseclaw.config import default_config, detect_environment, config_path
+    from defenseclaw.config import config_path, default_config, detect_environment
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 

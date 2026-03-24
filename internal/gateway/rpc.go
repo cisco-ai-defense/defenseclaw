@@ -60,6 +60,16 @@ func (c *Client) GetToolsCatalog(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "tools.catalog", nil)
 }
 
+// GetSkillsStatus fetches the installed skills and their current status.
+func (c *Client) GetSkillsStatus(ctx context.Context) (json.RawMessage, error) {
+	return c.Request(ctx, "skills.status", nil)
+}
+
+// GetSkillsBins fetches the available skill binaries/entries.
+func (c *Client) GetSkillsBins(ctx context.Context) (json.RawMessage, error) {
+	return c.Request(ctx, "skills.bins", nil)
+}
+
 // ResolveApproval approves or rejects an exec approval request.
 func (c *Client) ResolveApproval(ctx context.Context, id string, approved bool, reason string) error {
 	params := ApprovalResolveParams{

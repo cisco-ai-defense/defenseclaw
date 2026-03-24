@@ -43,7 +43,7 @@ All subcommands are registered on `defenseclaw`. Use `defenseclaw <command> --he
 | Command | Description |
 |---------|-------------|
 | `plugin list` | List installed plugins |
-| `plugin scan` | Scan a plugin |
+| `plugin scan <name-or-path>` | Scan a plugin for security issues |
 | `plugin install <name-or-path>` | Install a plugin from a local path or registry |
 | `plugin remove <name>` | Remove an installed plugin |
 
@@ -289,6 +289,30 @@ defenseclaw plugin list
 ```
 
 Lists installed plugins from `~/.defenseclaw/plugins/`.
+
+## plugin scan
+
+```
+defenseclaw plugin scan <name-or-path> [flags]
+```
+
+Scans a plugin directory for security issues. Checks for dangerous permissions,
+install scripts, credential theft, obfuscation, supply chain risks, and more.
+
+Accepts a plugin name (resolved from `~/.defenseclaw/plugins/`) or a direct path.
+
+**Flags:**
+- `--json` — output scan results as JSON
+
+**Examples:**
+
+```bash
+# Scan an installed plugin by name
+defenseclaw plugin scan my-plugin
+
+# Scan a plugin directory
+defenseclaw plugin scan /path/to/plugin
+```
 
 ## plugin install
 

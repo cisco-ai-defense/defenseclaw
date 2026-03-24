@@ -361,19 +361,13 @@ class Store:
         def _count(sql: str) -> int:
             return self.db.execute(sql).fetchone()[0]
 
+        q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
+        q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
         return Counts(
-            blocked_skills=_count(
-                "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')='block'"
-            ),
-            allowed_skills=_count(
-                "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')='allow'"
-            ),
-            blocked_mcps=_count(
-                "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')='block'"
-            ),
-            allowed_mcps=_count(
-                "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')='allow'"
-            ),
+            blocked_skills=_count(q_skill + "'block'"),
+            allowed_skills=_count(q_skill + "'allow'"),
+            blocked_mcps=_count(q_mcp + "'block'"),
+            allowed_mcps=_count(q_mcp + "'allow'"),
             alerts=_count(
                 "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
             ),

@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-lint:
+    name: Go Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          install-mode: goinstall
+
+  go-test:
+    name: Go Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+
+  go-build:
+    name: Go Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/defenseclaw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  python-lint-test:
+    name: Python Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - run: uv run ruff check cli/defenseclaw/
+      - run: uv run pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage-py.xml
+
+  python-audit:
+    name: Python Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - run: uv run pip install pip-audit
+      - run: uv export --no-hashes -o /tmp/requirements.txt
+      - run: uv run pip-audit -r /tmp/requirements.txt
+
+  ts-build-test:
+    name: TypeScript Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/defenseclaw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx vitest run
+
+  ts-audit:
+    name: npm Dependency Audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/defenseclaw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: npm ci
+      - run: npm audit --omit=dev
+
+  rego-test:
+    name: Rego Policy Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: open-policy-agent/setup-opa@v2
+        with:
+          version: latest
+      - run: opa test policies/rego/ -v

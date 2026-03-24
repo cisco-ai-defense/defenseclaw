@@ -9,6 +9,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -190,7 +191,22 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"skill_take_action": wcfg.Skill.TakeAction,
 	})
 
-	w := watcher.New(s.cfg, skillDirs, mcpDirs, s.store, s.logger, s.shell, func(r watcher.AdmissionResult) {
+	var opa *policy.Engine
+	if s.cfg.PolicyDir != "" {
+		regoDir := s.cfg.PolicyDir
+		if engine, err := policy.New(regoDir); err == nil {
+			if compileErr := engine.Compile(); compileErr == nil {
+				opa = engine
+				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", regoDir)
+			} else {
+				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
+		}
+	}
+
+	w := watcher.New(s.cfg, skillDirs, mcpDirs, s.store, s.logger, s.shell, opa, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
 

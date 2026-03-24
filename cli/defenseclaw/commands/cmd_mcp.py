@@ -41,7 +41,7 @@ def scan(app: AppContext, url: str, as_json: bool) -> None:
     if as_json:
         click.echo(result.to_json())
     elif result.is_clean():
-        click.secho(f"  Status: CLEAN", fg="green")
+        click.secho("  Status: CLEAN", fg="green")
     else:
         click.secho(
             f"  Status: {result.max_severity()} ({len(result.findings)} findings)",
