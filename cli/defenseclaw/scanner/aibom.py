@@ -28,7 +28,7 @@ class AIBOMScannerWrapper:
             tmp_path = tmp.name
 
         try:
-            proc = subprocess.run(
+            subprocess.run(
                 [self.binary, "analyze", target,
                  "--output-format", "json", "--output-file", tmp_path],
                 capture_output=True, text=True, timeout=300,

@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/open-policy-agent/opa/ast"
-	"github.com/open-policy-agent/opa/rego"
-	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	"github.com/open-policy-agent/opa/ast"            //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/rego"           //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/storage"        //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/storage/inmem"  //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 )
 
 // Engine evaluates OPA Rego policies for the admission gate.

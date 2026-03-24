@@ -759,7 +759,9 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
         if scan_data.get("clean"):
             click.secho("  Verdict:  CLEAN", fg="green")
         else:
-            click.echo(f"  Verdict:  {scan_data.get('total_findings', 0)} {scan_data.get('max_severity', 'INFO')} findings")
+            n = scan_data.get("total_findings", 0)
+            sev = scan_data.get("max_severity", "INFO")
+            click.echo(f"  Verdict:  {n} {sev} findings")
         click.echo(f"  Target:   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
@@ -801,7 +803,11 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
     if pe.is_blocked("skill", skill_name):
         if app.logger:
             app.logger.log_action("install-rejected", skill_name, "reason=blocked")
-        click.echo(f"error: skill {skill_name!r} is on the block list — run 'defenseclaw skill allow {skill_name}' to unblock", err=True)
+        click.echo(
+            f"error: skill {skill_name!r} is on the block list"
+            f" — run 'defenseclaw skill allow {skill_name}' to unblock",
+            err=True,
+        )
         raise SystemExit(1)
 
     # Allow list check — skip scan

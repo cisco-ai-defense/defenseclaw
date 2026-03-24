@@ -273,7 +273,9 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 
 	data, _ := json.Marshal(ocConfig)
 	ocPath := filepath.Join(tmpDir, "openclaw.json")
-	os.WriteFile(ocPath, data, 0o644)
+	if err := os.WriteFile(ocPath, data, 0o644); err != nil {
+		t.Fatalf("write openclaw.json: %v", err)
+	}
 
 	dirs := SkillDirsForMode(ClawOpenClaw, tmpDir)
 

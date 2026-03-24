@@ -158,8 +158,12 @@ class SeverityAction:
 
 @dataclass
 class SkillActionsConfig:
-    critical: SeverityAction = field(default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"))
-    high: SeverityAction = field(default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"))
+    critical: SeverityAction = field(
+        default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"),
+    )
+    high: SeverityAction = field(
+        default_factory=lambda: SeverityAction(file="quarantine", runtime="disable", install="block"),
+    )
     medium: SeverityAction = field(default_factory=SeverityAction)
     low: SeverityAction = field(default_factory=SeverityAction)
     info: SeverityAction = field(default_factory=SeverityAction)

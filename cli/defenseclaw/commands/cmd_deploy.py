@@ -156,8 +156,6 @@ def _auto_block(
 
     if not app.store:
         return 0
-
-    from defenseclaw.enforce import PolicyEngine
     pe = PolicyEngine(app.store)
     blocked = 0
 
