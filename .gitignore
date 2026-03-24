@@ -21,6 +21,15 @@ cover.out
 *.coverprofile
 *.test
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Python venv
+.venv/
+
 # Local binaries
 /defenseclaw
 /defenseclaw-*
