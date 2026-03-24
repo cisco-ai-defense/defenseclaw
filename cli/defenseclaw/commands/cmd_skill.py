@@ -618,6 +618,12 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
         # Avoids iterating all ~5000 members in Python which causes resource
         # exhaustion on macOS (fork bomb via VSCode shell integration hooks).
         import subprocess
+
+        if not as_json:
+            click.echo(
+                f"[scan] tar: archive={archive_path!s} prefix={skill_prefix!r} "
+                f"strip=3 dest={skill_dir!s}"
+            )
         tar_result = subprocess.run(
             [
                 "tar", "xzf", archive_path,
@@ -628,9 +634,18 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             capture_output=True, text=True, timeout=30,
         )
 
+        if not as_json:
+            click.echo(f"[scan] tar: exit={tar_result.returncode}")
+            if tar_result.stdout:
+                click.echo(f"[scan] tar stdout: {tar_result.stdout!r}")
+            if tar_result.stderr:
+                click.echo(f"[scan] tar stderr: {tar_result.stderr!r}", err=True)
+
         os.unlink(archive_path)  # free disk immediately
 
         found = tar_result.returncode == 0 and os.listdir(skill_dir)
+        if not as_json and found:
+            click.echo(f"[scan] tar: extracted entries in skill_dir: {os.listdir(skill_dir)!r}")
 
         if not found:
             click.echo(f"error: skill {name!r} not found in openclaw package", err=True)
@@ -687,8 +702,18 @@ def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
         os.makedirs(extract_dir, exist_ok=True)
 
         if tarfile.is_tarfile(download_path):
+            if not as_json:
+                click.echo(f"[scan] tarfile: extracting {download_path!s} -> {extract_dir!s}")
             with tarfile.open(download_path) as tf:
+                members = tf.getnames()
+                if not as_json:
+                    n = len(members)
+                    preview = members[:20]
+                    more = f" ... ({n} total)" if n > 20 else ""
+                    click.echo(f"[scan] tarfile: members={n} first={preview!r}{more}")
                 tf.extractall(extract_dir, filter="data")
+            if not as_json:
+                click.echo(f"[scan] tarfile: extractall done -> listing={os.listdir(extract_dir)!r}")
         elif zipfile.is_zipfile(download_path):
             with zipfile.ZipFile(download_path) as zf:
                 zf.extractall(extract_dir)
