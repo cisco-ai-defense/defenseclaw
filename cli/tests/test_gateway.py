@@ -153,5 +153,109 @@ class TestOrchestratorClientIsRunning(unittest.TestCase):
         self.assertFalse(client.is_running())
 
 
+class TestGatewayCSRFHeaderLiveServer(unittest.TestCase):
+    """Verify OrchestratorClient sends X-DefenseClaw-Client using a real HTTP server (no mocks)."""
+
+    def test_post_sends_csrf_header(self):
+        import http.server
+        import threading
+
+        captured = [None]
+
+        class CaptureHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured[0] = self.headers
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        try:
+            client = OrchestratorClient(host="127.0.0.1", port=port)
+            client.disable_skill("test-skill")
+            thread.join(timeout=5)
+
+            self.assertIsNotNone(captured[0])
+            self.assertEqual(captured[0].get("X-DefenseClaw-Client"), "python-cli")
+        finally:
+            server.server_close()
+
+    def test_get_sends_csrf_header(self):
+        import http.server
+        import threading
+
+        captured = [None]
+
+        class CaptureHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                captured[0] = self.headers
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        try:
+            client = OrchestratorClient(host="127.0.0.1", port=port)
+            client.health()
+            thread.join(timeout=5)
+
+            self.assertIsNotNone(captured[0])
+            self.assertEqual(captured[0].get("X-DefenseClaw-Client"), "python-cli")
+        finally:
+            server.server_close()
+
+    def test_scan_skill_sends_csrf_header(self):
+        import http.server
+        import threading
+
+        captured = [None]
+
+        class CaptureHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured[0] = self.headers
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"scanner":"skill-scanner","findings":[]}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        try:
+            client = OrchestratorClient(host="127.0.0.1", port=port)
+            client.scan_skill("/path/to/skill", name="my-skill")
+            thread.join(timeout=5)
+
+            self.assertIsNotNone(captured[0])
+            self.assertEqual(captured[0].get("X-DefenseClaw-Client"), "python-cli")
+        finally:
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

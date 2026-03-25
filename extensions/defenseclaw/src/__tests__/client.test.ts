@@ -313,6 +313,33 @@ describe("DaemonClient", () => {
 
       expect(lastRequest.headers["Content-Length"]).toBeDefined();
     });
+
+    it("includes X-DefenseClaw-Client header on GET requests", async () => {
+      const client = makeClient();
+      await client.status();
+
+      expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
+        "openclaw-plugin",
+      );
+    });
+
+    it("includes X-DefenseClaw-Client header on POST requests", async () => {
+      const client = makeClient();
+      await client.block("skill", "evil-skill", "malware");
+
+      expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
+        "openclaw-plugin",
+      );
+    });
+
+    it("includes X-DefenseClaw-Client header on DELETE requests", async () => {
+      const client = makeClient();
+      await client.unblock("skill", "temp-skill");
+
+      expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
+        "openclaw-plugin",
+      );
+    });
   });
 
   describe("evaluatePolicy", () => {

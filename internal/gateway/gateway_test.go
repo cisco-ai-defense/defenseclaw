@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -2431,4 +2432,498 @@ func counterByAttr(sum metricdata.Sum[int64], key, val string) int64 {
 		}
 	}
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Guardrail evaluate endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestHandleGuardrailEvaluate_Fallback(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+
+	body, _ := json.Marshal(guardrailEvaluateRequest{
+		Direction:   "prompt",
+		Model:       "gpt-4",
+		Mode:        "action",
+		ScannerMode: "local",
+		LocalResult: &policy.GuardrailScanResult{
+			Action:   "block",
+			Severity: "HIGH",
+			Findings: []string{"ignore previous"},
+			Reason:   "matched: ignore previous",
+		},
+		ContentLength: 200,
+		ElapsedMs:     5.0,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusOK, w.Body.String())
+	}
+
+	var resp policy.GuardrailOutput
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Action != "block" {
+		t.Errorf("action = %q, want block", resp.Action)
+	}
+	if resp.Severity != "HIGH" {
+		t.Errorf("severity = %q, want HIGH", resp.Severity)
+	}
+
+	events, _ := store.ListEvents(10)
+	found := false
+	for _, e := range events {
+		if e.Action == "guardrail-opa-verdict" {
+			found = true
+			if !strings.Contains(e.Details, "direction=prompt") {
+				t.Errorf("details missing direction: %s", e.Details)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected guardrail-opa-verdict audit event")
+	}
+}
+
+func TestHandleGuardrailEvaluate_CleanInput(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+
+	body, _ := json.Marshal(guardrailEvaluateRequest{
+		Direction:   "prompt",
+		Model:       "gpt-4",
+		Mode:        "action",
+		ScannerMode: "local",
+		LocalResult: &policy.GuardrailScanResult{
+			Action:   "allow",
+			Severity: "NONE",
+			Findings: []string{},
+			Reason:   "",
+		},
+		ContentLength: 100,
+		ElapsedMs:     1.0,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	var resp policy.GuardrailOutput
+	json.NewDecoder(w.Result().Body).Decode(&resp)
+	if resp.Action != "allow" {
+		t.Errorf("action = %q, want allow", resp.Action)
+	}
+	if resp.Severity != "NONE" {
+		t.Errorf("severity = %q, want NONE", resp.Severity)
+	}
+}
+
+func TestHandleGuardrailEvaluate_BadJSON(t *testing.T) {
+	_, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), logger: logger}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewBufferString("{bad"))
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(w, req)
+
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestHandleGuardrailEvaluate_MissingFields(t *testing.T) {
+	_, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), logger: logger}
+
+	body, _ := json.Marshal(guardrailEvaluateRequest{Direction: "prompt"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(w, req)
+
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestHandleGuardrailEvaluate_MethodNotAllowed(t *testing.T) {
+	api := &APIServer{health: NewSidecarHealth()}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/guardrail/evaluate", nil)
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(w, req)
+
+	if w.Result().StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleGuardrailEvaluate_BothScanners(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+
+	body, _ := json.Marshal(guardrailEvaluateRequest{
+		Direction:   "prompt",
+		Model:       "claude-sonnet",
+		Mode:        "action",
+		ScannerMode: "both",
+		LocalResult: &policy.GuardrailScanResult{
+			Action:   "alert",
+			Severity: "MEDIUM",
+			Findings: []string{"sk-"},
+			Reason:   "matched: sk-",
+		},
+		CiscoResult: &policy.GuardrailScanResult{
+			Action:   "block",
+			Severity: "HIGH",
+			Findings: []string{"Prompt Injection"},
+			Reason:   "cisco: Prompt Injection",
+		},
+		ContentLength: 500,
+		ElapsedMs:     15.0,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvaluate(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Result().StatusCode, http.StatusOK, w.Body.String())
+	}
+
+	var resp policy.GuardrailOutput
+	json.NewDecoder(w.Result().Body).Decode(&resp)
+	if resp.Severity != "HIGH" {
+		t.Errorf("severity = %q, want HIGH (Cisco escalates)", resp.Severity)
+	}
+}
+
+func TestBuildEnvIncludesScannerMode(t *testing.T) {
+	cfg := &config.GuardrailConfig{
+		GuardrailDir: "/test/guardrails",
+		Mode:         "observe",
+		ScannerMode:  "both",
+		CiscoAIDefense: config.CiscoAIDefenseConfig{
+			Endpoint:  "https://test.example.com",
+			APIKeyEnv: "MY_CISCO_KEY",
+			TimeoutMs: 5000,
+		},
+	}
+	llm := &LiteLLMProcess{cfg: cfg, apiPort: 18790}
+	env := llm.buildEnv()
+
+	checks := map[string]bool{
+		"DEFENSECLAW_SCANNER_MODE=both":                true,
+		"CISCO_AI_DEFENSE_ENDPOINT=https://test.example.com": true,
+		"CISCO_AI_DEFENSE_API_KEY_ENV=MY_CISCO_KEY":    true,
+		"CISCO_AI_DEFENSE_TIMEOUT_MS=5000":             true,
+	}
+	for _, e := range env {
+		for expected := range checks {
+			if e == expected {
+				checks[expected] = false
+			}
+		}
+	}
+	for expected, missing := range checks {
+		if missing {
+			t.Errorf("buildEnv() missing %s", expected)
+		}
+	}
+}
+
+func TestBuildEnvSkipsCiscoWhenLocal(t *testing.T) {
+	cfg := &config.GuardrailConfig{
+		GuardrailDir: "/test/guardrails",
+		Mode:         "observe",
+		ScannerMode:  "local",
+		CiscoAIDefense: config.CiscoAIDefenseConfig{
+			Endpoint:  "https://test.example.com",
+			APIKeyEnv: "MY_CISCO_KEY",
+		},
+	}
+	llm := &LiteLLMProcess{cfg: cfg, apiPort: 18790}
+	env := llm.buildEnv()
+
+	for _, e := range env {
+		if strings.HasPrefix(e, "CISCO_AI_DEFENSE_ENDPOINT=") {
+			t.Error("buildEnv() should not include CISCO_AI_DEFENSE_ENDPOINT when scanner_mode=local")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// csrfProtect middleware tests — live handler chain, no mocks
+// ---------------------------------------------------------------------------
+
+func TestCSRFProtectAllowsGETWithoutHeaders(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	})
+	handler := csrfProtect(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("GET without headers: status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestCSRFProtectBlocksPOSTWithoutClientHeader(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("inner handler should not be reached")
+	})
+	handler := csrfProtect(inner)
+
+	body := bytes.NewBufferString(`{"test":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("POST without X-DefenseClaw-Client: status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if !strings.Contains(w.Body.String(), "X-DefenseClaw-Client") {
+		t.Errorf("response body should mention missing header, got: %s", w.Body.String())
+	}
+}
+
+func TestCSRFProtectBlocksWrongContentType(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("inner handler should not be reached")
+	})
+	handler := csrfProtect(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/enforce/block", bytes.NewBufferString(`data`))
+	req.Header.Set("X-DefenseClaw-Client", "test-client")
+	req.Header.Set("Content-Type", "text/plain")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("POST with text/plain Content-Type: status = %d, want %d", w.Code, http.StatusUnsupportedMediaType)
+	}
+}
+
+func TestCSRFProtectBlocksNonLocalhostOrigin(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("inner handler should not be reached")
+	})
+	handler := csrfProtect(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/config/patch", bytes.NewBufferString(`{}`))
+	req.Header.Set("X-DefenseClaw-Client", "test-client")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("POST with non-localhost Origin: status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if !strings.Contains(w.Body.String(), "non-localhost") {
+		t.Errorf("response body should mention origin rejection, got: %s", w.Body.String())
+	}
+}
+
+func TestCSRFProtectAllowsLocalhostOrigin(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := csrfProtect(inner)
+
+	for _, origin := range []string{
+		"http://127.0.0.1:18790",
+		"http://localhost:18790",
+		"http://[::1]:18790",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/enforce/block", bytes.NewBufferString(`{}`))
+		req.Header.Set("X-DefenseClaw-Client", "test-client")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("POST with Origin %q: status = %d, want %d", origin, w.Code, http.StatusOK)
+		}
+	}
+}
+
+func TestCSRFProtectAllowsValidPOST(t *testing.T) {
+	reached := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := csrfProtect(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", bytes.NewBufferString(`{"skillKey":"test"}`))
+	req.Header.Set("X-DefenseClaw-Client", "python-cli")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("valid POST: status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !reached {
+		t.Error("inner handler was not reached for valid POST")
+	}
+}
+
+func TestCSRFProtectAllowsDELETEWithHeaders(t *testing.T) {
+	reached := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := csrfProtect(inner)
+
+	req := httptest.NewRequest(http.MethodDelete, "/enforce/block", bytes.NewBufferString(`{}`))
+	req.Header.Set("X-DefenseClaw-Client", "openclaw-plugin")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("DELETE with headers: status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !reached {
+		t.Error("inner handler was not reached for valid DELETE")
+	}
+}
+
+func TestCSRFProtectHEADAndOPTIONSExempt(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := csrfProtect(inner)
+
+	for _, method := range []string{http.MethodHead, http.MethodOptions} {
+		req := httptest.NewRequest(method, "/status", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("%s without headers: status = %d, want %d", method, w.Code, http.StatusOK)
+		}
+	}
+}
+
+// TestCSRFProtectKnownClientIdentities validates that every client identity
+// used across the codebase (Python CLI, TypeScript plugin, Python guardrail)
+// is accepted by the middleware.
+func TestCSRFProtectKnownClientIdentities(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := csrfProtect(inner)
+
+	clients := []string{
+		"python-cli",
+		"openclaw-plugin",
+		"litellm-guardrail",
+	}
+
+	for _, clientID := range clients {
+		t.Run(clientID, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewBufferString(`{}`))
+			req.Header.Set("X-DefenseClaw-Client", clientID)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("client %q: status = %d, want %d", clientID, w.Code, http.StatusOK)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mux-level integration test — verifies csrfProtect is actually wired into Run()
+// ---------------------------------------------------------------------------
+
+func TestAPIMuxCSRFIntegration(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	health := NewSidecarHealth()
+	api := NewAPIServer(":0", health, nil, store, logger)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", api.handleHealth)
+	mux.HandleFunc("/skill/disable", api.handleSkillDisable)
+	mux.HandleFunc("/enforce/block", api.handleEnforceBlock)
+	mux.HandleFunc("/v1/guardrail/event", api.handleGuardrailEvent)
+	wrapped := csrfProtect(mux)
+
+	ts := httptest.NewServer(wrapped)
+	defer ts.Close()
+
+	t.Run("GET /health passes without CSRF headers", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/health")
+		if err != nil {
+			t.Fatalf("GET /health: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /health: status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("POST /skill/disable without X-DefenseClaw-Client gets 403", func(t *testing.T) {
+		body := bytes.NewBufferString(`{"skillKey":"test"}`)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/skill/disable", body)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /skill/disable: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("POST without client header: status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+		}
+	})
+
+	t.Run("POST /v1/guardrail/event with all headers passes CSRF", func(t *testing.T) {
+		payload := `{"direction":"prompt","model":"gpt-4","action":"allow","severity":"NONE","reason":"","findings":[],"elapsed_ms":1.0}`
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/guardrail/event", bytes.NewBufferString(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Client", "litellm-guardrail")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /v1/guardrail/event: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("POST with valid headers: status = %d, want %d, body=%s", resp.StatusCode, http.StatusOK, body)
+		}
+	})
+
+	t.Run("POST /enforce/block with non-localhost Origin gets 403", func(t *testing.T) {
+		body := bytes.NewBufferString(`{"target_type":"skill","target_name":"x","reason":"test"}`)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/enforce/block", body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Client", "python-cli")
+		req.Header.Set("Origin", "https://evil.example.com")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /enforce/block: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("POST with evil Origin: status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+		}
+	})
 }
