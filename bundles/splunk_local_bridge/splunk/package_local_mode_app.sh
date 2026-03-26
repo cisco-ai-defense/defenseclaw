@@ -16,17 +16,27 @@ fi
 mkdir -p "${BUILD_DIR}"
 rm -f "${PACKAGE_PATH}"
 
-tar \
-  --exclude='*/__pycache__' \
-  --exclude='*/__pycache__/*' \
-  --exclude='*.pyc' \
-  --sort=name \
-  --mtime='UTC 2026-01-01' \
-  --owner=0 \
-  --group=0 \
-  --numeric-owner \
-  -czf "${PACKAGE_PATH}" \
-  -C "${SCRIPT_DIR}/apps" \
-  "${APP_NAME}"
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  tar \
+    --exclude='*/__pycache__' \
+    --exclude='*/__pycache__/*' \
+    --exclude='*.pyc' \
+    --sort=name \
+    --mtime='UTC 2026-01-01' \
+    --owner=0 \
+    --group=0 \
+    --numeric-owner \
+    -czf "${PACKAGE_PATH}" \
+    -C "${SCRIPT_DIR}/apps" \
+    "${APP_NAME}"
+else
+  COPYFILE_DISABLE=1 tar \
+    --exclude='*/__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='._*' \
+    -czf "${PACKAGE_PATH}" \
+    -C "${SCRIPT_DIR}/apps" \
+    "${APP_NAME}"
+fi
 
 echo "${PACKAGE_PATH}"

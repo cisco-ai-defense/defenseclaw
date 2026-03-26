@@ -59,7 +59,7 @@ fail() {
 
 is_truthy() {
   local value
-  value="${1,,}"
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "${value}" in
     1|true|yes|on) return 0 ;;
     *) return 1 ;;

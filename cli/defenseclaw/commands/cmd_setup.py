@@ -1602,9 +1602,8 @@ def _apply_o11y_config(
         otel.logs.protocol = "http"
         otel.logs.url_path = "/v1/log/otlp"
 
-    otel.resource.attributes["service.name"] = app_name
-
     _save_secret_to_dotenv("SPLUNK_ACCESS_TOKEN", access_token, app.cfg.data_dir)
+    _save_secret_to_dotenv("OTEL_SERVICE_NAME", app_name, app.cfg.data_dir)
 
 
 def _apply_logs_config(
@@ -1829,7 +1828,9 @@ def _print_splunk_status(app: AppContext) -> None:
             click.echo(f"    Logs:        {otel.logs.endpoint}{otel.logs.url_path}")
         else:
             click.echo(f"    Logs:        disabled")
-        svc = otel.resource.attributes.get("service.name", "defenseclaw")
+        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+        dotenv = _load_dotenv(dotenv_path)
+        svc = dotenv.get("OTEL_SERVICE_NAME", os.environ.get("OTEL_SERVICE_NAME", "defenseclaw"))
         click.echo(f"    Service:     {svc}")
         click.echo()
 

@@ -460,7 +460,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(otel.traces.url_path, "/v2/trace/otlp")
         self.assertEqual(otel.metrics.endpoint, "ingest.eu0.observability.splunkcloud.com")
         self.assertEqual(otel.metrics.url_path, "/v2/datapoint/otlp")
-        self.assertEqual(otel.resource.attributes.get("service.name"), "myapp")
         self.assertEqual(otel.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
 
         dotenv_path = os.path.join(self.tmp_dir, ".env")
@@ -468,17 +467,17 @@ class TestSetupSplunkCommand(unittest.TestCase):
         with open(dotenv_path) as f:
             content = f.read()
         self.assertIn("SPLUNK_ACCESS_TOKEN=test-tok", content)
+        self.assertIn("OTEL_SERVICE_NAME=myapp", content)
 
+    @patch.dict(os.environ, {}, clear=False)
     def test_setup_splunk_o11y_requires_token(self):
         from defenseclaw.commands.cmd_setup import setup
 
-        env = dict(os.environ)
-        env.pop("SPLUNK_ACCESS_TOKEN", None)
+        os.environ.pop("SPLUNK_ACCESS_TOKEN", None)
         result = self.runner.invoke(
             setup,
             ["splunk", "--o11y", "--non-interactive"],
             obj=self.app,
-            env=env,
         )
         self.assertNotEqual(result.exit_code, 0)
 
