@@ -1,0 +1,142 @@
+<dashboard version="1.1">
+  <label>Runs And Sessions</label>
+  <description>Audit, diagnostics, metrics, and traces for local DefenseClaw and OpenClaw run and session investigation.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>Runs and sessions investigation</h2>
+        <p>This page now combines the audit baseline with diagnostics-backed session state and queue context plus metrics-and-traces correlation for provider, model, token, cost, duration, and span activity. The current phase is still local and event-indexed rather than billing-authoritative or full distributed tracing.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Audit run and session inventory</title>
+      <table>
+        <search>
+          <query>`defenseclaw_run_inventory` | table run_id session_id count first_seen last_seen actions severities actors targets | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Diagnostics session inventory</title>
+      <table>
+        <search>
+          <query>`openclaw_diagnostics_session_inventory` | table run_id session_id session_key count event_names outcomes lanes reasons | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Diagnostics events by session</title>
+      <chart>
+        <search>
+          <query>`openclaw_diagnostics_base` | search session_id!="(unknown)" | timechart span=30m count by session_id limit=10 useother=t</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Session states by outcome</title>
+      <chart>
+        <search>
+          <query>`openclaw_session_state_events` | stats count by outcome | sort - count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Session state transitions</title>
+      <table>
+        <search>
+          <query>`openclaw_session_state_events` | table timestamp session_id session_key run_id outcome reason status | sort - timestamp | head 25</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Run attempts and retries</title>
+      <table>
+        <search>
+          <query>`openclaw_run_attempt_events` | table timestamp run_id session_id session_key attempt outcome reason duration_ms | sort - timestamp | head 25</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Queue wait by session</title>
+      <table>
+        <search>
+          <query>`openclaw_queue_lane_events` | stats avg(wait_ms) as avg_wait_ms max(wait_ms) as max_wait_ms values(lane) as lanes values(outcome) as outcomes by run_id session_id session_key | sort - max_wait_ms | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Message processing outcomes by session</title>
+      <table>
+        <search>
+          <query>`openclaw_message_processed_events` | stats count values(outcome) as outcomes values(reason) as reasons values(duration_ms) as durations by run_id session_id session_key | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Metrics and trace correlation by run and session</title>
+      <table>
+        <search>
+          <query>`openclaw_metrics_base` | eval signal_name=metric_name | fields run_id session_id session_key provider model signal_name | append [ search `openclaw_usage_traces` | eval signal_name=span_name | fields run_id session_id session_key provider model signal_name ] | search run_id!="(unknown)" OR session_id!="(unknown)" | stats values(signal_name) as signals values(provider) as providers values(model) as models by run_id session_id session_key | sort run_id session_id | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent correlated trace spans</title>
+      <table>
+        <search>
+          <query>`openclaw_usage_traces` | search run_id!="(unknown)" OR session_id!="(unknown)" | table timestamp span_name run_id session_id session_key duration_ms provider model status | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

@@ -1,0 +1,79 @@
+<dashboard version="1.1">
+  <label>DefenseClaw Security Focus</label>
+  <description>Prioritized views for high-severity, blocked, denied, and enforcement-oriented activity.</description>
+  <row>
+    <panel>
+      <title>Elevated risk events</title>
+      <single>
+        <search>
+          <query>`defenseclaw_audit_risk` | search risk_bucket="critical" OR risk_bucket="high" OR risk_bucket="medium" | stats count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Potential control actions</title>
+      <single>
+        <search>
+          <query>`defenseclaw_audit_base` | search action="*block*" OR action="*deny*" OR action="*enforce*" OR action="*quarantine*" | stats count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Error-class events</title>
+      <single>
+        <search>
+          <query>`defenseclaw_audit_base` | search severity=ERROR OR severity=CRITICAL OR action="*fail*" OR action="*error*" | stats count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Risk bucket distribution</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_audit_risk` | stats count by risk_bucket | sort - count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Actions that need attention</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_risk` | search risk_bucket="critical" OR risk_bucket="high" OR risk_bucket="medium" | stats count values(severity) as severity values(target) as target by action | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Latest notable events</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_risk` | search risk_bucket="critical" OR risk_bucket="high" OR risk_bucket="medium" | table timestamp risk_bucket action severity actor target details | sort - timestamp | head 30</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

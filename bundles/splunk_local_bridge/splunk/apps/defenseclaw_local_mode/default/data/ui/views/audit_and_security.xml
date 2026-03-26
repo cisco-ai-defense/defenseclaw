@@ -1,0 +1,96 @@
+<dashboard version="1.1">
+  <label>Audit And Security</label>
+  <description>Primary investigation view for recent DefenseClaw audit activity and elevated-risk actions.</description>
+  <row>
+    <panel>
+      <title>Audit activity over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_audit_base` | timechart span=30m count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Control activity over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_control_actions` | timechart span=30m count by action limit=6 useother=t</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Top actions</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_base` | stats count values(severity) as severities by action | sort - count | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Latest notable activity</title>
+      <table>
+        <search>
+          <query>`defenseclaw_notable_audit` | table timestamp run_id session_id risk_bucket action severity actor target details | sort - timestamp | head 25</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent deny and enforcement activity</title>
+      <table>
+        <search>
+          <query>`defenseclaw_control_actions` | table timestamp run_id session_id action severity actor target details | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Notable activity by run</title>
+      <table>
+        <search>
+          <query>`defenseclaw_notable_audit` | stats count values(action) as actions values(severity) as severities by run_id session_id | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Actors and targets</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_base` | stats count values(action) as actions values(run_id) as run_ids values(session_id) as session_ids by actor target | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

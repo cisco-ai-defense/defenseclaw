@@ -1,0 +1,110 @@
+<dashboard version="1.1">
+  <label>Alerts And Saved Searches</label>
+  <description>Disabled-by-default local alert content and the supporting saved searches for investigation.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>Local alert pack status</h2>
+        <p>This app now ships a bounded local alert pack across audit, gateway, diagnostics, and metrics signals. The packaged alerts are disabled by default, run on a 5-minute schedule with a 15-minute lookback when enabled, and do not configure external actions by default.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Packaged alert workflows</title>
+      <table>
+        <search>
+          <query>| makeresults count=7
+| streamstats count as row
+| eval alert_name=case(
+    row=1, "DefenseClaw Alert - Repeated Deny Activity",
+    row=2, "DefenseClaw Alert - Enforcement Action Detected",
+    row=3, "DefenseClaw Alert - High Severity Audit Burst",
+    row=4, "OpenClaw Alert - Repeated Gateway Error Signature",
+    row=5, "OpenClaw Alert - Queue Pressure Sustained",
+    row=6, "OpenClaw Alert - Retry Storm Or Stuck Session",
+    row=7, "OpenClaw Alert - High Cost Or Slow Run"
+  ),
+  signal_family=case(
+    row=1 OR row=2 OR row=3, "audit",
+    row=4, "gateway",
+    row=5 OR row=6, "diagnostics + metrics",
+    row=7, "metrics"
+  ),
+  threshold=case(
+    row=1, "2 deny or block actions in one run/session",
+    row=2, "any enforcement or quarantine action",
+    row=3, "2 ERROR or CRITICAL events in one run/session",
+    row=4, "2 identical gateway error signatures",
+    row=5, "queue depth >= 5 or queue wait >= 120 ms in at least 2 matching events",
+    row=6, "session.stuck or retry attempt >= 3",
+    row=7, "cost >= 1.00 USD or duration >= 5000 ms"
+  ),
+  default_state="disabled",
+  schedule="*/5 * * * *",
+  lookback="last 15 minutes",
+  drilldown_view=case(
+    row=1 OR row=2 OR row=3, "Audit And Security",
+    row=4, "Gateway Logs",
+    row=5 OR row=6, "Queue And Runtime Health",
+    row=7, "Model Usage And Cost"
+  )
+| table alert_name signal_family threshold default_state schedule lookback drilldown_view</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent matching alert conditions</title>
+      <table>
+        <search>
+          <query>`defenseclaw_repeated_deny_activity` | eval workflow="Repeated Deny Activity", threshold="deny_count &gt;= 2" | table workflow run_id session_id deny_count actions severities threshold
+| append [ search `defenseclaw_enforcement_action_detected` | eval workflow="Enforcement Action Detected", threshold="any enforcement or quarantine action" | table workflow run_id session_id action severity actor target threshold ]
+| append [ search `defenseclaw_high_severity_burst` | eval workflow="High Severity Audit Burst", threshold="high_severity_count &gt;= 2" | table workflow run_id session_id high_severity_count actions threshold ]
+| append [ search `openclaw_repeated_gateway_error_signature` | eval workflow="Repeated Gateway Error Signature", threshold="signature_count &gt;= 2" | table workflow subsystem error_signature signature_count run_ids session_ids threshold ]
+| append [ search `openclaw_queue_pressure_sustained` | eval workflow="Queue Pressure Sustained", threshold="pressure_matches &gt;= 2" | table workflow run_id session_id pressure_matches max_queue_depth max_wait_ms signal_sources threshold ]
+| append [ search `openclaw_retry_or_stuck_sessions` | eval workflow="Retry Storm Or Stuck Session", threshold="match_count &gt;= 1" | table workflow run_id session_id match_count alert_reasons max_threshold_value threshold ]
+| append [ search `openclaw_high_cost_or_slow_run_alert` | eval workflow="High Cost Or Slow Run", threshold="cost_usd &gt;= 1 or run_duration_ms &gt;= 5000" | table workflow run_id session_id cost_usd run_duration_ms providers models threshold ]
+| head 25</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Supporting saved searches</title>
+      <table>
+        <search>
+          <query>| makeresults count=4
+| streamstats count as row
+| eval search_name=case(
+    row=1, "DefenseClaw - Recent Deny And Enforcement Activity",
+    row=2, "OpenClaw - Recent Runtime Health Symptoms",
+    row=3, "OpenClaw - Recent Run Attempts And Retries",
+    row=4, "OpenClaw - Recent High Cost Or Slow Runs"
+  ),
+  purpose=case(
+    row=1, "Audit-driven triage for policy and enforcement activity.",
+    row=2, "Gateway-driven troubleshooting for runtime degradation.",
+    row=3, "Diagnostics-driven retry and stuck-session investigation.",
+    row=4, "Metrics-driven cost and latency investigation."
+  )
+| table search_name purpose</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

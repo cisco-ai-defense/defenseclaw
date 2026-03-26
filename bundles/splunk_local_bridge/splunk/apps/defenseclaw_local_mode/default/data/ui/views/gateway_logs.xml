@@ -1,0 +1,78 @@
+<dashboard version="1.1">
+  <label>Gateway Logs</label>
+  <description>Structured OpenClaw gateway-log investigation for local troubleshooting.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>Structured gateway logs</h2>
+        <p>This page is now backed by the structured <code>openclaw:gateway:json</code> signal family. It is the primary local troubleshooting surface for subsystem errors, noisy components, and raw gateway-log evidence.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Gateway log volume by level</title>
+      <chart>
+        <search>
+          <query>`openclaw_gateway_logs_base` | timechart span=15m count by level limit=8 useother=t</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Noisy subsystems</title>
+      <table>
+        <search>
+          <query>`openclaw_gateway_logs_base` | stats count values(level) as levels by subsystem | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent gateway errors</title>
+      <table>
+        <search>
+          <query>`openclaw_gateway_errors` | table timestamp level subsystem run_id session_id status error_code request_id message | sort - timestamp | head 25</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Repeated error signatures</title>
+      <table>
+        <search>
+          <query>`openclaw_gateway_error_signatures` | stats count latest(timestamp) as latest_seen values(message) as messages by subsystem error_signature | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent gateway logs</title>
+      <table>
+        <search>
+          <query>`openclaw_gateway_logs_base` | table timestamp level subsystem run_id session_id status request_id error_code message | sort - timestamp | head 30</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">30</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

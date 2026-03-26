@@ -1,0 +1,450 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_ENV_FILE="${ROOT_DIR}/env/.env.example"
+
+ACTION="${1:-help}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+PROFILE="local"
+ENV_FILE="${DEFAULT_ENV_FILE}"
+OUTPUT="text"
+DEBUG_MODE="false"
+REMOVE_VOLUMES="false"
+FOLLOW_LOGS="false"
+SERVICE_NAME="splunk"
+IMAGE_OVERRIDE=""
+RUN_LABEL="bridge-smoke"
+QUERY_STRING=""
+AUTH_ROLE="local"
+PRODUCT_TELEMETRY_INSTANCE_PATH="/opt/splunk/etc/apps/defenseclaw_local_mode/local/.product_telemetry_instance_id"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/splunk-claw-bridge <action> [options]
+
+Actions:
+  up       Package the app, start Splunk, wait for HEC readiness, and print connection details
+  down     Stop the selected compose profile
+  status   Show compose status for the selected profile
+  logs     Show compose logs for the selected profile
+  query    Run a SPL search through the public local query interface
+  smoke    Run the runtime smoke harness for the selected profile
+  help     Show this help
+
+Options:
+  --env-file PATH       Environment file to use. Default: env/.env.example
+  --profile NAME        Compose profile to use: local or ci. Default: local
+  --output FORMAT       Output format: text or json. Default: text
+  --image IMAGE         Override SPLUNK_IMAGE for this run
+  --debug               Export DEBUG=true and ANSIBLE_EXTRA_FLAGS=-vvv for bootstrap debugging
+  --volumes             Remove volumes on down
+  --follow              Follow logs (logs action only)
+  --service NAME        Compose service for logs. Default: splunk
+  --run-label LABEL     Harness run label for smoke. Default: bridge-smoke
+  --query SPL           SPL query string to execute with the query action
+  --auth-role ROLE      Query auth role: local or admin. Default: local
+EOF
+}
+
+fail() {
+  printf 'error: %s\n' "$1" >&2
+  exit 1
+}
+
+is_truthy() {
+  local value
+  value="${1,,}"
+  case "${value}" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_options() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --env-file)
+        [[ $# -ge 2 ]] || fail "--env-file requires a path"
+        ENV_FILE="$2"
+        shift 2
+        ;;
+      --profile)
+        [[ $# -ge 2 ]] || fail "--profile requires a value"
+        PROFILE="$2"
+        shift 2
+        ;;
+      --output)
+        [[ $# -ge 2 ]] || fail "--output requires a value"
+        OUTPUT="$2"
+        shift 2
+        ;;
+      --image)
+        [[ $# -ge 2 ]] || fail "--image requires a value"
+        IMAGE_OVERRIDE="$2"
+        shift 2
+        ;;
+      --debug)
+        DEBUG_MODE="true"
+        shift
+        ;;
+      --volumes)
+        REMOVE_VOLUMES="true"
+        shift
+        ;;
+      --follow)
+        FOLLOW_LOGS="true"
+        shift
+        ;;
+      --service)
+        [[ $# -ge 2 ]] || fail "--service requires a value"
+        SERVICE_NAME="$2"
+        shift 2
+        ;;
+      --run-label)
+        [[ $# -ge 2 ]] || fail "--run-label requires a value"
+        RUN_LABEL="$2"
+        shift 2
+        ;;
+      --query)
+        [[ $# -ge 2 ]] || fail "--query requires a value"
+        QUERY_STRING="$2"
+        shift 2
+        ;;
+      --auth-role)
+        [[ $# -ge 2 ]] || fail "--auth-role requires a value"
+        AUTH_ROLE="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "unknown option: $1"
+        ;;
+    esac
+  done
+}
+
+resolve_env_file() {
+  if [[ "${ENV_FILE}" != /* ]]; then
+    ENV_FILE="${ROOT_DIR}/${ENV_FILE}"
+  fi
+  [[ -f "${ENV_FILE}" ]] || fail "environment file not found: ${ENV_FILE}"
+}
+
+validate_profile() {
+  case "${PROFILE}" in
+    local|ci) ;;
+    *) fail "unsupported profile: ${PROFILE}" ;;
+  esac
+}
+
+validate_output() {
+  case "${OUTPUT}" in
+    text|json) ;;
+    *) fail "unsupported output format: ${OUTPUT}" ;;
+  esac
+}
+
+validate_auth_role() {
+  case "${AUTH_ROLE}" in
+    local|admin) ;;
+    *) fail "unsupported auth role: ${AUTH_ROLE}" ;;
+  esac
+}
+
+load_env_contract() {
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+
+  export SPLUNK_ENV_FILE="${ENV_FILE}"
+  if [[ -n "${IMAGE_OVERRIDE}" ]]; then
+    export SPLUNK_IMAGE="${IMAGE_OVERRIDE}"
+  fi
+  if [[ "${DEBUG_MODE}" == "true" ]]; then
+    export DEBUG="true"
+    export ANSIBLE_EXTRA_FLAGS="-vvv"
+  fi
+}
+
+compose_file() {
+  printf '%s/compose/docker-compose.%s.yml' "${ROOT_DIR}" "${PROFILE}"
+}
+
+run_compose() {
+  (
+    cd "${ROOT_DIR}"
+    docker compose -f "$(compose_file)" "$@"
+  )
+}
+
+require_running_service() {
+  local services
+  services="$(run_compose ps --status running --services || true)"
+  if ! printf '%s\n' "${services}" | grep -qx "splunk"; then
+    fail "the selected profile is not running; start it first with 'bin/splunk-claw-bridge up --profile ${PROFILE}'"
+  fi
+}
+
+package_app() {
+  (
+    cd "${ROOT_DIR}"
+    bash splunk/package_local_mode_app.sh
+  )
+}
+
+wait_for_hec_ready() {
+  local deadline
+  deadline=$((SECONDS + 240))
+  while (( SECONDS < deadline )); do
+    local status
+    status="$(
+      curl -sk -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Splunk ${DEFENSECLAW_HEC_TOKEN}" \
+        -H 'Content-Type: application/json' \
+        "${DEFENSECLAW_HEC_URL}" \
+        -d '{"event":"bridge-ready-check"}' || true
+    )"
+    if [[ "${status}" == "200" ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+print_up_text() {
+  cat <<EOF
+profile: ${PROFILE}
+image: ${SPLUNK_IMAGE}
+splunk_web_url: http://127.0.0.1:8000
+hec_url: ${DEFENSECLAW_HEC_URL}
+hec_token: ${DEFENSECLAW_HEC_TOKEN}
+username: ${DEFENSECLAW_LOCAL_USERNAME}
+password: ${DEFENSECLAW_LOCAL_PASSWORD}
+index: ${DEFENSECLAW_INDEX}
+sourcetype: ${DEFENSECLAW_SOURCETYPE}
+source: ${DEFENSECLAW_SOURCE}
+EOF
+}
+
+print_up_json() {
+  python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "profile": os.environ["PROFILE"],
+    "image": os.environ["SPLUNK_IMAGE"],
+    "splunk_web_url": "http://127.0.0.1:8000",
+    "hec_url": os.environ["DEFENSECLAW_HEC_URL"],
+    "hec_token": os.environ["DEFENSECLAW_HEC_TOKEN"],
+    "username": os.environ["DEFENSECLAW_LOCAL_USERNAME"],
+    "password": os.environ["DEFENSECLAW_LOCAL_PASSWORD"],
+    "index": os.environ["DEFENSECLAW_INDEX"],
+    "sourcetype": os.environ["DEFENSECLAW_SOURCETYPE"],
+    "source": os.environ["DEFENSECLAW_SOURCE"],
+}
+print(json.dumps(payload, indent=2))
+PY
+}
+
+print_status_json() {
+  local ps_json
+  ps_json="$(run_compose ps --format json)"
+  python3 - <<'PY' "${ps_json}"
+import json
+import os
+import sys
+
+services = json.loads(sys.argv[1] or "[]")
+if isinstance(services, dict):
+    services = [services]
+
+payload = {
+    "profile": os.environ["PROFILE"],
+    "image": os.environ["SPLUNK_IMAGE"],
+    "services": services,
+}
+print(json.dumps(payload, indent=2))
+PY
+}
+
+resolve_query_credentials() {
+  case "${AUTH_ROLE}" in
+    local)
+      QUERY_USERNAME="${DEFENSECLAW_LOCAL_USERNAME}"
+      QUERY_PASSWORD="${DEFENSECLAW_LOCAL_PASSWORD}"
+      ;;
+    admin)
+      QUERY_USERNAME="admin"
+      QUERY_PASSWORD="${SPLUNK_PASSWORD}"
+      ;;
+  esac
+}
+
+run_query_helper() {
+  run_compose exec -T -u splunk splunk \
+    /opt/splunk/bin/splunk cmd python /opt/splunk-claw-bridge/splunk/bin/export_search.py \
+    --username "${QUERY_USERNAME}" \
+    --password "${QUERY_PASSWORD}" \
+    --query "${QUERY_STRING}"
+}
+
+service_is_running() {
+  local services
+  services="$(run_compose ps --status running --services 2>/dev/null || true)"
+  printf '%s\n' "${services}" | grep -qx "splunk"
+}
+
+ensure_product_telemetry_instance_id() {
+  run_compose exec -T -u splunk splunk sh -lc "
+    umask 077
+    mkdir -p \"\$(dirname '${PRODUCT_TELEMETRY_INSTANCE_PATH}')\"
+    if [ ! -s '${PRODUCT_TELEMETRY_INSTANCE_PATH}' ]; then
+      cat /proc/sys/kernel/random/uuid > '${PRODUCT_TELEMETRY_INSTANCE_PATH}'
+    fi
+    tr -d '\r\n' < '${PRODUCT_TELEMETRY_INSTANCE_PATH}'
+  "
+}
+
+read_splunk_version() {
+  run_compose exec -T -u splunk splunk sh -lc \
+    "/opt/splunk/bin/splunk version 2>/dev/null | sed -n 's/^Splunk \\([^ ]*\\).*/\\1/p' | head -n 1"
+}
+
+emit_product_telemetry() {
+  local event_type="$1"
+  local integration_enabled="${DEFENSECLAW_INTEGRATION_ENABLED:-false}"
+  local instance_id="unknown"
+  local splunk_version="unknown"
+
+  if ! service_is_running; then
+    return 0
+  fi
+
+  instance_id="$(ensure_product_telemetry_instance_id || true)"
+  splunk_version="$(read_splunk_version || true)"
+  if [[ -z "${instance_id}" ]]; then
+    instance_id="unknown"
+  fi
+  if [[ -z "${splunk_version}" ]]; then
+    splunk_version="unknown"
+  fi
+
+  run_compose exec -T \
+    -u splunk \
+    -e "DEFENSECLAW_INTEGRATION_ENABLED=${integration_enabled}" \
+    -e "SPLUNK_VERSION=${splunk_version}" \
+    -e "PHONE_HOME_INSTANCE_ID=${instance_id}" \
+    splunk \
+    /opt/splunk/bin/splunk cmd python /opt/splunk-claw-bridge/splunk/apps/defenseclaw_local_mode/bin/send_product_telemetry.py \
+    --event-type "${event_type}" \
+    --instance-id "${instance_id}" \
+    --splunk-version "${splunk_version}" \
+    --defenseclaw-integration-enabled "${integration_enabled}" \
+    --output json >/dev/null
+}
+
+cmd_up() {
+  local package_path
+  package_path="$(package_app)"
+  run_compose up -d
+  wait_for_hec_ready || fail "timed out waiting for HEC readiness on ${DEFENSECLAW_HEC_URL}"
+  emit_product_telemetry startup
+  if is_truthy "${DEFENSECLAW_INTEGRATION_ENABLED:-false}"; then
+    emit_product_telemetry integration_configured
+  fi
+
+  if [[ "${OUTPUT}" == "json" ]]; then
+    export PROFILE
+    print_up_json
+  else
+    printf 'packaged_app: %s\n' "${package_path}"
+    print_up_text
+  fi
+}
+
+cmd_down() {
+  local -a down_args
+  down_args=(down)
+  if service_is_running; then
+    emit_product_telemetry shutdown
+  fi
+  if [[ "${REMOVE_VOLUMES}" == "true" || "${PROFILE}" == "ci" ]]; then
+    down_args+=(-v)
+  fi
+  run_compose "${down_args[@]}"
+}
+
+cmd_status() {
+  if [[ "${OUTPUT}" == "json" ]]; then
+    export PROFILE
+    print_status_json
+  else
+    run_compose ps
+  fi
+}
+
+cmd_logs() {
+  local -a log_args
+  log_args=(logs --no-color)
+  if [[ "${FOLLOW_LOGS}" == "true" ]]; then
+    log_args+=(--follow)
+  fi
+  log_args+=("${SERVICE_NAME}")
+  run_compose "${log_args[@]}"
+}
+
+cmd_query() {
+  [[ -n "${QUERY_STRING}" ]] || fail "query action requires --query"
+  require_running_service
+  resolve_query_credentials
+  run_query_helper
+}
+
+cmd_smoke() {
+  local -a smoke_args
+  package_app >/dev/null
+  smoke_args=(
+    --env-file "${ENV_FILE}"
+    --compose-file "compose/docker-compose.${PROFILE}.yml"
+    --compose-profile "${PROFILE}"
+    --runtime-smoke
+    --run-label "${RUN_LABEL}"
+  )
+  if [[ "${PROFILE}" == "ci" ]]; then
+    smoke_args+=(--teardown)
+  fi
+  (
+    cd "${ROOT_DIR}"
+    python3 harness/run_local_mode_harness.py "${smoke_args[@]}"
+  )
+}
+
+parse_options "$@"
+resolve_env_file
+validate_profile
+validate_output
+validate_auth_role
+load_env_contract
+
+case "${ACTION}" in
+  up) cmd_up ;;
+  down) cmd_down ;;
+  status) cmd_status ;;
+  logs) cmd_logs ;;
+  query) cmd_query ;;
+  smoke) cmd_smoke ;;
+  help) usage ;;
+  *) fail "unsupported action: ${ACTION}" ;;
+esac

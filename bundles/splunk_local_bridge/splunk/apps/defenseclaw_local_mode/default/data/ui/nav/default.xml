@@ -1,0 +1,16 @@
+<nav search_view="search">
+  <view name="local_mode_home" default="true" />
+  <collection label="Investigate">
+    <view name="audit_and_security" />
+    <view name="runs_and_sessions" />
+    <view name="queue_runtime_health" />
+  </collection>
+  <collection label="Observe">
+    <view name="gateway_logs" />
+    <view name="model_usage_and_cost" />
+  </collection>
+  <collection label="Operate">
+    <view name="alerts_and_saved_searches" />
+    <view name="search_and_drilldown" />
+  </collection>
+</nav>

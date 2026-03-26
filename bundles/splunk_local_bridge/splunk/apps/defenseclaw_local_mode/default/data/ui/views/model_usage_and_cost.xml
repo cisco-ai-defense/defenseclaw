@@ -1,0 +1,125 @@
+<dashboard version="1.1">
+  <label>Model Usage And Cost</label>
+  <description>Structured metrics and traces for model usage, operational cost estimates, latency, and queue-pressure investigation.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>Model usage and cost from metrics and traces</h2>
+        <p>This page is now backed by structured metrics and traces. The current usage and cost story is event-indexed and local: token usage, operational cost estimates, run duration, queue pressure, and correlated traces. It is not a billing-authoritative or full distributed-tracing surface.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Metrics events in last 15 minutes</title>
+      <single>
+        <search>
+          <query>`openclaw_metrics_base` | stats count</query>
+          <earliest>-15m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>High-cost or slow runs</title>
+      <single>
+        <search>
+          <query>`openclaw_high_cost_or_slow_runs` | stats count as flagged_runs</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Trace spans in last 24 hours</title>
+      <single>
+        <search>
+          <query>`openclaw_traces_base` | stats count as trace_spans</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Token and cost by provider and model</title>
+      <table>
+        <search>
+          <query>`openclaw_metrics_base` | search metric_name="openclaw.tokens" OR metric_name="openclaw.cost.usd" | stats sum(metric_value) as total_value by metric_name provider model | sort - total_value | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Run duration and queue wait by provider and model</title>
+      <table>
+        <search>
+          <query>`openclaw_duration_metrics` | stats avg(metric_value) as avg_metric_value max(metric_value) as max_metric_value by metric_name provider model | sort - max_metric_value | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Queue pressure signals</title>
+      <table>
+        <search>
+          <query>`openclaw_queue_pressure_metrics` | stats max(metric_value) as max_metric_value values(unit) as units by metric_name run_id session_id | sort - max_metric_value | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent trace spans</title>
+      <table>
+        <search>
+          <query>`openclaw_usage_traces` | table timestamp span_name trace_id span_id run_id session_id duration_ms provider model status | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent high-cost or slow runs</title>
+      <table>
+        <search>
+          <query>`openclaw_high_cost_or_slow_runs` | table run_id session_id session_key cost_usd run_duration_ms queue_wait_ms providers models | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Trace activity by span name</title>
+      <table>
+        <search>
+          <query>`openclaw_usage_traces` | stats count avg(duration_ms) as avg_duration_ms max(duration_ms) as max_duration_ms by span_name status | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

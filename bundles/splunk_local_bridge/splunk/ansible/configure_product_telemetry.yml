@@ -1,0 +1,17 @@
+- name: Ensure DefenseClaw product telemetry local app directory exists
+  file:
+    path: /opt/splunk/etc/apps/defenseclaw_local_mode/local
+    state: directory
+    owner: splunk
+    group: splunk
+    mode: "0700"
+
+- name: Configure DefenseClaw product telemetry scheduled-search override
+  copy:
+    dest: /opt/splunk/etc/apps/defenseclaw_local_mode/local/savedsearches.conf
+    owner: splunk
+    group: splunk
+    mode: "0600"
+    content: |
+      [DefenseClaw Internal - Daily Product Telemetry Usage Summary]
+      disabled = {{ '0' if (lookup('env', 'PHONE_HOME_ENABLED') | default('true', true) | lower) in ['1', 'true', 'yes', 'on'] else '1' }}

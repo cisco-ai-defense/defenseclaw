@@ -1,0 +1,91 @@
+<dashboard version="1.1">
+  <label>DefenseClaw Operational Health</label>
+  <description>Operational checks for ingest freshness, field coverage, and telemetry quality.</description>
+  <row>
+    <panel>
+      <title>Events in last 15 minutes</title>
+      <single>
+        <search>
+          <query>`defenseclaw_audit_base` | stats count</query>
+          <earliest>-15m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Last event age (minutes)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_audit_base` | stats max(_time) as last_seen | eval minutes_since_last_event=round((now()-last_seen)/60, 2) | table minutes_since_last_event</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Unique actors</title>
+      <single>
+        <search>
+          <query>`defenseclaw_audit_base` | stats dc(actor) as unique_actors</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Event volume over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_audit_base` | timechart span=30m count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Severity over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_audit_base` | timechart span=1h count by severity limit=6 useother=f</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Field coverage</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_base` | eval target_present=if(target="(none)", 0, 1), actor_present=if(actor="(unknown)", 0, 1), details_present=if(details="", 0, 1) | stats avg(target_present) as target_present_ratio avg(actor_present) as actor_present_ratio avg(details_present) as details_present_ratio</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Source and sourcetype validation</title>
+      <table>
+        <search>
+          <query>index=defenseclaw_local | stats count by source sourcetype host | sort - count | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

@@ -1,0 +1,150 @@
+<dashboard version="1.1">
+  <label>Overview</label>
+  <description>Landing overview for the local DefenseClaw and OpenClaw observability app.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>DefenseClaw local mode overview</h2>
+        <p>This overview brings together the local investigation workflow across audit, gateway logs, diagnostics, metrics, traces, alerts, and guided drilldowns for DefenseClaw and OpenClaw activity.</p>
+        <p>This app is moving toward a broader observability model with audit, gateway logs, diagnostics, metrics, traces, alerts, and guided drilldowns. The current local baseline is centered on DefenseClaw audit telemetry.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Indexed events</title>
+      <single>
+        <search>
+          <query>index=defenseclaw_local | stats count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Recent runs</title>
+      <single>
+        <search>
+          <query>`defenseclaw_run_session_base` | search run_id!="(unknown)" | stats dc(run_id) as recent_runs</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Notable audit events</title>
+      <single>
+        <search>
+          <query>`defenseclaw_notable_audit` | stats count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Deny or enforcement events</title>
+      <single>
+        <search>
+          <query>`defenseclaw_control_actions` | stats count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Activity by severity</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_audit_base` | stats count by severity | sort - count</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Top actions</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_base` | stats count by action | sort - count | head 10</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent sessions</title>
+      <single>
+        <search>
+          <query>`defenseclaw_run_session_base` | search session_id!="(unknown)" | stats dc(session_id) as recent_sessions</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Recent run and session inventory</title>
+      <table>
+        <search>
+          <query>`defenseclaw_run_inventory` | table run_id session_id count first_seen last_seen actions severities | head 12</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">12</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Priority investigations</title>
+      <table>
+        <search>
+          <query>`defenseclaw_notable_audit` | table timestamp run_id session_id action severity actor target details | sort - timestamp | head 12</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">12</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Latest audit events</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_base` | table timestamp run_id session_id action severity actor target details | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Next places to look</title>
+      <table>
+        <search>
+          <query>| makeresults count=4 | streamstats count as row | eval section=case(row=1, "Audit and Security", row=2, "Runs and Sessions", row=3, "Search and Drilldown", row=4, "Queue and Runtime Health"), purpose=case(row=1, "Review deny, enforcement, severity, and notable audit activity.", row=2, "Pivot by run_id and session_id to reconstruct one investigation timeline.", row=3, "Use guided searches for run inventory, control actions, and missing telemetry.", row=4, "Validate ingest freshness now and queue or diagnostics signals in later phases.") | table section purpose</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">4</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

@@ -1,0 +1,84 @@
+---
+ansible_post_tasks:
+  - file:///opt/splunk-claw-bridge/splunk/ansible/create_local_user.yml
+  - file:///opt/splunk-claw-bridge/splunk/ansible/configure_product_telemetry.yml
+
+splunk:
+  role: splunk_standalone
+  admin_user: admin
+  http_port: 8000
+  apps_location:
+    - /opt/splunk-claw-bridge/splunk/build/defenseclaw_local_mode.tgz
+  hec:
+    enable: true
+    ssl: false
+    port: 8088
+    token: 00000000-0000-0000-0000-000000000001
+  app_paths:
+    httpinput: /opt/splunk/etc/apps/splunk_httpinput
+  conf:
+    - key: indexes
+      value:
+        directory: /opt/splunk/etc/system/local
+        content:
+          defenseclaw_local:
+            homePath: $SPLUNK_DB/defenseclaw_local/db
+            coldPath: $SPLUNK_DB/defenseclaw_local/colddb
+            thawedPath: $SPLUNK_DB/defenseclaw_local/thaweddb
+            frozenTimePeriodInSecs: 5184000
+            maxTotalDataSizeMB: 30720
+    - key: inputs
+      value:
+        directory: /opt/splunk/etc/apps/splunk_httpinput/local
+        content:
+          http:
+            disabled: 0
+            maxSockets: 8
+            maxThreads: 4
+          http://splunk_hec_token:
+            disabled: 0
+            token: 00000000-0000-0000-0000-000000000001
+            index: defenseclaw_local
+            sourcetype: defenseclaw:json
+            source: defenseclaw
+    - key: outputs
+      value:
+        directory: /opt/splunk/etc/system/local
+        content:
+          tcpout:
+            disabled: true
+    - key: limits
+      value:
+        directory: /opt/splunk/etc/system/local
+        content:
+          search:
+            total_search_concurrency_limit: 2
+            max_rt_search_multiplier: 0
+          scheduler:
+            max_searches_perc: 25
+            saved_searches_disabled: false
+    - key: authorize
+      value:
+        directory: /opt/splunk/etc/system/local
+        content:
+          role_defenseclaw_local_user:
+            importRoles: user
+            srchIndexesAllowed: defenseclaw_local
+            srchIndexesDefault: defenseclaw_local
+            srchJobsQuota: 2
+            rtSrchJobsQuota: 0
+            srchMaxTime: 300
+    - key: user-prefs
+      value:
+        directory: /opt/splunk/etc/users/defenseclaw_local_user/user-prefs/local
+        content:
+          general:
+            default_namespace: defenseclaw_local_mode
+    - key: global-banner
+      value:
+        directory: /opt/splunk/etc/system/local
+        content:
+          BANNER_MESSAGE_SINGLETON:
+            global_banner.visible: "true"
+            global_banner.message: Built specifically for DefenseClaw local developer workflows. Unsupported. No supported upgrade or migration experience. Use only for local development, testing, and investigation.
+            global_banner.background_color: orange

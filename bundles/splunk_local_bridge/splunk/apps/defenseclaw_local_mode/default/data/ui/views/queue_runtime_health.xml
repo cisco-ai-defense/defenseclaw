@@ -1,0 +1,125 @@
+<dashboard version="1.1">
+  <label>Queue And Runtime Health</label>
+  <description>Diagnostics-driven queue, session, and retry analytics for local OpenClaw workflows.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>Queue and runtime analytics from diagnostics events</h2>
+        <p>This page is now backed by structured diagnostics events. The current health story is diagnostics-driven: queue lane activity, wait behavior, stuck sessions, run attempts, and message processing outcomes. Metrics, traces, and cost analytics remain future work.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Diagnostics events in last 15 minutes</title>
+      <single>
+        <search>
+          <query>`openclaw_diagnostics_base` | stats count</query>
+          <earliest>-15m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Active queue lanes</title>
+      <single>
+        <search>
+          <query>`openclaw_queue_lane_events` | stats dc(lane) as active_lanes</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Stuck sessions</title>
+      <single>
+        <search>
+          <query>`openclaw_stuck_sessions` | stats dc(session_id) as stuck_sessions</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Queue lane activity over time</title>
+      <chart>
+        <search>
+          <query>`openclaw_queue_lane_events` | timechart span=15m count by lane limit=8 useother=t</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Queue wait by lane</title>
+      <table>
+        <search>
+          <query>`openclaw_queue_lane_events` | stats avg(wait_ms) as avg_wait_ms max(wait_ms) as max_wait_ms values(outcome) as outcomes by lane | sort - max_wait_ms | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent stuck sessions</title>
+      <table>
+        <search>
+          <query>`openclaw_stuck_sessions` | table timestamp session_id session_key run_id lane outcome reason wait_ms | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent run attempts and retries</title>
+      <table>
+        <search>
+          <query>`openclaw_run_attempt_events` | table timestamp run_id session_id session_key attempt outcome reason duration_ms | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent message processing failures</title>
+      <table>
+        <search>
+          <query>`openclaw_message_processing_failures` | table timestamp session_id session_key run_id outcome reason duration_ms provider model | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent session state transitions</title>
+      <table>
+        <search>
+          <query>`openclaw_session_state_events` | table timestamp session_id session_key run_id outcome reason status | sort - timestamp | head 20</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

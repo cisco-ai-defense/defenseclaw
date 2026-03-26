@@ -264,6 +264,17 @@ class TestSetupCommand(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
+    def _make_bridge_dir(self) -> str:
+        bridge_dir = os.path.join(self.tmp_dir, "splunk-claw-bridge", "code")
+        os.makedirs(os.path.join(bridge_dir, "bin"), exist_ok=True)
+        os.makedirs(os.path.join(bridge_dir, "env"), exist_ok=True)
+        bridge_bin = os.path.join(bridge_dir, "bin", "splunk-claw-bridge")
+        with open(bridge_bin, "w") as f:
+            f.write("#!/usr/bin/env bash\n")
+        with open(os.path.join(bridge_dir, "env", ".env.example"), "w") as f:
+            f.write("DEFENSECLAW_HEC_URL=http://127.0.0.1:8088/services/collector/event\n")
+        return bridge_dir
+
     def test_setup_help(self):
         from defenseclaw.commands.cmd_setup import setup
         result = self.runner.invoke(setup, ["--help"])
@@ -280,7 +291,7 @@ class TestSetupCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import setup
         result = self.runner.invoke(setup, ["splunk-local", "--help"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Configure DefenseClaw to use the splunk-claw-bridge local Splunk preset", result.output)
+        self.assertIn("Configure DefenseClaw to use the bundled local Splunk preset", result.output)
 
     def test_setup_non_interactive_flags(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -312,7 +323,7 @@ class TestSetupCommand(unittest.TestCase):
 
         result = self.runner.invoke(
             setup,
-            ["splunk-local", "--non-interactive"],
+            ["splunk-local", "--non-interactive", "--no-bootstrap-bridge"],
             obj=self.app,
             catch_exceptions=False,
         )
@@ -327,7 +338,7 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.splunk.sourcetype, "defenseclaw:json")
         self.assertFalse(self.app.cfg.splunk.verify_tls)
         self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN", result.output)
-        self.assertIn("https://github.com/splunk/splunk-claw-bridge", result.output)
+        self.assertIn("Start the bundled local bridge manually", result.output)
 
     def test_setup_splunk_local_non_interactive_override(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -362,6 +373,77 @@ class TestSetupCommand(unittest.TestCase):
         self.assertTrue(self.app.cfg.splunk.verify_tls)
         self.assertEqual(self.app.cfg.splunk.batch_size, 9)
         self.assertEqual(self.app.cfg.splunk.flush_interval_s, 11)
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_setup_splunk_local_bootstrap_bridge(self, mock_run):
+        from defenseclaw.commands.cmd_setup import setup
+
+        bridge_dir = self._make_bridge_dir()
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "username": "defenseclaw_local_user",
+                    "password": "DefenseClawLocalUser1!",
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk-local",
+                "--non-interactive",
+                "--bridge-dir",
+                bridge_dir,
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.splunk.enabled)
+        self.assertEqual(self.app.cfg.splunk.hec_endpoint, "http://127.0.0.1:8088/services/collector/event")
+        self.assertEqual(self.app.cfg.splunk.hec_token, "bootstrap-token")
+        self.assertIn("Local bridge bootstrap", result.output)
+        self.assertIn("splunk_web_url", result.output)
+        self.assertIn("Local bridge HEC token saved to config", result.output)
+        self.assertNotIn("export DEFENSECLAW_SPLUNK_HEC_TOKEN", result.output)
+        called = mock_run.call_args
+        self.assertIsNotNone(called)
+        self.assertEqual(called.kwargs["cwd"], bridge_dir)
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_setup_splunk_local_disable_and_stop_bridge(self, mock_run):
+        from defenseclaw.commands.cmd_setup import setup
+
+        bridge_dir = self._make_bridge_dir()
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        self.app.cfg.splunk.enabled = True
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk-local",
+                "--disable",
+                "--stop-bridge",
+                "--bridge-dir",
+                bridge_dir,
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+        self.assertIn("Local Splunk bridge stopped", result.output)
 
     def test_setup_splunk_local_disable(self):
         from defenseclaw.commands.cmd_setup import setup

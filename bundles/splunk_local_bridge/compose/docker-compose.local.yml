@@ -1,0 +1,24 @@
+name: splunk-claw-bridge-local
+
+services:
+  splunk:
+    image: ${SPLUNK_IMAGE}
+    env_file:
+      - ${SPLUNK_ENV_FILE:-../env/.env.example}
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8088:8088"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - splunk_etc:/opt/splunk/etc
+      - splunk_var:/opt/splunk/var
+      - ../splunk/default.yml:/tmp/defaults/default.yml:ro
+      - ../splunk:/opt/splunk-claw-bridge/splunk:ro
+    restart: unless-stopped
+
+volumes:
+  splunk_etc:
+    name: splunk_claw_bridge_etc
+  splunk_var:
+    name: splunk_claw_bridge_var

@@ -1,0 +1,201 @@
+<dashboard version="1.1">
+  <label>Search And Drilldown</label>
+  <description>Guided audit, gateway-log, diagnostics, metrics, and traces searches for local investigation.</description>
+  <row>
+    <panel>
+      <html>
+        <h2>Search-first investigation</h2>
+        <p>Use the public query interface and these SPL pivots together. The current phase supports audit investigation, structured gateway-log troubleshooting, diagnostics-driven queue and session analytics, plus event-indexed metrics-and-traces pivots for usage, cost, duration, and span activity.</p>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent audit search results</title>
+      <table>
+        <search>
+          <query>`defenseclaw_audit_base` | table timestamp run_id session_id action severity actor target details component status | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent gateway search results</title>
+      <table>
+        <search>
+          <query>`openclaw_gateway_logs_base` | table timestamp level subsystem run_id session_id status error_code request_id message | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent diagnostics search results</title>
+      <table>
+        <search>
+          <query>`openclaw_diagnostics_base` | table timestamp event_name lane session_id session_key run_id outcome reason wait_ms queue_depth duration_ms attempt | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent metrics search results</title>
+      <table>
+        <search>
+          <query>`openclaw_metrics_base` | table timestamp metric_name metric_value unit provider model run_id session_id session_key | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent trace search results</title>
+      <table>
+        <search>
+          <query>`openclaw_traces_base` | table timestamp span_name trace_id span_id run_id session_id session_key duration_ms provider model status | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Guided pivots</title>
+      <table>
+        <search>
+          <query>| makeresults count=12 | streamstats count as row | eval pivot=case(row=1, "Recent run and session inventory", row=2, "Recent gateway errors", row=3, "Recent diagnostics events", row=4, "Queue lane activity", row=5, "Stuck sessions", row=6, "Run attempts and retries", row=7, "Message processing failures", row=8, "Session state transitions", row=9, "Run and session correlated gateway logs", row=10, "Missing diagnostics telemetry", row=11, "Recent model usage and cost", row=12, "Recent trace spans"), spl=case(row=1, "`defenseclaw_run_inventory` | table run_id session_id count actions severities", row=2, "`openclaw_gateway_errors` | table timestamp level subsystem error_code request_id message | sort - timestamp", row=3, "`openclaw_diagnostics_recent` | head 20", row=4, "`openclaw_queue_lane_events` | stats count avg(wait_ms) as avg_wait_ms max(wait_ms) as max_wait_ms by lane outcome", row=5, "`openclaw_stuck_sessions` | table timestamp session_id session_key run_id lane outcome reason wait_ms | sort - timestamp", row=6, "`openclaw_run_attempt_events` | table timestamp run_id session_id session_key attempt outcome reason duration_ms | sort - timestamp", row=7, "`openclaw_message_processing_failures` | table timestamp session_id session_key run_id outcome reason duration_ms provider model | sort - timestamp", row=8, "`openclaw_session_state_events` | table timestamp session_id session_key run_id outcome reason status | sort - timestamp", row=9, "`openclaw_gateway_logs_base` | search run_id!=\"(unknown)\" OR session_id!=\"(unknown)\" | table timestamp level subsystem run_id session_id request_id status message | sort - timestamp", row=10, "`openclaw_diagnostics_base` | stats max(_time) as last_seen | eval minutes_since_last_diagnostic_event=round((now()-last_seen)/60, 2)", row=11, "`openclaw_metrics_base` | search metric_name=\"openclaw.tokens\" OR metric_name=\"openclaw.cost.usd\" | table timestamp metric_name metric_value provider model run_id session_id | sort - timestamp", row=12, "`openclaw_usage_traces` | table timestamp span_name trace_id span_id run_id session_id duration_ms status | sort - timestamp") | table pivot spl</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">12</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent queue lane activity</title>
+      <table>
+        <search>
+          <query>`openclaw_queue_lane_events` | table timestamp lane session_id session_key run_id outcome wait_ms queue_depth reason | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent session state transitions</title>
+      <table>
+        <search>
+          <query>`openclaw_session_state_events` | table timestamp session_id session_key run_id outcome reason status | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent high-cost or slow runs</title>
+      <table>
+        <search>
+          <query>`openclaw_high_cost_or_slow_runs` | table run_id session_id session_key cost_usd run_duration_ms queue_wait_ms providers models | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent correlated trace spans</title>
+      <table>
+        <search>
+          <query>`openclaw_usage_traces` | search run_id!="(unknown)" OR session_id!="(unknown)" | table timestamp span_name run_id session_id session_key duration_ms provider model status | sort - timestamp | head 15</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent alert workflow matches</title>
+      <table>
+        <search>
+          <query>`defenseclaw_repeated_deny_activity` | eval workflow="Repeated Deny Activity" | table workflow run_id session_id deny_count actions severities
+| append [ search `defenseclaw_enforcement_action_detected` | eval workflow="Enforcement Action Detected" | table workflow run_id session_id action severity actor target ]
+| append [ search `defenseclaw_high_severity_burst` | eval workflow="High Severity Audit Burst" | table workflow run_id session_id high_severity_count actions ]
+| append [ search `openclaw_repeated_gateway_error_signature` | eval workflow="Repeated Gateway Error Signature" | table workflow subsystem error_signature signature_count run_ids session_ids ]
+| append [ search `openclaw_queue_pressure_sustained` | eval workflow="Queue Pressure Sustained" | table workflow run_id session_id pressure_matches max_queue_depth max_wait_ms signal_sources ]
+| append [ search `openclaw_retry_or_stuck_sessions` | eval workflow="Retry Storm Or Stuck Session" | table workflow run_id session_id match_count alert_reasons max_threshold_value ]
+| append [ search `openclaw_high_cost_or_slow_run_alert` | eval workflow="High Cost Or Slow Run" | table workflow run_id session_id cost_usd run_duration_ms providers models ]
+| head 20</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Alert drilldown starting points</title>
+      <table>
+        <search>
+          <query>| makeresults count=7
+| streamstats count as row
+| eval workflow=case(
+    row=1, "Repeated Deny Activity",
+    row=2, "Enforcement Action Detected",
+    row=3, "High Severity Audit Burst",
+    row=4, "Repeated Gateway Error Signature",
+    row=5, "Queue Pressure Sustained",
+    row=6, "Retry Storm Or Stuck Session",
+    row=7, "High Cost Or Slow Run"
+  ),
+  starting_point=case(
+    row=1, "`defenseclaw_repeated_deny_activity`",
+    row=2, "`defenseclaw_enforcement_action_detected`",
+    row=3, "`defenseclaw_high_severity_burst`",
+    row=4, "`openclaw_repeated_gateway_error_signature`",
+    row=5, "`openclaw_queue_pressure_sustained`",
+    row=6, "`openclaw_retry_or_stuck_sessions`",
+    row=7, "`openclaw_high_cost_or_slow_run_alert`"
+  ),
+  target_view=case(
+    row=1 OR row=2 OR row=3, "Audit And Security",
+    row=4, "Gateway Logs",
+    row=5 OR row=6, "Queue And Runtime Health",
+    row=7, "Model Usage And Cost"
+  )
+| table workflow starting_point target_view</query>
+          <earliest>0</earliest>
+          <latest></latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>
