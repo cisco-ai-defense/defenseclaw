@@ -118,6 +118,7 @@ def openclaw_config_path(dc_cfg: dict[str, Any]) -> Path:
     return Path(os.path.expanduser(cf))
 
 
+
 def _load_gateway_token() -> str:
     """Read OPENCLAW_GATEWAY_TOKEN from env or ~/.defenseclaw/.env."""
     token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")

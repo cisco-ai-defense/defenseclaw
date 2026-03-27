@@ -34,18 +34,25 @@ from defenseclaw.paths import bundled_rego_dir, bundled_splunk_bridge_dir
 @click.command("init")
 @click.option("--skip-install", is_flag=True, help="Skip automatic scanner dependency installation")
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
+@click.option("--sandbox", is_flag=True, help="Set up sandbox mode (Linux only: creates sandbox user and directories)")
 @pass_ctx
-def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> None:
+def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbox: bool) -> None:
     """Initialize DefenseClaw environment.
 
     Creates ~/.defenseclaw/, default config, SQLite database,
     and installs scanner dependencies.
 
+    Use --sandbox to set up openshell-sandbox standalone mode (Linux only).
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     from defenseclaw.config import config_path, default_config, detect_environment, load
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
+    import platform
+
+    if sandbox and platform.system() != "Linux":
+        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
+        raise SystemExit(1)
 
     click.echo()
     click.echo("  ── Environment ───────────────────────────────────────")
@@ -126,10 +133,38 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
 
     cfg.save()
 
-    click.echo()
-    click.echo("  ── Sidecar ───────────────────────────────────────────")
-    click.echo()
-    _start_gateway(cfg, logger)
+    # Sandbox setup (Linux only)
+    if sandbox:
+        already_configured = cfg.openshell.is_standalone()
+        if already_configured:
+            click.echo()
+            click.echo("  ── Sandbox ───────────────────────────────────────────")
+            click.echo()
+            click.echo("  Sandbox:       already configured (openshell.mode=standalone)")
+        else:
+            click.echo()
+            click.echo("  ── Sandbox ───────────────────────────────────────────")
+            click.echo()
+            from defenseclaw.commands.cmd_init_sandbox import _init_sandbox
+            sandbox_ok = _init_sandbox(cfg, logger)
+
+            if sandbox_ok:
+                click.echo()
+                click.echo("  ── Sandbox Networking ────────────────────────────────")
+                click.echo()
+                from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
+                app.cfg = cfg
+                ctx = click.Context(setup_sandbox, parent=click.get_current_context())
+                ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
+                           sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
+                           policy="default", no_auto_pair=False, disable=False,
+                           non_interactive=True)
+
+    if not sandbox:
+        click.echo()
+        click.echo("  ── Sidecar ───────────────────────────────────────────")
+        click.echo()
+        _start_gateway(cfg, logger)
 
     click.echo()
     click.echo("  ──────────────────────────────────────────────────────")
@@ -137,7 +172,9 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
     click.echo("  DefenseClaw initialized.")
     click.echo()
     click.echo("  Next steps:")
-    if guardrail_ok:
+    if sandbox:
+        click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
+    elif guardrail_ok:
         click.echo("    defenseclaw setup guardrail   Customize guardrail settings")
     else:
         click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")

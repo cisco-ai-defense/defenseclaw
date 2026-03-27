@@ -312,6 +312,7 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertIn("openclaw gateway run", content)
 
 
+
 class TestPrePairDevice(unittest.TestCase):
     def setUp(self):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-pair-test-")
