@@ -19,6 +19,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -278,6 +279,9 @@ func (l *LiteLLMProcess) streamLog(prefix string, r io.Reader) {
 			fmt.Fprintf(os.Stderr, "[%s] %s\n", prefix, line)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] read error: %v\n", prefix, err)
+	}
 }
 
 func (l *LiteLLMProcess) waitForHealthy(ctx context.Context) {
@@ -439,9 +443,11 @@ func (l *LiteLLMProcess) deriveMasterKey() string {
 	if err != nil {
 		return ""
 	}
-	digest := fmt.Sprintf("%x", sha256.Sum256(data))
-	if len(digest) > 16 {
-		digest = digest[:16]
+	mac := hmac.New(sha256.New, []byte("defenseclaw-litellm-master-key"))
+	mac.Write(data)
+	digest := fmt.Sprintf("%x", mac.Sum(nil))
+	if len(digest) > 32 {
+		digest = digest[:32]
 	}
 	return "sk-dc-" + digest
 }

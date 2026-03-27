@@ -32,12 +32,15 @@ class SkillEnforcer:
 
     def quarantine(self, skill_name: str, source_path: str) -> str | None:
         """Move skill directory to quarantine. Returns quarantine path or None."""
-        if not os.path.exists(source_path):
+        if os.path.islink(source_path):
+            return None
+        real_path = os.path.realpath(source_path)
+        if not os.path.exists(real_path):
             return None
         dest = os.path.join(self.quarantine_dir, skill_name)
         if os.path.exists(dest):
             shutil.rmtree(dest)
-        shutil.move(source_path, dest)
+        shutil.move(real_path, dest)
         return dest
 
     def restore(self, skill_name: str, restore_path: str) -> bool:

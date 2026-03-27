@@ -194,12 +194,13 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
         cfg["agents"]["defaults"]["model"]["primary"] = original_model
 
-    providers = cfg.get("models", {}).get("providers", {})
-    providers.pop("litellm", None)
+    if "models" in cfg and "providers" in cfg["models"]:
+        cfg["models"]["providers"].pop("litellm", None)
 
-    allow = cfg.get("plugins", {}).get("allow", [])
-    if "defenseclaw" in allow:
-        allow.remove("defenseclaw")
+    if "plugins" in cfg and "allow" in cfg["plugins"]:
+        allow = cfg["plugins"]["allow"]
+        if "defenseclaw" in allow:
+            allow.remove("defenseclaw")
 
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
@@ -405,16 +406,21 @@ def _derive_master_key(device_key_file: str) -> str:
     if _expand(device_key_file) != default_path:
         candidates.append(default_path)
 
+    import hmac
+
     for candidate in candidates:
         path = _expand(candidate)
         try:
             with open(path, "rb") as f:
                 data = f.read()
-            digest = hashlib.sha256(data).hexdigest()[:16]
+            digest = hmac.new(b"defenseclaw-litellm-master-key", data, hashlib.sha256).hexdigest()[:32]
             return f"sk-dc-{digest}"
         except OSError:
             continue
-    return "sk-dc-local-dev"
+    raise RuntimeError(
+        f"Device key not found: {device_key_file}\n"
+        f"  Run 'defenseclaw init' to generate a device key."
+    )
 
 
 def _unregister_plugin_from_config(openclaw_config: str) -> None:
@@ -534,11 +540,16 @@ def _backup(path: str) -> None:
         return
     bak = path + ".bak"
     if os.path.exists(bak):
-        for i in range(1, 20):
+        found = False
+        for i in range(1, 100):
             candidate = f"{path}.bak.{i}"
             if not os.path.exists(candidate):
                 bak = candidate
+                found = True
                 break
+        if not found:
+            import time
+            bak = f"{path}.bak.{int(time.time() * 1000)}.{os.getpid()}"
     shutil.copy2(path, bak)
 
 

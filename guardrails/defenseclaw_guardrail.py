@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -88,25 +90,45 @@ _SEVERITY_RANK = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 # ---------------------------------------------------------------------------
 
 _verdict_cache: dict[int, tuple[dict[str, Any], float]] = {}
+_verdict_lock = threading.Lock()
 _VERDICT_TTL = 30.0
 _VERDICT_CLEANUP_INTERVAL = 60.0
 _last_verdict_cleanup: float = 0.0
 
+_SECRET_REDACT_RE = re.compile(
+    r"(?:sk-ant-|sk-proj-|sk-|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_"
+    r"|xox[bpors]-|AIza|eyJ)[A-Za-z0-9\-_+/=.]{6,}"
+    r"|AKIA[A-Z0-9]{12,}",
+    re.IGNORECASE,
+)
+_KV_REDACT_RE = re.compile(
+    r"((?:password|secret|token|api_key|apikey|aws_secret_access)[=:\s]+)\S{6,}",
+    re.IGNORECASE,
+)
+
+
+def _redact_secrets(text: str) -> str:
+    text = _SECRET_REDACT_RE.sub(lambda m: m.group()[:4] + "***REDACTED***", text)
+    text = _KV_REDACT_RE.sub(r"\1***REDACTED***", text)
+    return text
+
 
 def _cache_verdict(data_id: int, verdict: dict[str, Any]) -> None:
     global _last_verdict_cleanup
-    _verdict_cache[data_id] = (verdict, time.monotonic())
-    now = time.monotonic()
-    if now - _last_verdict_cleanup > _VERDICT_CLEANUP_INTERVAL:
-        _last_verdict_cleanup = now
-        cutoff = now - _VERDICT_TTL
-        stale = [k for k, (_, ts) in _verdict_cache.items() if ts < cutoff]
-        for k in stale:
-            _verdict_cache.pop(k, None)
+    with _verdict_lock:
+        _verdict_cache[data_id] = (verdict, time.monotonic())
+        now = time.monotonic()
+        if now - _last_verdict_cleanup > _VERDICT_CLEANUP_INTERVAL:
+            _last_verdict_cleanup = now
+            cutoff = now - _VERDICT_TTL
+            stale = [k for k, (_, ts) in _verdict_cache.items() if ts < cutoff]
+            for k in stale:
+                _verdict_cache.pop(k, None)
 
 
 def _pop_verdict(data_id: int) -> dict[str, Any] | None:
-    entry = _verdict_cache.pop(data_id, None)
+    with _verdict_lock:
+        entry = _verdict_cache.pop(data_id, None)
     if entry is None:
         return None
     verdict, ts = entry
@@ -386,8 +408,6 @@ class DefenseClawGuardrail(CustomGuardrail):
         both:   local first, skip remote if local already flags
         """
         runtime = _read_runtime_config()
-        if runtime.get("mode"):
-            self.mode = runtime["mode"]
         if runtime.get("scanner_mode"):
             new_sm = runtime["scanner_mode"]
             if new_sm != self.scanner_mode:

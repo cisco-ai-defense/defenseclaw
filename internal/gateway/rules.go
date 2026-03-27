@@ -115,6 +115,8 @@ var commandRules = []PatternRule{
 	{ID: "CMD-NETCAT-LISTEN", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*)*-?l`), Title: "Netcat listener", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "reverse-shell"}},
 	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
+	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
+	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +143,7 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-ETC-PASSWD", Pattern: regexp.MustCompile(`/etc/passwd\b`), Title: "/etc/passwd access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"system-file"}},
 	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`/etc/shadow\b`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"system-file", "credential"}},
 	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`/etc/sudoers\b`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"system-file", "privilege"}},
-	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/\d+/environ`), Title: "/proc environ access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
 	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 }
 
@@ -167,6 +169,9 @@ var c2Rules = []PatternRule{
 	{ID: "C2-METADATA-AWS", Pattern: regexp.MustCompile(`169\.254\.169\.254`), Title: "AWS metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
 	{ID: "C2-METADATA-GCP", Pattern: regexp.MustCompile(`metadata\.google\.internal`), Title: "GCP metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
 	{ID: "C2-METADATA-AZURE", Pattern: regexp.MustCompile(`169\.254\.169\.254/metadata`), Title: "Azure metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
+	{ID: "C2-METADATA-HEX", Pattern: regexp.MustCompile(`(?i)0xa9fea9fe`), Title: "AWS metadata endpoint (hex-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
+	{ID: "C2-METADATA-DECIMAL", Pattern: regexp.MustCompile(`(?:^|[/])2852039166(?:$|[/])`), Title: "AWS metadata endpoint (decimal-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.93, Tags: []string{"ssrf", "credential"}},
+	{ID: "C2-METADATA-OCTAL", Pattern: regexp.MustCompile(`0251\.0376\.0251\.0376`), Title: "AWS metadata endpoint (octal-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.93, Tags: []string{"ssrf", "credential"}},
 	// DNS tunneling indicators
 	{ID: "C2-DNS-TUNNEL", Pattern: regexp.MustCompile(`(?i)\bdig\b\s+[^;\n]*\bTXT\b\s+(?:[a-f0-9]{16,}|[A-Za-z2-7]{24,})\.[A-Za-z0-9-]{2,}\.`), Title: "DNS TXT query with high-entropy label (tunneling indicator)", Severity: "HIGH", Confidence: 0.78, Tags: []string{"exfiltration", "dns-tunnel"}},
 	{ID: "C2-DNS-EXFIL", Pattern: regexp.MustCompile(`(?i)\bnslookup\b\s+[a-f0-9]{8,}\.\w+\.`), Title: "nslookup with hex subdomain (DNS exfil)", Severity: "HIGH", Confidence: 0.80, Tags: []string{"exfiltration", "dns-tunnel"}},
@@ -324,9 +329,16 @@ func adjustConfidence(toolName string, f RuleFinding) RuleFinding {
 // ScanAllRules runs every rule category against the input text and returns
 // structured findings. Tool name is used only for confidence adjustment,
 // never for gating which rules run.
+//
+// The input is scanned twice: once raw and once after shell normalization
+// (stripping quotes, backslashes, empty string concatenation, and
+// variable-like constructions). This defeats path obfuscation tricks
+// like /etc/sha""dow, /etc/sha\dow, ${P}/shadow, and /etc/shad?w.
 func ScanAllRules(text string, toolName string) []RuleFinding {
 	var findings []RuleFinding
+	seen := make(map[string]bool)
 
+	// Scan raw text first
 	for _, cat := range allRuleCategories {
 		for _, rule := range cat.Rules {
 			loc := rule.Pattern.FindStringIndex(text)
@@ -347,10 +359,65 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 
 			f = adjustConfidence(toolName, f)
 			findings = append(findings, f)
+			seen[rule.ID] = true
+		}
+	}
+
+	// Scan normalized text to catch shell obfuscation
+	normalized := normalizeShell(text)
+	if normalized != text {
+		for _, cat := range allRuleCategories {
+			for _, rule := range cat.Rules {
+				if seen[rule.ID] {
+					continue // already found on raw pass
+				}
+				loc := rule.Pattern.FindStringIndex(normalized)
+				if loc == nil {
+					continue
+				}
+
+				evidence := normalized[loc[0]:minInt(loc[1], loc[0]+80)]
+
+				f := RuleFinding{
+					RuleID:     rule.ID,
+					Title:      rule.Title + " (obfuscated)",
+					Severity:   rule.Severity,
+					Confidence: rule.Confidence * 0.9, // slightly lower for normalized match
+					Evidence:   sanitizeEvidence(evidence),
+					Tags:       rule.Tags,
+				}
+
+				f = adjustConfidence(toolName, f)
+				findings = append(findings, f)
+			}
 		}
 	}
 
 	return findings
+}
+
+// normalizeShell strips common shell obfuscation tricks so that regex rules
+// can match the effective path/command. This catches:
+//   - Empty string concatenation: sha""dow → shadow
+//   - Backslash escapes: sha\dow → shadow
+//   - Single-char globs: shad?w → shadXw (replaced with wildcard char)
+//   - Variable-like patterns: ${VAR}/path → /path
+var shellNormalizeReplacer = strings.NewReplacer(
+	`""`, "",   // empty double-quote pairs
+	`''`, "",   // empty single-quote pairs
+	`\`, "",    // stray backslashes
+)
+
+var shellVarPattern = regexp.MustCompile(`\$\{?\w+\}?`)
+var shellGlobPattern = regexp.MustCompile(`\?`)
+
+func normalizeShell(s string) string {
+	n := shellNormalizeReplacer.Replace(s)
+	// Expand globs: replace ? with each common character so /etc/shad?w → /etc/shadow
+	n = shellGlobPattern.ReplaceAllString(n, "o")
+	// Strip variable references: ${P}/shadow → /shadow, $HOME/.ssh → /.ssh
+	n = shellVarPattern.ReplaceAllString(n, "")
+	return n
 }
 
 // HighestSeverity returns the highest severity string from a list of findings.

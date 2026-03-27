@@ -117,10 +117,11 @@ def load_litellm_config() -> dict[str, Any]:
 
 def derive_master_key() -> str:
     """Derive master key from device.key, matching the Go sidecar and Python CLI."""
+    import hmac
     key_file = DC_DIR / "device.key"
     try:
         data = key_file.read_bytes()
-        digest = hashlib.sha256(data).hexdigest()[:16]
+        digest = hmac.new(b"defenseclaw-litellm-master-key", data, hashlib.sha256).hexdigest()[:32]
         return f"sk-dc-{digest}"
     except OSError:
         return ""

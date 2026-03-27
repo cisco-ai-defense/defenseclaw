@@ -342,12 +342,13 @@ LITELLM_PORT = 4000
 
 def _derive_master_key() -> str:
     """Derive the LiteLLM master key from the device key, matching the Go/Python derivation."""
-    import hashlib
+    import hashlib, hmac
     key_file = os.path.expanduser("~/.defenseclaw/device.key")
     try:
         with open(key_file, "rb") as f:
             data = f.read()
-        return "sk-dc-" + hashlib.sha256(data).hexdigest()[:16]
+        digest = hmac.new(b"defenseclaw-litellm-master-key", data, hashlib.sha256).hexdigest()[:32]
+        return f"sk-dc-{digest}"
     except OSError:
         return "sk-dc-local-dev"
 
