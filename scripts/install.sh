@@ -464,8 +464,13 @@ print_success() {
     printf "${BOLD}${GREEN}║        DefenseClaw installed successfully!               ║${NC}\n"
     printf "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════╝${NC}\n"
     echo ""
-    printf "  Get started:\n\n"
-    printf "    ${CYAN}defenseclaw init --enable-guardrail${NC}\n"
+    if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
+        printf "  Get started:\n\n"
+        printf "    ${CYAN}defenseclaw init --sandbox${NC}\n"
+    else
+        printf "  Get started:\n\n"
+        printf "    ${CYAN}defenseclaw init --enable-guardrail${NC}\n"
+    fi
     echo ""
 }
 
@@ -477,9 +482,11 @@ printf "  ${DIM}Enterprise Governance for Agentic AI${NC}\n"
 
 YES_MODE=false
 LOCAL_DIR=""
+INSTALL_SANDBOX=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --sandbox) INSTALL_SANDBOX=true; shift ;;
         --local)
             [[ $# -lt 2 ]] && die "--local requires a directory argument"
             LOCAL_DIR="$(cd "$2" && pwd)" || die "Directory not found: $2"
@@ -492,8 +499,10 @@ while [[ $# -gt 0 ]]; do
             echo "  curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash"
             echo "  ./scripts/install.sh --local ./dist               # from local build"
             echo "  curl -LsSf ... | bash -s -- --yes                 # non-interactive"
+            echo "  curl ... | bash -s -- --sandbox                   # also install openshell-sandbox"
             echo ""
             echo "Options:"
+            echo "  --sandbox      Also install openshell-sandbox (Linux only)"
             echo "  --local <dir>  Install from a local dist directory"
             echo "  --yes, -y      Skip all confirmation prompts"
             echo "  --help, -h     Show this help"
@@ -501,6 +510,7 @@ while [[ $# -gt 0 ]]; do
             echo "Environment variables:"
             echo "  DEFENSECLAW_HOME   Install directory (default: ~/.defenseclaw)"
             echo "  VERSION            Specific release version to install"
+            echo "  OPENSHELL_VERSION  openshell-sandbox version (default: 0.0.16)"
             echo ""
             echo "Build artifacts locally first:"
             echo "  make dist          # produces dist/ with all artifacts"
@@ -524,6 +534,26 @@ install_gateway
 install_python_cli
 install_plugin
 handle_openclaw
+
+if [[ "${INSTALL_SANDBOX}" == true ]]; then
+    if [[ "${OS}" != "linux" ]]; then
+        warn "Sandbox mode requires Linux — skipping openshell-sandbox"
+    else
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        local sandbox_installer="${script_dir}/install-openshell-sandbox.sh"
+        if [[ -f "${sandbox_installer}" ]]; then
+            bash "${sandbox_installer}"
+        else
+            step "Installing openshell-sandbox"
+            info "Downloading installer..."
+            curl -fsSL \
+                "https://raw.githubusercontent.com/${REPO}/main/scripts/install-openshell-sandbox.sh" \
+                | bash
+        fi
+    fi
+fi
+
 ensure_path
 print_success
 

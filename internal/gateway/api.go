@@ -115,9 +115,14 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 
+	handler := a.metricsMiddleware(csrfProtect(mux))
+	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
+		handler = a.tokenAuth(handler)
+	}
+
 	srv := &http.Server{
 		Addr:    a.addr,
-		Handler: a.metricsMiddleware(csrfProtect(mux)),
+		Handler: handler,
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},
@@ -1270,6 +1275,33 @@ func (sw *statusWriter) Flush() {
 	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// tokenAuth wraps a handler with Bearer token authentication.
+// GET /health is exempt to allow unauthenticated health checks.
+func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" && r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		token := ""
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		}
+		if token == "" {
+			token = r.Header.Get("X-DefenseClaw-Token")
+		}
+
+		expected := a.scannerCfg.Gateway.Token
+		if token != expected {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // csrfProtect wraps a handler with localhost CSRF defenses. Mutating methods

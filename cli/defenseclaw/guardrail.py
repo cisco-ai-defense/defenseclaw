@@ -22,11 +22,13 @@ DefenseClaw guardrail proxy (a pure Go reverse proxy).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -36,6 +38,7 @@ def patch_openclaw_config(
     proxy_port: int,
     master_key: str,
     original_model: str,
+    litellm_host: str = "localhost",
 ) -> str | None:
     """Patch openclaw.json to route through the guardrail proxy. Returns the original model or None on error."""
     path = _expand(openclaw_config_file)
@@ -58,7 +61,7 @@ def patch_openclaw_config(
         cfg["models"]["providers"] = {}
 
     cfg["models"]["providers"]["defenseclaw"] = {
-        "baseUrl": f"http://localhost:{proxy_port}",
+        "baseUrl": f"http://{litellm_host}:{proxy_port}",
         "apiKey": master_key,
         "api": "openai-completions",
         "models": [
@@ -91,9 +94,10 @@ def patch_openclaw_config(
     if install_path not in paths:
         paths.append(install_path)
 
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    with _preserve_ownership(path):
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
 
     _install_codeguard_skill_deferred(openclaw_config_file)
 
@@ -125,9 +129,10 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         if "defenseclaw" in allow:
             allow.remove("defenseclaw")
 
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    with _preserve_ownership(path):
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
 
     return True
 
@@ -373,9 +378,10 @@ def _unregister_plugin_from_config(openclaw_config: str) -> None:
             paths.remove(install_path)
 
     if changed:
-        with open(path, "w") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-            f.write("\n")
+        with _preserve_ownership(path):
+            with open(path, "w") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+                f.write("\n")
 
 
 def _register_plugin_in_config(openclaw_config: str, source_dir: str) -> None:
@@ -426,9 +432,10 @@ def _register_plugin_in_config(openclaw_config: str, source_dir: str) -> None:
         "installedAt": datetime.now(timezone.utc).isoformat(),
     }
 
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    with _preserve_ownership(path):
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
 
 
 def _remove_from_plugins_allow(openclaw_config: str, plugin_id: str) -> None:
@@ -445,15 +452,38 @@ def _remove_from_plugins_allow(openclaw_config: str, plugin_id: str) -> None:
         return
 
     allow.remove(plugin_id)
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    with _preserve_ownership(path):
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.write("\n")
 
 
 def _expand(p: str) -> str:
     if p.startswith("~/"):
         return str(Path.home() / p[2:])
     return p
+
+
+@contextmanager
+def _preserve_ownership(path: str):
+    """Capture a file's uid/gid before a write and restore it afterwards.
+
+    When setup commands run as root they re-create files owned by root,
+    breaking sandbox user access.  Wrap any write to openclaw.json (or
+    its .bak copies) in this context manager to keep the original owner.
+    """
+    uid = gid = None
+    try:
+        st = os.stat(path)
+        uid, gid = st.st_uid, st.st_gid
+    except OSError:
+        pass
+
+    yield
+
+    if uid is not None:
+        with contextlib.suppress(OSError):
+            os.chown(path, uid, gid)
 
 
 def _backup(path: str) -> None:
@@ -472,7 +502,10 @@ def _backup(path: str) -> None:
         if not found:
             import time
             bak = f"{path}.bak.{int(time.time() * 1000)}.{os.getpid()}"
+    st = os.stat(path)
     shutil.copy2(path, bak)
+    with contextlib.suppress(OSError):
+        os.chown(bak, st.st_uid, st.st_gid)
 
 
 def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:

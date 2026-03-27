@@ -1,0 +1,83 @@
+# Default OpenShell sandbox network policy — managed by DefenseClaw.
+#
+# Broad wildcards for common services. Suitable for most deployments.
+# All endpoints use tls: skip because openshell-sandbox's proxy performs
+# TLS interception by default, which breaks Node.js certificate validation.
+# DefenseClaw performs its own inspection at the guardrail layer.
+
+network_policies:
+  allow_defenseclaw_sidecar:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "10.200.0.1"
+      ports: [18970, 4000]
+      tls: skip
+
+  allow_channels:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "**.telegram.org"
+      ports: [443]
+      tls: skip
+    - host: "**.slack.com"
+      ports: [443]
+      tls: skip
+    - host: "hooks.slack.com"
+      ports: [443]
+      tls: skip
+    - host: "**.discord.com"
+      ports: [443]
+      tls: skip
+    - host: "gateway.discord.gg"
+      ports: [443]
+      tls: skip
+
+  allow_npm_registry:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "registry.npmjs.org"
+      ports: [443]
+      tls: skip
+
+  allow_llm_providers:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "openrouter.ai"
+      ports: [443]
+      tls: skip
+    - host: "api.openai.com"
+      ports: [443]
+      tls: skip
+    - host: "api.anthropic.com"
+      ports: [443]
+      tls: skip
+    - host: "generativelanguage.googleapis.com"
+      ports: [443]
+      tls: skip
+    - host: "api.groq.com"
+      ports: [443]
+      tls: skip
+    - host: "api.mistral.ai"
+      ports: [443]
+      tls: skip
+    - host: "api.together.xyz"
+      ports: [443]
+      tls: skip
+    - host: "api.deepseek.com"
+      ports: [443]
+      tls: skip
+
+  allow_openclaw:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "openclaw.ai"
+      ports: [443]
+      tls: skip
+    - host: "**.openclaw.ai"
+      ports: [443]
+      tls: skip

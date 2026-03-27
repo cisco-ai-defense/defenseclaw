@@ -110,8 +110,10 @@ func DefaultConfig() *Config {
 			CodeGuard: filepath.Join(dataDir, "codeguard-rules"),
 		},
 		OpenShell: OpenShellConfig{
-			Binary:    "openshell",
-			PolicyDir: "/etc/openshell/policies",
+			Binary:      "openshell",
+			PolicyDir:   "/etc/openshell/policies",
+			Version:     DefaultOpenShellVersion,
+			SandboxHome: DefaultSandboxHome,
 		},
 		Watch: WatchConfig{
 			DebounceMs: 500,
@@ -125,6 +127,7 @@ func DefaultConfig() *Config {
 		Guardrail: GuardrailConfig{
 			Mode:        "observe",
 			ScannerMode: "local",
+			Host:        "localhost",
 			Port:        4000,
 			Judge: JudgeConfig{
 				Injection:     true,
@@ -167,8 +170,8 @@ func DefaultConfig() *Config {
 				},
 			},
 		},
-		SkillActions:   DefaultSkillActions(),
-		MCPActions:     DefaultMCPActions(),
-		PluginActions:  DefaultPluginActions(),
+		SkillActions:  DefaultSkillActions(),
+		MCPActions:    DefaultMCPActions(),
+		PluginActions: DefaultPluginActions(),
 	}
 }

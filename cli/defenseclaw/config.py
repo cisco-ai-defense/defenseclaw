@@ -97,6 +97,7 @@ class ClawConfig:
     mode: str = "openclaw"
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
+    openclaw_home_original: str = ""
 
 
 @dataclass
@@ -179,10 +180,32 @@ class ScannersConfig:
     codeguard: str = ""
 
 
+DEFAULT_OPENSHELL_VERSION = "0.6.2"
+DEFAULT_SANDBOX_HOME = "/home/sandbox"
+
+
 @dataclass
 class OpenShellConfig:
     binary: str = "openshell"
     policy_dir: str = "/etc/openshell/policies"
+    mode: str = ""
+    version: str = DEFAULT_OPENSHELL_VERSION
+    sandbox_home: str = DEFAULT_SANDBOX_HOME
+    auto_pair: bool | None = None
+
+    def is_standalone(self) -> bool:
+        return self.mode == "standalone"
+
+    def effective_version(self) -> str:
+        return self.version or DEFAULT_OPENSHELL_VERSION
+
+    def effective_sandbox_home(self) -> str:
+        return self.sandbox_home or DEFAULT_SANDBOX_HOME
+
+    def should_auto_pair(self) -> bool:
+        if self.auto_pair is not None:
+            return self.auto_pair
+        return True
 
 
 @dataclass
@@ -429,6 +452,7 @@ class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
     scanner_mode: str = "local"     # local | remote | both
+    host: str = "localhost"         # host where guardrail proxy is reachable (bridge IP in sandbox mode)
     port: int = 4000
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
     model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
@@ -717,6 +741,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "local"),
+        host=raw.get("host", "localhost"),
         port=raw.get("port", 4000),
         model=raw.get("model", ""),
         model_name=raw.get("model_name", ""),
@@ -792,6 +817,22 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
         resource=OTelResourceConfig(
             attributes=resource_raw.get("attributes", {}),
         ),
+    )
+
+
+def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
+    if not raw:
+        return OpenShellConfig()
+    auto_pair = raw.get("auto_pair")
+    if auto_pair is not None:
+        auto_pair = bool(auto_pair)
+    return OpenShellConfig(
+        binary=raw.get("binary", "openshell"),
+        policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
+        mode=raw.get("mode", ""),
+        version=raw.get("version", DEFAULT_OPENSHELL_VERSION),
+        sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME),
+        auto_pair=auto_pair,
     )
 
 
@@ -886,6 +927,7 @@ def load() -> Config:
             mode=raw.get("claw", {}).get("mode", "openclaw"),
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
+            openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
@@ -907,10 +949,7 @@ def load() -> Config:
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
-        openshell=OpenShellConfig(
-            binary=raw.get("openshell", {}).get("binary", "openshell"),
-            policy_dir=raw.get("openshell", {}).get("policy_dir", "/etc/openshell/policies"),
-        ),
+        openshell=_merge_openshell(raw.get("openshell")),
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),

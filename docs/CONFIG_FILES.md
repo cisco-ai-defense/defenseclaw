@@ -53,7 +53,7 @@ and everything else.
 
 | | |
 |---|---|
-| **Created by** | `defenseclaw init`, `defenseclaw setup skill-scanner`, `defenseclaw setup mcp-scanner`, `defenseclaw setup gateway`, `defenseclaw setup guardrail` — all via Python `cfg.save()` (`cli/defenseclaw/config.py:290`) |
+| **Created by** | `defenseclaw init`, `defenseclaw setup skill-scanner`, `defenseclaw setup mcp-scanner`, `defenseclaw setup gateway`, `defenseclaw setup guardrail`, `defenseclaw setup sandbox` — all via Python `cfg.save()` (`cli/defenseclaw/config.py:290`) |
 | **Read by** | **Python CLI** at startup via `config.load()` (`cli/defenseclaw/config.py:426`). **Go sidecar** at startup via `config.Load()` (`internal/config/config.go:262`, Viper). |
 | **NOT read by** | Standalone Python guardrail code paths (none in the default stack); the Go sidecar loads YAML via Viper and passes structs into the proxy. |
 
@@ -123,3 +123,64 @@ The sidecar **runs the guardrail proxy in-process** (`internal/gateway/sidecar.g
 ### Legacy `DEFENSECLAW_*` variables
 
 **The built-in Go guardrail proxy does not set or depend on** `DEFENSECLAW_GUARDRAIL_MODE`, `DEFENSECLAW_SCANNER_MODE`, `DEFENSECLAW_API_PORT`, `DEFENSECLAW_DATA_DIR`, or `PYTHONPATH` for inspection. Mode and scanner mode come from `config.yaml` and `guardrail_runtime.json` as described above.
+
+---
+
+## Sandbox-related config fields
+
+These fields are set by `defenseclaw setup sandbox` for openshell-sandbox
+standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
+
+### `openshell.mode`
+
+| | |
+|---|---|
+| **Values** | `""` (default, no sandbox), `"standalone"` |
+| **Set by** | `defenseclaw setup sandbox` |
+| **Read by** | Go sidecar (`internal/config/config.go: OpenShellConfig.IsStandalone()`). |
+| **Effect** | When `"standalone"`, the sidecar knows OpenClaw is running inside a Linux namespace with a veth pair. |
+
+### `openshell.version`
+
+| | |
+|---|---|
+| **Values** | `"0.6.2"` (default, pinned tested version) |
+| **Set by** | `defaults.go`, overridable in config.yaml |
+| **Read by** | `defenseclaw init --sandbox` (install prompt), `internal/sandbox/install.go` (version check). |
+| **Effect** | Pins the openshell-sandbox binary version for reproducibility. |
+
+### `openshell.sandbox_home`
+
+| | |
+|---|---|
+| **Values** | `"/home/sandbox"` (default) |
+| **Set by** | `defenseclaw setup sandbox --sandbox-home <path>` |
+| **Read by** | Setup, init, systemd unit generation — all sandbox paths derive from this. |
+| **Effect** | Root directory for the sandbox user's home. All OpenClaw and DefenseClaw sandbox-side files live here. |
+
+### `openshell.auto_pair`
+
+| | |
+|---|---|
+| **Values** | `true` (default), `false` |
+| **Set by** | `defenseclaw setup sandbox --no-auto-pair` |
+| **Read by** | `defenseclaw setup sandbox` (device pre-pairing step). |
+| **Effect** | When `true`, the sidecar's Ed25519 device key is pre-injected into the sandbox's `devices.json` during setup. The sidecar connects immediately on first start without manual approval. When `false`, the operator must manually approve the pairing request. |
+
+### `gateway.api_bind`
+
+| | |
+|---|---|
+| **Values** | `""` (default: `127.0.0.1`), or an explicit IP address |
+| **Set by** | `defenseclaw setup sandbox` (auto-detected from `guardrail.host` in standalone mode) |
+| **Read by** | Go sidecar `runAPI()` — determines which interface the REST API binds to. |
+| **Effect** | In standalone mode, defaults to the host veth IP (e.g., `10.200.0.1`) so the sandbox can reach the API. Otherwise defaults to loopback. |
+
+### `guardrail.host`
+
+| | |
+|---|---|
+| **Values** | `"localhost"` (default), or a bridge IP like `"10.200.0.1"` |
+| **Set by** | `defenseclaw setup sandbox --host-ip <ip>` |
+| **Read by** | **Python CLI** `patch_openclaw_config()` — sets the `defenseclaw` provider `baseUrl` in `openclaw.json` to `http://{host}:{guardrail.port}`. **Go sidecar** `runAPI()` — in standalone mode, when `api_bind` is unset and host is not `localhost`, uses `guardrail.host` as the REST API bind address. |
+| **Effect** | Lets OpenClaw inside the sandbox point at the guardrail proxy and sidecar API on the host veth IP. |

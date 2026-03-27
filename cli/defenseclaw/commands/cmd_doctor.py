@@ -145,10 +145,13 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> None:
-    url = f"http://127.0.0.1:{cfg.gateway.api_port}/health"
+    bind = "127.0.0.1"
+    if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
+        bind = getattr(cfg.guardrail, "host", None) or bind
+    url = f"http://{bind}:{cfg.gateway.api_port}/health"
     code, body = _http_probe(url, timeout=5.0)
     if code == 200:
-        _emit("pass", "Sidecar API", f"127.0.0.1:{cfg.gateway.api_port}")
+        _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}")
         r.record("pass")
 
         try:
@@ -192,7 +195,8 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         r.record("skip")
         return
 
-    url = f"http://127.0.0.1:{cfg.guardrail.port}/health/liveliness"
+    host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+    url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}")
