@@ -2039,7 +2039,6 @@ def setup_sandbox(
       defenseclaw setup sandbox --policy strict --no-auto-pair
       defenseclaw setup sandbox --disable
     """
-    import secrets
     import platform
 
     if disable:
@@ -2081,10 +2080,17 @@ def setup_sandbox(
     click.echo(f"    guardrail.host:       {host_ip}")
     click.echo(f"    claw.home_dir:        {app.cfg.claw.home_dir}")
 
-    # 3. Generate gateway auth token
-    if not app.cfg.gateway.token:
-        app.cfg.gateway.token = secrets.token_urlsafe(32)
-        click.echo(f"    gateway.token:        (auto-generated)")
+    # 3. Read gateway auth token from OpenClaw config (same as non-sandbox mode).
+    #    OpenClaw owns the token — DefenseClaw never generates or injects one.
+    oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
+    detected_token = _detect_openclaw_gateway_token(oc_config)
+    if detected_token:
+        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected_token, data_dir)
+        app.cfg.gateway.token = ""
+        app.cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        click.echo(f"    gateway.token:        read from openclaw.json ({_mask(detected_token)})")
+    else:
+        click.echo(f"    gateway.token:        not found (sidecar will auto-detect on connect)")
 
     # 4. Install policy template
     _install_policy_template(data_dir, policy)
@@ -2094,10 +2100,9 @@ def setup_sandbox(
     _generate_resolv_conf(data_dir, dns)
     click.echo(f"    dns nameservers:      {dns}")
 
-    # 6. Patch sandbox-side OpenClaw config
-    oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
+    # 6. Patch sandbox-side OpenClaw config (port + bind only, never the token)
     if os.path.isfile(oc_config):
-        _patch_openclaw_gateway(oc_config, openclaw_port, app.cfg.gateway.resolved_token())
+        _patch_openclaw_gateway(oc_config, openclaw_port)
         click.echo(f"    openclaw.json:        patched (gateway.port={openclaw_port}, gateway.bind=lan)")
 
     # 7. Generate systemd unit files
@@ -2301,8 +2306,12 @@ def _validate_sandbox_prerequisites(sandbox_home: str) -> None:
         click.echo(f"  WARNING: sandbox home {sandbox_home} does not exist.", err=True)
 
 
-def _patch_openclaw_gateway(openclaw_config: str, port: int, token: str) -> bool:
-    """Patch gateway.* fields into openclaw.json for sandbox mode."""
+def _patch_openclaw_gateway(openclaw_config: str, port: int) -> bool:
+    """Patch gateway port and bind into openclaw.json for sandbox mode.
+
+    Only sets mode/port/bind — the auth token is owned by OpenClaw and
+    never written by DefenseClaw.
+    """
     try:
         st = os.stat(openclaw_config)
         with open(openclaw_config) as f:
@@ -2314,9 +2323,6 @@ def _patch_openclaw_gateway(openclaw_config: str, port: int, token: str) -> bool
     gw["mode"] = "local"
     gw["port"] = port
     gw["bind"] = "lan"
-    gw.pop("token", None)
-    auth = gw.setdefault("auth", {})
-    auth["token"] = token
 
     with open(openclaw_config, "w") as f:
         _json.dump(cfg, f, indent=2, ensure_ascii=False)
@@ -2738,24 +2744,93 @@ set -euo pipefail
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="$(dirname "$SCRIPTS_DIR")"
 PIDFILE="$DATA_DIR/sandbox.pids"
+ACL_FIXER_PID=""
+
+# ---------------------------------------------------------------------------
+# kill_tree PID — recursively kill a process and all its descendants.
+# Walks children depth-first so leaves die before parents, preventing zombies
+# from being reparented to PID 1.
+# ---------------------------------------------------------------------------
+kill_tree() {{
+    local pid=$1 sig=${{2:-TERM}}
+    local children
+    children=$(ps -o pid= --ppid "$pid" 2>/dev/null || true)
+    for child in $children; do
+        kill_tree "$child" "$sig"
+    done
+    kill -"$sig" "$pid" 2>/dev/null || true
+}}
 
 stop_sandbox() {{
+    echo "Stopping sandbox processes..."
+
+    # 1. Kill the ACL fixer first (lightweight, no children)
+    if [ -n "$ACL_FIXER_PID" ] && kill -0 "$ACL_FIXER_PID" 2>/dev/null; then
+        kill "$ACL_FIXER_PID" 2>/dev/null || true
+        wait "$ACL_FIXER_PID" 2>/dev/null || true
+        echo "  stopped acl-fixer (pid $ACL_FIXER_PID)"
+    fi
+
+    # 2. Kill tracked processes and their entire process trees
     if [ -f "$PIDFILE" ]; then
-        echo "Stopping sandbox processes..."
         while read -r pid name; do
             if kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null && echo "  stopped $name (pid $pid)"
+                kill_tree "$pid" TERM
+                echo "  sent SIGTERM to $name tree (pid $pid)"
             fi
         done < "$PIDFILE"
+
+        # Give processes 3 seconds to exit gracefully
+        sleep 3
+
+        # Escalate to SIGKILL for anything still alive
+        while read -r pid name; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill_tree "$pid" KILL
+                echo "  sent SIGKILL to $name tree (pid $pid)"
+            fi
+        done < "$PIDFILE"
+
+        # Reap all children to prevent zombies
+        while read -r pid name; do
+            wait "$pid" 2>/dev/null || true
+        done < "$PIDFILE"
+
         rm -f "$PIDFILE"
     fi
+
+    # 3. Kill any orphaned sandbox-related processes not tracked in the PID file.
+    #    These can accumulate when previous runs used an older stop mechanism
+    #    or when the script was killed without cleanup.
+    _kill_strays() {{
+        local pat="$1"
+        local pids
+        pids=$(pgrep -f "$pat" 2>/dev/null || true)
+        for p in $pids; do
+            # Don't kill ourselves or our parent
+            [ "$p" = "$$" ] && continue
+            [ "$p" = "$PPID" ] && continue
+            kill "$p" 2>/dev/null && echo "  killed stray $pat (pid $p)"
+        done
+    }}
+    _kill_strays openshell-sandbox
+    _kill_strays defenseclaw-gateway
+    _kill_strays "openclaw$"
+    _kill_strays openclaw-gateway
+    _kill_strays "dmesg --follow"
+
+    # 4. Clean up network namespace and veth pairs
     "$SCRIPTS_DIR/cleanup-sandbox.sh" 2>/dev/null || true
+
+    # 5. Reap any remaining background jobs (ACL fixer, etc.)
+    wait 2>/dev/null || true
+
     echo "Sandbox stopped."
-    exit 0
 }}
 
 if [ "${{1:-}}" = "stop" ]; then
     stop_sandbox
+    exit 0
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -2763,7 +2838,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-trap stop_sandbox EXIT INT TERM
+trap 'stop_sandbox; exit 0' EXIT INT TERM
 
 rm -f "$PIDFILE"
 
@@ -2821,6 +2896,23 @@ if curl -sf "http://{api_bind}:{api_port}/health" -o /dev/null 2>/dev/null; then
 else
     echo "WARNING: sidecar health check failed (http://{api_bind}:{api_port}/health)" >&2
 fi
+
+# 7. Background ACL fixer — OpenClaw uses atomic writes (write-to-temp then
+# rename) which bypass POSIX default ACLs, and explicit open(path, 0600)
+# resets the ACL mask to ---.  This loop periodically re-applies correct ACLs
+# so the sandbox user can always read/write OpenClaw config and extensions.
+_fix_sandbox_acls() {{
+    while kill -0 "$SANDBOX_PID" 2>/dev/null; do
+        sleep 5
+        for d in /root/.openclaw /home/sandbox/.openclaw; do
+            [ -d "$d" ] || continue
+            setfacl -R -m u:sandbox:rwX "$d" 2>/dev/null || true
+            setfacl -R -m m::rwx "$d" 2>/dev/null || true
+        done
+    done
+}}
+_fix_sandbox_acls &
+ACL_FIXER_PID=$!
 
 # Keep running until signalled
 wait
