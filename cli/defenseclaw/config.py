@@ -524,6 +524,7 @@ class JudgeConfig:
     pii: bool = True
     pii_prompt: bool = True
     pii_completion: bool = True
+    tool_injection: bool = True
     model: str = ""
     api_key_env: str = ""
     api_base: str = ""
@@ -816,6 +817,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         pii=raw.get("pii", True),
         pii_prompt=raw.get("pii_prompt", True),
         pii_completion=raw.get("pii_completion", True),
+        tool_injection=raw.get("tool_injection", True),
         model=raw.get("model", ""),
         api_key_env=raw.get("api_key_env", ""),
         api_base=raw.get("api_base", ""),

@@ -324,6 +324,7 @@ type JudgeConfig struct {
 	PII           bool    `mapstructure:"pii"             yaml:"pii"`
 	PIIPrompt     bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
 	PIICompletion bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
+	ToolInjection bool    `mapstructure:"tool_injection"  yaml:"tool_injection"`
 	Model         string  `mapstructure:"model"           yaml:"model"`
 	APIKeyEnv     string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
 	APIBase       string  `mapstructure:"api_base"        yaml:"api_base"`
@@ -679,6 +680,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.pii", true)
 	viper.SetDefault("guardrail.judge.pii_prompt", true)
 	viper.SetDefault("guardrail.judge.pii_completion", true)
+	viper.SetDefault("guardrail.judge.tool_injection", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
