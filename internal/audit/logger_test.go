@@ -16,7 +16,10 @@
 
 package audit
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestInferTargetType(t *testing.T) {
 	tests := []struct {
@@ -92,5 +95,30 @@ func TestContains(t *testing.T) {
 				t.Errorf("contains(%q, %q) = %v, want %v", tt.s, tt.substr, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLogger_LogIntegrityDrift(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	s, err := NewStore(filepath.Join(tmp, "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	l := NewLogger(s)
+	if err := l.LogIntegrityDrift("skill:demo", "fp mismatch"); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := s.ListEvents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Action != "integrity-drift" || ev[0].Severity != "HIGH" {
+		t.Fatalf("event: %+v", ev)
 	}
 }

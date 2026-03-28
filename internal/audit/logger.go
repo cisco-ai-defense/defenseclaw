@@ -112,6 +112,28 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	return nil
 }
 
+// LogIntegrityDrift records a HIGH-severity drift event for SIEM/TUI visibility.
+func (l *Logger) LogIntegrityDrift(target, details string) error {
+	event := Event{
+		Timestamp: time.Now().UTC(),
+		Action:    "integrity-drift",
+		Target:    target,
+		Details:   details,
+		Severity:  "HIGH",
+	}
+	if err := l.store.LogEvent(event); err != nil {
+		if l.otel != nil {
+			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		}
+		return err
+	}
+	if l.otel != nil {
+		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+	}
+	l.forwardToSplunk(event)
+	return nil
+}
+
 // LogAction persists an action event and emits OTel lifecycle signals.
 func (l *Logger) LogAction(action, target, details string) error {
 	return l.LogActionWithTrace(action, target, details, "")

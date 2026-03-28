@@ -170,5 +170,20 @@ func DefaultConfig() *Config {
 		SkillActions:   DefaultSkillActions(),
 		MCPActions:     DefaultMCPActions(),
 		PluginActions:  DefaultPluginActions(),
+		Integrity:      DefaultIntegrityConfig(),
+	}
+}
+
+// DefaultIntegrityConfig returns defaults for runtime integrity baselines.
+func DefaultIntegrityConfig() IntegrityConfig {
+	return IntegrityConfig{
+		Enabled:           false,
+		Skill:             true,
+		Plugin:            true,
+		MCP:               true,
+		TrustLevel:        "clean_warning",
+		OnDrift:           "alert",
+		MCPPollSeconds:    60,
+		DriftLogCooldownS: 120,
 	}
 }

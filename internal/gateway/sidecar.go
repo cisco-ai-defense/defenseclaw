@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/integrity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -267,6 +268,41 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		w.SetOTelProvider(s.otel)
 	}
 
+	w.SetOnIntegrityDrift(func(targetType, targetName, rootPath, reason string) {
+		if strings.ToLower(strings.TrimSpace(s.cfg.Integrity.OnDrift)) != "block" {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		switch targetType {
+		case "skill":
+			if !s.cfg.Gateway.Watcher.Skill.TakeAction {
+				return
+			}
+			if err := s.client.DisableSkill(ctx, targetName); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] integrity drift disable skill %s: %v\n", targetName, err)
+			} else {
+				_ = s.logger.LogAction("sidecar-integrity-disable", targetName,
+					fmt.Sprintf("type=skill path=%s %s", rootPath, reason))
+			}
+		case "plugin":
+			if !s.cfg.Gateway.Watcher.Plugin.TakeAction {
+				return
+			}
+			if err := s.client.DisablePlugin(ctx, targetName); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] integrity drift disable plugin %s: %v\n", targetName, err)
+			} else {
+				_ = s.logger.LogAction("sidecar-integrity-disable", targetName,
+					fmt.Sprintf("type=plugin path=%s %s", rootPath, reason))
+			}
+		}
+	})
+
+	mcpThrottle := make(map[string]time.Time)
+	if s.cfg.Integrity.Enabled && s.cfg.Integrity.MCP {
+		go s.runMCPIntegrityLoop(ctx, mcpThrottle)
+	}
+
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
 		len(skillDirs), len(pluginDirs), wcfg.Skill.TakeAction, wcfg.Plugin.TakeAction)
 
@@ -346,6 +382,34 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
 		_ = s.logger.LogAction("sidecar-watcher-disable-plugin", r.Event.Name,
 			fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
+	}
+}
+
+func (s *Sidecar) runMCPIntegrityLoop(ctx context.Context, throttle map[string]time.Time) {
+	run := func() {
+		_ = integrity.SyncMCPServerBaselines(s.cfg, s.store, s.logger, &s.cfg.Integrity, throttle, func(name string) error {
+			if strings.ToLower(strings.TrimSpace(s.cfg.Integrity.OnDrift)) != "block" {
+				return nil
+			}
+			ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return s.client.BlockMCPServer(ctx2, name)
+		})
+	}
+	run()
+	poll := time.Duration(s.cfg.Integrity.MCPPollSeconds) * time.Second
+	if poll < 10*time.Second {
+		poll = 10 * time.Second
+	}
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			run()
+		}
 	}
 }
 

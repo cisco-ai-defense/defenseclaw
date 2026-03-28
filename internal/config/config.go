@@ -60,6 +60,19 @@ type Config struct {
 	MCPActions     MCPActionsConfig      `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig   `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig            `mapstructure:"otel"             yaml:"otel"`
+	Integrity      IntegrityConfig       `mapstructure:"integrity"        yaml:"integrity"`
+}
+
+// IntegrityConfig controls install-time baselines and runtime drift detection.
+type IntegrityConfig struct {
+	Enabled           bool   `mapstructure:"enabled"               yaml:"enabled"`
+	Skill             bool   `mapstructure:"skill"                 yaml:"skill"`
+	Plugin            bool   `mapstructure:"plugin"                yaml:"plugin"`
+	MCP               bool   `mapstructure:"mcp"                   yaml:"mcp"`
+	TrustLevel        string `mapstructure:"trust_level"           yaml:"trust_level"`
+	OnDrift           string `mapstructure:"on_drift"              yaml:"on_drift"`
+	MCPPollSeconds    int    `mapstructure:"mcp_poll_seconds"      yaml:"mcp_poll_seconds"`
+	DriftLogCooldownS int    `mapstructure:"drift_log_cooldown_s" yaml:"drift_log_cooldown_s"`
 }
 
 type OTelConfig struct {
@@ -624,6 +637,16 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("otel.batch.max_export_batch_size", 512)
 	viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
 	viper.SetDefault("otel.batch.max_queue_size", 2048)
+
+	d := DefaultIntegrityConfig()
+	viper.SetDefault("integrity.enabled", d.Enabled)
+	viper.SetDefault("integrity.skill", d.Skill)
+	viper.SetDefault("integrity.plugin", d.Plugin)
+	viper.SetDefault("integrity.mcp", d.MCP)
+	viper.SetDefault("integrity.trust_level", d.TrustLevel)
+	viper.SetDefault("integrity.on_drift", d.OnDrift)
+	viper.SetDefault("integrity.mcp_poll_seconds", d.MCPPollSeconds)
+	viper.SetDefault("integrity.drift_log_cooldown_s", d.DriftLogCooldownS)
 
 	_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
 	_ = viper.BindEnv("otel.endpoint", "DEFENSECLAW_OTEL_ENDPOINT")

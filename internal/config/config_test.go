@@ -121,6 +121,10 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Watch.DebounceMs != 500 {
 		t.Errorf("expected debounce 500ms, got %d", cfg.Watch.DebounceMs)
 	}
+	d := DefaultIntegrityConfig()
+	if cfg.Integrity != d {
+		t.Errorf("DefaultConfig().Integrity = %+v, want %+v", cfg.Integrity, d)
+	}
 }
 
 func TestDefaultGatewayWatcherPluginConfig(t *testing.T) {

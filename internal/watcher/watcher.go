@@ -36,6 +36,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
+// OnIntegrityDrift is invoked after a drift is logged when operators need a gateway hook.
+type OnIntegrityDrift func(targetType, targetName, rootPath, reason string)
+
 // InstallType distinguishes between skill and MCP install events.
 type InstallType string
 
@@ -92,7 +95,14 @@ type InstallWatcher struct {
 	opa        *policy.Engine
 	otel       *telemetry.Provider
 	debounce   time.Duration
-	onAdmit    OnAdmission
+	onAdmit          OnAdmission
+	onIntegrityDrift OnIntegrityDrift
+	fsw              *fsnotify.Watcher
+
+	integrityPending map[string]time.Time // baseline root → first-seen
+	baselineByRoot   map[string]*audit.IntegrityBaseline
+	watchedIntDirs   map[string]bool
+	lastDriftLog     map[string]time.Time // "type:name" → last audit
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
@@ -107,18 +117,27 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		debounce = 500 * time.Millisecond
 	}
 	return &InstallWatcher{
-		cfg:        cfg,
-		skillDirs:  skillDirs,
-		pluginDirs: pluginDirs,
-		store:      store,
-		logger:     logger,
-		shell:      shell,
-		opa:        opa,
-		otel:       otel,
-		debounce:   debounce,
-		onAdmit:    onAdmit,
-		pending:    make(map[string]time.Time),
+		cfg:              cfg,
+		skillDirs:        skillDirs,
+		pluginDirs:       pluginDirs,
+		store:            store,
+		logger:           logger,
+		shell:            shell,
+		opa:              opa,
+		otel:             otel,
+		debounce:         debounce,
+		onAdmit:          onAdmit,
+		integrityPending: make(map[string]time.Time),
+		baselineByRoot:   make(map[string]*audit.IntegrityBaseline),
+		watchedIntDirs:   make(map[string]bool),
+		lastDriftLog:     make(map[string]time.Time),
+		pending:          make(map[string]time.Time),
 	}
+}
+
+// SetOnIntegrityDrift registers a callback after drift is recorded (e.g. gateway disable).
+func (w *InstallWatcher) SetOnIntegrityDrift(fn OnIntegrityDrift) {
+	w.onIntegrityDrift = fn
 }
 
 // SetOTelProvider attaches the OTel provider for watcher metrics.
@@ -156,6 +175,20 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
 	}
 
+	w.fsw = fsw
+	defer func() { w.fsw = nil }()
+
+	if w.cfg.Integrity.Enabled {
+		if err := w.loadIntegrityBaselinesFromStore(); err != nil {
+			fmt.Fprintf(os.Stderr, "[watch] integrity: load baselines: %v\n", err)
+		}
+		for root := range w.baselineByRoot {
+			if err := w.ensureTreeWatched(fsw, root); err != nil {
+				fmt.Fprintf(os.Stderr, "[watch] integrity: watch tree %s: %v\n", root, err)
+			}
+		}
+	}
+
 	_ = w.logger.LogAction("watch-start", "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
 	ticker := time.NewTicker(w.debounce)
@@ -171,24 +204,24 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
-				continue
-			}
-			if !w.isDirectChildDir(event.Name) {
-				continue
-			}
-			if w.otel != nil {
-				evtType := "create"
-				if event.Op&fsnotify.Rename != 0 {
-					evtType = "rename"
+			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 && w.isDirectChildDir(event.Name) {
+				if w.otel != nil {
+					evtType := "create"
+					if event.Op&fsnotify.Rename != 0 {
+						evtType = "rename"
+					}
+					w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String())
 				}
-				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String())
+				w.mu.Lock()
+				if _, exists := w.pending[event.Name]; !exists {
+					w.pending[event.Name] = time.Now()
+				}
+				w.mu.Unlock()
 			}
-			w.mu.Lock()
-			if _, exists := w.pending[event.Name]; !exists {
-				w.pending[event.Name] = time.Now()
+
+			if w.cfg.Integrity.Enabled {
+				w.handleIntegrityFilesystemEvent(ctx, event)
 			}
-			w.mu.Unlock()
 
 		case err, ok := <-fsw.Errors:
 			if !ok {
@@ -201,6 +234,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 		case <-ticker.C:
 			w.processPending(ctx)
+			w.flushIntegrityDrift(ctx)
 		}
 	}
 }
@@ -225,6 +259,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 		}
 		evt := w.classifyEvent(path)
 		result := w.runAdmission(ctx, evt)
+		w.postInstallIntegrity(ctx, evt, result)
 		if w.onAdmit != nil {
 			w.onAdmit(result)
 		}

@@ -150,6 +150,19 @@ func (s *Store) Init() error {
 	CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 	CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+
+	CREATE TABLE IF NOT EXISTS integrity_baselines (
+		id TEXT PRIMARY KEY,
+		target_type TEXT NOT NULL,
+		target_name TEXT NOT NULL,
+		root_path TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		meta_json TEXT,
+		updated_at DATETIME NOT NULL
+	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_integrity_type_name ON integrity_baselines(target_type, target_name);
+	CREATE INDEX IF NOT EXISTS idx_integrity_root_path ON integrity_baselines(root_path);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -656,6 +669,83 @@ type LatestScanInfo struct {
 	FindingCount int
 	MaxSeverity  string
 	RawJSON      string
+}
+
+// IntegrityBaseline is a recorded content fingerprint at trust boundary (install/allow).
+type IntegrityBaseline struct {
+	ID          string    `json:"id"`
+	TargetType  string    `json:"target_type"`
+	TargetName  string    `json:"target_name"`
+	RootPath    string    `json:"root_path"`
+	Fingerprint string    `json:"fingerprint"`
+	MetaJSON    string    `json:"meta_json,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// UpsertIntegrityBaseline stores or replaces the baseline for a target.
+func (s *Store) UpsertIntegrityBaseline(targetType, targetName, rootPath, fingerprint, metaJSON string) error {
+	if targetType == "" || targetName == "" || fingerprint == "" {
+		return fmt.Errorf("audit: integrity baseline: missing type, name, or fingerprint")
+	}
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	_, err := s.db.Exec(
+		`INSERT INTO integrity_baselines (id, target_type, target_name, root_path, fingerprint, meta_json, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(target_type, target_name) DO UPDATE SET
+		   root_path = excluded.root_path,
+		   fingerprint = excluded.fingerprint,
+		   meta_json = excluded.meta_json,
+		   updated_at = excluded.updated_at`,
+		id, targetType, targetName, rootPath, fingerprint, metaJSON, now,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: upsert integrity baseline: %w", err)
+	}
+	return nil
+}
+
+// GetIntegrityBaseline returns the baseline for a target type/name pair.
+func (s *Store) GetIntegrityBaseline(targetType, targetName string) (*IntegrityBaseline, error) {
+	var b IntegrityBaseline
+	var meta sql.NullString
+	err := s.db.QueryRow(
+		`SELECT id, target_type, target_name, root_path, fingerprint, meta_json, updated_at
+		 FROM integrity_baselines WHERE target_type = ? AND target_name = ?`,
+		targetType, targetName,
+	).Scan(&b.ID, &b.TargetType, &b.TargetName, &b.RootPath, &b.Fingerprint, &meta, &b.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("audit: get integrity baseline: %w", err)
+	}
+	b.MetaJSON = meta.String
+	return &b, nil
+}
+
+// ListIntegrityBaselines returns all baselines (for prefix matching in watcher).
+func (s *Store) ListIntegrityBaselines() ([]IntegrityBaseline, error) {
+	rows, err := s.db.Query(
+		`SELECT id, target_type, target_name, root_path, fingerprint, meta_json, updated_at
+		 FROM integrity_baselines ORDER BY length(root_path) DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list integrity baselines: %w", err)
+	}
+	defer rows.Close()
+
+	var out []IntegrityBaseline
+	for rows.Next() {
+		var b IntegrityBaseline
+		var meta sql.NullString
+		if err := rows.Scan(&b.ID, &b.TargetType, &b.TargetName, &b.RootPath, &b.Fingerprint, &meta, &b.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("audit: scan integrity baseline: %w", err)
+		}
+		b.MetaJSON = meta.String
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
