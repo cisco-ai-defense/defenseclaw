@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""LiteLLM proxy + DefenseClaw guardrail diagnostics — sandbox mode.
+"""Go guardrail proxy + sidecar diagnostics — sandbox mode.
 
-Same tests as test-litellm-proxy.py but resolves bind host and gateway
-token from config for sandbox networking (10.200.0.1 vs 127.0.0.1).
+Exercises the in-process DefenseClaw guardrail proxy (OpenAI-compatible HTTP)
+and the sidecar API. Resolves bind host and gateway token from config for
+sandbox networking (10.200.0.1 vs 127.0.0.1).
 
 Usage:
     python scripts/test-litellm-proxy-sandbox.py              # all tests
@@ -77,8 +78,7 @@ def header(title: str) -> None:
 
 DC_DIR = Path.home() / ".defenseclaw"
 CONFIG_FILE = DC_DIR / "config.yaml"
-LITELLM_CONFIG_FILE = DC_DIR / "litellm_config.yaml"
-OC_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
+LITELLM_CONFIG_FILE = DC_DIR / "litellm_config.yaml"  # legacy; optional
 ENV_FILE = DC_DIR / ".env"
 
 
@@ -99,14 +99,23 @@ def load_litellm_config() -> dict[str, Any]:
 
 
 def derive_master_key() -> str:
-    """Derive master key from device.key, matching the Go sidecar and Python CLI."""
+    """Derive proxy Bearer token from device.key (matches Go proxy + guardrail.py)."""
+    import hmac
+
     key_file = DC_DIR / "device.key"
     try:
         data = key_file.read_bytes()
-        digest = hashlib.sha256(data).hexdigest()[:16]
+        digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
         return f"sk-dc-{digest}"
     except OSError:
         return ""
+
+
+def openclaw_config_path(dc_cfg: dict[str, Any]) -> Path:
+    """Path to openclaw.json — uses claw.config_file when set (sandbox)."""
+    claw = dc_cfg.get("claw") or {}
+    cf = claw.get("config_file") or "~/.openclaw/openclaw.json"
+    return Path(os.path.expanduser(cf))
 
 
 def _load_gateway_token() -> str:
@@ -191,7 +200,7 @@ def http_post(
 # ---------------------------------------------------------------------------
 
 def test_proxy_health(proxy_base: str, auth_headers: dict[str, str], r: Results) -> None:
-    header("LiteLLM Proxy Health")
+    header("Guardrail Proxy Health")
 
     code, _ = http_get(f"{proxy_base}/health/liveliness", timeout=3)
     if code == 200:
@@ -203,13 +212,18 @@ def test_proxy_health(proxy_base: str, auth_headers: dict[str, str], r: Results)
     if code == 200:
         r.ok("GET /health → 200")
         if isinstance(body, dict):
-            unhealthy = body.get("unhealthy_endpoints", [])
-            if len(unhealthy) == 0:
-                r.ok("All model endpoints healthy")
+            if body.get("status") == "healthy":
+                r.ok("Guardrail proxy reports healthy")
             else:
-                r.fail(f"{len(unhealthy)} unhealthy model endpoint(s)")
-                for ep in unhealthy[:3]:
-                    r.detail(json.dumps(ep)[:120])
+                unhealthy = body.get("unhealthy_endpoints", [])
+                if isinstance(unhealthy, list) and len(unhealthy) == 0:
+                    r.ok("All model endpoints healthy (legacy shape)")
+                elif isinstance(unhealthy, list) and len(unhealthy) > 0:
+                    r.fail(f"{len(unhealthy)} unhealthy model endpoint(s)")
+                    for ep in unhealthy[:3]:
+                        r.detail(json.dumps(ep)[:120])
+                else:
+                    r.detail(f"health body keys: {list(body.keys())}")
         else:
             r.warn("Could not parse health response")
     else:
@@ -235,7 +249,7 @@ def test_model_listing(proxy_base: str, auth_headers: dict[str, str], r: Results
         if models:
             r.ok(f"{len(models)} model(s) available")
         else:
-            r.fail("No models returned (check litellm_config.yaml model_list)")
+            r.fail("No models returned (set guardrail.model / guardrail.model_name in config.yaml)")
         return models
     else:
         r.fail(f"GET /v1/models → {code}")
@@ -286,7 +300,7 @@ def test_chat_completion(proxy_base: str, model_name: str, auth_headers: dict[st
         r.fail("POST /v1/chat/completions → connection refused / timeout")
     elif code == 401:
         r.fail("POST /v1/chat/completions → 401 Unauthorized")
-        r.warn("Check master_key in litellm_config.yaml")
+        r.warn("Check Bearer token matches device.key-derived key (see derive_master_key)")
     else:
         r.fail(f"POST /v1/chat/completions → {code}")
         if isinstance(body, dict):
@@ -365,15 +379,21 @@ def test_guardrail_config(sidecar_base: str, r: Results) -> dict[str, str]:
 # 6. OpenClaw config check
 # ---------------------------------------------------------------------------
 
-def test_openclaw_config(litellm_port: int, r: Results, bind_host: str = "127.0.0.1") -> None:
+def test_openclaw_config(
+    guardrail_port: int,
+    r: Results,
+    bind_host: str = "127.0.0.1",
+    oc_path: Path | None = None,
+) -> None:
     header("OpenClaw Config")
 
-    if not OC_CONFIG.exists():
-        r.warn(f"openclaw.json not found at {OC_CONFIG}")
+    path = oc_path or (Path.home() / ".openclaw" / "openclaw.json")
+    if not path.exists():
+        r.warn(f"openclaw.json not found at {path}")
         return
 
     try:
-        cfg = json.loads(OC_CONFIG.read_text())
+        cfg = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
         r.warn(f"Could not parse openclaw.json: {exc}")
         return
@@ -382,20 +402,20 @@ def test_openclaw_config(litellm_port: int, r: Results, bind_host: str = "127.0.
         cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
     )
     providers = cfg.get("models", {}).get("providers", {})
-    litellm_cfg = providers.get("litellm", {})
-    base_url = litellm_cfg.get("baseUrl", "")
+    dc_cfg = providers.get("defenseclaw", {})
+    base_url = dc_cfg.get("baseUrl", "")
 
-    if "litellm/" in model:
-        r.ok(f"OpenClaw model routed through LiteLLM: {model}")
+    if "defenseclaw/" in model:
+        r.ok(f"OpenClaw model routed through DefenseClaw guardrail proxy: {model}")
         if base_url:
-            r.ok(f"LiteLLM baseUrl: {base_url}")
-            expected = f"http://{bind_host}:{litellm_port}"
-            if base_url != expected:
+            r.ok(f"defenseclaw baseUrl: {base_url}")
+            expected = f"http://{bind_host}:{guardrail_port}"
+            if base_url.rstrip("/") != expected.rstrip("/"):
                 r.warn(f"baseUrl mismatch: expected {expected}, got {base_url}")
         else:
-            r.fail("No baseUrl configured for litellm provider")
+            r.fail("No baseUrl configured for defenseclaw provider")
     else:
-        r.warn(f"OpenClaw model NOT routed through LiteLLM: {model}")
+        r.warn(f"OpenClaw model NOT routed through DefenseClaw proxy: {model}")
         r.detail("Run: defenseclaw setup guardrail")
 
 
@@ -409,11 +429,16 @@ def test_processes(r: Results) -> None:
     import subprocess
 
     try:
-        out = subprocess.check_output(["pgrep", "-f", "litellm.*--port"], text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(
+            ["pgrep", "-f", "defenseclaw-gateway"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
         pids = out.strip().split()
-        r.ok(f"LiteLLM process running (pid={pids[0]})")
+        if pids:
+            r.ok(f"defenseclaw-gateway process running (pid={pids[0]})")
     except (subprocess.CalledProcessError, FileNotFoundError):
-        r.fail("No LiteLLM process found")
+        r.warn("No defenseclaw-gateway PID found (sidecar may run under another argv)")
 
     try:
         out = subprocess.check_output(["pgrep", "-f", "defenseclaw.*sidecar"], text=True, stderr=subprocess.DEVNULL)
@@ -865,7 +890,7 @@ def print_summary(r: Results) -> None:
         print("  1. Start the sidecar:     defenseclaw sidecar start")
         print("  2. Enable guardrail:      defenseclaw setup guardrail")
         print("  3. Check API key:         echo $ANTHROPIC_API_KEY")
-        print("  4. Check litellm install: litellm --version")
+        print("  4. Check guardrail enabled: defenseclaw setup guardrail")
         print("  5. View proxy logs:       tail -f ~/.defenseclaw/sidecar.log")
 
 
@@ -874,7 +899,7 @@ def print_summary(r: Results) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="LiteLLM Proxy + DefenseClaw Guardrail Diagnostics")
+    parser = argparse.ArgumentParser(description="DefenseClaw guardrail proxy + sidecar diagnostics (sandbox)")
     parser.add_argument("--proxy-only", action="store_true", help="Skip guardrail tests")
     parser.add_argument("--guardrail", action="store_true", help="Run guardrail tests only")
     args = parser.parse_args()
@@ -888,23 +913,29 @@ def main() -> None:
     ll_cfg = load_litellm_config()
 
     bind_host = _resolve_bind_host(dc_cfg)
-    litellm_port = int(os.environ.get("LITELLM_PORT", dc_cfg.get("guardrail", {}).get("port", 4000)))
-    sidecar_port = int(os.environ.get("SIDECAR_PORT", dc_cfg.get("gateway", {}).get("api_port", 18790)))
+    guardrail_port = int(os.environ.get("GUARDRAIL_PORT", os.environ.get("LITELLM_PORT", dc_cfg.get("guardrail", {}).get("port", 4000))))
+    sidecar_port = int(os.environ.get("SIDECAR_PORT", dc_cfg.get("gateway", {}).get("api_port", 18970)))
 
-    proxy_base = f"http://{bind_host}:{litellm_port}"
+    proxy_base = f"http://{bind_host}:{guardrail_port}"
     sidecar_base = f"http://{bind_host}:{sidecar_port}"
+    oc_path = openclaw_config_path(dc_cfg)
 
     gateway_token = _load_gateway_token()
     if gateway_token:
         SIDECAR_HEADERS["Authorization"] = f"Bearer {gateway_token}"
 
-    master_key = (
-        os.environ.get("LITELLM_MASTER_KEY", "")
-        or ll_cfg.get("general_settings", {}).get("master_key", "")
-        or derive_master_key()
-    )
-    model_list = ll_cfg.get("model_list", [])
-    model_name = model_list[0]["model_name"] if model_list else ""
+    gr = dc_cfg.get("guardrail", {}) or {}
+    model_name = (gr.get("model_name") or gr.get("model") or "").strip()
+    if not model_name:
+        model_list = ll_cfg.get("model_list", [])
+        if model_list and isinstance(model_list[0], dict):
+            model_name = (model_list[0].get("model_name") or "").strip()
+
+    master_key = os.environ.get("DEFENSECLAW_PROXY_TOKEN", "") or os.environ.get("LITELLM_MASTER_KEY", "")
+    if not master_key:
+        master_key = ll_cfg.get("general_settings", {}).get("master_key", "") or ""
+    if not master_key:
+        master_key = derive_master_key()
 
     guardrail_enabled = dc_cfg.get("guardrail", {}).get("enabled", False)
     guardrail_mode = dc_cfg.get("guardrail", {}).get("mode", "observe")
@@ -913,13 +944,13 @@ def main() -> None:
     if master_key:
         auth_headers["Authorization"] = f"Bearer {master_key}"
 
-    print(f"{BOLD}LiteLLM Proxy Diagnostics{RESET}")
+    print(f"{BOLD}DefenseClaw guardrail diagnostics{RESET}")
     print(f"{DIM}{'─' * 50}{RESET}")
-    print(f"  Proxy port:      {litellm_port}")
+    print(f"  Proxy port:      {guardrail_port}")
     print(f"  Sidecar port:    {sidecar_port}")
     print(f"  Model:           {model_name or '<not configured>'}")
     print(f"  Guardrail:       {guardrail_enabled} ({guardrail_mode})")
-    print(f"  LiteLLM config:  {LITELLM_CONFIG_FILE}")
+    print(f"  openclaw.json:   {oc_path}")
 
     r = Results()
 
@@ -929,7 +960,7 @@ def main() -> None:
         test_chat_completion(proxy_base, model_name, auth_headers, r)
         test_sidecar_health(sidecar_base, r)
         test_guardrail_config(sidecar_base, r)
-        test_openclaw_config(litellm_port, r, bind_host)
+        test_openclaw_config(guardrail_port, r, bind_host, oc_path)
         test_processes(r)
 
     if not args.proxy_only:

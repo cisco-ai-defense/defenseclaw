@@ -38,7 +38,7 @@ def patch_openclaw_config(
     proxy_port: int,
     master_key: str,
     original_model: str,
-    litellm_host: str = "localhost",
+    guardrail_host: str = "localhost",
 ) -> str | None:
     """Patch openclaw.json to route through the guardrail proxy. Returns the original model or None on error."""
     path = _expand(openclaw_config_file)
@@ -61,7 +61,7 @@ def patch_openclaw_config(
         cfg["models"]["providers"] = {}
 
     cfg["models"]["providers"]["defenseclaw"] = {
-        "baseUrl": f"http://{litellm_host}:{proxy_port}",
+        "baseUrl": f"http://{guardrail_host}:{proxy_port}",
         "apiKey": master_key,
         "api": "openai-completions",
         "models": [

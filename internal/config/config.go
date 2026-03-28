@@ -325,8 +325,9 @@ func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
 	return ""
 }
 
-// EffectiveHost returns the host LiteLLM should be reachable at.
-// Defaults to "localhost" when not configured.
+// EffectiveHost returns the hostname clients (e.g. OpenClaw) use to reach the
+// guardrail proxy — same value written to openclaw.json baseUrl. Defaults to
+// "localhost" when not configured.
 func (g *GuardrailConfig) EffectiveHost() string {
 	if g.Host != "" {
 		return g.Host

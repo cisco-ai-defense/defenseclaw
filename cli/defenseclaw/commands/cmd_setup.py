@@ -835,7 +835,7 @@ def execute_guardrail_setup(
         proxy_port=gc.port,
         master_key=master_key,
         original_model=gc.original_model,
-        litellm_host=gc.host or "localhost",
+        guardrail_host=gc.host or "localhost",
     )
     if prev_model is not None:
         click.echo(f"  ✓ OpenClaw config patched: {app.cfg.claw.config_file}")
