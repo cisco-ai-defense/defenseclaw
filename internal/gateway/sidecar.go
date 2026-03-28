@@ -513,7 +513,7 @@ func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
 // On success it transitions sandbox health to running; on context
 // cancellation or too many failures it transitions to error/stopped.
 func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface{}) {
-	addr := fmt.Sprintf("%s:%d", s.cfg.Gateway.Host, s.cfg.Gateway.Port)
+	addr := net.JoinHostPort(s.cfg.Gateway.Host, fmt.Sprintf("%d", s.cfg.Gateway.Port))
 	const maxAttempts = 20
 	backoff := 500 * time.Millisecond
 

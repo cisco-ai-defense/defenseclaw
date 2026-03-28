@@ -38,7 +38,12 @@ def restore_sandbox_ownership_if_needed(cfg) -> None:
 @click.option("--host-ip", default="10.200.0.1", help="Bridge IP of the host (default: 10.200.0.1)")
 @click.option("--sandbox-home", default=None, help="Sandbox user home directory (default: /home/sandbox)")
 @click.option("--openclaw-port", type=int, default=18789, help="OpenClaw gateway port inside sandbox")
-@click.option("--policy", type=click.Choice(["default", "strict", "permissive"]), default="default", help="Network policy template")
+@click.option(
+    "--policy",
+    type=click.Choice(["default", "strict", "permissive"]),
+    default="default",
+    help="Network policy template",
+)
 @click.option("--dns", default="8.8.8.8,1.1.1.1", help="DNS nameservers (comma-separated, or 'host')")
 @click.option("--no-auto-pair", is_flag=True, help="Disable automatic device pre-pairing")
 @click.option("--disable", is_flag=True, help="Revert to host mode (no sandbox)")
@@ -108,7 +113,7 @@ def setup_sandbox(
     app.cfg.claw.home_dir = os.path.join(sandbox_home, ".openclaw")
     app.cfg.claw.config_file = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
 
-    click.echo(f"    openshell.mode:       standalone")
+    click.echo("    openshell.mode:       standalone")
     click.echo(f"    openshell.sandbox_home: {sandbox_home}")
     click.echo(f"    gateway.host:         {sandbox_ip}")
     click.echo(f"    guardrail.host:       {host_ip}")
@@ -124,7 +129,7 @@ def setup_sandbox(
         app.cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         click.echo(f"    gateway.token:        read from openclaw.json ({_mask(detected_token)})")
     else:
-        click.echo(f"    gateway.token:        not found (sidecar will auto-detect on connect)")
+        click.echo("    gateway.token:        not found (sidecar will auto-detect on connect)")
 
     # 4. Install policy template
     _install_policy_template(data_dir, policy)
@@ -151,11 +156,11 @@ def setup_sandbox(
     if not no_auto_pair:
         paired = _pre_pair_device(data_dir, sandbox_home)
         if paired:
-            click.echo(f"    device pairing:       pre-paired")
+            click.echo("    device pairing:       pre-paired")
         else:
-            click.echo(f"    device pairing:       skipped (device.key not found)")
+            click.echo("    device pairing:       skipped (device.key not found)")
     else:
-        click.echo(f"    device pairing:       manual (--no-auto-pair)")
+        click.echo("    device pairing:       manual (--no-auto-pair)")
 
     # 10. Fix ownership and traversal — all files written above (openclaw.json
     #     patch, paired.json, policy templates) were created as root. Restore
@@ -209,10 +214,10 @@ def setup_sandbox(
         click.echo("    1. Install systemd units manually (requires root):")
         click.echo(f"       sudo cp {data_dir}/systemd/*.service /etc/systemd/system/")
         click.echo(f"       sudo cp {data_dir}/systemd/*.target /etc/systemd/system/")
-        click.echo(f"       sudo mkdir -p /usr/local/lib/defenseclaw")
+        click.echo("       sudo mkdir -p /usr/local/lib/defenseclaw")
         click.echo(f"       sudo cp {data_dir}/scripts/*.sh /usr/local/lib/defenseclaw/")
-        click.echo(f"       sudo chmod +x /usr/local/lib/defenseclaw/*.sh")
-        click.echo(f"       sudo systemctl daemon-reload")
+        click.echo("       sudo chmod +x /usr/local/lib/defenseclaw/*.sh")
+        click.echo("       sudo systemctl daemon-reload")
         click.echo()
         click.echo("    2. Run 'defenseclaw setup guardrail' to configure LLM interception")
         click.echo(f"       (will set baseUrl to http://{host_ip}:{app.cfg.guardrail.port})")
@@ -242,6 +247,7 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
     deletes the backup file.
     """
     import json as _json_mod
+
     from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP
 
     backup_path = os.path.join(data_dir, OPENCLAW_OWNERSHIP_BACKUP)
@@ -453,7 +459,7 @@ def _generate_systemd_units(
     systemd_dir = os.path.join(data_dir, "systemd")
     os.makedirs(systemd_dir, exist_ok=True)
 
-    sandbox_unit = f"""[Unit]
+    sandbox_unit = """[Unit]
 Description=OpenShell Sandbox (DefenseClaw-managed)
 Documentation=https://github.com/defenseclaw/defenseclaw
 After=network.target
@@ -717,7 +723,8 @@ if ip netns exec "$NS" true 2>/dev/null; then
     done
 
     ip netns exec "$NS" iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" --dport "$API_PORT" -j ACCEPT 2>/dev/null || true
-    ip netns exec "$NS" iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" --dport "$GUARDRAIL_PORT" -j ACCEPT 2>/dev/null || true
+    ip netns exec "$NS" iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
+        --dport "$GUARDRAIL_PORT" -j ACCEPT 2>/dev/null || true
 
     echo "Injected iptables rules into namespace $NS"
 else
@@ -958,7 +965,7 @@ wait
     os.chmod(path, 0o755)
 
 
-def _extract_ed25519_pubkey(key_data: bytes) -> "bytes | None":
+def _extract_ed25519_pubkey(key_data: bytes) -> bytes | None:
     """Extract the Ed25519 public key from a device key file.
 
     Supports PEM-encoded seeds (as written by the Go gateway) and raw
@@ -970,7 +977,7 @@ def _extract_ed25519_pubkey(key_data: bytes) -> "bytes | None":
     text = key_data.decode("utf-8", errors="replace")
     if "BEGIN ED25519 PRIVATE KEY" in text:
         lines = text.strip().splitlines()
-        b64_lines = [l for l in lines if not l.startswith("-----")]
+        b64_lines = [line for line in lines if not line.startswith("-----")]
         try:
             seed = base64.b64decode("".join(b64_lines))
         except Exception:

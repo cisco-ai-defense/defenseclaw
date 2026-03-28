@@ -8,11 +8,11 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
-
 
 OPENCLAW_OWNERSHIP_BACKUP = "openclaw-ownership-backup.json"
 
@@ -163,7 +163,7 @@ def _init_sandbox(cfg, logger) -> bool:
     # 5. Install DefenseClaw plugin into sandbox
     target_plugin = os.path.join(sandbox_home, ".openclaw", "extensions", "defenseclaw", "dist", "index.js")
     if os.path.isfile(target_plugin):
-        click.echo(f"  Plugin:        already installed")
+        click.echo("  Plugin:        already installed")
     else:
         _install_plugin_to_sandbox(cfg, sandbox_home)
 
@@ -561,7 +561,7 @@ def _install_plugin_to_sandbox(cfg, sandbox_home: str) -> None:
         click.echo(f"  Plugin:        failed to install ({exc})")
 
 
-def _find_openshell_policies_dir() -> "Path | None":
+def _find_openshell_policies_dir() -> Path | None:
     """Locate the openshell policy templates directory.
 
     Checks repo-relative path first, then the bundled _data/ directory

@@ -40,7 +40,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-API_BASE = "http://127.0.0.1:18790"
+API_BASE = "http://127.0.0.1:18970"
 CSRF_HEADER = "X-DefenseClaw-Client"
 GATEWAY_LOG = os.path.expanduser("~/.defenseclaw/gateway.log")
 SPLUNK_BRIDGE_DIR = os.path.expanduser("~/.defenseclaw/splunk-bridge")
