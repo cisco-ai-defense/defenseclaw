@@ -433,6 +433,7 @@ class GuardrailConfig:
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
     model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
     api_key_env: str = ""           # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
+    api_base: str = ""              # optional custom OpenAI-compatible base URL
     original_model: str = ""        # original OpenClaw model (for revert)
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
@@ -721,6 +722,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         model=raw.get("model", ""),
         model_name=raw.get("model_name", ""),
         api_key_env=raw.get("api_key_env", ""),
+        api_base=raw.get("api_base", ""),
         original_model=raw.get("original_model", ""),
         block_message=raw.get("block_message", ""),
         judge=_merge_judge(raw.get("judge")),

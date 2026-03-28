@@ -89,6 +89,7 @@ class TestGuardrailConfig(unittest.TestCase):
                     model="anthropic/claude-opus-4-5",
                     model_name="claude-opus",
                     api_key_env="ANTHROPIC_API_KEY",
+                    api_base="https://llm-proxy.example.test",
                     block_message="Blocked by policy. Contact security@acme.com.",
                 ),
             )
@@ -105,6 +106,7 @@ class TestGuardrailConfig(unittest.TestCase):
             self.assertEqual(g["model"], "anthropic/claude-opus-4-5")
             self.assertEqual(g["model_name"], "claude-opus")
             self.assertEqual(g["api_key_env"], "ANTHROPIC_API_KEY")
+            self.assertEqual(g["api_base"], "https://llm-proxy.example.test")
             self.assertEqual(g["block_message"], "Blocked by policy. Contact security@acme.com.")
 
 

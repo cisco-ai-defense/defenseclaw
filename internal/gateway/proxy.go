@@ -46,12 +46,12 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
-	cfg       *config.GuardrailConfig
-	logger    *audit.Logger
-	health    *SidecarHealth
-	otel      *telemetry.Provider
-	store     *audit.Store
-	dataDir   string
+	cfg     *config.GuardrailConfig
+	logger  *audit.Logger
+	health  *SidecarHealth
+	otel    *telemetry.Provider
+	store   *audit.Store
+	dataDir string
 
 	provider  LLMProvider
 	inspector ContentInspector
@@ -87,10 +87,7 @@ func NewGuardrailProxy(
 		return nil, fmt.Errorf("proxy: no API key available (set guardrail.api_key_env and provide the key in ~/.defenseclaw/.env or environment)")
 	}
 
-	provider, err := NewProvider(cfg.Model, apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: create provider: %w", err)
-	}
+	provider := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 
 	var cisco *CiscoInspectClient
 	if cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {

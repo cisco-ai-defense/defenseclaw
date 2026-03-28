@@ -40,38 +40,38 @@ type ClawConfig struct {
 }
 
 type Config struct {
-	DataDir        string                `mapstructure:"data_dir"         yaml:"data_dir"`
-	AuditDB        string                `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string                `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string                `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string                `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string                `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig            `mapstructure:"claw"             yaml:"claw"`
-	InspectLLM     InspectLLMConfig      `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
-	CiscoAIDefense CiscoAIDefenseConfig  `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig        `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig       `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig           `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig        `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig       `mapstructure:"guardrail"        yaml:"guardrail"`
-	Splunk         SplunkConfig          `mapstructure:"splunk"           yaml:"splunk"`
-	Gateway        GatewayConfig         `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig    `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig      `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig   `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig            `mapstructure:"otel"             yaml:"otel"`
+	DataDir        string               `mapstructure:"data_dir"         yaml:"data_dir"`
+	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment    string               `mapstructure:"environment"      yaml:"environment"`
+	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
+	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Splunk         SplunkConfig         `mapstructure:"splunk"           yaml:"splunk"`
+	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
 }
 
 type OTelConfig struct {
-	Enabled  bool              `mapstructure:"enabled"  yaml:"enabled"`
-	Protocol string            `mapstructure:"protocol" yaml:"protocol"`
-	Endpoint string            `mapstructure:"endpoint" yaml:"endpoint"`
-	Headers  map[string]string `mapstructure:"headers"  yaml:"headers"`
-	TLS      OTelTLSConfig     `mapstructure:"tls"      yaml:"tls"`
-	Traces   OTelTracesConfig  `mapstructure:"traces"   yaml:"traces"`
-	Logs     OTelLogsConfig    `mapstructure:"logs"     yaml:"logs"`
-	Metrics  OTelMetricsConfig `mapstructure:"metrics"  yaml:"metrics"`
-	Batch    OTelBatchConfig   `mapstructure:"batch"    yaml:"batch"`
+	Enabled  bool               `mapstructure:"enabled"  yaml:"enabled"`
+	Protocol string             `mapstructure:"protocol" yaml:"protocol"`
+	Endpoint string             `mapstructure:"endpoint" yaml:"endpoint"`
+	Headers  map[string]string  `mapstructure:"headers"  yaml:"headers"`
+	TLS      OTelTLSConfig      `mapstructure:"tls"      yaml:"tls"`
+	Traces   OTelTracesConfig   `mapstructure:"traces"   yaml:"traces"`
+	Logs     OTelLogsConfig     `mapstructure:"logs"     yaml:"logs"`
+	Metrics  OTelMetricsConfig  `mapstructure:"metrics"  yaml:"metrics"`
+	Batch    OTelBatchConfig    `mapstructure:"batch"    yaml:"batch"`
 	Resource OTelResourceConfig `mapstructure:"resource" yaml:"resource"`
 }
 
@@ -145,8 +145,8 @@ func (c *SplunkConfig) ResolvedHECToken() string {
 }
 
 type WatchConfig struct {
-	DebounceMs         int  `mapstructure:"debounce_ms"          yaml:"debounce_ms"`
-	AutoBlock          bool `mapstructure:"auto_block"           yaml:"auto_block"`
+	DebounceMs          int  `mapstructure:"debounce_ms"          yaml:"debounce_ms"`
+	AutoBlock           bool `mapstructure:"auto_block"           yaml:"auto_block"`
 	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
 }
 
@@ -259,6 +259,7 @@ type GuardrailConfig struct {
 	Model         string      `mapstructure:"model"           yaml:"model"`
 	ModelName     string      `mapstructure:"model_name"      yaml:"model_name"`
 	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
+	APIBase       string      `mapstructure:"api_base"        yaml:"api_base"`
 	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
 	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
 	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`
@@ -267,15 +268,15 @@ type GuardrailConfig struct {
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
-	Enabled        bool    `mapstructure:"enabled"         yaml:"enabled"`
-	Injection      bool    `mapstructure:"injection"       yaml:"injection"`
-	PII            bool    `mapstructure:"pii"             yaml:"pii"`
-	PIIPrompt      bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
-	PIICompletion  bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
-	Model          string  `mapstructure:"model"           yaml:"model"`
-	APIKeyEnv      string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
-	APIBase        string  `mapstructure:"api_base"        yaml:"api_base"`
-	Timeout        float64 `mapstructure:"timeout"         yaml:"timeout"`
+	Enabled       bool    `mapstructure:"enabled"         yaml:"enabled"`
+	Injection     bool    `mapstructure:"injection"       yaml:"injection"`
+	PII           bool    `mapstructure:"pii"             yaml:"pii"`
+	PIIPrompt     bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
+	PIICompletion bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
+	Model         string  `mapstructure:"model"           yaml:"model"`
+	APIKeyEnv     string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
+	APIBase       string  `mapstructure:"api_base"        yaml:"api_base"`
+	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
 }
 
 // ResolvedJudgeAPIKey returns the judge API key from the env var.

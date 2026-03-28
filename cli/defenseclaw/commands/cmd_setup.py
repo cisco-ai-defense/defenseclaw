@@ -1157,6 +1157,8 @@ def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = F
         ("model_name", gc.model_name),
         ("api_key_env", gc.api_key_env),
     ]
+    if gc.api_base:
+        rows.append(("api_base", gc.api_base))
     for key, val in rows:
         click.echo(f"    guardrail.{key + ':':<16s} {val}")
     click.echo()

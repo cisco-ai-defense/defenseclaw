@@ -191,6 +191,47 @@ func parseSSEChunks(t *testing.T, body io.Reader) []json.RawMessage {
 	return chunks
 }
 
+func TestNewGuardrailProxyUsesConfiguredAPIBase(t *testing.T) {
+	t.Setenv("LLM_API_KEY", "sk-test")
+
+	store, logger := testStoreAndLogger(t)
+	health := NewSidecarHealth()
+	cfg := &config.GuardrailConfig{
+		Enabled:   true,
+		Mode:      "action",
+		Port:      4000,
+		Model:     "openai/gpt-4o",
+		ModelName: "gpt-4o",
+		APIKeyEnv: "LLM_API_KEY",
+		APIBase:   "https://llm-proxy.example.test",
+	}
+
+	proxy, err := NewGuardrailProxy(
+		cfg,
+		&config.CiscoAIDefenseConfig{},
+		logger,
+		health,
+		nil,
+		store,
+		t.TempDir(),
+		"",
+	)
+	if err != nil {
+		t.Fatalf("NewGuardrailProxy: %v", err)
+	}
+
+	provider, ok := proxy.provider.(*openaiProvider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *openaiProvider", proxy.provider)
+	}
+	if provider.baseURL != "https://llm-proxy.example.test" {
+		t.Fatalf("provider.baseURL = %q, want %q", provider.baseURL, "https://llm-proxy.example.test")
+	}
+	if provider.model != "gpt-4o" {
+		t.Fatalf("provider.model = %q, want %q", provider.model, "gpt-4o")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // a) Field pass-through tests
 // ---------------------------------------------------------------------------
