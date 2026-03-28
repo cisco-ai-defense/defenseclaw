@@ -146,10 +146,7 @@ Verify the gateway is up with `openclaw gateway status`. See the [OpenClaw Getti
 ### Install DefenseClaw
 
 ```bash
-git clone https://github.com/defenseclaw/defenseclaw.git
-cd defenseclaw
-make dist
-./scripts/install.sh --local dist/
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
 defenseclaw init --enable-guardrail
 ```
 
