@@ -277,12 +277,12 @@ def _skill_display_name(s: dict[str, Any]) -> str:
     emoji = (s.get("emoji", "") or "").strip()
     name = s.get("name", "")
 
-    # Rich tables line up better when every row starts with the same
-    # icon slot, even if a skill doesn't ship with a custom emoji.
+    # Different terminals still render emoji widths a little differently,
+    # so lead with the actual skill name and keep the icon as a suffix.
     if not emoji:
-        emoji = "▫️"
+        return name
 
-    return f"{emoji} {name}"
+    return f"{name} {emoji}"
 
 
 @skill.command("list")
