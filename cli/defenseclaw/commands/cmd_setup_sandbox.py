@@ -18,9 +18,7 @@ def restore_sandbox_ownership_if_needed(cfg) -> None:
     if not cfg.openshell.is_standalone():
         return
     sandbox_home = cfg.openshell.effective_sandbox_home()
-    oc_target = os.path.join(sandbox_home, ".openclaw")
-    if os.path.islink(oc_target):
-        oc_target = os.readlink(oc_target)
+    oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
     try:
         subprocess.run(
             ["chown", "-R", "sandbox:sandbox", oc_target],
@@ -168,9 +166,7 @@ def setup_sandbox(
     #     sandbox ownership so the OpenClaw process can read/write them.
     #     Also ensure parent directories (e.g. /root/) have o+x so the sandbox
     #     user can follow the symlink to the real OpenClaw home.
-    oc_target = os.path.join(sandbox_home, ".openclaw")
-    if os.path.islink(oc_target):
-        oc_target = os.readlink(oc_target)
+    oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
     try:
         subprocess.run(
             ["chown", "-R", "sandbox:sandbox", oc_target],

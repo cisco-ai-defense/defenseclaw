@@ -176,9 +176,7 @@ def _init_sandbox(cfg, logger) -> bool:
 
     # 7. Fix ownership — files written after the initial chown (plugin, policies)
     #    need to be owned by sandbox too
-    oc_target = os.path.join(sandbox_home, ".openclaw")
-    if os.path.islink(oc_target):
-        oc_target = os.readlink(oc_target)
+    oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
     try:
         subprocess.run(
             ["chown", "-R", "sandbox:sandbox", oc_target],
