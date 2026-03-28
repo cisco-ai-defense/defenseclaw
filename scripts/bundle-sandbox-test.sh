@@ -143,14 +143,30 @@ echo "Date:   $(date -Iseconds)"
 echo ""
 
 WORK_DIR="$(mktemp -d /tmp/sandbox-e2e.XXXXXX)"
-DATA_DIR="${HOME}/.defenseclaw"
+REAL_DC_DIR="${HOME}/.defenseclaw"
+BACKUP_DC_DIR=""
+DATA_DIR="${REAL_DC_DIR}"
 SANDBOX_HOME="${WORK_DIR}/sandbox-home"
 HOST_IP="10.200.99.1"
 SANDBOX_IP="10.200.99.2"
 
+if [[ -d "${REAL_DC_DIR}" ]]; then
+    BACKUP_DC_DIR="${WORK_DIR}/defenseclaw-backup"
+    cp -a "${REAL_DC_DIR}" "${BACKUP_DC_DIR}"
+    rm -rf "${REAL_DC_DIR}"
+fi
 mkdir -p "${DATA_DIR}" "${SANDBOX_HOME}/.openclaw" "${SANDBOX_HOME}/.defenseclaw"
 
-trap 'rm -rf "${WORK_DIR}"; rm -rf "${DATA_DIR}"; ip link delete veth-test-h 2>/dev/null || true; ip netns delete test-sandbox 2>/dev/null || true' EXIT
+_cleanup() {
+    rm -rf "${REAL_DC_DIR}"
+    if [[ -n "${BACKUP_DC_DIR}" ]] && [[ -d "${BACKUP_DC_DIR}" ]]; then
+        cp -a "${BACKUP_DC_DIR}" "${REAL_DC_DIR}"
+    fi
+    rm -rf "${WORK_DIR}"
+    ip link delete veth-test-h 2>/dev/null || true
+    ip netns delete test-sandbox 2>/dev/null || true
+}
+trap _cleanup EXIT
 
 # ── T1: Install script ──────────────────────────────────────────────────────
 
@@ -234,7 +250,7 @@ fi
 
 bold "--- T6: Gateway sidecar on veth IP ---"
 
-# Write minimal config to ~/.defenseclaw/config.yaml (where the gateway looks)
+# Write minimal config (gateway reads from ~/.defenseclaw/config.yaml; backed up on entry)
 cat > "${DATA_DIR}/config.yaml" << YAML
 data_dir: ${DATA_DIR}
 audit_db: ${DATA_DIR}/audit.db

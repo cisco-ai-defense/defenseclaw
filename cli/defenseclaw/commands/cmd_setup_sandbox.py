@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import shlex
 import shutil
 import subprocess
 
@@ -503,8 +504,8 @@ SyslogIdentifier=defenseclaw-gateway
 
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths={data_dir}
-ReadOnlyPaths={sandbox_home}/.openclaw
+ReadWritePaths="{data_dir}"
+ReadOnlyPaths="{sandbox_home}/.openclaw"
 
 [Install]
 WantedBy=defenseclaw-sandbox.target
@@ -582,13 +583,17 @@ def _generate_launcher_scripts(
     scripts_dir = os.path.join(data_dir, "scripts")
     os.makedirs(scripts_dir, exist_ok=True)
 
-    api_port = cfg.gateway.api_port
-    guardrail_port = cfg.guardrail.port
+    api_port = int(cfg.gateway.api_port)
+    guardrail_port = int(cfg.guardrail.port)
+
+    q_sandbox_home = shlex.quote(sandbox_home)
+    q_data_dir = shlex.quote(data_dir)
+    q_host_ip = shlex.quote(host_ip)
 
     pre_sandbox = f"""#!/bin/bash
 set -euo pipefail
 
-SANDBOX_HOME="{sandbox_home}"
+SANDBOX_HOME={q_sandbox_home}
 OC_LINK="$SANDBOX_HOME/.openclaw"
 
 # Resolve the real OpenClaw home (follows symlink)
@@ -668,11 +673,11 @@ fi
     start_sandbox = f"""#!/bin/bash
 set -euo pipefail
 
-DEFENSECLAW_DIR="{data_dir}"
+DEFENSECLAW_DIR={q_data_dir}
 RESOLV_FILE="$DEFENSECLAW_DIR/sandbox-resolv.conf"
 POLICY_REGO="$DEFENSECLAW_DIR/openshell-policy.rego"
 POLICY_DATA="$DEFENSECLAW_DIR/openshell-policy.yaml"
-SANDBOX_HOME="{sandbox_home}"
+SANDBOX_HOME={q_sandbox_home}
 
 exec unshare --mount -- bash -c '
     mount --bind '"$RESOLV_FILE"' /etc/resolv.conf
@@ -689,8 +694,8 @@ exec unshare --mount -- bash -c '
     post_sandbox = f"""#!/bin/bash
 set -euo pipefail
 
-DEFENSECLAW_DIR="{data_dir}"
-HOST_IP="{host_ip}"
+DEFENSECLAW_DIR={q_data_dir}
+HOST_IP={q_host_ip}
 API_PORT={api_port}
 GUARDRAIL_PORT={guardrail_port}
 
@@ -745,7 +750,7 @@ done
     start_openclaw = f"""#!/bin/bash
 set -euo pipefail
 
-export NO_PROXY="{host_ip}${{NO_PROXY:+,$NO_PROXY}}"
+export NO_PROXY={q_host_ip}"${{NO_PROXY:+,$NO_PROXY}}"
 
 exec openclaw gateway run
 """
@@ -777,7 +782,10 @@ def _generate_run_sandbox_script(data_dir: str, host_ip: str, cfg) -> None:
 
     gateway_bin = shutil.which("defenseclaw-gateway") or "defenseclaw-gateway"
     api_bind = host_ip
-    api_port = cfg.gateway.api_port
+    api_port = int(cfg.gateway.api_port)
+
+    q_gateway_bin = shlex.quote(gateway_bin)
+    q_api_bind = shlex.quote(api_bind)
 
     script = f"""#!/bin/bash
 set -euo pipefail
@@ -920,7 +928,7 @@ echo "==> Injecting iptables rules..."
 
 # 5. Start defenseclaw-gateway
 echo "==> Starting defenseclaw-gateway..."
-{gateway_bin} &
+{q_gateway_bin} &
 GATEWAY_PID=$!
 echo "$GATEWAY_PID defenseclaw-gateway" >> "$PIDFILE"
 echo "  defenseclaw-gateway started (pid $GATEWAY_PID)"
@@ -928,14 +936,14 @@ echo "  defenseclaw-gateway started (pid $GATEWAY_PID)"
 sleep 2
 
 # 6. Health check
-if curl -sf "http://{api_bind}:{api_port}/health" -o /dev/null 2>/dev/null; then
+if curl -sf "http://{q_api_bind}:{api_port}/health" -o /dev/null 2>/dev/null; then
     echo ""
     echo "==> Sandbox is running"
-    echo "    sidecar health: http://{api_bind}:{api_port}/health"
+    echo "    sidecar health: http://{q_api_bind}:{api_port}/health"
     echo "    stop with:      $SCRIPTS_DIR/run-sandbox.sh stop"
     echo ""
 else
-    echo "WARNING: sidecar health check failed (http://{api_bind}:{api_port}/health)" >&2
+    echo "WARNING: sidecar health check failed (http://{q_api_bind}:{api_port}/health)" >&2
 fi
 
 # 7. Background ACL fixer — OpenClaw uses atomic writes (write-to-temp then

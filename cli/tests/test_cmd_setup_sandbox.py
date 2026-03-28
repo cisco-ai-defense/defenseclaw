@@ -121,7 +121,7 @@ class TestGenerateSystemdUnits(unittest.TestCase):
         sidecar_path = os.path.join(self.data_dir, "systemd", "defenseclaw-gateway.service")
         with open(sidecar_path) as f:
             content = f.read()
-        self.assertIn(f"ReadWritePaths={self.data_dir}", content)
+        self.assertIn(f'ReadWritePaths="{self.data_dir}"', content)
 
 
 class TestGenerateLauncherScripts(unittest.TestCase):
