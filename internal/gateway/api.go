@@ -940,7 +940,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/guardrail/event — receive verdict telemetry from the Python guardrail
+// POST /v1/guardrail/event — receive verdict telemetry from the guardrail proxy
 // ---------------------------------------------------------------------------
 
 type guardrailEventRequest struct {
@@ -1006,8 +1006,8 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 
 	if a.otel != nil {
 		ctx := r.Context()
-		a.otel.RecordGuardrailEvaluation(ctx, "litellm-guardrail", req.Action)
-		a.otel.RecordGuardrailLatency(ctx, "litellm-guardrail", req.ElapsedMs)
+		a.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", req.Action)
+		a.otel.RecordGuardrailLatency(ctx, "guardrail-proxy", req.ElapsedMs)
 		if req.CiscoElapsedMs > 0 {
 			a.otel.RecordGuardrailLatency(ctx, "cisco-ai-defense", req.CiscoElapsedMs)
 			a.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", req.Action)
@@ -1020,7 +1020,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "litellm", tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "guardrail-proxy", tIn, tOut)
 		}
 	}
 
@@ -1264,6 +1264,12 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(code int) {
 	sw.status = code
 	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // csrfProtect wraps a handler with localhost CSRF defenses. Mutating methods

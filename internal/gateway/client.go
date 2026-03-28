@@ -171,6 +171,8 @@ func (c *Client) maybeBufferOrDispatchEvent(evt EventFrame) {
 	c.handshakeMu.Lock()
 	if c.bufferHandshakeEvents {
 		c.handshakeBuf = append(c.handshakeBuf, evt)
+		readLoopLogf("[bifrost] event %s buffered during handshake (buf_size=%d)",
+			evt.Event, len(c.handshakeBuf))
 		c.handshakeMu.Unlock()
 		return
 	}
@@ -190,6 +192,8 @@ func (c *Client) dispatchEvent(evt EventFrame) {
 	}
 	if c.OnEvent != nil {
 		c.OnEvent(evt)
+	} else {
+		readLoopLogf("[bifrost] WARNING: OnEvent is nil, event %s dropped", evt.Event)
 	}
 }
 

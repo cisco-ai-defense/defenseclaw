@@ -17,10 +17,9 @@
  */
 
 /**
- * LLM client — calls litellm via the defenseclaw Python bridge.
+ * LLM client — calls the defenseclaw Python bridge for LLM access.
  *
- * Uses the same litellm library as the skill scanner so provider routing,
- * API key handling, and model support are identical.
+ * Uses the same provider routing and API key handling as the skill scanner.
  *
  * The bridge is at cli/defenseclaw/llm.py and accepts JSON on stdin,
  * returns JSON on stdout.
@@ -40,7 +39,7 @@ export interface LLMConfig {
   apiKey?: string;
   /** Custom API base URL (for Azure, Ollama, etc.). */
   apiBase?: string;
-  /** Provider hint (litellm auto-detects from model name). */
+  /** Provider hint (auto-detected from model name if omitted). */
   provider?: string;
   /** Max output tokens (default 8192). */
   maxTokens?: number;

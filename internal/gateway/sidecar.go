@@ -114,7 +114,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Goroutine 4: LiteLLM guardrail proxy (opt-in via config)
+	// Goroutine 4: guardrail proxy (opt-in via config)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -349,10 +349,30 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	}
 }
 
-// runGuardrail starts the LiteLLM proxy child process when guardrail is enabled.
+// runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
-	llm := NewLiteLLMProcess(&s.cfg.Guardrail, &s.cfg.CiscoAIDefense, s.logger, s.health, s.cfg.Gateway.APIPort, s.cfg.DataDir)
-	return llm.Run(ctx)
+	proxy, err := NewGuardrailProxy(
+		&s.cfg.Guardrail,
+		&s.cfg.CiscoAIDefense,
+		s.logger,
+		s.health,
+		s.otel,
+		s.store,
+		s.cfg.DataDir,
+		s.cfg.PolicyDir,
+	)
+	if err != nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		fmt.Fprintf(os.Stderr, "[guardrail] init error: %v\n", err)
+		if !s.cfg.Guardrail.Enabled {
+			s.health.SetGuardrail(StateDisabled, "", nil)
+			<-ctx.Done()
+			return nil
+		}
+		<-ctx.Done()
+		return err
+	}
+	return proxy.Run(ctx)
 }
 
 // runAPI starts the REST API server.

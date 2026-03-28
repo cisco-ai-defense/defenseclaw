@@ -68,7 +68,7 @@ export interface LLMPolicy {
   api_key: string;
   /** Custom API base URL. */
   api_base: string;
-  /** Provider hint (litellm auto-detects from model name). */
+  /** Provider hint (auto-detected from model name if omitted). */
   provider: string;
   /** Max output tokens for LLM analyzer (default 8192). */
   max_output_tokens: number;

@@ -20,14 +20,14 @@ local REST API for CLI and plugin integration.
                 │       │       └─────────────┘                   │
                 │       │                                         │
                 │  ┌────┴───────┐  ┌────────────┐  ┌───────────┐ │
-                │  │ APIServer  │  │  Watcher   │  │  LiteLLM  │ │
-                │  │ (REST API) │  │ (fsnotify) │  │  Process  │ │
-                │  └────────────┘  └────────────┘  │  Manager  │ │
- localhost:     │       ▲                │          └─────┬─────┘ │
- api_port   ◄──┼───────┘                │               │        │
-                │                        │  admission     │ spawn  │
-                │                        ▼               ▼        │
-                │              client.DisableSkill()  LiteLLM     │
+                │  │ APIServer  │  │  Watcher   │  │ Guardrail │ │
+                │  │ (REST API) │  │ (fsnotify) │  │   Proxy   │ │
+                │  └────────────┘  └────────────┘  └─────┬─────┘ │
+ localhost:     │       ▲                │                │        │
+ api_port   ◄──┼───────┘                │                │        │
+                │                        │  admission     │ HTTP   │
+                │                        ▼                ▼        │
+                │              client.DisableSkill()  Guardrail   │
                 │                                     proxy       │
                 │                                  (port 4000)    │
                 └──────────────────────────────────────────────────┘
@@ -41,8 +41,8 @@ The Sidecar runs four independent subsystems as goroutines:
    installs and runs the admission gate. Opt-in via config.
 3. **REST API server** — exposes `/health`, `/status`, and skill/config
    mutation endpoints on localhost.
-4. **LiteLLM guardrail** — spawns and supervises the LiteLLM proxy as a
-   child process for LLM traffic inspection. Opt-in via config.
+4. **Guardrail proxy** — runs the built-in Go reverse proxy for LLM traffic
+   inspection. Opt-in via config.
 
 Each subsystem is fault-isolated: a gateway disconnect does not stop the
 watcher, API server, or guardrail. Shutdown is coordinated via context
@@ -60,7 +60,8 @@ cancellation.
 | `rpc.go` | High-level RPC methods. `DisableSkill`, `EnableSkill`, `GetConfig`, `PatchConfig`, `GetStatus`, `GetToolsCatalog`, `ResolveApproval`. |
 | `api.go` | Local REST API server. Health, status, skill enable/disable, config patch endpoints. |
 | `health.go` | Subsystem health tracker. Thread-safe state machine with snapshots for the API. |
-| `litellm.go` | LiteLLM process manager. Spawns, monitors, and restarts the LiteLLM proxy child process. |
+| `proxy.go` | Guardrail proxy. Builds `GuardrailProxy`, runs the OpenAI-compatible HTTP server, and supervises LLM traffic inspection. |
+| `guardrail.go` | `GuardrailInspector` — local patterns, Cisco AI Defense, LLM judge, OPA `EvaluateGuardrail`, verdict merge. |
 
 ## WebSocket Protocol (v3)
 
@@ -203,48 +204,45 @@ but no gateway action is taken.
 Non-skill events (e.g. MCP installs) and non-blocking verdicts (clean,
 allowed, warning) are ignored by the admission handler.
 
-## LiteLLM Guardrail
+## Guardrail
 
-When `guardrail.enabled` is `true`, the sidecar spawns a LiteLLM proxy as
-a supervised child process. The proxy loads the DefenseClaw guardrail Python
-module and inspects all LLM traffic flowing between OpenClaw and the
-upstream provider.
+When `guardrail.enabled` is `true`, the sidecar runs a guardrail proxy in a
+dedicated goroutine. `GuardrailProxy` is a built-in Go reverse proxy: it
+accepts OpenAI-compatible requests, inspects prompts and completions, and
+forwards to the upstream LLM provider.
 
 ### Process Lifecycle
 
-1. **Startup**: `LiteLLMProcess.Run()` locates the `litellm` binary (PATH,
-   `~/.local/bin`, `~/.cargo/bin`), verifies the config file exists, then
-   starts the process with `--config`, `--port`, and `--detailed_debug` flags.
-2. **Environment**: The child process inherits the parent's environment plus:
-   - `PYTHONPATH` prepended with the guardrail module directory so LiteLLM
-     can import `defenseclaw_guardrail`
-   - `DEFENSECLAW_GUARDRAIL_MODE` set to the configured mode (`observe`
-     or `action`)
-3. **Health check**: A background goroutine polls
-   `GET http://127.0.0.1:{port}/health/liveliness` every second. Once it
-   returns 200, the health state transitions to `running`. Times out after
-   30 seconds.
-4. **Output streaming**: stdout and stderr of the LiteLLM process are
-   streamed line-by-line to the sidecar's stderr with `[litellm:out]` and
-   `[litellm:err]` prefixes.
-5. **Crash recovery**: If the process exits unexpectedly, the sidecar
-   restarts it with exponential backoff (1s → 2s → 4s → ... → 30s max).
-6. **Shutdown**: On context cancellation (SIGINT/SIGTERM), the child process
-   is killed via `exec.CommandContext`.
+1. **Startup**: `GuardrailProxy.Run()` resolves the upstream API key from
+   `guardrail.api_key_env` and `~/.defenseclaw/.env`, constructs the provider
+   for `guardrail.model`, then starts the HTTP listener on
+   `127.0.0.1:{port}` (OpenAI-compatible routes and `/health/*`).
+2. **Configuration**: Mode (`observe` | `action`), model aliases, Cisco AI
+   Defense, and optional LLM judge settings come from `guardrail` in
+   `~/.defenseclaw/config.yaml` and optional runtime overrides via the local
+   API.
+3. **Health check**: After the server binds, a short grace period elapses;
+   then health transitions to `running`. Callers can probe
+   `GET http://127.0.0.1:{port}/health/liveliness` as a guardrail proxy
+   process check.
+4. **Logging**: Diagnostic lines are written to the sidecar's stderr with
+   a `[guardrail]` prefix (legacy external-proxy logs used `[proxy:out]` /
+   `[proxy:err]` when stdout and stderr were split).
+5. **Errors**: Listen or unexpected server errors set guardrail health to
+   `error` and return from the goroutine; the sidecar continues running other
+   subsystems.
+6. **Shutdown**: On context cancellation (SIGINT/SIGTERM), the HTTP server
+   shuts down gracefully via `http.Server.Shutdown`.
 
-### Guardrail Module
+### Guardrail inspection (Go)
 
-The Python guardrail module (`guardrails/defenseclaw_guardrail.py`) is a
-LiteLLM `CustomGuardrail` subclass with two hooks:
-
-- **`async_pre_call_hook`**: Scans prompt messages for injection attacks,
-  secrets/PII, and data exfiltration patterns. In `action` mode, raises an
-  exception to block flagged prompts.
-- **`async_post_call_success_hook`**: Scans LLM responses for leaked secrets
-  and inspects tool calls. In `action` mode, raises to block flagged responses.
-
-All inspection is local pattern matching — no network calls in the hot path.
-The module reads its mode once from `DEFENSECLAW_GUARDRAIL_MODE` at init.
+The sidecar runs LLM inspection entirely in Go: `GuardrailInspector` in
+`internal/gateway/guardrail.go` (local patterns, optional Cisco AI Defense API,
+optional LLM judge, OPA policy via `policy.Engine.EvaluateGuardrail`) is invoked
+from `GuardrailProxy` in `internal/gateway/proxy.go` on each request and
+response (including streaming). Mode and `scanner_mode` come from the loaded
+config and from `guardrail_runtime.json` hot-reload, not from a Python module
+or `DEFENSECLAW_*` env vars.
 
 ### Configuration
 
@@ -254,12 +252,11 @@ Settings live under the `guardrail` key in `~/.defenseclaw/config.yaml`:
 guardrail:
   enabled: false
   mode: "observe"                # observe | action
-  port: 4000                     # LiteLLM proxy port
+  port: 4000                     # guardrail proxy port
   model: "anthropic/claude-opus-4-5"    # upstream model
   model_name: "claude-opus"      # alias exposed to OpenClaw
   api_key_env: "ANTHROPIC_API_KEY"
   guardrail_dir: "~/.defenseclaw/guardrails"
-  litellm_config: "~/.defenseclaw/litellm_config.yaml"
   original_model: ""             # saved for revert on disable
 ```
 
@@ -268,8 +265,8 @@ guardrail:
 Managed via the Python CLI:
 
 - `defenseclaw setup guardrail` — interactive wizard that configures the
-  guardrail, generates `litellm_config.yaml`, copies the guardrail module,
-  and patches `openclaw.json` to route through LiteLLM.
+  guardrail, configures proxy settings, and patches `openclaw.json` to route
+  through the guardrail proxy (inspection is in the Go binary).
 - `defenseclaw setup guardrail --disable` — reverts `openclaw.json` to the
   original model and sets `guardrail.enabled = false`.
 
@@ -331,13 +328,13 @@ gateway:
   context cancellation. Read loop delivers by ID lookup.
 - **Disconnect signaling**: `sync.Once`-guarded channel close. Both the
   read loop (on error) and `Close()` call `signalDisconnect()`.
-- **Health tracker**: `sync.RWMutex` protects all three subsystem states.
+- **Health tracker**: `sync.RWMutex` protects all subsystem states.
   Writers take exclusive lock; `Snapshot()` takes read lock.
 - **Sidecar subsystems**: four independent goroutines coordinated by a
   shared context and `sync.WaitGroup`. First error is captured via a
   buffered channel.
-- **LiteLLM child process**: spawned via `exec.CommandContext` — context
-  cancellation sends SIGKILL. Stdout/stderr streamed via separate goroutines.
+- **Guardrail proxy**: runs in a dedicated sidecar goroutine; context
+  cancellation triggers graceful `http.Server.Shutdown` on the proxy listener.
 
 ## Testing
 

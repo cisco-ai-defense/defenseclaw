@@ -195,10 +195,10 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     url = f"http://127.0.0.1:{cfg.guardrail.port}/health/liveliness"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
-        _emit("pass", "Guardrail proxy", f"LiteLLM healthy on port {cfg.guardrail.port}")
+        _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}")
         r.record("pass")
     else:
-        _emit("fail", "Guardrail proxy", f"LiteLLM not responding on port {cfg.guardrail.port}")
+        _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}")
         r.record("fail")
 
 
@@ -215,7 +215,7 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         r.record("fail")
         return
 
-    dotenv_path = os.path.join(os.path.dirname(gc.litellm_config), ".env")
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
     api_key = _resolve_api_key(env_name, dotenv_path)
 
     if not api_key:
@@ -313,7 +313,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         r.record("fail")
         return
 
-    dotenv_path = os.path.join(os.path.dirname(gc.litellm_config), ".env")
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
     api_key = _resolve_api_key(key_env, dotenv_path) if key_env else ""
 
     if not api_key:

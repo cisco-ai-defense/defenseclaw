@@ -412,6 +412,19 @@ class FirewallConfig:
 
 
 @dataclass
+class JudgeConfig:
+    enabled: bool = False
+    injection: bool = True
+    pii: bool = True
+    pii_prompt: bool = True
+    pii_completion: bool = True
+    model: str = ""
+    api_key_env: str = ""
+    api_base: str = ""
+    timeout: float = 30.0
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
@@ -420,10 +433,9 @@ class GuardrailConfig:
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
     model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
     api_key_env: str = ""           # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
-    guardrail_dir: str = ""         # directory containing guardrail module (must match litellm_config dir)
-    litellm_config: str = ""        # path to generated litellm_config.yaml
     original_model: str = ""        # original OpenClaw model (for revert)
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
+    judge: JudgeConfig = field(default_factory=JudgeConfig)
 
 
 @dataclass
@@ -682,12 +694,25 @@ def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
     )
 
 
+def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
+    if not raw:
+        return JudgeConfig()
+    return JudgeConfig(
+        enabled=raw.get("enabled", False),
+        injection=raw.get("injection", True),
+        pii=raw.get("pii", True),
+        pii_prompt=raw.get("pii_prompt", True),
+        pii_completion=raw.get("pii_completion", True),
+        model=raw.get("model", ""),
+        api_key_env=raw.get("api_key_env", ""),
+        api_base=raw.get("api_base", ""),
+        timeout=raw.get("timeout", 30.0),
+    )
+
+
 def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConfig:
     if not raw:
-        return GuardrailConfig(
-            guardrail_dir=data_dir,
-            litellm_config=os.path.join(data_dir, "litellm_config.yaml"),
-        )
+        return GuardrailConfig()
     return GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
@@ -696,10 +721,9 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         model=raw.get("model", ""),
         model_name=raw.get("model_name", ""),
         api_key_env=raw.get("api_key_env", ""),
-        guardrail_dir=raw.get("guardrail_dir", data_dir),
-        litellm_config=raw.get("litellm_config", os.path.join(data_dir, "litellm_config.yaml")),
         original_model=raw.get("original_model", ""),
         block_message=raw.get("block_message", ""),
+        judge=_merge_judge(raw.get("judge")),
     )
 
 
@@ -948,10 +972,7 @@ def default_config() -> Config:
             config_file=os.path.join(data_dir, "firewall.yaml"),
             rules_file=os.path.join(data_dir, "firewall.pf.conf"),
         ),
-        guardrail=GuardrailConfig(
-            guardrail_dir=data_dir,
-            litellm_config=os.path.join(data_dir, "litellm_config.yaml"),
-        ),
+        guardrail=GuardrailConfig(),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),
         ),

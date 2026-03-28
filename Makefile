@@ -195,11 +195,9 @@ dist-cli: _bundle-data
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data:
-	@mkdir -p cli/defenseclaw/_data/guardrails
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/skills
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
-	cp guardrails/defenseclaw_guardrail.py cli/defenseclaw/_data/guardrails/
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/

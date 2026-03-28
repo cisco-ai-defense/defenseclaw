@@ -633,7 +633,7 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 @click.option("--cisco-endpoint", default=None, help="Cisco AI Defense API endpoint")
 @click.option("--cisco-api-key-env", default=None, help="Env var name holding Cisco AI Defense API key")
 @click.option("--cisco-timeout-ms", type=int, default=None, help="Cisco AI Defense timeout (ms)")
-@click.option("--port", "guard_port", type=int, default=None, help="LiteLLM proxy port")
+@click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port")
 @click.option("--block-message", default=None,
               help="Custom message shown when a request is blocked (empty = default)")
 @click.option("--restart", is_flag=True, help="Restart defenseclaw-gateway and openclaw gateway after setup")
@@ -650,11 +650,11 @@ def setup_guardrail(
     verify: bool,
     non_interactive: bool,
 ) -> None:
-    """Configure the LLM guardrail (routes LLM traffic through LiteLLM for inspection).
+    """Configure the LLM guardrail (routes LLM traffic through the Go proxy for inspection).
 
-    Routes all LLM traffic through a local LiteLLM proxy with DefenseClaw
-    guardrails attached. Every prompt and response is inspected for prompt
-    injection, secrets, PII, and data exfiltration patterns.
+    Routes all LLM traffic through the built-in Go guardrail proxy.
+    Every prompt and response is inspected for prompt injection, secrets,
+    PII, and data exfiltration patterns.
 
     Two modes:
       observe — log findings, never block (default, recommended to start)
@@ -726,9 +726,8 @@ def setup_guardrail(
             click.echo(f"  ⚠ {w}")
         click.echo()
 
-    data_dir = os.path.dirname(gc.litellm_config) if gc.litellm_config else os.path.expanduser("~/.defenseclaw")
     if restart:
-        _restart_services(data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
+        _restart_services(app.cfg.data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
     else:
         click.echo("  Next steps:")
         click.echo("    1. Restart the defenseclaw sidecar:")
@@ -760,14 +759,10 @@ def execute_guardrail_setup(
     is responsible for calling ``app.cfg.save()`` (used by ``init`` which
     saves once at the end).
     """
-    from defenseclaw.commands.cmd_init import _install_litellm_proxy_extras, _litellm_proxy_ready
     from defenseclaw.guardrail import (
         _derive_master_key,
-        generate_litellm_config,
-        install_guardrail_module,
         install_openclaw_plugin,
         patch_openclaw_config,
-        write_litellm_config,
     )
 
     gc = app.cfg.guardrail
@@ -789,53 +784,20 @@ def execute_guardrail_setup(
         click.echo("    Run interactively (without --non-interactive) to set the model.")
         return False, warnings
 
-    click.echo()
-
-    # --- Step 0: Ensure litellm[proxy] extras are installed ---
-    if _litellm_proxy_ready():
-        click.echo("  ✓ LiteLLM proxy extras verified")
-    else:
-        click.echo("  LiteLLM proxy extras missing, installing...", nl=False)
-        if _install_litellm_proxy_extras():
-            click.echo(" done")
-        else:
-            click.echo(" failed")
-            click.echo("    Install manually: pip install 'litellm[proxy]'")
-            warnings.append("litellm[proxy] extras not installed — proxy will fail to start")
-
-    # --- Step 1: Generate and write LiteLLM config ---
-    litellm_cfg = generate_litellm_config(
-        model=gc.model,
-        model_name=gc.model_name,
-        api_key_env=gc.api_key_env,
-        port=gc.port,
-        device_key_file=app.cfg.gateway.device_key_file,
-    )
-    ok, err = write_litellm_config(litellm_cfg, gc.litellm_config)
-    if ok:
-        click.echo(f"  ✓ LiteLLM config written to {gc.litellm_config}")
-    else:
-        click.echo(f"  ✗ Failed to write LiteLLM config: {err}")
-        click.echo(f"    Check permissions on {os.path.dirname(gc.litellm_config)}")
-        return False, warnings
-
-    # --- Step 2: Install guardrail module ---
-    repo_source = _find_guardrail_source()
-    if repo_source:
-        ok, err = install_guardrail_module(repo_source, gc.guardrail_dir)
-        if ok:
-            click.echo(f"  ✓ Guardrail module installed to {gc.guardrail_dir}/")
-        else:
-            click.echo(f"  ✗ Failed to install guardrail module: {err}")
-            warnings.append("Guardrail module not installed — LLM inspection will not work")
-    else:
-        click.echo("  ⚠ Guardrail module not found in repo")
+    if "/" not in gc.model:
+        click.echo(f"  ⚠ Model '{gc.model}' has no provider prefix (e.g. anthropic/{gc.model}).")
+        click.echo("    The proxy will attempt to infer the provider from the model name,")
+        click.echo("    but this may route to the wrong API. Run interactively to set it explicitly.")
         warnings.append(
-            "Guardrail module not found — if running from a pip install, "
-            "ensure defenseclaw_guardrail.py is in the guardrail_dir"
+            f"Model '{gc.model}' has no provider prefix — provider will be inferred at runtime. "
+            "Run 'defenseclaw setup guardrail' interactively to fix."
         )
 
-    # --- Step 3: Install OpenClaw plugin ---
+    click.echo()
+
+    click.echo("  ✓ Guardrail proxy is built into the Go binary (no Python deps)")
+
+    # --- Step 1: Install OpenClaw plugin ---
     plugin_source = _find_plugin_source()
     if plugin_source:
         openclaw_home = app.cfg.claw.home_dir
@@ -863,13 +825,13 @@ def execute_guardrail_setup(
             "then re-run setup"
         )
 
-    # --- Step 4: Patch OpenClaw config ---
+    # --- Step 2: Patch OpenClaw config ---
     master_key = _derive_master_key(app.cfg.gateway.device_key_file)
 
     prev_model = patch_openclaw_config(
         openclaw_config_file=app.cfg.claw.config_file,
         model_name=gc.model_name,
-        litellm_port=gc.port,
+        proxy_port=gc.port,
         master_key=master_key,
         original_model=gc.original_model,
     )
@@ -885,7 +847,7 @@ def execute_guardrail_setup(
             f"Fix {app.cfg.claw.config_file} and re-run setup"
         )
 
-    # --- Step 5: Save DefenseClaw config ---
+    # --- Step 3: Save DefenseClaw config ---
     if save_config:
         try:
             app.cfg.save()
@@ -897,10 +859,10 @@ def execute_guardrail_setup(
     if gc.original_model:
         click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
 
-    # --- Step 6: Write .env file for API keys ---
+    # --- Step 4: Write .env file for API keys ---
     if gc.api_key_env:
         env_val = os.environ.get(gc.api_key_env, "")
-        dotenv_path = os.path.join(os.path.dirname(gc.litellm_config), ".env")
+        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
         existing_dotenv = _load_dotenv(dotenv_path)
 
         if not env_val and gc.api_key_env not in existing_dotenv:
@@ -912,7 +874,7 @@ def execute_guardrail_setup(
                 default="",
             )
             if not env_val:
-                click.echo("    Skipped — the LiteLLM proxy will fail without this key.")
+                click.echo("    Skipped — the guardrail proxy will fail without this key.")
                 click.echo(f"    You can set it later in {dotenv_path}")
                 warnings.append(f"{gc.api_key_env} not set — sidecar will fail to start")
 
@@ -923,7 +885,7 @@ def execute_guardrail_setup(
             _write_dotenv(dotenv_path, existing_dotenv)
             click.echo(f"  ✓ API keys written to {dotenv_path} (mode 0600)")
 
-    # --- Step 7: Write guardrail_runtime.json ---
+    # --- Step 5: Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
 
     return True, warnings
@@ -931,9 +893,11 @@ def execute_guardrail_setup(
 
 def _interactive_guardrail_setup(app: AppContext, gc) -> None:
     from defenseclaw.guardrail import (
+        KNOWN_PROVIDERS,
         detect_api_key_env,
         detect_current_model,
-        model_to_litellm_name,
+        guess_provider,
+        model_to_proxy_name,
     )
 
     click.echo()
@@ -1005,37 +969,56 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
             "  Timeout (ms)", default=aid.timeout_ms, type=int,
         )
 
-    gc.port = click.prompt("  LiteLLM proxy port", default=gc.port or 4000, type=int)
+    gc.port = click.prompt("  Guardrail proxy port", default=gc.port or 4000, type=int)
 
     # Detect current model
     current_model, current_provider = detect_current_model(app.cfg.claw.config_file)
     click.echo()
 
-    if current_model and not current_model.startswith("litellm/"):
+    # If model has no provider/ prefix, ask the user to confirm the provider.
+    if current_model and not current_provider and "/" not in current_model:
+        guessed = guess_provider(current_model)
+        click.echo(f"  Current OpenClaw model: {current_model}")
+        click.echo(f"  No provider prefix detected (e.g. anthropic/{current_model}).")
+        provider_choices = click.Choice(KNOWN_PROVIDERS)
+        chosen = click.prompt(
+            "  Which provider hosts this model?",
+            type=provider_choices,
+            default=guessed if guessed else None,
+        )
+        current_model = f"{chosen}/{current_model}"
+        current_provider = chosen
+        click.echo(f"  Using: {current_model}")
+        click.echo()
+
+    routed_prefixes = ("defenseclaw/",)
+    is_already_routed = current_model and any(current_model.startswith(p) for p in routed_prefixes)
+
+    if current_model and not is_already_routed:
         click.echo(f"  Current OpenClaw model: {current_model}")
         if click.confirm("  Route this model through the guardrail?", default=True):
             gc.model = current_model
-            gc.model_name = model_to_litellm_name(current_model)
+            gc.model_name = model_to_proxy_name(current_model)
             gc.original_model = current_model
         else:
             gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-            gc.model_name = model_to_litellm_name(gc.model)
-    elif current_model and current_model.startswith("litellm/"):
-        click.echo(f"  Already routed through LiteLLM: {current_model}")
+            gc.model_name = model_to_proxy_name(gc.model)
+    elif is_already_routed:
+        click.echo(f"  Already routed through guardrail: {current_model}")
         if gc.model:
             click.echo(f"  Upstream model: {gc.model}")
         else:
             click.echo("  Upstream model not configured — need to set it.")
             gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-            gc.model_name = model_to_litellm_name(gc.model)
-        if not gc.original_model or gc.original_model.startswith("litellm/"):
+            gc.model_name = model_to_proxy_name(gc.model)
+        if not gc.original_model or any(gc.original_model.startswith(p) for p in routed_prefixes):
             gc.original_model = gc.model
     else:
         gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-        gc.model_name = model_to_litellm_name(gc.model)
+        gc.model_name = model_to_proxy_name(gc.model)
 
     if not gc.model_name:
-        gc.model_name = model_to_litellm_name(gc.model)
+        gc.model_name = model_to_proxy_name(gc.model)
 
     if not gc.model or not gc.model_name:
         click.echo("  Error: model and model_name must not be empty.")
@@ -1047,7 +1030,7 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         gc.api_key_env = detect_api_key_env(gc.model)
 
     env_val = os.environ.get(gc.api_key_env, "")
-    dotenv_path = os.path.join(os.path.dirname(gc.litellm_config), ".env")
+    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
     existing_dotenv = _load_dotenv(dotenv_path)
     dotenv_val = existing_dotenv.get(gc.api_key_env, "")
     click.echo()
@@ -1072,7 +1055,7 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
     click.echo("  Disabling LLM guardrail...")
     warnings: list[str] = []
 
-    # Restore OpenClaw config (model + remove litellm provider + plugins.allow)
+    # Restore OpenClaw config (model + remove defenseclaw provider + plugins.allow)
     if gc.original_model:
         if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
             click.echo(f"  ✓ OpenClaw model restored to: {gc.original_model}")
@@ -1082,11 +1065,11 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
             warnings.append(
                 f"Manually edit {app.cfg.claw.config_file}: "
                 f"set agents.defaults.model.primary to \"{gc.original_model}\" "
-                "and remove the \"litellm\" provider from models.providers"
+                "and remove the \"defenseclaw\" provider from models.providers"
             )
     else:
         click.echo("  ⚠ No original model on record — cannot revert LLM routing")
-        click.echo("    The model in openclaw.json may still point to litellm/...")
+        click.echo("    The model in openclaw.json may still point to defenseclaw/...")
         warnings.append(
             f"Check {app.cfg.claw.config_file} and set agents.defaults.model.primary "
             "to your desired model (e.g. anthropic/claude-sonnet-4-20250514)"
@@ -1122,8 +1105,7 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     if restart:
         click.echo()
-        data_dir = os.path.dirname(gc.litellm_config) if gc.litellm_config else os.path.expanduser("~/.defenseclaw")
-        _restart_services(data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
+        _restart_services(app.cfg.data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
     else:
         click.echo()
         click.echo("  Restart the defenseclaw sidecar for changes to take effect:")
@@ -1157,35 +1139,10 @@ def _write_guardrail_runtime(data_dir: str, gc) -> None:
         click.echo(f"  ⚠ Failed to write runtime config: {exc}")
 
 
-def _find_guardrail_source() -> str | None:
-    """Locate the guardrail module in bundled package data or repo tree."""
-    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    bundled = os.path.join(pkg_dir, "_data", "guardrails", "defenseclaw_guardrail.py")
-    if os.path.isfile(bundled):
-        return bundled
-
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "guardrails", "defenseclaw_guardrail.py"),
-        os.path.join(os.path.dirname(__file__), "..", "guardrails", "defenseclaw_guardrail.py"),
-    ]
-    try:
-        repo_root = os.path.dirname(os.path.dirname(pkg_dir))
-        candidates.append(os.path.join(repo_root, "guardrails", "defenseclaw_guardrail.py"))
-    except Exception:
-        pass
-
-    for c in candidates:
-        resolved = os.path.realpath(c)
-        if os.path.isfile(resolved):
-            return resolved
-    return None
-
-
 def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:
     click.echo()
     click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
-    click.echo(f"  ✓ LiteLLM config written to {gc.litellm_config}")
-    click.echo(f"  ✓ Guardrail module installed to {gc.guardrail_dir}/defenseclaw_guardrail.py")
+    click.echo("  ✓ Guardrail proxy configured (built into Go binary)")
     click.echo(f"  ✓ OpenClaw config patched: {openclaw_config_file}")
     if gc.original_model:
         click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")

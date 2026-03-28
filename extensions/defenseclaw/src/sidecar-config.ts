@@ -22,7 +22,7 @@ import { homedir } from "node:os";
 import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_API_PORT = 18790;
+const DEFAULT_API_PORT = 18970;
 
 interface SidecarConfig {
   host: string;
@@ -34,7 +34,7 @@ let cached: SidecarConfig | undefined;
 
 /**
  * Read gateway.host and gateway.api_port from ~/.defenseclaw/config.yaml.
- * Falls back to defaults (127.0.0.1:18790) if the file is missing or
+ * Falls back to defaults (127.0.0.1:18970) if the file is missing or
  * malformed. Result is cached for the lifetime of the process.
  */
 export function loadSidecarConfig(): SidecarConfig {

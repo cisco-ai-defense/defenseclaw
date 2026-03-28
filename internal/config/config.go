@@ -252,17 +252,38 @@ func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 }
 
 type GuardrailConfig struct {
-	Enabled       bool   `mapstructure:"enabled"        yaml:"enabled"`
-	Mode          string `mapstructure:"mode"            yaml:"mode"`
-	ScannerMode   string `mapstructure:"scanner_mode"    yaml:"scanner_mode"`
-	Port          int    `mapstructure:"port"            yaml:"port"`
-	Model         string `mapstructure:"model"           yaml:"model"`
-	ModelName     string `mapstructure:"model_name"      yaml:"model_name"`
-	APIKeyEnv     string `mapstructure:"api_key_env"     yaml:"api_key_env"`
-	GuardrailDir  string `mapstructure:"guardrail_dir"   yaml:"guardrail_dir"`
-	LiteLLMConfig string `mapstructure:"litellm_config"  yaml:"litellm_config"`
-	OriginalModel string `mapstructure:"original_model"  yaml:"original_model"`
-	BlockMessage  string `mapstructure:"block_message"   yaml:"block_message"`
+	Enabled       bool        `mapstructure:"enabled"        yaml:"enabled"`
+	Mode          string      `mapstructure:"mode"            yaml:"mode"`
+	ScannerMode   string      `mapstructure:"scanner_mode"    yaml:"scanner_mode"`
+	Port          int         `mapstructure:"port"            yaml:"port"`
+	Model         string      `mapstructure:"model"           yaml:"model"`
+	ModelName     string      `mapstructure:"model_name"      yaml:"model_name"`
+	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
+	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
+	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
+	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`
+}
+
+// JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
+// an LLM to detect prompt injection and PII exfiltration.
+type JudgeConfig struct {
+	Enabled        bool    `mapstructure:"enabled"         yaml:"enabled"`
+	Injection      bool    `mapstructure:"injection"       yaml:"injection"`
+	PII            bool    `mapstructure:"pii"             yaml:"pii"`
+	PIIPrompt      bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
+	PIICompletion  bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
+	Model          string  `mapstructure:"model"           yaml:"model"`
+	APIKeyEnv      string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
+	APIBase        string  `mapstructure:"api_base"        yaml:"api_base"`
+	Timeout        float64 `mapstructure:"timeout"         yaml:"timeout"`
+}
+
+// ResolvedJudgeAPIKey returns the judge API key from the env var.
+func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
+	if c.APIKeyEnv != "" {
+		return os.Getenv(c.APIKeyEnv)
+	}
+	return ""
 }
 
 type GatewayConfig struct {
@@ -554,9 +575,13 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.mode", "observe")
 	viper.SetDefault("guardrail.scanner_mode", "local")
 	viper.SetDefault("guardrail.port", 4000)
-	viper.SetDefault("guardrail.guardrail_dir", dataDir)
-	viper.SetDefault("guardrail.litellm_config", filepath.Join(dataDir, "litellm_config.yaml"))
 	viper.SetDefault("guardrail.block_message", "")
+	viper.SetDefault("guardrail.judge.enabled", false)
+	viper.SetDefault("guardrail.judge.injection", true)
+	viper.SetDefault("guardrail.judge.pii", true)
+	viper.SetDefault("guardrail.judge.pii_prompt", true)
+	viper.SetDefault("guardrail.judge.pii_completion", true)
+	viper.SetDefault("guardrail.judge.timeout", 30.0)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)

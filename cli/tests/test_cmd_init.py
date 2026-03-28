@@ -580,7 +580,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw setup guardrail", result.output)
-        self.assertIn("enable llm inspection", result.output.lower())
+        self.assertIn("enable llm traffic inspection", result.output.lower())
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
     @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")

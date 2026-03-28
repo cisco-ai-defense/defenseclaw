@@ -710,9 +710,9 @@ func TestRecordGuardrailEvaluation_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordGuardrailEvaluation(ctx, "litellm-guardrail", "block")
-	p.RecordGuardrailEvaluation(ctx, "litellm-guardrail", "allow")
-	p.RecordGuardrailEvaluation(ctx, "litellm-guardrail", "block")
+	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "block")
+	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "allow")
+	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "block")
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -749,8 +749,8 @@ func TestRecordGuardrailLatency_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordGuardrailLatency(ctx, "litellm-guardrail", 15.5)
-	p.RecordGuardrailLatency(ctx, "litellm-guardrail", 22.0)
+	p.RecordGuardrailLatency(ctx, "guardrail-proxy", 15.5)
+	p.RecordGuardrailLatency(ctx, "guardrail-proxy", 22.0)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -779,9 +779,9 @@ func TestRecordGuardrailLatency_EmitsMetric(t *testing.T) {
 		t.Errorf("histogram sum = %f, want 37.5", dp.Sum)
 	}
 
-	hasScanner := hasAttribute(dp.Attributes, "guardrail.scanner", "litellm-guardrail")
+	hasScanner := hasAttribute(dp.Attributes, "guardrail.scanner", "guardrail-proxy")
 	if !hasScanner {
-		t.Error("histogram missing attribute guardrail.scanner=litellm-guardrail")
+		t.Error("histogram missing attribute guardrail.scanner=guardrail-proxy")
 	}
 }
 
@@ -794,8 +794,8 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordLLMTokens(ctx, "litellm", 150, 75)
-	p.RecordLLMTokens(ctx, "litellm", 200, 0) // no completion tokens
+	p.RecordLLMTokens(ctx, "guardrail-proxy", 150, 75)
+	p.RecordLLMTokens(ctx, "guardrail-proxy", 200, 0) // no completion tokens
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {

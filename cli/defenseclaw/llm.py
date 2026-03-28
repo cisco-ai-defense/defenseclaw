@@ -14,11 +14,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw-llm — thin CLI bridge to litellm.
+"""defenseclaw-llm — thin CLI bridge to LLM provider SDKs.
 
 Called by the TypeScript plugin scanner (and anything else) via subprocess.
-Uses the same litellm library as the skill scanner so provider routing,
-API key handling, and model support are identical.
+Routes to Anthropic or OpenAI based on the model name.
 
 Usage:
   echo '{"model":"claude-sonnet-4-20250514","messages":[...]}' | python -m defenseclaw.llm
@@ -32,7 +31,7 @@ Input (stdin JSON):
     "temperature": 0.0,
     "api_key": "...",           // optional, falls back to env
     "api_base": "...",          // optional
-    "provider": "anthropic"     // optional, litellm auto-detects from model name
+    "provider": "anthropic"     // optional, auto-detected from model name
   }
 
 Output (stdout JSON):
@@ -50,59 +49,167 @@ import json
 import sys
 
 
-def call_litellm(request: dict) -> dict:
+def _resolve_provider(model: str, provider_hint: str = "") -> tuple[str, str]:
+    """Determine the provider and bare model name.
+
+    Returns (provider, bare_model).  Handles prefixed names like
+    ``anthropic/claude-sonnet-4-20250514`` and bare names like ``claude-sonnet-4-20250514``.
+    """
+    if provider_hint:
+        bare = model.split("/", 1)[-1] if "/" in model else model
+        return provider_hint.lower(), bare
+
+    if "/" in model:
+        prefix, bare = model.split("/", 1)
+        return prefix.lower(), bare
+
+    lower = model.lower()
+    if lower.startswith("claude"):
+        return "anthropic", model
+    if lower.startswith(("gpt", "o1", "o3", "o4")):
+        return "openai", model
+    if lower.startswith("gemini"):
+        return "google", model
+
+    return "openai", model
+
+
+def _call_anthropic(
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    api_key: str | None,
+    api_base: str | None,
+) -> dict:
     try:
-        import litellm
+        import anthropic
     except ImportError:
         return {
             "content": "",
-            "model": "",
+            "model": model,
             "usage": {},
-            "error": "litellm not installed. Install with: pip install litellm",
+            "error": "anthropic SDK not installed. Install with: pip install anthropic",
         }
 
+    kwargs: dict = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if api_base:
+        kwargs["base_url"] = api_base
+
+    client = anthropic.Anthropic(**kwargs)
+
+    system_text = ""
+    api_messages = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_text = msg.get("content", "")
+        else:
+            api_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+
+    create_kwargs: dict = {
+        "model": model,
+        "messages": api_messages,
+        "max_tokens": max_tokens,
+    }
+    if temperature > 0:
+        create_kwargs["temperature"] = temperature
+    if system_text:
+        create_kwargs["system"] = system_text
+
+    response = client.messages.create(**create_kwargs)
+
+    content = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            content += block.text
+
+    usage = {}
+    if response.usage:
+        usage = {
+            "prompt_tokens": response.usage.input_tokens,
+            "completion_tokens": response.usage.output_tokens,
+            "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+        }
+
+    return {
+        "content": content,
+        "model": response.model,
+        "usage": usage,
+        "error": None,
+    }
+
+
+def _call_openai(
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    api_key: str | None,
+    api_base: str | None,
+) -> dict:
+    try:
+        import openai
+    except ImportError:
+        return {
+            "content": "",
+            "model": model,
+            "usage": {},
+            "error": "openai SDK not installed. Install with: pip install openai",
+        }
+
+    kwargs: dict = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if api_base:
+        kwargs["base_url"] = api_base
+
+    client = openai.OpenAI(**kwargs)
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+    content = ""
+    if response.choices and len(response.choices) > 0:
+        content = response.choices[0].message.content or ""
+
+    usage = {}
+    if response.usage:
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens or 0,
+            "completion_tokens": response.usage.completion_tokens or 0,
+            "total_tokens": response.usage.total_tokens or 0,
+        }
+
+    return {
+        "content": content,
+        "model": response.model or model,
+        "usage": usage,
+        "error": None,
+    }
+
+
+def call_llm(request: dict) -> dict:
     model = request.get("model", "")
     messages = request.get("messages", [])
     max_tokens = request.get("max_tokens", 8192)
     temperature = request.get("temperature", 0.0)
-
-    # Optional overrides
     api_key = request.get("api_key")
     api_base = request.get("api_base")
+    provider_hint = request.get("provider", "")
 
-    kwargs: dict = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if api_key:
-        kwargs["api_key"] = api_key
-    if api_base:
-        kwargs["api_base"] = api_base
+    provider, bare_model = _resolve_provider(model, provider_hint)
 
     try:
-        response = litellm.completion(**kwargs)
-
-        content = ""
-        if response.choices and len(response.choices) > 0:
-            content = response.choices[0].message.content or ""
-
-        usage = {}
-        if hasattr(response, "usage") and response.usage:
-            usage = {
-                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-                "total_tokens": getattr(response.usage, "total_tokens", 0),
-            }
-
-        return {
-            "content": content,
-            "model": getattr(response, "model", model),
-            "usage": usage,
-            "error": None,
-        }
-
+        if provider == "anthropic":
+            return _call_anthropic(bare_model, messages, max_tokens, temperature, api_key, api_base)
+        else:
+            return _call_openai(bare_model, messages, max_tokens, temperature, api_key, api_base)
     except Exception as exc:
         return {
             "content": "",
@@ -112,8 +219,11 @@ def call_litellm(request: dict) -> dict:
         }
 
 
+# Backward-compatible alias.
+call_litellm = call_llm
+
+
 def main() -> None:
-    # Read request from stdin
     raw = sys.stdin.read().strip()
     if not raw:
         json.dump({"content": "", "model": "", "usage": {}, "error": "empty input"}, sys.stdout)
@@ -125,7 +235,7 @@ def main() -> None:
         json.dump({"content": "", "model": "", "usage": {}, "error": f"invalid JSON: {exc}"}, sys.stdout)
         return
 
-    result = call_litellm(request)
+    result = call_llm(request)
     json.dump(result, sys.stdout)
 
 

@@ -231,15 +231,14 @@ dist/
 ### Individual Dist Targets
 
 ```bash
-make dist-cli       # Build Python wheel (bundles guardrail module, Rego policies, CodeGuard skill)
+make dist-cli       # Build Python wheel (bundles Rego policies, CodeGuard skill, policy data)
 make dist-gateway   # Cross-compile gateway for all 4 platform/arch combos
 make dist-plugin    # Build and tar the OpenClaw plugin with runtime deps
 make dist-checksums # Generate SHA-256 checksums.txt
 ```
 
 `dist-cli` bundles data files into the wheel before building:
-guardrail module, Rego policies, `data.json`, YAML policy templates,
-and the CodeGuard skill.
+Rego policies, `data.json`, YAML policy templates, and the CodeGuard skill.
 
 ### Install from Local Dist
 
@@ -307,7 +306,7 @@ defenseclaw init
 | Flag | Description |
 |------|-------------|
 | `--skip-install` | Skip scanner dependency checks and package installs |
-| `--enable-guardrail` | Run interactive guardrail setup (LiteLLM + OpenClaw plugin) during init |
+| `--enable-guardrail` | Run interactive guardrail setup (guardrail proxy + OpenClaw plugin) during init |
 
 What init does, step by step:
 
@@ -320,7 +319,7 @@ What init does, step by step:
    importable
 7. Reads gateway defaults from OpenClaw config + generates device key
 8. If `--enable-guardrail`: runs the full guardrail setup flow
-   (LiteLLM proxy, guardrail module, OpenClaw plugin)
+   (guardrail proxy + OpenClaw plugin)
 9. Installs the CodeGuard skill to `~/.openclaw/skills/codeguard/`
 10. Starts `defenseclaw-gateway` if the binary exists on PATH
 
@@ -335,7 +334,7 @@ defenseclaw init --enable-guardrail
 ### `defenseclaw setup guardrail`
 
 Configure the LLM guardrail that inspects prompts and completions
-flowing through the LiteLLM proxy.
+flowing through the guardrail proxy.
 
 ```bash
 defenseclaw setup guardrail
@@ -345,7 +344,7 @@ defenseclaw setup guardrail
 |------|-------------|
 | `--mode MODE` | `observe` (log only) or `action` (block dangerous content) |
 | `--scanner-mode MODE` | `local` (pattern matching) or `remote` (Cisco AI Defense API) |
-| `--port PORT` | LiteLLM proxy port |
+| `--port PORT` | guardrail proxy port |
 | `--block-message TEXT` | Custom message shown when content is blocked in action mode |
 | `--cisco-endpoint URL` | Cisco AI Defense API endpoint |
 | `--cisco-api-key-env VAR` | Env var name for Cisco API key |
@@ -357,13 +356,12 @@ defenseclaw setup guardrail
 
 What guardrail setup does:
 
-1. Installs the `litellm[proxy]` Python package
-2. Writes LiteLLM proxy config (`litellm_config.yaml`)
-3. Installs the guardrail module (`defenseclaw_guardrail.py`)
-4. Installs the DefenseClaw OpenClaw plugin
-5. Patches `openclaw.json` to route LLM calls through the proxy
-6. Saves settings to `config.yaml` and API keys to `.env`
-7. Writes `guardrail_runtime.json` for live mode toggling
+1. Configures the guardrail proxy
+2. Configures proxy model routing
+3. Installs the DefenseClaw OpenClaw plugin
+4. Patches `openclaw.json` to route LLM calls through the proxy
+5. Saves settings to `config.yaml` and API keys to `.env`
+6. Writes `guardrail_runtime.json` for live mode toggling
 
 ```bash
 # Non-interactive with specific mode
@@ -521,7 +519,7 @@ Checks performed:
 | Scanner binaries | `skill-scanner` and `mcp-scanner` CLIs are on PATH |
 | Sidecar health | `GET /health` to the sidecar; reports gateway, watcher, and guardrail sub-states |
 | OpenClaw gateway | `GET /health` to the OpenClaw gateway (if configured) |
-| Guardrail proxy | LiteLLM proxy liveliness check (if guardrail is enabled) |
+| Guardrail proxy | guardrail proxy health check (if guardrail is enabled) |
 | LLM API key | Probe Anthropic or OpenAI API (if LLM analyzer is configured) |
 | Cisco AI Defense | Endpoint health check (if remote scanner mode is enabled) |
 | VirusTotal | API connectivity check (if VirusTotal is enabled) |

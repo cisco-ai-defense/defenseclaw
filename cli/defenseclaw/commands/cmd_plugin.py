@@ -69,8 +69,8 @@ def scan(
     Uses defenseclaw-plugin-scanner to check for dangerous permissions,
     install scripts, credential theft, obfuscation, and supply chain risks.
 
-    LLM analysis uses the same litellm configuration as the skill scanner
-    (reads from config.yaml: scanners.skill_scanner.llm_*).
+    LLM analysis uses the same configuration as the skill scanner
+    (reads from config.yaml: inspect_llm).
 
     Examples:\n
       defenseclaw plugin scan my-plugin\n

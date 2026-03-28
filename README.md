@@ -86,7 +86,7 @@ CodeGuard runs automatically during skill/plugin scans and is also available as 
 
 #### Message Inspection
 
-The LiteLLM guardrail module inspects every LLM prompt and completion flowing through the proxy for secrets, PII, and injection patterns. It operates independently of the plugin — it protects the LLM channel even if the plugin is not installed. In **observe** mode findings are logged; in **action** mode dangerous content is blocked before it reaches the LLM or the user.
+The guardrail proxy inspects every LLM prompt and completion for secrets, PII, and injection patterns. It operates independently of the plugin — it protects the LLM channel even if the plugin is not installed. In **observe** mode findings are logged; in **action** mode dangerous content is blocked before it reaches the LLM or the user.
 
 #### Tool Inspection
 
@@ -115,7 +115,7 @@ DefenseClaw is a multi-component system with three runtimes that work together:
 | **Gateway** | Go 1.25+ | Central daemon — REST API, WebSocket bridge to OpenClaw, policy engine, inspection pipeline, SQLite audit store, SIEM export |
 | **Plugin** | TypeScript | Runs inside OpenClaw — intercepts tool calls via `before_tool_call` hook, provides `/scan`, `/block`, `/allow` slash commands |
 
-The **CLI** and **Plugin** communicate with the **Gateway** over a local REST API. The Gateway connects to the OpenClaw Gateway over WebSocket (protocol v3) to subscribe to events and send enforcement commands. A supervised **LiteLLM proxy** with a custom guardrail module inspects all LLM traffic in real time.
+The **CLI** and **Plugin** communicate with the **Gateway** over a local REST API. The Gateway connects to the OpenClaw Gateway over WebSocket (protocol v3) to subscribe to events and send enforcement commands. A built-in **guardrail proxy** inspects all LLM traffic in real time.
 
 For the full system diagram, data flows, and component responsibilities, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

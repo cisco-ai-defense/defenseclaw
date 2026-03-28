@@ -17,8 +17,8 @@ Source: `internal/gateway/api.go`, `internal/gateway/inspect.go`
 | `/status` | GET | Full sidecar status + gateway hello | TS plugin (`DaemonClient.status()` in `client.ts`), Python CLI (`OrchestratorClient.status()` in `gateway.py`) — no CLI command calls it directly |
 | `/api/v1/inspect/tool` | POST | **Inspect tool call before execution** | OpenClaw plugin `before_tool_call` hook (`index.ts`) |
 | `/api/v1/scan/code` | POST | **Run CodeGuard scanner on a file/directory** | TS plugin `runCodeScan()` (`enforcer.ts`), CodeGuard skill (`main.py`) |
-| `/v1/guardrail/event` | POST | Receive verdict telemetry from LiteLLM guardrail | Python guardrail (`defenseclaw_guardrail.py`) |
-| `/v1/guardrail/evaluate` | POST | OPA policy evaluation for guardrail verdicts | Python guardrail (`defenseclaw_guardrail.py`) |
+| `/v1/guardrail/event` | POST | Receive verdict telemetry from guardrail proxy | Optional HTTP path; built-in proxy logs via `recordTelemetry()` in `proxy.go` |
+| `/v1/guardrail/evaluate` | POST | OPA policy evaluation for guardrail verdicts | Optional HTTP path; built-in proxy uses in-process OPA in `guardrail.go` |
 | `/v1/guardrail/config` | GET/PATCH | Read/update guardrail mode at runtime | No production callers |
 | `/enforce/block` | POST/DELETE | Add/remove block list entries | TS plugin `/block` command (`index.ts`, `enforcer.ts`, `client.ts`) |
 | `/enforce/allow` | POST | Add allow list entries | TS plugin `/allow` command (`index.ts`, `enforcer.ts`, `client.ts`) |
@@ -51,7 +51,7 @@ Source: `internal/gateway/api.go`, `internal/gateway/inspect.go`
 
 - [Health & Status](#health--status)
 - [Tool Inspection](#tool-inspection)
-- [Guardrail (LiteLLM)](#guardrail-litellm)
+- [Guardrail](#guardrail)
 - [Enforcement (Block/Allow)](#enforcement-blockallow)
 - [Admission Policy](#admission-policy)
 - [Policy Domains (OPA)](#policy-domains-opa)
@@ -188,31 +188,42 @@ Source: `internal/gateway/inspect.go`
 
 ---
 
-## Guardrail (LiteLLM)
+## Guardrail
 
-These endpoints are used by the Python LiteLLM guardrail module
-(`guardrails/defenseclaw_guardrail.py`) running inside the LiteLLM proxy.
+These endpoints support guardrail telemetry and OPA evaluation. The **built-in**
+Go guardrail proxy (`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`)
+writes inspection results to the audit store and OTel **in-process** via
+`recordTelemetry()`; it does not require HTTP calls to these routes for normal
+operation. `POST /v1/guardrail/event` remains available for external or
+programmatic callers that want the same logging path.
 
 ### POST /v1/guardrail/event
 
-Receives verdict telemetry from the Python guardrail after each LLM
-prompt or completion inspection. Logs to audit store and records OTel
+Receives verdict telemetry after each LLM prompt or completion inspection (same
+fields the built-in proxy records directly). Logs to audit store and records OTel
 metrics.
 
 **Callers:**
-- `guardrails/defenseclaw_guardrail.py` — `_report_to_sidecar()` POSTs
-  after every inspection verdict.
+- **Built-in path:** `GuardrailProxy.recordTelemetry()` in `internal/gateway/proxy.go`
+  after `GuardrailInspector.Inspect()` in `internal/gateway/guardrail.go` (no HTTP hop).
+- **HTTP path:** any client that POSTs the JSON schema below (tests, integrations).
 
-**Code flow:**
+**Code flow (built-in):**
 
 ```
-LLM request/response flows through LiteLLM proxy
-  → defenseclaw_guardrail.py async_pre_call_hook / async_post_call_success_hook
-    → _inspect() runs local pattern matching
-    → _report_to_sidecar() POST /v1/guardrail/event
-      → api.go handleGuardrailEvent()
-        → audit store: LogEvent() + LogAction()
-        → OTel: RecordGuardrailEvaluation() + RecordGuardrailLatency()
+LLM request/response flows through GuardrailProxy (proxy.go)
+  → GuardrailInspector.Inspect() (guardrail.go): local / Cisco / judge / OPA
+  → recordTelemetry() (proxy.go)
+    → audit store: LogEvent() + LogAction()
+    → OTel: RecordGuardrailEvaluation() + RecordGuardrailLatency()
+```
+
+**Code flow (HTTP caller):**
+
+```
+POST /v1/guardrail/event
+  → api.go handleGuardrailEvent()
+    → audit store + OTel (same as above)
 ```
 
 **Request:**
@@ -235,21 +246,29 @@ Evaluates guardrail scan results against the OPA policy engine (or
 built-in fallback). Returns the final action/severity decision.
 
 **Callers:**
-- `guardrails/defenseclaw_guardrail.py` — `_evaluate_via_sidecar()` POSTs
-  combined local + Cisco scan results for policy evaluation.
+- **Built-in path:** `GuardrailInspector.finalize()` in `internal/gateway/guardrail.go`
+  calls `policy.Engine.EvaluateGuardrail()` in-process (no HTTP hop).
+- **HTTP path:** `POST /v1/guardrail/evaluate` for tests or external tools.
 
-**Code flow:**
+**Code flow (built-in):**
 
 ```
-defenseclaw_guardrail.py _inspect()
-  → _scan_local() and/or _scan_cisco() produce scan results
-  → _evaluate_via_sidecar() POST /v1/guardrail/evaluate
-    → api.go handleGuardrailEvaluate()
-      → policy.New(policyDir).EvaluateGuardrail() (OPA)
-      → fallback: built-in severity ranking if OPA unavailable
-      → audit store: LogEvent() + LogAction()
-      → OTel: RecordGuardrailEvaluation()
-    → returns GuardrailOutput JSON
+GuardrailInspector.Inspect() / finalize() (guardrail.go)
+  → local + Cisco + judge merge
+  → policy.New(policyDir).EvaluateGuardrail() (OPA, in-process)
+  → returns ScanVerdict to proxy
+```
+
+**Code flow (HTTP caller):**
+
+```
+POST /v1/guardrail/evaluate
+  → api.go handleGuardrailEvaluate()
+    → policy.New(policyDir).EvaluateGuardrail() (OPA)
+    → fallback: built-in severity ranking if OPA unavailable
+    → audit store: LogEvent() + LogAction()
+    → OTel: RecordGuardrailEvaluation()
+  → returns GuardrailOutput JSON
 ```
 
 **Request:**
@@ -796,7 +815,7 @@ but no production command calls it directly.
 **Request:**
 
 ```json
-{ "path": "agent.model", "value": "litellm/claude-opus-4-5" }
+{ "path": "agent.model", "value": "defenseclaw/claude-opus-4-5" }
 ```
 
 ### GET /skills

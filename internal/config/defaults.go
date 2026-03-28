@@ -123,10 +123,16 @@ func DefaultConfig() *Config {
 			AnchorName: "com.defenseclaw",
 		},
 		Guardrail: GuardrailConfig{
-			Mode:          "observe",
-			Port:          4000,
-			GuardrailDir:  dataDir,
-			LiteLLMConfig: filepath.Join(dataDir, "litellm_config.yaml"),
+			Mode:        "observe",
+			ScannerMode: "local",
+			Port:        4000,
+			Judge: JudgeConfig{
+				Injection:     true,
+				PII:           true,
+				PIIPrompt:     true,
+				PIICompletion: true,
+				Timeout:       30.0,
+			},
 		},
 		Splunk: SplunkConfig{
 			HECEndpoint:   "https://localhost:8088/services/collector/event",

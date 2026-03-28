@@ -26,8 +26,8 @@
  * - Consensus runs support
  * - AITech taxonomy alignment
  *
- * Calls litellm via the Python bridge (cli/defenseclaw/llm.py) —
- * same library, same provider routing as the skill scanner.
+ * Calls the Python bridge (cli/defenseclaw/llm.py) —
+ * same provider routing as the skill scanner.
  */
 import { randomBytes } from "node:crypto";
 import type { Finding, Severity } from "../../types.js";

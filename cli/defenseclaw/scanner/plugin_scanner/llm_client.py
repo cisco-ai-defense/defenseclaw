@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""LLM client -- calls litellm via the defenseclaw bridge."""
+"""LLM client -- calls the defenseclaw LLM bridge."""
 
 from __future__ import annotations
 

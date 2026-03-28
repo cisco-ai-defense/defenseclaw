@@ -184,13 +184,13 @@ environment variables when skill-scanner runs.
 defenseclaw setup guardrail [flags]
 ```
 
-Configure the LLM guardrail (LiteLLM proxy + inspection module). See
+Configure the LLM guardrail (guardrail proxy). See
 [Guardrail Quick Start](GUARDRAIL_QUICKSTART.md) for a full walkthrough.
 
 **Flags:**
 - `--mode` — `observe` (log only) or `action` (block threats)
 - `--scanner-mode` — `local`, `remote`, or `both`
-- `--port` — LiteLLM proxy port (default: 4000)
+- `--port` — guardrail proxy port (default: 4000)
 - `--disable` — disable guardrail and revert openclaw.json
 - `--restart` — restart sidecar + OpenClaw after configuration
 - `--non-interactive` — use flags instead of prompts
@@ -295,4 +295,4 @@ defenseclaw doctor [--json]
 ```
 
 Runs connectivity and credential checks against all configured services
-(sidecar, LiteLLM, Cisco AI Defense, Splunk, scanners).
+(sidecar, guardrail proxy, Cisco AI Defense, Splunk, scanners).

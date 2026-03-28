@@ -116,7 +116,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
         _install_guardrail(cfg, logger, skip_install)
         click.echo()
         click.echo("  Run 'defenseclaw init --enable-guardrail' or")
-        click.echo("  'defenseclaw setup guardrail' to enable LLM inspection.")
+        click.echo("  'defenseclaw setup guardrail' to enable the guardrail proxy.")
 
     click.echo()
     click.echo("  ── Skills ────────────────────────────────────────────")
@@ -251,7 +251,7 @@ def _ensure_device_key(path: str) -> None:
     """Create the Ed25519 device key file if it doesn't exist.
 
     The Go gateway creates this on first start, but the guardrail setup
-    needs it earlier to derive the LiteLLM master key. Uses the same PEM
+    needs it earlier to derive the proxy master key. Uses the same PEM
     format as internal/gateway/device.go.
     """
     if os.path.exists(path):
@@ -371,172 +371,13 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
 
 
 def _install_guardrail(cfg, logger, skip: bool) -> None:
-    """Install LiteLLM proxy and copy the guardrail module."""
+    """Report guardrail proxy status (built into Go binary, no external deps)."""
     if skip:
-        click.echo("  LiteLLM:       skipped (--skip-install)")
+        click.echo("  Guardrail:     skipped (--skip-install)")
         return
 
-    if _litellm_proxy_ready():
-        click.echo("  LiteLLM:       proxy extras verified")
-    elif shutil.which("litellm"):
-        click.echo("  LiteLLM:       installing proxy extras...", nl=False)
-        if _install_litellm_proxy_extras():
-            click.echo(" done")
-            logger.log_action("install-dep", "litellm", "package=litellm[proxy]")
-        else:
-            click.echo(" failed")
-            click.echo("                 install manually: pip install 'litellm[proxy]'")
-    else:
-        click.echo("  LiteLLM:       installing...", nl=False)
-        if _install_litellm():
-            click.echo(" done")
-            logger.log_action("install-dep", "litellm", "package=litellm[proxy]")
-        else:
-            click.echo(" failed")
-            click.echo("                 install manually: uv tool install 'litellm[proxy]'")
-
-    guardrail_dir = cfg.guardrail.guardrail_dir
-    os.makedirs(guardrail_dir, exist_ok=True)
-
-    from defenseclaw.guardrail import install_guardrail_module
-
-    repo_source = _find_guardrail_source()
-    if repo_source:
-        install_guardrail_module(repo_source, guardrail_dir)
-        click.echo(f"  Module:        {guardrail_dir}")
-        logger.log_action("install-dep", "guardrail", f"dir={guardrail_dir}")
-    else:
-        click.echo("  Module:        not found (run setup guardrail later)")
-
-
-def _find_guardrail_source() -> str | None:
-    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    bundled = os.path.join(pkg_dir, "_data", "guardrails", "defenseclaw_guardrail.py")
-    if os.path.isfile(bundled):
-        return bundled
-
-    candidates = [
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "guardrails", "defenseclaw_guardrail.py"),
-    ]
-    try:
-        repo_root = os.path.dirname(os.path.dirname(pkg_dir))
-        candidates.append(os.path.join(repo_root, "guardrails", "defenseclaw_guardrail.py"))
-    except Exception:
-        pass
-
-    for c in candidates:
-        resolved = os.path.realpath(c)
-        if os.path.isfile(resolved):
-            return resolved
-    return None
-
-
-def _resolve_litellm_python() -> str | None:
-    """Resolve the Python interpreter that the litellm binary actually uses.
-
-    When litellm is installed via ``uv tool install``, it lives in an isolated
-    virtualenv with its own Python.  We must check/install extras against
-    *that* interpreter, not ``sys.executable``.
-    """
-    litellm_bin = shutil.which("litellm")
-    if not litellm_bin:
-        return None
-    try:
-        real = os.path.realpath(litellm_bin)
-        with open(real) as f:
-            first = f.readline()
-            if not first.startswith("#!"):
-                return None
-            shebang = first[2:].strip().split()
-            last = shebang[-1] if shebang else ""
-            if last not in ("sh", "/bin/sh", "/usr/bin/env"):
-                return last
-            second = f.readline()
-            if "exec" in second:
-                import re
-                quoted = re.findall(r"'([^']+)'", second)
-                for p in quoted:
-                    if p.startswith("/"):
-                        return p
-    except (OSError, UnicodeDecodeError):
-        pass
-    return None
-
-
-def _litellm_proxy_ready() -> bool:
-    """Check that litellm binary exists AND its proxy extras are importable.
-
-    Checks against the Python that litellm actually runs under (its tool
-    virtualenv), not the defenseclaw CLI's own ``sys.executable``.
-    """
-    python = _resolve_litellm_python()
-    if not python:
-        return False
-    try:
-        result = subprocess.run(
-            [python, "-c", "import backoff; import prisma"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return result.returncode == 0
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-def _install_litellm_proxy_extras() -> bool:
-    """Install litellm[proxy] extras into litellm's own Python environment.
-
-    When litellm is installed via ``uv tool install``, its virtualenv is
-    separate from the defenseclaw CLI environment.  We resolve litellm's
-    Python and pip-install directly into that interpreter so the proxy
-    extras are available when the Go gateway spawns litellm.
-    """
-    python = _resolve_litellm_python()
-    uv = shutil.which("uv")
-    try:
-        if python:
-            if uv:
-                result = subprocess.run(
-                    [uv, "pip", "install", "--python", python, "litellm[proxy]"],
-                    capture_output=True, text=True,
-                )
-            else:
-                result = subprocess.run(
-                    [python, "-m", "pip", "install", "litellm[proxy]"],
-                    capture_output=True, text=True,
-                )
-            return result.returncode == 0
-
-        if uv:
-            result = subprocess.run(
-                [uv, "pip", "install", "litellm[proxy]"],
-                capture_output=True, text=True,
-            )
-        else:
-            pip = shutil.which("pip") or shutil.which("pip3")
-            if not pip:
-                return False
-            result = subprocess.run(
-                [pip, "install", "litellm[proxy]"],
-                capture_output=True, text=True,
-            )
-        return result.returncode == 0
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def _install_litellm() -> bool:
-    _ensure_uv()
-    uv = shutil.which("uv")
-    if not uv:
-        return False
-    try:
-        result = subprocess.run(
-            [uv, "tool", "install", "--python", "3.13", "litellm[proxy]"],
-            capture_output=True, text=True,
-        )
-        return result.returncode == 0 or "already installed" in result.stderr
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+    click.echo("  Guardrail:     built into Go binary (no external dependencies)")
+    logger.log_action("install-dep", "guardrail", "builtin")
 
 
 def _ensure_uv() -> None:

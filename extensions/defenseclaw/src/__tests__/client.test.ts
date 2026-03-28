@@ -138,7 +138,7 @@ function makeClient(
   resolver?: (request: RecordedRequest) => MockResponse,
 ): DaemonClient {
   return new DaemonClient({
-    baseUrl: "http://127.0.0.1:18790",
+    baseUrl: "http://127.0.0.1:18970",
     requestImpl: createRequestImpl(resolver),
   });
 }
@@ -306,7 +306,7 @@ describe("DaemonClient", () => {
     it("returns ok=false on request errors", async () => {
       const client = makeClient(() => ({
         status: 0,
-        requestError: new Error("connect ECONNREFUSED 127.0.0.1:18790"),
+        requestError: new Error("connect ECONNREFUSED 127.0.0.1:18970"),
       }));
       const res = await client.status();
 

@@ -149,14 +149,17 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.Port != 4000 {
 		t.Errorf("expected guardrail port 4000, got %d", cfg.Guardrail.Port)
 	}
-	if cfg.Guardrail.GuardrailDir != cfg.DataDir {
-		t.Errorf("guardrail_dir should equal data_dir, got %q vs %q", cfg.Guardrail.GuardrailDir, cfg.DataDir)
-	}
-	if cfg.Guardrail.LiteLLMConfig == "" {
-		t.Error("litellm_config should not be empty")
+	if cfg.Guardrail.ScannerMode != "local" {
+		t.Errorf("expected guardrail scanner_mode %q, got %q", "local", cfg.Guardrail.ScannerMode)
 	}
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
+	}
+	if !cfg.Guardrail.Judge.Injection {
+		t.Error("expected judge.injection true by default")
+	}
+	if !cfg.Guardrail.Judge.PII {
+		t.Error("expected judge.pii true by default")
 	}
 }
 

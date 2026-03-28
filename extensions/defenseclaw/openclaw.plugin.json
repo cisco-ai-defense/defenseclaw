@@ -9,7 +9,7 @@
     "properties": {
       "sidecarPort": {
         "type": "integer",
-        "default": 18790,
+        "default": 18970,
         "description": "Port for the DefenseClaw Go sidecar REST API"
       },
       "mode": {

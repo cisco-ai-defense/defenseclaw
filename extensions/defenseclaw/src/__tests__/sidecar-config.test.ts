@@ -49,8 +49,8 @@ describe("loadSidecarConfig", () => {
 
     const cfg = loadSidecarConfig();
     expect(cfg.host).toBe("127.0.0.1");
-    expect(cfg.apiPort).toBe(18790);
-    expect(cfg.baseUrl).toBe("http://127.0.0.1:18790");
+    expect(cfg.apiPort).toBe(18970);
+    expect(cfg.baseUrl).toBe("http://127.0.0.1:18970");
   });
 
   it("reads host and api_port from config.yaml", () => {
@@ -82,8 +82,8 @@ describe("loadSidecarConfig", () => {
 
     const cfg = loadSidecarConfig();
     expect(cfg.host).toBe("192.168.1.1");
-    expect(cfg.apiPort).toBe(18790);
-    expect(cfg.baseUrl).toBe("http://192.168.1.1:18790");
+    expect(cfg.apiPort).toBe(18970);
+    expect(cfg.baseUrl).toBe("http://192.168.1.1:18970");
   });
 
   it("returns defaults for empty config file", () => {
@@ -91,7 +91,7 @@ describe("loadSidecarConfig", () => {
 
     const cfg = loadSidecarConfig();
     expect(cfg.host).toBe("127.0.0.1");
-    expect(cfg.apiPort).toBe(18790);
+    expect(cfg.apiPort).toBe(18970);
   });
 
   it("returns defaults when gateway section is missing", () => {
@@ -99,14 +99,14 @@ describe("loadSidecarConfig", () => {
 
     const cfg = loadSidecarConfig();
     expect(cfg.host).toBe("127.0.0.1");
-    expect(cfg.apiPort).toBe(18790);
+    expect(cfg.apiPort).toBe(18970);
   });
 
   it("ignores non-numeric api_port", () => {
     mockReadFileSync.mockReturnValue('gateway:\n  api_port: "not-a-number"\n');
 
     const cfg = loadSidecarConfig();
-    expect(cfg.apiPort).toBe(18790);
+    expect(cfg.apiPort).toBe(18970);
   });
 
   it("ignores empty host string", () => {
@@ -143,6 +143,6 @@ describe("loadSidecarConfig", () => {
 
     const cfg = loadSidecarConfig();
     expect(cfg.host).toBe("127.0.0.1");
-    expect(cfg.apiPort).toBe(18790);
+    expect(cfg.apiPort).toBe(18970);
   });
 });

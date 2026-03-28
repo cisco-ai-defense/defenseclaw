@@ -70,30 +70,44 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 
 // Route dispatches a single event frame to the correct handler.
 func (r *EventRouter) Route(evt EventFrame) {
+	seqStr := "nil"
+	if evt.Seq != nil {
+		seqStr = fmt.Sprintf("%d", *evt.Seq)
+	}
+
 	switch evt.Event {
 	case "tool_call":
+		readLoopLogf("[bifrost] route → tool_call seq=%s payload_len=%d", seqStr, len(evt.Payload))
 		r.handleToolCall(evt)
 	case "tool_result":
+		readLoopLogf("[bifrost] route → tool_result seq=%s payload_len=%d", seqStr, len(evt.Payload))
 		r.handleToolResult(evt)
 	case "exec.approval.requested":
+		readLoopLogf("[bifrost] route → exec.approval.requested seq=%s payload_len=%d", seqStr, len(evt.Payload))
 		// Must not block readLoop: handleApprovalRequest calls ResolveApproval →
 		// Client.request, which needs readLoop to deliver the RPC response. If the
 		// gateway emits this event before the connect handshake res, synchronous
 		// handling deadlocks (sidecar stuck at "waiting for connect response").
 		go r.handleApprovalRequest(evt)
 	case "session.tool":
+		readLoopLogf("[bifrost] route → session.tool seq=%s payload_len=%d", seqStr, len(evt.Payload))
 		r.handleSessionTool(evt)
 	case "agent":
+		readLoopLogf("[bifrost] route → agent seq=%s payload_len=%d", seqStr, len(evt.Payload))
 		r.handleAgentEvent(evt)
 	case "session.message":
+		readLoopLogf("[bifrost] route → session.message seq=%s payload_len=%d", seqStr, len(evt.Payload))
 		r.handleSessionMessage(evt)
-	case "tick", "health", "chat", "presence", "heartbeat",
-		"sessions.changed",
+	case "sessions.changed":
+		r.handleSessionsChanged(evt, seqStr)
+	case "chat":
+		r.handleChatEvent(evt, seqStr)
+	case "tick", "health", "presence", "heartbeat",
 		"exec.approval.resolved":
-		// known events, no action needed from router
+		// known lifecycle events, no action needed
 	default:
-		fmt.Fprintf(os.Stderr, "[sidecar] unhandled event: %s (payload_len=%d)\n",
-			evt.Event, len(evt.Payload))
+		readLoopLogf("[bifrost] route → UNHANDLED event=%s seq=%s payload_len=%d",
+			evt.Event, seqStr, len(evt.Payload))
 	}
 }
 
@@ -128,13 +142,19 @@ type sessionToolData struct {
 func (r *EventRouter) handleSessionTool(evt EventFrame) {
 	var payload SessionToolPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] parse session.tool: %v\n", err)
+		readLoopLogf("[bifrost] session.tool parse error: %v (raw=%s)",
+			err, truncate(string(evt.Payload), 200))
 		return
 	}
+
+	readLoopLogf("[bifrost] session.tool raw: type=%q tool=%q name=%q callId=%q has_data=%v has_args=%v",
+		payload.Type, payload.Tool, payload.Name, payload.CallID, payload.Data != nil, payload.Args != nil)
 
 	// Normalize OpenClaw stream format into the flat field layout.
 	if payload.Data != nil {
 		d := payload.Data
+		readLoopLogf("[bifrost] session.tool data: phase=%q name=%q toolCallId=%q isError=%v",
+			d.Phase, d.Name, d.ToolCallID, d.IsError)
 		if payload.Name == "" && payload.Tool == "" {
 			payload.Name = d.Name
 		}
@@ -154,8 +174,10 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 				payload.ExitCode = &code
 			}
 		case "update":
-			return // intermediate progress, nothing to trace
+			readLoopLogf("[bifrost] session.tool phase=update (skipping intermediate progress)")
+			return
 		default:
+			readLoopLogf("[bifrost] session.tool unknown phase=%q, using as type", d.Phase)
 			payload.Type = d.Phase
 		}
 	}
@@ -166,10 +188,11 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 	}
 
 	if toolName == "" && payload.Type == "" {
+		readLoopLogf("[bifrost] session.tool DROPPED: no tool name and no type (payload_len=%d)", len(evt.Payload))
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[sidecar] session.tool type=%s tool=%s callId=%s\n",
+	readLoopLogf("[bifrost] session.tool DISPATCHING type=%s tool=%s callId=%s",
 		payload.Type, toolName, payload.CallID)
 
 	switch payload.Type {
@@ -210,17 +233,123 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 // the sidecar is subscribed to a session, using the same stream format as
 // session.tool (runId, stream:"tool", data:{phase, name, ...}).
 func (r *EventRouter) handleSessionMessage(evt EventFrame) {
+	// OpenClaw sends two session.message formats:
+	//   Format A (chat message): {sessionKey, message:{role,content,...}, messageSeq, session:{...}}
+	//   Format B (tool stream):  {stream:"tool", data:{phase,name,...}, runId, sessionKey}
+	// We handle both.
 	var envelope struct {
+		// Format B fields
 		Stream string          `json:"stream"`
+		RunID  string          `json:"runId"`
 		Data   json.RawMessage `json:"data,omitempty"`
+		// Format A fields
+		SessionKey string          `json:"sessionKey"`
+		Message    json.RawMessage `json:"message,omitempty"`
+		MessageID  string          `json:"messageId"`
+		MessageSeq int             `json:"messageSeq"`
 	}
 	if err := json.Unmarshal(evt.Payload, &envelope); err != nil {
+		readLoopLogf("[bifrost] session.message parse error: %v", err)
 		return
 	}
-	if envelope.Stream != "tool" || envelope.Data == nil {
+
+	// Format B: tool stream → delegate to session.tool handler
+	if envelope.Stream == "tool" && envelope.Data != nil {
+		readLoopLogf("[bifrost] session.message (tool stream) → handleSessionTool runId=%s", envelope.RunID)
+		r.handleSessionTool(evt)
 		return
 	}
-	r.handleSessionTool(evt)
+
+	// Format A: chat message
+	if envelope.Message != nil {
+		var msg struct {
+			Role         string          `json:"role"`
+			Content      json.RawMessage `json:"content"`
+			Timestamp    int64           `json:"timestamp"`
+			StopReason   string          `json:"stopReason"`
+			ErrorMessage string          `json:"errorMessage"`
+			Provider     string          `json:"provider"`
+			Model        string          `json:"model"`
+		}
+		if err := json.Unmarshal(envelope.Message, &msg); err != nil {
+			readLoopLogf("[bifrost] session.message: has message field but failed to parse: %v", err)
+			return
+		}
+
+		contentStr := ""
+		// content can be a string or an array of content blocks
+		if len(msg.Content) > 0 {
+			if msg.Content[0] == '"' {
+				_ = json.Unmarshal(msg.Content, &contentStr)
+			} else {
+				contentStr = string(msg.Content)
+			}
+		}
+		contentPreview := truncate(contentStr, 120)
+
+		readLoopLogf("[bifrost] session.message: role=%s msgId=%s seq=%d session=%s content=(%d chars) %q",
+			msg.Role, envelope.MessageID, envelope.MessageSeq, envelope.SessionKey, len(contentStr), contentPreview)
+
+		if msg.StopReason == "error" || msg.ErrorMessage != "" {
+			readLoopLogf("[bifrost] session.message ERROR: stopReason=%s error=%q provider=%s model=%s",
+				msg.StopReason, msg.ErrorMessage, msg.Provider, msg.Model)
+		}
+
+		_ = r.logger.LogAction("gateway-session-message", envelope.SessionKey,
+			fmt.Sprintf("role=%s msgId=%s seq=%d content_len=%d", msg.Role, envelope.MessageID, envelope.MessageSeq, len(contentStr)))
+		return
+	}
+
+	readLoopLogf("[bifrost] session.message SKIPPED: no message field, stream=%q", envelope.Stream)
+}
+
+func (r *EventRouter) handleSessionsChanged(evt EventFrame, seqStr string) {
+	var sc struct {
+		SessionKey string `json:"sessionKey"`
+		Phase      string `json:"phase"`
+		RunID      string `json:"runId"`
+		MessageID  string `json:"messageId"`
+		Ts         int64  `json:"ts"`
+		Session    struct {
+			Status   string `json:"status"`
+			Model    string `json:"model"`
+			Provider string `json:"modelProvider"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(evt.Payload, &sc); err != nil {
+		readLoopLogf("[bifrost] sessions.changed parse error: %v", err)
+		return
+	}
+	readLoopLogf("[bifrost] sessions.changed: phase=%s session=%s status=%s model=%s runId=%s msgId=%s",
+		sc.Phase, sc.SessionKey, sc.Session.Status, sc.Session.Model, sc.RunID, sc.MessageID)
+
+	if sc.Session.Status == "failed" || sc.Phase == "error" {
+		readLoopLogf("[bifrost] sessions.changed ERROR: session %s status=failed phase=%s", sc.SessionKey, sc.Phase)
+		_ = r.logger.LogAction("gateway-session-error", sc.SessionKey,
+			fmt.Sprintf("phase=%s runId=%s model=%s", sc.Phase, sc.RunID, sc.Session.Model))
+	}
+}
+
+func (r *EventRouter) handleChatEvent(evt EventFrame, seqStr string) {
+	var ce struct {
+		RunID        string `json:"runId"`
+		SessionKey   string `json:"sessionKey"`
+		Seq          int    `json:"seq"`
+		State        string `json:"state"`
+		ErrorMessage string `json:"errorMessage"`
+	}
+	if err := json.Unmarshal(evt.Payload, &ce); err != nil {
+		readLoopLogf("[bifrost] chat parse error: %v", err)
+		return
+	}
+	readLoopLogf("[bifrost] chat: state=%s session=%s runId=%s seq=%d",
+		ce.State, ce.SessionKey, ce.RunID, ce.Seq)
+	if ce.State == "error" {
+		readLoopLogf("[bifrost] chat ERROR: %q session=%s runId=%s",
+			ce.ErrorMessage, ce.SessionKey, ce.RunID)
+		_ = r.logger.LogAction("gateway-chat-error", ce.SessionKey,
+			fmt.Sprintf("runId=%s error=%s", ce.RunID, truncate(ce.ErrorMessage, 200)))
+	}
 }
 
 func mustMarshal(v interface{}) json.RawMessage {
@@ -255,8 +384,34 @@ type agentToolResult struct {
 }
 
 func (r *EventRouter) handleAgentEvent(evt EventFrame) {
+	// OpenClaw sends two agent event formats:
+	//   Format A (stream): {runId, stream:"lifecycle"|"tool"|"text", data:{phase,...}, sessionKey, seq, ts}
+	//   Format B (legacy): {type, toolCall:{...}, toolResult:{...}, content}
+	var streamEvt struct {
+		RunID      string          `json:"runId"`
+		Stream     string          `json:"stream"`
+		Data       json.RawMessage `json:"data,omitempty"`
+		SessionKey string          `json:"sessionKey"`
+		Seq        int             `json:"seq"`
+		Ts         int64           `json:"ts"`
+	}
+	if err := json.Unmarshal(evt.Payload, &streamEvt); err == nil && streamEvt.Stream != "" {
+		r.handleAgentStreamEvent(streamEvt, evt)
+		return
+	}
+
+	// Legacy format with toolCall/toolResult at top level
 	var payload agentEventPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		readLoopLogf("[bifrost] agent event parse error: %v", err)
+		return
+	}
+
+	readLoopLogf("[bifrost] agent event (legacy): type=%q has_toolCall=%v has_toolResult=%v",
+		payload.Type, payload.ToolCall != nil, payload.ToolResult != nil)
+
+	if payload.ToolCall == nil && payload.ToolResult == nil {
+		readLoopLogf("[bifrost] agent event SKIPPED: no toolCall or toolResult in payload")
 		return
 	}
 
@@ -274,8 +429,7 @@ func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 			args = tc.Input
 		}
 
-		fmt.Fprintf(os.Stderr, "[sidecar] agent event: tool_call tool=%s id=%s\n", toolName, tc.ID)
-
+		readLoopLogf("[bifrost] agent event → tool_call tool=%s id=%s", toolName, tc.ID)
 		syntheticEvt := EventFrame{
 			Type:    evt.Type,
 			Event:   "tool_call",
@@ -295,8 +449,7 @@ func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 			return
 		}
 
-		fmt.Fprintf(os.Stderr, "[sidecar] agent event: tool_result tool=%s id=%s\n", toolName, tr.ID)
-
+		readLoopLogf("[bifrost] agent event → tool_result tool=%s id=%s", toolName, tr.ID)
 		syntheticEvt := EventFrame{
 			Type:    evt.Type,
 			Event:   "tool_result",
@@ -304,6 +457,79 @@ func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 			Seq:     evt.Seq,
 		}
 		r.handleToolResult(syntheticEvt)
+	}
+}
+
+// agentStreamData captures the data envelope of OpenClaw's stream-based agent events.
+type agentStreamData struct {
+	Phase      string          `json:"phase"`
+	Name       string          `json:"name"`
+	ToolCallID string          `json:"toolCallId"`
+	Args       json.RawMessage `json:"args,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	StartedAt  int64           `json:"startedAt,omitempty"`
+	EndedAt    int64           `json:"endedAt,omitempty"`
+	IsError    bool            `json:"isError,omitempty"`
+	Meta       string          `json:"meta,omitempty"`
+}
+
+func (r *EventRouter) handleAgentStreamEvent(se struct {
+	RunID      string          `json:"runId"`
+	Stream     string          `json:"stream"`
+	Data       json.RawMessage `json:"data,omitempty"`
+	SessionKey string          `json:"sessionKey"`
+	Seq        int             `json:"seq"`
+	Ts         int64           `json:"ts"`
+}, evt EventFrame) {
+	var data agentStreamData
+	if se.Data != nil {
+		_ = json.Unmarshal(se.Data, &data)
+	}
+
+	readLoopLogf("[bifrost] agent stream: stream=%s phase=%s runId=%s session=%s seq=%d",
+		se.Stream, data.Phase, se.RunID, se.SessionKey, se.Seq)
+
+	switch se.Stream {
+	case "lifecycle":
+		switch data.Phase {
+		case "start":
+			readLoopLogf("[bifrost] agent lifecycle START runId=%s", se.RunID)
+			_ = r.logger.LogAction("gateway-agent-start", se.SessionKey,
+				fmt.Sprintf("runId=%s", se.RunID))
+		case "error":
+			readLoopLogf("[bifrost] agent lifecycle ERROR runId=%s error=%q", se.RunID, data.Error)
+			_ = r.logger.LogAction("gateway-agent-error", se.SessionKey,
+				fmt.Sprintf("runId=%s error=%s", se.RunID, truncate(data.Error, 200)))
+		case "end":
+			readLoopLogf("[bifrost] agent lifecycle END runId=%s", se.RunID)
+			_ = r.logger.LogAction("gateway-agent-end", se.SessionKey,
+				fmt.Sprintf("runId=%s", se.RunID))
+		default:
+			readLoopLogf("[bifrost] agent lifecycle phase=%s runId=%s", data.Phase, se.RunID)
+		}
+
+	case "tool":
+		readLoopLogf("[bifrost] agent tool stream: phase=%s name=%s toolCallId=%s",
+			data.Phase, data.Name, data.ToolCallID)
+		syntheticPayload := SessionToolPayload{
+			Tool:   data.Name,
+			CallID: data.ToolCallID,
+			Args:   data.Args,
+			Data:   &sessionToolData{Phase: data.Phase, Name: data.Name, ToolCallID: data.ToolCallID, Args: data.Args, IsError: data.IsError},
+		}
+		toolEvt := EventFrame{
+			Type:    evt.Type,
+			Event:   "session.tool",
+			Payload: mustMarshal(syntheticPayload),
+			Seq:     evt.Seq,
+		}
+		r.handleSessionTool(toolEvt)
+
+	case "text":
+		readLoopLogf("[bifrost] agent text stream: phase=%s (content delivery, no action)", data.Phase)
+
+	default:
+		readLoopLogf("[bifrost] agent unknown stream=%s phase=%s", se.Stream, data.Phase)
 	}
 }
 
@@ -316,6 +542,18 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	_ = r.logger.LogAction("gateway-tool-call", payload.Tool,
 		fmt.Sprintf("status=%s args_length=%d", payload.Status, len(payload.Args)))
+
+	// Static block list — checked before any pattern scanning.
+	if r.policy != nil {
+		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
+			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
+			_ = r.logger.LogAction("gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
+			if r.otel != nil {
+				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+			}
+			return
+		}
+	}
 
 	// Use the shared rule engine — no tool-name gating.
 	findings := ScanAllRules(string(payload.Args), payload.Tool)

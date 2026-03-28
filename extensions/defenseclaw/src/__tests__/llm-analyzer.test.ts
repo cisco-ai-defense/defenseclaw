@@ -186,8 +186,8 @@ describe("Python bridge CLI (defenseclaw.llm)", () => {
     );
 
     const content = await readFile(bridgePath, "utf-8");
-    expect(content).toContain("def call_litellm");
+    expect(content).toContain("def call_llm");
     expect(content).toContain("def main");
-    expect(content).toContain("litellm.completion");
+    expect(content).toContain("_call_anthropic");
   });
 });

@@ -45,24 +45,24 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │  └────────────────────────────────────────────┘     │               │    │
 │  │                                                     │               │    │
 │  │  ┌──────────────────┐  ┌──────────────┐             │               │    │
-│  │  │  SQLite DB       │  │  LiteLLM     │             │               │    │
-│  │  │                  │  │  Process Mgr │             │               │    │
+│  │  │  SQLite DB       │  │  Guardrail   │             │               │    │
+│  │  │                  │  │  Proxy       │             │               │    │
 │  │  │  Audit events    │  │              │             │               │    │
-│  │  │  Scan results    │  │  Spawns and  │             │               │    │
-│  │  │  Block/allow     │  │  supervises  │             │               │    │
-│  │  │  Skill inventory │  │  LiteLLM     │             │               │    │
+│  │  │  Scan results    │  │  Runs        │             │               │    │
+│  │  │  Block/allow     │  │  guardrail   │             │               │    │
+│  │  │  Skill inventory │  │  proxy       │             │               │    │
 │  │  └──────────────────┘  └──────┬───────┘             │               │    │
 │  └──────────────────────────────┼────────────────────┼─────────────────┘    │
 │                                 │                    │                      │
 │             ┌───────────────────┘                    │ WS (events           │
-│             │ child process                          │  + RPC)              │
+│             │ runs                                   │  + RPC)              │
 │             ▼                                        │                      │
 │  ┌──────────────────────────────────┐                │                      │
-│  │  LiteLLM Proxy (port 4000)      │                 │                      │
+│  │  Guardrail Proxy (port 4000)    │                 │                      │
 │  │                                  │                │                      │
 │  │  ┌────────────────────────────┐  │                │                      │
 │  │  │  DefenseClaw Guardrail     │  │                │                      │
-│  │  │  (Python module)           │  │                │                      │
+│  │  │  (built-in Go)             │  │                │                      │
 │  │  │                            │  │                │                      │
 │  │  │  pre_call:  prompt scan    │  │                │                      │
 │  │  │  post_call: response scan  │  │                │                      │
@@ -89,7 +89,7 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │     session.message                  tools.catalog / skills.status    │  │
 │  │                                      sessions.list / subscribe        │  │
 │  │                                                                       │  │
-│  │   LLM traffic routed through LiteLLM proxy via openclaw.json          │  │
+│  │   LLM traffic routed through guardrail proxy via openclaw.json        │  │
 │  │   provider config (baseUrl → http://localhost:4000)                   │  │
 │  └──────────────────────────┬─────────────────────────────────────────────┘ │
 │                              │                                              │
@@ -153,7 +153,7 @@ only component with direct access to all subsystems.
 | Event subscription | Subscribes to all OpenClaw gateway events (`tool_call`, `tool_result`, `exec.approval.requested`, etc.) |
 | Command dispatch | Sends RPC commands to OpenClaw: `exec.approval.resolve`, `skills.update`, `config.patch` |
 | Policy engine | Runs admission gate: block list → allow list → scan → verdict |
-| LLM guardrail management | Spawns and supervises LiteLLM proxy as a child process; restarts on crash |
+| LLM guardrail management | Runs guardrail proxy; restarts on crash |
 | Audit / SIEM | Logs all events to SQLite, forwards to Splunk HEC (batch or real-time) |
 | DB access | Full read/write to SQLite — scan results, block/allow lists, inventory |
 
@@ -168,11 +168,11 @@ and plugins (read/write via gateway REST API).
 | Block/allow lists | CLI | Gateway (admission gate) |
 | Skill inventory (AIBOM) | CLI | Gateway, plugins, TUI |
 
-### 5. LLM Guardrail (LiteLLM + Python module)
+### 5. LLM Guardrail (Go Proxy)
 
 The guardrail intercepts all LLM traffic between OpenClaw and the upstream
-provider. It runs as a LiteLLM proxy with a custom guardrail module loaded.
-The gateway manages the LiteLLM process as a supervised child.
+provider. It runs as a Go reverse proxy with built-in inspection.
+The gateway runs the guardrail proxy as part of the sidecar.
 
 | Responsibility | Detail |
 |----------------|--------|
@@ -186,8 +186,8 @@ The gateway manages the LiteLLM process as a supervised child.
 
 1. `defenseclaw setup guardrail` configures the model, mode, and port
 2. OpenClaw's `openclaw.json` is patched to route LLM calls through `http://localhost:4000`
-3. The gateway spawns LiteLLM as a child process with the guardrail module on `PYTHONPATH`
-4. LiteLLM proxies requests to the real LLM provider, invoking the guardrail on every call
+3. The gateway runs the built-in guardrail proxy
+4. The proxy forwards requests to the real LLM provider, running inspection on every call
 
 See `docs/GUARDRAIL.md` for the full data flow.
 
@@ -223,7 +223,7 @@ See `docs/GUARDRAIL.md` for the full data flow.
 ### LLM Traffic Inspection Flow
 
 ```
-  OpenClaw Agent                LiteLLM Proxy               LLM Provider
+  OpenClaw Agent                Guardrail Proxy             LLM Provider
        │                     (localhost:4000)              (Anthropic, etc.)
        │                            │                            │
        │  1. LLM API request        │                            │
@@ -313,9 +313,9 @@ requires only a new case in `internal/config/claw.go`.
 │ (JS/TS) │            │  │Engine  │  │                       │ (OpenAI format)
 └─────────┘            │  └────────┘  │◀──────▶  SQLite DB    │
                         │              │                       ▼
-                        │   spawns     │               ┌──────────────┐
-                        │   child ────────────────────▶│   LiteLLM    │
-                        └──────────────┘               │   Proxy      │
+                        │   runs       │               ┌──────────────┐
+                        │   ──────────────────────────▶│  Guardrail   │
+                        └──────────────┘               │  Proxy       │
                                                        │  + Guardrail │
                                                        └──────┬───────┘
                                                               │

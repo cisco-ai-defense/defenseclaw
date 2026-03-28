@@ -378,11 +378,9 @@ install_python_cli() {
     
     log_success "Python CLI installed (editable mode)"
     
-    # Note: cisco-ai-skill-scanner not installed due to litellm PyPI incident
-    # Once litellm is restored, users can manually install:
-    #   pip install cisco-ai-skill-scanner
-    log_info "Scanner dependencies skipped (litellm unavailable on PyPI)"
-    log_info "Once restored, install manually: pip install cisco-ai-skill-scanner"
+    # Note: cisco-ai-skill-scanner requires additional dependencies.
+    # Users can manually install: pip install cisco-ai-skill-scanner
+    log_info "Scanner dependencies: install manually with pip install cisco-ai-skill-scanner"
     
     # Install dev dependencies (ruff, pytest, pytest-cov)
     log_info "Installing Python dev dependencies..."

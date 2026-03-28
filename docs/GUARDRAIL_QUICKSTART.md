@@ -15,8 +15,7 @@ Set up the LLM guardrail and verify it works end-to-end.
 defenseclaw init
 ```
 
-This installs `litellm[proxy]` and copies the guardrail module to
-`~/.defenseclaw/defenseclaw_guardrail.py`.
+This configures the guardrail proxy and installs the OpenClaw plugin.
 
 If you've already run `init` before, it will skip what's already present.
 
@@ -30,7 +29,7 @@ defenseclaw setup guardrail
 
 The wizard walks through:
 - **Mode**: `observe` (log only) or `action` (block threats) — start with `observe`
-- **Port**: LiteLLM proxy port (default `4000`)
+- **Port**: guardrail proxy port (default `4000`)
 - **Model**: auto-detected from `openclaw.json`, e.g. `anthropic/claude-opus-4-5`
 - **API key env var**: e.g. `ANTHROPIC_API_KEY` — must be set before starting
 
@@ -59,7 +58,7 @@ defenseclaw setup guardrail --restart
 ### Option B: Manual restart
 
 ```bash
-# Restart the DefenseClaw sidecar (starts LiteLLM as a child process)
+# Restart the DefenseClaw sidecar
 defenseclaw-gateway restart
 
 # Restart OpenClaw to pick up the patched openclaw.json
@@ -72,7 +71,7 @@ openclaw gateway restart
 # Check sidecar health (should show guardrail subsystem as HEALTHY)
 defenseclaw sidecar status
 
-# Check LiteLLM is responding
+# Check guardrail proxy is responding
 curl -s http://localhost:4000/health/liveliness
 # Expected: "I'm alive!"
 ```
@@ -81,13 +80,15 @@ curl -s http://localhost:4000/health/liveliness
 
 In observe mode the guardrail logs findings but never blocks.
 
+For the `curl` examples below, export `DEFENSECLAW_MASTER_KEY` to the bearer token derived from `device.key` (default `~/.defenseclaw/device.key`). The guardrail proxy uses the same derivation as the OpenClaw defenseclaw provider.
+
 ### 4a. Clean request
 
 Send a normal prompt:
 
 ```bash
 curl -s http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $(grep master_key ~/.defenseclaw/litellm_config.yaml | awk '{print $2}')" \
+  -H "Authorization: Bearer $DEFENSECLAW_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4-5",
@@ -118,7 +119,7 @@ curl -s http://localhost:4000/v1/chat/completions \
 
 ```bash
 curl -s http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $(grep master_key ~/.defenseclaw/litellm_config.yaml | awk '{print $2}')" \
+  -H "Authorization: Bearer $DEFENSECLAW_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4-5",
@@ -152,7 +153,7 @@ defenseclaw setup guardrail --non-interactive --mode action --restart
 
 ```bash
 curl -s http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $(grep master_key ~/.defenseclaw/litellm_config.yaml | awk '{print $2}')" \
+  -H "Authorization: Bearer $DEFENSECLAW_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4-5",
@@ -190,7 +191,7 @@ The LLM is **never called** — no API cost incurred.
 
 ```bash
 curl -s http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $(grep master_key ~/.defenseclaw/litellm_config.yaml | awk '{print $2}')" \
+  -H "Authorization: Bearer $DEFENSECLAW_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4-5",
@@ -207,7 +208,7 @@ HIGH/CRITICAL are blocked).
 
 ```bash
 curl -s http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer $(grep master_key ~/.defenseclaw/litellm_config.yaml | awk '{print $2}')" \
+  -H "Authorization: Bearer $DEFENSECLAW_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4-5",
@@ -273,7 +274,7 @@ defenseclaw setup guardrail --disable --restart
 
 This restores direct LLM access:
 - `openclaw.json` primary model is reverted to the original
-- LiteLLM provider is removed from `openclaw.json`
+- defenseclaw provider is removed from `openclaw.json`
 - Guardrail is disabled in `config.yaml`
 - Both services are restarted
 
@@ -290,24 +291,13 @@ This restores direct LLM access:
 
 ### No PRE-CALL/POST-CALL in logs
 
-1. Check that LiteLLM is alive: `curl http://localhost:4000/health/liveliness`
-2. Check the guardrail module exists: `ls ~/.defenseclaw/defenseclaw_guardrail.py`
-3. Check `litellm_config.yaml` has `default_on: true` on both guardrails:
-   `grep default_on ~/.defenseclaw/litellm_config.yaml`
-4. If missing, regenerate: `defenseclaw setup guardrail --restart`
-
-### ImportError: Could not find module file
-
-LiteLLM resolves the guardrail module relative to `litellm_config.yaml`.
-Both files must be in the same directory (`~/.defenseclaw/`). Fix:
-
-```bash
-cp guardrails/defenseclaw_guardrail.py ~/.defenseclaw/defenseclaw_guardrail.py
-```
+1. Check that the guardrail proxy is alive: `curl http://localhost:4000/health/liveliness`
+2. Check the guardrail proxy is configured in `~/.defenseclaw/config.yaml` (`guardrail.enabled`, port, model)
+3. If misconfigured, regenerate: `defenseclaw setup guardrail --restart`
 
 ### OpenClaw "Invalid config" after setup
 
-The `models.providers.litellm.models.0.id` must not be empty. Re-run the
+The `models.providers.defenseclaw.models.0.id` must not be empty. Re-run the
 setup wizard and ensure you specify the upstream model:
 
 ```bash
@@ -316,7 +306,7 @@ defenseclaw setup guardrail
 
 ### API key not found
 
-LiteLLM reads the API key from the environment variable specified in
+The guardrail proxy reads the API key from the environment variable specified in
 `guardrail.api_key_env`. Make sure it's exported before starting the sidecar:
 
 ```bash
