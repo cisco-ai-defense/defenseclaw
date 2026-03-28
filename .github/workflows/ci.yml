@@ -35,7 +35,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make go-test-cov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: go-coverage
           path: coverage.out
@@ -53,7 +53,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -67,7 +67,7 @@ jobs:
       - run: uv sync
       - run: make py-lint
       - run: make cli-test-cov
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-coverage
           path: coverage-py.xml
