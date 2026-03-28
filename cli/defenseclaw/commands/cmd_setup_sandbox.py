@@ -391,9 +391,14 @@ def _patch_openclaw_gateway(openclaw_config: str, port: int) -> bool:
         f.write("\n")
 
     try:
-        os.chown(openclaw_config, st.st_uid, st.st_gid)
-    except OSError:
-        pass
+        import pwd as _pwd
+        sb = _pwd.getpwnam("sandbox")
+        os.chown(openclaw_config, sb.pw_uid, sb.pw_gid)
+    except (KeyError, OSError):
+        try:
+            os.chown(openclaw_config, st.st_uid, st.st_gid)
+        except OSError:
+            pass
     return True
 
 
@@ -740,30 +745,46 @@ if ! ip addr show | grep -q "$HOST_IP"; then
     echo "WARNING: veth pair not detected — openshell-sandbox manages networking internally" >&2
 fi
 
-# Attempt iptables injection into the sandbox namespace.
-# openshell-sandbox creates namespaces programmatically and may not expose
-# them in a way compatible with 'ip netns exec'. In that case, network
-# policy is enforced by openshell-sandbox's built-in OPA proxy, which
-# reads allowed endpoints from the policy data YAML.
+# Resolve a command prefix for running iptables in the sandbox network
+# namespace.  Try 'ip netns exec' first (works on real Linux hosts where
+# openshell-sandbox registers the namespace under /var/run/netns/).  Fall
+# back to 'nsenter --target <pid> --net' which works even in Docker where
+# the namespace bind-mount may not be visible.
+NSENTER=""
+
 NS=$(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}' | head -1)
-if [ -z "$NS" ]; then
-    echo "NOTE: sandbox namespace not accessible via ip netns — OPA proxy handles network policy"
+if [ -n "$NS" ] && ip netns exec "$NS" true 2>/dev/null; then
+    NSENTER="ip netns exec $NS"
+else
+    for pid in $(pgrep -f openshell-sandbox 2>/dev/null); do
+        child=$(pgrep -P "$pid" 2>/dev/null | head -1)
+        if [ -n "$child" ]; then
+            NSENTER="nsenter --target $child --net"
+            break
+        fi
+    done
+fi
+
+if [ -z "$NSENTER" ]; then
+    echo "NOTE: sandbox namespace not accessible — OPA proxy handles network policy"
     exit 0
 fi
 
-if ip netns exec "$NS" true 2>/dev/null; then
-    for ns in $(grep '^nameserver' "$DEFENSECLAW_DIR/sandbox-resolv.conf" | awk '{{print $2}}'); do
-        ip netns exec "$NS" iptables -I OUTPUT 1 -p udp -d "$ns" --dport 53 -j ACCEPT 2>/dev/null || true
-    done
+for ns in $(grep '^nameserver' "$DEFENSECLAW_DIR/sandbox-resolv.conf" | awk '{{print $2}}'); do
+    $NSENTER iptables -I OUTPUT 1 -p udp -d "$ns" --dport 53 -j ACCEPT 2>/dev/null || true
+done
 
-    ip netns exec "$NS" iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" --dport "$API_PORT" -j ACCEPT 2>/dev/null || true
-    ip netns exec "$NS" iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
-        --dport "$GUARDRAIL_PORT" -j ACCEPT 2>/dev/null || true
+$NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" --dport "$API_PORT" -j ACCEPT 2>/dev/null || true
+$NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
+    --dport "$GUARDRAIL_PORT" -j ACCEPT 2>/dev/null || true
 
-    echo "Injected iptables rules into namespace $NS"
-else
-    echo "NOTE: cannot enter namespace $NS — OPA proxy handles network policy"
-fi
+echo "Injected iptables rules via $NSENTER"
+
+# MASQUERADE DNS on the HOST side so responses from external nameservers
+# route back to the sandbox IP (10.200.0.x).  Scoped to UDP port 53 only —
+# all other sandbox traffic goes through the OPA proxy.
+iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
+    iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 """
 
     cleanup_sandbox = """#!/bin/bash
@@ -779,7 +800,16 @@ done
     start_openclaw = f"""#!/bin/bash
 set -euo pipefail
 
+export HTTPS_PROXY=http://{q_host_ip}:3128
+export HTTP_PROXY=http://{q_host_ip}:3128
 export NO_PROXY={q_host_ip}"${{NO_PROXY:+,$NO_PROXY}}"
+
+# Wait for DNS — iptables rules are injected by post-sandbox.sh after
+# the network namespace is created, so DNS may not work immediately.
+for i in $(seq 1 30); do
+    python3 -c "import socket; socket.getaddrinfo('api.telegram.org', 443)" 2>/dev/null && break
+    sleep 1
+done
 
 exec openclaw gateway run
 """
