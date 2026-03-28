@@ -468,10 +468,15 @@ def _expand(p: str) -> str:
 def _preserve_ownership(path: str):
     """Capture a file's uid/gid before a write and restore it afterwards.
 
-    When setup commands run as root they re-create files owned by root,
-    breaking sandbox user access.  Wrap any write to openclaw.json (or
-    its .bak copies) in this context manager to keep the original owner.
+    Only relevant in standalone sandbox mode where setup commands run as
+    root and would otherwise re-create files owned by root, breaking
+    sandbox user access.  Skipped entirely for non-root callers since
+    os.chown requires elevated privileges.
     """
+    if os.getuid() != 0:
+        yield
+        return
+
     uid = gid = None
     try:
         st = os.stat(path)

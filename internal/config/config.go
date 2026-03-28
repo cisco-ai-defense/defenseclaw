@@ -584,7 +584,6 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("openshell.binary", "openshell")
 	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
 	viper.SetDefault("openshell.version", DefaultOpenShellVersion)
-	viper.SetDefault("openshell.sandbox_home", DefaultSandboxHome)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

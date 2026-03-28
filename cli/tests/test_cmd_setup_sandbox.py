@@ -1,4 +1,4 @@
-"""Tests for sandbox helper functions in cmd_setup.py."""
+"""Tests for sandbox helper functions in cmd_setup_sandbox.py."""
 
 import hashlib
 import json
@@ -8,7 +8,7 @@ import stat
 import tempfile
 import unittest
 
-from defenseclaw.commands.cmd_setup import (
+from defenseclaw.commands.cmd_setup_sandbox import (
     _generate_resolv_conf,
     _parse_host_resolv,
     _generate_systemd_units,
@@ -272,7 +272,7 @@ class TestPrePairDevice(unittest.TestCase):
         import base64
         import hashlib
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        from defenseclaw.commands.cmd_setup import _extract_ed25519_pubkey
+        from defenseclaw.commands.cmd_setup_sandbox import _extract_ed25519_pubkey
 
         priv = Ed25519PrivateKey.generate()
         seed = priv.private_bytes_raw()

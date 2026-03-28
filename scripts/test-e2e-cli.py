@@ -310,11 +310,6 @@ def test_api_policy(t: TestRunner):
         body={"destination": "192.168.1.1", "port": 443, "protocol": "tcp"},
     )
     t.api(
-        "POST /policy/evaluate/sandbox",
-        "POST", "/policy/evaluate/sandbox",
-        body={"skill_name": "test-skill", "command": "curl http://example.com", "cwd": "/tmp"},
-    )
-    t.api(
         "POST /policy/evaluate/audit",
         "POST", "/policy/evaluate/audit",
         body={"action": "install", "target": "test-skill", "target_type": "skill"},
@@ -690,10 +685,6 @@ def test_lifecycle_policy_change(t: TestRunner):
     t.api("lifecycle:policy: firewall eval (permissive)",
           "POST", "/policy/evaluate/firewall",
           body={"destination": "10.0.0.1", "port": 80, "protocol": "tcp"})
-
-    t.api("lifecycle:policy: sandbox eval (permissive)",
-          "POST", "/policy/evaluate/sandbox",
-          body={"skill_name": "test", "command": "ls", "cwd": "/tmp"})
 
     t.api("lifecycle:policy: audit eval (permissive)",
           "POST", "/policy/evaluate/audit",

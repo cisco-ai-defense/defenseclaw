@@ -1032,8 +1032,11 @@ func TestDefaultConfig_OpenShellFields(t *testing.T) {
 	if cfg.OpenShell.Version != DefaultOpenShellVersion {
 		t.Errorf("expected version %q, got %q", DefaultOpenShellVersion, cfg.OpenShell.Version)
 	}
-	if cfg.OpenShell.SandboxHome != DefaultSandboxHome {
-		t.Errorf("expected sandbox_home %q, got %q", DefaultSandboxHome, cfg.OpenShell.SandboxHome)
+	if cfg.OpenShell.SandboxHome != "" {
+		t.Errorf("expected sandbox_home to be empty by default, got %q", cfg.OpenShell.SandboxHome)
+	}
+	if got := cfg.OpenShell.EffectiveSandboxHome(); got != DefaultSandboxHome {
+		t.Errorf("EffectiveSandboxHome() = %q, want %q", got, DefaultSandboxHome)
 	}
 }
 

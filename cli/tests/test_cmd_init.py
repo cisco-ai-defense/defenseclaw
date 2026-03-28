@@ -823,7 +823,7 @@ class TestDetectOpenclawHome(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_returns_none_when_no_openclaw(self):
-        from defenseclaw.commands.cmd_init import _detect_openclaw_home
+        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
         with patch.dict(os.environ, {"SUDO_USER": ""}, clear=False), \
              patch("os.path.expanduser", return_value=os.path.join(self.tmp_dir, "nonexistent")):
             result = _detect_openclaw_home()
@@ -831,7 +831,7 @@ class TestDetectOpenclawHome(unittest.TestCase):
             self.assertTrue(result is None or isinstance(result, str))
 
     def test_finds_openclaw_with_config(self):
-        from defenseclaw.commands.cmd_init import _detect_openclaw_home
+        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
         # Create openclaw.json
         with open(os.path.join(self.oc_home, "openclaw.json"), "w") as f:
             f.write('{"gateway": {}}')
@@ -842,7 +842,7 @@ class TestDetectOpenclawHome(unittest.TestCase):
             self.assertEqual(result, self.oc_home)
 
     def test_prefers_sudo_user_home(self):
-        from defenseclaw.commands.cmd_init import _detect_openclaw_home
+        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
 
         # Create two homes with openclaw.json
         sudo_home = os.path.join(self.tmp_dir, "sudouser")
@@ -876,7 +876,7 @@ class TestSaveOwnershipBackup(unittest.TestCase):
 
     def test_creates_backup_file(self):
         import json
-        from defenseclaw.commands.cmd_init import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
+        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
         backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
         self.assertTrue(os.path.isfile(backup_path))
 
@@ -890,7 +890,7 @@ class TestSaveOwnershipBackup(unittest.TestCase):
         self.assertEqual(data["original_gid"], os.stat(self.oc_home).st_gid)
 
     def test_backup_file_path(self):
-        from defenseclaw.commands.cmd_init import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
+        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
         backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
         expected = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
         self.assertEqual(backup_path, expected)
@@ -911,7 +911,7 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
 
     def test_idempotent_when_already_configured(self):
         import json
-        from defenseclaw.commands.cmd_init import _integrate_openclaw_home, OPENCLAW_OWNERSHIP_BACKUP
+        from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home, OPENCLAW_OWNERSHIP_BACKUP
 
         # Simulate a previous successful integration
         backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
@@ -929,12 +929,12 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
         self.assertTrue(result)
 
     def test_returns_false_when_no_openclaw(self):
-        from defenseclaw.commands.cmd_init import _integrate_openclaw_home
+        from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home
 
         cfg = MagicMock()
         cfg.data_dir = self.data_dir
 
-        with patch("defenseclaw.commands.cmd_init._detect_openclaw_home", return_value=None):
+        with patch("defenseclaw.commands.cmd_init_sandbox._detect_openclaw_home", return_value=None):
             result = _integrate_openclaw_home(cfg, self.sandbox_home)
             self.assertFalse(result)
 
@@ -953,14 +953,14 @@ class TestRestoreOpenclawOwnership(unittest.TestCase):
         shutil.rmtree(self.oc_home, ignore_errors=True)
 
     def test_noop_when_no_backup(self):
-        from defenseclaw.commands.cmd_setup import _restore_openclaw_ownership
+        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
         # Should not raise
         _restore_openclaw_ownership(self.data_dir, self.sandbox_home)
 
     def test_removes_symlink(self):
         import json
-        from defenseclaw.commands.cmd_init import OPENCLAW_OWNERSHIP_BACKUP
-        from defenseclaw.commands.cmd_setup import _restore_openclaw_ownership
+        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP
+        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
 
         st = os.stat(self.oc_home)
         backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)

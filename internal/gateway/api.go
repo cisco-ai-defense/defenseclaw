@@ -99,7 +99,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/audit/event", a.handleAuditEvent)
 	mux.HandleFunc("/policy/evaluate", a.handlePolicyEvaluate)
 	mux.HandleFunc("/policy/evaluate/firewall", a.handlePolicyEvaluateFirewall)
-	mux.HandleFunc("/policy/evaluate/sandbox", a.handlePolicyEvaluateSandbox)
 	mux.HandleFunc("/policy/evaluate/audit", a.handlePolicyEvaluateAudit)
 	mux.HandleFunc("/policy/evaluate/skill-actions", a.handlePolicyEvaluateSkillActions)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
@@ -1504,56 +1503,6 @@ func (a *APIServer) handlePolicyEvaluateFirewall(w http.ResponseWriter, r *http.
 		if out.Action == "deny" || out.Action == "block" {
 			a.otel.EmitPolicyDecision("firewall", out.Action, input.Destination, "network", out.RuleName, nil)
 		}
-	}
-
-	a.writeJSON(w, http.StatusOK, out)
-}
-
-// ---------------------------------------------------------------------------
-// POST /policy/evaluate/sandbox
-// ---------------------------------------------------------------------------
-
-func (a *APIServer) handlePolicyEvaluateSandbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var input policy.SandboxInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if input.SkillName == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "skill_name is required"})
-		return
-	}
-
-	start := time.Now()
-	ctx := r.Context()
-	var span trace.Span
-	if a.otel != nil {
-		ctx, span = a.otel.StartPolicySpan(ctx, "sandbox", "skill", input.SkillName)
-	}
-
-	engine, err := a.loadPolicyEngine()
-	if err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	out, err := engine.EvaluateSandbox(ctx, input)
-	if err != nil {
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	if a.otel != nil {
-		verdict := "allow"
-		if len(out.DeniedEndpoints) > 0 || len(out.DeniedFromRequest) > 0 {
-			verdict = "restrict"
-		}
-		a.otel.EndPolicySpan(span, "sandbox", verdict, "", start)
 	}
 
 	a.writeJSON(w, http.StatusOK, out)

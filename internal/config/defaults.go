@@ -110,10 +110,9 @@ func DefaultConfig() *Config {
 			CodeGuard: filepath.Join(dataDir, "codeguard-rules"),
 		},
 		OpenShell: OpenShellConfig{
-			Binary:      "openshell",
-			PolicyDir:   "/etc/openshell/policies",
-			Version:     DefaultOpenShellVersion,
-			SandboxHome: DefaultSandboxHome,
+			Binary:    "openshell",
+			PolicyDir: "/etc/openshell/policies",
+			Version:   DefaultOpenShellVersion,
 		},
 		Watch: WatchConfig{
 			DebounceMs: 500,
