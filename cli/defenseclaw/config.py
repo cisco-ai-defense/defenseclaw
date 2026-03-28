@@ -186,7 +186,7 @@ DEFAULT_SANDBOX_HOME = "/home/sandbox"
 
 @dataclass
 class OpenShellConfig:
-    binary: str = "openshell"
+    binary: str = "openshell-sandbox"
     policy_dir: str = "/etc/openshell/policies"
     mode: str = ""
     version: str = DEFAULT_OPENSHELL_VERSION
@@ -827,7 +827,7 @@ def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     if auto_pair is not None:
         auto_pair = bool(auto_pair)
     return OpenShellConfig(
-        binary=raw.get("binary", "openshell"),
+        binary=raw.get("binary", "openshell-sandbox"),
         policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
         mode=raw.get("mode", ""),
         version=raw.get("version", DEFAULT_OPENSHELL_VERSION),

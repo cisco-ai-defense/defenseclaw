@@ -310,8 +310,8 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         r.record("skip")
         return
 
-    endpoint = gc.cisco_ai_defense.endpoint
-    key_env = gc.cisco_ai_defense.api_key_env
+    endpoint = cfg.cisco_ai_defense.endpoint
+    key_env = cfg.cisco_ai_defense.api_key_env
     if not endpoint:
         _emit("fail", "Cisco AI Defense", "endpoint not configured")
         r.record("fail")

@@ -420,6 +420,10 @@ func (c *Client) request(ctx context.Context, method string, params interface{})
 
 	ch := make(chan *ResponseFrame, 1)
 	c.mu.Lock()
+	if c.conn == nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("gateway: not connected")
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 

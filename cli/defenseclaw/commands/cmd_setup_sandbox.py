@@ -79,6 +79,15 @@ def setup_sandbox(
         _save_secret_to_dotenv,
     )
 
+    if not app.cfg:
+        from defenseclaw.config import load
+        app.cfg = load()
+    if not app.store:
+        from defenseclaw.db import Store
+        from defenseclaw.logger import Logger
+        app.store = Store(app.cfg.audit_db)
+        app.logger = Logger(app.store)
+
     if disable:
         _disable_sandbox(app)
         return
