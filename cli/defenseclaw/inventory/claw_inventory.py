@@ -24,7 +24,9 @@ Commands are dispatched in parallel via ``ThreadPoolExecutor`` and deduplicated
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -154,6 +156,20 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
                 tags=["claw-aibom", key],
             ),
         )
+        if key == "skills" and isinstance(payload, list):
+            for skill in payload:
+                if skill.get("integrity_error"):
+                    findings.append(
+                        Finding(
+                            id=f"integrity-failure-{skill.get('id', 'unknown')}",
+                            severity="CRITICAL",
+                            title="Critical Integrity Failure",
+                            description=skill["integrity_error"],
+                            location=skill.get("path", target),
+                            scanner="aibom-claw",
+                            tags=["claw-aibom", "integrity", "tamper", "skill"],
+                        )
+                    )
     return ScanResult(
         scanner="aibom-claw",
         target=target,
@@ -496,8 +512,11 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
         if has_policy:
             table.add_column("Policy", min_width=14)
         for s in eligible:
+            name = s.get("id", "")
+            if s.get("integrity_error"):
+                name += " [bold red]\\[TAMPERED][/bold red]"
             row = [
-                s.get("id", ""),
+                name,
                 s.get("source", ""),
                 _trunc(s.get("description", ""), 50),
             ]
@@ -866,17 +885,42 @@ def _fetch_all(needed: set[str]) -> tuple[dict[str, Any], list[dict[str, str]]]:
 # Parsers — transform raw CLI JSON into normalized inventory rows
 # ---------------------------------------------------------------------------
 
+def _compute_dir_hash(path: str) -> str:
+    if not os.path.isdir(path):
+        return ""
+    hasher = hashlib.sha256()
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in sorted(dirs) if d not in (".git", "__pycache__")]
+        for f in sorted(files):
+            if f == "manifest.json":
+                continue
+            fp = os.path.join(root, f)
+            rel = os.path.relpath(fp, path)
+            hasher.update(rel.encode("utf-8"))
+            try:
+                with open(fp, "rb") as bf:
+                    while chunk := bf.read(65536):
+                        hasher.update(chunk)
+            except OSError:
+                pass
+    return hasher.hexdigest()
+
+
 def _parse_skills(raw: Any) -> list[dict[str, Any]]:
     if not raw or not isinstance(raw, dict):
         return []
     skills = raw.get("skills", [])
+    workspace_dir = raw.get("workspaceDir", "")
+    managed_dir = raw.get("managedSkillsDir", "")
     rows: list[dict[str, Any]] = []
     for s in skills:
         if not isinstance(s, dict):
             continue
+        skill_id = s.get("name", "")
+        source = s.get("source", "")
         row: dict[str, Any] = {
-            "id": s.get("name", ""),
-            "source": s.get("source", ""),
+            "id": skill_id,
+            "source": source,
             "eligible": s.get("eligible", False),
             "enabled": not s.get("disabled", False),
             "bundled": s.get("bundled", False),
@@ -893,6 +937,28 @@ def _parse_skills(raw: Any) -> list[dict[str, Any]]:
                 row["missing_bins"] = missing_bins
             if missing_env:
                 row["missing_env"] = missing_env
+        
+        path = ""
+        if source.startswith("workspace") and workspace_dir:
+            path = os.path.join(workspace_dir, "skills", skill_id)
+        elif source not in ("openclaw-bundled", "bundled", "") and managed_dir:
+            path = os.path.join(managed_dir, skill_id)
+        
+        if path and os.path.isdir(path):
+            row["path"] = path
+            actual_hash = _compute_dir_hash(path)
+            row["hash"] = actual_hash
+            manifest_path = os.path.join(path, "manifest.json")
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        manifest = json.load(f)
+                    expected_hash = manifest.get("hash")
+                    if expected_hash and expected_hash != actual_hash:
+                        row["integrity_error"] = f"Hash mismatch for skill '{skill_id}': expected {expected_hash}, got {actual_hash}"
+                except Exception as e:
+                    row["integrity_error"] = f"Failed to read manifest for skill '{skill_id}': {e}"
+
         rows.append(row)
     return rows
 
