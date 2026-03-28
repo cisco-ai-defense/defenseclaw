@@ -498,7 +498,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage:"
             echo "  curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash"
             echo "  ./scripts/install.sh --local ./dist               # from local build"
-            echo "  curl -LsSf ... | bash -s -- --yes                 # non-interactive"
+            echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
             echo "  curl ... | bash -s -- --sandbox                   # also install openshell-sandbox"
             echo ""
             echo "Options:"
