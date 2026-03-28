@@ -279,16 +279,32 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
     except FileNotFoundError:
         click.echo("  Ownership:     chown not found")
 
-    # Restore parent directory permissions (remove o+x we added)
+    # Restore parent directory permissions (remove o+x we added).
+    # Validate each path is a true ancestor of openclaw_home and
+    # the mode is sane to guard against tampered backup files.
+    real_oc_home = os.path.realpath(openclaw_home)
     for entry in backup.get("parents_modified", []):
         ppath = entry.get("path", "")
         orig_mode = entry.get("original_mode", "")
-        if ppath and orig_mode:
-            try:
-                os.chmod(ppath, int(orig_mode, 8))
-                click.echo(f"  Traversal:     restored {ppath} to {orig_mode}")
-            except OSError:
-                pass
+        if not ppath or not orig_mode:
+            continue
+        real_ppath = os.path.realpath(ppath)
+        if not real_oc_home.startswith(real_ppath + "/"):
+            click.echo(f"  Traversal:     skipping non-ancestor {ppath}")
+            continue
+        try:
+            mode_int = int(orig_mode, 8)
+        except ValueError:
+            click.echo(f"  Traversal:     skipping invalid mode {orig_mode!r}")
+            continue
+        if mode_int & 0o002:
+            click.echo(f"  Traversal:     skipping world-writable mode {orig_mode}")
+            continue
+        try:
+            os.chmod(real_ppath, mode_int)
+            click.echo(f"  Traversal:     restored {ppath} to {orig_mode}")
+        except OSError:
+            pass
 
     # Remove symlink from sandbox home
     symlink_path = os.path.join(sandbox_home, ".openclaw")
@@ -418,13 +434,21 @@ def _install_policy_template(data_dir: str, policy_name: str) -> None:
 
 def _generate_resolv_conf(data_dir: str, dns_arg: str) -> None:
     """Write sandbox-resolv.conf with configured nameservers."""
+    import ipaddress as _ipaddress
+
     if dns_arg == "host":
         nameservers = _parse_host_resolv()
     else:
         nameservers = [ns.strip() for ns in dns_arg.split(",") if ns.strip()]
 
-    if not nameservers:
-        nameservers = ["8.8.8.8", "1.1.1.1"]
+    validated: list[str] = []
+    for ns in nameservers:
+        try:
+            _ipaddress.ip_address(ns)
+            validated.append(ns)
+        except ValueError:
+            click.echo(f"  Warning: skipping invalid nameserver: {ns!r}")
+    nameservers = validated or ["8.8.8.8", "1.1.1.1"]
 
     resolv_path = os.path.join(data_dir, "sandbox-resolv.conf")
     with open(resolv_path, "w") as f:
