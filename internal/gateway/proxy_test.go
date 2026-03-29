@@ -1111,6 +1111,66 @@ func TestPatchRawResponseModel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// resolveProvider unit tests
+// ---------------------------------------------------------------------------
+
+func TestResolveProvider_AzureHeader(t *testing.T) {
+	// When api-key header is present, handleChatCompletion should set
+	// TargetAPIKey from the header and TargetURL = "azure" sentinel.
+	// Verify this by inspecting resolveProvider directly with a pre-built request.
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "observe")
+
+	// Direct unit test: build a ChatRequest as handleChatCompletion would.
+	req := &ChatRequest{
+		Model:        "gpt-4.1",
+		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		TargetAPIKey: "azure-test-key",
+		TargetURL:    "azure",
+	}
+
+	provider := proxy.resolveProvider(req)
+	if provider == nil {
+		t.Fatal("resolveProvider returned nil for azure sentinel")
+	}
+	azProv, ok := provider.(*azureOpenAIProvider)
+	if !ok {
+		t.Fatalf("resolveProvider returned %T, want *azureOpenAIProvider", provider)
+	}
+	if azProv.apiKey != "azure-test-key" {
+		t.Errorf("azureOpenAIProvider.apiKey = %q, want azure-test-key", azProv.apiKey)
+	}
+	if azProv.model != "gpt-4.1" {
+		t.Errorf("azureOpenAIProvider.model = %q, want gpt-4.1", azProv.model)
+	}
+}
+
+func TestResolveProvider_FetchInterceptor(t *testing.T) {
+	// When X-DC-Target-URL is set (fetch interceptor path), resolveProvider
+	// should return a provider based on the inferred provider from the URL.
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "observe")
+
+	req := &ChatRequest{
+		Model:        "gpt-4",
+		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		TargetAPIKey: "sk-openai-key",
+		TargetURL:    "https://api.openai.com",
+	}
+
+	provider := proxy.resolveProvider(req)
+	if provider == nil {
+		t.Fatal("resolveProvider returned nil for fetch interceptor path")
+	}
+	// Should not be primary (mock) — should be a real provider built from prefix+model.
+	if provider == prov {
+		t.Error("resolveProvider should not return primary mock when TargetURL is set")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Integration: real local inspector with proxy
 // ---------------------------------------------------------------------------
 
