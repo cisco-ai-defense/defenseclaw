@@ -793,8 +793,10 @@ def _run_openclaw(*args: str) -> _CmdResult:
     """
     cmd_str = "openclaw " + " ".join(args) + " --json"
     try:
+        from defenseclaw.config import openclaw_cmd_prefix, openclaw_bin
+        prefix = openclaw_cmd_prefix()
         proc = subprocess.run(
-            ["openclaw", *args, "--json"],
+            [*prefix, openclaw_bin(), *args, "--json"],
             capture_output=True,
             text=True,
             timeout=30,

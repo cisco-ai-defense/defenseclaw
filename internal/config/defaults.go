@@ -39,6 +39,9 @@ const (
 )
 
 func DefaultDataPath() string {
+	if v := os.Getenv("DEFENSECLAW_HOME"); v != "" {
+		return v
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."

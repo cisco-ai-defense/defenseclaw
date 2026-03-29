@@ -371,9 +371,11 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.config.detect_environment", return_value="macos")
     @patch("defenseclaw.config.default_data_path")
+    @patch.dict(os.environ, {}, clear=False)
     def test_init_no_token_shows_local(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
+        os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
 
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
@@ -419,7 +421,7 @@ class TestResolveOpenclawGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             oc_data = {
                 "gateway": {
-                    "model": "remote",
+                    "mode": "remote",
                     "host": "10.0.0.5",
                     "port": 20000,
                     "auth": {"token": "remote-token"},
@@ -946,8 +948,13 @@ class TestRestoreOpenclawOwnership(unittest.TestCase):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-restore-")
         self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-")
         self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-restore-")
+        self._sudo_patcher = patch(
+            "defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False
+        )
+        self._sudo_patcher.start()
 
     def tearDown(self):
+        self._sudo_patcher.stop()
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
         shutil.rmtree(self.oc_home, ignore_errors=True)

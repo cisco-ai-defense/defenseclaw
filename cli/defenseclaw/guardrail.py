@@ -171,8 +171,10 @@ def install_openclaw_plugin(source_dir: str, openclaw_home: str) -> tuple[str, s
 
         _remove_from_plugins_allow(oc_config, "defenseclaw")
 
+        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+        prefix = openclaw_cmd_prefix()
         result = subprocess.run(
-            ["openclaw", "plugins", "install", source_dir],
+            [*prefix, openclaw_bin(), "plugins", "install", source_dir],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0:
@@ -239,8 +241,10 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
     _remove_from_plugins_allow(oc_config, "defenseclaw")
 
     try:
+        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+        prefix = openclaw_cmd_prefix()
         result = subprocess.run(
-            ["openclaw", "plugins", "uninstall", "defenseclaw"],
+            [*prefix, openclaw_bin(), "plugins", "uninstall", "defenseclaw"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:

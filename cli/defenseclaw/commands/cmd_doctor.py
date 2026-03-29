@@ -330,7 +330,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     code, body = _http_probe(
         health_url,
         headers={"Authorization": f"Bearer {api_key}"},
-        timeout=float(gc.cisco_ai_defense.timeout_ms) / 1000.0,
+        timeout=float(cfg.cisco_ai_defense.timeout_ms) / 1000.0,
     )
 
     if code == 200:

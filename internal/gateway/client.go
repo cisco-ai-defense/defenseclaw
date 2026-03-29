@@ -514,16 +514,19 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 // with an auth error (token_missing, token_mismatch, unauthorized, etc.),
 // the sidecar can self-heal by:
 //
-//   1. Re-injecting its device entry into OpenClaw's devices/paired.json
-//   2. Re-reading the current gateway.auth.token from openclaw.json
+//  1. Re-injecting its device entry into OpenClaw's devices/paired.json
+//     (handles NOT_PAIRED after OpenClaw restarts and clears pairing state)
+//  2. Re-reading the shared gateway.auth.token from openclaw.json
+//     (handles token_mismatch if the token was rotated)
 //
-// This only activates in standalone sandbox mode (cfg.SandboxHome != "").
-// To disable, set openshell.auto_repair=false in config.yaml or clear
-// SandboxHome at runtime.
+// OpenClaw auth checks the shared gateway.auth.token first; the per-device
+// token in device-auth.json is a Node.js client-side cache irrelevant here.
+//
+// Only activates in standalone sandbox mode (cfg.SandboxHome != "").
 // ---------------------------------------------------------------------------
 
-// tryAuthRepair attempts to repair device pairing and gateway token
-// when a connect attempt fails with an auth-related error.
+// tryAuthRepair attempts to repair device pairing and refresh the shared
+// gateway token when a connect attempt fails with an auth-related error.
 // No-op when sandbox mode is inactive or the error is not auth-related.
 func (c *Client) tryAuthRepair(connectErr error) {
 	if !c.shouldAutoRepair(connectErr) {

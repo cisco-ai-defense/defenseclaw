@@ -217,7 +217,7 @@ type OpenShellConfig struct {
 	Version     string `mapstructure:"version"        yaml:"version,omitempty"`
 	SandboxHome string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
 	AutoPair    *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
-	DNSOverride *bool  `mapstructure:"dns_override"   yaml:"dns_override,omitempty"`
+	HostNetworking *bool `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
 }
 
 const DefaultOpenShellVersion = "0.6.2"
@@ -254,12 +254,12 @@ func (o *OpenShellConfig) ShouldAutoPair() bool {
 	return true
 }
 
-// ShouldOverrideDNS returns whether DefenseClaw should manage DNS inside
-// the sandbox (resolv.conf mount, DNS iptables, MASQUERADE).
-// Defaults to true when not explicitly set.
-func (o *OpenShellConfig) ShouldOverrideDNS() bool {
-	if o.DNSOverride != nil {
-		return *o.DNSOverride
+// HostNetworkingEnabled returns whether DefenseClaw should manage host-side
+// iptables rules for the sandbox (DNS forwarding, UI port forwarding,
+// guardrail redirect, MASQUERADE). Defaults to true when not explicitly set.
+func (o *OpenShellConfig) HostNetworkingEnabled() bool {
+	if o.HostNetworking != nil {
+		return *o.HostNetworking
 	}
 	return true
 }
@@ -596,7 +596,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("openshell.binary", "openshell")
 	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
 	viper.SetDefault("openshell.version", DefaultOpenShellVersion)
-	viper.SetDefault("openshell.dns_override", true)
+	viper.SetDefault("openshell.host_networking", true)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

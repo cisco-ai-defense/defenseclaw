@@ -7,14 +7,21 @@ import shutil
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from defenseclaw.commands.cmd_setup_sandbox import (
-    _generate_resolv_conf,
-    _parse_host_resolv,
-    _generate_systemd_units,
     _generate_launcher_scripts,
+    _generate_resolv_conf,
+    _generate_systemd_units,
+    _parse_host_resolv,
     _pre_pair_device,
 )
+
+
+def _patch_no_sudo():
+    return patch(
+        "defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False
+    )
 
 
 class TestParseHostResolv(unittest.TestCase):
@@ -65,7 +72,7 @@ class TestGenerateResolvConf(unittest.TestCase):
 
 class _MockOpenshell:
     def __init__(self):
-        self.dns_override = True
+        self.host_networking = True
 
 
 class _MockGuardrail:
@@ -77,6 +84,7 @@ class _MockGuardrail:
 class _MockGateway:
     def __init__(self):
         self.api_port = 18790
+        self.port = 18789
 
 
 class _MockCfg:
@@ -103,7 +111,6 @@ class TestGenerateSystemdUnits(unittest.TestCase):
         systemd_dir = os.path.join(self.data_dir, "systemd")
         expected_files = [
             "openshell-sandbox.service",
-            "defenseclaw-gateway.service",
             "defenseclaw-sandbox.target",
         ]
         for name in expected_files:
@@ -119,39 +126,39 @@ class TestGenerateSystemdUnits(unittest.TestCase):
         )
         systemd_dir = os.path.join(self.data_dir, "systemd")
 
-        for name in ("openshell-sandbox.service", "defenseclaw-gateway.service"):
-            with open(os.path.join(systemd_dir, name)) as f:
-                content = f.read()
-            self.assertIn("ExecStart", content)
-            self.assertIn("WantedBy", content)
+        with open(os.path.join(systemd_dir, "openshell-sandbox.service")) as f:
+            content = f.read()
+        self.assertIn("ExecStart", content)
+        self.assertIn("WantedBy", content)
 
         with open(os.path.join(systemd_dir, "defenseclaw-sandbox.target")) as f:
             content = f.read()
         self.assertIn("WantedBy", content)
 
-    def test_sidecar_unit_contains_readwritepaths(self):
+    def test_no_gateway_service_generated(self):
         _generate_systemd_units(
             self.data_dir, self.sandbox_home,
             "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         sidecar_path = os.path.join(self.data_dir, "systemd", "defenseclaw-gateway.service")
-        with open(sidecar_path) as f:
-            content = f.read()
-        self.assertIn(f'ReadWritePaths="{self.data_dir}"', content)
+        self.assertFalse(os.path.exists(sidecar_path))
 
 
 class TestGenerateLauncherScripts(unittest.TestCase):
     def setUp(self):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-scripts-test-")
         self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-home-")
+        self._sudo_patcher = _patch_no_sudo()
+        self._sudo_patcher.start()
 
     def tearDown(self):
+        self._sudo_patcher.stop()
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
     def test_scripts_created(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg(),
+            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         scripts_dir = os.path.join(self.data_dir, "scripts")
         expected = [
@@ -168,7 +175,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_scripts_are_executable(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg(),
+            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         scripts_dir = os.path.join(self.data_dir, "scripts")
         for name in ("pre-sandbox.sh", "start-sandbox.sh", "post-sandbox.sh", "cleanup-sandbox.sh"):
@@ -177,7 +184,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_start_sandbox_contains_openshell(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg(),
+            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         with open(os.path.join(self.data_dir, "scripts", "start-sandbox.sh")) as f:
             content = f.read()
@@ -186,7 +193,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
     def test_post_sandbox_contains_host_ip(self):
         host_ip = "10.200.0.1"
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, host_ip, _MockCfg(),
+            self.data_dir, self.sandbox_home, host_ip, "10.200.0.2", _MockCfg(),
         )
         with open(os.path.join(self.data_dir, "scripts", "post-sandbox.sh")) as f:
             content = f.read()
@@ -194,26 +201,29 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
 
 class _CfgFactory:
-    """Build _MockCfg variants for the dns_override x guardrail_enabled matrix."""
+    """Build _MockCfg variants for the host_networking x guardrail_enabled matrix."""
 
     @staticmethod
-    def make(dns_override: bool, guardrail_enabled: bool):
+    def make(host_networking: bool, guardrail_enabled: bool):
         cfg = _MockCfg()
         cfg.openshell = _MockOpenshell()
-        cfg.openshell.dns_override = dns_override
+        cfg.openshell.host_networking = host_networking
         cfg.guardrail = _MockGuardrail()
         cfg.guardrail.enabled = guardrail_enabled
         return cfg
 
 
 class TestLauncherScriptConditionals(unittest.TestCase):
-    """Verify scripts respect dns_override and guardrail.enabled flags."""
+    """Verify scripts respect host_networking and guardrail.enabled flags."""
 
     def setUp(self):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-cond-test-")
         self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-cond-home-")
+        self._sudo_patcher = _patch_no_sudo()
+        self._sudo_patcher.start()
 
     def tearDown(self):
+        self._sudo_patcher.stop()
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
@@ -221,10 +231,10 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         with open(os.path.join(self.data_dir, "scripts", name)) as f:
             return f.read()
 
-    def _gen(self, dns_override, guardrail_enabled):
-        cfg = _CfgFactory.make(dns_override, guardrail_enabled)
+    def _gen(self, host_networking, guardrail_enabled):
+        cfg = _CfgFactory.make(host_networking, guardrail_enabled)
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", cfg,
+            self.data_dir, self.sandbox_home, "10.200.0.1", "10.200.0.2", cfg,
         )
 
     # --- (True, True) — full rules ---
@@ -318,8 +328,11 @@ class TestPrePairDevice(unittest.TestCase):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-pair-test-")
         self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-home-")
         os.makedirs(os.path.join(self.sandbox_home, ".openclaw"), exist_ok=True)
+        self._sudo_patcher = _patch_no_sudo()
+        self._sudo_patcher.start()
 
     def tearDown(self):
+        self._sudo_patcher.stop()
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
@@ -376,6 +389,7 @@ class TestPrePairDevice(unittest.TestCase):
 
     def test_pem_encoded_key(self):
         import base64
+
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
         priv = Ed25519PrivateKey.generate()
@@ -407,6 +421,7 @@ class TestPrePairDevice(unittest.TestCase):
         """Verify Python derives the same device ID as the Go gateway."""
         import base64
         import hashlib
+
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from defenseclaw.commands.cmd_setup_sandbox import _extract_ed25519_pubkey
 

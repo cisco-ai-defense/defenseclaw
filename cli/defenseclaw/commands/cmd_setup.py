@@ -769,16 +769,19 @@ def execute_guardrail_setup(
     gc = app.cfg.guardrail
     warnings: list[str] = []
 
+    standalone = app.cfg.openshell.is_standalone()
+
     # --- Pre-flight checks ---
-    claw_cfg_file = app.cfg.claw.config_file
-    oc_config_path = (
-        os.path.expanduser(claw_cfg_file) if claw_cfg_file.startswith("~/") else claw_cfg_file
-    )
-    if not os.path.isfile(oc_config_path):
-        click.echo(f"  ✗ OpenClaw config not found: {app.cfg.claw.config_file}")
-        click.echo("    Make sure OpenClaw is installed and initialized.")
-        click.echo("    Expected location: ~/.openclaw/openclaw.json")
-        return False, warnings
+    if not standalone:
+        claw_cfg_file = app.cfg.claw.config_file
+        oc_config_path = (
+            os.path.expanduser(claw_cfg_file) if claw_cfg_file.startswith("~/") else claw_cfg_file
+        )
+        if not os.path.isfile(oc_config_path):
+            click.echo(f"  ✗ OpenClaw config not found: {app.cfg.claw.config_file}")
+            click.echo("    Make sure OpenClaw is installed and initialized.")
+            click.echo("    Expected location: ~/.openclaw/openclaw.json")
+            return False, warnings
 
     if not gc.model or not gc.model_name:
         click.echo("  ✗ Model or model_name is empty — cannot configure guardrail.")
@@ -798,56 +801,60 @@ def execute_guardrail_setup(
 
     click.echo("  ✓ Guardrail proxy is built into the Go binary (no Python deps)")
 
-    # --- Step 1: Install OpenClaw plugin ---
-    plugin_source = _find_plugin_source()
-    if plugin_source:
-        openclaw_home = app.cfg.claw.home_dir
-        method, cli_error = install_openclaw_plugin(plugin_source, openclaw_home)
-        if method == "cli":
-            click.echo("  ✓ OpenClaw plugin installed (via openclaw CLI)")
-        elif method == "manual":
-            click.echo("  ✓ OpenClaw plugin installed to extensions/")
-        elif method == "error":
-            click.echo(f"  ✗ OpenClaw plugin installation failed: {cli_error}")
-            warnings.append(
-                "Plugin not installed — tool interception will not work. "
-                "Try: make plugin-install && defenseclaw setup guardrail"
-            )
+    if standalone:
+        click.echo("  ⚠ Sandbox mode: skipping OpenClaw plugin install and config patch")
+        click.echo("    Run 'defenseclaw sandbox setup' to install the guardrail plugin into the sandbox")
+    else:
+        # --- Step 1: Install OpenClaw plugin ---
+        plugin_source = _find_plugin_source()
+        if plugin_source:
+            openclaw_home = app.cfg.claw.home_dir
+            method, cli_error = install_openclaw_plugin(plugin_source, openclaw_home)
+            if method == "cli":
+                click.echo("  ✓ OpenClaw plugin installed (via openclaw CLI)")
+            elif method == "manual":
+                click.echo("  ✓ OpenClaw plugin installed to extensions/")
+            elif method == "error":
+                click.echo(f"  ✗ OpenClaw plugin installation failed: {cli_error}")
+                warnings.append(
+                    "Plugin not installed — tool interception will not work. "
+                    "Try: make plugin-install && defenseclaw setup guardrail"
+                )
+            else:
+                click.echo("  ⚠ OpenClaw plugin not built — run 'make plugin && make plugin-install'")
+                warnings.append(
+                    "Plugin not built — tool interception will not work. "
+                    "Build with: make plugin && make plugin-install"
+                )
         else:
-            click.echo("  ⚠ OpenClaw plugin not built — run 'make plugin && make plugin-install'")
+            click.echo("  ⚠ OpenClaw plugin not found at ~/.defenseclaw/extensions/")
             warnings.append(
-                "Plugin not built — tool interception will not work. "
-                "Build with: make plugin && make plugin-install"
+                "Plugin not found — run 'make plugin-install' to stage it, "
+                "then re-run setup"
             )
-    else:
-        click.echo("  ⚠ OpenClaw plugin not found at ~/.defenseclaw/extensions/")
-        warnings.append(
-            "Plugin not found — run 'make plugin-install' to stage it, "
-            "then re-run setup"
-        )
 
-    # --- Step 2: Patch OpenClaw config ---
-    master_key = _derive_master_key(app.cfg.gateway.device_key_file)
+        # --- Step 2: Patch OpenClaw config ---
+        master_key = _derive_master_key(app.cfg.gateway.device_key_file)
 
-    prev_model = patch_openclaw_config(
-        openclaw_config_file=app.cfg.claw.config_file,
-        model_name=gc.model_name,
-        proxy_port=gc.port,
-        master_key=master_key,
-        original_model=gc.original_model,
-        guardrail_host=gc.host or "localhost",
-    )
-    if prev_model is not None:
-        click.echo(f"  ✓ OpenClaw config patched: {app.cfg.claw.config_file}")
-        if prev_model and not gc.original_model:
-            gc.original_model = prev_model
-    else:
-        click.echo(f"  ✗ Failed to patch OpenClaw config: {app.cfg.claw.config_file}")
-        click.echo("    File may be malformed or unreadable. Check the JSON syntax.")
-        warnings.append(
-            "OpenClaw config not patched — LLM traffic will not be routed through the guardrail. "
-            f"Fix {app.cfg.claw.config_file} and re-run setup"
+        prev_model = patch_openclaw_config(
+            openclaw_config_file=app.cfg.claw.config_file,
+            model_name=gc.model_name,
+            proxy_port=gc.port,
+            master_key=master_key,
+            original_model=gc.original_model,
+            guardrail_host=gc.host or "localhost",
         )
+        if prev_model is not None:
+            click.echo(f"  ✓ OpenClaw config patched: {app.cfg.claw.config_file}")
+            if prev_model and not gc.original_model:
+                gc.original_model = prev_model
+        else:
+            click.echo(f"  ✗ Failed to patch OpenClaw config: {app.cfg.claw.config_file}")
+            click.echo("    File may be malformed or unreadable. Check the JSON syntax.")
+            warnings.append(
+                "OpenClaw config not patched — LLM traffic will not be routed through the guardrail. "
+                f"Fix {app.cfg.claw.config_file} and re-run setup"
+            )
 
     # --- Step 3: Save DefenseClaw config ---
     if save_config:
@@ -891,21 +898,15 @@ def execute_guardrail_setup(
     _write_guardrail_runtime(app.cfg.data_dir, gc)
 
     # --- Step 6: Sandbox-specific setup (plugin + iptables scripts) ---
-    if app.cfg.openshell.is_standalone():
-        from defenseclaw.commands.cmd_init_sandbox import _install_plugin_to_sandbox
-        from defenseclaw.commands.cmd_setup_sandbox import _generate_launcher_scripts
-
-        sandbox_home = app.cfg.openshell.effective_sandbox_home()
-        _install_plugin_to_sandbox(app.cfg, sandbox_home)
-        _generate_launcher_scripts(
-            app.cfg.data_dir, sandbox_home,
-            gc.host or "localhost", app.cfg,
-        )
-        click.echo("  ✓ Sandbox scripts regenerated with guardrail iptables rules")
-
-    # --- Step 7: Restore sandbox ownership if in standalone mode ---
-    from defenseclaw.commands.cmd_setup_sandbox import restore_sandbox_ownership_if_needed
-    restore_sandbox_ownership_if_needed(app.cfg)
+    if standalone:
+        click.echo()
+        click.echo(click.style(
+            "  ** Re-run 'defenseclaw sandbox setup' to install the guardrail plugin "
+            "and restart the sandbox. **", fg="yellow",
+        ))
+    else:
+        from defenseclaw.commands.cmd_setup_sandbox import restore_sandbox_ownership_if_needed
+        restore_sandbox_ownership_if_needed(app.cfg)
 
     return True, warnings
 
@@ -1068,70 +1069,63 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
-    from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
+    standalone = app.cfg.openshell.is_standalone()
 
     click.echo()
     click.echo("  Disabling LLM guardrail...")
     warnings: list[str] = []
 
-    # Restore OpenClaw config (model + remove defenseclaw provider + plugins.allow)
-    if gc.original_model:
-        if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
-            click.echo(f"  ✓ OpenClaw model restored to: {gc.original_model}")
+    if standalone:
+        click.echo("  ⚠ Sandbox mode: skipping OpenClaw config restore and plugin removal")
+        click.echo("    Run 'defenseclaw sandbox setup' to remove the guardrail plugin from the sandbox")
+    else:
+        from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
+
+        # Restore OpenClaw config (model + remove defenseclaw provider + plugins.allow)
+        if gc.original_model:
+            if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
+                click.echo(f"  ✓ OpenClaw model restored to: {gc.original_model}")
+            else:
+                click.echo(f"  ✗ Could not restore OpenClaw config: {app.cfg.claw.config_file}")
+                click.echo("    The file may be missing or contain invalid JSON.")
+                warnings.append(
+                    f"Manually edit {app.cfg.claw.config_file}: "
+                    f"set agents.defaults.model.primary to \"{gc.original_model}\" "
+                    "and remove the \"defenseclaw\" provider from models.providers"
+                )
         else:
-            click.echo(f"  ✗ Could not restore OpenClaw config: {app.cfg.claw.config_file}")
-            click.echo("    The file may be missing or contain invalid JSON.")
+            click.echo("  ⚠ No original model on record — cannot revert LLM routing")
+            click.echo("    The model in openclaw.json may still point to defenseclaw/...")
             warnings.append(
-                f"Manually edit {app.cfg.claw.config_file}: "
-                f"set agents.defaults.model.primary to \"{gc.original_model}\" "
-                "and remove the \"defenseclaw\" provider from models.providers"
+                f"Check {app.cfg.claw.config_file} and set agents.defaults.model.primary "
+                "to your desired model (e.g. anthropic/claude-sonnet-4-20250514)"
             )
-    else:
-        click.echo("  ⚠ No original model on record — cannot revert LLM routing")
-        click.echo("    The model in openclaw.json may still point to defenseclaw/...")
-        warnings.append(
-            f"Check {app.cfg.claw.config_file} and set agents.defaults.model.primary "
-            "to your desired model (e.g. anthropic/claude-sonnet-4-20250514)"
-        )
 
-    # Uninstall OpenClaw plugin
-    openclaw_home = app.cfg.claw.home_dir
-    result = uninstall_openclaw_plugin(openclaw_home)
-    if result == "cli":
-        click.echo("  ✓ OpenClaw plugin uninstalled (via openclaw CLI)")
-    elif result == "manual":
-        click.echo("  ✓ OpenClaw plugin removed from extensions/")
-    elif result == "error":
-        ext_dir = os.path.join(os.path.expanduser(openclaw_home), "extensions", "defenseclaw")
-        click.echo(f"  ✗ Could not remove OpenClaw plugin at {ext_dir}")
-        warnings.append(f"Manually delete: rm -rf {ext_dir}")
-    else:
-        click.echo("  ✓ OpenClaw plugin not installed (nothing to remove)")
+        # Uninstall OpenClaw plugin
+        openclaw_home = app.cfg.claw.home_dir
+        result = uninstall_openclaw_plugin(openclaw_home)
+        if result == "cli":
+            click.echo("  ✓ OpenClaw plugin uninstalled (via openclaw CLI)")
+        elif result == "manual":
+            click.echo("  ✓ OpenClaw plugin removed from extensions/")
+        elif result == "error":
+            ext_dir = os.path.join(os.path.expanduser(openclaw_home), "extensions", "defenseclaw")
+            click.echo(f"  ✗ Could not remove OpenClaw plugin at {ext_dir}")
+            warnings.append(f"Manually delete: rm -rf {ext_dir}")
+        else:
+            click.echo("  ✓ OpenClaw plugin not installed (nothing to remove)")
 
-    # Remove plugin and iptables rules from sandbox if in standalone mode
-    if app.cfg.openshell.is_standalone():
-        from defenseclaw.commands.cmd_setup_sandbox import (
-            _generate_launcher_scripts,
-            restore_sandbox_ownership_if_needed,
-        )
-
-        sandbox_home = app.cfg.openshell.effective_sandbox_home()
-        _uninstall_plugin_from_sandbox(sandbox_home)
-
-        gc.enabled = False
-        _generate_launcher_scripts(
-            app.cfg.data_dir, sandbox_home,
-            gc.host or "localhost", app.cfg,
-        )
-        click.echo("  ✓ Sandbox scripts regenerated without guardrail iptables rules")
-
-        restore_sandbox_ownership_if_needed(app.cfg)
-    else:
-        gc.enabled = False
+    gc.enabled = False
 
     try:
         app.cfg.save()
         click.echo("  ✓ Config saved")
+        if standalone:
+            click.echo()
+            click.echo(click.style(
+                "  ** Re-run 'defenseclaw sandbox setup' to remove the guardrail plugin "
+                "and restart the sandbox. **", fg="yellow",
+            ))
     except OSError as exc:
         click.echo(f"  ✗ Failed to save config: {exc}")
         warnings.append("Config not saved — guardrail may re-enable on next run")

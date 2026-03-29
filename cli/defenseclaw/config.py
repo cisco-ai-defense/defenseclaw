@@ -45,6 +45,27 @@ def _home() -> Path:
 
 
 def default_data_path() -> Path:
+    """Return the DefenseClaw data directory.
+
+    When running under ``sudo``, checks the invoking user's home first
+    so that ``sudo defenseclaw sandbox init`` finds the config created
+    by the unprivileged user.  Falls back to the current user's home.
+    """
+    env_override = os.environ.get("DEFENSECLAW_HOME")
+    if env_override:
+        return Path(env_override)
+
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and os.getuid() == 0:
+        try:
+            import pwd
+            pw = pwd.getpwnam(sudo_user)
+            candidate = Path(pw.pw_dir) / DATA_DIR_NAME
+            if (candidate / CONFIG_FILE_NAME).is_file():
+                return candidate
+        except KeyError:
+            pass
+
     return _home() / DATA_DIR_NAME
 
 
@@ -76,6 +97,67 @@ def detect_environment() -> str:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
     return "linux"
+
+
+_sandbox_mode_cache: bool | None = None
+
+
+def openclaw_cmd_prefix() -> list[str]:
+    """Return ``["sudo", "-u", "sandbox"]`` when in standalone sandbox mode.
+
+    Used by any code that shells out to the ``openclaw`` CLI so that
+    config writes target the sandbox-owned OpenClaw home.  The prefix
+    does NOT include the ``openclaw`` binary itself — callers append it.
+    When in sandbox mode, ``sudo -u sandbox`` won't inherit the invoking
+    user's PATH, so callers should use :func:`openclaw_bin` for the
+    binary path.
+    """
+    global _sandbox_mode_cache
+    if _sandbox_mode_cache is None:
+        try:
+            cp = config_path()
+            if cp.is_file():
+                import yaml
+                with open(cp) as f:
+                    raw = yaml.safe_load(f) or {}
+                mode = raw.get("openshell", {}).get("mode", "")
+                _sandbox_mode_cache = mode == "standalone"
+            else:
+                _sandbox_mode_cache = False
+        except Exception:
+            _sandbox_mode_cache = False
+    if _sandbox_mode_cache:
+        return ["sudo", "-u", "sandbox"]
+    return []
+
+
+_openclaw_bin_cache: str | None = None
+
+
+def openclaw_bin() -> str:
+    """Return the absolute path to the ``openclaw`` binary.
+
+    Resolves via ``shutil.which`` first, then checks common npm install
+    locations.  Falls back to the bare name ``"openclaw"`` if it cannot
+    be found (letting the caller's subprocess raise a clear error).
+    """
+    global _openclaw_bin_cache
+    if _openclaw_bin_cache is None:
+        import shutil
+        found = shutil.which("openclaw")
+        if not found:
+            from pathlib import Path
+            candidates = [
+                Path.home() / ".npm-global" / "bin" / "openclaw",
+                Path("/usr/local/bin/openclaw"),
+                Path.home() / ".local" / "bin" / "openclaw",
+            ]
+            for c in candidates:
+                if c.is_file():
+                    found = str(c)
+                    break
+        _openclaw_bin_cache = found or "openclaw"
+    return _openclaw_bin_cache
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +274,7 @@ class OpenShellConfig:
     version: str = DEFAULT_OPENSHELL_VERSION
     sandbox_home: str = DEFAULT_SANDBOX_HOME
     auto_pair: bool | None = None
-    dns_override: bool = True
+    host_networking: bool = True
 
     def is_standalone(self) -> bool:
         return self.mode == "standalone"
@@ -555,8 +637,9 @@ def _read_openclaw_config(config_file: str) -> dict[str, Any] | None:
 def _read_mcp_servers_via_cli() -> list[MCPServerEntry] | None:
     """Read mcp.servers via ``openclaw config get``.  Returns None on failure."""
     try:
+        prefix = openclaw_cmd_prefix()
         result = subprocess.run(
-            ["openclaw", "config", "get", "mcp.servers"],
+            [*prefix, openclaw_bin(), "config", "get", "mcp.servers"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -827,11 +910,11 @@ def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     auto_pair = raw.get("auto_pair")
     if auto_pair is not None:
         auto_pair = bool(auto_pair)
-    dns_override = raw.get("dns_override")
-    if dns_override is not None:
-        dns_override = bool(dns_override)
+    host_networking = raw.get("host_networking")
+    if host_networking is not None:
+        host_networking = bool(host_networking)
     else:
-        dns_override = True
+        host_networking = True
     return OpenShellConfig(
         binary=raw.get("binary", "openshell-sandbox"),
         policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
@@ -839,7 +922,7 @@ def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
         version=raw.get("version", DEFAULT_OPENSHELL_VERSION),
         sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME),
         auto_pair=auto_pair,
-        dns_override=dns_override,
+        host_networking=host_networking,
     )
 
 

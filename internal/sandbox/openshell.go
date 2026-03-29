@@ -55,10 +55,7 @@ func (o *OpenShell) fallbackPolicyPath() string {
 	return ""
 }
 
-// EffectivePolicyPath returns the resolved path for the sandbox policy file.
-// It tries the primary PolicyDir first; if that directory cannot be created,
-// it falls back to FallbackDir.
-func (o *OpenShell) EffectivePolicyPath() string {
+func (o *OpenShell) effectivePolicyPath() string {
 	primary := o.PolicyPath()
 	dir := filepath.Dir(primary)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -70,12 +67,12 @@ func (o *OpenShell) EffectivePolicyPath() string {
 }
 
 func (o *OpenShell) LoadPolicy() (*Policy, error) {
-	path := o.EffectivePolicyPath()
+	path := o.effectivePolicyPath()
 	return LoadPolicy(path)
 }
 
 func (o *OpenShell) SavePolicy(p *Policy) error {
-	path := o.EffectivePolicyPath()
+	path := o.effectivePolicyPath()
 	return p.Save(path)
 }
 

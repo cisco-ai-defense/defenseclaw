@@ -67,6 +67,14 @@ func TestDefaultDataPath(t *testing.T) {
 	}
 }
 
+func TestDefaultDataPath_EnvOverride(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", "/custom/path/.defenseclaw")
+	dp := DefaultDataPath()
+	if dp != "/custom/path/.defenseclaw" {
+		t.Errorf("DefaultDataPath() = %q, want /custom/path/.defenseclaw", dp)
+	}
+}
+
 func TestConfigPath(t *testing.T) {
 	cp := ConfigPath()
 	if filepath.Base(cp) != DefaultConfigName {
@@ -1003,27 +1011,27 @@ func TestOpenShellConfig_ShouldAutoPair(t *testing.T) {
 	})
 }
 
-func TestOpenShellConfig_ShouldOverrideDNS(t *testing.T) {
+func TestOpenShellConfig_HostNetworkingEnabled(t *testing.T) {
 	t.Run("nil defaults to true", func(t *testing.T) {
 		oc := OpenShellConfig{}
-		if !oc.ShouldOverrideDNS() {
-			t.Error("ShouldOverrideDNS() = false, want true (default)")
+		if !oc.HostNetworkingEnabled() {
+			t.Error("HostNetworkingEnabled() = false, want true (default)")
 		}
 	})
 
 	t.Run("explicit true", func(t *testing.T) {
 		b := true
-		oc := OpenShellConfig{DNSOverride: &b}
-		if !oc.ShouldOverrideDNS() {
-			t.Error("ShouldOverrideDNS() = false, want true")
+		oc := OpenShellConfig{HostNetworking: &b}
+		if !oc.HostNetworkingEnabled() {
+			t.Error("HostNetworkingEnabled() = false, want true")
 		}
 	})
 
 	t.Run("explicit false", func(t *testing.T) {
 		b := false
-		oc := OpenShellConfig{DNSOverride: &b}
-		if oc.ShouldOverrideDNS() {
-			t.Error("ShouldOverrideDNS() = true, want false")
+		oc := OpenShellConfig{HostNetworking: &b}
+		if oc.HostNetworkingEnabled() {
+			t.Error("HostNetworkingEnabled() = true, want false")
 		}
 	})
 }

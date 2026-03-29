@@ -10,7 +10,29 @@ import subprocess
 
 import click
 
+from defenseclaw.commands.cmd_init_sandbox import (
+    _ensure_sudo_cache,
+    _fix_data_dir_ownership,
+    _needs_sudo,
+    _sudo_prefix,
+    _sudo_write,
+)
 from defenseclaw.context import AppContext, pass_ctx
+
+
+def _sudo_read_json(path: str) -> dict | None:
+    """Read a JSON file that may require sudo (e.g. inside /home/sandbox/)."""
+    try:
+        if _needs_sudo():
+            result = subprocess.run(
+                [*_sudo_prefix(), "cat", path],
+                capture_output=True, text=True, check=True,
+            )
+            return _json.loads(result.stdout)
+        with open(path) as f:
+            return _json.load(f)
+    except (OSError, _json.JSONDecodeError, subprocess.CalledProcessError):
+        return None
 
 
 def restore_sandbox_ownership_if_needed(cfg) -> None:
@@ -21,11 +43,47 @@ def restore_sandbox_ownership_if_needed(cfg) -> None:
     oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
     try:
         subprocess.run(
-            ["chown", "-R", "sandbox:sandbox", oc_target],
+            [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
             capture_output=True, check=False,
         )
     except FileNotFoundError:
         pass
+
+
+def _find_openclaw_binary() -> str:
+    """Locate the openclaw binary for use in generated launcher scripts.
+
+    Checks system PATH first, then the invoking user's npm global prefix
+    (which may not be on PATH, especially under sudo).
+    """
+    found = shutil.which("openclaw")
+    if found:
+        return found
+
+    sudo_user = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
+    if sudo_user:
+        try:
+            import pwd as _pwd
+            pw = _pwd.getpwnam(sudo_user)
+            result = subprocess.run(
+                ["sudo", "-u", sudo_user, "npm", "config", "get", "prefix"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                prefix = result.stdout.strip()
+                if prefix:
+                    candidate = os.path.join(prefix, "bin", "openclaw")
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        return candidate
+
+            for bindir in [".local/bin", ".nvm/current/bin"]:
+                candidate = os.path.join(pw.pw_dir, bindir, "openclaw")
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+        except (KeyError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    return "openclaw"
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +103,8 @@ def restore_sandbox_ownership_if_needed(cfg) -> None:
 )
 @click.option("--dns", default="8.8.8.8,1.1.1.1", help="DNS nameservers (comma-separated, or 'host')")
 @click.option("--no-auto-pair", is_flag=True, help="Disable automatic device pre-pairing")
-@click.option("--no-dns-override", is_flag=True,
-              help="Skip DNS plumbing (resolv.conf mount, DNS iptables, MASQUERADE)")
+@click.option("--no-host-networking", is_flag=True,
+              help="Skip host-side iptables rules (DNS, UI forwarding, MASQUERADE)")
 @click.option("--no-guardrail", is_flag=True,
               help="Skip guardrail network setup (API_PORT + GUARDRAIL_PORT iptables)")
 @click.option("--disable", is_flag=True, help="Revert to host mode (no sandbox)")
@@ -61,7 +119,7 @@ def setup_sandbox(
     policy: str,
     dns: str,
     no_auto_pair: bool,
-    no_dns_override: bool,
+    no_host_networking: bool,
     no_guardrail: bool,
     disable: bool,
     non_interactive: bool,
@@ -80,7 +138,6 @@ def setup_sandbox(
     import platform
 
     from defenseclaw.commands.cmd_setup import (
-        _detect_openclaw_gateway_token,
         _mask,
         _save_secret_to_dotenv,
     )
@@ -95,12 +152,15 @@ def setup_sandbox(
         app.logger = Logger(app.store)
 
     if disable:
+        _ensure_sudo_cache()
         _disable_sandbox(app)
         return
 
     if platform.system() != "Linux":
         click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
         raise SystemExit(1)
+
+    _ensure_sudo_cache()
 
     sandbox_home = sandbox_home or app.cfg.openshell.effective_sandbox_home()
     data_dir = app.cfg.data_dir
@@ -116,8 +176,8 @@ def setup_sandbox(
     app.cfg.openshell.sandbox_home = sandbox_home
     if no_auto_pair:
         app.cfg.openshell.auto_pair = False
-    if no_dns_override:
-        app.cfg.openshell.dns_override = False
+    if no_host_networking:
+        app.cfg.openshell.host_networking = False
     if no_guardrail:
         app.cfg.guardrail.enabled = False
 
@@ -134,7 +194,7 @@ def setup_sandbox(
 
     click.echo("    openshell.mode:       standalone")
     click.echo(f"    openshell.sandbox_home: {sandbox_home}")
-    click.echo(f"    openshell.dns_override: {app.cfg.openshell.dns_override}")
+    click.echo(f"    openshell.host_networking: {app.cfg.openshell.host_networking}")
     click.echo(f"    gateway.host:         {sandbox_ip}")
     if app.cfg.guardrail.enabled:
         click.echo(f"    guardrail.host:       {host_ip}")
@@ -142,32 +202,24 @@ def setup_sandbox(
         click.echo("    guardrail:            disabled (use 'defenseclaw setup guardrail' to enable)")
     click.echo(f"    claw.home_dir:        {app.cfg.claw.home_dir}")
 
-    # 3. Read gateway auth token from OpenClaw config (same as non-sandbox mode).
-    #    OpenClaw owns the token — DefenseClaw never generates or injects one.
+    # 3. Read OpenClaw config (token resolution deferred to after pairing — step 9b).
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
-    detected_token = _detect_openclaw_gateway_token(oc_config)
-    if detected_token:
-        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected_token, data_dir)
-        app.cfg.gateway.token = ""
-        app.cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
-        click.echo(f"    gateway.token:        read from openclaw.json ({_mask(detected_token)})")
-    else:
-        click.echo("    gateway.token:        not found (sidecar will auto-detect on connect)")
+    oc_json = _sudo_read_json(oc_config)
 
     # 4. Install policy template
     _install_policy_template(data_dir, policy)
     click.echo(f"    policy template:      {policy}")
 
-    # 5. Generate DNS resolv.conf (only when DNS override is active)
-    if app.cfg.openshell.dns_override:
+    # 5. Generate DNS resolv.conf (only when host networking is active)
+    if app.cfg.openshell.host_networking:
         _generate_resolv_conf(data_dir, dns)
         click.echo(f"    dns nameservers:      {dns}")
     else:
-        click.echo("    dns:                  managed by openshell-sandbox (override disabled)")
+        click.echo("    dns:                  managed by openshell-sandbox (host networking disabled)")
 
-    # 6. Patch sandbox-side OpenClaw config (port + bind only, never the token)
-    if os.path.isfile(oc_config):
-        _patch_openclaw_gateway(oc_config, openclaw_port)
+    # 6. Patch sandbox-side OpenClaw config (port + bind + guardrail baseUrl)
+    if oc_json is not None:
+        _patch_openclaw_gateway(oc_config, openclaw_port, existing_cfg=oc_json, host_ip=host_ip)
         click.echo(f"    openclaw.json:        patched (gateway.port={openclaw_port}, gateway.bind=lan)")
 
     # 7. Generate systemd unit files
@@ -175,7 +227,7 @@ def setup_sandbox(
     click.echo(f"    systemd units:        generated in {data_dir}")
 
     # 8. Generate launcher scripts
-    _generate_launcher_scripts(data_dir, sandbox_home, host_ip, app.cfg)
+    _generate_launcher_scripts(data_dir, sandbox_home, host_ip, sandbox_ip, app.cfg)
     click.echo(f"    launcher scripts:     generated in {data_dir}")
 
     # 9. Device pre-pairing
@@ -188,15 +240,35 @@ def setup_sandbox(
     else:
         click.echo("    device pairing:       manual (--no-auto-pair)")
 
-    # 10. Fix ownership and traversal — all files written above (openclaw.json
-    #     patch, paired.json, policy templates) were created as root. Restore
-    #     sandbox ownership so the OpenClaw process can read/write them.
-    #     Also ensure parent directories (e.g. /root/) have o+x so the sandbox
-    #     user can follow the symlink to the real OpenClaw home.
+    # 9b. Read the shared gateway.auth.token from openclaw.json.
+    #     This is the canonical auth token — device-auth.json is a client-side
+    #     cache used by the OpenClaw Node.js client, not by our Go gateway.
+    detected_token = (oc_json or {}).get("gateway", {}).get("auth", {}).get("token", "")
+
+    if detected_token:
+        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected_token, data_dir)
+        app.cfg.gateway.token = ""
+        app.cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        click.echo(f"    gateway.token:        detected ({_mask(detected_token)})")
+    else:
+        click.echo("    gateway.token:        not found (sidecar will auto-detect on connect)")
+
+    # 10a. Install CodeGuard skill into the sandbox-owned OpenClaw tree
+    _install_codeguard_to_sandbox(app.cfg, sandbox_home)
+
+    # 10b. Install guardrail plugin into the sandbox-owned OpenClaw extensions
+    if app.cfg.guardrail.enabled:
+        _install_guardrail_plugin_to_sandbox(sandbox_home)
+
+    # 11. Fix ownership and traversal — all files written above (openclaw.json
+    #     patch, paired.json, policy templates) were created as the invoking
+    #     user.  Restore sandbox ownership so the OpenClaw process can
+    #     read/write them.  Also ensure parent directories (e.g. /root/) have
+    #     o+x so the sandbox user can follow the symlink to the real OpenClaw home.
     oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
     try:
         subprocess.run(
-            ["chown", "-R", "sandbox:sandbox", oc_target],
+            [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
             capture_output=True, check=False,
         )
     except FileNotFoundError:
@@ -205,15 +277,29 @@ def setup_sandbox(
     from defenseclaw.commands.cmd_init_sandbox import _ensure_parent_traversal
     _ensure_parent_traversal(oc_target)
 
-    # 11. Save config
+    # 12. Add invoking user to sandbox group so the gateway watcher can
+    #     observe skill/extension directories owned by sandbox:sandbox.
+    _add_user_to_sandbox_group()
+    _grant_watcher_acls(sandbox_home, app.cfg)
+
+    # 13. Save config
     app.cfg.save()
 
-    # 12. Install systemd units and launcher scripts (if systemd present)
+    # 14. Stop host-side OpenClaw — the sandbox will run its own instance.
+    #     Leaving the host one running causes duplicate openclaw-gateway
+    #     processes and token conflicts.
+    _stop_host_openclaw()
+
+    # 15. Install systemd units and launcher scripts (if systemd present)
     has_systemd = shutil.which("systemctl") is not None
     installed = _install_systemd_units(data_dir) if has_systemd else False
 
-    # 13. Generate convenience run-sandbox.sh for non-systemd environments
+    # 16. Generate convenience run-sandbox.sh for non-systemd environments
     _generate_run_sandbox_script(data_dir, host_ip, app.cfg)
+
+    # 17. Fix data_dir ownership — files written by root (systemd units,
+    #     scripts, config) should be owned by the invoking user.
+    _fix_data_dir_ownership(data_dir)
 
     click.echo()
     click.echo("  ── Summary ───────────────────────────────────────────")
@@ -225,11 +311,18 @@ def setup_sandbox(
         click.echo("  ✓ Systemd units installed and daemon reloaded")
         click.echo()
         click.echo("  Next steps:")
-        click.echo("    1. Run 'defenseclaw setup guardrail' to configure LLM interception")
-        click.echo(f"       (will set baseUrl to http://{host_ip}:{app.cfg.guardrail.port})")
-        click.echo()
-        click.echo("    2. Start the sandbox:")
+        click.echo("    1. Start the sandbox:")
         click.echo("       sudo systemctl start defenseclaw-sandbox.target")
+        click.echo()
+        click.echo("    2. (Re)start the gateway:")
+        click.echo("       defenseclaw-gateway start")
+        click.echo()
+        click.echo("  Stop:")
+        click.echo("       sudo systemctl stop defenseclaw-sandbox.target")
+        click.echo()
+        click.echo("  Logs:")
+        click.echo("       sudo journalctl -u openshell-sandbox -f")
+        click.echo(f"       {data_dir}/gateway.log")
     elif has_systemd:
         click.echo("  ⚠ Systemd units were generated but could not be installed automatically.")
         click.echo(f"    Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
@@ -243,23 +336,30 @@ def setup_sandbox(
         click.echo("       sudo chmod +x /usr/local/lib/defenseclaw/*.sh")
         click.echo("       sudo systemctl daemon-reload")
         click.echo()
-        click.echo("    2. Run 'defenseclaw setup guardrail' to configure LLM interception")
-        click.echo(f"       (will set baseUrl to http://{host_ip}:{app.cfg.guardrail.port})")
-        click.echo()
-        click.echo("    3. Start the sandbox:")
+        click.echo("    2. Start the sandbox:")
         click.echo("       sudo systemctl start defenseclaw-sandbox.target")
+        click.echo()
+        click.echo("    3. (Re)start the gateway:")
+        click.echo("       defenseclaw-gateway start")
+        click.echo()
+        click.echo("  Stop:")
+        click.echo("       sudo systemctl stop defenseclaw-sandbox.target")
+        click.echo()
+        click.echo("  Logs:")
+        click.echo("       sudo journalctl -u openshell-sandbox -f")
+        click.echo(f"       {data_dir}/gateway.log")
     else:
         click.echo("  ℹ No systemd detected (container/minimal environment).")
         click.echo()
         click.echo("  Next steps:")
-        click.echo("    1. Run 'defenseclaw setup guardrail' to configure LLM interception")
-        click.echo(f"       (will set baseUrl to http://{host_ip}:{app.cfg.guardrail.port})")
-        click.echo()
-        click.echo("    2. Start the sandbox manually:")
+        click.echo("    1. Start the sandbox manually:")
         click.echo(f"       sudo {data_dir}/scripts/run-sandbox.sh")
         click.echo()
-        click.echo("    To stop:")
+        click.echo("  Stop:")
         click.echo(f"       sudo {data_dir}/scripts/run-sandbox.sh stop")
+        click.echo()
+        click.echo("  Logs:")
+        click.echo(f"       {data_dir}/gateway.log")
     click.echo()
 
 
@@ -296,7 +396,7 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
     # Restore ownership
     try:
         result = subprocess.run(
-            ["chown", "-R", f"{uid}:{gid}", openclaw_home],
+            [*_sudo_prefix(), "chown", "-R", f"{uid}:{gid}", openclaw_home],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -327,20 +427,24 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
         if mode_int & 0o002:
             click.echo(f"  Traversal:     skipping world-writable mode {orig_mode}")
             continue
-        try:
-            os.chmod(real_ppath, mode_int)
+        result = subprocess.run(
+            [*_sudo_prefix(), "chmod", oct(mode_int)[-4:], real_ppath],
+            capture_output=True, check=False,
+        )
+        if result.returncode == 0:
             click.echo(f"  Traversal:     restored {ppath} to {orig_mode}")
-        except OSError:
-            pass
 
     # Remove symlink from sandbox home
     symlink_path = os.path.join(sandbox_home, ".openclaw")
     if os.path.islink(symlink_path):
-        try:
-            os.remove(symlink_path)
+        result = subprocess.run(
+            [*_sudo_prefix(), "rm", "-f", symlink_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
             click.echo(f"  Symlink:       removed {symlink_path}")
-        except OSError as exc:
-            click.echo(f"  Symlink:       remove failed ({exc})")
+        else:
+            click.echo(f"  Symlink:       remove failed ({result.stderr.strip()})")
 
     # Remove backup file
     try:
@@ -353,12 +457,29 @@ def _disable_sandbox(app: AppContext) -> None:
     """Revert to host mode: restore OpenClaw ownership, clean up symlink, reset config."""
     sandbox_home = app.cfg.openshell.effective_sandbox_home()
 
-    # Restore gateway config in openclaw.json BEFORE removing the symlink
+    # Capture current sandbox IPs/port before resetting config.
+    # gateway.host may already be reset to 127.0.0.1 if --disable ran before,
+    # so fall back to the well-known default sandbox IP.
+    cfg_host = app.cfg.gateway.host
+    sandbox_ip = cfg_host if cfg_host not in ("127.0.0.1", "localhost", "") else "10.200.0.2"
+    openclaw_port = int(app.cfg.gateway.port)
+
+    # 1. Stop and disable systemd units
+    _disable_systemd_units()
+
+    # 2. Remove iptables rules
+    if app.cfg.openshell.host_networking:
+        _remove_iptables_rules(sandbox_ip, openclaw_port)
+
+    # 3. Restore gateway config in openclaw.json BEFORE removing the symlink
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
-    if os.path.isfile(oc_config):
+    oc_exists = subprocess.run(
+        [*_sudo_prefix(), "test", "-f", oc_config], capture_output=True,
+    ).returncode == 0
+    if oc_exists:
         _restore_openclaw_gateway(oc_config)
 
-    # Restore original OpenClaw ownership and remove symlink
+    # 4. Restore original OpenClaw ownership and remove symlink
     _restore_openclaw_ownership(app.cfg.data_dir, sandbox_home)
 
     app.cfg.openshell.mode = ""
@@ -374,75 +495,357 @@ def _disable_sandbox(app: AppContext) -> None:
     click.echo("  Re-run 'defenseclaw setup guardrail' to update openclaw.json baseUrl.")
 
 
+def _disable_systemd_units() -> None:
+    """Stop and disable sandbox systemd units."""
+    units = ["defenseclaw-sandbox.target", "openshell-sandbox.service"]
+    for unit in units:
+        subprocess.run(
+            [*_sudo_prefix(), "systemctl", "stop", unit],
+            capture_output=True, check=False,
+        )
+        subprocess.run(
+            [*_sudo_prefix(), "systemctl", "disable", unit],
+            capture_output=True, check=False,
+        )
+    subprocess.run(
+        [*_sudo_prefix(), "systemctl", "daemon-reload"],
+        capture_output=True, check=False,
+    )
+    click.echo("  Systemd:       sandbox units stopped and disabled")
+
+
+def _remove_iptables_rules(sandbox_ip: str, openclaw_port: int) -> None:
+    """Remove iptables NAT rules added during sandbox setup."""
+    rules = [
+        ["-t", "nat", "-D", "OUTPUT", "-d", "127.0.0.1",
+         "-p", "tcp", "--dport", str(openclaw_port),
+         "-j", "DNAT", "--to-destination", f"{sandbox_ip}:{openclaw_port}"],
+        ["-t", "nat", "-D", "POSTROUTING", "-d", sandbox_ip,
+         "-p", "tcp", "--dport", str(openclaw_port),
+         "-j", "MASQUERADE"],
+        ["-t", "nat", "-D", "POSTROUTING", "-s", "10.200.0.0/24",
+         "-p", "udp", "--dport", "53",
+         "-j", "MASQUERADE"],
+    ]
+    removed = 0
+    for rule in rules:
+        result = subprocess.run(
+            [*_sudo_prefix(), "iptables", *rule],
+            capture_output=True, check=False,
+        )
+        if result.returncode == 0:
+            removed += 1
+    subprocess.run(
+        [*_sudo_prefix(), "sysctl", "-w", "net.ipv4.conf.all.route_localnet=0"],
+        capture_output=True, check=False,
+    )
+    if removed > 0:
+        click.echo(f"  iptables:      removed {removed} NAT rules")
+    else:
+        click.echo("  iptables:      clean (already removed by sandbox shutdown)")
+
+
 def _validate_sandbox_prerequisites(sandbox_home: str) -> None:
-    """Check that required prerequisites exist."""
+    """Check that required prerequisites exist; abort if missing."""
     import pwd
+    missing: list[str] = []
     try:
         pwd.getpwnam("sandbox")
     except KeyError:
-        click.echo("  WARNING: 'sandbox' user not found. Run 'defenseclaw sandbox init' first.", err=True)
+        missing.append("'sandbox' user not found")
 
     if not os.path.isdir(sandbox_home):
-        click.echo(f"  WARNING: sandbox home {sandbox_home} does not exist.", err=True)
+        missing.append(f"sandbox home {sandbox_home} does not exist")
+
+    if missing:
+        detail = "\n  ".join(f"- {m}" for m in missing)
+        raise click.ClickException(
+            f"Sandbox not initialized. Run 'defenseclaw sandbox init' first.\n  {detail}"
+        )
 
 
-def _patch_openclaw_gateway(openclaw_config: str, port: int) -> bool:
+def _add_user_to_sandbox_group() -> None:
+    """Add the invoking user to the sandbox group.
+
+    This lets the gateway's file watcher (running as the invoking user)
+    read skill/extension directories owned by sandbox:sandbox.
+    """
+    sudo_user = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
+    if not sudo_user or sudo_user in ("root", "sandbox"):
+        return
+
+    import grp
+    try:
+        members = grp.getgrnam("sandbox").gr_mem
+    except KeyError:
+        return
+
+    if sudo_user in members:
+        return
+
+    result = subprocess.run(
+        [*_sudo_prefix(), "usermod", "-aG", "sandbox", sudo_user],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        click.echo(f"    group membership:    {sudo_user} added to sandbox group")
+        msg = click.style("(log out and back in for this to take effect)", fg="green")
+        click.echo(f"                         {msg}")
+    else:
+        click.echo(f"    group membership:    failed ({result.stderr.strip()})", err=True)
+
+
+def _grant_watcher_acls(sandbox_home: str, cfg) -> None:
+    """Grant the invoking user read+execute ACLs on sandbox directories.
+
+    The gateway watcher runs as the invoking user and needs to traverse
+    sandbox-owned directories to watch for skill/plugin changes. Group
+    membership alone requires a re-login; setfacl takes effect immediately.
+    """
+    sudo_user = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
+    if not sudo_user or sudo_user in ("root", "sandbox"):
+        return
+
+    if not shutil.which("setfacl"):
+        return
+
+    oc_home = os.path.join(sandbox_home, ".openclaw")
+    dirs = [
+        sandbox_home,
+        oc_home,
+        os.path.join(oc_home, "skills"),
+        os.path.join(oc_home, "workspace"),
+        os.path.join(oc_home, "workspace", "skills"),
+        os.path.join(oc_home, "extensions"),
+    ]
+    # The gateway also needs to read openclaw.json for skill dir autodiscovery
+    files = [
+        os.path.join(oc_home, "openclaw.json"),
+    ]
+
+    granted = 0
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        result = subprocess.run(
+            [*_sudo_prefix(), "setfacl", "-m", f"u:{sudo_user}:rx,m::rx", d],
+            capture_output=True, check=False,
+        )
+        if result.returncode == 0:
+            granted += 1
+    for f in files:
+        if not os.path.isfile(f):
+            continue
+        result = subprocess.run(
+            [*_sudo_prefix(), "setfacl", "-m", f"u:{sudo_user}:r,m::r", f],
+            capture_output=True, check=False,
+        )
+        if result.returncode == 0:
+            granted += 1
+    if granted:
+        click.echo(f"    watcher ACLs:        granted read access on {granted} paths")
+
+
+def _stop_host_openclaw() -> None:
+    """Stop the host-side OpenClaw gateway before the sandbox starts its own.
+
+    Only targets processes owned by the invoking user (SUDO_USER or USER),
+    never the sandbox user's processes.
+    """
+    sudo_user = os.environ.get("SUDO_USER") or os.environ.get("USER", "")
+    if not sudo_user or sudo_user in ("root", "sandbox"):
+        return
+
+    result = subprocess.run(
+        ["pgrep", "-u", sudo_user, "-f", "openclaw-gateway"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+
+    openclaw_bin = _find_openclaw_binary()
+    if not openclaw_bin:
+        return
+
+    # Always run as the original user — we're stopping *their* gateway,
+    # and we may be running as root via sudo.
+    run_as = ["sudo", "-u", sudo_user] if os.getuid() == 0 else []
+    try:
+        subprocess.run(
+            [*run_as, openclaw_bin, "gateway", "stop"],
+            capture_output=True, timeout=10,
+        )
+        click.echo("    host openclaw:       stopped (sandbox will run its own)")
+    except subprocess.TimeoutExpired:
+        click.echo("    host openclaw:       stop timed out (kill manually if needed)")
+
+
+def _install_codeguard_to_sandbox(cfg, sandbox_home: str) -> None:
+    """Install CodeGuard skill into the sandbox-owned OpenClaw skills directory.
+
+    Uses sudo because ~/.openclaw/ is owned by sandbox:sandbox at this point.
+    The caller is responsible for chowning the tree afterward.
+    """
+    from defenseclaw.paths import bundled_codeguard_dir
+
+    source_dir = bundled_codeguard_dir()
+    if not source_dir.is_dir() or not (source_dir / "SKILL.md").is_file():
+        click.echo("    codeguard:           skipped (skill source not found)")
+        return
+
+    skill_dirs = cfg.skill_dirs()
+    if not skill_dirs:
+        click.echo("    codeguard:           skipped (no skill directories)")
+        return
+
+    target_dir = os.path.join(skill_dirs[0], "codeguard")
+    subprocess.run(
+        [*_sudo_prefix(), "mkdir", "-p", skill_dirs[0]],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        [*_sudo_prefix(), "rm", "-rf", target_dir],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        [*_sudo_prefix(), "cp", "-r", str(source_dir), target_dir],
+        capture_output=True, check=False,
+    )
+
+    oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
+    oc_json = _sudo_read_json(oc_config)
+    if oc_json is not None:
+        skills = oc_json.setdefault("skills", {})
+        entries = skills.setdefault("entries", {})
+        entries["codeguard"] = {"enabled": True}
+        content = _json.dumps(oc_json, indent=2, ensure_ascii=False) + "\n"
+        _sudo_write(content, oc_config)
+
+    click.echo(f"    codeguard:           installed to {target_dir}")
+
+
+def _install_guardrail_plugin_to_sandbox(sandbox_home: str) -> None:
+    """Install the DefenseClaw guardrail plugin into the sandbox OpenClaw extensions.
+
+    Copies the plugin files and registers it in openclaw.json so OpenClaw
+    routes LLM traffic through the guardrail proxy.
+    """
+    from defenseclaw.paths import bundled_extensions_dir
+
+    source_dir = bundled_extensions_dir()
+    if not source_dir.is_dir() or not (source_dir / "package.json").is_file():
+        click.echo("    guardrail plugin:    skipped (plugin source not found)")
+        return
+
+    oc_ext = os.path.join(sandbox_home, ".openclaw", "extensions", "defenseclaw")
+    subprocess.run(
+        [*_sudo_prefix(), "mkdir", "-p", os.path.dirname(oc_ext)],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        [*_sudo_prefix(), "rm", "-rf", oc_ext],
+        capture_output=True, check=False,
+    )
+    subprocess.run(
+        [*_sudo_prefix(), "cp", "-r", str(source_dir), oc_ext],
+        capture_output=True, check=False,
+    )
+
+    oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
+    oc_json = _sudo_read_json(oc_config)
+    if oc_json is not None:
+        plugins = oc_json.setdefault("plugins", {})
+        allow = plugins.setdefault("allow", [])
+        if "defenseclaw" not in allow:
+            allow.append("defenseclaw")
+        content = _json.dumps(oc_json, indent=2, ensure_ascii=False) + "\n"
+        _sudo_write(content, oc_config)
+
+    click.echo(f"    guardrail plugin:    installed to {oc_ext}")
+
+
+def _patch_openclaw_gateway(
+    openclaw_config: str, port: int, *, existing_cfg: dict | None = None,
+    host_ip: str = "10.200.0.1",
+) -> bool:
     """Patch gateway port and bind into openclaw.json for sandbox mode.
 
     Only sets mode/port/bind — the auth token is owned by OpenClaw and
-    never written by DefenseClaw.
+    never written by DefenseClaw.  Also rewrites the guardrail provider
+    baseUrl from localhost → host_ip so the sandbox can reach the proxy.
     """
-    try:
-        st = os.stat(openclaw_config)
-        with open(openclaw_config) as f:
-            cfg = _json.load(f)
-    except (OSError, _json.JSONDecodeError):
-        return False
+    if existing_cfg is not None:
+        import copy
+        cfg = copy.deepcopy(existing_cfg)
+    else:
+        cfg = _sudo_read_json(openclaw_config)
+        if cfg is None:
+            return False
 
     gw = cfg.setdefault("gateway", {})
     gw["mode"] = "local"
     gw["port"] = port
     gw["bind"] = "lan"
 
-    with open(openclaw_config, "w") as f:
-        _json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    dc_provider = cfg.get("models", {}).get("providers", {}).get("defenseclaw", {})
+    if dc_provider and "baseUrl" in dc_provider:
+        from urllib.parse import urlparse
+        parsed = urlparse(dc_provider["baseUrl"])
+        dc_provider["baseUrl"] = f"http://{host_ip}:{parsed.port or 4000}"
 
-    try:
-        import pwd as _pwd
-        sb = _pwd.getpwnam("sandbox")
-        os.chown(openclaw_config, sb.pw_uid, sb.pw_gid)
-    except (KeyError, OSError):
-        try:
-            os.chown(openclaw_config, st.st_uid, st.st_gid)
-        except OSError:
-            pass
+    content = _json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+    if _needs_sudo():
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        subprocess.run([*_sudo_prefix(), "cp", tmp_path, openclaw_config],
+                       capture_output=True, check=False)
+        os.unlink(tmp_path)
+    else:
+        with open(openclaw_config, "w") as f:
+            f.write(content)
+
+    subprocess.run(
+        [*_sudo_prefix(), "chown", "sandbox:sandbox", openclaw_config],
+        capture_output=True, check=False,
+    )
     return True
 
 
 def _restore_openclaw_gateway(openclaw_config: str) -> bool:
-    """Remove gateway.* fields from openclaw.json."""
-    try:
-        st = os.stat(openclaw_config)
-        with open(openclaw_config) as f:
-            cfg = _json.load(f)
-    except (OSError, _json.JSONDecodeError):
+    """Restore gateway defaults in openclaw.json after sandbox mode."""
+    cfg = _sudo_read_json(openclaw_config)
+    if cfg is None:
         return False
 
     gw = cfg.get("gateway", {})
-    for key in ("mode", "port", "bind", "token"):
-        gw.pop(key, None)
-    auth = gw.get("auth", {})
-    auth.pop("token", None)
+    gw["mode"] = "local"
+    gw["port"] = 18789
+    gw["bind"] = "loopback"
 
-    with open(openclaw_config, "w") as f:
-        _json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    dc_provider = cfg.get("models", {}).get("providers", {}).get("defenseclaw", {})
+    if dc_provider and "baseUrl" in dc_provider:
+        from urllib.parse import urlparse
+        parsed = urlparse(dc_provider["baseUrl"])
+        dc_provider["baseUrl"] = f"http://localhost:{parsed.port or 4000}"
 
-    try:
-        os.chown(openclaw_config, st.st_uid, st.st_gid)
-    except OSError:
-        pass
+    content = _json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+    if _needs_sudo():
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        subprocess.run([*_sudo_prefix(), "cp", tmp_path, openclaw_config],
+                       capture_output=True, check=False)
+        os.unlink(tmp_path)
+    else:
+        with open(openclaw_config, "w") as f:
+            f.write(content)
+
+    # Ownership is restored by _restore_openclaw_ownership, not here.
     return True
 
 
@@ -536,36 +939,9 @@ SyslogIdentifier=openshell-sandbox
 WantedBy=defenseclaw-sandbox.target
 """
 
-    sidecar_unit = f"""[Unit]
-Description=DefenseClaw Gateway Sidecar
-Documentation=https://github.com/defenseclaw/defenseclaw
-After=openshell-sandbox.service
-Wants=openshell-sandbox.service
-
-[Service]
-Type=exec
-ExecStart=/usr/local/bin/defenseclaw-gateway run
-
-Restart=on-failure
-RestartSec=3
-RestartMaxDelaySec=30
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=defenseclaw-gateway
-
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths="{data_dir}"
-ReadOnlyPaths="{sandbox_home}/.openclaw"
-
-[Install]
-WantedBy=defenseclaw-sandbox.target
-"""
-
     target_unit = """[Unit]
-Description=DefenseClaw Sandbox (sandbox + sidecar)
-Wants=openshell-sandbox.service defenseclaw-gateway.service
+Description=DefenseClaw Sandbox
+Wants=openshell-sandbox.service
 
 [Install]
 WantedBy=multi-user.target
@@ -573,8 +949,6 @@ WantedBy=multi-user.target
 
     with open(os.path.join(systemd_dir, "openshell-sandbox.service"), "w") as f:
         f.write(sandbox_unit)
-    with open(os.path.join(systemd_dir, "defenseclaw-gateway.service"), "w") as f:
-        f.write(sidecar_unit)
     with open(os.path.join(systemd_dir, "defenseclaw-sandbox.target"), "w") as f:
         f.write(target_unit)
 
@@ -585,7 +959,6 @@ def _install_systemd_units(data_dir: str) -> bool:
     Returns True if all steps succeeded.
     """
     import glob
-    import shutil
 
     systemd_src = os.path.join(data_dir, "systemd")
     scripts_src = os.path.join(data_dir, "scripts")
@@ -596,20 +969,25 @@ def _install_systemd_units(data_dir: str) -> bool:
         click.echo("    systemd install:     skipped (units not generated)")
         return False
 
+    sudo = _sudo_prefix()
     try:
         for f in glob.glob(os.path.join(systemd_src, "*.service")) + \
                  glob.glob(os.path.join(systemd_src, "*.target")):
-            shutil.copy2(f, systemd_dst)
+            subprocess.run([*sudo, "cp", f, systemd_dst],
+                           capture_output=True, check=True)
 
-        os.makedirs(scripts_dst, exist_ok=True)
+        subprocess.run([*sudo, "mkdir", "-p", scripts_dst],
+                       capture_output=True, check=True)
         if os.path.isdir(scripts_src):
             for f in glob.glob(os.path.join(scripts_src, "*.sh")):
-                shutil.copy2(f, scripts_dst)
-                os.chmod(os.path.join(scripts_dst, os.path.basename(f)), 0o755)
+                subprocess.run([*sudo, "cp", f, scripts_dst],
+                               capture_output=True, check=True)
+                subprocess.run([*sudo, "chmod", "755",
+                                os.path.join(scripts_dst, os.path.basename(f))],
+                               capture_output=True, check=False)
 
-        import subprocess
         subprocess.run(
-            ["systemctl", "daemon-reload"],
+            [*sudo, "systemctl", "daemon-reload"],
             capture_output=True, check=True,
         )
         click.echo("    systemd install:     units and scripts installed")
@@ -629,21 +1007,23 @@ def _generate_launcher_scripts(
     data_dir: str,
     sandbox_home: str,
     host_ip: str,
+    sandbox_ip: str,
     cfg,
 ) -> None:
     """Generate launcher shell scripts for the sandbox lifecycle.
 
-    Reads ``cfg.openshell.dns_override`` and ``cfg.guardrail.enabled`` to
-    conditionally include DNS plumbing and guardrail iptables rules.
+    Reads ``cfg.openshell.host_networking`` and ``cfg.guardrail.enabled`` to
+    conditionally include DNS plumbing, UI forwarding, and guardrail iptables rules.
     """
     scripts_dir = os.path.join(data_dir, "scripts")
     os.makedirs(scripts_dir, exist_ok=True)
 
-    dns_override = cfg.openshell.dns_override
+    host_networking = cfg.openshell.host_networking
     guardrail_enabled = cfg.guardrail.enabled
 
     api_port = int(cfg.gateway.api_port)
     guardrail_port = int(cfg.guardrail.port)
+    openclaw_port = int(cfg.gateway.port)
 
     q_sandbox_home = shlex.quote(sandbox_home)
     q_data_dir = shlex.quote(data_dir)
@@ -729,8 +1109,8 @@ if [ -f "$SANDBOX_HOME/.openclaw/gateway.pid" ]; then
 fi
 """
 
-    # start-sandbox.sh: conditionally mount resolv.conf for DNS override
-    if dns_override:
+    # start-sandbox.sh: conditionally mount resolv.conf for DNS
+    if host_networking:
         start_sandbox_body = """\
 exec unshare --mount -- bash -c '
     mount --bind '"$RESOLV_FILE"' /etc/resolv.conf
@@ -766,12 +1146,12 @@ SANDBOX_HOME={q_sandbox_home}
 {start_sandbox_body}"""
 
     # post-sandbox.sh: conditionally inject DNS and guardrail iptables rules
-    needs_iptables = dns_override or guardrail_enabled
+    needs_iptables = host_networking or guardrail_enabled
 
     if needs_iptables:
         iptables_rules = ""
 
-        if dns_override:
+        if host_networking:
             iptables_rules += """
 for ns in $(grep '^nameserver' "$DEFENSECLAW_DIR/sandbox-resolv.conf" | awk '{print $2}'); do
     $NSENTER iptables -I OUTPUT 1 -p udp -d "$ns" --dport 53 -j ACCEPT 2>/dev/null || true
@@ -786,13 +1166,28 @@ $NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
 """
 
         masquerade_block = ""
-        if dns_override:
+        if host_networking:
             masquerade_block = """
 # MASQUERADE DNS on the HOST side so responses from external nameservers
 # route back to the sandbox IP (10.200.0.x).  Scoped to UDP port 53 only —
 # all other sandbox traffic goes through the OPA proxy.
 iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
     iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
+
+# Allow DNAT from localhost to non-loopback addresses (required for UI forwarding).
+sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
+
+# Forward localhost:OPENCLAW_PORT to the sandbox so the UI is accessible
+# from the host without SSH tunneling. Only local processes can reach this
+# (OUTPUT chain, not PREROUTING).
+iptables -t nat -C OUTPUT -d 127.0.0.1 -p tcp --dport "$OPENCLAW_PORT" \\
+    -j DNAT --to-destination "$SANDBOX_IP:$OPENCLAW_PORT" 2>/dev/null || \\
+    iptables -t nat -A OUTPUT -d 127.0.0.1 -p tcp --dport "$OPENCLAW_PORT" \\
+    -j DNAT --to-destination "$SANDBOX_IP:$OPENCLAW_PORT" 2>/dev/null || true
+iptables -t nat -C POSTROUTING -d "$SANDBOX_IP" -p tcp --dport "$OPENCLAW_PORT" \\
+    -j MASQUERADE 2>/dev/null || \\
+    iptables -t nat -A POSTROUTING -d "$SANDBOX_IP" -p tcp --dport "$OPENCLAW_PORT" \\
+    -j MASQUERADE 2>/dev/null || true
 """
 
         post_sandbox = f"""#!/bin/bash
@@ -800,8 +1195,10 @@ set -euo pipefail
 
 DEFENSECLAW_DIR={q_data_dir}
 HOST_IP={q_host_ip}
+SANDBOX_IP={shlex.quote(sandbox_ip)}
 API_PORT={api_port}
 GUARDRAIL_PORT={guardrail_port}
+OPENCLAW_PORT={openclaw_port}
 
 # Wait for the veth pair to come up
 for i in $(seq 1 30); do
@@ -848,8 +1245,25 @@ echo "Injected iptables rules via $NSENTER"
 exit 0
 """
 
-    cleanup_sandbox = """#!/bin/bash
-for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{print $1}'); do
+    cleanup_iptables = ""
+    if host_networking:
+        cleanup_iptables = f"""
+# Remove UI port forwarding rules
+iptables -t nat -D OUTPUT -d 127.0.0.1 -p tcp --dport {openclaw_port} \\
+    -j DNAT --to-destination {sandbox_ip}:{openclaw_port} 2>/dev/null || true
+iptables -t nat -D POSTROUTING -d {sandbox_ip} -p tcp --dport {openclaw_port} \\
+    -j MASQUERADE 2>/dev/null || true
+
+# Remove DNS MASQUERADE
+iptables -t nat -D POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
+
+# Restore route_localnet
+sysctl -w net.ipv4.conf.all.route_localnet=0 >/dev/null 2>&1 || true
+"""
+
+    cleanup_sandbox = f"""#!/bin/bash
+{cleanup_iptables}
+for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
     ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
 done
 
@@ -859,7 +1273,7 @@ done
 """
 
     # start-openclaw.sh: conditionally include DNS wait loop
-    if dns_override:
+    if host_networking:
         dns_wait = """\
 
 # Wait for DNS — iptables rules are injected by post-sandbox.sh after
@@ -872,6 +1286,9 @@ done
     else:
         dns_wait = ""
 
+    openclaw_bin = _find_openclaw_binary()
+    q_openclaw_bin = shlex.quote(openclaw_bin)
+
     start_openclaw = f"""#!/bin/bash
 set -euo pipefail
 
@@ -879,7 +1296,7 @@ export HTTPS_PROXY=http://{q_host_ip}:3128
 export HTTP_PROXY=http://{q_host_ip}:3128
 export NO_PROXY={q_host_ip}"${{NO_PROXY:+,$NO_PROXY}}"
 {dns_wait}
-exec openclaw gateway run
+exec {q_openclaw_bin} gateway run
 """
 
     for name, content in [
@@ -894,11 +1311,7 @@ exec openclaw gateway run
         os.chmod(path, 0o755)
 
     oc_script = os.path.join(sandbox_home, "start-openclaw.sh")
-    try:
-        with open(oc_script, "w") as f:
-            f.write(start_openclaw)
-        os.chmod(oc_script, 0o755)
-    except OSError:
+    if not _sudo_write(start_openclaw, oc_script, mode=0o755):
         click.echo(f"  WARNING: Could not write {oc_script}. Create it manually.", err=True)
 
 
@@ -1197,21 +1610,17 @@ def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
         "approvedAtMs": now_ms,
     }
 
-    os.makedirs(devices_dir, exist_ok=True)
-    with open(paired_path, "w") as f:
-        _json.dump(paired, f, indent=2)
-        f.write("\n")
+    sudo = _sudo_prefix()
+    subprocess.run([*sudo, "mkdir", "-p", devices_dir],
+                   capture_output=True, check=False)
 
-    # Ensure the sandbox user can read the paired device file
-    try:
-        import pwd as _pwd
-        import shutil
-        sandbox_uid = _pwd.getpwnam("sandbox").pw_uid
-        sandbox_gid = _pwd.getpwnam("sandbox").pw_gid
-        for d in [devices_dir, paired_path]:
-            shutil.chown(d, sandbox_uid, sandbox_gid)
-    except (KeyError, OSError):
-        pass
+    content = _json.dumps(paired, indent=2) + "\n"
+    _sudo_write(content, paired_path)
+
+    subprocess.run(
+        [*sudo, "chown", "-R", "sandbox:sandbox", devices_dir],
+        capture_output=True, check=False,
+    )
 
     return True
 
