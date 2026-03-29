@@ -104,11 +104,14 @@ func NewGuardrailProxy(
 		return nil, fmt.Errorf("proxy: guardrail.model is required")
 	}
 
-	// API key is no longer required at startup — the fetch interceptor in the
-	// OpenClaw plugin supplies the real provider key per-request from
-	// OpenClaw's auth-profiles.json. The primary provider is built with an
-	// empty key; resolveProvider will use the per-request key instead.
-	apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath) // may be empty — that's fine
+	// Resolve the API key. Try .env first, then fall back to reading the key
+	// directly from OpenClaw's auth-profiles.json (same source the fetch
+	// interceptor uses). This ensures the primary provider works even before
+	// OpenClaw is restarted to load the fetch interceptor plugin.
+	apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
+	if apiKey == "" {
+		apiKey = resolveKeyFromOpenClawProfiles(cfg.Model)
+	}
 	primary := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 
 	var cisco *CiscoInspectClient
@@ -405,14 +408,30 @@ func inferProviderFromURL(targetURL string) string {
 // When X-DC-Target-URL is present (set by the plugin's fetch interceptor),
 // it is used as the authoritative routing signal. Falls back to primary.
 func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
-	// Highest priority: target URL from fetch interceptor.
+	// Azure: detected via api-key header (req.TargetURL == "azure" sentinel).
+	if req.TargetURL == "azure" {
+		baseURL := os.Getenv("AZURE_OPENAI_ENDPOINT")
+		if baseURL == "" {
+			baseURL = ResolveAPIKey("AZURE_OPENAI_ENDPOINT", filepath.Join(p.dataDir, ".env"))
+		}
+		if baseURL == "" {
+			baseURL = "https://api.openai.azure.com"
+		}
+		return &azureOpenAIProvider{
+			model:   req.Model,
+			apiKey:  req.TargetAPIKey,
+			baseURL: baseURL,
+		}
+	}
+
+	// Fetch interceptor path: X-DC-Target-URL set by plugin.
 	if req.TargetURL != "" {
 		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
 			return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, "")
 		}
 	}
 
-	// Fall back: use pass-through key with model prefix if it's a real provider key.
+	// Real provider key passed through (not sk-dc-* master key).
 	prefix, _ := splitModel(req.Model)
 	if prefix != "" && req.TargetAPIKey != "" && !strings.HasPrefix(req.TargetAPIKey, "sk-dc-") {
 		return NewProviderWithBase(req.Model, req.TargetAPIKey, "")
@@ -455,9 +474,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// proxy the real upstream URL the request was originally destined for.
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
 
-	// Preserve the original Authorization header so it can be forwarded to
-	// the upstream when routing via the fetch interceptor path.
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+	// Preserve the auth header so it can be forwarded to the upstream.
+	// Azure uses "api-key" header; all others use "Authorization: Bearer".
+	if azureKey := r.Header.Get("api-key"); azureKey != "" {
+		req.TargetAPIKey = azureKey
+		req.TargetURL = "azure" // signal azureProvider routing
+	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(auth, "Bearer ")
 	}
 
@@ -929,6 +951,40 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 		return strings.TrimPrefix(auth, "Bearer ") == p.masterKey
 	}
 	return false
+}
+
+// resolveKeyFromOpenClawProfiles reads the API key for a given model's provider
+// from OpenClaw's auth-profiles.json (~/.openclaw/agents/main/agent/auth-profiles.json).
+// This is the same source the fetch interceptor uses, ensuring keys are always
+// sourced from OpenClaw without needing a separate .env entry.
+func resolveKeyFromOpenClawProfiles(model string) string {
+	providerName, _ := splitModel(model)
+	if providerName == "" {
+		providerName = inferProvider(model, "")
+	}
+	profileID := providerName + ":default"
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	profilesPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
+	data, err := os.ReadFile(profilesPath)
+	if err != nil {
+		return ""
+	}
+	var profiles struct {
+		Profiles map[string]struct {
+			Key string `json:"key"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(data, &profiles); err != nil {
+		return ""
+	}
+	if p, ok := profiles.Profiles[profileID]; ok && p.Key != "" {
+		return p.Key
+	}
+	return ""
 }
 
 // deriveMasterKey produces a deterministic master key from the device key
