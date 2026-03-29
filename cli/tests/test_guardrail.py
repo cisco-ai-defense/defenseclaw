@@ -1290,31 +1290,41 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         mock_restart.assert_called_once()
         self.assertNotIn("Restart services for changes to take effect", result.output)
 
-    @patch("defenseclaw.commands.cmd_setup._restart_services")
-    def test_disable_with_restart(self, mock_restart):
+    def test_disable_restarts_openclaw(self):
+        """Disabling always restarts OpenClaw gateway to unload the plugin."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
         self.app.cfg.guardrail.original_model = "anthropic/claude-opus-4-5"
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--disable", "--restart"],
-            obj=self.app,
-        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--disable"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_restart.assert_called_once()
+        # Verify openclaw gateway restart was attempted
+        calls = [str(c) for c in mock_run.call_args_list]
+        self.assertTrue(
+            any("openclaw" in c and "gateway" in c and "restart" in c for c in calls),
+            f"Expected openclaw gateway restart call. Got: {calls}"
+        )
+        self.assertIn("OpenClaw gateway restarted", result.output)
 
     def test_disable_without_restart_shows_instructions(self):
+        """--disable always restarts OpenClaw; no separate --restart flag needed."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--disable"],
-            obj=self.app,
-        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--disable"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("defenseclaw-gateway restart", result.output)
-        self.assertIn("openclaw gateway auto-reloads", result.output)
         self.assertIn("No original model on record", result.output)
+        self.assertIn("Restarting OpenClaw gateway", result.output)
 
     def test_help_shows_restart_option(self):
         from defenseclaw.commands.cmd_setup import setup

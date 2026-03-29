@@ -1108,12 +1108,6 @@ func (p *GuardrailProxy) applyRuntime(cfg map[string]string) {
 	if bm, ok := cfg["block_message"]; ok {
 		p.blockMessage = bm
 	}
-	// Hot-disable: when "enabled" is written as "false" to the runtime config
-	// (by `defenseclaw setup guardrail --disable`), the proxy stops inspecting
-	// and passes requests through transparently without a sidecar restart.
-	if en, ok := cfg["enabled"]; ok && en == "false" {
-		p.mode = "passthrough" // sentinel — handled in handleChatCompletion
-	}
 }
 
 // ---------------------------------------------------------------------------
