@@ -237,6 +237,17 @@ func splitModel(model string) (provider, modelID string) {
 	return "", model
 }
 
+// resolvePassThroughKey returns the API key to use for a request: if the
+// request carries a pass-through key (extracted from the incoming Authorization
+// header by the proxy), that takes priority; otherwise the provider's
+// configured key is used.
+func resolvePassThroughKey(passThrough, configured string) string {
+	if passThrough != "" {
+		return passThrough
+	}
+	return configured
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI provider — pass-through
 // ---------------------------------------------------------------------------
@@ -245,15 +256,6 @@ type openaiProvider struct {
 	model   string
 	apiKey  string
 	baseURL string
-}
-
-// resolveKey returns the API key for this request: prefer the pass-through key
-// from the incoming request, fall back to the provider's configured key.
-func (p *openaiProvider) resolveKey(req *ChatRequest) string {
-	if req.APIKey != "" {
-		return req.APIKey
-	}
-	return p.apiKey
 }
 
 // patchRawBody takes raw JSON bytes and overrides the "model" and "stream"
@@ -292,7 +294,7 @@ func (p *openaiProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.resolveKey(req))
+	httpReq.Header.Set("Authorization", "Bearer "+resolvePassThroughKey(req.APIKey, p.apiKey))
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -339,7 +341,7 @@ func (p *openaiProvider) ChatCompletionStream(ctx context.Context, req *ChatRequ
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.resolveKey(req))
+	httpReq.Header.Set("Authorization", "Bearer "+resolvePassThroughKey(req.APIKey, p.apiKey))
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -386,8 +388,16 @@ func readOpenAISSE(r io.Reader, cb func(StreamChunk)) (*ChatUsage, error) {
 // ---------------------------------------------------------------------------
 
 type anthropicProvider struct {
-	model  string
-	apiKey string
+	model   string
+	apiKey  string
+	baseURL string // optional override for tests; defaults to https://api.anthropic.com
+}
+
+func (p *anthropicProvider) endpoint() string {
+	if p.baseURL != "" {
+		return strings.TrimRight(p.baseURL, "/") + "/v1/messages"
+	}
+	return "https://api.anthropic.com/v1/messages"
 }
 
 type anthropicRequest struct {
@@ -441,16 +451,12 @@ func (p *anthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+		p.endpoint(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	apiKey := req.APIKey
-	if apiKey == "" {
-		apiKey = p.apiKey
-	}
-	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("x-api-key", resolvePassThroughKey(req.APIKey, p.apiKey))
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)
@@ -482,16 +488,12 @@ func (p *anthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatR
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+		p.endpoint(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	apiKey := req.APIKey
-	if apiKey == "" {
-		apiKey = p.apiKey
-	}
-	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("x-api-key", resolvePassThroughKey(req.APIKey, p.apiKey))
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)

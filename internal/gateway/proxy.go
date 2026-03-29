@@ -317,10 +317,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string) {
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (non-streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
-	p.rtMu.RLock()
-	provider := p.provider
-	p.rtMu.RUnlock()
-	resp, err := provider.ChatCompletion(r.Context(), req)
+	resp, err := p.provider.ChatCompletion(r.Context(), req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -388,10 +385,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	lastScanLen := 0
 	const scanInterval = 500
 
-	p.rtMu.RLock()
-	provider := p.provider
-	p.rtMu.RUnlock()
-	usage, err := provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
+	usage, err := p.provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
 		chunk.Model = aliasModel
 
 		// Accumulate content for post-stream inspection.

@@ -363,6 +363,37 @@ func TestAPIKeyPassThrough(t *testing.T) {
 			t.Errorf("Authorization = %q, want Bearer static-key", capturedAuth)
 		}
 	})
+
+	t.Run("anthropic_uses_request_key_when_set", func(t *testing.T) {
+		var capturedAPIKey string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedAPIKey = r.Header.Get("x-api-key")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "msg_01",
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]interface{}{{"type": "text", "text": "hi"}},
+				"model":   "claude-opus-4-6",
+				"stop_reason": "end_turn",
+				"usage": map[string]int{"input_tokens": 5, "output_tokens": 2},
+			})
+		}))
+		defer srv.Close()
+
+		p := &anthropicProvider{model: "claude-opus-4-6", apiKey: "static-ant-key", baseURL: srv.URL}
+		req := &ChatRequest{
+			Messages: []ChatMessage{{Role: "user", Content: "hello"}},
+			APIKey:   "pass-through-ant-key",
+		}
+		_, err := p.ChatCompletion(t.Context(), req)
+		if err != nil {
+			t.Fatalf("anthropicProvider ChatCompletion error: %v", err)
+		}
+		if capturedAPIKey != "pass-through-ant-key" {
+			t.Errorf("x-api-key = %q, want pass-through-ant-key", capturedAPIKey)
+		}
+	})
 }
 
 func TestProxyExtractsAPIKeyFromAuthHeader(t *testing.T) {
