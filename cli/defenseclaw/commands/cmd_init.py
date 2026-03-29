@@ -45,10 +45,11 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     Use --sandbox to set up openshell-sandbox standalone mode (Linux only).
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
+    import platform
+
     from defenseclaw.config import config_path, default_config, detect_environment, load
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
-    import platform
 
     if sandbox and platform.system() != "Linux":
         click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
