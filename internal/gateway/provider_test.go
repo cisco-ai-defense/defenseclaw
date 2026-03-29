@@ -396,6 +396,63 @@ func TestAPIKeyPassThrough(t *testing.T) {
 	})
 }
 
+func TestAzureProvider(t *testing.T) {
+	var capturedAPIKey, capturedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAPIKey = r.Header.Get("api-key")
+		capturedPath = r.URL.Path + "?" + r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "chatcmpl-1", "object": "chat.completion", "created": 1,
+			"model": "gpt-4o",
+			"choices": []map[string]interface{}{
+				{"index": 0, "message": map[string]string{"role": "assistant", "content": "hi"}, "finish_reason": "stop"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	t.Run("uses_api_key_header_not_bearer", func(t *testing.T) {
+		p := &azureProvider{
+			deployment: "my-gpt4o",
+			apiKey:     "static-azure-key",
+			baseURL:    srv.URL,
+			apiVersion: "2024-02-01",
+		}
+		req := &ChatRequest{
+			Messages: []ChatMessage{{Role: "user", Content: "hello"}},
+			APIKey:   "pass-through-azure-key",
+		}
+		_, err := p.ChatCompletion(t.Context(), req)
+		if err != nil {
+			t.Fatalf("ChatCompletion error: %v", err)
+		}
+		if capturedAPIKey != "pass-through-azure-key" {
+			t.Errorf("api-key = %q, want pass-through-azure-key", capturedAPIKey)
+		}
+		if !strings.Contains(capturedPath, "api-version=2024-02-01") {
+			t.Errorf("path %q missing api-version param", capturedPath)
+		}
+	})
+}
+
+func TestNewProvider_Azure(t *testing.T) {
+	p, err := NewProvider("azure/my-gpt4o", "azure-key")
+	if err != nil {
+		t.Fatalf("NewProvider error: %v", err)
+	}
+	ap, ok := p.(*azureProvider)
+	if !ok {
+		t.Fatalf("want azureProvider, got %T", p)
+	}
+	if ap.deployment != "my-gpt4o" {
+		t.Errorf("deployment = %q, want my-gpt4o", ap.deployment)
+	}
+	if ap.apiVersion != "2024-02-01" {
+		t.Errorf("apiVersion = %q, want 2024-02-01", ap.apiVersion)
+	}
+}
+
 func TestProxyExtractsAPIKeyFromAuthHeader(t *testing.T) {
 	var capturedKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

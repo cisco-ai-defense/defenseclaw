@@ -261,6 +261,7 @@ type GuardrailConfig struct {
 	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
 	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
 	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
+	AzureBaseURL  string      `mapstructure:"azure_base_url"  yaml:"azure_base_url"`
 	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`
 }
 
@@ -576,6 +577,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.scanner_mode", "local")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.block_message", "")
+	viper.SetDefault("guardrail.azure_base_url", "")
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)

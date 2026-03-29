@@ -180,6 +180,13 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "http://localhost:11434"}, nil
 	case "openai":
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
+	case "azure":
+		return &azureProvider{
+			deployment: modelID,
+			apiKey:     apiKey,
+			baseURL:    "https://api.openai.azure.com",
+			apiVersion: "2024-02-01",
+		}, nil
 	default:
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	}
@@ -381,6 +388,101 @@ func readOpenAISSE(r io.Reader, cb func(StreamChunk)) (*ChatUsage, error) {
 		cb(chunk)
 	}
 	return usage, scanner.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Azure OpenAI provider — api-key header, api-version query param
+// ---------------------------------------------------------------------------
+
+type azureProvider struct {
+	deployment string // Azure deployment name (the model name part after "azure/")
+	apiKey     string
+	baseURL    string // e.g. https://<resource>.openai.azure.com
+	apiVersion string // e.g. "2024-02-01"
+}
+
+func (p *azureProvider) endpoint() string {
+	return fmt.Sprintf("%s/openai/deployments/%s/chat/completions?api-version=%s",
+		strings.TrimRight(p.baseURL, "/"), p.deployment, p.apiVersion)
+}
+
+func (p *azureProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	var body []byte
+	var err error
+	if len(req.RawBody) > 0 {
+		body, err = patchRawBody(req.RawBody, p.deployment, false)
+	} else {
+		req.Model = p.deployment
+		req.Stream = false
+		body, err = json.Marshal(req)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("api-key", resolvePassThroughKey(req.APIKey, p.apiKey))
+
+	resp, err := providerHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("provider: azure upstream returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	rawResp, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure read response: %w", err)
+	}
+	var chatResp ChatResponse
+	if err := json.Unmarshal(rawResp, &chatResp); err != nil {
+		return nil, fmt.Errorf("provider: azure decode response: %w", err)
+	}
+	chatResp.RawResponse = rawResp
+	return &chatResp, nil
+}
+
+func (p *azureProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
+	var body []byte
+	var err error
+	if len(req.RawBody) > 0 {
+		body, err = patchRawBody(req.RawBody, p.deployment, true)
+	} else {
+		req.Model = p.deployment
+		req.Stream = true
+		body, err = json.Marshal(req)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("api-key", resolvePassThroughKey(req.APIKey, p.apiKey))
+
+	resp, err := providerHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("provider: azure stream request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("provider: azure upstream returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return readOpenAISSE(resp.Body, chunkCb)
 }
 
 // ---------------------------------------------------------------------------
