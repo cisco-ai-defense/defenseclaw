@@ -870,9 +870,21 @@ def execute_guardrail_setup(
     if gc.original_model:
         click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
 
-    # --- Step 4: No API key needed ---
-    # The plugin's fetch interceptor reads provider keys directly from
-    # OpenClaw's auth-profiles.json at runtime. No key storage required.
+    # --- Step 4: Auto-detect Azure endpoints and write to .env ---
+    # No provider API keys needed — the fetch interceptor reads them from
+    # OpenClaw's auth-profiles.json at runtime. Azure endpoints are the
+    # exception: they're customer-specific URLs we detect from openclaw.json
+    # and write to .env so the proxy knows where to forward Azure requests.
+    from defenseclaw.guardrail import detect_azure_endpoints
+    azure_endpoints = detect_azure_endpoints(app.cfg.claw.config_file)
+    if azure_endpoints:
+        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+        existing_dotenv = _load_dotenv(dotenv_path)
+        # Write the first Azure endpoint as AZURE_OPENAI_ENDPOINT
+        first_name, first_url = next(iter(azure_endpoints.items()))
+        existing_dotenv["AZURE_OPENAI_ENDPOINT"] = first_url
+        _write_dotenv(dotenv_path, existing_dotenv)
+        click.echo(f"  ✓ Azure endpoint saved: {first_url[:60]}...")
 
     # --- Step 5: Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
