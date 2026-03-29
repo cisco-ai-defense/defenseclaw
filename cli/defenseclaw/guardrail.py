@@ -60,28 +60,6 @@ def patch_openclaw_config(
     if "providers" not in cfg["models"]:
         cfg["models"]["providers"] = {}
 
-    # Save and patch ALL existing providers
-    original_providers = {}
-    for name, prov in list(cfg["models"]["providers"].items()):
-        if name in ("defenseclaw", "litellm"):
-            continue
-        original_providers[name] = prov.copy()
-        # Redirect to proxy
-        prov["baseUrl"] = f"http://localhost:{proxy_port}"
-        prov["apiKey"] = master_key
-
-    # Store originals in ~/.defenseclaw/ — NOT in openclaw.json which has
-    # strict schema validation and rejects unrecognized top-level keys.
-    dc_home = os.path.join(str(Path.home()), ".defenseclaw")
-    restore_path = os.path.join(dc_home, "original_providers.json")
-    if original_providers:
-        try:
-            os.makedirs(dc_home, exist_ok=True)
-            with open(restore_path, "w") as f:
-                json.dump(original_providers, f, indent=2)
-        except OSError:
-            pass
-
     # Add the defenseclaw provider (for the primary model alias)
     cfg["models"]["providers"]["defenseclaw"] = {
         "baseUrl": f"http://{guardrail_host}:{proxy_port}",
@@ -139,20 +117,6 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
     if original_model:
         cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
         cfg["agents"]["defaults"]["model"]["primary"] = original_model
-
-    # Restore original provider entries
-    # Read original providers from ~/.defenseclaw/ (not from openclaw.json).
-    restore_path = os.path.join(str(Path.home()), ".defenseclaw", "original_providers.json")
-    original_providers: dict = {}
-    try:
-        with open(restore_path) as f:
-            original_providers = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    if original_providers and "models" in cfg and "providers" in cfg["models"]:
-        for name, prov in original_providers.items():
-            cfg["models"]["providers"][name] = prov
 
     if "models" in cfg and "providers" in cfg["models"]:
         cfg["models"]["providers"].pop("defenseclaw", None)
@@ -316,30 +280,6 @@ def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     return primary, ""
 
 
-def detect_provider_configs(openclaw_config_file: str) -> dict[str, dict]:
-    """Read all provider configurations from openclaw.json.
-
-    Returns {provider_name: {"base_url": ..., "api_key": ..., "models": [...]}}.
-    """
-    path = _expand(openclaw_config_file)
-    try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-    providers = cfg.get("models", {}).get("providers", {})
-    result = {}
-    for name, prov in providers.items():
-        if name == "defenseclaw" or name == "litellm":
-            continue
-        result[name] = {
-            "base_url": prov.get("baseUrl", ""),
-            "api_key": prov.get("apiKey", ""),
-            "models": [m.get("id", "") for m in prov.get("models", [])],
-        }
-    return result
-
 
 def detect_api_key_env(model: str) -> str:
     """Guess the API key env var from the model string."""
@@ -384,26 +324,6 @@ def guess_provider(model: str) -> str:
         return "gemini"
     return ""
 
-
-def write_provider_configs(
-    data_dir: str,
-    provider_configs: dict[str, dict],
-    supported_providers: set[str],
-) -> None:
-    """Write guardrail_providers.json for the Go proxy to read."""
-    entries = {}
-    for name, cfg in provider_configs.items():
-        api_key_env = detect_api_key_env(name)
-        entries[name] = {
-            "base_url": cfg.get("base_url", ""),
-            "api_key_env": api_key_env,
-            "supported": name in supported_providers,
-        }
-
-    path = os.path.join(_expand(data_dir), "guardrail_providers.json")
-    with open(path, "w") as f:
-        json.dump(entries, f, indent=2, ensure_ascii=False)
-        f.write("\n")
 
 
 # ------------------------------------------------------------------

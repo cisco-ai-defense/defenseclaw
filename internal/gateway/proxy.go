@@ -74,8 +74,6 @@ type GuardrailProxy struct {
 	store     *audit.Store
 	dataDir   string
 
-	providers        map[string]LLMProvider
-	blockedProviders map[string]bool
 	primary          LLMProvider
 	inspector        ContentInspector
 	masterKey        string
@@ -112,38 +110,6 @@ func NewGuardrailProxy(
 
 	primary := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 
-	providers := map[string]LLMProvider{}
-	blockedProviders := map[string]bool{}
-
-	// Load multi-provider config if available.
-	provCfgPath := filepath.Join(dataDir, "guardrail_providers.json")
-	if data, err := os.ReadFile(provCfgPath); err == nil {
-		var provEntries map[string]struct {
-			BaseURL   string `json:"base_url"`
-			APIKeyEnv string `json:"api_key_env"`
-			Supported bool   `json:"supported"`
-		}
-		if json.Unmarshal(data, &provEntries) == nil {
-			for name, entry := range provEntries {
-				if !entry.Supported {
-					blockedProviders[name] = true
-					continue
-				}
-				key := ResolveAPIKey(entry.APIKeyEnv, dotenvPath)
-				if key == "" {
-					continue
-				}
-				providers[name] = NewProviderWithBase(name+"/placeholder", key, entry.BaseURL)
-			}
-		}
-	}
-
-	// Ensure primary provider prefix is in the map.
-	primaryPrefix, _ := splitModel(cfg.Model)
-	if primaryPrefix != "" {
-		providers[primaryPrefix] = primary
-	}
-
 	var cisco *CiscoInspectClient
 	if cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
@@ -156,19 +122,17 @@ func NewGuardrailProxy(
 	masterKey := deriveMasterKey(dataDir)
 
 	return &GuardrailProxy{
-		cfg:              cfg,
-		logger:           logger,
-		health:           health,
-		otel:             otel,
-		store:            store,
-		dataDir:          dataDir,
-		providers:        providers,
-		blockedProviders: blockedProviders,
-		primary:          primary,
-		inspector:        inspector,
-		masterKey:        masterKey,
-		mode:             cfg.Mode,
-		blockMessage:     cfg.BlockMessage,
+		cfg:          cfg,
+		logger:       logger,
+		health:       health,
+		otel:         otel,
+		store:        store,
+		dataDir:      dataDir,
+		primary:      primary,
+		inspector:    inspector,
+		masterKey:    masterKey,
+		mode:         cfg.Mode,
+		blockMessage: cfg.BlockMessage,
 	}, nil
 }
 
@@ -275,6 +239,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// OpenAI-compatible paths (e.g. /api/v1/chat/completions from OpenRouter)
+	// must use handleChatCompletion which has proper streaming SSE support.
+	// Passthrough's io.Copy doesn't flush, breaking streaming responses.
+	if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+		p.handleChatCompletion(w, r)
 		return
 	}
 
@@ -429,33 +401,22 @@ func inferProviderFromURL(targetURL string) string {
 }
 
 // resolveProvider selects the upstream LLMProvider for the given request.
-// When X-DC-Target-URL is present (set by the fetch interceptor), it is used
-// as the primary routing signal — overriding the model prefix — because it
-// reflects the real upstream URL regardless of which provider config OpenClaw
-// used. Falls back to model prefix, then primary provider.
+// When X-DC-Target-URL is present (set by the plugin's fetch interceptor),
+// it is used as the authoritative routing signal. Falls back to primary.
 func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 	// Highest priority: target URL from fetch interceptor.
 	if req.TargetURL != "" {
 		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
-			if _, blocked := p.blockedProviders[prefix]; blocked {
-				return nil
-			}
-			// Create provider on-the-fly using the key the fetch interceptor
-			// preserved from the original request's Authorization header.
 			return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, "")
 		}
 	}
 
-	// Fall back to model prefix.
+	// Fall back: use pass-through key with model prefix if it's a real provider key.
 	prefix, _ := splitModel(req.Model)
-	if prefix != "" {
-		if _, blocked := p.blockedProviders[prefix]; blocked {
-			return nil
-		}
-		if prov, ok := p.providers[prefix]; ok {
-			return prov
-		}
+	if prefix != "" && req.TargetAPIKey != "" && !strings.HasPrefix(req.TargetAPIKey, "sk-dc-") {
+		return NewProviderWithBase(req.Model, req.TargetAPIKey, "")
 	}
+
 	return p.primary
 }
 

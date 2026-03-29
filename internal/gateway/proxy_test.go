@@ -144,16 +144,14 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 	health := NewSidecarHealth()
 
 	return &GuardrailProxy{
-		cfg:              cfg,
-		logger:           logger,
-		health:           health,
-		store:            store,
-		dataDir:          t.TempDir(),
-		providers:        map[string]LLMProvider{},
-		blockedProviders: map[string]bool{},
-		primary:          prov,
-		inspector:        insp,
-		mode:             mode,
+		cfg:       cfg,
+		logger:    logger,
+		health:    health,
+		store:     store,
+		dataDir:   t.TempDir(),
+		primary:   prov,
+		inspector: insp,
+		mode:      mode,
 	}
 }
 
