@@ -23,10 +23,7 @@ for full details.
 ### Install DefenseClaw
 
 ```bash
-git clone https://github.com/defenseclaw/defenseclaw.git
-cd defenseclaw
-make build
-source .venv/bin/activate
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
 defenseclaw init --enable-guardrails
 ```
 
