@@ -887,7 +887,6 @@ def execute_guardrail_setup(
 def _interactive_guardrail_setup(app: AppContext, gc) -> None:
     from defenseclaw.guardrail import (
         KNOWN_PROVIDERS,
-        detect_api_key_env,
         detect_current_model,
         guess_provider,
         model_to_proxy_name,
