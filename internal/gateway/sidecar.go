@@ -76,9 +76,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	router.notify = notify
 
 	// Wire LLM judge for tool call injection detection if configured.
-	fmt.Fprintf(os.Stderr, "[sidecar] judge config: enabled=%v tool_injection=%v model=%q api_key_env=%q\n",
-		cfg.Guardrail.Judge.Enabled, cfg.Guardrail.Judge.ToolInjection,
-		cfg.Guardrail.Judge.Model, cfg.Guardrail.Judge.APIKeyEnv)
 	if cfg.Guardrail.Judge.Enabled && cfg.Guardrail.Judge.ToolInjection {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
 		judge := NewLLMJudge(&cfg.Guardrail.Judge, dotenvPath)
@@ -86,8 +83,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			router.SetJudge(judge)
 			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled for tool call inspection (model=%s)\n",
 				cfg.Guardrail.Judge.Model)
-		} else {
-			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge init returned nil (missing API key?)\n")
 		}
 	}
 
