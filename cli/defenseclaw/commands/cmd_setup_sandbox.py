@@ -927,9 +927,9 @@ ExecStart=/usr/local/lib/defenseclaw/start-sandbox.sh
 ExecStartPost=/usr/local/lib/defenseclaw/post-sandbox.sh
 ExecStopPost=/usr/local/lib/defenseclaw/cleanup-sandbox.sh
 
-Restart=on-failure
-RestartSec=5
-RestartMaxDelaySec=60
+Restart=always
+RestartSec=30
+RestartMaxDelaySec=120
 
 StandardOutput=journal
 StandardError=journal
