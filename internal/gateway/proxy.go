@@ -511,6 +511,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
 
+	// Hot-disabled: guardrail was turned off without sidecar restart.
+	// Return 503 so the fetch interceptor stops routing through the proxy.
+	if mode == "passthrough" {
+		http.Error(w, `{"error":{"message":"DefenseClaw guardrail is disabled","code":"guardrail_disabled"}}`,
+			http.StatusServiceUnavailable)
+		return
+	}
+
 	// --- Create invoke_agent root span for this request ---
 	var agentCtx context.Context
 	var agentSpan trace.Span
@@ -1099,6 +1107,12 @@ func (p *GuardrailProxy) applyRuntime(cfg map[string]string) {
 	}
 	if bm, ok := cfg["block_message"]; ok {
 		p.blockMessage = bm
+	}
+	// Hot-disable: when "enabled" is written as "false" to the runtime config
+	// (by `defenseclaw setup guardrail --disable`), the proxy stops inspecting
+	// and passes requests through transparently without a sidecar restart.
+	if en, ok := cfg["enabled"]; ok && en == "false" {
+		p.mode = "passthrough" // sentinel — handled in handleChatCompletion
 	}
 }
 

@@ -667,7 +667,10 @@ def setup_guardrail(
     gc = app.cfg.guardrail
 
     if disable:
-        _disable_guardrail(app, gc, restart=restart)
+        # Always restart on disable — leaving the proxy running defeats the
+        # purpose of disabling. The fetch interceptor also needs OpenClaw
+        # to restart (which happens automatically when openclaw.json changes).
+        _disable_guardrail(app, gc, restart=True)
         return
 
     aid = app.cfg.cisco_ai_defense
@@ -1107,6 +1110,10 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         click.echo(f"  ✗ Failed to save config: {exc}")
         warnings.append("Config not saved — guardrail may re-enable on next run")
 
+    # Write enabled=false to guardrail_runtime.json immediately so the running
+    # proxy hot-disables without waiting for a sidecar restart.
+    _write_guardrail_runtime(app.cfg.data_dir, gc)
+
     if warnings:
         click.echo()
         click.echo("  ── Manual steps required ─────────────────────────────")
@@ -1136,6 +1143,7 @@ def _write_guardrail_runtime(data_dir: str, gc) -> None:
 
     runtime_file = os.path.join(data_dir, "guardrail_runtime.json")
     payload = {
+        "enabled": "true" if gc.enabled else "false",
         "mode": gc.mode,
         "scanner_mode": gc.scanner_mode,
         "block_message": gc.block_message,
