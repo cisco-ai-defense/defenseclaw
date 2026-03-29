@@ -2,8 +2,8 @@ package sandbox
 
 // Endpoint represents a network endpoint with host and port.
 type Endpoint struct {
-	Host string
-	Port int
+	Host string `json:"host"`
+	Port int    `json:"port"`
 }
 
 // KnownChannelEndpoints maps OpenClaw channel names to their required network endpoints.

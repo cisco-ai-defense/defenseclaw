@@ -32,11 +32,12 @@ func runPolicyDiff(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("policy diff: openshell.mode is not 'standalone'")
 	}
 
-	// Load active policy
-	policyPath := filepath.Join(cfg.DataDir, "openshell-policy.yaml")
+	// Load active policy using config-driven path resolution
+	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
+	policyPath := shell.EffectivePolicyPath()
 	policyData, err := os.ReadFile(policyPath)
 	if err != nil {
-		return fmt.Errorf("policy diff: read policy: %w", err)
+		return fmt.Errorf("policy diff: read policy %s: %w", policyPath, err)
 	}
 
 	policy, err := sandbox.ParseOpenShellPolicy(policyData)
@@ -70,8 +71,8 @@ func runPolicyDiff(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 	if missing > 0 {
 		fmt.Printf("%d endpoint(s) missing from active policy.\n", missing)
-		fmt.Printf("Edit %s and run:\n", policyPath)
-		fmt.Println("  sudo systemctl restart openshell-sandbox.service")
+		fmt.Printf("Edit %s or use 'defenseclaw sandbox network allow'.\n", policyPath)
+		fmt.Println("Restart the sandbox for changes to take effect.")
 	} else {
 		fmt.Println("All discovered endpoints are covered by the active policy.")
 	}
