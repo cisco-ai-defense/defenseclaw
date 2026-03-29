@@ -267,11 +267,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Extract text for inspection. Both OpenAI and Anthropic formats have a
-	// top-level "messages" array — parse just enough to get the last user text.
+	// Extract text for inspection. Parse multiple API formats:
+	//  - Chat Completions: {"messages": [...]}
+	//  - Anthropic Messages: {"messages": [...], "system": "..."}
+	//  - OpenAI/Azure Responses API: {"input": [...] | "string"}
 	var partial struct {
-		Messages []ChatMessage `json:"messages"`
-		System   string        `json:"system,omitempty"`
+		Messages []ChatMessage   `json:"messages"`
+		System   string          `json:"system,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"` // Responses API
 	}
 	_ = json.Unmarshal(body, &partial)
 
@@ -287,6 +290,22 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	userText := lastUserText(partial.Messages)
 	if userText == "" && partial.System != "" {
 		userText = partial.System
+	}
+	// Responses API: input can be a string or array of message objects.
+	if userText == "" && len(partial.Input) > 0 {
+		if partial.Input[0] == '"' {
+			// Plain string input
+			_ = json.Unmarshal(partial.Input, &userText)
+		} else if partial.Input[0] == '[' {
+			// Array of messages — reuse the messages parser
+			var inputMsgs []ChatMessage
+			if json.Unmarshal(partial.Input, &inputMsgs) == nil {
+				userText = lastUserText(inputMsgs)
+				if len(partial.Messages) == 0 {
+					partial.Messages = inputMsgs
+				}
+			}
+		}
 	}
 
 	if userText != "" {
@@ -335,14 +354,28 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	defer resp.Body.Close()
 
-	// Stream response back to caller.
+	// Stream response back to caller with flushing for SSE/streaming responses.
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	if flusher, ok := w.(http.Flusher); ok {
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		_, _ = io.Copy(w, resp.Body)
+	}
 }
 
 func (p *GuardrailProxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
