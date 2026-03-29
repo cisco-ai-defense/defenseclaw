@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -188,6 +189,11 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/health/liveliness", p.handleHealth)
 	mux.HandleFunc("/health/readiness", p.handleHealth)
 	mux.HandleFunc("/health", p.handleHealth)
+	// Catch-all for provider-native paths (e.g. /v1/messages for Anthropic,
+	// /v1beta/models/*/generateContent for Gemini). The fetch interceptor
+	// preserves the original path; we inspect the content then forward verbatim
+	// to the real upstream from X-DC-Target-URL.
+	mux.HandleFunc("/", p.handlePassthrough)
 
 	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
 	logged := p.requestLogger(mux)
@@ -252,6 +258,107 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 				r.Method, r.URL.Path)
 		}
 	})
+}
+
+// handlePassthrough handles provider-native API paths (e.g. /v1/messages for
+// Anthropic, /v1beta/models/*/generateContent for Gemini) that the fetch
+// interceptor redirects to the proxy while preserving the original path.
+//
+// It extracts user-visible text for inspection, then forwards the entire
+// original request body and headers verbatim to the real upstream URL
+// (from X-DC-Target-URL + original path). No format translation is needed.
+func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		// GET on unknown paths (health probes, etc.) — just 200 OK.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	targetOrigin := r.Header.Get("X-DC-Target-URL")
+	if targetOrigin == "" {
+		// No target URL — not from the fetch interceptor; reject.
+		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+
+	// Extract text for inspection. Both OpenAI and Anthropic formats have a
+	// top-level "messages" array — parse just enough to get the last user text.
+	var partial struct {
+		Messages []ChatMessage `json:"messages"`
+		System   string        `json:"system,omitempty"`
+	}
+	_ = json.Unmarshal(body, &partial)
+
+	p.reloadRuntimeConfig()
+	p.rtMu.RLock()
+	mode := p.mode
+	customBlockMsg := p.blockMessage
+	p.rtMu.RUnlock()
+
+	userText := lastUserText(partial.Messages)
+	if userText == "" && partial.System != "" {
+		userText = partial.System
+	}
+
+	if userText != "" {
+		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, r.URL.Path, mode)
+		if verdict.Action == "block" && mode == "action" {
+			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			writeOpenAIError(w, http.StatusForbidden, msg)
+			return
+		}
+	}
+
+	// Forward verbatim to real upstream: reassemble original URL.
+	upstreamURL := strings.TrimRight(targetOrigin, "/") + r.URL.RequestURI()
+	upstreamKey := r.Header.Get("Authorization")
+
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
+		return
+	}
+
+	// Copy all original headers except the ones specific to the proxy hop.
+	for k, vs := range r.Header {
+		switch strings.ToLower(k) {
+		case "x-dc-target-url", "host":
+			continue
+		}
+		for _, v := range vs {
+			upstreamReq.Header.Add(k, v)
+		}
+	}
+	if upstreamKey != "" {
+		upstreamReq.Header.Set("Authorization", upstreamKey)
+	}
+
+	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", upstreamURL)
+	resp, err := providerHTTPClient.Do(upstreamReq)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	// Stream response back to caller.
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func (p *GuardrailProxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
