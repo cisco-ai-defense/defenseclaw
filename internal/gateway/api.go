@@ -1189,12 +1189,7 @@ func (a *APIServer) writeGuardrailRuntime() error {
 		return fmt.Errorf("api: no config available")
 	}
 	runtimeFile := filepath.Join(a.scannerCfg.DataDir, "guardrail_runtime.json")
-	enabled := "true"
-	if !a.scannerCfg.Guardrail.Enabled {
-		enabled = "false"
-	}
 	data, err := json.Marshal(map[string]string{
-		"enabled":       enabled,
 		"mode":          a.scannerCfg.Guardrail.Mode,
 		"scanner_mode":  a.scannerCfg.Guardrail.ScannerMode,
 		"block_message": a.scannerCfg.Guardrail.BlockMessage,
