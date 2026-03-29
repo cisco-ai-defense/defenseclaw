@@ -185,6 +185,12 @@ func inferProvider(model string, apiKey string) string {
 	if strings.HasPrefix(apiKey, "sk-ant-") {
 		return "anthropic"
 	}
+	if strings.HasPrefix(model, "gemini") {
+		return "gemini"
+	}
+	if strings.HasPrefix(apiKey, "AIza") {
+		return "gemini"
+	}
 	return "openai"
 }
 
@@ -199,9 +205,23 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) LLMProvide
 	return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
 }
 
+var knownProviders = map[string]bool{
+	"openai":        true,
+	"anthropic":     true,
+	"openrouter":    true,
+	"azure":         true,
+	"gemini":        true,
+	"gemini-openai": true,
+}
+
 func splitModel(model string) (provider, modelID string) {
-	if i := strings.IndexByte(model, '/'); i >= 0 {
-		return model[:i], model[i+1:]
+	i := strings.IndexByte(model, '/')
+	if i < 0 {
+		return "", model
+	}
+	prefix := model[:i]
+	if knownProviders[prefix] {
+		return prefix, model[i+1:]
 	}
 	return "", model
 }
