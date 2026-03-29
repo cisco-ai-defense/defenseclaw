@@ -78,15 +78,22 @@ export default function (api: PluginApi) {
 
   // ─── LLM fetch interceptor ───
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
-  // the guardrail proxy regardless of which provider/model OpenClaw uses.
-  const interceptor = createFetchInterceptor(sidecarConfig.guardrailPort);
-  api.registerService({
-    id: "llm-interceptor",
-    start: async () => {
-      interceptor.start();
-      return { stop: () => interceptor.stop() };
-    },
-  });
+  // the guardrail proxy. Only active when guardrail.enabled = true in
+  // ~/.defenseclaw/config.yaml. When the guardrail is disabled via
+  // `defenseclaw setup guardrail --disable`, the plugin entry itself is
+  // disabled in openclaw.json so the interceptor won't load on next restart.
+  if (sidecarConfig.guardrailEnabled) {
+    const interceptor = createFetchInterceptor(sidecarConfig.guardrailPort);
+    api.registerService({
+      id: "llm-interceptor",
+      start: async () => {
+        interceptor.start();
+        return { stop: () => interceptor.stop() };
+      },
+    });
+  } else {
+    console.log("[defenseclaw] guardrail disabled — LLM fetch interceptor not started");
+  }
 
   async function inspectTool(
     payload: Record<string, unknown>,
