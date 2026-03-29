@@ -457,9 +457,18 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// proxy the real upstream URL the request was originally destined for.
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
 
-	// Preserve the auth header so it can be forwarded to the upstream.
-	// Azure uses "api-key" header; all others use "Authorization: Bearer".
-	if azureKey := r.Header.Get("api-key"); azureKey != "" {
+	// Extract the LLM provider key for upstream forwarding.
+	//
+	// Priority order:
+	//  1. X-AI-Auth — set by the fetch interceptor with the real provider key.
+	//     Authorization stays as sk-dc-* for connection auth; X-AI-Auth carries
+	//     the actual LLM key. This separation supports remote DefenseClaw gateways
+	//     where the connection key must be validated independently of the LLM key.
+	//  2. api-key — Azure OpenAI sends its key in this header.
+	//  3. Authorization Bearer — fallback when fetch interceptor is not active.
+	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
+		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+	} else if azureKey := r.Header.Get("api-key"); azureKey != "" {
 		req.TargetAPIKey = azureKey
 		req.TargetURL = "azure" // signal azureProvider routing
 	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {

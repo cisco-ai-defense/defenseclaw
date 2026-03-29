@@ -48,6 +48,14 @@ const OLLAMA_PORTS = ["11434"];
 /** Header name the proxy reads to determine the real upstream URL. */
 export const TARGET_URL_HEADER = "X-DC-Target-URL";
 
+/**
+ * Header carrying the real LLM provider key to the proxy.
+ * Kept separate from Authorization so the original OpenClaw→DefenseClaw
+ * connection auth (sk-dc-* master key) is preserved for gateway auth,
+ * including future remote DefenseClaw gateway deployments.
+ */
+export const AI_AUTH_HEADER = "X-AI-Auth";
+
 function isLLMUrl(url: string, guardrailPort: number): boolean {
   if (LLM_DOMAINS.some(domain => url.includes(domain))) return true;
   // Ollama: localhost or 127.0.0.1 on known Ollama ports, but NOT the proxy port.
@@ -161,14 +169,20 @@ export function createFetchInterceptor(guardrailPort: number) {
       );
       headers.set(TARGET_URL_HEADER, original.origin);
 
-      // If the Authorization header is a defenseclaw master key (sk-dc-*),
-      // replace it with the real provider key from OpenClaw's auth-profiles.
-      // This happens when OpenClaw uses the "defenseclaw" provider entry.
-      const auth = headers.get("Authorization") ?? "";
-      if (auth.startsWith("Bearer sk-dc-")) {
-        const realKey = getRealKeyForUrl(urlStr);
-        if (realKey) {
-          headers.set("Authorization", `Bearer ${realKey}`);
+      // Inject the real LLM provider key as X-AI-Auth — a dedicated header
+      // separate from Authorization. This preserves the original sk-dc-* master
+      // key in Authorization for OpenClaw→DefenseClaw connection auth (including
+      // future remote gateway deployments), while giving the proxy the actual
+      // provider key it needs to call the upstream LLM.
+      const realKey = getRealKeyForUrl(urlStr);
+      if (realKey) {
+        headers.set(AI_AUTH_HEADER, `Bearer ${realKey}`);
+      } else {
+        // No cached key — forward original Authorization as X-AI-Auth so the
+        // proxy has it available (e.g. when OpenClaw sends the real key directly).
+        const existingAuth = headers.get("Authorization") ?? "";
+        if (existingAuth && !existingAuth.startsWith("Bearer sk-dc-")) {
+          headers.set(AI_AUTH_HEADER, existingAuth);
         }
       }
 
