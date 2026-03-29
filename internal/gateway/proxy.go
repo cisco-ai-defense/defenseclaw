@@ -53,9 +53,11 @@ type GuardrailProxy struct {
 	store     *audit.Store
 	dataDir   string
 
-	provider  LLMProvider
-	inspector ContentInspector
-	masterKey string
+	providers        map[string]LLMProvider
+	blockedProviders map[string]bool
+	primary          LLMProvider
+	inspector        ContentInspector
+	masterKey        string
 
 	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
 	// endpoint on the API server writes guardrail_runtime.json; the proxy
@@ -87,9 +89,38 @@ func NewGuardrailProxy(
 		return nil, fmt.Errorf("proxy: no API key available (set guardrail.api_key_env and provide the key in ~/.defenseclaw/.env or environment)")
 	}
 
-	provider, err := NewProvider(cfg.Model, apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: create provider: %w", err)
+	primary := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
+
+	providers := map[string]LLMProvider{}
+	blockedProviders := map[string]bool{}
+
+	// Load multi-provider config if available.
+	provCfgPath := filepath.Join(dataDir, "guardrail_providers.json")
+	if data, err := os.ReadFile(provCfgPath); err == nil {
+		var provEntries map[string]struct {
+			BaseURL   string `json:"base_url"`
+			APIKeyEnv string `json:"api_key_env"`
+			Supported bool   `json:"supported"`
+		}
+		if json.Unmarshal(data, &provEntries) == nil {
+			for name, entry := range provEntries {
+				if !entry.Supported {
+					blockedProviders[name] = true
+					continue
+				}
+				key := ResolveAPIKey(entry.APIKeyEnv, dotenvPath)
+				if key == "" {
+					continue
+				}
+				providers[name] = NewProviderWithBase(name+"/placeholder", key, entry.BaseURL)
+			}
+		}
+	}
+
+	// Ensure primary provider prefix is in the map.
+	primaryPrefix, _ := splitModel(cfg.Model)
+	if primaryPrefix != "" {
+		providers[primaryPrefix] = primary
 	}
 
 	var cisco *CiscoInspectClient
@@ -104,17 +135,19 @@ func NewGuardrailProxy(
 	masterKey := deriveMasterKey(dataDir)
 
 	return &GuardrailProxy{
-		cfg:          cfg,
-		logger:       logger,
-		health:       health,
-		otel:         otel,
-		store:        store,
-		dataDir:      dataDir,
-		provider:     provider,
-		inspector:    inspector,
-		masterKey:    masterKey,
-		mode:         cfg.Mode,
-		blockMessage: cfg.BlockMessage,
+		cfg:              cfg,
+		logger:           logger,
+		health:           health,
+		otel:             otel,
+		store:            store,
+		dataDir:          dataDir,
+		providers:        providers,
+		blockedProviders: blockedProviders,
+		primary:          primary,
+		inspector:        inspector,
+		masterKey:        masterKey,
+		mode:             cfg.Mode,
+		blockMessage:     cfg.BlockMessage,
 	}, nil
 }
 
@@ -235,6 +268,22 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// resolveProvider selects the upstream LLMProvider for the given model
+// string. It returns nil if the model's provider prefix is explicitly
+// blocked in blockedProviders.
+func (p *GuardrailProxy) resolveProvider(model string) LLMProvider {
+	prefix, _ := splitModel(model)
+	if prefix != "" {
+		if _, blocked := p.blockedProviders[prefix]; blocked {
+			return nil
+		}
+		if prov, ok := p.providers[prefix]; ok {
+			return prov
+		}
+	}
+	return p.primary
+}
+
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -301,17 +350,29 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Forward to upstream provider ---
+	upstream := p.resolveProvider(req.Model)
+	if upstream == nil {
+		provName, _ := splitModel(req.Model)
+		msg := fmt.Sprintf("provider %q is not supported by DefenseClaw guardrail — traffic blocked", provName)
+		if req.Stream {
+			p.writeBlockedStream(w, req.Model, msg)
+		} else {
+			writeOpenAIError(w, http.StatusForbidden, msg)
+		}
+		return
+	}
+
 	if req.Stream {
-		p.handleStreamingRequest(w, r, &req, mode, customBlockMsg)
+		p.handleStreamingRequest(w, r, &req, mode, customBlockMsg, upstream)
 	} else {
-		p.handleNonStreamingRequest(w, r, &req, mode, customBlockMsg)
+		p.handleNonStreamingRequest(w, r, &req, mode, customBlockMsg, upstream)
 	}
 }
 
-func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string) {
+func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string, upstream LLMProvider) {
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (non-streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
-	resp, err := p.provider.ChatCompletion(r.Context(), req)
+	resp, err := upstream.ChatCompletion(r.Context(), req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -361,7 +422,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string) {
+func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string, upstream LLMProvider) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported")
@@ -379,7 +440,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	lastScanLen := 0
 	const scanInterval = 500
 
-	usage, err := p.provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
+	usage, err := upstream.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
 		chunk.Model = aliasModel
 
 		// Accumulate content for post-stream inspection.
