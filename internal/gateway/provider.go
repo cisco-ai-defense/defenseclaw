@@ -187,6 +187,13 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 			baseURL:    "https://api.openai.azure.com",
 			apiVersion: "2024-02-01",
 		}, nil
+	case "google", "gemini":
+		// Google AI Studio OpenAI-compatible endpoint.
+		return &openaiProvider{
+			model:   modelID,
+			apiKey:  apiKey,
+			baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		}, nil
 	default:
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	}
@@ -203,6 +210,9 @@ func inferProvider(model string, apiKey string) string {
 	}
 	if strings.HasPrefix(apiKey, "sk-or-") {
 		return "openrouter"
+	}
+	if strings.HasPrefix(model, "gemini") {
+		return "google"
 	}
 	return "openai"
 }

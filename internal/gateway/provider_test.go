@@ -487,3 +487,39 @@ func TestProxyExtractsAPIKeyFromAuthHeader(t *testing.T) {
 		t.Errorf("upstream Authorization = %q, want Bearer sk-or-passthrough-key", capturedKey)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Google Gemini via OpenAI-compatible endpoint
+// ---------------------------------------------------------------------------
+
+func TestNewProvider_Gemini(t *testing.T) {
+	tests := []struct {
+		model       string
+		wantBaseURL string
+	}{
+		{"google/gemini-2.0-flash", "https://generativelanguage.googleapis.com/v1beta/openai"},
+		{"gemini/gemini-2.0-flash", "https://generativelanguage.googleapis.com/v1beta/openai"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			p, err := NewProvider(tc.model, "google-key")
+			if err != nil {
+				t.Fatalf("NewProvider(%q) error: %v", tc.model, err)
+			}
+			op, ok := p.(*openaiProvider)
+			if !ok {
+				t.Fatalf("want openaiProvider, got %T", p)
+			}
+			if op.baseURL != tc.wantBaseURL {
+				t.Errorf("baseURL = %q, want %q", op.baseURL, tc.wantBaseURL)
+			}
+		})
+	}
+}
+
+func TestInferProvider_Gemini(t *testing.T) {
+	got := inferProvider("gemini-2.0-flash", "")
+	if got != "google" {
+		t.Errorf("inferProvider(gemini-*) = %q, want google", got)
+	}
+}
