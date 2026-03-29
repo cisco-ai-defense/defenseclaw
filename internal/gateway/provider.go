@@ -241,6 +241,12 @@ func inferAPIKeyEnv(model string) string {
 		return "OPENAI_API_KEY"
 	case "openrouter":
 		return "OPENROUTER_API_KEY"
+	case "google", "gemini":
+		return "GOOGLE_API_KEY"
+	case "azure":
+		return "AZURE_OPENAI_API_KEY"
+	case "bedrock":
+		return "AWS_ACCESS_KEY_ID"
 	case "ollama":
 		return "" // no key needed
 	default:
@@ -558,40 +564,45 @@ func (p *bedrockProvider) ChatCompletionStream(ctx context.Context, req *ChatReq
 		return nil, err
 	}
 
-	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		content := resp.Choices[0].Message.Content
-		finishReason := "stop"
+	// Always emit at least a role chunk so streaming callers get a consistent
+	// response shape even when the model returns no text (e.g. tool-call only).
+	finishReason := "stop"
+	content := ""
+	if len(resp.Choices) > 0 {
 		if resp.Choices[0].FinishReason != nil {
 			finishReason = *resp.Choices[0].FinishReason
 		}
-
-		// Emit role chunk
-		chunkCb(StreamChunk{
-			ID:      resp.ID,
-			Object:  "chat.completion.chunk",
-			Created: resp.Created,
-			Model:   resp.Model,
-			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: "assistant"}}},
-		})
-
-		// Emit content chunk
-		chunkCb(StreamChunk{
-			ID:      resp.ID,
-			Object:  "chat.completion.chunk",
-			Created: resp.Created,
-			Model:   resp.Model,
-			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: content}}},
-		})
-
-		// Emit finish chunk
-		chunkCb(StreamChunk{
-			ID:      resp.ID,
-			Object:  "chat.completion.chunk",
-			Created: resp.Created,
-			Model:   resp.Model,
-			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &finishReason}},
-		})
+		if resp.Choices[0].Message != nil {
+			content = resp.Choices[0].Message.Content
+		}
 	}
+
+	// Emit role chunk
+	chunkCb(StreamChunk{
+		ID:      resp.ID,
+		Object:  "chat.completion.chunk",
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: "assistant"}}},
+	})
+
+	// Emit content chunk
+	chunkCb(StreamChunk{
+		ID:      resp.ID,
+		Object:  "chat.completion.chunk",
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: content}}},
+	})
+
+	// Emit finish chunk
+	chunkCb(StreamChunk{
+		ID:      resp.ID,
+		Object:  "chat.completion.chunk",
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &finishReason}},
+	})
 
 	return resp.Usage, nil
 }
