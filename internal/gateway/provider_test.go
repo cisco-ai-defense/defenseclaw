@@ -529,6 +529,58 @@ func TestInferProvider_Gemini(t *testing.T) {
 // Amazon Bedrock provider
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Provider matrix — all 8 providers in one table
+// ---------------------------------------------------------------------------
+
+func TestNewProvider_AllProviders(t *testing.T) {
+	tests := []struct {
+		model     string
+		apiKey    string
+		wantType  string
+		wantField string // for openaiProvider: check baseURL; for others: just type
+	}{
+		{"openrouter/meta-llama/llama-3.3-70b", "sk-or-key", "openai", "https://openrouter.ai/api"},
+		{"openai/gpt-4o", "sk-key", "openai", "https://api.openai.com"},
+		{"anthropic/claude-opus-4-6", "sk-ant-key", "anthropic", ""},
+		{"ollama/llama3.2:3b", "", "openai", "http://localhost:11434"},
+		{"google/gemini-2.0-flash", "google-key", "openai", "https://generativelanguage.googleapis.com/v1beta/openai"},
+		{"gemini/gemini-2.0-flash", "google-key", "openai", "https://generativelanguage.googleapis.com/v1beta/openai"},
+		{"azure/my-deployment", "azure-key", "azure", ""},
+		{"bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0", "", "bedrock", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			p, err := NewProvider(tc.model, tc.apiKey)
+			if err != nil {
+				t.Fatalf("NewProvider(%q) error: %v", tc.model, err)
+			}
+			switch tc.wantType {
+			case "openai":
+				op, ok := p.(*openaiProvider)
+				if !ok {
+					t.Fatalf("want openaiProvider, got %T", p)
+				}
+				if tc.wantField != "" && op.baseURL != tc.wantField {
+					t.Errorf("baseURL = %q, want %q", op.baseURL, tc.wantField)
+				}
+			case "anthropic":
+				if _, ok := p.(*anthropicProvider); !ok {
+					t.Fatalf("want anthropicProvider, got %T", p)
+				}
+			case "azure":
+				if _, ok := p.(*azureProvider); !ok {
+					t.Fatalf("want azureProvider, got %T", p)
+				}
+			case "bedrock":
+				if _, ok := p.(*bedrockProvider); !ok {
+					t.Fatalf("want bedrockProvider, got %T", p)
+				}
+			}
+		})
+	}
+}
+
 func TestNewProvider_Bedrock(t *testing.T) {
 	t.Run("creates_bedrock_provider", func(t *testing.T) {
 		p, err := NewProvider("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0", "")
