@@ -865,7 +865,7 @@ def execute_guardrail_setup(
     if all_providers:
         supported_set = {"anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai"}
         write_provider_configs(app.cfg.data_dir, all_providers, supported_set)
-        click.echo(f"  ✓ Provider configs written to ~/.defenseclaw/guardrail_providers.json")
+        click.echo("  Provider configs written to ~/.defenseclaw/guardrail_providers.json")
 
     # --- Step 3: Save DefenseClaw config ---
     if save_config:
@@ -1079,7 +1079,8 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
 
     # Detect all providers in openclaw.json
-    from defenseclaw.guardrail import detect_provider_configs, KNOWN_PROVIDERS as KNOWN_PROV_LIST
+    from defenseclaw.guardrail import KNOWN_PROVIDERS as KNOWN_PROV_LIST
+    from defenseclaw.guardrail import detect_provider_configs
 
     all_providers = detect_provider_configs(app.cfg.claw.config_file)
     if all_providers:
