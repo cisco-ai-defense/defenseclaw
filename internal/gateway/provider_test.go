@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -522,4 +523,45 @@ func TestInferProvider_Gemini(t *testing.T) {
 	if got != "google" {
 		t.Errorf("inferProvider(gemini-*) = %q, want google", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Amazon Bedrock provider
+// ---------------------------------------------------------------------------
+
+func TestNewProvider_Bedrock(t *testing.T) {
+	t.Run("creates_bedrock_provider", func(t *testing.T) {
+		p, err := NewProvider("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0", "")
+		if err != nil {
+			t.Fatalf("NewProvider bedrock error: %v", err)
+		}
+		bp, ok := p.(*bedrockProvider)
+		if !ok {
+			t.Fatalf("want bedrockProvider, got %T", p)
+		}
+		if bp.modelID != "anthropic.claude-3-5-sonnet-20241022-v2:0" {
+			t.Errorf("modelID = %q", bp.modelID)
+		}
+	})
+
+	t.Run("defaults_region_to_us_east_1", func(t *testing.T) {
+		// Unset AWS_REGION to test default
+		orig := os.Getenv("AWS_REGION")
+		origDef := os.Getenv("AWS_DEFAULT_REGION")
+		os.Unsetenv("AWS_REGION")
+		os.Unsetenv("AWS_DEFAULT_REGION")
+		defer func() {
+			os.Setenv("AWS_REGION", orig)
+			os.Setenv("AWS_DEFAULT_REGION", origDef)
+		}()
+
+		p, err := NewProvider("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0", "")
+		if err != nil {
+			t.Fatalf("NewProvider bedrock error: %v", err)
+		}
+		bp := p.(*bedrockProvider)
+		if bp.region != "us-east-1" {
+			t.Errorf("region = %q, want us-east-1", bp.region)
+		}
+	})
 }

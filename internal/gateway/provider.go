@@ -11,6 +11,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 )
 
 // ChatMessage is the OpenAI-compatible message format used as the canonical
@@ -194,6 +197,15 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 			apiKey:  apiKey,
 			baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
 		}, nil
+	case "bedrock":
+		region := os.Getenv("AWS_REGION")
+		if region == "" {
+			region = os.Getenv("AWS_DEFAULT_REGION")
+		}
+		if region == "" {
+			region = "us-east-1"
+		}
+		return &bedrockProvider{modelID: modelID, region: region}, nil
 	default:
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	}
@@ -493,6 +505,95 @@ func (p *azureProvider) ChatCompletionStream(ctx context.Context, req *ChatReque
 	}
 
 	return readOpenAISSE(resp.Body, chunkCb)
+}
+
+// ---------------------------------------------------------------------------
+// Amazon Bedrock provider — AWS Signature V4, Anthropic format translation
+// ---------------------------------------------------------------------------
+
+type bedrockProvider struct {
+	modelID string
+	region  string
+}
+
+func (p *bedrockProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(p.region))
+	if err != nil {
+		return nil, fmt.Errorf("provider: bedrock load config: %w", err)
+	}
+	client := bedrockruntime.NewFromConfig(cfg)
+
+	// Translate OpenAI format to Anthropic Messages API format
+	ap := &anthropicProvider{model: p.modelID}
+	aReq := ap.translateRequest(req)
+	aReq.Stream = false
+
+	body, err := json.Marshal(aReq)
+	if err != nil {
+		return nil, fmt.Errorf("provider: bedrock marshal: %w", err)
+	}
+
+	contentType := "application/json"
+	out, err := client.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
+		ModelId:     &p.modelID,
+		Body:        body,
+		ContentType: &contentType,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("provider: bedrock invoke: %w", err)
+	}
+
+	var aResp anthropicResponse
+	if err := json.Unmarshal(out.Body, &aResp); err != nil {
+		return nil, fmt.Errorf("provider: bedrock decode response: %w", err)
+	}
+
+	return ap.translateResponse(&aResp, req.Model), nil
+}
+
+func (p *bedrockProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
+	// Fall back to non-streaming for Bedrock — collect the full response then emit as a single chunk
+	resp, err := p.ChatCompletion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		content := resp.Choices[0].Message.Content
+		finishReason := "stop"
+		if resp.Choices[0].FinishReason != nil {
+			finishReason = *resp.Choices[0].FinishReason
+		}
+
+		// Emit role chunk
+		chunkCb(StreamChunk{
+			ID:      resp.ID,
+			Object:  "chat.completion.chunk",
+			Created: resp.Created,
+			Model:   resp.Model,
+			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: "assistant"}}},
+		})
+
+		// Emit content chunk
+		chunkCb(StreamChunk{
+			ID:      resp.ID,
+			Object:  "chat.completion.chunk",
+			Created: resp.Created,
+			Model:   resp.Model,
+			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: content}}},
+		})
+
+		// Emit finish chunk
+		chunkCb(StreamChunk{
+			ID:      resp.ID,
+			Object:  "chat.completion.chunk",
+			Created: resp.Created,
+			Model:   resp.Model,
+			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &finishReason}},
+		})
+	}
+
+	return resp.Usage, nil
 }
 
 // ---------------------------------------------------------------------------
