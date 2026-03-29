@@ -77,6 +77,11 @@ def patch_openclaw_config(
     cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
     cfg["agents"]["defaults"]["model"]["primary"] = f"defenseclaw/{model_name}"
 
+    # Clear the model history so only the configured model appears in OpenClaw's
+    # model picker. The fetch interceptor handles all providers transparently,
+    # so there's no need to expose historical model entries to the user.
+    cfg["agents"]["defaults"].pop("models", None)
+
     plugins = cfg.setdefault("plugins", {})
     allow = plugins.setdefault("allow", [])
     if "defenseclaw" not in allow:
