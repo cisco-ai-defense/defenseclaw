@@ -47,6 +47,50 @@ function isAlreadyProxied(url: string): boolean {
   return url.includes("127.0.0.1") || url.includes("localhost");
 }
 
+/** Domain → auth-profiles.json profile id mapping. */
+const DOMAIN_TO_PROFILE: Record<string, string> = {
+  "api.anthropic.com":               "anthropic:default",
+  "openrouter.ai":                   "openrouter:default",
+  "api.openai.com":                  "openai:default",
+  "generativelanguage.googleapis.com": "google:default",
+};
+
+// Synchronous key cache — loaded once at interceptor start.
+const providerKeyCache: Record<string, string> = {};
+
+function loadProviderKeys(): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("node:fs") as typeof import("node:fs");
+    const os = require("node:os") as typeof import("node:os");
+    const path = require("node:path") as typeof import("node:path");
+
+    const profilesPath = path.join(
+      os.homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json"
+    );
+    const data = JSON.parse(fs.readFileSync(profilesPath, "utf8"));
+    const profiles = data?.profiles ?? {};
+
+    for (const [domain, profileId] of Object.entries(DOMAIN_TO_PROFILE)) {
+      const key = profiles[profileId]?.key;
+      if (key) providerKeyCache[domain] = key;
+    }
+    console.log(
+      `[defenseclaw] loaded provider keys for: ${Object.keys(providerKeyCache).join(", ")}`
+    );
+  } catch {
+    // auth-profiles.json not found — keys will fall through unchanged
+  }
+}
+
+/** Return the real provider key for a URL if we have it, else empty string. */
+function getRealKeyForUrl(urlStr: string): string {
+  for (const [domain, key] of Object.entries(providerKeyCache)) {
+    if (urlStr.includes(domain)) return key;
+  }
+  return "";
+}
+
 /**
  * Creates an interceptor that, when started, patches globalThis.fetch to
  * redirect LLM API calls through the guardrail proxy.
@@ -59,6 +103,11 @@ export function createFetchInterceptor(guardrailPort: number) {
   function start(): void {
     if (originalFetch) return; // already started
     originalFetch = globalThis.fetch;
+
+    // Load real provider keys from OpenClaw's auth-profiles.json so we can
+    // inject them when OpenClaw sends requests via the defenseclaw provider
+    // (which uses sk-dc-* master key as Bearer, not the real provider key).
+    loadProviderKeys();
 
     globalThis.fetch = async (
       input: RequestInfo | URL,
@@ -86,6 +135,17 @@ export function createFetchInterceptor(guardrailPort: number) {
         input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
       );
       headers.set(TARGET_URL_HEADER, original.origin);
+
+      // If the Authorization header is a defenseclaw master key (sk-dc-*),
+      // replace it with the real provider key from OpenClaw's auth-profiles.
+      // This happens when OpenClaw uses the "defenseclaw" provider entry.
+      const auth = headers.get("Authorization") ?? "";
+      if (auth.startsWith("Bearer sk-dc-")) {
+        const realKey = getRealKeyForUrl(urlStr);
+        if (realKey) {
+          headers.set("Authorization", `Bearer ${realKey}`);
+        }
+      }
 
       // Build new init, preserving all original properties.
       const newInit: RequestInit =
