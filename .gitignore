@@ -70,3 +70,4 @@ coverage*.xml
 # E2E local-only setup scripts (documented in docs/E2E.md)
 scripts/provision-*
 scripts/e2e-*-session*
+.worktrees/
