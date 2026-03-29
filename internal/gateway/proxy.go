@@ -305,13 +305,20 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
 
+	provider := inferProviderFromURL(targetOrigin)
+	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
+
 	userText := lastUserText(partial.Messages)
 	if userText == "" && partial.System != "" {
 		userText = partial.System
 	}
 
 	if userText != "" {
-		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, r.URL.Path, mode)
+		t0 := time.Now()
+		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+		elapsed := time.Since(t0)
+		p.logPreCall(label, partial.Messages, verdict, elapsed)
+		p.recordTelemetry("prompt", label, verdict, elapsed, nil, nil)
 		if verdict.Action == "block" && mode == "action" {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			writeOpenAIError(w, http.StatusForbidden, msg)
@@ -321,6 +328,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Forward verbatim to real upstream: reassemble original URL.
 	upstreamURL := strings.TrimRight(targetOrigin, "/") + r.URL.RequestURI()
+	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, upstreamURL)
 	upstreamKey := r.Header.Get("Authorization")
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
