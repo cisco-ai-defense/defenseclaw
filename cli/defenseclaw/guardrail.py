@@ -278,6 +278,10 @@ def detect_api_key_env(model: str) -> str:
     lower = model.lower()
     if "anthropic" in lower or "claude" in lower:
         return "ANTHROPIC_API_KEY"
+    if "azure" in lower:
+        return "AZURE_OPENAI_API_KEY"
+    if "openrouter" in lower:
+        return "OPENROUTER_API_KEY"
     if "openai" in lower or "gpt" in lower or "o1" in lower:
         return "OPENAI_API_KEY"
     if "gemini" in lower or "google" in lower:
@@ -290,7 +294,7 @@ def detect_api_key_env(model: str) -> str:
 def model_to_proxy_name(model: str) -> str:
     """Derive a short model alias from a full model string like 'anthropic/claude-opus-4-5'."""
     name = model.split("/")[-1] if "/" in model else model
-    for prefix in ("anthropic-", "openai-", "google-"):
+    for prefix in ("anthropic-", "openai-", "google-", "azure-", "openrouter-", "gemini-", "gemini-openai-"):
         name = name.removeprefix(prefix)
     return name
 
@@ -298,7 +302,7 @@ def model_to_proxy_name(model: str) -> str:
 
 
 # Known provider prefixes for model name heuristics.
-KNOWN_PROVIDERS = ["anthropic", "openai"]
+KNOWN_PROVIDERS = ["anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai"]
 
 
 def guess_provider(model: str) -> str:
@@ -309,7 +313,7 @@ def guess_provider(model: str) -> str:
     if lower.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"
     if lower.startswith("gemini"):
-        return "google"
+        return "gemini"
     return ""
 
 
