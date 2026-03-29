@@ -290,11 +290,49 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// resolveProvider selects the upstream LLMProvider for the given model
-// string. It returns nil if the model's provider prefix is explicitly
-// blocked in blockedProviders.
-func (p *GuardrailProxy) resolveProvider(model string) LLMProvider {
-	prefix, _ := splitModel(model)
+// inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
+// set by the plugin's fetch interceptor) to a provider name. This is the
+// most reliable routing signal when the fetch interceptor is active because
+// it reflects the actual upstream the request was destined for.
+func inferProviderFromURL(targetURL string) string {
+	switch {
+	case strings.Contains(targetURL, "anthropic.com"):
+		return "anthropic"
+	case strings.Contains(targetURL, "openrouter.ai"):
+		return "openrouter"
+	case strings.Contains(targetURL, "openai.com"):
+		return "openai"
+	case strings.Contains(targetURL, "googleapis.com"):
+		return "gemini"
+	case strings.Contains(targetURL, "amazonaws.com"):
+		return "bedrock"
+	case strings.Contains(targetURL, "openai.azure.com"):
+		return "azure"
+	default:
+		return ""
+	}
+}
+
+// resolveProvider selects the upstream LLMProvider for the given request.
+// When X-DC-Target-URL is present (set by the fetch interceptor), it is used
+// as the primary routing signal — overriding the model prefix — because it
+// reflects the real upstream URL regardless of which provider config OpenClaw
+// used. Falls back to model prefix, then primary provider.
+func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
+	// Highest priority: target URL from fetch interceptor.
+	if req.TargetURL != "" {
+		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
+			if _, blocked := p.blockedProviders[prefix]; blocked {
+				return nil
+			}
+			// Create provider on-the-fly using the key the fetch interceptor
+			// preserved from the original request's Authorization header.
+			return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, "")
+		}
+	}
+
+	// Fall back to model prefix.
+	prefix, _ := splitModel(req.Model)
 	if prefix != "" {
 		if _, blocked := p.blockedProviders[prefix]; blocked {
 			return nil
@@ -335,6 +373,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	req.RawBody = body
+
+	// X-DC-Target-URL is set by the plugin's fetch interceptor and tells the
+	// proxy the real upstream URL the request was originally destined for.
+	req.TargetURL = r.Header.Get("X-DC-Target-URL")
+
+	// Preserve the original Authorization header so it can be forwarded to
+	// the upstream when routing via the fetch interceptor path.
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		req.TargetAPIKey = strings.TrimPrefix(auth, "Bearer ")
+	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] parsed: model=%q stream=%v messages=%d\n",
 		req.Model, req.Stream, len(req.Messages))
@@ -413,7 +461,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Forward to upstream provider ---
-	upstream := p.resolveProvider(req.Model)
+	upstream := p.resolveProvider(&req)
 	if upstream == nil {
 		provName, _ := splitModel(req.Model)
 		msg := fmt.Sprintf("provider %q is not supported by DefenseClaw guardrail — traffic blocked", provName)

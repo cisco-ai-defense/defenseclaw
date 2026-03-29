@@ -114,6 +114,8 @@ type ChatRequest struct {
 	Tools       json.RawMessage `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
 	RawBody     json.RawMessage `json:"-"`
+	TargetURL   string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor
+	TargetAPIKey string         `json:"-"` // from Authorization header, forwarded to upstream
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
