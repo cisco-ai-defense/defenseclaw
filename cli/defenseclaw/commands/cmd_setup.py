@@ -890,7 +890,20 @@ def execute_guardrail_setup(
     # --- Step 5: Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
 
-    # --- Step 8: Restore sandbox ownership if in standalone mode ---
+    # --- Step 6: Sandbox-specific setup (plugin + iptables scripts) ---
+    if app.cfg.openshell.is_standalone():
+        from defenseclaw.commands.cmd_init_sandbox import _install_plugin_to_sandbox
+        from defenseclaw.commands.cmd_setup_sandbox import _generate_launcher_scripts
+
+        sandbox_home = app.cfg.openshell.effective_sandbox_home()
+        _install_plugin_to_sandbox(app.cfg, sandbox_home)
+        _generate_launcher_scripts(
+            app.cfg.data_dir, sandbox_home,
+            gc.host or "localhost", app.cfg,
+        )
+        click.echo("  ✓ Sandbox scripts regenerated with guardrail iptables rules")
+
+    # --- Step 7: Restore sandbox ownership if in standalone mode ---
     from defenseclaw.commands.cmd_setup_sandbox import restore_sandbox_ownership_if_needed
     restore_sandbox_ownership_if_needed(app.cfg)
 
@@ -1095,7 +1108,27 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
     else:
         click.echo("  ✓ OpenClaw plugin not installed (nothing to remove)")
 
-    gc.enabled = False
+    # Remove plugin and iptables rules from sandbox if in standalone mode
+    if app.cfg.openshell.is_standalone():
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _generate_launcher_scripts,
+            restore_sandbox_ownership_if_needed,
+        )
+
+        sandbox_home = app.cfg.openshell.effective_sandbox_home()
+        _uninstall_plugin_from_sandbox(sandbox_home)
+
+        gc.enabled = False
+        _generate_launcher_scripts(
+            app.cfg.data_dir, sandbox_home,
+            gc.host or "localhost", app.cfg,
+        )
+        click.echo("  ✓ Sandbox scripts regenerated without guardrail iptables rules")
+
+        restore_sandbox_ownership_if_needed(app.cfg)
+    else:
+        gc.enabled = False
+
     try:
         app.cfg.save()
         click.echo("  ✓ Config saved")
@@ -1178,6 +1211,21 @@ def _find_plugin_source() -> str | None:
     if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
         return resolved
     return None
+
+
+def _uninstall_plugin_from_sandbox(sandbox_home: str) -> None:
+    """Remove the DefenseClaw plugin from the sandbox user's OpenClaw extensions."""
+    import shutil
+
+    target_dir = os.path.join(sandbox_home, ".openclaw", "extensions", "defenseclaw")
+    if os.path.isdir(target_dir):
+        try:
+            shutil.rmtree(target_dir)
+            click.echo(f"  ✓ Sandbox plugin removed from {target_dir}")
+        except OSError as exc:
+            click.echo(f"  ✗ Could not remove sandbox plugin: {exc}")
+    else:
+        click.echo("  ✓ Sandbox plugin not installed (nothing to remove)")
 
 
 # ---------------------------------------------------------------------------

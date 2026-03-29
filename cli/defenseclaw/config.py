@@ -192,6 +192,7 @@ class OpenShellConfig:
     version: str = DEFAULT_OPENSHELL_VERSION
     sandbox_home: str = DEFAULT_SANDBOX_HOME
     auto_pair: bool | None = None
+    dns_override: bool = True
 
     def is_standalone(self) -> bool:
         return self.mode == "standalone"
@@ -826,6 +827,11 @@ def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     auto_pair = raw.get("auto_pair")
     if auto_pair is not None:
         auto_pair = bool(auto_pair)
+    dns_override = raw.get("dns_override")
+    if dns_override is not None:
+        dns_override = bool(dns_override)
+    else:
+        dns_override = True
     return OpenShellConfig(
         binary=raw.get("binary", "openshell-sandbox"),
         policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
@@ -833,6 +839,7 @@ def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
         version=raw.get("version", DEFAULT_OPENSHELL_VERSION),
         sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME),
         auto_pair=auto_pair,
+        dns_override=dns_override,
     )
 
 

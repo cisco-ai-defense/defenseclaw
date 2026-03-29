@@ -63,11 +63,27 @@ class TestGenerateResolvConf(unittest.TestCase):
         self.assertIn("nameserver", content)
 
 
+class _MockOpenshell:
+    def __init__(self):
+        self.dns_override = True
+
+
+class _MockGuardrail:
+    def __init__(self):
+        self.port = 4000
+        self.enabled = True
+
+
+class _MockGateway:
+    def __init__(self):
+        self.api_port = 18790
+
+
 class _MockCfg:
-    class gateway:
-        api_port = 18790
-    class guardrail:
-        port = 4000
+    def __init__(self):
+        self.gateway = _MockGateway()
+        self.guardrail = _MockGuardrail()
+        self.openshell = _MockOpenshell()
 
 
 class TestGenerateSystemdUnits(unittest.TestCase):
@@ -82,7 +98,7 @@ class TestGenerateSystemdUnits(unittest.TestCase):
     def test_unit_files_created(self):
         _generate_systemd_units(
             self.data_dir, self.sandbox_home,
-            "10.200.0.1", "10.200.0.2", _MockCfg,
+            "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         systemd_dir = os.path.join(self.data_dir, "systemd")
         expected_files = [
@@ -99,7 +115,7 @@ class TestGenerateSystemdUnits(unittest.TestCase):
     def test_unit_files_contain_keywords(self):
         _generate_systemd_units(
             self.data_dir, self.sandbox_home,
-            "10.200.0.1", "10.200.0.2", _MockCfg,
+            "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         systemd_dir = os.path.join(self.data_dir, "systemd")
 
@@ -116,7 +132,7 @@ class TestGenerateSystemdUnits(unittest.TestCase):
     def test_sidecar_unit_contains_readwritepaths(self):
         _generate_systemd_units(
             self.data_dir, self.sandbox_home,
-            "10.200.0.1", "10.200.0.2", _MockCfg,
+            "10.200.0.1", "10.200.0.2", _MockCfg(),
         )
         sidecar_path = os.path.join(self.data_dir, "systemd", "defenseclaw-gateway.service")
         with open(sidecar_path) as f:
@@ -135,7 +151,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_scripts_created(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg,
+            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg(),
         )
         scripts_dir = os.path.join(self.data_dir, "scripts")
         expected = [
@@ -152,7 +168,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_scripts_are_executable(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg,
+            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg(),
         )
         scripts_dir = os.path.join(self.data_dir, "scripts")
         for name in ("pre-sandbox.sh", "start-sandbox.sh", "post-sandbox.sh", "cleanup-sandbox.sh"):
@@ -161,7 +177,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
 
     def test_start_sandbox_contains_openshell(self):
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg,
+            self.data_dir, self.sandbox_home, "10.200.0.1", _MockCfg(),
         )
         with open(os.path.join(self.data_dir, "scripts", "start-sandbox.sh")) as f:
             content = f.read()
@@ -170,11 +186,130 @@ class TestGenerateLauncherScripts(unittest.TestCase):
     def test_post_sandbox_contains_host_ip(self):
         host_ip = "10.200.0.1"
         _generate_launcher_scripts(
-            self.data_dir, self.sandbox_home, host_ip, _MockCfg,
+            self.data_dir, self.sandbox_home, host_ip, _MockCfg(),
         )
         with open(os.path.join(self.data_dir, "scripts", "post-sandbox.sh")) as f:
             content = f.read()
         self.assertIn(host_ip, content)
+
+
+class _CfgFactory:
+    """Build _MockCfg variants for the dns_override x guardrail_enabled matrix."""
+
+    @staticmethod
+    def make(dns_override: bool, guardrail_enabled: bool):
+        cfg = _MockCfg()
+        cfg.openshell = _MockOpenshell()
+        cfg.openshell.dns_override = dns_override
+        cfg.guardrail = _MockGuardrail()
+        cfg.guardrail.enabled = guardrail_enabled
+        return cfg
+
+
+class TestLauncherScriptConditionals(unittest.TestCase):
+    """Verify scripts respect dns_override and guardrail.enabled flags."""
+
+    def setUp(self):
+        self.data_dir = tempfile.mkdtemp(prefix="dclaw-cond-test-")
+        self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-cond-home-")
+
+    def tearDown(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        shutil.rmtree(self.sandbox_home, ignore_errors=True)
+
+    def _read_script(self, name):
+        with open(os.path.join(self.data_dir, "scripts", name)) as f:
+            return f.read()
+
+    def _gen(self, dns_override, guardrail_enabled):
+        cfg = _CfgFactory.make(dns_override, guardrail_enabled)
+        _generate_launcher_scripts(
+            self.data_dir, self.sandbox_home, "10.200.0.1", cfg,
+        )
+
+    # --- (True, True) — full rules ---
+
+    def test_dns_on_guardrail_on_post_has_dns_rules(self):
+        self._gen(True, True)
+        content = self._read_script("post-sandbox.sh")
+        self.assertIn("--dport 53", content)
+        self.assertIn("MASQUERADE", content)
+
+    def test_dns_on_guardrail_on_post_has_guardrail_rules(self):
+        self._gen(True, True)
+        content = self._read_script("post-sandbox.sh")
+        self.assertIn("18790", content)
+        self.assertIn("4000", content)
+
+    def test_dns_on_guardrail_on_start_has_mount(self):
+        self._gen(True, True)
+        content = self._read_script("start-sandbox.sh")
+        self.assertIn("mount --bind", content)
+
+    def test_dns_on_guardrail_on_openclaw_has_dns_wait(self):
+        self._gen(True, True)
+        with open(os.path.join(self.sandbox_home, "start-openclaw.sh")) as f:
+            content = f.read()
+        self.assertIn("getaddrinfo", content)
+
+    # --- (True, False) — DNS only ---
+
+    def test_dns_on_guardrail_off_post_has_dns_no_guardrail(self):
+        self._gen(True, False)
+        content = self._read_script("post-sandbox.sh")
+        self.assertIn("--dport 53", content)
+        self.assertIn("MASQUERADE", content)
+        self.assertNotIn('--dport "$API_PORT"', content)
+        self.assertNotIn('--dport "$GUARDRAIL_PORT"', content)
+
+    def test_dns_on_guardrail_off_start_has_mount(self):
+        self._gen(True, False)
+        content = self._read_script("start-sandbox.sh")
+        self.assertIn("mount --bind", content)
+
+    # --- (False, True) — guardrail only ---
+
+    def test_dns_off_guardrail_on_post_has_guardrail_no_dns(self):
+        self._gen(False, True)
+        content = self._read_script("post-sandbox.sh")
+        self.assertNotIn("--dport 53", content)
+        self.assertNotIn("MASQUERADE", content)
+        self.assertIn("18790", content)
+        self.assertIn("4000", content)
+
+    def test_dns_off_guardrail_on_start_no_mount(self):
+        self._gen(False, True)
+        content = self._read_script("start-sandbox.sh")
+        self.assertNotIn("mount --bind", content)
+        self.assertIn("openshell-sandbox", content)
+
+    def test_dns_off_guardrail_on_openclaw_no_dns_wait(self):
+        self._gen(False, True)
+        with open(os.path.join(self.sandbox_home, "start-openclaw.sh")) as f:
+            content = f.read()
+        self.assertNotIn("getaddrinfo", content)
+
+    # --- (False, False) — no rules ---
+
+    def test_dns_off_guardrail_off_post_is_noop(self):
+        self._gen(False, False)
+        content = self._read_script("post-sandbox.sh")
+        self.assertNotIn("NSENTER", content)
+        self.assertNotIn("MASQUERADE", content)
+        self.assertIn("exit 0", content)
+
+    def test_dns_off_guardrail_off_start_no_mount(self):
+        self._gen(False, False)
+        content = self._read_script("start-sandbox.sh")
+        self.assertNotIn("mount --bind", content)
+        self.assertIn("openshell-sandbox", content)
+
+    def test_dns_off_guardrail_off_openclaw_no_dns_wait(self):
+        self._gen(False, False)
+        with open(os.path.join(self.sandbox_home, "start-openclaw.sh")) as f:
+            content = f.read()
+        self.assertNotIn("getaddrinfo", content)
+        self.assertIn("openclaw gateway run", content)
 
 
 class TestPrePairDevice(unittest.TestCase):

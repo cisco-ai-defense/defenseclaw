@@ -45,6 +45,10 @@ def restore_sandbox_ownership_if_needed(cfg) -> None:
 )
 @click.option("--dns", default="8.8.8.8,1.1.1.1", help="DNS nameservers (comma-separated, or 'host')")
 @click.option("--no-auto-pair", is_flag=True, help="Disable automatic device pre-pairing")
+@click.option("--no-dns-override", is_flag=True,
+              help="Skip DNS plumbing (resolv.conf mount, DNS iptables, MASQUERADE)")
+@click.option("--no-guardrail", is_flag=True,
+              help="Skip guardrail network setup (API_PORT + GUARDRAIL_PORT iptables)")
 @click.option("--disable", is_flag=True, help="Revert to host mode (no sandbox)")
 @click.option("--non-interactive", is_flag=True, help="Skip confirmation prompts")
 @pass_ctx
@@ -57,6 +61,8 @@ def setup_sandbox(
     policy: str,
     dns: str,
     no_auto_pair: bool,
+    no_dns_override: bool,
+    no_guardrail: bool,
     disable: bool,
     non_interactive: bool,
 ) -> None:
@@ -110,10 +116,15 @@ def setup_sandbox(
     app.cfg.openshell.sandbox_home = sandbox_home
     if no_auto_pair:
         app.cfg.openshell.auto_pair = False
+    if no_dns_override:
+        app.cfg.openshell.dns_override = False
+    if no_guardrail:
+        app.cfg.guardrail.enabled = False
 
     app.cfg.gateway.host = sandbox_ip
     app.cfg.gateway.port = openclaw_port
-    app.cfg.guardrail.host = host_ip
+    if app.cfg.guardrail.enabled:
+        app.cfg.guardrail.host = host_ip
     app.cfg.gateway.watcher.enabled = True
     app.cfg.gateway.watcher.skill.enabled = True
     app.cfg.gateway.watcher.skill.take_action = True
@@ -123,8 +134,12 @@ def setup_sandbox(
 
     click.echo("    openshell.mode:       standalone")
     click.echo(f"    openshell.sandbox_home: {sandbox_home}")
+    click.echo(f"    openshell.dns_override: {app.cfg.openshell.dns_override}")
     click.echo(f"    gateway.host:         {sandbox_ip}")
-    click.echo(f"    guardrail.host:       {host_ip}")
+    if app.cfg.guardrail.enabled:
+        click.echo(f"    guardrail.host:       {host_ip}")
+    else:
+        click.echo("    guardrail:            disabled (use 'defenseclaw setup guardrail' to enable)")
     click.echo(f"    claw.home_dir:        {app.cfg.claw.home_dir}")
 
     # 3. Read gateway auth token from OpenClaw config (same as non-sandbox mode).
@@ -143,9 +158,12 @@ def setup_sandbox(
     _install_policy_template(data_dir, policy)
     click.echo(f"    policy template:      {policy}")
 
-    # 5. Generate DNS resolv.conf
-    _generate_resolv_conf(data_dir, dns)
-    click.echo(f"    dns nameservers:      {dns}")
+    # 5. Generate DNS resolv.conf (only when DNS override is active)
+    if app.cfg.openshell.dns_override:
+        _generate_resolv_conf(data_dir, dns)
+        click.echo(f"    dns nameservers:      {dns}")
+    else:
+        click.echo("    dns:                  managed by openshell-sandbox (override disabled)")
 
     # 6. Patch sandbox-side OpenClaw config (port + bind only, never the token)
     if os.path.isfile(oc_config):
@@ -613,9 +631,16 @@ def _generate_launcher_scripts(
     host_ip: str,
     cfg,
 ) -> None:
-    """Generate launcher shell scripts for the sandbox lifecycle."""
+    """Generate launcher shell scripts for the sandbox lifecycle.
+
+    Reads ``cfg.openshell.dns_override`` and ``cfg.guardrail.enabled`` to
+    conditionally include DNS plumbing and guardrail iptables rules.
+    """
     scripts_dir = os.path.join(data_dir, "scripts")
     os.makedirs(scripts_dir, exist_ok=True)
+
+    dns_override = cfg.openshell.dns_override
+    guardrail_enabled = cfg.guardrail.enabled
 
     api_port = int(cfg.gateway.api_port)
     guardrail_port = int(cfg.guardrail.port)
@@ -704,15 +729,9 @@ if [ -f "$SANDBOX_HOME/.openclaw/gateway.pid" ]; then
 fi
 """
 
-    start_sandbox = f"""#!/bin/bash
-set -euo pipefail
-
-DEFENSECLAW_DIR={q_data_dir}
-RESOLV_FILE="$DEFENSECLAW_DIR/sandbox-resolv.conf"
-POLICY_REGO="$DEFENSECLAW_DIR/openshell-policy.rego"
-POLICY_DATA="$DEFENSECLAW_DIR/openshell-policy.yaml"
-SANDBOX_HOME={q_sandbox_home}
-
+    # start-sandbox.sh: conditionally mount resolv.conf for DNS override
+    if dns_override:
+        start_sandbox_body = """\
 exec unshare --mount -- bash -c '
     mount --bind '"$RESOLV_FILE"' /etc/resolv.conf
     exec openshell-sandbox \\
@@ -724,8 +743,59 @@ exec unshare --mount -- bash -c '
         -- '"$SANDBOX_HOME"'/start-openclaw.sh
 '
 """
+    else:
+        start_sandbox_body = f"""\
+exec openshell-sandbox \\
+    --policy-rules "$POLICY_REGO" \\
+    --policy-data "$POLICY_DATA" \\
+    --log-level info \\
+    --timeout 0 \\
+    -w {q_sandbox_home} \\
+    -- {q_sandbox_home}/start-openclaw.sh
+"""
 
-    post_sandbox = f"""#!/bin/bash
+    start_sandbox = f"""#!/bin/bash
+set -euo pipefail
+
+DEFENSECLAW_DIR={q_data_dir}
+RESOLV_FILE="$DEFENSECLAW_DIR/sandbox-resolv.conf"
+POLICY_REGO="$DEFENSECLAW_DIR/openshell-policy.rego"
+POLICY_DATA="$DEFENSECLAW_DIR/openshell-policy.yaml"
+SANDBOX_HOME={q_sandbox_home}
+
+{start_sandbox_body}"""
+
+    # post-sandbox.sh: conditionally inject DNS and guardrail iptables rules
+    needs_iptables = dns_override or guardrail_enabled
+
+    if needs_iptables:
+        iptables_rules = ""
+
+        if dns_override:
+            iptables_rules += """
+for ns in $(grep '^nameserver' "$DEFENSECLAW_DIR/sandbox-resolv.conf" | awk '{print $2}'); do
+    $NSENTER iptables -I OUTPUT 1 -p udp -d "$ns" --dport 53 -j ACCEPT 2>/dev/null || true
+done
+"""
+
+        if guardrail_enabled:
+            iptables_rules += """
+$NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" --dport "$API_PORT" -j ACCEPT 2>/dev/null || true
+$NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
+    --dport "$GUARDRAIL_PORT" -j ACCEPT 2>/dev/null || true
+"""
+
+        masquerade_block = ""
+        if dns_override:
+            masquerade_block = """
+# MASQUERADE DNS on the HOST side so responses from external nameservers
+# route back to the sandbox IP (10.200.0.x).  Scoped to UDP port 53 only —
+# all other sandbox traffic goes through the OPA proxy.
+iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
+    iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
+"""
+
+        post_sandbox = f"""#!/bin/bash
 set -euo pipefail
 
 DEFENSECLAW_DIR={q_data_dir}
@@ -769,22 +839,13 @@ if [ -z "$NSENTER" ]; then
     echo "NOTE: sandbox namespace not accessible — OPA proxy handles network policy"
     exit 0
 fi
-
-for ns in $(grep '^nameserver' "$DEFENSECLAW_DIR/sandbox-resolv.conf" | awk '{{print $2}}'); do
-    $NSENTER iptables -I OUTPUT 1 -p udp -d "$ns" --dport 53 -j ACCEPT 2>/dev/null || true
-done
-
-$NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" --dport "$API_PORT" -j ACCEPT 2>/dev/null || true
-$NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
-    --dport "$GUARDRAIL_PORT" -j ACCEPT 2>/dev/null || true
-
+{iptables_rules}
 echo "Injected iptables rules via $NSENTER"
-
-# MASQUERADE DNS on the HOST side so responses from external nameservers
-# route back to the sandbox IP (10.200.0.x).  Scoped to UDP port 53 only —
-# all other sandbox traffic goes through the OPA proxy.
-iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
-    iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
+{masquerade_block}"""
+    else:
+        post_sandbox = """#!/bin/bash
+# No iptables rules needed (DNS override and guardrail both disabled)
+exit 0
 """
 
     cleanup_sandbox = """#!/bin/bash
@@ -797,12 +858,9 @@ for veth in $(ip link show 2>/dev/null | grep -oP 'veth-h-\\S+(?=@)'); do
 done
 """
 
-    start_openclaw = f"""#!/bin/bash
-set -euo pipefail
-
-export HTTPS_PROXY=http://{q_host_ip}:3128
-export HTTP_PROXY=http://{q_host_ip}:3128
-export NO_PROXY={q_host_ip}"${{NO_PROXY:+,$NO_PROXY}}"
+    # start-openclaw.sh: conditionally include DNS wait loop
+    if dns_override:
+        dns_wait = """\
 
 # Wait for DNS — iptables rules are injected by post-sandbox.sh after
 # the network namespace is created, so DNS may not work immediately.
@@ -810,7 +868,17 @@ for i in $(seq 1 30); do
     python3 -c "import socket; socket.getaddrinfo('api.telegram.org', 443)" 2>/dev/null && break
     sleep 1
 done
+"""
+    else:
+        dns_wait = ""
 
+    start_openclaw = f"""#!/bin/bash
+set -euo pipefail
+
+export HTTPS_PROXY=http://{q_host_ip}:3128
+export HTTP_PROXY=http://{q_host_ip}:3128
+export NO_PROXY={q_host_ip}"${{NO_PROXY:+,$NO_PROXY}}"
+{dns_wait}
 exec openclaw gateway run
 """
 

@@ -77,8 +77,10 @@ def sandbox_init_cmd(app: AppContext) -> None:
             ctx = click.Context(setup_sandbox, parent=click.get_current_context())
             ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
                        sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
-                       policy="default", no_auto_pair=False, disable=False,
-                       non_interactive=True)
+                       policy="default", no_auto_pair=False,
+                       no_dns_override=not cfg.openshell.dns_override,
+                       no_guardrail=not cfg.guardrail.enabled,
+                       disable=False, non_interactive=True)
 
     click.echo()
     click.echo("  ──────────────────────────────────────────────────────")
@@ -135,8 +137,12 @@ def _init_sandbox(cfg, logger) -> bool:
             click.echo(" failed")
             click.echo("                 install manually: install-openshell-sandbox")
 
-    # 1b. Ensure iptables is installed (runtime dep for openshell-sandbox)
-    _ensure_iptables()
+    # 1b. Ensure iptables is installed (needed when DefenseClaw injects
+    #     DNS or guardrail rules; skipped when neither feature is active)
+    if cfg.openshell.dns_override or cfg.guardrail.enabled:
+        _ensure_iptables()
+    else:
+        click.echo("  iptables:      not required (no DNS override, no guardrail)")
 
     # 2. Create sandbox system user (idempotent)
     _create_sandbox_user(sandbox_home)
@@ -160,12 +166,16 @@ def _init_sandbox(cfg, logger) -> bool:
     else:
         click.echo(f"  Sandbox dirs:  created at {sandbox_home}")
 
-    # 5. Install DefenseClaw plugin into sandbox
+    # 5. Install DefenseClaw plugin into sandbox (only when guardrail is enabled)
     target_plugin = os.path.join(sandbox_home, ".openclaw", "extensions", "defenseclaw", "dist", "index.js")
-    if os.path.isfile(target_plugin):
-        click.echo("  Plugin:        already installed")
+    if cfg.guardrail.enabled:
+        if os.path.isfile(target_plugin):
+            click.echo("  Plugin:        already installed")
+        else:
+            _install_plugin_to_sandbox(cfg, sandbox_home)
     else:
-        _install_plugin_to_sandbox(cfg, sandbox_home)
+        click.echo("  Plugin:        skipped (guardrail not enabled)")
+        click.echo("                 run 'defenseclaw setup guardrail' to enable")
 
     # 6. Copy default OpenShell policy files
     rego_dst = os.path.join(cfg.data_dir, "openshell-policy.rego")

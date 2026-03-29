@@ -1003,6 +1003,31 @@ func TestOpenShellConfig_ShouldAutoPair(t *testing.T) {
 	})
 }
 
+func TestOpenShellConfig_ShouldOverrideDNS(t *testing.T) {
+	t.Run("nil defaults to true", func(t *testing.T) {
+		oc := OpenShellConfig{}
+		if !oc.ShouldOverrideDNS() {
+			t.Error("ShouldOverrideDNS() = false, want true (default)")
+		}
+	})
+
+	t.Run("explicit true", func(t *testing.T) {
+		b := true
+		oc := OpenShellConfig{DNSOverride: &b}
+		if !oc.ShouldOverrideDNS() {
+			t.Error("ShouldOverrideDNS() = false, want true")
+		}
+	})
+
+	t.Run("explicit false", func(t *testing.T) {
+		b := false
+		oc := OpenShellConfig{DNSOverride: &b}
+		if oc.ShouldOverrideDNS() {
+			t.Error("ShouldOverrideDNS() = true, want false")
+		}
+	})
+}
+
 func TestGatewayConfig_RequiresTLSWithMode(t *testing.T) {
 	tests := []struct {
 		name    string
