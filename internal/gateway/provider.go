@@ -173,6 +173,10 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 	switch provider {
 	case "anthropic":
 		return &anthropicProvider{model: modelID, apiKey: apiKey}, nil
+	case "openrouter":
+		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://openrouter.ai/api"}, nil
+	case "ollama":
+		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "http://localhost:11434"}, nil
 	case "openai":
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	default:
@@ -189,7 +193,29 @@ func inferProvider(model string, apiKey string) string {
 	if strings.HasPrefix(apiKey, "sk-ant-") {
 		return "anthropic"
 	}
+	if strings.HasPrefix(apiKey, "sk-or-") {
+		return "openrouter"
+	}
 	return "openai"
+}
+
+// inferAPIKeyEnv returns the conventional environment variable name for the
+// provider prefix in a "provider/model" model string. Used as a fallback when
+// guardrail.api_key_env is not explicitly configured.
+func inferAPIKeyEnv(model string) string {
+	provider, _ := splitModel(model)
+	switch provider {
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "openrouter":
+		return "OPENROUTER_API_KEY"
+	case "ollama":
+		return "" // no key needed
+	default:
+		return "OPENAI_API_KEY"
+	}
 }
 
 // NewProviderWithBase creates a provider that sends requests to a custom base URL
