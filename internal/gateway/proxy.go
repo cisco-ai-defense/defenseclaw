@@ -100,14 +100,15 @@ func NewGuardrailProxy(
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
-	apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("proxy: guardrail.model is required")
 	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("proxy: no API key available (set guardrail.api_key_env and provide the key in ~/.defenseclaw/.env or environment)")
-	}
 
+	// API key is no longer required at startup — the fetch interceptor in the
+	// OpenClaw plugin supplies the real provider key per-request from
+	// OpenClaw's auth-profiles.json. The primary provider is built with an
+	// empty key; resolveProvider will use the per-request key instead.
+	apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath) // may be empty — that's fine
 	primary := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 
 	var cisco *CiscoInspectClient
