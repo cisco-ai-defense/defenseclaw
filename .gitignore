@@ -66,3 +66,4 @@ coverage*.xml
 *.key
 *.p12
 *.pfx
+.worktrees/
