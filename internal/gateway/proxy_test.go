@@ -144,14 +144,14 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 	health := NewSidecarHealth()
 
 	return &GuardrailProxy{
-		cfg:       cfg,
-		logger:    logger,
-		health:    health,
-		store:     store,
-		dataDir:   t.TempDir(),
-		provider:  prov,
-		inspector: insp,
-		mode:      mode,
+		cfg:             cfg,
+		logger:          logger,
+		health:          health,
+		store:           store,
+		dataDir:         t.TempDir(),
+		defaultProvider: prov,
+		inspector:       insp,
+		mode:            mode,
 	}
 }
 
@@ -1238,4 +1238,52 @@ func TestProxyWithLocalInspector(t *testing.T) {
 			t.Errorf("expected original response, got id=%q", resp.ID)
 		}
 	})
+}
+
+func TestPerRequestProviderRouting(t *testing.T) {
+	openrouterCalled := false
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openrouterCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "1", "object": "chat.completion", "created": 1,
+			"model": "llama-3.3-70b",
+			"choices": []map[string]interface{}{
+				{"index": 0, "message": map[string]string{"role": "assistant", "content": "from openrouter"}, "finish_reason": "stop"},
+			},
+		})
+	}))
+	defer openrouterSrv.Close()
+
+	store, logger := testStoreAndLogger(t)
+	health := NewSidecarHealth()
+	cfg := &config.GuardrailConfig{Enabled: true, Port: 0, Mode: "observe"}
+	proxy := &GuardrailProxy{
+		cfg:          cfg,
+		logger:       logger,
+		health:       health,
+		store:        store,
+		dataDir:      t.TempDir(),
+		inspector:    newMockInspector(),
+		mode:         "observe",
+		providerURLs: map[string]string{"openrouter": openrouterSrv.URL},
+	}
+
+	reqBody := mustJSON(t, map[string]interface{}{
+		"model":    "openrouter/meta-llama/llama-3.3-70b",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-or-testkey")
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	proxy.handleChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if !openrouterCalled {
+		t.Error("openrouter server was not called")
+	}
 }

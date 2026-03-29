@@ -53,7 +53,12 @@ type GuardrailProxy struct {
 	store     *audit.Store
 	dataDir   string
 
-	provider  LLMProvider
+	// defaultProvider is used instead of per-request creation when set.
+	// This exists solely for unit testing — production code never sets it.
+	defaultProvider LLMProvider
+	// providerURLs overrides base URLs per provider prefix for tests.
+	providerURLs    map[string]string
+
 	inspector ContentInspector
 	masterKey string
 
@@ -79,19 +84,6 @@ func NewGuardrailProxy(
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
-	apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
-	if cfg.Model == "" {
-		return nil, fmt.Errorf("proxy: guardrail.model is required")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("proxy: no API key available (set guardrail.api_key_env and provide the key in ~/.defenseclaw/.env or environment)")
-	}
-
-	provider, err := NewProvider(cfg.Model, apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: create provider: %w", err)
-	}
-
 	var cisco *CiscoInspectClient
 	if cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
@@ -110,12 +102,43 @@ func NewGuardrailProxy(
 		otel:         otel,
 		store:        store,
 		dataDir:      dataDir,
-		provider:     provider,
 		inspector:    inspector,
 		masterKey:    masterKey,
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
 	}, nil
+}
+
+// newProviderForRequest creates an LLM provider for this specific request.
+// It reads the model field from req, resolves the provider prefix, and
+// routes to the correct base URL. The API key is taken from req.APIKey
+// (pass-through from the incoming Authorization header).
+//
+// In tests, defaultProvider overrides this entirely, and providerURLs
+// overrides base URLs per provider prefix.
+func (p *GuardrailProxy) newProviderForRequest(req *ChatRequest) LLMProvider {
+	if p.defaultProvider != nil {
+		return p.defaultProvider
+	}
+
+	model := req.Model
+	if model == "" {
+		model = p.cfg.Model
+	}
+
+	providerName, _ := splitModel(model)
+	if providerName == "" {
+		providerName = inferProvider(model, req.APIKey)
+	}
+
+	// Allow test overrides of base URLs.
+	if baseURL, ok := p.providerURLs[providerName]; ok {
+		return NewProviderWithBase(model, req.APIKey, baseURL)
+	}
+
+	// Pass empty baseURL so NewProviderWithBase falls through to built-in
+	// provider defaults (OpenAI, Anthropic, OpenRouter, Ollama, etc.).
+	return NewProviderWithBase(model, req.APIKey, "")
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
@@ -317,7 +340,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string) {
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (non-streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
-	resp, err := p.provider.ChatCompletion(r.Context(), req)
+	provider := p.newProviderForRequest(req)
+	resp, err := provider.ChatCompletion(r.Context(), req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -385,7 +409,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	lastScanLen := 0
 	const scanInterval = 500
 
-	usage, err := p.provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
+	provider := p.newProviderForRequest(req)
+	usage, err := provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
 		chunk.Model = aliasModel
 
 		// Accumulate content for post-stream inspection.
