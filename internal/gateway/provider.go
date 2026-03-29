@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -173,6 +174,8 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	case "openrouter":
 		return &openrouterProvider{model: modelID, apiKey: apiKey}, nil
+	case "azure":
+		return nil, fmt.Errorf("provider: azure requires api_base; use NewProviderWithBase")
 	default:
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	}
@@ -208,6 +211,8 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) LLMProvide
 	switch provider {
 	case "openrouter":
 		return &openrouterProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
+	case "azure":
+		return &azureOpenAIProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
 	default:
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
 	}
