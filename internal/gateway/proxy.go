@@ -416,6 +416,25 @@ func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 		return NewProviderWithBase(req.Model, req.TargetAPIKey, "")
 	}
 
+	// Master key or no key: try to infer provider from model name and look up
+	// key from OpenClaw's config (covers azure, openrouter via primary, etc.)
+	if req.TargetAPIKey == "" || strings.HasPrefix(req.TargetAPIKey, "sk-dc-") {
+		// Check if model belongs to an Azure provider in openclaw.json
+		if azureURL := resolveAzureEndpointFromOpenClaw(); azureURL != "" {
+			azureKey := resolveAzureKeyFromOpenClaw()
+			if azureKey != "" {
+				// Check if this model is registered under that Azure provider
+				if isModelInAzureProvider(req.Model) {
+					return &azureOpenAIProvider{
+						model:   req.Model,
+						apiKey:  azureKey,
+						baseURL: azureURL,
+					}
+				}
+			}
+		}
+	}
+
 	return p.primary
 }
 
@@ -439,6 +458,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] ── INCOMING REQUEST ──────────────────────────────────\n")
+	fmt.Fprintf(os.Stderr, "[guardrail] headers: Authorization=%s api-key=%s X-DC-Target-URL=%s\n",
+		truncateLog(r.Header.Get("Authorization"), 20),
+		truncateLog(r.Header.Get("api-key"), 20),
+		r.Header.Get("X-DC-Target-URL"))
 	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n", len(body), truncateLog(string(body), 2000))
 
 	var req ChatRequest
@@ -727,31 +750,92 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 	return false
 }
 
-// resolveAzureEndpointFromOpenClaw reads Azure base URLs from openclaw.json
-// models.providers entries whose baseUrl contains "openai.azure.com".
-func resolveAzureEndpointFromOpenClaw() string {
+// azureProviderCache caches Azure provider info read from openclaw.json.
+type azureProviderInfo struct {
+	baseURL string
+	apiKey  string
+	models  []string
+}
+
+var azureProviderCacheMu sync.Mutex
+var azureProviderCached *azureProviderInfo
+var azureProviderCacheTs time.Time
+
+const azureProviderCacheTTL = 30 * time.Second
+
+func loadAzureProviderInfo() *azureProviderInfo {
+	azureProviderCacheMu.Lock()
+	defer azureProviderCacheMu.Unlock()
+
+	if azureProviderCached != nil && time.Since(azureProviderCacheTs) < azureProviderCacheTTL {
+		return azureProviderCached
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return nil
 	}
 	data, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
 	if err != nil {
-		return ""
+		return nil
 	}
 	var cfg struct {
 		Models struct {
 			Providers map[string]struct {
 				BaseURL string `json:"baseUrl"`
+				APIKey  string `json:"apiKey"`
+				Models  []struct {
+					ID string `json:"id"`
+				} `json:"models"`
 			} `json:"providers"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
+		return nil
 	}
 	for _, prov := range cfg.Models.Providers {
 		if strings.Contains(prov.BaseURL, "openai.azure.com") {
-			return prov.BaseURL
+			var modelIDs []string
+			for _, m := range prov.Models {
+				modelIDs = append(modelIDs, m.ID)
+			}
+			info := &azureProviderInfo{
+				baseURL: prov.BaseURL,
+				apiKey:  prov.APIKey,
+				models:  modelIDs,
+			}
+			azureProviderCached = info
+			azureProviderCacheTs = time.Now()
+			return info
 		}
+	}
+	return nil
+}
+
+func resolveAzureKeyFromOpenClaw() string {
+	if info := loadAzureProviderInfo(); info != nil {
+		return info.apiKey
+	}
+	return ""
+}
+
+func isModelInAzureProvider(model string) bool {
+	info := loadAzureProviderInfo()
+	if info == nil {
+		return false
+	}
+	for _, m := range info.models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveAzureEndpointFromOpenClaw reads the Azure base URL from openclaw.json.
+func resolveAzureEndpointFromOpenClaw() string {
+	if info := loadAzureProviderInfo(); info != nil {
+		return info.baseURL
 	}
 	return ""
 }
