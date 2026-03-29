@@ -1111,6 +1111,48 @@ func TestPatchRawResponseModel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// f) Loopback bypass auth tests
+// ---------------------------------------------------------------------------
+
+func TestAuthenticateRequest_Loopback(t *testing.T) {
+	proxy := &GuardrailProxy{masterKey: "sk-dc-secret"}
+
+	t.Run("loopback_ipv4_always_allowed", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		r.RemoteAddr = "127.0.0.1:54321"
+		if !proxy.authenticateRequest(r) {
+			t.Error("loopback IPv4 should be allowed without master key")
+		}
+	})
+
+	t.Run("loopback_ipv6_always_allowed", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		r.RemoteAddr = "[::1]:54321"
+		if !proxy.authenticateRequest(r) {
+			t.Error("loopback IPv6 should be allowed without master key")
+		}
+	})
+
+	t.Run("non_loopback_wrong_key_rejected", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		r.RemoteAddr = "10.0.0.5:54321"
+		r.Header.Set("Authorization", "Bearer wrong-key")
+		if proxy.authenticateRequest(r) {
+			t.Error("non-loopback with wrong key should be rejected")
+		}
+	})
+
+	t.Run("non_loopback_correct_key_allowed", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		r.RemoteAddr = "10.0.0.5:54321"
+		r.Header.Set("Authorization", "Bearer sk-dc-secret")
+		if !proxy.authenticateRequest(r) {
+			t.Error("non-loopback with correct key should be allowed")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Integration: real local inspector with proxy
 // ---------------------------------------------------------------------------
 

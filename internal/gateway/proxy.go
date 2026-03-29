@@ -511,6 +511,14 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 	if p.masterKey == "" {
 		return true
 	}
+	// Loopback connections are always trusted — the proxy binds exclusively to
+	// 127.0.0.1 so only local processes can reach it. OpenClaw sends the real
+	// provider API key as its Bearer token (not the master key), so we cannot
+	// validate it against the master key.
+	if addr := r.RemoteAddr; strings.HasPrefix(addr, "127.0.0.1:") || strings.HasPrefix(addr, "[::1]:") {
+		return true
+	}
+	// Non-loopback clients must present the derived master key.
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ") == p.masterKey
