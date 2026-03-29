@@ -117,6 +117,7 @@ type ChatRequest struct {
 	Tools       json.RawMessage `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
 	RawBody     json.RawMessage `json:"-"`
+	APIKey      string          `json:"-"` // pass-through from incoming Authorization header
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
@@ -246,6 +247,15 @@ type openaiProvider struct {
 	baseURL string
 }
 
+// resolveKey returns the API key for this request: prefer the pass-through key
+// from the incoming request, fall back to the provider's configured key.
+func (p *openaiProvider) resolveKey(req *ChatRequest) string {
+	if req.APIKey != "" {
+		return req.APIKey
+	}
+	return p.apiKey
+}
+
 // patchRawBody takes raw JSON bytes and overrides the "model" and "stream"
 // fields, preserving every other field the client sent (response_format,
 // seed, frequency_penalty, parallel_tool_calls, logit_bias, etc.).
@@ -282,7 +292,7 @@ func (p *openaiProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	httpReq.Header.Set("Authorization", "Bearer "+p.resolveKey(req))
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -329,7 +339,7 @@ func (p *openaiProvider) ChatCompletionStream(ctx context.Context, req *ChatRequ
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	httpReq.Header.Set("Authorization", "Bearer "+p.resolveKey(req))
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -436,7 +446,11 @@ func (p *anthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	apiKey := req.APIKey
+	if apiKey == "" {
+		apiKey = p.apiKey
+	}
+	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)
@@ -473,7 +487,11 @@ func (p *anthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatR
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	apiKey := req.APIKey
+	if apiKey == "" {
+		apiKey = p.apiKey
+	}
+	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)

@@ -265,6 +265,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 	req.RawBody = body
 
+	// Extract the incoming Bearer token for transparent pass-through to the upstream.
+	// OpenClaw already holds the real provider key — no need for defenseclaw to store it.
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		req.APIKey = strings.TrimPrefix(auth, "Bearer ")
+	}
+
 	fmt.Fprintf(os.Stderr, "[guardrail] parsed: model=%q stream=%v messages=%d\n",
 		req.Model, req.Stream, len(req.Messages))
 
@@ -311,7 +317,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string) {
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (non-streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
-	resp, err := p.provider.ChatCompletion(r.Context(), req)
+	p.rtMu.RLock()
+	provider := p.provider
+	p.rtMu.RUnlock()
+	resp, err := provider.ChatCompletion(r.Context(), req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
@@ -379,7 +388,10 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	lastScanLen := 0
 	const scanInterval = 500
 
-	usage, err := p.provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
+	p.rtMu.RLock()
+	provider := p.provider
+	p.rtMu.RUnlock()
+	usage, err := provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
 		chunk.Model = aliasModel
 
 		// Accumulate content for post-stream inspection.
