@@ -1244,6 +1244,10 @@ func TestPerRequestProviderRouting(t *testing.T) {
 	openrouterCalled := false
 	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		openrouterCalled = true
+		// Verify the key was forwarded unchanged
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-or-testkey" {
+			t.Errorf("upstream Authorization = %q, want Bearer sk-or-testkey", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"id": "1", "object": "chat.completion", "created": 1,
@@ -1286,4 +1290,54 @@ func TestPerRequestProviderRouting(t *testing.T) {
 	if !openrouterCalled {
 		t.Error("openrouter server was not called")
 	}
+
+	t.Run("falls_back_to_cfg_model_when_request_model_empty", func(t *testing.T) {
+		fallbackCalled := false
+		fallbackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fallbackCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "2", "object": "chat.completion", "created": 1,
+				"model": "llama-3.3-70b",
+				"choices": []map[string]interface{}{
+					{"index": 0, "message": map[string]string{"role": "assistant", "content": "fallback"}, "finish_reason": "stop"},
+				},
+			})
+		}))
+		defer fallbackSrv.Close()
+
+		store2, logger2 := testStoreAndLogger(t)
+		health2 := NewSidecarHealth()
+		cfg2 := &config.GuardrailConfig{
+			Enabled: true, Port: 0, Mode: "observe",
+			Model: "openrouter/meta-llama/llama-3.3-70b",
+		}
+		proxy2 := &GuardrailProxy{
+			cfg:          cfg2,
+			logger:       logger2,
+			health:       health2,
+			store:        store2,
+			dataDir:      t.TempDir(),
+			inspector:    newMockInspector(),
+			mode:         "observe",
+			providerURLs: map[string]string{"openrouter": fallbackSrv.URL},
+		}
+
+		// Send request with no model field — proxy should use cfg.Model
+		reqBody2 := mustJSON(t, map[string]interface{}{
+			"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+		})
+		req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody2))
+		req2.Header.Set("Content-Type", "application/json")
+		req2.RemoteAddr = "127.0.0.1:1234"
+		rec2 := httptest.NewRecorder()
+		proxy2.handleChatCompletion(rec2, req2)
+
+		if rec2.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200; body: %s", rec2.Code, rec2.Body.String())
+		}
+		if !fallbackCalled {
+			t.Error("fallback server was not called — cfg.Model fallback did not work")
+		}
+	})
 }

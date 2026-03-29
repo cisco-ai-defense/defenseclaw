@@ -70,8 +70,9 @@ type GuardrailProxy struct {
 	blockMessage string
 }
 
-// NewGuardrailProxy constructs and wires a proxy. Returns an error if the
-// upstream provider can't be resolved (missing model or API key).
+// NewGuardrailProxy constructs and wires a proxy. Provider selection
+// happens per-request via newProviderForRequest — no model or API key
+// is required at construction time.
 func NewGuardrailProxy(
 	cfg *config.GuardrailConfig,
 	ciscoAID *config.CiscoAIDefenseConfig,
@@ -124,6 +125,12 @@ func (p *GuardrailProxy) newProviderForRequest(req *ChatRequest) LLMProvider {
 	model := req.Model
 	if model == "" {
 		model = p.cfg.Model
+	}
+
+	if model == "" {
+		// Neither the request nor the config specifies a model.
+		// Return an error-signalling provider that surfaces this clearly.
+		return &errProvider{err: fmt.Errorf("no model specified — set guardrail.model in config or include model in request")}
 	}
 
 	providerName, _ := splitModel(model)
@@ -744,6 +751,21 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 			p.otel.RecordLLMTokens(ctx, "guardrail-proxy", ptrOr(tokIn, 0), ptrOr(tokOut, 0))
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// errProvider
+// ---------------------------------------------------------------------------
+
+// errProvider is a sentinel LLMProvider that always returns a configuration error.
+// Used when newProviderForRequest cannot determine a model to route to.
+type errProvider struct{ err error }
+
+func (p *errProvider) ChatCompletion(_ context.Context, _ *ChatRequest) (*ChatResponse, error) {
+	return nil, p.err
+}
+func (p *errProvider) ChatCompletionStream(_ context.Context, _ *ChatRequest, _ func(StreamChunk)) (*ChatUsage, error) {
+	return nil, p.err
 }
 
 // ---------------------------------------------------------------------------
