@@ -388,9 +388,10 @@ func inferProviderFromURL(targetURL string) string {
 func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 	// Azure: detected via api-key header (req.TargetURL == "azure" sentinel).
 	if req.TargetURL == "azure" {
-		baseURL := os.Getenv("AZURE_OPENAI_ENDPOINT")
+		// Resolve base URL: .env → openclaw.json providers → default
+		baseURL := ResolveAPIKey("AZURE_OPENAI_ENDPOINT", filepath.Join(p.dataDir, ".env"))
 		if baseURL == "" {
-			baseURL = ResolveAPIKey("AZURE_OPENAI_ENDPOINT", filepath.Join(p.dataDir, ".env"))
+			baseURL = resolveAzureEndpointFromOpenClaw()
 		}
 		if baseURL == "" {
 			baseURL = "https://api.openai.azure.com"
@@ -724,6 +725,35 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 		return strings.TrimPrefix(auth, "Bearer ") == p.masterKey
 	}
 	return false
+}
+
+// resolveAzureEndpointFromOpenClaw reads Azure base URLs from openclaw.json
+// models.providers entries whose baseUrl contains "openai.azure.com".
+func resolveAzureEndpointFromOpenClaw() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		Models struct {
+			Providers map[string]struct {
+				BaseURL string `json:"baseUrl"`
+			} `json:"providers"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+	for _, prov := range cfg.Models.Providers {
+		if strings.Contains(prov.BaseURL, "openai.azure.com") {
+			return prov.BaseURL
+		}
+	}
+	return ""
 }
 
 // resolveKeyFromOpenClawProfiles reads the API key for a given model's provider
