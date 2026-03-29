@@ -148,6 +148,19 @@ def patch_openclaw_config(
         "models": all_models,
     }
 
+    # Redirect ALL existing providers through the proxy so that selecting any
+    # model in OpenClaw's picker routes through security inspection, not just
+    # models explicitly registered under the defenseclaw provider.
+    # The original baseUrl is saved as _dcOriginalBaseUrl for restore.
+    proxy_url = f"http://localhost:{proxy_port}"
+    for provider_name, provider_cfg in cfg["models"]["providers"].items():
+        if provider_name == "defenseclaw":
+            continue
+        original_url = provider_cfg.get("baseUrl", "")
+        if original_url and original_url != proxy_url:
+            provider_cfg["_dcOriginalBaseUrl"] = original_url
+            provider_cfg["baseUrl"] = proxy_url
+
     cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
     # Find the fully-qualified ID in all_models that matches the configured model_name.
     # The enumerated IDs are provider-prefixed (e.g. "openrouter/anthropic/claude-sonnet-4.6")
@@ -204,6 +217,11 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
     if "models" in cfg and "providers" in cfg["models"]:
         cfg["models"]["providers"].pop("defenseclaw", None)
         cfg["models"]["providers"].pop("litellm", None)  # backward compat
+
+        # Restore any provider baseUrls that were redirected through the proxy.
+        for provider_cfg in cfg["models"]["providers"].values():
+            if "_dcOriginalBaseUrl" in provider_cfg:
+                provider_cfg["baseUrl"] = provider_cfg.pop("_dcOriginalBaseUrl")
 
     if "plugins" in cfg and "allow" in cfg["plugins"]:
         allow = cfg["plugins"]["allow"]

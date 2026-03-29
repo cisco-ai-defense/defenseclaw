@@ -133,14 +133,54 @@ func (p *GuardrailProxy) newProviderForRequest(req *ChatRequest) LLMProvider {
 		return &errProvider{err: fmt.Errorf("no model specified — set guardrail.model in config or include model in request")}
 	}
 
+	// Determine the upstream provider. Priority order:
+	// 1. API key prefix (most reliable when OpenClaw redirects native providers
+	//    through the proxy — the key identifies the real upstream even when the
+	//    model field lacks a provider prefix or has a conflicting one)
+	// 2. Model name prefix (e.g. "openrouter/...", "anthropic/...")
+	// 3. Inference from model name heuristics
+	keyProvider := inferProvider("", req.APIKey) // key-only inference
 	providerName, _ := splitModel(model)
-	if providerName == "" {
+	if keyProvider != "" && keyProvider != "openai" {
+		// A specific provider was identified from the API key — trust it.
+		// This handles the common case where OpenClaw sends "anthropic/claude-x"
+		// to the proxy using an sk-or-* key (OpenRouter) — without this, the
+		// proxy would incorrectly route to Anthropic direct.
+		providerName = keyProvider
+	} else if providerName == "" {
 		providerName = inferProvider(model, req.APIKey)
 	}
 
 	// Allow test overrides of base URLs.
 	if baseURL, ok := p.providerURLs[providerName]; ok {
+		if providerName == "azure" {
+			_, modelID := splitModel(model)
+			return &azureProvider{
+				deployment: modelID,
+				apiKey:     req.APIKey,
+				baseURL:    baseURL,
+				apiVersion: "2024-02-01",
+			}
+		}
 		return NewProviderWithBase(model, req.APIKey, baseURL)
+	}
+
+	// For Azure, use the configured base URL if set (each customer has a unique resource URL).
+	if providerName == "azure" {
+		_, modelID := splitModel(model)
+		baseURL := ""
+		if p.cfg != nil {
+			baseURL = p.cfg.AzureBaseURL
+		}
+		if baseURL == "" {
+			baseURL = "https://api.openai.azure.com"
+		}
+		return &azureProvider{
+			deployment: modelID,
+			apiKey:     req.APIKey,
+			baseURL:    baseURL,
+			apiVersion: "2024-02-01",
+		}
 	}
 
 	// Pass empty baseURL so NewProviderWithBase falls through to built-in
