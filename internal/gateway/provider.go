@@ -171,6 +171,8 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 		return &anthropicProvider{model: modelID, apiKey: apiKey}, nil
 	case "openai":
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
+	case "openrouter":
+		return &openrouterProvider{model: modelID, apiKey: apiKey}, nil
 	default:
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	}
@@ -197,12 +199,18 @@ func inferProvider(model string, apiKey string) string {
 // NewProviderWithBase creates a provider that sends requests to a custom base URL
 // using OpenAI-compatible format. Used for the LLM judge to support arbitrary endpoints.
 func NewProviderWithBase(model string, apiKey string, baseURL string) LLMProvider {
-	_, modelID := splitModel(model)
+	provider, modelID := splitModel(model)
 	if baseURL == "" {
 		p, _ := NewProvider(model, apiKey)
 		return p
 	}
-	return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
+	// Route to the appropriate provider with custom baseURL
+	switch provider {
+	case "openrouter":
+		return &openrouterProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
+	default:
+		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
+	}
 }
 
 var knownProviders = map[string]bool{
