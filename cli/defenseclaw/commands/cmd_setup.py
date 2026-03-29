@@ -870,31 +870,9 @@ def execute_guardrail_setup(
     if gc.original_model:
         click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
 
-    # --- Step 4: Write .env file for API keys ---
-    if gc.api_key_env:
-        env_val = os.environ.get(gc.api_key_env, "")
-        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
-        existing_dotenv = _load_dotenv(dotenv_path)
-
-        if not env_val and gc.api_key_env not in existing_dotenv:
-            click.echo()
-            click.echo(f"  ⚠ {gc.api_key_env} is not set in your current environment")
-            env_val = click.prompt(
-                f"  Enter the value for {gc.api_key_env}",
-                hide_input=True,
-                default="",
-            )
-            if not env_val:
-                click.echo("    Skipped — the guardrail proxy will fail without this key.")
-                click.echo(f"    You can set it later in {dotenv_path}")
-                warnings.append(f"{gc.api_key_env} not set — sidecar will fail to start")
-
-        if env_val:
-            existing_dotenv[gc.api_key_env] = env_val
-
-        if existing_dotenv:
-            _write_dotenv(dotenv_path, existing_dotenv)
-            click.echo(f"  ✓ API keys written to {dotenv_path} (mode 0600)")
+    # --- Step 4: No API key needed ---
+    # The plugin's fetch interceptor reads provider keys directly from
+    # OpenClaw's auth-profiles.json at runtime. No key storage required.
 
     # --- Step 5: Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
@@ -1047,27 +1025,12 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         gc.enabled = False
         return
 
-    # API key env var
-    if not gc.api_key_env or _looks_like_secret(gc.api_key_env):
-        gc.api_key_env = detect_api_key_env(gc.model)
-
-    env_val = os.environ.get(gc.api_key_env, "")
-    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
-    existing_dotenv = _load_dotenv(dotenv_path)
-    dotenv_val = existing_dotenv.get(gc.api_key_env, "")
+    # No API key prompt — the plugin's fetch interceptor reads keys directly from
+    # OpenClaw's auth-profiles.json at runtime. DefenseClaw never stores or
+    # manages upstream provider credentials.
+    gc.api_key_env = ""
     click.echo()
-    if env_val:
-        click.echo(f"  API key env var: {gc.api_key_env} ({_mask(env_val)})")
-        if not click.confirm("  Use this env var?", default=True):
-            gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
-    elif dotenv_val:
-        click.echo(f"  API key: {gc.api_key_env} ({_mask(dotenv_val)}) — from {dotenv_path}")
-        if not click.confirm("  Use this key?", default=True):
-            gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
-    else:
-        click.echo(f"  API key env var: {gc.api_key_env} (not set in environment or .env)")
-        click.echo("  The key will be saved to ~/.defenseclaw/.env during setup.")
-        gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
+    click.echo("  API key: sourced automatically from OpenClaw (no key needed here)")
 
 
 
