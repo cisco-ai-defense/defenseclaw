@@ -169,6 +169,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	}
 	if len(h.Details) > 0 {
 		for k, v := range h.Details {
+			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
+				continue
+			}
 			fmt.Printf("             %s: %v\n", k, v)
 		}
 	}
