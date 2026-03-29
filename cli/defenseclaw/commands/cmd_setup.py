@@ -850,15 +850,6 @@ def execute_guardrail_setup(
             f"Fix {app.cfg.claw.config_file} and re-run setup"
         )
 
-    # --- Step 2b: Write multi-provider config for Go proxy ---
-    from defenseclaw.guardrail import detect_provider_configs, write_provider_configs
-
-    all_providers = detect_provider_configs(app.cfg.claw.config_file)
-    if all_providers:
-        supported_set = {"anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai"}
-        write_provider_configs(app.cfg.data_dir, all_providers, supported_set)
-        click.echo("  Provider configs written to ~/.defenseclaw/guardrail_providers.json")
-
     # --- Step 3: Save DefenseClaw config ---
     if save_config:
         try:
@@ -1059,38 +1050,6 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         click.echo("  The key will be saved to ~/.defenseclaw/.env during setup.")
         gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
 
-    # Detect all providers in openclaw.json
-    from defenseclaw.guardrail import KNOWN_PROVIDERS as KNOWN_PROV_LIST
-    from defenseclaw.guardrail import detect_provider_configs
-
-    all_providers = detect_provider_configs(app.cfg.claw.config_file)
-    if all_providers:
-        supported = {n for n in all_providers if n in KNOWN_PROV_LIST}
-        unsupported = {n for n in all_providers if n not in KNOWN_PROV_LIST}
-
-        click.echo()
-        click.echo(f"  Found {len(all_providers)} provider(s) in OpenClaw config:")
-        for name in sorted(all_providers):
-            status = "supported" if name in supported else "unsupported (will be blocked)"
-            models = ", ".join(all_providers[name].get("models", [])[:3])
-            click.echo(f"    {name}: {models} -- {status}")
-
-        if unsupported:
-            click.echo()
-            click.echo(f"  Warning: {len(unsupported)} unsupported provider(s) will have traffic BLOCKED:")
-            for name in sorted(unsupported):
-                click.echo(f"    - {name}")
-
-        click.echo()
-        if click.confirm("  Route all providers through the guardrail?", default=True):
-            # For azure, extract base_url automatically
-            for name in supported:
-                base = all_providers[name].get("base_url", "")
-                if name == "azure" and base:
-                    gc.api_base = base
-                    click.echo(f"  Azure deployment URL extracted: {base[:60]}...")
-        else:
-            click.echo("  Skipping multi-provider patching -- only the primary model will be routed.")
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
