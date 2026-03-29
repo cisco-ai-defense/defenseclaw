@@ -37,7 +37,7 @@ def patch_openclaw_config(
     master_key: str,
     original_model: str,
 ) -> str | None:
-    """Patch openclaw.json to route through the guardrail proxy. Returns the original model or None on error."""
+    """Patch openclaw.json to route ALL providers through the guardrail proxy."""
     path = _expand(openclaw_config_file)
 
     try:
@@ -57,6 +57,21 @@ def patch_openclaw_config(
     if "providers" not in cfg["models"]:
         cfg["models"]["providers"] = {}
 
+    # Save and patch ALL existing providers
+    original_providers = {}
+    for name, prov in list(cfg["models"]["providers"].items()):
+        if name in ("defenseclaw", "litellm"):
+            continue
+        original_providers[name] = prov.copy()
+        # Redirect to proxy
+        prov["baseUrl"] = f"http://localhost:{proxy_port}"
+        prov["apiKey"] = master_key
+
+    # Store originals for restore
+    if original_providers:
+        cfg["_defenseclaw_original_providers"] = original_providers
+
+    # Add the defenseclaw provider (for the primary model alias)
     cfg["models"]["providers"]["defenseclaw"] = {
         "baseUrl": f"http://localhost:{proxy_port}",
         "apiKey": master_key,
@@ -81,9 +96,6 @@ def patch_openclaw_config(
     if "defenseclaw" not in allow:
         allow.append("defenseclaw")
 
-    # Ensure plugins.load.paths includes the install directory so OpenClaw
-    # can discover the plugin even when ``openclaw plugins install`` didn't
-    # set it (or a prior disable/re-enable cycle cleared it).
     oc_home = os.path.dirname(path)
     install_path = os.path.join(oc_home, "extensions", "defenseclaw")
     load = plugins.setdefault("load", {})
@@ -101,7 +113,7 @@ def patch_openclaw_config(
 
 
 def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> bool:
-    """Revert OpenClaw config to use the original model directly."""
+    """Revert OpenClaw config — restore all original providers."""
     path = _expand(openclaw_config_file)
 
     try:
@@ -116,9 +128,15 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
         cfg["agents"]["defaults"]["model"]["primary"] = original_model
 
+    # Restore original provider entries
+    original_providers = cfg.pop("_defenseclaw_original_providers", {})
+    if original_providers and "models" in cfg and "providers" in cfg["models"]:
+        for name, prov in original_providers.items():
+            cfg["models"]["providers"][name] = prov
+
     if "models" in cfg and "providers" in cfg["models"]:
         cfg["models"]["providers"].pop("defenseclaw", None)
-        cfg["models"]["providers"].pop("litellm", None)  # backward compat
+        cfg["models"]["providers"].pop("litellm", None)
 
     if "plugins" in cfg and "allow" in cfg["plugins"]:
         allow = cfg["plugins"]["allow"]
@@ -273,6 +291,31 @@ def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     return primary, ""
 
 
+def detect_provider_configs(openclaw_config_file: str) -> dict[str, dict]:
+    """Read all provider configurations from openclaw.json.
+
+    Returns {provider_name: {"base_url": ..., "api_key": ..., "models": [...]}}.
+    """
+    path = _expand(openclaw_config_file)
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    providers = cfg.get("models", {}).get("providers", {})
+    result = {}
+    for name, prov in providers.items():
+        if name == "defenseclaw" or name == "litellm":
+            continue
+        result[name] = {
+            "base_url": prov.get("baseUrl", ""),
+            "api_key": prov.get("apiKey", ""),
+            "models": [m.get("id", "") for m in prov.get("models", [])],
+        }
+    return result
+
+
 def detect_api_key_env(model: str) -> str:
     """Guess the API key env var from the model string."""
     lower = model.lower()
@@ -315,6 +358,27 @@ def guess_provider(model: str) -> str:
     if lower.startswith("gemini"):
         return "gemini"
     return ""
+
+
+def write_provider_configs(
+    data_dir: str,
+    provider_configs: dict[str, dict],
+    supported_providers: set[str],
+) -> None:
+    """Write guardrail_providers.json for the Go proxy to read."""
+    entries = {}
+    for name, cfg in provider_configs.items():
+        api_key_env = detect_api_key_env(name)
+        entries[name] = {
+            "base_url": cfg.get("base_url", ""),
+            "api_key_env": api_key_env,
+            "supported": name in supported_providers,
+        }
+
+    path = os.path.join(_expand(data_dir), "guardrail_providers.json")
+    with open(path, "w") as f:
+        json.dump(entries, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 # ------------------------------------------------------------------
