@@ -1011,7 +1011,7 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
     # No API key prompt — the guardrail proxy forwards OpenClaw's key per-request.
     # Defenseclaw never needs to store or manage upstream provider credentials.
-    gc.api_key_env = detect_api_key_env(gc.model)
+    gc.api_key_env = ""
     click.echo()
     click.echo("  API key: sourced from OpenClaw automatically (no key needed here)")
 

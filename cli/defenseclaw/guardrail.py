@@ -125,8 +125,16 @@ def patch_openclaw_config(
     }
 
     cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
-    # Set the primary to the explicitly configured model, or first enumerated model
-    primary_id = model_name if model_name else (all_models[0]["id"] if all_models else "")
+    # Find the fully-qualified ID in all_models that matches the configured model_name.
+    # The enumerated IDs are provider-prefixed (e.g. "openrouter/anthropic/claude-sonnet-4.6")
+    # while model_name may be bare (e.g. "anthropic/claude-sonnet-4.6").
+    primary_id = model_name  # fallback to bare if not found in enumerated list
+    for m in all_models:
+        if m["id"] == model_name or m["id"].endswith(f"/{model_name}"):
+            primary_id = m["id"]
+            break
+    if not primary_id and all_models:
+        primary_id = all_models[0]["id"]
     cfg["agents"]["defaults"]["model"]["primary"] = f"defenseclaw/{primary_id}"
 
     plugins = cfg.setdefault("plugins", {})

@@ -1624,8 +1624,41 @@ class TestEnumerateAllModels(unittest.TestCase):
             self.assertIn("ollama/llama3.2:3b", dc_ids)
             self.assertEqual(
                 result["agents"]["defaults"]["model"]["primary"],
-                "defenseclaw/anthropic/claude-sonnet-4.6",
+                "defenseclaw/openrouter/anthropic/claude-sonnet-4.6",
             )
+            # Verify the primary actually appears in the registered model IDs
+            assert result["agents"]["defaults"]["model"]["primary"] in [f"defenseclaw/{m['id']}" for m in dc_models]
+
+    def test_patch_registers_fallback_when_no_providers(self, tmp_path=None):
+        """When no other providers exist, patch_openclaw_config uses the single-model fallback."""
+        import tempfile
+        from defenseclaw.guardrail import patch_openclaw_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "openclaw.json")
+            cfg = {
+                "agents": {"defaults": {"model": {"primary": "openrouter/claude"}}},
+                "models": {"providers": {}},  # no providers
+                "plugins": {},
+            }
+            with open(config_path, "w") as f:
+                json.dump(cfg, f)
+
+            patch_openclaw_config(
+                config_path,
+                model_name="claude-sonnet-4.6",
+                proxy_port=4000,
+                master_key="sk-dc-test",
+                original_model="openrouter/claude",
+            )
+
+            with open(config_path) as f:
+                result = json.load(f)
+
+            dc_models = result["models"]["providers"]["defenseclaw"]["models"]
+            assert len(dc_models) == 1
+            assert dc_models[0]["id"] == "claude-sonnet-4.6"
+            assert result["agents"]["defaults"]["model"]["primary"] == "defenseclaw/claude-sonnet-4.6"
 
 
 if __name__ == "__main__":
