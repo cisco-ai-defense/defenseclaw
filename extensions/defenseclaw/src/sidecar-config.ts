@@ -30,6 +30,7 @@ interface SidecarConfig {
   apiPort: number;
   baseUrl: string;
   token: string;
+  guardrailPort: number;
 }
 
 let cached: SidecarConfig | undefined;
@@ -46,6 +47,7 @@ export function loadSidecarConfig(): SidecarConfig {
 
   let host = DEFAULT_HOST;
   let apiPort = DEFAULT_API_PORT;
+  let guardrailPort = 4000;
   let token = "";
 
   try {
@@ -64,6 +66,10 @@ export function loadSidecarConfig(): SidecarConfig {
         const envVal = process.env[tokenEnv];
         if (envVal) token = envVal;
       }
+      const gr = raw["guardrail"] as Record<string, unknown> | undefined;
+      if (gr && typeof gr === "object") {
+        if (typeof gr["port"] === "number") guardrailPort = gr["port"];
+      }
     }
   } catch {
     // Config missing or unreadable — use defaults
@@ -78,7 +84,7 @@ export function loadSidecarConfig(): SidecarConfig {
     token = readDotEnvToken(DEFAULT_TOKEN_ENV);
   }
 
-  cached = { host, apiPort, baseUrl: `http://${host}:${apiPort}`, token };
+  cached = { host, apiPort, baseUrl: `http://${host}:${apiPort}`, token, guardrailPort };
   return cached;
 }
 
