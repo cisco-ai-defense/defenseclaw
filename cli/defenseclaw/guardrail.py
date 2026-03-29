@@ -30,6 +30,52 @@ import subprocess
 from pathlib import Path
 
 
+def enumerate_all_models(openclaw_config_file: str) -> list[dict]:
+    """Read all models from all configured providers in openclaw.json.
+
+    Returns a list of model dicts ready to register under the defenseclaw provider.
+    Each model id is prefixed with the provider name (e.g. "openrouter/...") unless
+    the id already starts with that provider prefix.
+    Skips the "defenseclaw" provider itself to avoid circular registration.
+    Returns an empty list if the file cannot be read or has no providers.
+    """
+    path = _expand(openclaw_config_file)
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    providers = cfg.get("models", {}).get("providers", {})
+    result = []
+
+    for provider_name, provider_cfg in providers.items():
+        if provider_name == "defenseclaw":
+            continue  # skip our own proxy entry
+
+        for model in provider_cfg.get("models", []):
+            model_id = model.get("id", "")
+            if not model_id:
+                continue
+
+            # Prefix with provider name if not already prefixed
+            if not model_id.startswith(f"{provider_name}/"):
+                full_id = f"{provider_name}/{model_id}"
+            else:
+                full_id = model_id
+
+            result.append({
+                "id": full_id,
+                "name": model.get("name", full_id) + " (via DefenseClaw)",
+                "reasoning": model.get("reasoning", False),
+                "input": model.get("input", ["text"]),
+                "contextWindow": model.get("contextWindow", 128000),
+                "maxTokens": model.get("maxTokens", 8192),
+            })
+
+    return result
+
+
 def patch_openclaw_config(
     openclaw_config_file: str,
     model_name: str,
@@ -57,24 +103,31 @@ def patch_openclaw_config(
     if "providers" not in cfg["models"]:
         cfg["models"]["providers"] = {}
 
+    # Enumerate all models from all configured providers so every model
+    # the user picks in OpenClaw routes through the guardrail proxy.
+    all_models = enumerate_all_models(openclaw_config_file)
+    if not all_models:
+        # Fallback: register just the configured model when no other providers exist
+        all_models = [{
+            "id": model_name,
+            "name": f"{model_name} (via DefenseClaw)",
+            "reasoning": False,
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 64000,
+        }]
+
     cfg["models"]["providers"]["defenseclaw"] = {
         "baseUrl": f"http://localhost:{proxy_port}",
         "apiKey": master_key,
         "api": "openai-completions",
-        "models": [
-            {
-                "id": model_name,
-                "name": f"{model_name} (via DefenseClaw)",
-                "reasoning": False,
-                "input": ["text", "image"],
-                "contextWindow": 200000,
-                "maxTokens": 64000,
-            },
-        ],
+        "models": all_models,
     }
 
     cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
-    cfg["agents"]["defaults"]["model"]["primary"] = f"defenseclaw/{model_name}"
+    # Set the primary to the explicitly configured model, or first enumerated model
+    primary_id = model_name if model_name else (all_models[0]["id"] if all_models else "")
+    cfg["agents"]["defaults"]["model"]["primary"] = f"defenseclaw/{primary_id}"
 
     plugins = cfg.setdefault("plugins", {})
     allow = plugins.setdefault("allow", [])

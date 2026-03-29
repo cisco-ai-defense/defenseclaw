@@ -1500,5 +1500,133 @@ class TestInitGuardrailInstall(unittest.TestCase):
         logger.log_action.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# enumerate_all_models
+# ---------------------------------------------------------------------------
+
+class TestEnumerateAllModels(unittest.TestCase):
+    def _write_cfg(self, cfg: dict) -> str:
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump(cfg, f)
+        f.close()
+        return f.name
+
+    def test_prefixes_provider(self):
+        from defenseclaw.guardrail import enumerate_all_models
+        cfg = {
+            "models": {
+                "providers": {
+                    "openrouter": {
+                        "models": [
+                            {"id": "anthropic/claude-sonnet-4.6", "name": "Claude"},
+                            {"id": "meta-llama/llama-3.3-70b", "name": "Llama"},
+                        ]
+                    }
+                }
+            }
+        }
+        path = self._write_cfg(cfg)
+        try:
+            models = enumerate_all_models(path)
+            ids = [m["id"] for m in models]
+            self.assertIn("openrouter/anthropic/claude-sonnet-4.6", ids)
+            self.assertIn("openrouter/meta-llama/llama-3.3-70b", ids)
+        finally:
+            os.unlink(path)
+
+    def test_skips_defenseclaw(self):
+        from defenseclaw.guardrail import enumerate_all_models
+        cfg = {
+            "models": {
+                "providers": {
+                    "defenseclaw": {"models": [{"id": "old-model"}]},
+                    "openrouter": {"models": [{"id": "some-model", "name": "Some"}]},
+                }
+            }
+        }
+        path = self._write_cfg(cfg)
+        try:
+            models = enumerate_all_models(path)
+            self.assertFalse(any("defenseclaw" in m["id"] for m in models))
+            self.assertTrue(any("openrouter/some-model" == m["id"] for m in models))
+        finally:
+            os.unlink(path)
+
+    def test_does_not_double_prefix(self):
+        from defenseclaw.guardrail import enumerate_all_models
+        cfg = {
+            "models": {
+                "providers": {
+                    "ollama": {
+                        "models": [
+                            {"id": "llama3.2:3b"},
+                            {"id": "ollama/qwen3:4b"},
+                        ]
+                    }
+                }
+            }
+        }
+        path = self._write_cfg(cfg)
+        try:
+            models = enumerate_all_models(path)
+            ids = [m["id"] for m in models]
+            self.assertIn("ollama/llama3.2:3b", ids)
+            self.assertIn("ollama/qwen3:4b", ids)
+            self.assertNotIn("ollama/ollama/qwen3:4b", ids)
+        finally:
+            os.unlink(path)
+
+    def test_empty_on_missing_file(self):
+        from defenseclaw.guardrail import enumerate_all_models
+        models = enumerate_all_models("/nonexistent/file.json")
+        self.assertEqual(models, [])
+
+    def test_patch_registers_all_models(self):
+        from defenseclaw.guardrail import patch_openclaw_config
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "openclaw.json")
+            cfg = {
+                "agents": {"defaults": {"model": {"primary": "openrouter/claude"}}},
+                "models": {
+                    "providers": {
+                        "openrouter": {
+                            "models": [
+                                {"id": "anthropic/claude-sonnet-4.6", "name": "Claude", "contextWindow": 200000, "maxTokens": 64000},
+                                {"id": "meta-llama/llama-3.3-70b", "name": "Llama", "contextWindow": 128000, "maxTokens": 8192},
+                            ]
+                        },
+                        "ollama": {
+                            "models": [{"id": "llama3.2:3b", "name": "Llama Local", "contextWindow": 32000, "maxTokens": 4096}]
+                        },
+                    }
+                },
+                "plugins": {},
+            }
+            with open(config_path, "w") as f:
+                json.dump(cfg, f)
+
+            patch_openclaw_config(
+                config_path,
+                model_name="anthropic/claude-sonnet-4.6",
+                proxy_port=4000,
+                master_key="sk-dc-test",
+                original_model="openrouter/claude",
+            )
+
+            with open(config_path) as f:
+                result = json.load(f)
+
+            dc_models = result["models"]["providers"]["defenseclaw"]["models"]
+            dc_ids = [m["id"] for m in dc_models]
+
+            self.assertIn("openrouter/anthropic/claude-sonnet-4.6", dc_ids)
+            self.assertIn("openrouter/meta-llama/llama-3.3-70b", dc_ids)
+            self.assertIn("ollama/llama3.2:3b", dc_ids)
+            self.assertEqual(
+                result["agents"]["defaults"]["model"]["primary"],
+                "defenseclaw/anthropic/claude-sonnet-4.6",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
