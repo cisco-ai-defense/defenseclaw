@@ -90,6 +90,13 @@ def patch_openclaw_config(
     if "defenseclaw" not in allow:
         allow.append("defenseclaw")
 
+    # Re-enable plugin entry (may have been disabled by restore_openclaw_config).
+    entries = plugins.setdefault("entries", {})
+    if "defenseclaw" not in entries:
+        entries["defenseclaw"] = {"enabled": True}
+    else:
+        entries["defenseclaw"]["enabled"] = True
+
     oc_home = os.path.dirname(path)
     install_path = os.path.join(oc_home, "extensions", "defenseclaw")
     load = plugins.setdefault("load", {})
@@ -127,10 +134,22 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         cfg["models"]["providers"].pop("defenseclaw", None)
         cfg["models"]["providers"].pop("litellm", None)
 
-    if "plugins" in cfg and "allow" in cfg["plugins"]:
-        allow = cfg["plugins"]["allow"]
+    if "plugins" in cfg:
+        plugins = cfg["plugins"]
+        # Remove from allow list
+        allow = plugins.get("allow", [])
         if "defenseclaw" in allow:
             allow.remove("defenseclaw")
+        # Disable in entries (stops fetch interceptor from loading)
+        entries = plugins.get("entries", {})
+        if "defenseclaw" in entries:
+            entries["defenseclaw"]["enabled"] = False
+        # Remove from load paths
+        oc_home = os.path.dirname(path)
+        install_path = os.path.join(oc_home, "extensions", "defenseclaw")
+        paths = plugins.get("load", {}).get("paths", [])
+        if install_path in paths:
+            paths.remove(install_path)
 
     with _preserve_ownership(path):
         with open(path, "w") as f:
