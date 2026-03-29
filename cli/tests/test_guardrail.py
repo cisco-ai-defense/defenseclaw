@@ -1629,6 +1629,63 @@ class TestEnumerateAllModels(unittest.TestCase):
             # Verify the primary actually appears in the registered model IDs
             assert result["agents"]["defaults"]["model"]["primary"] in [f"defenseclaw/{m['id']}" for m in dc_models]
 
+    def test_enumerates_from_agents_defaults_models_when_providers_empty(self):
+        """agents.defaults.models is the fallback source when models.providers is empty.
+
+        This is the common case after repeated setup runs: OpenClaw cleans up
+        models.providers but always keeps agents.defaults.models populated.
+        """
+        from defenseclaw.guardrail import enumerate_all_models
+        cfg = {
+            "models": {"providers": {}},  # providers gone — simulates real-world state
+            "agents": {
+                "defaults": {
+                    "models": {
+                        "openrouter/anthropic/claude-sonnet-4.6": {"alias": "Claude"},
+                        "ollama/llama3.2:3b": {},
+                        "openrouter/auto": {"alias": "OpenRouter"},
+                    }
+                }
+            },
+        }
+        path = self._write_cfg(cfg)
+        try:
+            models = enumerate_all_models(path)
+            ids = [m["id"] for m in models]
+            self.assertIn("openrouter/anthropic/claude-sonnet-4.6", ids)
+            self.assertIn("ollama/llama3.2:3b", ids)
+            self.assertIn("openrouter/auto", ids)
+        finally:
+            os.unlink(path)
+
+    def test_deduplicates_between_sources(self):
+        """A model in both providers and agents.defaults.models appears only once."""
+        from defenseclaw.guardrail import enumerate_all_models
+        cfg = {
+            "models": {
+                "providers": {
+                    "ollama": {"models": [{"id": "llama3.2:3b", "name": "Llama"}]}
+                }
+            },
+            "agents": {
+                "defaults": {
+                    "models": {
+                        "ollama/llama3.2:3b": {},  # same model, also in history
+                        "openrouter/anthropic/claude-sonnet-4.6": {},
+                    }
+                }
+            },
+        }
+        path = self._write_cfg(cfg)
+        try:
+            models = enumerate_all_models(path)
+            ids = [m["id"] for m in models]
+            # llama3.2:3b appears in both sources — must be deduplicated
+            self.assertEqual(ids.count("ollama/llama3.2:3b"), 1)
+            self.assertIn("openrouter/anthropic/claude-sonnet-4.6", ids)
+        finally:
+            os.unlink(path)
+
     def test_patch_registers_fallback_when_no_providers(self, tmp_path=None):
         """When no other providers exist, patch_openclaw_config uses the single-model fallback."""
         import tempfile

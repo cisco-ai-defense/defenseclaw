@@ -31,13 +31,19 @@ from pathlib import Path
 
 
 def enumerate_all_models(openclaw_config_file: str) -> list[dict]:
-    """Read all models from all configured providers in openclaw.json.
+    """Read all models from openclaw.json that should route through the guardrail proxy.
 
-    Returns a list of model dicts ready to register under the defenseclaw provider.
-    Each model id is prefixed with the provider name (e.g. "openrouter/...") unless
-    the id already starts with that provider prefix.
-    Skips the "defenseclaw" provider itself to avoid circular registration.
-    Returns an empty list if the file cannot be read or has no providers.
+    Sources, in priority order:
+    1. models.providers — each non-defenseclaw provider's model list
+    2. agents.defaults.models — the map of every model the user has ever used in
+       OpenClaw (always populated even when providers are removed from models.providers)
+    3. auth.profiles — provider names that are configured but have no model entries yet
+
+    This three-source approach means the list is always complete regardless of whether
+    OpenClaw has cleaned up the models.providers entries.
+
+    Returns model dicts with fully-qualified ids (e.g. "openrouter/anthropic/claude-sonnet")
+    ready to register under the defenseclaw provider.
     """
     path = _expand(openclaw_config_file)
     try:
@@ -46,32 +52,50 @@ def enumerate_all_models(openclaw_config_file: str) -> list[dict]:
     except (OSError, json.JSONDecodeError):
         return []
 
-    providers = cfg.get("models", {}).get("providers", {})
-    result = []
+    return _enumerate_models_from_cfg(cfg)
 
-    for provider_name, provider_cfg in providers.items():
+
+def _enumerate_models_from_cfg(cfg: dict) -> list[dict]:
+    """Enumerate all models from an already-loaded openclaw.json config dict.
+
+    Called both from enumerate_all_models (file path API) and directly from
+    patch_openclaw_config (avoids re-reading a file that hasn't been written yet).
+    """
+    seen: set[str] = set()
+    result: list[dict] = []
+
+    def _add(full_id: str, meta: dict) -> None:
+        if full_id in seen or full_id.startswith("defenseclaw/"):
+            return
+        seen.add(full_id)
+        result.append({
+            "id": full_id,
+            "name": meta.get("name", full_id) + " (via DefenseClaw)",
+            "reasoning": meta.get("reasoning", False),
+            "input": meta.get("input", ["text"]),
+            "contextWindow": meta.get("contextWindow", 128000),
+            "maxTokens": meta.get("maxTokens", 8192),
+        })
+
+    # Source 1: models.providers — richest metadata, skip defenseclaw entry.
+    for provider_name, provider_cfg in cfg.get("models", {}).get("providers", {}).items():
         if provider_name == "defenseclaw":
-            continue  # skip our own proxy entry
-
+            continue
         for model in provider_cfg.get("models", []):
             model_id = model.get("id", "")
             if not model_id:
                 continue
+            full_id = model_id if model_id.startswith(f"{provider_name}/") else f"{provider_name}/{model_id}"
+            _add(full_id, model)
 
-            # Prefix with provider name if not already prefixed
-            if not model_id.startswith(f"{provider_name}/"):
-                full_id = f"{provider_name}/{model_id}"
-            else:
-                full_id = model_id
-
-            result.append({
-                "id": full_id,
-                "name": model.get("name", full_id) + " (via DefenseClaw)",
-                "reasoning": model.get("reasoning", False),
-                "input": model.get("input", ["text"]),
-                "contextWindow": model.get("contextWindow", 128000),
-                "maxTokens": model.get("maxTokens", 8192),
-            })
+    # Source 2: agents.defaults.models — every model the user has selected in OpenClaw.
+    # Keys are already fully-qualified (e.g. "openrouter/anthropic/claude-sonnet-4.6").
+    # This is the most reliable source: OpenClaw populates it on every model switch and
+    # never removes entries even when models.providers gets cleaned up.
+    for model_id, model_meta in cfg.get("agents", {}).get("defaults", {}).get("models", {}).items():
+        if "/" not in model_id:
+            continue  # bare name with no provider prefix — skip
+        _add(model_id, model_meta if isinstance(model_meta, dict) else {})
 
     return result
 
@@ -103,9 +127,9 @@ def patch_openclaw_config(
     if "providers" not in cfg["models"]:
         cfg["models"]["providers"] = {}
 
-    # Enumerate all models from all configured providers so every model
-    # the user picks in OpenClaw routes through the guardrail proxy.
-    all_models = enumerate_all_models(openclaw_config_file)
+    # Enumerate all models from the already-loaded cfg dict (not re-reading the file)
+    # so we always see the current state including agents.defaults.models history.
+    all_models = _enumerate_models_from_cfg(cfg)
     if not all_models:
         # Fallback: register just the configured model when no other providers exist
         all_models = [{
