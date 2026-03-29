@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const azureAPIVersion = "2024-12-01-preview"
+const azureAPIVersion = "2025-01-01-preview"
 
 type azureOpenAIProvider struct {
 	model   string
@@ -20,7 +20,18 @@ type azureOpenAIProvider struct {
 
 func (p *azureOpenAIProvider) chatURL() string {
 	base := strings.TrimRight(p.baseURL, "/")
-	return base + "/chat/completions?api-version=" + azureAPIVersion
+	// Normalize Foundry-style base URLs (ending in /openai/v1 or /openai/v1/)
+	// to the classic deployments path format that Azure expects.
+	// openai/v1 → openai/deployments/{deployment}/chat/completions
+	for _, suffix := range []string{"/openai/v1", "/v1"} {
+		if strings.HasSuffix(base, suffix) {
+			base = strings.TrimSuffix(base, suffix)
+			break
+		}
+	}
+	base = strings.TrimRight(base, "/")
+	return fmt.Sprintf("%s/openai/deployments/%s/chat/completions?api-version=%s",
+		base, p.model, azureAPIVersion)
 }
 
 func (p *azureOpenAIProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
