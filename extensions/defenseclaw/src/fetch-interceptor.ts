@@ -32,27 +32,52 @@ const LLM_DOMAINS = [
   "api.anthropic.com",
   "openrouter.ai",
   "api.openai.com",
-  "generativelanguage.googleapis.com",
-  "amazonaws.com",          // covers bedrock-runtime.*.amazonaws.com
+  "openai.azure.com",       // Azure OpenAI — customer-specific subdomain
+  "generativelanguage.googleapis.com", // Gemini (Google AI Studio)
+  "googleapis.com/v1/projects", // Vertex AI Gemini
+  "amazonaws.com",          // Bedrock: bedrock-runtime.*.amazonaws.com
 ];
+
+/**
+ * Ollama runs locally — intercept by matching its default port.
+ * We cannot list "localhost" broadly because that would also match
+ * the proxy itself (localhost:4000).
+ */
+const OLLAMA_PORTS = ["11434"];
 
 /** Header name the proxy reads to determine the real upstream URL. */
 export const TARGET_URL_HEADER = "X-DC-Target-URL";
 
-function isLLMUrl(url: string): boolean {
-  return LLM_DOMAINS.some(domain => url.includes(domain));
+function isLLMUrl(url: string, guardrailPort: number): boolean {
+  if (LLM_DOMAINS.some(domain => url.includes(domain))) return true;
+  // Ollama: localhost or 127.0.0.1 on known Ollama ports, but NOT the proxy port.
+  return OLLAMA_PORTS.some(
+    port =>
+      (url.includes(`localhost:${port}`) || url.includes(`127.0.0.1:${port}`)) &&
+      !url.includes(`:${guardrailPort}`)
+  );
 }
 
-function isAlreadyProxied(url: string): boolean {
-  return url.includes("127.0.0.1") || url.includes("localhost");
+function isAlreadyProxied(url: string, guardrailPort: number): boolean {
+  // Only skip requests already targeting the guardrail proxy itself.
+  return (
+    url.includes(`127.0.0.1:${guardrailPort}`) ||
+    url.includes(`localhost:${guardrailPort}`)
+  );
 }
 
-/** Domain → auth-profiles.json profile id mapping. */
+/**
+ * Domain substring → auth-profiles.json profile id mapping.
+ * OpenClaw stores one profile per provider under agents/main/agent/auth-profiles.json.
+ * Keys are read once at interceptor start and cached for the process lifetime.
+ */
 const DOMAIN_TO_PROFILE: Record<string, string> = {
   "api.anthropic.com":               "anthropic:default",
   "openrouter.ai":                   "openrouter:default",
   "api.openai.com":                  "openai:default",
+  "openai.azure.com":                "azure:default",
   "generativelanguage.googleapis.com": "google:default",
+  "googleapis.com/v1/projects":      "google:default", // Vertex AI
 };
 
 // Synchronous key cache — loaded once at interceptor start.
@@ -116,7 +141,7 @@ export function createFetchInterceptor(guardrailPort: number) {
       const urlStr = String(input instanceof Request ? input.url : input);
 
       // Pass through non-LLM calls and calls already going to the proxy.
-      if (!isLLMUrl(urlStr) || isAlreadyProxied(urlStr)) {
+      if (!isLLMUrl(urlStr, guardrailPort) || isAlreadyProxied(urlStr, guardrailPort)) {
         return originalFetch!(input, init);
       }
 
