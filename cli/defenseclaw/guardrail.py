@@ -70,9 +70,17 @@ def patch_openclaw_config(
         prov["baseUrl"] = f"http://localhost:{proxy_port}"
         prov["apiKey"] = master_key
 
-    # Store originals for restore
+    # Store originals in ~/.defenseclaw/ — NOT in openclaw.json which has
+    # strict schema validation and rejects unrecognized top-level keys.
+    dc_home = os.path.join(str(Path.home()), ".defenseclaw")
+    restore_path = os.path.join(dc_home, "original_providers.json")
     if original_providers:
-        cfg["_defenseclaw_original_providers"] = original_providers
+        try:
+            os.makedirs(dc_home, exist_ok=True)
+            with open(restore_path, "w") as f:
+                json.dump(original_providers, f, indent=2)
+        except OSError:
+            pass
 
     # Add the defenseclaw provider (for the primary model alias)
     cfg["models"]["providers"]["defenseclaw"] = {
@@ -133,7 +141,15 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         cfg["agents"]["defaults"]["model"]["primary"] = original_model
 
     # Restore original provider entries
-    original_providers = cfg.pop("_defenseclaw_original_providers", {})
+    # Read original providers from ~/.defenseclaw/ (not from openclaw.json).
+    restore_path = os.path.join(str(Path.home()), ".defenseclaw", "original_providers.json")
+    original_providers: dict = {}
+    try:
+        with open(restore_path) as f:
+            original_providers = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass
+
     if original_providers and "models" in cfg and "providers" in cfg["models"]:
         for name, prov in original_providers.items():
             cfg["models"]["providers"][name] = prov
