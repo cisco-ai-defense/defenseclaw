@@ -785,20 +785,7 @@ def execute_guardrail_setup(
         click.echo("    Expected location: ~/.openclaw/openclaw.json")
         return False, warnings
 
-    if not gc.model or not gc.model_name:
-        click.echo("  ✗ Model or model_name is empty — cannot configure guardrail.")
-        click.echo("    Run interactively (without --non-interactive) to set the model.")
-        return False, warnings
-
-    if "/" not in gc.model:
-        click.echo(f"  ⚠ Model '{gc.model}' has no provider prefix (e.g. anthropic/{gc.model}).")
-        click.echo("    The proxy will attempt to infer the provider from the model name,")
-        click.echo("    but this may route to the wrong API. Run interactively to set it explicitly.")
-        warnings.append(
-            f"Model '{gc.model}' has no provider prefix — provider will be inferred at runtime. "
-            "Run 'defenseclaw setup guardrail' interactively to fix."
-        )
-
+    # No model validation — the fetch interceptor scans all models automatically.
     click.echo()
 
     click.echo("  ✓ Guardrail proxy is built into the Go binary (no Python deps)")
@@ -888,12 +875,6 @@ def execute_guardrail_setup(
 
 
 def _interactive_guardrail_setup(app: AppContext, gc) -> None:
-    from defenseclaw.guardrail import (
-        KNOWN_PROVIDERS,
-        detect_current_model,
-        guess_provider,
-        model_to_proxy_name,
-    )
 
     click.echo()
     click.echo("  LLM Guardrail Configuration")
@@ -966,65 +947,11 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
     gc.port = click.prompt("  Guardrail proxy port", default=gc.port or 4000, type=int)
 
-    # Detect current model
-    current_model, current_provider = detect_current_model(app.cfg.claw.config_file)
+    # No model selection needed — the fetch interceptor intercepts ALL outbound
+    # LLM calls regardless of which model or provider OpenClaw uses. Nothing to
+    # configure here.
     click.echo()
-
-    # If model has no provider/ prefix, ask the user to confirm the provider.
-    if current_model and not current_provider and "/" not in current_model:
-        guessed = guess_provider(current_model)
-        click.echo(f"  Current OpenClaw model: {current_model}")
-        click.echo(f"  No provider prefix detected (e.g. anthropic/{current_model}).")
-        provider_choices = click.Choice(KNOWN_PROVIDERS)
-        chosen = click.prompt(
-            "  Which provider hosts this model?",
-            type=provider_choices,
-            default=guessed if guessed else None,
-        )
-        current_model = f"{chosen}/{current_model}"
-        current_provider = chosen
-        click.echo(f"  Using: {current_model}")
-        click.echo()
-
-    routed_prefixes = ("defenseclaw/",)
-    is_already_routed = current_model and any(current_model.startswith(p) for p in routed_prefixes)
-
-    if current_model and not is_already_routed:
-        click.echo(f"  Current OpenClaw model: {current_model}")
-        if click.confirm("  Route this model through the guardrail?", default=True):
-            gc.model = current_model
-            gc.model_name = model_to_proxy_name(current_model)
-            gc.original_model = current_model
-        else:
-            gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-            gc.model_name = model_to_proxy_name(gc.model)
-    elif is_already_routed:
-        click.echo(f"  Already routed through guardrail: {current_model}")
-        if gc.model:
-            click.echo(f"  Upstream model: {gc.model}")
-        else:
-            click.echo("  Upstream model not configured — need to set it.")
-            gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-            gc.model_name = model_to_proxy_name(gc.model)
-        if not gc.original_model or any(gc.original_model.startswith(p) for p in routed_prefixes):
-            gc.original_model = gc.model
-    else:
-        gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-        gc.model_name = model_to_proxy_name(gc.model)
-
-    if not gc.model_name:
-        gc.model_name = model_to_proxy_name(gc.model)
-
-    if not gc.model or not gc.model_name:
-        click.echo("  Error: model and model_name must not be empty.")
-        gc.enabled = False
-        return
-
-    # No API key prompt — the plugin's fetch interceptor reads keys directly from
-    # OpenClaw's auth-profiles.json at runtime. DefenseClaw never stores or
-    # manages upstream provider credentials.
-    gc.api_key_env = ""
-    click.echo()
+    click.echo("  Model: all models scanned automatically via fetch interceptor")
     click.echo("  API key: sourced automatically from OpenClaw (no key needed here)")
 
 
