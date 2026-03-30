@@ -986,11 +986,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Make sure OpenClaw is installed", result.output)
         self.assertNotIn("Guardrail proxy is built into the Go binary", result.output)
 
-    def test_preflight_aborts_when_model_empty(self):
+    def test_preflight_succeeds_with_empty_model(self):
+        """Model is no longer required — fetch interceptor scans all models."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = ""
         self.app.cfg.guardrail.model_name = ""
-        self.app.cfg.guardrail.api_key_env = "ANTHROPIC_API_KEY"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
@@ -998,8 +998,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Model or model_name is empty", result.output)
-        self.assertNotIn("Guardrail proxy is built into the Go binary", result.output)
+        # Setup proceeds without model — all models scanned automatically
+        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
 
     def test_api_key_env_warning_when_not_set(self):
         from defenseclaw.commands.cmd_setup import setup
