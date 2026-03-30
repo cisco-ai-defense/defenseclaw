@@ -24,7 +24,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.5.0",
     "typescript": "^5.4.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.2"
   },
   "peerDependenciesMeta": {
     "@openclaw/plugin-sdk": {
