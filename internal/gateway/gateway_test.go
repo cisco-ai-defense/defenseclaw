@@ -4055,3 +4055,193 @@ func TestAPIMuxCSRFIntegration(t *testing.T) {
 		}
 	})
 }
+
+func tokenAuthTestServer(t *testing.T, token string) (*APIServer, *bool) {
+	t.Helper()
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Gateway.Token = token
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	called := false
+	return api, &called
+}
+
+func TestTokenAuth_HealthExempt(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET /health without token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("GET /health: next handler was not called")
+	}
+}
+
+func TestTokenAuth_RejectNoToken(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("POST /skill/disable without token: status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestTokenAuth_AcceptBearerToken(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with Bearer token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("POST with Bearer token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_AcceptCustomHeader(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("X-DefenseClaw-Token", "secret-token-123")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with X-DefenseClaw-Token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("POST with X-DefenseClaw-Token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_RejectWrongToken(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("POST with wrong Bearer token: status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestTokenAuth_BearerPrecedence(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	req.Header.Set("X-DefenseClaw-Token", "wrong")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with correct Bearer + wrong custom header: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("Bearer should take precedence over X-DefenseClaw-Token")
+	}
+}
+
+func TestTokenAuth_DisabledWhenEmpty(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with empty token config: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("empty token config: next handler was not called")
+	}
+}
+
+func TestSidecarHealthSetSandbox(t *testing.T) {
+	h := NewSidecarHealth()
+	snap := h.Snapshot()
+	if snap.Sandbox != nil {
+		t.Fatal("NewSidecarHealth: Sandbox should be nil initially")
+	}
+
+	details := map[string]interface{}{"profile": "strict"}
+	h.SetSandbox(StateRunning, "", details)
+	snap = h.Snapshot()
+	if snap.Sandbox == nil {
+		t.Fatal("SetSandbox: Sandbox should not be nil after SetSandbox")
+	}
+	if snap.Sandbox.State != StateRunning {
+		t.Errorf("SetSandbox state = %q, want %q", snap.Sandbox.State, StateRunning)
+	}
+	if snap.Sandbox.LastError != "" {
+		t.Errorf("SetSandbox LastError = %q, want empty", snap.Sandbox.LastError)
+	}
+	if snap.Sandbox.Details["profile"] != "strict" {
+		t.Errorf("SetSandbox details[profile] = %v, want %q", snap.Sandbox.Details["profile"], "strict")
+	}
+}
+
+func TestSidecarHealthSandboxConcurrency(t *testing.T) {
+	h := NewSidecarHealth()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func(n int) {
+			defer wg.Done()
+			h.SetSandbox(StateRunning, "", map[string]interface{}{"iter": n})
+		}(i)
+		go func() {
+			defer wg.Done()
+			snap := h.Snapshot()
+			_ = snap.Sandbox
+		}()
+	}
+	wg.Wait()
+
+	snap := h.Snapshot()
+	if snap.Sandbox == nil {
+		t.Fatal("Sandbox should not be nil after concurrent SetSandbox calls")
+	}
+	if snap.Sandbox.State != StateRunning {
+		t.Errorf("Sandbox state after concurrency = %q, want %q", snap.Sandbox.State, StateRunning)
+	}
+}

@@ -34,18 +34,26 @@ from defenseclaw.paths import bundled_rego_dir, bundled_splunk_bridge_dir
 @click.command("init")
 @click.option("--skip-install", is_flag=True, help="Skip automatic scanner dependency installation")
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
+@click.option("--sandbox", is_flag=True, help="Set up sandbox mode (Linux only: creates sandbox user and directories)")
 @pass_ctx
-def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> None:
+def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbox: bool) -> None:
     """Initialize DefenseClaw environment.
 
     Creates ~/.defenseclaw/, default config, SQLite database,
     and installs scanner dependencies.
 
+    Use --sandbox to set up openshell-sandbox standalone mode (Linux only).
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
+    import platform
+
     from defenseclaw.config import config_path, default_config, detect_environment, load
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
+
+    if sandbox and platform.system() != "Linux":
+        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
+        raise SystemExit(1)
 
     click.echo()
     click.echo("  ── Environment ───────────────────────────────────────")
@@ -122,14 +130,45 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
     click.echo()
     click.echo("  ── Skills ────────────────────────────────────────────")
     click.echo()
-    _install_codeguard_skill(cfg, logger)
+    if cfg.openshell.is_standalone():
+        click.echo("  CodeGuard:     deferred (installed during sandbox setup)")
+    else:
+        _install_codeguard_skill(cfg, logger)
 
     cfg.save()
 
-    click.echo()
-    click.echo("  ── Sidecar ───────────────────────────────────────────")
-    click.echo()
-    _start_gateway(cfg, logger)
+    # Sandbox setup (Linux only)
+    if sandbox:
+        already_configured = cfg.openshell.is_standalone()
+        if already_configured:
+            click.echo()
+            click.echo("  ── Sandbox ───────────────────────────────────────────")
+            click.echo()
+            click.echo("  Sandbox:       already configured (openshell.mode=standalone)")
+        else:
+            click.echo()
+            click.echo("  ── Sandbox ───────────────────────────────────────────")
+            click.echo()
+            from defenseclaw.commands.cmd_init_sandbox import _init_sandbox
+            sandbox_ok = _init_sandbox(cfg, logger)
+
+            if sandbox_ok:
+                click.echo()
+                click.echo("  ── Sandbox Networking ────────────────────────────────")
+                click.echo()
+                from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
+                app.cfg = cfg
+                ctx = click.Context(setup_sandbox, parent=click.get_current_context())
+                ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
+                           sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
+                           policy="default", no_auto_pair=False, disable=False,
+                           non_interactive=True)
+
+    if not sandbox:
+        click.echo()
+        click.echo("  ── Sidecar ───────────────────────────────────────────")
+        click.echo()
+        _start_gateway(cfg, logger)
 
     click.echo()
     click.echo("  ──────────────────────────────────────────────────────")
@@ -137,7 +176,9 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
     click.echo("  DefenseClaw initialized.")
     click.echo()
     click.echo("  Next steps:")
-    if guardrail_ok:
+    if sandbox:
+        click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
+    elif guardrail_ok:
         click.echo("    defenseclaw setup guardrail   Customize guardrail settings")
     else:
         click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
@@ -265,8 +306,9 @@ def _ensure_device_key(path: str) -> None:
 def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
     """Read gateway host, port, and token from openclaw.json.
 
-    Looks for gateway.port and gateway.auth.token when gateway.model is 'local'.
-    Returns a dict with resolved values; missing keys use safe defaults.
+    Looks for gateway.port and gateway.auth.token when gateway.mode is 'local'.
+    Always uses the shared gateway.auth.token — device-auth.json is a
+    client-side cache used by the OpenClaw Node.js client, not by our Go gateway.
     """
     from defenseclaw.config import _read_openclaw_config
 
@@ -284,8 +326,8 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
     if not isinstance(gw, dict):
         return result
 
-    model = gw.get("model", "local")
-    if model == "local":
+    mode = gw.get("mode", "local")
+    if mode == "local":
         result["host"] = "127.0.0.1"
     else:
         result["host"] = gw.get("host", "127.0.0.1")
@@ -311,23 +353,22 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     Only applies OpenClaw values (host/port/token) when creating a new config.
     Existing configs preserve user-customized gateway settings.
     """
+    oc_gw = _resolve_openclaw_gateway(cfg.claw.config_file)
     token_configured = False
     if is_new_config:
-        oc_gw = _resolve_openclaw_gateway(cfg.claw.config_file)
         cfg.gateway.host = oc_gw["host"]
         cfg.gateway.port = oc_gw["port"]
-        if oc_gw["token"]:
-            from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
-            _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", oc_gw["token"], cfg.data_dir)
-            cfg.gateway.token = ""
-            cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
-            token_configured = True
-        else:
-            cfg.gateway.token = ""
-            # Keep standard env indirection so ~/.defenseclaw/.env can supply the token
-            # when OpenClaw enables gateway auth after init.
-            cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+
+    # Always re-sync the token from openclaw.json — it may have changed
+    # after re-onboarding or OpenClaw restart.
+    if oc_gw["token"]:
+        from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", oc_gw["token"], cfg.data_dir)
+        cfg.gateway.token = ""
+        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        token_configured = True
     else:
+        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
 
     if not cfg.gateway.device_key_file:
@@ -501,7 +542,10 @@ def _start_gateway(cfg, logger) -> None:
         click.echo("                 check: defenseclaw-gateway status")
 
     if started:
-        _check_sidecar_health(cfg.gateway.api_port)
+        bind = "127.0.0.1"
+        if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
+            bind = cfg.guardrail.host
+        _check_sidecar_health(cfg.gateway.api_port, bind=bind)
 
 
 def _is_sidecar_running(pid_file: str) -> bool:
@@ -530,13 +574,13 @@ def _read_pid(pid_file: str) -> int | None:
         return None
 
 
-def _check_sidecar_health(api_port: int, retries: int = 3) -> None:
+def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.1") -> None:
     """Briefly poll the sidecar REST API to confirm it started."""
     import time
     import urllib.error
     import urllib.request
 
-    url = f"http://127.0.0.1:{api_port}/health"
+    url = f"http://{bind}:{api_port}/health"
     for i in range(retries):
         time.sleep(1)
         try:
@@ -550,3 +594,5 @@ def _check_sidecar_health(api_port: int, retries: int = 3) -> None:
 
     click.echo("  Health:        not responding")
     click.echo("                 check: defenseclaw-gateway status")
+
+

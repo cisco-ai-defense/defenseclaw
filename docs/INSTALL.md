@@ -34,6 +34,8 @@ Instructions are provided for both **NVIDIA DGX Spark** (aarch64/Ubuntu) and **m
 
 On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, block/allow lists, audit logging, and the TUI dashboard. Sandbox enforcement is gracefully skipped.
 
+**For sandbox setup on Linux**, see [SANDBOX.md](SANDBOX.md) for full architecture, configuration, and troubleshooting.
+
 ## Splunk Terms And Scope For The Local Preset
 
 If you enable the bundled local Splunk workflow through `DefenseClaw`, you are

@@ -145,10 +145,13 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> None:
-    url = f"http://127.0.0.1:{cfg.gateway.api_port}/health"
+    bind = "127.0.0.1"
+    if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
+        bind = getattr(cfg.guardrail, "host", None) or bind
+    url = f"http://{bind}:{cfg.gateway.api_port}/health"
     code, body = _http_probe(url, timeout=5.0)
     if code == 200:
-        _emit("pass", "Sidecar API", f"127.0.0.1:{cfg.gateway.api_port}")
+        _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}")
         r.record("pass")
 
         try:
@@ -192,7 +195,8 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         r.record("skip")
         return
 
-    url = f"http://127.0.0.1:{cfg.guardrail.port}/health/liveliness"
+    host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+    url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}")
@@ -306,8 +310,8 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         r.record("skip")
         return
 
-    endpoint = gc.cisco_ai_defense.endpoint
-    key_env = gc.cisco_ai_defense.api_key_env
+    endpoint = cfg.cisco_ai_defense.endpoint
+    key_env = cfg.cisco_ai_defense.api_key_env
     if not endpoint:
         _emit("fail", "Cisco AI Defense", "endpoint not configured")
         r.record("fail")
@@ -326,7 +330,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     code, body = _http_probe(
         health_url,
         headers={"Authorization": f"Bearer {api_key}"},
-        timeout=float(gc.cisco_ai_defense.timeout_ms) / 1000.0,
+        timeout=float(cfg.cisco_ai_defense.timeout_ms) / 1000.0,
     )
 
     if code == 200:
