@@ -271,10 +271,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	// Responses API: input can be a string or array of message objects.
 	if userText == "" && len(partial.Input) > 0 {
-		if partial.Input[0] == '"' {
+		switch partial.Input[0] {
+		case '"':
 			// Plain string input
 			_ = json.Unmarshal(partial.Input, &userText)
-		} else if partial.Input[0] == '[' {
+		case '[':
 			// Array of messages — reuse the messages parser
 			var inputMsgs []ChatMessage
 			if json.Unmarshal(partial.Input, &inputMsgs) == nil {
