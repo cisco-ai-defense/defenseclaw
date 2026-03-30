@@ -947,13 +947,6 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
     gc.port = click.prompt("  Guardrail proxy port", default=gc.port or 4000, type=int)
 
-    # No model selection needed — the fetch interceptor intercepts ALL outbound
-    # LLM calls regardless of which model or provider OpenClaw uses. Nothing to
-    # configure here.
-    click.echo()
-    click.echo("  Model: all models scanned automatically via fetch interceptor")
-    click.echo("  API key: sourced automatically from OpenClaw (no key needed here)")
-
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
