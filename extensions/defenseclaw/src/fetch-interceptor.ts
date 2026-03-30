@@ -27,6 +27,10 @@
  * the proxy can route to the correct upstream after inspection.
  */
 
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 /** Domains that should be intercepted and routed through the guardrail. */
 const LLM_DOMAINS = [
   "api.anthropic.com",
@@ -101,15 +105,10 @@ function loadProviderKeys(): void {
   }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const fs = require("node:fs") as typeof import("node:fs");
-    const os = require("node:os") as typeof import("node:os");
-    const path = require("node:path") as typeof import("node:path");
-
-    const profilesPath = path.join(
-      os.homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json"
+    const profilesPath = join(
+      homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json"
     );
-    const data = JSON.parse(fs.readFileSync(profilesPath, "utf8"));
+    const data = JSON.parse(readFileSync(profilesPath, "utf8"));
     const profiles = data?.profiles ?? {};
 
     const fresh: Record<string, string> = {};
@@ -119,8 +118,9 @@ function loadProviderKeys(): void {
     }
     providerKeyCache = fresh;
     providerKeyCacheTs = now;
-  } catch {
-    // auth-profiles.json not found — keys fall through unchanged
+  } catch (err) {
+    // auth-profiles.json not found or unreadable — log so it's diagnosable
+    console.log(`[defenseclaw] could not load provider keys: ${err}`);
     providerKeyCacheTs = now; // avoid hammering on every request
   }
 }
