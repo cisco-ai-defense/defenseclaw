@@ -32,12 +32,18 @@ from pathlib import Path
 
 def patch_openclaw_config(
     openclaw_config_file: str,
-    model_name: str,
-    proxy_port: int,
-    master_key: str,
+    model_name: str,  # kept for API compat — no longer used (fetch interceptor handles routing)
+    proxy_port: int,  # kept for API compat — no longer used
+    master_key: str,  # kept for API compat — no longer used
     original_model: str,
 ) -> str | None:
-    """Patch openclaw.json to route ALL providers through the guardrail proxy."""
+    """Register the DefenseClaw plugin in openclaw.json.
+
+    The fetch interceptor handles all traffic routing transparently —
+    no provider entry or model redirection is needed. This function only
+    registers the plugin so OpenClaw loads it on startup.
+    """
+    _ = model_name, proxy_port, master_key  # unused — fetch interceptor handles routing
     path = _expand(openclaw_config_file)
 
     try:
@@ -51,36 +57,6 @@ def patch_openclaw_config(
     prev_model = (
         cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
     )
-
-    if "models" not in cfg:
-        cfg["models"] = {}
-    if "providers" not in cfg["models"]:
-        cfg["models"]["providers"] = {}
-
-    # Add the defenseclaw provider (for the primary model alias)
-    cfg["models"]["providers"]["defenseclaw"] = {
-        "baseUrl": f"http://localhost:{proxy_port}",
-        "apiKey": master_key,
-        "api": "openai-completions",
-        "models": [
-            {
-                "id": model_name,
-                "name": f"{model_name} (via DefenseClaw)",
-                "reasoning": False,
-                "input": ["text", "image"],
-                "contextWindow": 200000,
-                "maxTokens": 64000,
-            },
-        ],
-    }
-
-    cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
-    cfg["agents"]["defaults"]["model"]["primary"] = f"defenseclaw/{model_name}"
-
-    # Clear the model history so only the configured model appears in OpenClaw's
-    # model picker. The fetch interceptor handles all providers transparently,
-    # so there's no need to expose historical model entries to the user.
-    cfg["agents"]["defaults"].pop("models", None)
 
     plugins = cfg.setdefault("plugins", {})
     allow = plugins.setdefault("allow", [])
@@ -111,7 +87,11 @@ def patch_openclaw_config(
 
 
 def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> bool:
-    """Revert OpenClaw config — restore all original providers."""
+    """Remove the DefenseClaw plugin registration from openclaw.json.
+
+    The fetch interceptor required no model or provider changes, so there is
+    nothing to revert — just remove the plugin entries.
+    """
     path = _expand(openclaw_config_file)
 
     try:
@@ -122,10 +102,7 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
 
     _backup(path)
 
-    if original_model:
-        cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
-        cfg["agents"]["defaults"]["model"]["primary"] = original_model
-
+    # Remove leftover defenseclaw provider entry if present from older setups.
     if "models" in cfg and "providers" in cfg["models"]:
         cfg["models"]["providers"].pop("defenseclaw", None)
         cfg["models"]["providers"].pop("litellm", None)
