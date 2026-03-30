@@ -91,6 +91,9 @@ def setup_skill_scanner(
             llm.provider = llm_provider
         if llm_model is not None:
             llm.model = llm_model
+        if llm.provider or llm.model:
+            from defenseclaw.guardrail import detect_api_key_env
+            llm.api_key_env = detect_api_key_env(f"{llm.provider}/{llm.model}")
         if llm_consensus_runs is not None:
             sc.llm_consensus_runs = llm_consensus_runs
         if policy is not None:
@@ -102,6 +105,13 @@ def setup_skill_scanner(
 
     app.cfg.save()
     _print_summary(sc, llm, aid)
+
+    if llm.api_key_env and not llm.resolved_api_key():
+        click.echo(
+            f"\n  Warning: {llm.api_key_env} is not set in your environment.\n"
+            f"  LLM analysis will fail until this variable is exported or added to ~/.defenseclaw/.env\n",
+            err=True,
+        )
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _check_virustotal, _DoctorResult
@@ -347,6 +357,9 @@ def setup_mcp_scanner(
             llm.provider = llm_provider
         if llm_model is not None:
             llm.model = llm_model
+        if llm.provider or llm.model:
+            from defenseclaw.guardrail import detect_api_key_env
+            llm.api_key_env = detect_api_key_env(f"{llm.provider}/{llm.model}")
         if scan_prompts is not None:
             mc.scan_prompts = scan_prompts
         if scan_resources is not None:
@@ -358,6 +371,13 @@ def setup_mcp_scanner(
 
     app.cfg.save()
     _print_mcp_summary(mc, llm, aid)
+
+    if llm.api_key_env and not llm.resolved_api_key():
+        click.echo(
+            f"\n  Warning: {llm.api_key_env} is not set in your environment.\n"
+            f"  LLM analysis will fail until this variable is exported or added to ~/.defenseclaw/.env\n",
+            err=True,
+        )
 
     if app.logger:
         parts = [f"analyzers={mc.analyzers or 'default'}"]
