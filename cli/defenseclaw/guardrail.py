@@ -61,6 +61,12 @@ def patch_openclaw_config(
         cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
     )
 
+    # Clear model history — OpenClaw shows all entries in agents.defaults.models
+    # as selectable models in the UI. Since the fetch interceptor handles all
+    # traffic regardless of model, there is no need to show the history.
+    # OpenClaw repopulates this as models are used, so we clear on each setup.
+    cfg.setdefault("agents", {}).setdefault("defaults", {}).pop("models", None)
+
     plugins = cfg.setdefault("plugins", {})
     allow = plugins.setdefault("allow", [])
     if "defenseclaw" not in allow:
