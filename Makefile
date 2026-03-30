@@ -191,7 +191,7 @@ go-lint:
 # Distribution targets — build release artifacts into dist/
 # ---------------------------------------------------------------------------
 
-dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums
+dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-checksums
 	@echo ""
 	@echo "Release artifacts:"
 	@ls -lh $(DIST_DIR)/
@@ -258,7 +258,7 @@ dist-sandbox:
 
 dist-test:
 	@mkdir -p $(DIST_DIR)/test
-	cp scripts/test-litellm-proxy.py $(DIST_DIR)/test/
+	cp scripts/test-proxy-sandbox.py $(DIST_DIR)/test/
 	cp scripts/test-e2e-tool-block.sh $(DIST_DIR)/test/
 	cp scripts/test-e2e-sandbox-policy-diff.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-cli.py $(DIST_DIR)/test/ 2>/dev/null || true
