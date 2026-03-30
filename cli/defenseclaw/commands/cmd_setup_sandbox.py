@@ -98,7 +98,7 @@ def _find_openclaw_binary() -> str:
 @click.option(
     "--policy",
     type=click.Choice(["default", "strict", "permissive"]),
-    default="default",
+    default="permissive",
     help="Network policy template",
 )
 @click.option("--dns", default="8.8.8.8,1.1.1.1", help="DNS nameservers (comma-separated, or 'host')")

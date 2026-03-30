@@ -223,6 +223,59 @@ Severity thresholds are configurable in `~/.defenseclaw/config.yaml` under `skil
 
 ---
 
+## OpenShell Sandbox
+
+Run OpenClaw inside an NVIDIA OpenShell sandbox with full DefenseClaw governance. The sandbox provides OS-level isolation (Linux namespaces, Landlock, seccomp) while DefenseClaw adds scanning, policy enforcement, and audit logging.
+
+**Security layers:**
+
+- **Network isolation** — isolated network namespace with veth pair, forced HTTP CONNECT proxy
+- **Filesystem access control** — Landlock LSM restrictions
+- **System call filtering** — seccomp-BPF profiles
+- **Network policy** — OPA-based per-connection rules (destination, binary, L7)
+- **LLM guardrails** — all LLM traffic inspected before reaching provider
+- **Skill/plugin admission gate** — nothing runs until scanned
+
+### Initialize sandbox
+
+```bash
+sudo defenseclaw sandbox init
+```
+
+This creates the `sandbox` system user, moves OpenClaw under sandbox ownership, installs the DefenseClaw plugin, and copies default OpenShell policies.
+
+### Start sandbox
+
+```bash
+# Start the sandbox
+sudo systemctl start defenseclaw-sandbox.target
+
+# Start the gateway (separate terminal or use & to background)
+defenseclaw-gateway start
+```
+
+Access the OpenClaw UI at `http://localhost:18789` (forwarded from the sandbox automatically).
+
+### Monitor sandbox
+
+```bash
+# Check health
+defenseclaw status
+
+# View logs
+journalctl -u openshell-sandbox -f
+tail -f ~/.defenseclaw/gateway.log
+
+# Verify network
+ip link show | grep veth-h
+```
+
+For full setup, architecture, monitoring, and debugging details, see [docs/SANDBOX.md](docs/SANDBOX.md).
+
+**Note:** Sandbox mode requires Linux with systemd and root access. Not available on macOS/Windows.
+
+---
+
 ## SIEM Integration
 
 ### Splunk HEC

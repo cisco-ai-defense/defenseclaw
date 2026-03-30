@@ -1,9 +1,10 @@
 # Default OpenShell sandbox network policy — managed by DefenseClaw.
 #
-# Broad wildcards for common services. Suitable for most deployments.
-# All endpoints use tls: skip because openshell-sandbox's proxy performs
-# TLS interception by default, which breaks Node.js certificate validation.
-# DefenseClaw performs its own inspection at the guardrail layer.
+# Balanced security. Allows sidecar, channels (Slack, Discord, Telegram), npm,
+# and OpenClaw services. LLM providers are NOT included — use guardrail proxy
+# on the host side for LLM traffic inspection.
+#
+# For direct LLM provider access, use: defenseclaw sandbox setup --policy permissive
 
 network_policies:
   allow_defenseclaw_sidecar:
@@ -39,35 +40,6 @@ network_policies:
     - path: /**
     endpoints:
     - host: "registry.npmjs.org"
-      ports: [443]
-      tls: skip
-
-  allow_llm_providers:
-    binaries:
-    - path: /**
-    endpoints:
-    - host: "openrouter.ai"
-      ports: [443]
-      tls: skip
-    - host: "api.openai.com"
-      ports: [443]
-      tls: skip
-    - host: "api.anthropic.com"
-      ports: [443]
-      tls: skip
-    - host: "generativelanguage.googleapis.com"
-      ports: [443]
-      tls: skip
-    - host: "api.groq.com"
-      ports: [443]
-      tls: skip
-    - host: "api.mistral.ai"
-      ports: [443]
-      tls: skip
-    - host: "api.together.xyz"
-      ports: [443]
-      tls: skip
-    - host: "api.deepseek.com"
       ports: [443]
       tls: skip
 

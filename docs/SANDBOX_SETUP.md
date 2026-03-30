@@ -42,7 +42,7 @@ Options (all have sensible defaults):
 | `--host-ip` | `10.200.0.1` | Host-side veth IP |
 | `--sandbox-home` | `/home/sandbox` | Sandbox user's home |
 | `--openclaw-port` | `18789` | OpenClaw gateway port |
-| `--policy` | `default` | Policy template (default/strict/permissive) |
+| `--policy` | `permissive` | Policy template (permissive/default/strict) |
 | `--dns` | `8.8.8.8,1.1.1.1` | DNS servers for the sandbox |
 
 What happens:

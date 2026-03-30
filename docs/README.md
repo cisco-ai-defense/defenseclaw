@@ -11,6 +11,7 @@ DefenseClaw is the enterprise governance layer for [OpenClaw](https://github.com
 - [API Reference](API.md) — Go sidecar REST API endpoints
 - [LLM Guardrail](GUARDRAIL.md) — guardrail data flow and configuration
 - [Guardrail Quick Start](GUARDRAIL_QUICKSTART.md) — set up and test the LLM guardrail
+- [OpenShell Sandbox](SANDBOX.md) — sandbox architecture, setup, monitoring, and debugging
 - [Splunk App Guide](SPLUNK_APP.md) — local Splunk app purpose, dashboards, signals, and investigation flow
 - [TUI Guide](TUI.md) — dashboard usage, keybindings, navigation
 - [OpenTelemetry](OTEL.md) — OTEL signal spec, Splunk mapping

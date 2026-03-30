@@ -1,8 +1,8 @@
-# Permissive OpenShell sandbox network policy — development use only.
+# Permissive OpenShell sandbox network policy — managed by DefenseClaw.
 #
-# Allows all common services plus direct LLM provider access.
-# NOT recommended for production — bypasses guardrail enforcement
-# at the network level.
+# DEFAULT policy. Allows common services plus direct LLM provider access.
+# For production with enforced guardrail inspection, use: defenseclaw sandbox setup --policy default
+# For maximum security (sidecar only), use: defenseclaw sandbox setup --policy strict
 
 network_policies:
   allow_defenseclaw_sidecar:
