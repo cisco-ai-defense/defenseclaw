@@ -88,10 +88,18 @@ const DOMAIN_TO_PROFILE: Record<string, string> = {
   "googleapis.com/v1/projects":      "google:default", // Vertex AI
 };
 
-// Synchronous key cache — loaded once at interceptor start.
-const providerKeyCache: Record<string, string> = {};
+// Key cache with TTL — refreshed every 30 seconds so key changes in
+// OpenClaw are picked up without needing to restart.
+const KEY_CACHE_TTL_MS = 30_000;
+let providerKeyCache: Record<string, string> = {};
+let providerKeyCacheTs = 0;
 
 function loadProviderKeys(): void {
+  const now = Date.now();
+  if (now - providerKeyCacheTs < KEY_CACHE_TTL_MS && providerKeyCacheTs > 0) {
+    return; // still fresh
+  }
+
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require("node:fs") as typeof import("node:fs");
@@ -104,15 +112,16 @@ function loadProviderKeys(): void {
     const data = JSON.parse(fs.readFileSync(profilesPath, "utf8"));
     const profiles = data?.profiles ?? {};
 
+    const fresh: Record<string, string> = {};
     for (const [domain, profileId] of Object.entries(DOMAIN_TO_PROFILE)) {
       const key = profiles[profileId]?.key;
-      if (key) providerKeyCache[domain] = key;
+      if (key) fresh[domain] = key;
     }
-    console.log(
-      `[defenseclaw] loaded provider keys for: ${Object.keys(providerKeyCache).join(", ")}`
-    );
+    providerKeyCache = fresh;
+    providerKeyCacheTs = now;
   } catch {
-    // auth-profiles.json not found — keys will fall through unchanged
+    // auth-profiles.json not found — keys fall through unchanged
+    providerKeyCacheTs = now; // avoid hammering on every request
   }
 }
 
@@ -152,6 +161,10 @@ export function createFetchInterceptor(guardrailPort: number) {
       if (!isLLMUrl(urlStr, guardrailPort) || isAlreadyProxied(urlStr, guardrailPort)) {
         return originalFetch!(input, init);
       }
+
+      // Refresh key cache if stale — picks up key changes made in OpenClaw
+      // without requiring a restart.
+      loadProviderKeys();
 
       let original: URL;
       try {
