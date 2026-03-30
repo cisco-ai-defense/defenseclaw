@@ -30,6 +30,14 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
+// Use CommonJS require() for https/http — ESM module objects are frozen and
+// cannot have properties reassigned, but the CJS exports object is mutable.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const https = _require("https") as typeof import("https");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const http = _require("http") as typeof import("http");
 
 /** Domains that should be intercepted and routed through the guardrail. */
 const LLM_DOMAINS = [
@@ -141,6 +149,7 @@ function getRealKeyForUrl(urlStr: string): string {
 export function createFetchInterceptor(guardrailPort: number) {
   const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
+  let originalHttpsRequest: typeof https.request | null = null;
 
   function start(): void {
     if (originalFetch) return; // already started
@@ -212,6 +221,78 @@ export function createFetchInterceptor(guardrailPort: number) {
       return originalFetch!(proxied, newInit);
     };
 
+    // Also patch https.request so axios, undici, and other non-fetch HTTP
+    // clients are intercepted. All of them ultimately use node:https.request.
+    originalHttpsRequest = https.request.bind(https);
+    const originalHttpRequest = http.request.bind(http);
+
+    type NodeRequestOptions = Record<string, unknown>;
+    type NodeIncomingMessage = unknown;
+    type NodeClientRequest = ReturnType<typeof http.request>;
+
+    function patchedHttpsRequest(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+      callback?: (res: NodeIncomingMessage) => void,
+    ): NodeClientRequest {
+      const urlStr = typeof urlOrOptions === "string"
+        ? urlOrOptions
+        : urlOrOptions instanceof URL
+          ? urlOrOptions.toString()
+          : ((urlOrOptions as NodeRequestOptions).hostname as string ?? "");
+
+      if (isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort)) {
+        loadProviderKeys();
+        let opts: NodeRequestOptions = {};
+        let cb = callback;
+
+        if (typeof optionsOrCallback === "function") {
+          cb = optionsOrCallback;
+          opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
+            ? {} : urlOrOptions as NodeRequestOptions;
+        } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
+          opts = optionsOrCallback as NodeRequestOptions;
+        }
+
+        // Parse original URL to get host, path, protocol
+        let originalUrl: URL;
+        try {
+          const optsAs = opts as { hostname?: string; path?: string };
+          originalUrl = new URL(typeof urlOrOptions === "string" ? urlOrOptions
+            : urlOrOptions instanceof URL ? urlOrOptions.toString()
+            : `https://${optsAs.hostname ?? ""}${optsAs.path ?? ""}`);
+        } catch {
+          return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+        }
+
+        const realKey = getRealKeyForUrl(urlStr);
+        const hdrs = opts.headers as Record<string, string> ?? {};
+        const existingAuth = hdrs["authorization"] ?? hdrs["Authorization"] ?? "";
+        const aiAuth = realKey ? `Bearer ${realKey}`
+          : (existingAuth && !existingAuth.startsWith("Bearer sk-dc-") ? existingAuth : "");
+
+        const newOpts: NodeRequestOptions = {
+          ...opts,
+          hostname: "127.0.0.1",
+          port: guardrailPort,
+          protocol: "http:",
+          path: `${originalUrl.pathname}${originalUrl.search}`,
+          headers: {
+            ...hdrs,
+            "X-DC-Target-URL": originalUrl.origin,
+            ...(aiAuth ? { "X-AI-Auth": aiAuth } : {}),
+          },
+        };
+
+        console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);
+        return http.request(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+      }
+
+      return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+    }
+
+    https.request = patchedHttpsRequest as typeof https.request;
+
     console.log(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
@@ -221,8 +302,12 @@ export function createFetchInterceptor(guardrailPort: number) {
     if (originalFetch) {
       globalThis.fetch = originalFetch;
       originalFetch = null;
-      console.log("[defenseclaw] LLM fetch interceptor stopped");
     }
+    // Restore https.request (safe because we used CJS require, not frozen ESM)
+    if (originalHttpsRequest) {
+      https.request = originalHttpsRequest;
+    }
+    console.log("[defenseclaw] LLM fetch interceptor stopped");
   }
 
   return { start, stop };
