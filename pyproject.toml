@@ -21,7 +21,7 @@ tui = ["textual>=0.50"]
 dev = [
     "pytest==9.0.2",
     "pytest-cov==7.1.0",
-    "ruff==0.15.7",
+    "ruff==0.15.8",
 ]
 
 [project.scripts]
