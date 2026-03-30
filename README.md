@@ -20,7 +20,7 @@
 
 **AI agents are powerful. Unchecked, they're dangerous.**
 
-Large language model agents — like those built on [OpenClaw](https://github.com/nvidia/openclaw) — can install skills, call MCP servers, execute code, and reach the network. Every one of those actions is an attack surface. A single malicious skill can exfiltrate data. A compromised MCP server can inject hidden instructions. Generated code can contain hardcoded secrets or command injection.
+Large language model agents — like those built on [OpenClaw](https://github.com/openclaw/openclaw) — can install skills, call MCP servers, execute code, and reach the network. Every one of those actions is an attack surface. A single malicious skill can exfiltrate data. A compromised MCP server can inject hidden instructions. Generated code can contain hardcoded secrets or command injection.
 
 **DefenseClaw is the enterprise governance layer for OpenClaw.** It sits between your AI agents and the infrastructure they run on, enforcing a simple principle: **nothing runs until it's scanned, and anything dangerous is blocked automatically.**
 
