@@ -303,6 +303,13 @@ Splunk runtime through this preset, local Splunk usage is subject to the
 Splunk General Terms and the local-mode scope guardrails documented in
 [docs/INSTALL.md](docs/INSTALL.md).
 
+The bundled local runtime starts as a local Splunk Enterprise Trial. After the
+60-day trial period, you can continue using the same local single-instance
+workflow in Splunk Free mode unless you apply another valid Splunk Enterprise
+license. In Splunk Free mode, alerting is disabled, authentication and RBAC are
+removed, and the local user credentials printed by the setup command no longer
+apply. Existing Splunk license and ingest limits still apply in every mode.
+
 That command also installs the local Splunk app automatically. The app gives
 users a purpose-built investigation surface for DefenseClaw audit activity,
 OpenClaw runtime evidence, diagnostics, metrics, traces, and saved searches.
