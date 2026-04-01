@@ -325,11 +325,21 @@ if [[ -z "$LOCAL_DIST" ]]; then
     (cd "$SOURCE_DIR" && make gateway-install) && info "defenseclaw-gateway rebuilt and installed"
 
     step "Installing Python CLI ..."
+    # Uninstall old non-editable wheel first so stale code in site-packages
+    # doesn't shadow the new source (the old wheel may contain outdated
+    # guardrail.py that still writes models.providers.defenseclaw).
     if [[ -d "$DEFENSECLAW_VENV" ]]; then
-        "${DEFENSECLAW_VENV}/bin/uv" pip install -e "$SOURCE_DIR" \
-            --python "${DEFENSECLAW_VENV}/bin/python" --quiet 2>/dev/null \
-        || uv pip install -e "$SOURCE_DIR" --quiet 2>/dev/null \
-        || pip install -e "$SOURCE_DIR" --quiet
+        VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
+        VENV_UV="${DEFENSECLAW_VENV}/bin/uv"
+        # Uninstall the old wheel from the defenseclaw venv
+        "${VENV_UV}" pip uninstall defenseclaw --python "$VENV_PYTHON" -q 2>/dev/null \
+            || "${VENV_PYTHON}" -m pip uninstall defenseclaw -y -q 2>/dev/null \
+            || true
+        # Reinstall from current source as editable so site-packages always
+        # reflects the repo (no stale .whl or build/ artifact can shadow it).
+        "${VENV_UV}" pip install -e "$SOURCE_DIR" \
+            --python "$VENV_PYTHON" --quiet 2>/dev/null \
+        || "${VENV_PYTHON}" -m pip install -e "$SOURCE_DIR" --quiet
     else
         uv pip install -e "$SOURCE_DIR" --quiet 2>/dev/null \
         || pip install -e "$SOURCE_DIR" --quiet
