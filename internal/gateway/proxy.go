@@ -331,7 +331,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// Return 200 with the block message as an assistant turn so
 			// openclaw surfaces it to the user rather than treating it as
 			// an error and retrying with a different provider.
-			p.writeBlockedPassthrough(w, provider, partial.Model, partial.Stream, msg)
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
 			return
 		}
 	}
@@ -832,10 +832,10 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 }
 
 // writeBlockedPassthrough dispatches to the correct blocked-response writer
-// based on provider and whether the original request was streaming. This is
-// used by handlePassthrough where the request is in provider-native format
-// (e.g. Anthropic /v1/messages), so the response must match that format.
-func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, provider, model string, stream bool, msg string) {
+// based on provider, request path, and streaming flag. The response format
+// must match the native API format of the original request so the caller
+// can parse the blocked message instead of treating it as an error.
+func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, provider, model string, stream bool, msg string) {
 	if provider == "anthropic" {
 		if stream {
 			p.writeBlockedStreamAnthropic(w, model, msg)
@@ -844,12 +844,148 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, provider
 		}
 		return
 	}
-	// All other providers use the OpenAI-compatible format.
+	// OpenAI Responses API (/v1/responses or /openai/v1/responses).
+	if strings.HasSuffix(path, "/responses") {
+		if stream {
+			p.writeBlockedStreamOpenAIResponses(w, model, msg)
+		} else {
+			p.writeBlockedResponseOpenAIResponses(w, model, msg)
+		}
+		return
+	}
+	// Chat Completions API and all other OpenAI-compatible paths.
 	if stream {
 		p.writeBlockedStream(w, model, msg)
 	} else {
 		p.writeBlockedResponse(w, model, msg)
 	}
+}
+
+// writeBlockedResponseOpenAIResponses returns a blocked response in OpenAI
+// Responses API format (non-streaming).
+func (p *GuardrailProxy) writeBlockedResponseOpenAIResponses(w http.ResponseWriter, model, msg string) {
+	resp := map[string]interface{}{
+		"id":         "resp_blocked",
+		"object":     "response",
+		"created_at": time.Now().Unix(),
+		"model":      model,
+		"status":     "completed",
+		"output": []map[string]interface{}{{
+			"type":   "message",
+			"id":     "msg_blocked",
+			"role":   "assistant",
+			"status": "completed",
+			"content": []map[string]interface{}{{
+				"type":        "output_text",
+				"text":        msg,
+				"annotations": []interface{}{},
+			}},
+		}},
+		"usage": map[string]int{
+			"input_tokens":  0,
+			"output_tokens": 1,
+			"total_tokens":  1,
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// writeBlockedStreamOpenAIResponses returns a blocked response as an OpenAI
+// Responses API server-sent event stream.
+func (p *GuardrailProxy) writeBlockedStreamOpenAIResponses(w http.ResponseWriter, model, msg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.writeBlockedResponseOpenAIResponses(w, model, msg)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writeSSE := func(eventType string, data interface{}) {
+		raw, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
+		flusher.Flush()
+	}
+
+	respID := "resp_blocked"
+	itemID := "item_blocked"
+
+	writeSSE("response.created", map[string]interface{}{
+		"type": "response.created",
+		"response": map[string]interface{}{
+			"id": respID, "object": "response", "model": model,
+			"status": "in_progress", "output": []interface{}{},
+		},
+	})
+	writeSSE("response.output_item.added", map[string]interface{}{
+		"type":          "response.output_item.added",
+		"response_id":   respID,
+		"output_index":  0,
+		"item": map[string]interface{}{
+			"id": itemID, "type": "message", "role": "assistant",
+			"status": "in_progress", "content": []interface{}{},
+		},
+	})
+	writeSSE("response.content_part.added", map[string]interface{}{
+		"type":          "response.content_part.added",
+		"response_id":   respID,
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"part":          map[string]string{"type": "output_text", "text": ""},
+	})
+	writeSSE("response.output_text.delta", map[string]interface{}{
+		"type":          "response.output_text.delta",
+		"response_id":   respID,
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"delta":         msg,
+	})
+	writeSSE("response.output_text.done", map[string]interface{}{
+		"type":          "response.output_text.done",
+		"response_id":   respID,
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"text":          msg,
+	})
+	writeSSE("response.content_part.done", map[string]interface{}{
+		"type":          "response.content_part.done",
+		"response_id":   respID,
+		"item_id":       itemID,
+		"output_index":  0,
+		"content_index": 0,
+		"part": map[string]interface{}{
+			"type": "output_text", "text": msg, "annotations": []interface{}{},
+		},
+	})
+	writeSSE("response.output_item.done", map[string]interface{}{
+		"type":         "response.output_item.done",
+		"response_id":  respID,
+		"output_index": 0,
+		"item": map[string]interface{}{
+			"id": itemID, "type": "message", "role": "assistant", "status": "completed",
+			"content": []map[string]interface{}{{"type": "output_text", "text": msg, "annotations": []interface{}{}}},
+		},
+	})
+	outputItem := map[string]interface{}{
+		"id": itemID, "type": "message", "role": "assistant", "status": "completed",
+		"content": []map[string]interface{}{{"type": "output_text", "text": msg, "annotations": []interface{}{}}},
+	}
+	writeSSE("response.completed", map[string]interface{}{
+		"type": "response.completed",
+		"response": map[string]interface{}{
+			"id": respID, "object": "response", "model": model, "status": "completed",
+			"output": []interface{}{outputItem},
+			"usage":  map[string]int{"input_tokens": 0, "output_tokens": 1, "total_tokens": 1},
+		},
+	})
 }
 
 // writeBlockedResponseAnthropic returns a blocked response in Anthropic
