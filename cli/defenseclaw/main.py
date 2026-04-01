@@ -39,6 +39,7 @@ from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
+from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.context import AppContext
 
 SKIP_LOAD_COMMANDS = {"init"}
@@ -116,6 +117,7 @@ cli.add_command(alerts)
 cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(doctor)
+cli.add_command(upgrade)
 
 
 def _ensure_codeguard_skill(cfg) -> None:
