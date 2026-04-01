@@ -99,7 +99,6 @@ firewall:
     - 80
 
 enforcement:
-  update_sandbox_policy: true
   max_enforcement_delay_seconds: 2
 
 audit:

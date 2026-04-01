@@ -45,6 +45,27 @@ def _home() -> Path:
 
 
 def default_data_path() -> Path:
+    """Return the DefenseClaw data directory.
+
+    When running under ``sudo``, checks the invoking user's home first
+    so that ``sudo defenseclaw sandbox init`` finds the config created
+    by the unprivileged user.  Falls back to the current user's home.
+    """
+    env_override = os.environ.get("DEFENSECLAW_HOME")
+    if env_override:
+        return Path(env_override)
+
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and os.getuid() == 0:
+        try:
+            import pwd
+            pw = pwd.getpwnam(sudo_user)
+            candidate = Path(pw.pw_dir) / DATA_DIR_NAME
+            if (candidate / CONFIG_FILE_NAME).is_file():
+                return candidate
+        except KeyError:
+            pass
+
     return _home() / DATA_DIR_NAME
 
 
@@ -78,6 +99,67 @@ def detect_environment() -> str:
     return "linux"
 
 
+_sandbox_mode_cache: bool | None = None
+
+
+def openclaw_cmd_prefix() -> list[str]:
+    """Return ``["sudo", "-u", "sandbox"]`` when in standalone sandbox mode.
+
+    Used by any code that shells out to the ``openclaw`` CLI so that
+    config writes target the sandbox-owned OpenClaw home.  The prefix
+    does NOT include the ``openclaw`` binary itself — callers append it.
+    When in sandbox mode, ``sudo -u sandbox`` won't inherit the invoking
+    user's PATH, so callers should use :func:`openclaw_bin` for the
+    binary path.
+    """
+    global _sandbox_mode_cache
+    if _sandbox_mode_cache is None:
+        try:
+            cp = config_path()
+            if cp.is_file():
+                import yaml
+                with open(cp) as f:
+                    raw = yaml.safe_load(f) or {}
+                mode = raw.get("openshell", {}).get("mode", "")
+                _sandbox_mode_cache = mode == "standalone"
+            else:
+                _sandbox_mode_cache = False
+        except Exception:
+            _sandbox_mode_cache = False
+    if _sandbox_mode_cache:
+        return ["sudo", "-u", "sandbox"]
+    return []
+
+
+_openclaw_bin_cache: str | None = None
+
+
+def openclaw_bin() -> str:
+    """Return the absolute path to the ``openclaw`` binary.
+
+    Resolves via ``shutil.which`` first, then checks common npm install
+    locations.  Falls back to the bare name ``"openclaw"`` if it cannot
+    be found (letting the caller's subprocess raise a clear error).
+    """
+    global _openclaw_bin_cache
+    if _openclaw_bin_cache is None:
+        import shutil
+        found = shutil.which("openclaw")
+        if not found:
+            from pathlib import Path
+            candidates = [
+                Path.home() / ".npm-global" / "bin" / "openclaw",
+                Path("/usr/local/bin/openclaw"),
+                Path.home() / ".local" / "bin" / "openclaw",
+            ]
+            for c in candidates:
+                if c.is_file():
+                    found = str(c)
+                    break
+        _openclaw_bin_cache = found or "openclaw"
+    return _openclaw_bin_cache
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses — same YAML keys as Go structs
 # ---------------------------------------------------------------------------
@@ -97,6 +179,7 @@ class ClawConfig:
     mode: str = "openclaw"
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
+    openclaw_home_original: str = ""
 
 
 @dataclass
@@ -179,10 +262,33 @@ class ScannersConfig:
     codeguard: str = ""
 
 
+DEFAULT_OPENSHELL_VERSION = "0.6.2"
+DEFAULT_SANDBOX_HOME = "/home/sandbox"
+
+
 @dataclass
 class OpenShellConfig:
-    binary: str = "openshell"
+    binary: str = "openshell-sandbox"
     policy_dir: str = "/etc/openshell/policies"
+    mode: str = ""
+    version: str = DEFAULT_OPENSHELL_VERSION
+    sandbox_home: str = DEFAULT_SANDBOX_HOME
+    auto_pair: bool | None = None
+    host_networking: bool = True
+
+    def is_standalone(self) -> bool:
+        return self.mode == "standalone"
+
+    def effective_version(self) -> str:
+        return self.version or DEFAULT_OPENSHELL_VERSION
+
+    def effective_sandbox_home(self) -> str:
+        return self.sandbox_home or DEFAULT_SANDBOX_HOME
+
+    def should_auto_pair(self) -> bool:
+        if self.auto_pair is not None:
+            return self.auto_pair
+        return True
 
 
 @dataclass
@@ -429,6 +535,7 @@ class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
     scanner_mode: str = "local"     # local | remote | both
+    host: str = "localhost"         # host where guardrail proxy is reachable (bridge IP in sandbox mode)
     port: int = 4000
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
     model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
@@ -530,8 +637,9 @@ def _read_openclaw_config(config_file: str) -> dict[str, Any] | None:
 def _read_mcp_servers_via_cli() -> list[MCPServerEntry] | None:
     """Read mcp.servers via ``openclaw config get``.  Returns None on failure."""
     try:
+        prefix = openclaw_cmd_prefix()
         result = subprocess.run(
-            ["openclaw", "config", "get", "mcp.servers"],
+            [*prefix, openclaw_bin(), "config", "get", "mcp.servers"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -717,6 +825,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "local"),
+        host=raw.get("host", "localhost"),
         port=raw.get("port", 4000),
         model=raw.get("model", ""),
         model_name=raw.get("model_name", ""),
@@ -792,6 +901,28 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
         resource=OTelResourceConfig(
             attributes=resource_raw.get("attributes", {}),
         ),
+    )
+
+
+def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
+    if not raw:
+        return OpenShellConfig()
+    auto_pair = raw.get("auto_pair")
+    if auto_pair is not None:
+        auto_pair = bool(auto_pair)
+    host_networking = raw.get("host_networking")
+    if host_networking is not None:
+        host_networking = bool(host_networking)
+    else:
+        host_networking = True
+    return OpenShellConfig(
+        binary=raw.get("binary", "openshell-sandbox"),
+        policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
+        mode=raw.get("mode", ""),
+        version=raw.get("version", DEFAULT_OPENSHELL_VERSION),
+        sandbox_home=raw.get("sandbox_home", DEFAULT_SANDBOX_HOME),
+        auto_pair=auto_pair,
+        host_networking=host_networking,
     )
 
 
@@ -886,6 +1017,7 @@ def load() -> Config:
             mode=raw.get("claw", {}).get("mode", "openclaw"),
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
+            openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
@@ -907,10 +1039,7 @@ def load() -> Config:
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
-        openshell=OpenShellConfig(
-            binary=raw.get("openshell", {}).get("binary", "openshell"),
-            policy_dir=raw.get("openshell", {}).get("policy_dir", "/etc/openshell/policies"),
-        ),
+        openshell=_merge_openshell(raw.get("openshell")),
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),

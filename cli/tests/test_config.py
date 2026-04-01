@@ -30,6 +30,8 @@ from defenseclaw.config import (
     CiscoAIDefenseConfig,
     Config,
     ClawConfig,
+    DEFAULT_OPENSHELL_VERSION,
+    DEFAULT_SANDBOX_HOME,
     GatewayConfig,
     GatewayWatcherConfig,
     GatewayWatcherSkillConfig,
@@ -37,6 +39,8 @@ from defenseclaw.config import (
     MCPScannerConfig,
     GatewayWatcherPluginConfig,
     PluginActionsConfig,
+    GuardrailConfig,
+    OpenShellConfig,
     SeverityAction,
     SkillActionsConfig,
     SkillScannerConfig,
@@ -46,7 +50,9 @@ from defenseclaw.config import (
     _merge_gateway_watcher,
     _merge_inspect_llm,
     _merge_mcp_scanner,
+    _merge_openshell,
     _merge_plugin_actions,
+    _merge_guardrail,
     _merge_severity_action,
     _merge_skill_actions,
     default_config,
@@ -603,6 +609,27 @@ class TestConfigTopLevelSections(unittest.TestCase):
             self.assertEqual(raw["cisco_ai_defense"]["api_key"], "aid-456")
             self.assertEqual(raw["cisco_ai_defense"]["timeout_ms"], 5000)
 
+    def test_save_and_reload_guardrail_openshell(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                guardrail=GuardrailConfig(host="10.200.0.1"),
+                openshell=OpenShellConfig(mode="standalone"),
+            )
+            cfg.save()
+
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+            self.assertEqual(raw["guardrail"]["host"], "10.200.0.1")
+            self.assertEqual(raw["openshell"]["mode"], "standalone")
+
     def test_load_reads_new_sections(self):
         import yaml
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -677,6 +704,122 @@ class TestGatewayResolvedToken(unittest.TestCase):
         env = {"OPENCLAW_GATEWAY_TOKEN": "other"}
         with patch.dict(os.environ, env, clear=False):
             self.assertEqual(gw.resolved_token(), "fallback")
+
+
+class TestGuardrailHostField(unittest.TestCase):
+    def test_default_guardrail_host(self):
+        gc = GuardrailConfig()
+        self.assertEqual(gc.host, "localhost")
+
+    def test_merge_guardrail_host_from_yaml(self):
+        gc = _merge_guardrail({"host": "10.200.0.1"}, "/tmp")
+        self.assertEqual(gc.host, "10.200.0.1")
+
+    def test_merge_guardrail_host_default(self):
+        gc = _merge_guardrail({}, "/tmp")
+        self.assertEqual(gc.host, "localhost")
+
+    def test_merge_guardrail_none(self):
+        gc = _merge_guardrail(None, "/tmp")
+        self.assertEqual(gc.host, "localhost")
+
+
+class TestOpenShellModeField(unittest.TestCase):
+    def test_default_mode_empty(self):
+        oc = OpenShellConfig()
+        self.assertEqual(oc.mode, "")
+
+    def test_mode_from_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import yaml
+            cfg_data = {
+                "openshell": {"mode": "standalone"},
+            }
+            cfg_file = os.path.join(tmpdir, "config.yaml")
+            with open(cfg_file, "w") as f:
+                yaml.dump(cfg_data, f)
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                cfg = load()
+                self.assertEqual(cfg.openshell.mode, "standalone")
+
+
+class TestOpenShellSandboxFields(unittest.TestCase):
+    def test_default_version(self):
+        oc = OpenShellConfig()
+        self.assertEqual(oc.version, DEFAULT_OPENSHELL_VERSION)
+        self.assertEqual(oc.effective_version(), DEFAULT_OPENSHELL_VERSION)
+
+    def test_custom_version(self):
+        oc = OpenShellConfig(version="0.7.0")
+        self.assertEqual(oc.effective_version(), "0.7.0")
+
+    def test_default_sandbox_home(self):
+        oc = OpenShellConfig()
+        self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
+        self.assertEqual(oc.effective_sandbox_home(), DEFAULT_SANDBOX_HOME)
+
+    def test_custom_sandbox_home(self):
+        oc = OpenShellConfig(sandbox_home="/opt/sandbox")
+        self.assertEqual(oc.effective_sandbox_home(), "/opt/sandbox")
+
+    def test_is_standalone(self):
+        self.assertFalse(OpenShellConfig().is_standalone())
+        self.assertTrue(OpenShellConfig(mode="standalone").is_standalone())
+        self.assertFalse(OpenShellConfig(mode="cluster").is_standalone())
+
+    def test_auto_pair_default(self):
+        oc = OpenShellConfig()
+        self.assertTrue(oc.should_auto_pair())
+
+    def test_auto_pair_explicit_true(self):
+        oc = OpenShellConfig(auto_pair=True)
+        self.assertTrue(oc.should_auto_pair())
+
+    def test_auto_pair_explicit_false(self):
+        oc = OpenShellConfig(auto_pair=False)
+        self.assertFalse(oc.should_auto_pair())
+
+    def test_merge_openshell_none(self):
+        oc = _merge_openshell(None)
+        self.assertEqual(oc.version, DEFAULT_OPENSHELL_VERSION)
+        self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
+        self.assertIsNone(oc.auto_pair)
+
+    def test_merge_openshell_with_data(self):
+        oc = _merge_openshell({
+            "mode": "standalone",
+            "version": "0.7.0",
+            "sandbox_home": "/opt/sandbox",
+            "auto_pair": False,
+        })
+        self.assertEqual(oc.mode, "standalone")
+        self.assertEqual(oc.version, "0.7.0")
+        self.assertEqual(oc.sandbox_home, "/opt/sandbox")
+        self.assertFalse(oc.auto_pair)
+
+    def test_load_openshell_sandbox_fields(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_data = {
+                "openshell": {
+                    "mode": "standalone",
+                    "version": "0.7.0",
+                    "sandbox_home": "/opt/sandbox",
+                    "auto_pair": False,
+                },
+            }
+            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+                yaml.dump(cfg_data, f)
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                cfg = load()
+                self.assertEqual(cfg.openshell.mode, "standalone")
+                self.assertEqual(cfg.openshell.version, "0.7.0")
+                self.assertEqual(cfg.openshell.sandbox_home, "/opt/sandbox")
+                self.assertFalse(cfg.openshell.auto_pair)
 
 
 if __name__ == "__main__":

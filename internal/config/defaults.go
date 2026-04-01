@@ -39,6 +39,9 @@ const (
 )
 
 func DefaultDataPath() string {
+	if v := os.Getenv("DEFENSECLAW_HOME"); v != "" {
+		return v
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
@@ -112,6 +115,7 @@ func DefaultConfig() *Config {
 		OpenShell: OpenShellConfig{
 			Binary:    "openshell",
 			PolicyDir: "/etc/openshell/policies",
+			Version:   DefaultOpenShellVersion,
 		},
 		Watch: WatchConfig{
 			DebounceMs: 500,
@@ -125,6 +129,7 @@ func DefaultConfig() *Config {
 		Guardrail: GuardrailConfig{
 			Mode:        "observe",
 			ScannerMode: "local",
+			Host:        "localhost",
 			Port:        4000,
 			Judge: JudgeConfig{
 				Injection:     true,
@@ -167,23 +172,8 @@ func DefaultConfig() *Config {
 				},
 			},
 		},
-		SkillActions:   DefaultSkillActions(),
-		MCPActions:     DefaultMCPActions(),
-		PluginActions:  DefaultPluginActions(),
-		Integrity:      DefaultIntegrityConfig(),
-	}
-}
-
-// DefaultIntegrityConfig returns defaults for runtime integrity baselines.
-func DefaultIntegrityConfig() IntegrityConfig {
-	return IntegrityConfig{
-		Enabled:           false,
-		Skill:             true,
-		Plugin:            true,
-		MCP:               true,
-		TrustLevel:        "clean_warning",
-		OnDrift:           "alert",
-		MCPPollSeconds:    60,
-		DriftLogCooldownS: 120,
+		SkillActions:  DefaultSkillActions(),
+		MCPActions:    DefaultMCPActions(),
+		PluginActions: DefaultPluginActions(),
 	}
 }

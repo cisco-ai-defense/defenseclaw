@@ -69,6 +69,15 @@ def install_codeguard_skill(cfg) -> str:
         shutil.copytree(source_dir, target_dir)
     except OSError as exc:
         reason = exc.strerror or str(exc)
+        if "ermission" in reason:
+            from defenseclaw.config import load as _load_cfg
+            try:
+                _cfg = _load_cfg()
+                if _cfg.openshell.is_standalone():
+                    return ("skipped (Permission denied — sandbox mode). "
+                            "Use 'defenseclaw sandbox setup' to install skills")
+            except Exception:
+                pass
         return f"skipped ({reason})"
 
     oc_config = _expand(cfg.claw.config_file)

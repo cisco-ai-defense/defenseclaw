@@ -584,7 +584,10 @@ func (w *InstallWatcher) enforceBlock(evt InstallEvent) {
 		if _, err := se.Quarantine(evt.Path); err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 		}
-		_ = se.UpdateSandboxPolicy(evt.Name, true)
+		// TODO: re-enable once sandbox policy sync is wired end-to-end
+		// if w.cfg.OpenShell.IsStandalone() {
+		// 	_ = se.UpdateSandboxPolicy(evt.Name, true)
+		// }
 	case InstallMCP:
 		me := enforce.NewMCPEnforcer(w.shell)
 		_ = me.BlockEndpoint(evt.Name)

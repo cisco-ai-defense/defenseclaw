@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -144,6 +145,75 @@ func (d *DeviceIdentity) ConnectDevice(p ConnectDeviceParams) map[string]interfa
 		"signedAt":  signedAt,
 		"nonce":     p.Nonce,
 	}
+}
+
+// RepairPairing writes (or overwrites) the sidecar's device entry into
+// OpenClaw's devices/paired.json so the gateway can authenticate on the
+// next connect attempt.  This is called automatically when a connect
+// handshake fails with "token_missing" or "unauthorized", which happens
+// when openclaw regenerates its pairing state (e.g. after a restart).
+func (d *DeviceIdentity) RepairPairing(sandboxHome string) error {
+	devicesDir := filepath.Join(sandboxHome, ".openclaw", "devices")
+	pairedPath := filepath.Join(devicesDir, "paired.json")
+
+	paired := make(map[string]interface{})
+	if data, err := os.ReadFile(pairedPath); err == nil {
+		_ = json.Unmarshal(data, &paired)
+	}
+
+	nowMs := time.Now().UnixMilli()
+	scopes := []string{
+		"operator.read", "operator.write",
+		"operator.admin", "operator.approvals",
+	}
+
+	existing, _ := paired[d.DeviceID].(map[string]interface{})
+	if existing == nil {
+		existing = map[string]interface{}{}
+	}
+
+	tokens := existing["tokens"]
+	if tokens == nil {
+		tokens = map[string]interface{}{}
+	}
+	createdAt := existing["createdAtMs"]
+	if createdAt == nil {
+		createdAt = nowMs
+	}
+
+	paired[d.DeviceID] = map[string]interface{}{
+		"deviceId":      d.DeviceID,
+		"publicKey":     d.PublicKeyBase64URL(),
+		"displayName":   "defenseclaw-sidecar",
+		"platform":      "linux",
+		"deviceFamily":  existing["deviceFamily"],
+		"clientId":      "gateway-client",
+		"clientMode":    "backend",
+		"role":          "operator",
+		"roles":         []string{"operator"},
+		"scopes":        scopes,
+		"approvedScopes": scopes,
+		"tokens":        tokens,
+		"createdAtMs":   createdAt,
+		"approvedAtMs":  nowMs,
+	}
+
+	if err := os.MkdirAll(devicesDir, 0o755); err != nil {
+		return fmt.Errorf("gateway: repair pairing: mkdir: %w", err)
+	}
+
+	data, err := json.MarshalIndent(paired, "", "  ")
+	if err != nil {
+		return fmt.Errorf("gateway: repair pairing: marshal: %w", err)
+	}
+	data = append(data, '\n')
+
+	if err := os.WriteFile(pairedPath, data, 0o644); err != nil {
+		return fmt.Errorf("gateway: repair pairing: write: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "[gateway] repaired device pairing in %s\n", pairedPath)
+	return nil
 }
 
 func normalizeMetadata(s string) string {
