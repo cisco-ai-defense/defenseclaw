@@ -31,6 +31,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { loadSidecarConfig } from "./sidecar-config.js";
 const _require = createRequire(import.meta.url);
 // Use CommonJS require() for https/http — ESM module objects are frozen and
 // cannot have properties reassigned, but the CJS exports object is mutable.
@@ -62,11 +63,18 @@ export const TARGET_URL_HEADER = "X-DC-Target-URL";
 
 /**
  * Header carrying the real LLM provider key to the proxy.
- * Kept separate from Authorization so the original OpenClaw→DefenseClaw
- * connection auth (sk-dc-* master key) is preserved for gateway auth,
- * including future remote DefenseClaw gateway deployments.
+ * Kept separate from Authorization so the original Authorization header
+ * (which may carry a different token) is preserved verbatim.
  */
 export const AI_AUTH_HEADER = "X-AI-Auth";
+
+/**
+ * Header carrying the defenseclaw proxy authentication token (the openclaw
+ * gateway token from OPENCLAW_GATEWAY_TOKEN / gateway.token in config.yaml).
+ * The proxy validates this for non-loopback connections; loopback connections
+ * are trusted by network topology alone.
+ */
+export const DC_AUTH_HEADER = "X-DC-Auth";
 
 function isLLMUrl(url: string, guardrailPort: number): boolean {
   if (LLM_DOMAINS.some(domain => url.includes(domain))) return true;
@@ -120,9 +128,23 @@ function loadProviderKeys(): void {
     const profiles = data?.profiles ?? {};
 
     const fresh: Record<string, string> = {};
+    // (1) Static domain → profile mapping.
     for (const [domain, profileId] of Object.entries(DOMAIN_TO_PROFILE)) {
       const key = profiles[profileId]?.key;
       if (key) fresh[domain] = key;
+    }
+    // (2) Dynamic scan: any profile with metadata.endpoint gets its hostname
+    // added to the cache (covers Azure AI Foundry and other custom endpoints).
+    for (const profile of Object.values(profiles) as Array<{ key?: string; metadata?: { endpoint?: string } }>) {
+      const endpoint = profile.metadata?.endpoint;
+      if (endpoint && profile.key) {
+        try {
+          const hostname = new URL(endpoint).hostname;
+          if (hostname) fresh[hostname] = profile.key;
+        } catch {
+          // ignore malformed endpoint URLs
+        }
+      }
     }
     providerKeyCache = fresh;
     providerKeyCacheTs = now;
@@ -191,11 +213,17 @@ export function createFetchInterceptor(guardrailPort: number) {
       );
       headers.set(TARGET_URL_HEADER, original.origin);
 
-      // Inject the real LLM provider key as X-AI-Auth — a dedicated header
-      // separate from Authorization. This preserves the original sk-dc-* master
-      // key in Authorization for OpenClaw→DefenseClaw connection auth (including
-      // future remote gateway deployments), while giving the proxy the actual
-      // provider key it needs to call the upstream LLM.
+      // X-DC-Auth: proxy authentication token (defenseclaw gateway token).
+      // The proxy trusts loopback connections, so this is belt-and-suspenders
+      // for remote proxy deployments.
+      const sidecarToken = loadSidecarConfig().token;
+      if (sidecarToken) {
+        headers.set(DC_AUTH_HEADER, `Bearer ${sidecarToken}`);
+      }
+
+      // X-AI-Auth: real LLM provider key, separate from Authorization so the
+      // proxy can resolve the correct upstream key independently of the header
+      // that openclaw sends for its own auth flows.
       const realKey = getRealKeyForUrl(urlStr);
       if (realKey) {
         headers.set(AI_AUTH_HEADER, `Bearer ${realKey}`);
@@ -270,6 +298,7 @@ export function createFetchInterceptor(guardrailPort: number) {
         const existingAuth = hdrs["authorization"] ?? hdrs["Authorization"] ?? "";
         const aiAuth = realKey ? `Bearer ${realKey}`
           : (existingAuth && !existingAuth.startsWith("Bearer sk-dc-") ? existingAuth : "");
+        const sidecarToken = loadSidecarConfig().token;
 
         const newOpts: NodeRequestOptions = {
           ...opts,
@@ -281,6 +310,7 @@ export function createFetchInterceptor(guardrailPort: number) {
             ...hdrs,
             "X-DC-Target-URL": originalUrl.origin,
             ...(aiAuth ? { "X-AI-Auth": aiAuth } : {}),
+            ...(sidecarToken ? { "X-DC-Auth": `Bearer ${sidecarToken}` } : {}),
           },
         };
 
