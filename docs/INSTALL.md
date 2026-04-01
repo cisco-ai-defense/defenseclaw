@@ -56,6 +56,14 @@ access, or use the software.
 Scope guardrails for the local Splunk preset:
 
 - use it only for local, single-instance workflows
+- expect the bundled runtime to start in a local Splunk Enterprise Trial mode
+- after the 60-day trial, continue using the same local single-instance setup
+  in Splunk Free mode
+- in Splunk Free mode, alerting is disabled
+- in Splunk Free mode, authentication and RBAC are removed, so the
+  setup-printed local user credentials no longer apply
+- to keep using full Splunk Enterprise features after the trial, apply a valid
+  Splunk Enterprise license
 - assume existing Splunk license limits still apply
 - do not treat it as an endorsed path to multi-instance or long-term
   deployment
@@ -488,9 +496,14 @@ defenseclaw setup splunk
 | `--disable` | Disable integration(s); combine with `--o11y` / `--logs` to scope |
 | `--non-interactive` | Requires at least `--o11y` or `--logs` |
 
-The `--logs` option requires Docker and sets up a local Splunk
-Enterprise container with the DefenseClaw Splunk bridge
-(`splunk-claw-bridge`).
+The `--logs` option requires Docker and sets up a local Splunk runtime with the
+DefenseClaw Splunk bridge (`splunk-claw-bridge`). By default, that runtime
+starts in a local Splunk Enterprise Trial mode. After the 60-day trial period,
+you can continue using the same local single-instance workflow in Splunk Free
+mode. In Splunk Free mode, alerting is disabled and authentication is not
+required. To keep using full Splunk Enterprise features after the trial, apply
+a valid Splunk Enterprise license. For more details, see
+https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free
 
 ```bash
 # Enable Splunk Observability
