@@ -80,7 +80,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Role       string          `json:"role"`
+		Role       string          `json:"role,omitempty"`
 		Content    json.RawMessage `json:"content,omitempty"`
 		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
 		ToolCallID string          `json:"tool_call_id,omitempty"`
@@ -94,7 +94,7 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	}
 	if m.RawContent != nil {
 		a.Content = m.RawContent
-	} else if m.Content != "" || m.Role != "" {
+	} else if m.Content != "" {
 		c, _ := json.Marshal(m.Content)
 		a.Content = c
 	}
