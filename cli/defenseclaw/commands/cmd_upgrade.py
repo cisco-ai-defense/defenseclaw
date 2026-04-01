@@ -362,12 +362,20 @@ def _rebuild_from_source(source_dir: str, skip_pull: bool) -> None:
     # Reinstall Python CLI — uninstall old wheel first so stale site-packages
     # (e.g. old guardrail.py that writes models.providers.defenseclaw) can't
     # shadow the new source.
+    # uv venvs do not bundle pip, so always use uv (never python -m pip).
     click.echo("  → Installing Python CLI ...")
+    uv = shutil.which("uv")
+    if not uv:
+        click.echo("  ✗ uv not found on PATH — cannot install Python CLI", err=True)
+        raise SystemExit(1)
+
     venv = os.path.expanduser("~/.defenseclaw/.venv")
-    venv_uv = os.path.join(venv, "bin", "uv")
     venv_python = os.path.join(venv, "bin", "python")
-    uv = venv_uv if os.path.isfile(venv_uv) else (shutil.which("uv") or "uv")
     python = venv_python if os.path.isfile(venv_python) else sys.executable
+
+    # Recreate venv if missing.
+    if not os.path.isdir(venv):
+        subprocess.run([uv, "venv", venv, "--python", "3.12"], check=True)
 
     # Step 1: uninstall old wheel so editable install takes full effect.
     subprocess.run(
@@ -375,17 +383,13 @@ def _rebuild_from_source(source_dir: str, skip_pull: bool) -> None:
         check=False, capture_output=True,
     )
 
-    # Step 2: install editable from current source.
-    result = subprocess.run(
-        [uv, "pip", "install", "-e", source_dir, "--python", python, "--quiet"],
-        check=False,
+    # Step 2: install editable from current source — also updates all
+    # Python dependencies declared in pyproject.toml.
+    subprocess.run(
+        [uv, "pip", "install", "-e", source_dir, "--python", python],
+        check=True,
     )
-    if result.returncode != 0:
-        subprocess.run(
-            [python, "-m", "pip", "install", "-e", source_dir, "--quiet"],
-            check=True,
-        )
-    click.echo("  ✓ Python CLI updated")
+    click.echo("  ✓ Python CLI and dependencies updated")
 
     # Rebuild plugin (best-effort)
     click.echo("  → Rebuilding OpenClaw plugin ...")
