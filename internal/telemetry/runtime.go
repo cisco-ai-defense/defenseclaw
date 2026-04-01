@@ -288,7 +288,12 @@ func (p *Provider) EndLLMSpan(
 	startTime time.Time,
 	agentName string,
 ) {
+	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
+	// to the histogram data points, linking metrics to traces.
 	ctx := context.Background()
+	if span != nil {
+		ctx = trace.ContextWithSpan(ctx, span)
+	}
 	durationSec := time.Since(startTime).Seconds()
 	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, int64(promptTokens), int64(completionTokens))
 	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, durationSec)
