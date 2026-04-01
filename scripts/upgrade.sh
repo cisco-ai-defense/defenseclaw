@@ -325,26 +325,32 @@ if [[ -z "$LOCAL_DIST" ]]; then
     (cd "$SOURCE_DIR" && make gateway-install) && info "defenseclaw-gateway rebuilt and installed"
 
     step "Installing Python CLI ..."
-    # Uninstall old non-editable wheel first so stale code in site-packages
-    # doesn't shadow the new source (the old wheel may contain outdated
-    # guardrail.py that still writes models.providers.defenseclaw).
-    if [[ -d "$DEFENSECLAW_VENV" ]]; then
-        VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-        VENV_UV="${DEFENSECLAW_VENV}/bin/uv"
-        # Uninstall the old wheel from the defenseclaw venv
-        "${VENV_UV}" pip uninstall defenseclaw --python "$VENV_PYTHON" -q 2>/dev/null \
-            || "${VENV_PYTHON}" -m pip uninstall defenseclaw -y -q 2>/dev/null \
-            || true
-        # Reinstall from current source as editable so site-packages always
-        # reflects the repo (no stale .whl or build/ artifact can shadow it).
-        "${VENV_UV}" pip install -e "$SOURCE_DIR" \
-            --python "$VENV_PYTHON" --quiet 2>/dev/null \
-        || "${VENV_PYTHON}" -m pip install -e "$SOURCE_DIR" --quiet
-    else
-        uv pip install -e "$SOURCE_DIR" --quiet 2>/dev/null \
-        || pip install -e "$SOURCE_DIR" --quiet
+    # Use the system uv (uv venvs do not bundle pip, so python -m pip is
+    # unavailable — always use uv for package management).
+    UV_BIN="$(command -v uv 2>/dev/null || true)"
+    if [[ -z "$UV_BIN" ]]; then
+        error "uv not found on PATH — cannot install Python CLI"
+        error "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
     fi
-    info "Python CLI updated"
+
+    VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
+
+    # Recreate the venv if it doesn't exist yet.
+    if [[ ! -d "$DEFENSECLAW_VENV" ]]; then
+        step "Creating venv at $DEFENSECLAW_VENV ..."
+        "$UV_BIN" venv "$DEFENSECLAW_VENV" --python 3.12
+    fi
+
+    # Uninstall old non-editable wheel so stale site-packages code (e.g.
+    # old guardrail.py that writes models.providers.defenseclaw) can't shadow
+    # the new source.
+    "$UV_BIN" pip uninstall defenseclaw --python "$VENV_PYTHON" -q 2>/dev/null || true
+
+    # Install editable from current source. This also installs/updates all
+    # Python dependencies declared in pyproject.toml.
+    "$UV_BIN" pip install -e "$SOURCE_DIR" --python "$VENV_PYTHON"
+    info "Python CLI and dependencies updated"
 
     step "Rebuilding OpenClaw plugin ..."
     if command -v make >/dev/null 2>&1 && [[ -f "${SOURCE_DIR}/Makefile" ]]; then
