@@ -313,7 +313,7 @@ def _restore_openclaw_json(openclaw_config: str | None, _openclaw_home: str, cfg
     if os.path.isfile(original_bak):
         if not _has_defenseclaw_entries(original_bak):
             shutil.copy2(original_bak, openclaw_config)
-            click.echo(f"  ✓ Restored openclaw.json from original backup (defenseclaw-free)")
+            click.echo("  ✓ Restored openclaw.json from original backup (defenseclaw-free)")
             return
         click.echo("  ⚠ Backup also has defenseclaw entries — using programmatic restore")
 
@@ -363,7 +363,8 @@ def _rebuild_from_source(source_dir: str, skip_pull: bool) -> None:
     click.echo("  → Installing Python CLI ...")
     venv = os.path.expanduser("~/.defenseclaw/.venv")
     uv = os.path.join(venv, "bin", "uv") if os.path.isfile(os.path.join(venv, "bin", "uv")) else "uv"
-    python = os.path.join(venv, "bin", "python") if os.path.isfile(os.path.join(venv, "bin", "python")) else sys.executable
+    venv_python = os.path.join(venv, "bin", "python")
+    python = venv_python if os.path.isfile(venv_python) else sys.executable
 
     pip_cmd = None
     if shutil.which(uv) or os.path.isfile(uv):
