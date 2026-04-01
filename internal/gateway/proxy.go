@@ -36,6 +36,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
+// guardrailListenAddr returns the TCP listen address for the guardrail HTTP server.
+// Loopback-style hosts bind 127.0.0.1 only. Any other host (e.g. a veth / bridge
+// IP for openshell standalone sandbox) binds that address so peers outside the
+// host loopback namespace can connect — matching openclaw.json baseUrl from
+// patch_openclaw_config.
+func guardrailListenAddr(port int, effectiveHost string) string {
+	h := strings.TrimSpace(effectiveHost)
+	if h == "" {
+		h = "localhost"
+	}
+	switch strings.ToLower(h) {
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	default:
+		return fmt.Sprintf("%s:%d", h, port)
+	}
+}
+
 // ContentInspector abstracts guardrail inspection so the proxy can be
 // tested with a mock inspector.
 type ContentInspector interface {
@@ -150,16 +168,17 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// to the real upstream from X-DC-Target-URL.
 	mux.HandleFunc("/", p.handlePassthrough)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", p.cfg.Port)
+	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
 	logged := p.requestLogger(mux)
 	srv := &http.Server{Addr: addr, Handler: logged}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 		"port": p.cfg.Port,
 		"mode": p.mode,
+		"addr": addr,
 	})
-	fmt.Fprintf(os.Stderr, "[guardrail] starting proxy (port=%d mode=%s model=%s)\n",
-		p.cfg.Port, p.mode, p.cfg.ModelName)
+	fmt.Fprintf(os.Stderr, "[guardrail] starting proxy (addr=%s mode=%s model=%s)\n",
+		addr, p.mode, p.cfg.ModelName)
 	_ = p.logger.LogAction("guardrail-start", "",
 		fmt.Sprintf("port=%d mode=%s model=%s", p.cfg.Port, p.mode, p.cfg.ModelName))
 
@@ -177,8 +196,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		p.health.SetGuardrail(StateRunning, "", map[string]interface{}{
 			"port": p.cfg.Port,
 			"mode": p.mode,
+			"addr": addr,
 		})
-		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on port %d\n", p.cfg.Port)
+		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
 		_ = p.logger.LogAction("guardrail-healthy", "", fmt.Sprintf("port=%d", p.cfg.Port))
 	}
 

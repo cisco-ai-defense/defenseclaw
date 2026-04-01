@@ -28,11 +28,14 @@ import requests
 
 
 class OrchestratorClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5,
+                 token: str = "") -> None:
         self.base_url = f"http://{host}:{port}"
         self.timeout = timeout
         self._session = requests.Session()
         self._session.headers["X-DefenseClaw-Client"] = "python-cli"
+        if token:
+            self._session.headers["Authorization"] = f"Bearer {token}"
 
     def health(self) -> dict[str, Any]:
         resp = self._session.get(f"{self.base_url}/health", timeout=self.timeout)

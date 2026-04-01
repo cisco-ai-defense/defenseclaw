@@ -1257,3 +1257,25 @@ func TestProxyWithLocalInspector(t *testing.T) {
 		}
 	})
 }
+
+func TestGuardrailListenAddr(t *testing.T) {
+	tests := []struct {
+		port int
+		host string
+		want string
+	}{
+		{4000, "", "127.0.0.1:4000"},
+		{4000, "localhost", "127.0.0.1:4000"},
+		{4000, "127.0.0.1", "127.0.0.1:4000"},
+		{4000, "::1", "127.0.0.1:4000"},
+		{4000, "10.200.0.1", "10.200.0.1:4000"},
+		{4000, " Localhost ", "127.0.0.1:4000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := guardrailListenAddr(tt.port, tt.host); got != tt.want {
+				t.Errorf("guardrailListenAddr(%d, %q) = %q, want %q", tt.port, tt.host, got, tt.want)
+			}
+		})
+	}
+}

@@ -62,7 +62,6 @@ firewall:
   allowed_ports: []
 
 enforcement:
-  update_sandbox_policy: false
   max_enforcement_delay_seconds: 5
 
 audit:

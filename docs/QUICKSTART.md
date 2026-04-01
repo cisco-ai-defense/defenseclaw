@@ -128,3 +128,9 @@ defenseclaw alerts
 # Show more
 defenseclaw alerts -n 50
 ```
+
+## Next Steps
+
+- **Run OpenClaw in a sandbox** (Linux only) — see [SANDBOX.md](SANDBOX.md) for full OpenShell sandbox setup with network isolation and policy enforcement
+- **Read the full documentation** — [README.md](README.md) has links to all guides
+- **Customize policies** — see [CLI.md](CLI.md) for policy commands
