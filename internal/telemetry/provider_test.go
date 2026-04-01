@@ -128,9 +128,8 @@ func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p.RecordToolDuration(ctx, "shell", "builtin", 50)
 	p.RecordToolError(ctx, "shell", 1)
 	p.RecordApproval(ctx, "approved", true, false)
-	p.RecordLLMCall(ctx, "openai", "gpt-4")
-	p.RecordLLMTokens(ctx, "openai", 100, 200)
-	p.RecordLLMDuration(ctx, "openai", "gpt-4", 500)
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", 100, 200)
+	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", 0.5)
 	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern")
 	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block")
 	p.RecordGuardrailLatency(ctx, "ai-defense", 100)
@@ -794,32 +793,42 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordLLMTokens(ctx, "guardrail-proxy", 150, 75)
-	p.RecordLLMTokens(ctx, "guardrail-proxy", 200, 0) // no completion tokens
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", 150, 75)
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", 200, 0) // no completion tokens
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
 
-	found := findCounter(rm, "defenseclaw.llm.tokens")
+	found := findHistogram(rm, "gen_ai.client.token.usage")
 	if found == nil {
-		t.Fatal("metric defenseclaw.llm.tokens not found")
+		t.Fatal("metric gen_ai.client.token.usage not found")
 	}
 
-	sum, ok := found.Data.(metricdata.Sum[int64])
+	hist, ok := found.Data.(metricdata.Histogram[float64])
 	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", found.Data)
+		t.Fatalf("expected Histogram[float64], got %T", found.Data)
 	}
 
-	promptTokens := counterValueByAttr(sum, "token.type", "prompt")
-	completionTokens := counterValueByAttr(sum, "token.type", "completion")
-
-	if promptTokens != 350 {
-		t.Errorf("prompt tokens = %d, want 350", promptTokens)
+	var inputSum, outputSum float64
+	for _, dp := range hist.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "gen_ai.token.type" {
+				if attr.Value.AsString() == "input" {
+					inputSum += dp.Sum
+				} else if attr.Value.AsString() == "output" {
+					outputSum += dp.Sum
+				}
+			}
+		}
 	}
-	if completionTokens != 75 {
-		t.Errorf("completion tokens = %d, want 75", completionTokens)
+
+	if inputSum != 350 {
+		t.Errorf("input token sum = %v, want 350", inputSum)
+	}
+	if outputSum != 75 {
+		t.Errorf("output token sum = %v, want 75", outputSum)
 	}
 }
 

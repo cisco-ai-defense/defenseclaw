@@ -37,9 +37,10 @@ type metricsSet struct {
 	toolDuration  metric.Float64Histogram
 	toolErrors    metric.Int64Counter
 	approvalCount metric.Int64Counter
-	llmCalls      metric.Int64Counter
-	llmTokens     metric.Int64Counter
-	llmDuration   metric.Float64Histogram
+
+	// GenAI semconv metrics
+	genAITokenUsage       metric.Float64Histogram // gen_ai.client.token.usage
+	genAIOperationDuration metric.Float64Histogram // gen_ai.client.operation.duration
 
 	// Alert metrics
 	alertCount           metric.Int64Counter
@@ -135,23 +136,20 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	ms.llmCalls, err = m.Int64Counter("defenseclaw.llm.calls",
-		metric.WithUnit("{call}"),
-		metric.WithDescription("Total LLM calls observed"))
-	if err != nil {
-		return nil, err
-	}
-
-	ms.llmTokens, err = m.Int64Counter("defenseclaw.llm.tokens",
+	ms.genAITokenUsage, err = m.Float64Histogram("gen_ai.client.token.usage",
 		metric.WithUnit("{token}"),
-		metric.WithDescription("Total tokens consumed"))
+		metric.WithDescription("Number of input and output tokens used."),
+		metric.WithExplicitBucketBoundaries(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	ms.llmDuration, err = m.Float64Histogram("defenseclaw.llm.duration",
-		metric.WithUnit("ms"),
-		metric.WithDescription("LLM call duration distribution"))
+	ms.genAIOperationDuration, err = m.Float64Histogram("gen_ai.client.operation.duration",
+		metric.WithUnit("s"),
+		metric.WithDescription("GenAI operation duration."),
+		metric.WithExplicitBucketBoundaries(0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -364,43 +362,36 @@ func (p *Provider) RecordApproval(ctx context.Context, result string, auto, dang
 	))
 }
 
-// RecordLLMCall records an LLM call metric.
-func (p *Provider) RecordLLMCall(ctx context.Context, system, model string) {
+// RecordLLMTokens records token consumption metrics per OTel GenAI semconv.
+// gen_ai.client.token.usage histogram with gen_ai.token.type = "input"/"output".
+func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model string, prompt, completion int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.llmCalls.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("gen_ai.system", system),
+	commonAttrs := []attribute.KeyValue{
+		attribute.String("gen_ai.operation.name", operationName),
+		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.request.model", model),
-	))
-}
-
-// RecordLLMTokens records token consumption metrics.
-func (p *Provider) RecordLLMTokens(ctx context.Context, system string, prompt, completion int64) {
-	if !p.Enabled() || p.metrics == nil {
-		return
 	}
 	if prompt > 0 {
-		p.metrics.llmTokens.Add(ctx, prompt, metric.WithAttributes(
-			attribute.String("gen_ai.system", system),
-			attribute.String("token.type", "prompt"),
-		))
+		attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", "input")}, commonAttrs...)
+		p.metrics.genAITokenUsage.Record(ctx, float64(prompt), metric.WithAttributes(attrs...))
 	}
 	if completion > 0 {
-		p.metrics.llmTokens.Add(ctx, completion, metric.WithAttributes(
-			attribute.String("gen_ai.system", system),
-			attribute.String("token.type", "completion"),
-		))
+		attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", "output")}, commonAttrs...)
+		p.metrics.genAITokenUsage.Record(ctx, float64(completion), metric.WithAttributes(attrs...))
 	}
 }
 
-// RecordLLMDuration records LLM call duration.
-func (p *Provider) RecordLLMDuration(ctx context.Context, system, model string, durationMs float64) {
+// RecordLLMDuration records LLM call duration per OTel GenAI semconv.
+// gen_ai.client.operation.duration histogram, unit=seconds.
+func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, providerName, model string, durationSeconds float64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.llmDuration.Record(ctx, durationMs, metric.WithAttributes(
-		attribute.String("gen_ai.system", system),
+	p.metrics.genAIOperationDuration.Record(ctx, durationSeconds, metric.WithAttributes(
+		attribute.String("gen_ai.operation.name", operationName),
+		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.request.model", model),
 	))
 }

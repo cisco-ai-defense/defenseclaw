@@ -230,23 +230,34 @@ Runtime events from the OpenClaw gateway (WebSocket events routed through
 
 ### 5a. Span Hierarchy
 
+#### Guardrail Proxy Path (LLM Gateway)
+
+The guardrail proxy intercepts OpenAI-compatible requests and produces the
+full GenAI semconv trace hierarchy:
+
 ```
-[Agent Session Span]                       root span (planned — not yet implemented)
-  ├── [LLM Call Span]                      planned — awaiting OpenClaw llm_call/llm_result events
-  │     └── [Tool Call Span]               ✓ implemented — from tool_call / tool_result events
-  │           └── [Exec Approval Span]     ✓ implemented — from exec.approval.requested / resolved
-  ├── [LLM Call Span]
-  │     ├── [Tool Call Span]
-  │     └── [Tool Call Span]
-  └── ...
+invoke_agent {agentName}                    ✓ root span — per HTTP request
+├── apply_guardrail defenseclaw input       ✓ input inspection
+└── chat {model}                            ✓ LLM call (SpanKind=CLIENT)
+    ├── apply_guardrail defenseclaw output  ✓ output inspection (if content present)
+    ├── execute_tool {toolName}             ✓ per tool_call in LLM response
+    │   └── apply_guardrail defenseclaw tool_call  ✓ tool args inspection
+    └── execute_tool {toolName}
+        └── apply_guardrail defenseclaw tool_call
 ```
 
-When session boundaries or LLM call pairing are not available from OpenClaw,
-each `tool_call → tool_result` pair is emitted as an independent span.
+#### WebSocket Event Router Path
+
+Tool and approval spans from real-time agent session events:
+
+```
+tool/{tool_name}                            ✓ from tool_call → tool_result WS events
+  └── exec.approval/{approval_id}           ✓ from exec.approval.requested WS events
+```
 
 ### 5b. Tool Call Span
 
-Created on `tool_call` event; ended on matching `tool_result`.
+**WS path**: Created on `tool_call` event; ended on matching `tool_result`.
 
 | Field | Value |
 |---|---|
@@ -256,13 +267,16 @@ Created on `tool_call` event; ended on matching `tool_result`.
 | `end_time` | `tool_result` event timestamp |
 | `status` | `OK` or `ERROR` (from `exit_code`) |
 
-#### Attributes
+#### Attributes (WS path)
 
 | Attribute | Type | Description |
 |---|---|---|
+| `gen_ai.operation.name` | string | `execute_tool` |
+| `gen_ai.tool.name` | string | tool name |
+| `gen_ai.tool.type` | string | `function` |
 | `defenseclaw.tool.name` | string | tool name (e.g. `shell`) |
 | `defenseclaw.tool.status` | string | status from `tool_call` payload |
-| `defenseclaw.tool.args` | string | truncated args JSON (max 2048 chars) |
+| `defenseclaw.tool.args_length` | int | byte length of arguments |
 | `defenseclaw.tool.exit_code` | int | from `tool_result` |
 | `defenseclaw.tool.output_length` | int | byte length of `tool_result` output |
 | `defenseclaw.tool.dangerous` | bool | matched dangerous pattern |
@@ -275,6 +289,23 @@ Created on `tool_call` event; ended on matching `tool_result`.
 | Event Name | Attributes |
 |---|---|
 | `tool.flagged` | `defenseclaw.flag.reason`, `defenseclaw.flag.pattern` |
+
+**Proxy path**: Created for each `tool_call` entry in the LLM response's
+`choices[0].message.tool_calls` array. Child of the `chat` span.
+
+| Field | Value |
+|---|---|
+| `name` | `execute_tool {tool_name}` |
+| `kind` | `INTERNAL` |
+| `status` | `OK` |
+
+#### Attributes (Proxy path)
+
+| Attribute | Type | Description |
+|---|---|---|
+| `gen_ai.operation.name` | string | `execute_tool` |
+| `gen_ai.tool.name` | string | tool function name |
+| `gen_ai.tool.type` | string | `function` |
 
 ### 5c. Exec Approval Span
 
@@ -300,22 +331,19 @@ Nested under the tool call span, or standalone if no parent.
 | `defenseclaw.approval.auto` | bool | was auto-approved |
 | `defenseclaw.approval.dangerous` | bool | matched dangerous pattern |
 
-### 5d. LLM Call Span ⚠️ PLANNED
+### 5d. LLM Call Span ✅ IMPLEMENTED
 
-> **Status**: Code implemented (`StartLLMSpan`/`EndLLMSpan` in
-> `internal/telemetry/runtime.go`) but **not wired** — OpenClaw does not
-> yet emit `llm_call`/`llm_result` WebSocket events. See §9c and
-> [OTEL-IMPLEMENTATION-STATUS.md](OTEL-IMPLEMENTATION-STATUS.md) for details.
-
-Will be emitted when OpenClaw hooks or the LLM gateway interceptor capture
-LLM request/response pairs.
+> **Status**: Implemented via guardrail proxy path. Created when an HTTP
+> request is forwarded to the upstream LLM provider (`handleNonStreamingRequest`
+> in `proxy.go`). Child of the `invoke_agent` span.
 
 | Field | Value |
 |---|---|
-| `name` | `llm/{model_name}` |
+| `name` | `chat {model}` |
 | `kind` | `CLIENT` |
-| `start_time` | LLM request sent |
-| `end_time` | LLM response received |
+| `start_time` | before upstream request |
+| `end_time` | after upstream response |
+| `status` | `OK` or `ERROR` (if guardrail blocked) |
 
 #### Attributes
 
@@ -323,18 +351,82 @@ Uses [OTEL GenAI semantic conventions](https://opentelemetry.io/docs/specs/semco
 
 | Attribute | Type | Description |
 |---|---|---|
+| `gen_ai.operation.name` | string | `chat` |
 | `gen_ai.system` | string | `openai` \| `anthropic` \| `nvidia-nim` \| ... |
+| `gen_ai.provider.name` | string | provider identifier (e.g. `defenseclaw`) |
 | `gen_ai.request.model` | string | requested model |
 | `gen_ai.response.model` | string | actual model used |
 | `gen_ai.request.max_tokens` | int | max tokens parameter |
 | `gen_ai.request.temperature` | float | temperature parameter |
-| `gen_ai.response.finish_reasons` | string[] | `["stop"]` \| `["tool_use"]` |
-| `gen_ai.usage.prompt_tokens` | int | input tokens |
-| `gen_ai.usage.completion_tokens` | int | output tokens |
-| `defenseclaw.llm.provider` | string | provider identifier |
+| `gen_ai.response.finish_reasons` | string[] | `["stop"]` \| `["tool_calls"]` |
+| `gen_ai.usage.input_tokens` | int | input tokens |
+| `gen_ai.usage.output_tokens` | int | output tokens |
 | `defenseclaw.llm.tool_calls` | int | number of tool_use blocks |
 | `defenseclaw.llm.guardrail` | string | `none` \| `local` \| `ai-defense` |
 | `defenseclaw.llm.guardrail.result` | string | `pass` \| `flagged` \| `blocked` |
+
+#### Metrics (emitted per LLM call)
+
+| Metric | Attributes |
+|---|---|
+| `gen_ai.client.token.usage` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` (`input`/`output`) |
+| `gen_ai.client.operation.duration` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model` |
+
+> **TODO**: Add `gen_ai.agent.name` to metric attributes when available
+> from the parent `invoke_agent` span. See
+> [OTEL-IMPLEMENTATION-STATUS.md](OTEL-IMPLEMENTATION-STATUS.md) §1.
+
+### 5e. Guardrail Span ✅ IMPLEMENTED
+
+Created by the guardrail proxy when inspecting input, output, or tool call
+arguments. Follows [OTel GenAI semconv PR #3233](https://github.com/open-telemetry/semantic-conventions/pull/3233).
+
+| Field | Value |
+|---|---|
+| `name` | `apply_guardrail {name} {targetType}` |
+| `kind` | `INTERNAL` |
+| `status` | `OK` or `ERROR` (if blocked) |
+
+#### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `gen_ai.operation.name` | string | `apply_guardrail` |
+| `gen_ai.guardrail.name` | string | `defenseclaw` |
+| `gen_ai.security.target.type` | string | `input` \| `output` \| `tool_call` |
+| `gen_ai.request.model` | string | model being guarded |
+| `gen_ai.security.decision.type` | string | `allow` \| `warn` \| `deny` |
+| `defenseclaw.guardrail.severity` | string | severity from inspector |
+| `defenseclaw.guardrail.reason` | string | reason (truncated 256 chars) |
+
+#### Parent Relationships
+
+| Target Type | Parent Span |
+|---|---|
+| `input` | `invoke_agent` (root) |
+| `output` | `chat` (LLM span) |
+| `tool_call` | `execute_tool` (tool span) |
+
+### 5f. Invoke Agent Span ✅ IMPLEMENTED
+
+Root span for each guardrail proxy HTTP request. Groups all child spans
+(input guardrail, LLM call, output guardrail, tool calls) into a single
+trace.
+
+| Field | Value |
+|---|---|
+| `name` | `invoke_agent {agentName}` |
+| `kind` | `INTERNAL` |
+| `status` | `OK` or `ERROR` |
+
+#### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `gen_ai.operation.name` | string | `invoke_agent` |
+| `gen_ai.agent.name` | string | agent name (e.g. `openclaw`) |
+| `gen_ai.conversation.id` | string | conversation/session identifier |
+| `gen_ai.provider.name` | string | provider (if set) |
 
 ---
 
@@ -450,9 +542,18 @@ All metrics use the `defenseclaw.*` namespace.
 | `defenseclaw.tool.duration` | Histogram | `ms` | `tool.name`, `tool.provider` |
 | `defenseclaw.tool.errors` | Counter | `{error}` | `tool.name`, `exit_code` |
 | `defenseclaw.approval.count` | Counter | `{request}` | `result`, `auto`, `dangerous` |
-| `defenseclaw.llm.calls` | Counter | `{call}` | `gen_ai.system`, `gen_ai.request.model` |
-| `defenseclaw.llm.tokens` | Counter | `{token}` | `gen_ai.system`, `token.type` (`prompt` / `completion`) |
-| `defenseclaw.llm.duration` | Histogram | `ms` | `gen_ai.system`, `gen_ai.request.model` |
+
+### GenAI Semconv Metrics
+
+| Metric | Type | Unit | Buckets | Attributes |
+|---|---|---|---|---|
+| `gen_ai.client.token.usage` | Histogram | `{token}` | 1,4,16,64,256,1K,4K,16K,64K,256K,1M,4M,16M,64M | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` |
+| `gen_ai.client.operation.duration` | Histogram | `s` | 0.01,0.02,0.04,...,81.92 | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model` |
+
+> **Note**: Buckets follow [OTel GenAI semconv metrics spec](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-metrics.md). `gen_ai.token.type` values are `input` and `output`.
+
+> **TODO**: Add `gen_ai.agent.name` attribute to these metrics when the
+> agent name is available from the parent `invoke_agent` span context.
 
 ### Alert Metrics
 
@@ -586,21 +687,34 @@ if span, ok := r.activeToolSpans[payload.Tool]; ok {
 r.otel.EmitRuntimeAlert(AlertDangerousCommand, payload, "denied")
 ```
 
-### 9c. LLM Gateway Hooks (future)
+### 9c. Guardrail Proxy — LLM Gateway ✅ IMPLEMENTED
 
-When OpenClaw provides `llm_call` / `llm_result` events:
+The guardrail proxy (`internal/gateway/proxy.go`) intercepts
+OpenAI-compatible `/v1/chat/completions` requests and produces the full
+GenAI semconv trace hierarchy:
 
 ```go
-case "llm_call":
-    span := r.otel.StartLLMSpan(model, provider, params)
-case "llm_result":
-    r.otel.EndLLMSpan(span, usage, finishReason)
-    if guardrailResult != nil {
-        r.otel.EmitRuntimeAlert(AlertGuardrail, guardrailResult)
-    }
+// In handleNonStreamingRequest():
+agentCtx, agentSpan := p.otel.StartAgentSpan(ctx, conversationID, "openclaw", "")
+grSpan := p.otel.StartGuardrailSpan(agentCtx, "defenseclaw", "input", model)
+// ... inspect input ...
+p.otel.EndGuardrailSpan(grSpan, decision, severity, reason, t0)
+llmCtx, llmSpan := p.otel.StartLLMSpan(agentCtx, system, model, provider, maxTokens, temp)
+// ... forward to upstream LLM ...
+grSpan = p.otel.StartGuardrailSpan(llmCtx, "defenseclaw", "output", model)
+// ... inspect output ...
+p.otel.EndGuardrailSpan(grSpan, decision, severity, reason, t0)
+p.emitToolCallSpans(reqCtx, llmCtx, toolCalls, model, mode) // tool_call + guardrail per tool
+p.otel.EndLLMSpan(llmSpan, model, tokens, finishReasons, toolCallCount, ...)
+p.otel.EndAgentSpan(agentSpan, "")
 ```
 
-### 9d. Proposed Package Structure
+### 9d. WebSocket Event Router — Tool/Approval Spans
+
+The router handles `tool_call`, `tool_result`, `exec.approval.requested`
+WebSocket events. See §5b and §5c for span details.
+
+### 9e. Package Structure
 
 ```
 internal/
@@ -609,13 +723,19 @@ internal/
     resource.go       # buildResource(cfg) — shared Resource with all attributes
     lifecycle.go      # EmitLifecycleEvent(...)
     scan.go           # EmitScanResult(...)
-    runtime.go        # ToolSpan, LLMSpan, ApprovalSpan
+    runtime.go        # Agent/LLM/Tool/Approval/Guardrail spans + metrics
     alerts.go         # EmitRuntimeAlert(...)
     metrics.go        # Counter/histogram registration and recording
+    policy.go         # PolicySpan + policy metrics
     shutdown.go       # Graceful flush + shutdown on context cancel
+  gateway/
+    proxy.go          # Guardrail proxy — full GenAI trace hierarchy
+    router.go         # WS EventRouter — tool/approval spans
+    inspect.go        # CodeGuard — inspect spans + alerts
+    api.go            # REST API — policy spans
 ```
 
-### 9e. Dual Export: Splunk HEC + OTEL
+### 9f. Dual Export: Splunk HEC + OTEL
 
 The existing `SplunkForwarder` (HEC-based) remains for backward
 compatibility. When both `splunk.enabled` and `otel.enabled` are true,

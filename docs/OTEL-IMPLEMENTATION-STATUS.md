@@ -1,24 +1,64 @@
 # DefenseClaw OpenTelemetry — Implementation Status
 
-> Audit of `OTEL.md` spec vs actual implementation as of 2026-03-29.
+> Audit of `OTEL.md` spec vs actual implementation as of 2026-04-01.
 
 ---
 
 ## Summary
 
-The OTel implementation covers **3 of 4 signal categories** fully, with
-partial implementation of the fourth (Runtime Traces). Overall the
-telemetry foundation is mature — the main gap is **LLM call spans**,
-which are defined in code but never wired to any event source.
+The OTel implementation covers **all 4 signal categories** fully. The
+guardrail proxy path provides full GenAI semconv trace hierarchy with
+`invoke_agent`, `chat`, `apply_guardrail`, and `execute_tool` spans.
 
 | Category | Spec Section | Status | Notes |
 |----------|-------------|--------|-------|
 | Asset lifecycle events | §3 Logs | **COMPLETE** | All actions mapped and emitted |
 | Asset scan results | §4 Logs + Metrics | **COMPLETE** | Summary + individual findings + metrics |
-| Runtime events (Traces) | §5 Traces | **PARTIAL** | Tool + Approval spans wired; LLM spans dead code |
+| Runtime events (Traces) | §5 Traces | **COMPLETE** | Full proxy path + WS tool/approval spans |
 | Runtime alerts | §6 Logs | **COMPLETE** | All alert types emitted |
-| Metrics | §7 | **COMPLETE** | All counters/histograms registered, 28+ instruments |
+| Metrics | §7 | **COMPLETE** | `gen_ai.client.*` semconv + `defenseclaw.*` custom metrics |
 | Configuration | §8 | **COMPLETE** | Full config struct, env var overrides |
+
+---
+
+## Telemetry Paths
+
+DefenseClaw has **two distinct telemetry paths**:
+
+### Path 1: Guardrail Proxy (LLM Gateway)
+
+HTTP proxy on port 4000 intercepts OpenAI-compatible requests. Produces
+the full GenAI semconv trace hierarchy:
+
+```
+invoke_agent {agentName}                    root span (SpanKind=INTERNAL)
+├── apply_guardrail defenseclaw input       input inspection
+└── chat {model}                            LLM call (SpanKind=CLIENT)
+    ├── apply_guardrail defenseclaw output  output inspection
+    ├── execute_tool {toolName}             per tool_call in response
+    │   └── apply_guardrail defenseclaw tool_call  tool args inspection
+    └── execute_tool {toolName}
+        └── apply_guardrail defenseclaw tool_call
+```
+
+**Metrics emitted per LLM call:**
+- `gen_ai.client.token.usage` — histogram, `{token}`, with `gen_ai.token.type` = `input`/`output`
+- `gen_ai.client.operation.duration` — histogram, `s`
+
+**Common attributes on both metrics:**
+- `gen_ai.operation.name` (e.g. `chat`)
+- `gen_ai.provider.name` (e.g. `defenseclaw`)
+- `gen_ai.request.model` (e.g. `gpt-4o-mini`)
+
+### Path 2: WebSocket Event Router
+
+Gateway subscribes to OpenClaw WebSocket events. Tool/approval spans are
+emitted from real-time agent session events:
+
+```
+tool/{toolName}           from tool_call → tool_result WS events
+exec.approval/{id}        from exec.approval.requested WS events
+```
 
 ---
 
@@ -28,50 +68,14 @@ which are defined in code but never wired to any event source.
 
 | Method | File | Wired In Production? | Trigger |
 |--------|------|---------------------|---------|
-| `EmitStartupSpan` | `runtime.go:35` | **YES** | Gateway startup (once) |
-| `EmitInspectSpan` | `runtime.go:49` | **YES** | HTTP `/inspect/tool` (CodeGuard) |
-| `StartToolSpan` / `EndToolSpan` | `runtime.go:70–148` | **YES** | WS `tool_call` / `tool_result` via `router.go` |
-| `StartApprovalSpan` / `EndApprovalSpan` | `runtime.go:150–210` | **YES** | WS `exec.approval.requested` via `router.go` |
-| `StartLLMSpan` / `EndLLMSpan` | `runtime.go:212–280` | **NO — DEAD CODE** | No caller anywhere in codebase |
-| `StartPolicySpan` / `EndPolicySpan` | `policy.go:20–80` | **YES** | HTTP `/policy/evaluate/*` + watcher |
-
-#### LLM Span Gap Analysis
-
-`StartLLMSpan()` and `EndLLMSpan()` are fully implemented with correct
-GenAI semantic convention attributes (`gen_ai.system`, `gen_ai.request.model`,
-`gen_ai.usage.prompt_tokens`, etc.) but **zero production callers exist**.
-
-**Root cause**: OpenClaw does not emit `llm_call` / `llm_result` WebSocket
-events. The `OTEL.md` spec (§9c) documents these as "future":
-
-```
-### 9c. LLM Gateway Hooks (future)
-When OpenClaw provides `llm_call` / `llm_result` events: ...
-```
-
-The `EventRouter.Route()` switch in `router.go` handles these events:
-- `tool_call` → `handleToolCall()` → `StartToolSpan` ✓
-- `tool_result` → `handleToolResult()` → `EndToolSpan` ✓
-- `exec.approval.requested` → `handleApprovalRequest()` → `StartApprovalSpan` ✓
-- `session.tool` → normalizes to `tool_call`/`tool_result` ✓
-- `agent` (stream=tool) → normalizes to `session.tool` ✓
-- `session.message` (stream=tool) → normalizes to `session.tool` ✓
-
-**No handler exists for `llm_call` / `llm_result`**. The `session.message`
-handler (Format A) parses chat messages with `model` and `provider` fields
-but only logs them — it does not create LLM spans.
-
-#### What Would Be Needed for LLM Spans
-
-Two options:
-
-1. **Wait for OpenClaw** to emit explicit `llm_call` / `llm_result` events
-   and add handlers in `Route()` (the spec's stated plan).
-
-2. **Derive LLM spans from `session.message`** — the `handleSessionMessage()`
-   Format A handler already parses `role`, `model`, `provider`, `stopReason`,
-   and `content`, but no telemetry calls are made. An `assistant` message
-   with a `model` field could trigger `StartLLMSpan`/`EndLLMSpan`.
+| `EmitStartupSpan` | `runtime.go` | **YES** | Gateway startup (once) |
+| `EmitInspectSpan` | `runtime.go` | **YES** | HTTP `/inspect/tool` (CodeGuard) |
+| `StartAgentSpan` / `EndAgentSpan` | `runtime.go` | **YES** | Guardrail proxy — per HTTP request |
+| `StartLLMSpan` / `EndLLMSpan` | `runtime.go` | **YES** | Guardrail proxy — LLM forward + response |
+| `StartGuardrailSpan` / `EndGuardrailSpan` | `runtime.go` | **YES** | Guardrail proxy — input/output/tool_call inspection |
+| `StartToolSpan` / `EndToolSpan` | `runtime.go` | **YES** | Guardrail proxy (tool_calls in response) + WS events |
+| `StartApprovalSpan` / `EndApprovalSpan` | `runtime.go` | **YES** | WS `exec.approval.requested` via `router.go` |
+| `StartPolicySpan` / `EndPolicySpan` | `policy.go` | **YES** | HTTP `/policy/evaluate/*` + watcher |
 
 ### Logs
 
@@ -80,12 +84,16 @@ Two options:
 | `EmitLifecycleEvent` | `lifecycle.go` | **YES** | `audit.Logger.LogAction()` |
 | `EmitScanResult` | `scan.go` | **YES** | `audit.Logger.LogScan()` |
 | `EmitScanFinding` | `scan.go` | **YES** | Per-finding (opt-in `emit_individual_findings`) |
-| `EmitRuntimeAlert` | `alerts.go` | **YES** | `router.go` (dangerous commands, guardrails) + `inspect.go` (CodeGuard) |
+| `EmitRuntimeAlert` | `alerts.go` | **YES** | `router.go` + `inspect.go` + guardrail proxy |
 
-### Metrics
+### Metrics — GenAI Semconv
 
-All metric instruments are registered in `metrics.go` and recorded by their
-respective telemetry methods. **All spec'd metrics from §7 are implemented**:
+| Metric | Instrument | Unit | Buckets | Callers |
+|--------|-----------|------|---------|---------|
+| `gen_ai.client.token.usage` | Float64Histogram | `{token}` | 1,4,16,...,67M | `RecordLLMTokens()` ← `EndLLMSpan()` |
+| `gen_ai.client.operation.duration` | Float64Histogram | `s` | 0.01,...,81.92 | `RecordLLMDuration()` ← `EndLLMSpan()` |
+
+### Metrics — DefenseClaw Custom
 
 | Metric | Instrument | Callers |
 |--------|-----------|---------|
@@ -97,17 +105,61 @@ respective telemetry methods. **All spec'd metrics from §7 are implemented**:
 | `defenseclaw.tool.duration` | Histogram | `RecordToolDuration()` ← `EndToolSpan()` |
 | `defenseclaw.tool.errors` | Counter | `RecordToolError()` ← `EndToolSpan()` |
 | `defenseclaw.approval.count` | Counter | `RecordApproval()` ← `EndApprovalSpan()` |
-| `defenseclaw.llm.calls` | Counter | `RecordLLMCall()` ← `StartLLMSpan()` (**dead path**) |
-| `defenseclaw.llm.tokens` | Counter | `RecordLLMTokens()` ← `EndLLMSpan()` (**dead path**) |
-| `defenseclaw.llm.duration` | Histogram | `RecordLLMDuration()` ← `EndLLMSpan()` (**dead path**) |
 | `defenseclaw.alert.count` | Counter | `RecordAlert()` ← `EmitRuntimeAlert()` |
 | `defenseclaw.guardrail.evaluations` | Counter | `RecordGuardrailEvaluation()` |
 | `defenseclaw.guardrail.latency` | Histogram | `RecordGuardrailLatency()` |
 | `defenseclaw.policy.evaluations` | Counter | `RecordPolicyEvaluation()` ← `EndPolicySpan()` |
 | `defenseclaw.policy.latency` | Histogram | `RecordPolicyLatency()` ← `EndPolicySpan()` |
 
-**Note**: LLM metrics (`defenseclaw.llm.*`) instruments are registered but
-never called because the LLM span methods are dead code.
+---
+
+## Gaps and Recommendations
+
+### 1. `gen_ai.agent.name` propagation to metrics
+
+**Current state**: The `invoke_agent` span carries `gen_ai.agent.name` but
+`RecordLLMTokens()` and `RecordLLMDuration()` do not include it as a metric
+attribute. The SDOT Python utils (`MetricsEmitter`) propagate `gen_ai.agent.name`
+to all `gen_ai.client.*` metrics when `llm_invocation.agent_name` is set.
+
+**Action**: Add optional `agentName` parameter to `RecordLLMTokens()` and
+`RecordLLMDuration()`. Thread agent name from the proxy handler (known at
+`StartAgentSpan` time) through to `EndLLMSpan()` → metric recording.
+
+### 2. `gen_ai.workflow.name` support
+
+**Current state**: No workflow concept exists in DefenseClaw proxy path.
+The SDOT utils support `Workflow` as a parent span with `gen_ai.workflow.name`
+that propagates to all child LLM calls. DefenseClaw could treat the OpenClaw
+conversation/session as a workflow.
+
+**Action**: Optional for v1. Consider adding `gen_ai.workflow.name` to
+the `invoke_agent` span attributes and to metric dimensions when a workflow
+name is available (e.g. from OpenClaw config or conversation metadata).
+
+### 3. Span attributes alignment with SDOT semconv
+
+**Current state**: DefenseClaw spans use correct `gen_ai.*` attributes.
+Some attributes are DefenseClaw-specific (`defenseclaw.llm.tool_calls`,
+`defenseclaw.llm.guardrail`, etc.) — these are additive over semconv.
+
+The `execute_tool` spans from the proxy path use `gen_ai.operation.name`
+and `gen_ai.tool.name` matching semconv. The WS-path tool spans use
+`defenseclaw.tool.*` attributes (different naming, predates proxy path).
+
+**Action**: Consider aligning WS-path tool spans to also use `gen_ai.*`
+semconv attributes for consistency.
+
+### 4. `gen_ai.system` attribute on spans and metrics
+
+**Current state**: `StartLLMSpan` sets `gen_ai.system` on the span but
+`RecordLLMTokens`/`RecordLLMDuration` use `gen_ai.provider.name` instead.
+The SDOT utils include `gen_ai.system` in metrics via the `system` field
+on `GenAI` base type, separate from `provider`.
+
+**Action**: The proxy passes `"defenseclaw"` as `providerName` because it
+acts as a proxy, not the actual LLM provider. Consider also passing the
+underlying `gen_ai.system` (e.g. `openai`) for proper metric dimensioning.
 
 ---
 
@@ -140,24 +192,42 @@ OpenClaw WebSocket Events
 └── tick/health/presence/heartbeat ──────→ ignored
 ```
 
-**Key observation**: Tool calls reach `StartToolSpan`/`EndToolSpan` via
-5 different OpenClaw event formats (tool_call, session.tool, agent stream,
-agent legacy, session.message stream). The normalization is robust.
-
 ---
 
-## Runtime Span Prerequisites
+## Guardrail Proxy — Request Flow
 
-Tool, approval, and inspect spans **require a live OpenClaw WebSocket
-connection**. The gateway connects to OpenClaw at `wss://<host>:<port>` and
-receives events only when an agent session is actively running.
-
-Without OpenClaw:
-- `defenseclaw/startup` span — **always emitted** (verifies pipeline)
-- `tool/*` spans — **never emitted** (no `tool_call` events arrive)
-- `exec.approval/*` spans — **never emitted** (no approval events)
-- `inspect/*` spans — **emitted via HTTP** (CodeGuard, not WS-dependent)
-- `policy/*` spans — **emitted via HTTP** (REST API or watcher, not WS-dependent)
+```
+HTTP POST /v1/chat/completions
+│
+├── StartAgentSpan(conversationID, "openclaw")
+│
+├── Input Inspection
+│   ├── StartGuardrailSpan("defenseclaw", "input", model)
+│   ├── inspector.Inspect(direction="prompt")
+│   └── EndGuardrailSpan(decision, severity)
+│
+├── StartLLMSpan(system, model, provider, maxTokens, temperature)
+│
+├── ChatCompletion → upstream LLM provider
+│
+├── Output Inspection (if content present)
+│   ├── StartGuardrailSpan("defenseclaw", "output", model)
+│   ├── inspector.Inspect(direction="completion")
+│   └── EndGuardrailSpan(decision, severity)
+│
+├── Tool Call Spans (for each tool_call in response)
+│   ├── StartToolSpan(toolName)
+│   ├── StartGuardrailSpan("defenseclaw", "tool_call", model)
+│   ├── inspector.Inspect(direction="tool_call", content=args)
+│   ├── EndGuardrailSpan(decision, severity)
+│   └── EndToolSpan(toolName)
+│
+├── EndLLMSpan(model, tokens, finishReasons, toolCallCount, guardrail)
+│   ├── RecordLLMTokens → gen_ai.client.token.usage
+│   └── RecordLLMDuration → gen_ai.client.operation.duration
+│
+└── EndAgentSpan
+```
 
 ---
 
@@ -165,28 +235,19 @@ Without OpenClaw:
 
 | File | Purpose | Signal Types |
 |------|---------|-------------|
-| `internal/telemetry/provider.go` | OTel Provider, InitProvider, TracerProvider/LoggerProvider/MeterProvider | All |
-| `internal/telemetry/resource.go` | buildResource() with all resource attributes | All |
-| `internal/telemetry/lifecycle.go` | EmitLifecycleEvent() — asset install/block/allow/quarantine | Logs |
+| `internal/telemetry/provider.go` | OTel Provider, InitProvider | All |
+| `internal/telemetry/resource.go` | buildResource() | All |
+| `internal/telemetry/lifecycle.go` | EmitLifecycleEvent() | Logs |
 | `internal/telemetry/scan.go` | EmitScanResult(), EmitScanFinding() | Logs + Metrics |
-| `internal/telemetry/runtime.go` | StartToolSpan, EndToolSpan, StartLLMSpan (**dead**), EndLLMSpan (**dead**), StartApprovalSpan, EndApprovalSpan, EmitStartupSpan, EmitInspectSpan | Traces + Metrics |
+| `internal/telemetry/runtime.go` | Agent/LLM/Tool/Approval/Guardrail spans | Traces + Metrics |
 | `internal/telemetry/alerts.go` | EmitRuntimeAlert() | Logs + Metrics |
-| `internal/telemetry/metrics.go` | All metric instruments (28+ counters/histograms) | Metrics |
+| `internal/telemetry/metrics.go` | All metric instruments (28+) | Metrics |
 | `internal/telemetry/policy.go` | StartPolicySpan, EndPolicySpan | Traces + Metrics |
-| `internal/gateway/router.go` | EventRouter — WS event dispatch, tool/approval span lifecycle | Consumes telemetry |
-| `internal/gateway/inspect.go` | CodeGuard inspection — EmitInspectSpan, EmitRuntimeAlert | Consumes telemetry |
-| `internal/gateway/api.go` | REST API — StartPolicySpan/EndPolicySpan | Consumes telemetry |
+| `internal/gateway/router.go` | EventRouter — WS event dispatch | Consumes telemetry |
+| `internal/gateway/proxy.go` | Guardrail proxy — full GenAI trace hierarchy | Consumes telemetry |
+| `internal/gateway/inspect.go` | CodeGuard inspection | Consumes telemetry |
+| `internal/gateway/api.go` | REST API | Consumes telemetry |
 
 ---
 
-## Recommendations
-
-1. **Update OTEL.md §5d** to mark LLM Call Span as `(planned — awaiting OpenClaw llm_call/llm_result events)` instead of presenting it alongside implemented spans.
-
-2. **Consider deriving LLM spans from `session.message`** — the Format A handler already parses `model`, `provider`, `stopReason`, and `content`. Adding `StartLLMSpan`/`EndLLMSpan` calls for `role=assistant` messages with a `model` field would activate the existing dead code without waiting for OpenClaw.
-
-3. **Add `Agent Session Span`** — OTEL.md §5a shows a root `[Agent Session Span]` in the hierarchy but no implementation exists. The `handleAgentStreamEvent()` lifecycle handler (`start`/`end` events) could create this span.
-
----
-
-*Compiled: 2026-03-29 | Source: Code audit of DefenseClaw v0.2.0*
+*Compiled: 2026-04-01 | Source: Code audit of DefenseClaw*
