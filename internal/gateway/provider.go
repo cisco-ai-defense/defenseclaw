@@ -61,7 +61,9 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 		}
 		var sb strings.Builder
 		for i, b := range blocks {
-			if b.Type == "text" || b.Type == "" {
+			// "text" — Chat Completions / Anthropic
+			// "input_text" / "output_text" — OpenAI Responses API
+			if b.Type == "text" || b.Type == "input_text" || b.Type == "output_text" || b.Type == "" {
 				if i > 0 && sb.Len() > 0 {
 					sb.WriteString("\n")
 				}

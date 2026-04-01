@@ -77,6 +77,7 @@ type GuardrailProxy struct {
 	primary          LLMProvider
 	inspector        ContentInspector
 	masterKey        string
+	gatewayToken     string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
 
 	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
 	// endpoint on the API server writes guardrail_runtime.json; the proxy
@@ -86,8 +87,9 @@ type GuardrailProxy struct {
 	blockMessage string
 }
 
-// NewGuardrailProxy constructs and wires a proxy. Returns an error if the
-// upstream provider can't be resolved (missing model or API key).
+// NewGuardrailProxy constructs and wires a proxy. guardrail.model is optional:
+// when omitted the proxy relies on the fetch interceptor's X-DC-Target-URL and
+// X-AI-Auth headers to route all requests at runtime.
 func NewGuardrailProxy(
 	cfg *config.GuardrailConfig,
 	ciscoAID *config.CiscoAIDefenseConfig,
@@ -100,19 +102,22 @@ func NewGuardrailProxy(
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
-	if cfg.Model == "" {
-		return nil, fmt.Errorf("proxy: guardrail.model is required")
+	// primary is optional: when guardrail.model is empty the proxy relies
+	// entirely on the fetch interceptor supplying X-DC-Target-URL and
+	// X-AI-Auth at runtime. A nil primary causes resolveProvider to return
+	// an error only for requests that lack those headers.
+	var primary LLMProvider
+	if cfg.Model != "" {
+		// Resolve the API key. Try .env first, then fall back to reading the
+		// key directly from OpenClaw's auth-profiles.json (same source the
+		// fetch interceptor uses). This ensures the primary provider works
+		// even before OpenClaw is restarted to load the fetch interceptor.
+		apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
+		if apiKey == "" {
+			apiKey = resolveKeyFromOpenClawProfiles(cfg.Model)
+		}
+		primary = NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 	}
-
-	// Resolve the API key. Try .env first, then fall back to reading the key
-	// directly from OpenClaw's auth-profiles.json (same source the fetch
-	// interceptor uses). This ensures the primary provider works even before
-	// OpenClaw is restarted to load the fetch interceptor plugin.
-	apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
-	if apiKey == "" {
-		apiKey = resolveKeyFromOpenClawProfiles(cfg.Model)
-	}
-	primary := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 
 	var cisco *CiscoInspectClient
 	if cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
@@ -124,6 +129,7 @@ func NewGuardrailProxy(
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
 
 	masterKey := deriveMasterKey(dataDir)
+	gatewayToken := ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
 
 	return &GuardrailProxy{
 		cfg:          cfg,
@@ -135,6 +141,7 @@ func NewGuardrailProxy(
 		primary:      primary,
 		inspector:    inspector,
 		masterKey:    masterKey,
+		gatewayToken: gatewayToken,
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
 	}, nil
@@ -270,11 +277,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Extract text for inspection. Parse multiple API formats:
 	//  - Chat Completions: {"messages": [...]}
 	//  - Anthropic Messages: {"messages": [...], "system": "..."}
-	//  - OpenAI/Azure Responses API: {"input": [...] | "string"}
+	//  - OpenAI/Azure Responses API: {"input": [...] | "string", "instructions": "..."}
 	var partial struct {
-		Messages []ChatMessage   `json:"messages"`
-		System   string          `json:"system,omitempty"`
-		Input    json.RawMessage `json:"input,omitempty"` // Responses API
+		Model        string          `json:"model"`
+		Messages     []ChatMessage   `json:"messages"`
+		System       string          `json:"system,omitempty"`
+		Instructions string          `json:"instructions,omitempty"` // Responses API system prompt
+		Input        json.RawMessage `json:"input,omitempty"`         // Responses API
+		Stream       bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
 
@@ -291,22 +301,45 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	if userText == "" && partial.System != "" {
 		userText = partial.System
 	}
-	// Responses API: input can be a string or array of message objects.
+	// Responses API: input can be a string or array of message/item objects.
 	if userText == "" && len(partial.Input) > 0 {
 		switch partial.Input[0] {
 		case '"':
 			// Plain string input
 			_ = json.Unmarshal(partial.Input, &userText)
 		case '[':
-			// Array of messages — reuse the messages parser
-			var inputMsgs []ChatMessage
-			if json.Unmarshal(partial.Input, &inputMsgs) == nil {
+			// Array of items. The Responses API wraps each turn in an outer
+			// object with "type":"message"; extract the inner content directly.
+			var rawItems []json.RawMessage
+			if json.Unmarshal(partial.Input, &rawItems) == nil {
+				var inputMsgs []ChatMessage
+				for _, raw := range rawItems {
+					var wrapper struct {
+						Type    string          `json:"type"`
+						Role    string          `json:"role"`
+						Content json.RawMessage `json:"content"`
+					}
+					if json.Unmarshal(raw, &wrapper) == nil {
+						// Both bare messages and "type":"message" wrapped items.
+						if wrapper.Role != "" {
+							msg := ChatMessage{Role: wrapper.Role, RawContent: wrapper.Content}
+							// Re-unmarshal to populate msg.Content via ChatMessage logic.
+							_ = json.Unmarshal(raw, &msg)
+							inputMsgs = append(inputMsgs, msg)
+						}
+					}
+				}
 				userText = lastUserText(inputMsgs)
 				if len(partial.Messages) == 0 {
 					partial.Messages = inputMsgs
 				}
 			}
 		}
+	}
+	// Responses API: fall back to instructions (system-level prompt) if no
+	// user turn was found — still worth inspecting for prompt injection.
+	if userText == "" && partial.Instructions != "" {
+		userText = partial.Instructions
 	}
 
 	if userText != "" {
@@ -317,7 +350,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.recordTelemetry("prompt", label, verdict, elapsed, nil, nil)
 		if verdict.Action == "block" && mode == "action" {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
-			writeOpenAIError(w, http.StatusForbidden, msg)
+			// Return 200 with the block message as an assistant turn so
+			// openclaw surfaces it to the user rather than treating it as
+			// an error and retrying with a different provider.
+			p.writeBlockedPassthrough(w, provider, partial.Model, partial.Stream, msg)
 			return
 		}
 	}
@@ -325,7 +361,27 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Forward verbatim to real upstream: reassemble original URL.
 	upstreamURL := strings.TrimRight(targetOrigin, "/") + r.URL.RequestURI()
 	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, upstreamURL)
-	upstreamKey := r.Header.Get("Authorization")
+
+	// Resolve the key to use for the upstream provider.
+	// Priority: (1) proxy's configured key (env / auth-profiles), (2) X-AI-Auth
+	// from the fetch interceptor, (3) original Authorization — skipping any
+	// sk-dc-* master keys which are internal to the defenseclaw proxy layer.
+	upstreamAuth := ""
+	if prov := inferProviderFromURL(targetOrigin); prov != "" {
+		if key := resolveConfiguredKeyForProvider(prov, p.dataDir); key != "" {
+			upstreamAuth = "Bearer " + key
+		}
+	}
+	if upstreamAuth == "" {
+		if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
+			upstreamAuth = aiAuth
+		}
+	}
+	if upstreamAuth == "" {
+		if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
+			upstreamAuth = auth
+		}
+	}
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
@@ -333,18 +389,18 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Copy all original headers except the ones specific to the proxy hop.
+	// Copy all original headers except proxy-hop headers.
 	for k, vs := range r.Header {
 		switch strings.ToLower(k) {
-		case "x-dc-target-url", "host":
+		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host":
 			continue
 		}
 		for _, v := range vs {
 			upstreamReq.Header.Add(k, v)
 		}
 	}
-	if upstreamKey != "" {
-		upstreamReq.Header.Set("Authorization", upstreamKey)
+	if upstreamAuth != "" {
+		upstreamReq.Header.Set("Authorization", upstreamAuth)
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", upstreamURL)
@@ -462,7 +518,21 @@ func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 	// Fetch interceptor path: X-DC-Target-URL set by plugin.
 	if req.TargetURL != "" {
 		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
-			return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, "")
+			// Prefer the key from the proxy's own configured sources (env vars,
+			// .env, auth-profiles.json) over X-AI-Auth from the fetch interceptor,
+			// so the key set up during "defenseclaw setup" / openclaw configure is
+			// always authoritative.
+			key := resolveConfiguredKeyForProvider(prefix, p.dataDir)
+			if key == "" {
+				key = req.TargetAPIKey // fallback: what the interceptor sent
+			}
+			// Azure requires the specific resource endpoint as baseURL.
+			// Use X-DC-Target-URL directly instead of the generic fallback.
+			baseURL := ""
+			if prefix == "azure" {
+				baseURL = req.TargetURL
+			}
+			return NewProviderWithBase(prefix+"/"+req.Model, key, baseURL)
 		}
 	}
 
@@ -472,6 +542,8 @@ func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 		return NewProviderWithBase(req.Model, req.TargetAPIKey, "")
 	}
 
+	// p.primary is nil when guardrail.model is not configured; the fetch
+	// interceptor is expected to supply X-DC-Target-URL for all requests.
 	return p.primary
 }
 
@@ -623,7 +695,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if req.Stream {
 			p.writeBlockedStream(w, req.Model, msg)
 		} else {
-			writeOpenAIError(w, http.StatusForbidden, msg)
+			p.writeBlockedResponse(w, req.Model, msg)
 		}
 		return
 	}
@@ -994,11 +1066,130 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 	flusher.Flush()
 }
 
+// writeBlockedPassthrough dispatches to the correct blocked-response writer
+// based on provider and whether the original request was streaming. This is
+// used by handlePassthrough where the request is in provider-native format
+// (e.g. Anthropic /v1/messages), so the response must match that format.
+func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, provider, model string, stream bool, msg string) {
+	if provider == "anthropic" {
+		if stream {
+			p.writeBlockedStreamAnthropic(w, model, msg)
+		} else {
+			p.writeBlockedResponseAnthropic(w, model, msg)
+		}
+		return
+	}
+	// All other providers use the OpenAI-compatible format.
+	if stream {
+		p.writeBlockedStream(w, model, msg)
+	} else {
+		p.writeBlockedResponse(w, model, msg)
+	}
+}
+
+// writeBlockedResponseAnthropic returns a blocked response in Anthropic
+// Messages API format (non-streaming).
+func (p *GuardrailProxy) writeBlockedResponseAnthropic(w http.ResponseWriter, model, msg string) {
+	resp := map[string]interface{}{
+		"id":          "msg_blocked",
+		"type":        "message",
+		"role":        "assistant",
+		"model":       model,
+		"stop_reason": "end_turn",
+		"content": []map[string]interface{}{
+			{"type": "text", "text": msg},
+		},
+		"usage": map[string]int{"input_tokens": 0, "output_tokens": 1},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// writeBlockedStreamAnthropic returns a blocked response as an Anthropic
+// Messages API SSE stream so the client receives a valid streaming response.
+func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, model, msg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.writeBlockedResponseAnthropic(w, model, msg)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writeAnthropicSSE := func(eventType string, data interface{}) {
+		raw, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
+		flusher.Flush()
+	}
+
+	writeAnthropicSSE("message_start", map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":      "msg_blocked",
+			"type":    "message",
+			"role":    "assistant",
+			"model":   model,
+			"content": []interface{}{},
+			"usage":   map[string]int{"input_tokens": 0},
+		},
+	})
+	writeAnthropicSSE("content_block_start", map[string]interface{}{
+		"type":  "content_block_start",
+		"index": 0,
+		"content_block": map[string]string{
+			"type": "text",
+			"text": "",
+		},
+	})
+	writeAnthropicSSE("ping", map[string]string{"type": "ping"})
+	writeAnthropicSSE("content_block_delta", map[string]interface{}{
+		"type":  "content_block_delta",
+		"index": 0,
+		"delta": map[string]string{
+			"type": "text_delta",
+			"text": msg,
+		},
+	})
+	writeAnthropicSSE("content_block_stop", map[string]interface{}{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+	writeAnthropicSSE("message_delta", map[string]interface{}{
+		"type": "message_delta",
+		"delta": map[string]interface{}{
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+		},
+		"usage": map[string]int{"output_tokens": 1},
+	})
+	writeAnthropicSSE("message_stop", map[string]string{"type": "message_stop"})
+}
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
 
 func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
+	// The proxy binds exclusively to 127.0.0.1, so all loopback connections
+	// originate from the local machine and are implicitly trusted.
+	if strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") || strings.HasPrefix(r.RemoteAddr, "[::1]:") {
+		return true
+	}
+
+	// For non-loopback (remote proxy deployments): accept X-DC-Auth with the
+	// defenseclaw gateway token (sent by the fetch interceptor).
+	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
+		token := strings.TrimPrefix(dcAuth, "Bearer ")
+		if p.gatewayToken != "" && token == p.gatewayToken {
+			return true
+		}
+	}
+
+	// Fall back to Authorization with the proxy master key.
 	if p.masterKey == "" {
 		return true
 	}
@@ -1037,6 +1228,73 @@ func resolveAzureEndpointFromOpenClaw() string {
 	return ""
 }
 
+// providerEnvVars maps provider name → well-known environment variable names
+// for the API key, checked in order of preference.
+var providerEnvVars = map[string][]string{
+	"openrouter": {"OPENROUTER_API_KEY"},
+	"anthropic":  {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"},
+	"openai":     {"OPENAI_API_KEY"},
+	"gemini":     {"GOOGLE_API_KEY", "GEMINI_API_KEY"},
+	"azure":      {"AZURE_OPENAI_API_KEY"},
+}
+
+// resolveConfiguredKeyForProvider returns the API key for the named provider
+// from the proxy's own configuration sources: env vars (including .env) first,
+// then OpenClaw's auth-profiles.json. This is the "key provided during configure"
+// and is preferred over whatever the fetch interceptor forwards in X-AI-Auth.
+func resolveConfiguredKeyForProvider(providerName, dataDir string) string {
+	dotenvPath := filepath.Join(dataDir, ".env")
+	if vars, ok := providerEnvVars[providerName]; ok {
+		for _, v := range vars {
+			if key := ResolveAPIKey(v, dotenvPath); key != "" {
+				return key
+			}
+		}
+	}
+	// Try the canonical profile name first.
+	if key := resolveKeyFromOpenClawProfilesForProvider(providerName); key != "" {
+		return key
+	}
+	// For Azure: scan all profiles for any with metadata.endpoint pointing at
+	// an Azure domain — covers custom deployments like Azure AI Foundry where
+	// the profile id is "microsoft-foundry:default" rather than "azure:default".
+	if providerName == "azure" {
+		return resolveKeyFromOpenClawProfileByEndpoint("openai.azure.com")
+	}
+	return ""
+}
+
+// resolveKeyFromOpenClawProfileByEndpoint scans all profiles for one whose
+// metadata.endpoint hostname contains the given substring, and returns its key.
+func resolveKeyFromOpenClawProfileByEndpoint(endpointSubstr string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	profilesPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
+	data, err := os.ReadFile(profilesPath)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Profiles map[string]struct {
+			Key      string `json:"key"`
+			Metadata struct {
+				Endpoint string `json:"endpoint"`
+			} `json:"metadata"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return ""
+	}
+	for _, p := range doc.Profiles {
+		if p.Key != "" && strings.Contains(p.Metadata.Endpoint, endpointSubstr) {
+			return p.Key
+		}
+	}
+	return ""
+}
+
 // resolveKeyFromOpenClawProfiles reads the API key for a given model's provider
 // from OpenClaw's auth-profiles.json (~/.openclaw/agents/main/agent/auth-profiles.json).
 // This is the same source the fetch interceptor uses, ensuring keys are always
@@ -1046,6 +1304,10 @@ func resolveKeyFromOpenClawProfiles(model string) string {
 	if providerName == "" {
 		providerName = inferProvider(model, "")
 	}
+	return resolveKeyFromOpenClawProfilesForProvider(providerName)
+}
+
+func resolveKeyFromOpenClawProfilesForProvider(providerName string) string {
 	profileID := providerName + ":default"
 
 	home, err := os.UserHomeDir()
