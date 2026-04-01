@@ -113,6 +113,12 @@ def bundled_install_openshell_script() -> Path | None:
     return None
 
 
+def scripts_dir() -> str:
+    """Return the paths to the scripts/ directory in the repository."""
+    candidate = _REPO_ROOT / "scripts"
+    return str(candidate) if candidate.is_dir() else str(_REPO_ROOT)
+
+
 def splunk_bridge_bin(data_dir: str) -> str | None:
     """Locate the splunk-claw-bridge executable.
 
