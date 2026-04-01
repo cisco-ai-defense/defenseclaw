@@ -92,7 +92,7 @@ CodeGuard runs automatically during skill/plugin scans and is also available as 
 
 #### Message Inspection
 
-The guardrail proxy inspects every LLM prompt and completion for secrets, PII, and injection patterns. It operates independently of the plugin — it protects the LLM channel even if the plugin is not installed. In **observe** mode findings are logged; in **action** mode dangerous content is blocked before it reaches the LLM or the user.
+The guardrail proxy inspects every LLM prompt and completion for secrets, PII, and injection patterns across all 7 supported providers (Anthropic, OpenAI, Azure OpenAI, Gemini, OpenRouter, Ollama, Bedrock). The fetch interceptor plugin patches `globalThis.fetch` inside OpenClaw's Node.js process to route **all** outbound LLM calls through the proxy — regardless of which provider the user selects. In **observe** mode findings are logged; in **action** mode dangerous content is blocked before it reaches the LLM or the user.
 
 #### Tool Inspection
 
@@ -119,7 +119,7 @@ DefenseClaw is a multi-component system with three runtimes that work together:
 |-----------|----------|------|
 | **CLI** | Python 3.11+ | Operator-facing tool — runs scanners, manages block/allow lists, TUI dashboard |
 | **Gateway** | Go 1.25+ | Central daemon — REST API, WebSocket bridge to OpenClaw, policy engine, inspection pipeline, SQLite audit store, SIEM export |
-| **Plugin** | TypeScript | Runs inside OpenClaw — intercepts tool calls via `before_tool_call` hook, provides `/scan`, `/block`, `/allow` slash commands |
+| **Plugin** | TypeScript | Runs inside OpenClaw — fetch interceptor routes all LLM traffic through guardrail proxy, intercepts tool calls via `before_tool_call` hook, provides `/scan`, `/block`, `/allow` slash commands |
 
 The **CLI** and **Plugin** communicate with the **Gateway** over a local REST API. The Gateway connects to the OpenClaw Gateway over WebSocket (protocol v3) to subscribe to events and send enforcement commands. A built-in **guardrail proxy** inspects all LLM traffic in real time.
 
@@ -388,6 +388,7 @@ make ts-test        # TypeScript plugin tests
 | [API Reference](docs/API.md) | REST API endpoint documentation |
 | [LLM Guardrail](docs/GUARDRAIL.md) | Guardrail data flow and configuration |
 | [Guardrail Quick Start](docs/GUARDRAIL_QUICKSTART.md) | Set up and test the LLM guardrail |
+| [Upgrading](docs/CLI.md#upgrade) | In-place upgrade with config backup/restore |
 | [OpenTelemetry](docs/OTEL.md) | OTEL signal spec and Splunk mapping |
 | [Config Reference](docs/CONFIG_FILES.md) | Config files and environment variables |
 | [Contributing](docs/CONTRIBUTING.md) | Contribution guidelines |

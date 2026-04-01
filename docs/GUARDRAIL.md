@@ -1,22 +1,81 @@
 # LLM Guardrail — Data Flow & Architecture
 
 The LLM guardrail intercepts all traffic between OpenClaw and LLM providers.
-It uses a built-in Go guardrail reverse proxy (`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`) to inspect every
-prompt and response without requiring any changes to OpenClaw or agent code.
+It combines a TypeScript fetch interceptor plugin (running inside OpenClaw's
+Node.js process) with a Go guardrail reverse proxy
+(`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`) to inspect
+every prompt and response without requiring any changes to OpenClaw or agent
+code.
 
-## Why a Guardrail Proxy?
+## Why a Fetch Interceptor + Proxy?
 
 OpenClaw's `message_sending` plugin hook is broken (issue #26422) — outbound
 messages never fire, making plugin-only interception impossible for LLM
-responses. The guardrail proxy sits at the network level between
-OpenClaw and the LLM provider, completely bypassing this limitation.
+responses. Additionally, configuring a single proxy provider in
+`openclaw.json` only covers one model — switching to any other provider
+(Anthropic, Azure, Ollama, etc.) in OpenClaw's UI bypasses the proxy
+entirely.
 
-The guardrail proxy provides a unified OpenAI-compatible API, so OpenClaw doesn't
-need to know which upstream provider is being used. The guardrail works
-identically for Anthropic, OpenAI, Google, and any other provider the proxy
-supports.
+The solution is two-layered:
+
+1. **Fetch interceptor** (`plugins/defenseclaw/fetch-interceptor.ts`) —
+   patches `globalThis.fetch` inside OpenClaw's Node.js process, routing
+   **all** outbound LLM calls through `localhost:4000` regardless of which
+   provider the user selects.
+2. **Guardrail proxy** (`internal/gateway/proxy.go`) — inspects the
+   intercepted traffic, runs pre-call and post-call scanning, and forwards
+   to the real upstream provider.
+
+### Auth Design (X-AI-Auth header)
+
+LLM provider keys travel in a dedicated `X-AI-Auth` header, separate from
+`Authorization`. This preserves the `sk-dc-*` master key in `Authorization`
+for DefenseClaw gateway auth, while giving the proxy the real provider key
+for upstream calls.
+
+```
+Authorization: Bearer sk-dc-*       ← OpenClaw→DefenseClaw connection
+X-AI-Auth:     Bearer sk-or-*       ← LLM provider key for upstream
+```
+
+### Providers Covered
+
+| Provider | Interception | Format |
+|----------|-------------|--------|
+| Anthropic | api.anthropic.com | /v1/messages (passthrough) |
+| OpenAI | api.openai.com | /v1/chat/completions |
+| OpenRouter | openrouter.ai | /api/v1/chat/completions |
+| Azure OpenAI | *.openai.azure.com | /openai/v1/responses + /chat/completions |
+| Gemini | generativelanguage.googleapis.com | OpenAI-compatible |
+| Ollama | localhost:11434 | Pass-through (no key needed) |
+| Bedrock | *.amazonaws.com | AWS SigV4 pass-through |
 
 ## Data Flow
+
+### Fetch Interceptor Flow
+
+```
+ ┌──────────────┐     ┌─────────────────────┐     ┌────────────────────┐     ┌──────────────┐
+ │   OpenClaw    │     │  Fetch Interceptor  │     │   Guardrail Proxy  │     │  LLM Provider│
+ │   Agent       │     │  (in-process plugin)│     │  (localhost:4000)  │     │              │
+ └──────┬───────┘     └──────────┬──────────┘     └──────────┬─────────┘     └──────┬───────┘
+        │                        │                           │                      │
+        │  fetch(provider_url)   │                           │                      │
+        ├───────────────────────►│                           │                      │
+        │                        │                           │                      │
+        │                        │  Redirects to localhost   │                      │
+        │                        │  + adds X-AI-Auth header  │                      │
+        │                        │  + adds X-DC-Target-URL   │                      │
+        │                        ├──────────────────────────►│                      │
+        │                        │                           │                      │
+        │                        │            PRE-CALL scan  │                      │
+        │                        │                           ├─────────────────────►│
+        │                        │                           │◄─────────────────────┤
+        │                        │            POST-CALL scan │                      │
+        │                        │                           │                      │
+        │  Response              │◄──────────────────────────┤                      │
+        │◄───────────────────────┤                           │                      │
+```
 
 ### Normal Request (observe mode, clean)
 
@@ -184,10 +243,22 @@ supports.
 │                                                                     │
 │  Owns:                                                              │
 │  ├── `defenseclaw init` — seeds config, policies, optional guardrail setup │
-│  ├── `defenseclaw setup guardrail` — interactive config wizard     │
-│  ├── proxy config generation                                │
-│  ├── openclaw.json patching (add defenseclaw provider, reroute model)  │
-│  └── openclaw.json revert on --disable                             │
+│  ├── `defenseclaw setup guardrail` — config wizard (plugin-only, no model changes) │
+│  ├── `defenseclaw upgrade` — in-place upgrade with backup/restore  │
+│  ├── openclaw.json patching (plugin registration only)             │
+│  └── openclaw.json revert + plugin uninstall on --disable          │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                 Fetch Interceptor Plugin (TypeScript)                │
+│                                                                     │
+│  Owns:                                                              │
+│  ├── Patches globalThis.fetch inside OpenClaw's Node.js process    │
+│  ├── Routes ALL outbound LLM calls through localhost:4000          │
+│  ├── Injects X-AI-Auth header with real provider key               │
+│  │   (from auth-profiles.json, refreshed every 30s)               │
+│  ├── Adds X-DC-Target-URL header with original provider URL       │
+│  └── Activates only when guardrail.enabled = true                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -265,7 +336,7 @@ internal/gateway/
 │                                                                  │
 │  1. Install uv (if needed)                                      │
 │  2. Install scanners (skill-scanner, mcp-scanner, aibom)        │
-│  3. Configure guardrail proxy (Go binary; no Python guardrail file) │
+│  3. Configure guardrail proxy (Go binary)                       │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
@@ -276,16 +347,15 @@ internal/gateway/
 │  1. Enable guardrail? → yes                                     │
 │  2. Mode? → observe (default) or action                         │
 │  3. Port? → 4000 (default)                                      │
-│  4. Detect current OpenClaw model (reads openclaw.json)         │
-│  5. Route through guardrail? → yes                              │
-│  6. Detect API key env var (from model name)                    │
-│  7. Verify API key is set in environment                        │
+│                                                                  │
+│  No model or API key prompts — the fetch interceptor handles    │
+│  provider detection and key injection automatically.            │
 │                                                                  │
 │  Generates:                                                      │
 │  ├── ~/.defenseclaw/config.yaml (guardrail section)             │
 │  └── Patches ~/.openclaw/openclaw.json                          │
-│      ├── Adds defenseclaw provider (baseUrl=localhost:4000)     │
-│      └── Sets primary model to defenseclaw/{model_name}         │
+│      ├── Registers defenseclaw in plugins.allow                 │
+│      └── Enables plugin entry (fetch interceptor loads on start)│
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
@@ -303,17 +373,36 @@ internal/gateway/
 │     ├── Polls /health/liveliness until 200                      │
 │     └── Restarts on crash (exponential backoff)                 │
 └──────────────────────────────────────────────────────────────────┘
+
+When OpenClaw starts, the fetch interceptor plugin activates and routes
+all outbound LLM calls through the guardrail proxy — regardless of
+which provider the user selects in the UI.
 ```
 
 ## Teardown
 
 ```
 defenseclaw setup guardrail --disable
-  1. Restore openclaw.json primary model to original
-  2. Remove defenseclaw provider from openclaw.json
+  1. Remove defenseclaw plugin entries from openclaw.json
+  2. Uninstall plugin from ~/.openclaw/extensions/defenseclaw/
   3. Set guardrail.enabled = false in config.yaml
-  4. Restart sidecar for changes to take effect
+  4. Restart OpenClaw gateway (fetch interceptor unloads)
 ```
+
+## Upgrade
+
+```
+defenseclaw upgrade [--source-dir DIR] [--skip-pull] [--local DIR] [--yes]
+  1. Save current guardrail settings (mode, port, scanner-mode, block-message)
+  2. Back up ~/.defenseclaw/ and openclaw.json to timestamped directory
+  3. Restore openclaw.json to pre-DefenseClaw state
+  4. Stop gateway, remove plugin
+  5. Rebuild from source (or install from local dist)
+  6. Re-configure guardrail with saved settings
+  7. Start gateway, restart OpenClaw
+```
+
+See [CLI Reference — upgrade](CLI.md#upgrade) for full options.
 
 ## Scanner Modes
 
@@ -469,10 +558,22 @@ for external callers; the built-in proxy does not require it for normal operatio
 │                                                                     │
 │  Owns:                                                              │
 │  ├── `defenseclaw init` — seeds config, policies, optional guardrail setup │
-│  ├── `defenseclaw setup guardrail` — interactive config wizard     │
-│  ├── proxy config generation                                │
-│  ├── openclaw.json patching (add defenseclaw provider, reroute model)  │
-│  └── openclaw.json revert on --disable                             │
+│  ├── `defenseclaw setup guardrail` — config wizard (plugin-only, no model changes) │
+│  ├── `defenseclaw upgrade` — in-place upgrade with backup/restore  │
+│  ├── openclaw.json patching (plugin registration only)             │
+│  └── openclaw.json revert + plugin uninstall on --disable          │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                 Fetch Interceptor Plugin (TypeScript)                │
+│                                                                     │
+│  Owns:                                                              │
+│  ├── Patches globalThis.fetch inside OpenClaw's Node.js process    │
+│  ├── Routes ALL outbound LLM calls through localhost:4000          │
+│  ├── Injects X-AI-Auth header with real provider key               │
+│  │   (from auth-profiles.json, refreshed every 30s)               │
+│  ├── Adds X-DC-Target-URL header with original provider URL       │
+│  └── Activates only when guardrail.enabled = true                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -485,10 +586,17 @@ policies/rego/
   data.json                         # guardrail section: patterns, thresholds, Cisco trust
 
 cli/defenseclaw/
-  guardrail.py                      # config generation, openclaw.json patching
-  commands/cmd_setup.py             # `setup guardrail` command
+  guardrail.py                      # config generation, openclaw.json patching, plugin lifecycle
+  commands/cmd_setup.py             # `setup guardrail` command (plugin-only, no model changes)
+  commands/cmd_upgrade.py           # `upgrade` command — backup, restore, rebuild, reinstall
   commands/cmd_init.py              # configures guardrail proxy + OpenClaw integration
   config.py                         # GuardrailConfig + CiscoAIDefenseConfig dataclasses
+  paths.py                          # scripts_dir() for locating scripts in dev/wheel installs
+
+plugins/defenseclaw/src/
+  index.ts                          # Plugin entry — registers interceptor as plugin service
+  fetch-interceptor.ts              # Patches globalThis.fetch, injects X-AI-Auth, routes to proxy
+  sidecar-config.ts                 # Reads guardrail.port from config
 
 internal/config/
   config.go                         # GuardrailConfig + CiscoAIDefenseConfig Go structs
@@ -499,13 +607,23 @@ internal/policy/
 
 internal/gateway/
   guardrail.go                      # GuardrailInspector — scanners + OPA finalize
-  proxy.go                          # GuardrailProxy — reverse proxy + inspection
+  proxy.go                          # GuardrailProxy — reverse proxy + passthrough + inspection
+  provider.go                       # Provider routing (splitModel, inferProvider)
+  provider_openai.go                # OpenAI provider
+  provider_anthropic.go             # Anthropic provider (passthrough /v1/messages)
+  provider_azure.go                 # Azure OpenAI (Foundry→deployment URL, api-version)
+  provider_gemini.go                # Gemini (native + OpenAI-compatible)
+  provider_openrouter.go            # OpenRouter (attribution headers)
   api.go                            # POST /v1/guardrail/evaluate, /v1/guardrail/event
   sidecar.go                        # runGuardrail() goroutine
   health.go                         # guardrail subsystem health tracking
 
+scripts/
+  upgrade.sh                        # Shell-based upgrade (mirrors `defenseclaw upgrade`)
+
 ~/.defenseclaw/                     # runtime (generated, not in repo)
   config.yaml                       # guardrail section (incl. scanner_mode, cisco_ai_defense)
+  backups/                          # timestamped upgrade backups
 ```
 
 ## Per-Inspection Audit Events
@@ -553,14 +671,17 @@ restart (including Cisco client enable/disable when scanner mode changes).
 
 ## Setup Wizard
 
-`defenseclaw setup guardrail` now prompts for:
+`defenseclaw setup guardrail` prompts for:
 
 1. Enable guardrail? (yes/no)
 2. Mode (observe/action)
 3. Scanner mode (local/remote/both)
 4. Cisco AI Defense endpoint, API key env var, timeout (if remote/both)
-5. guardrail proxy port
-6. Upstream model detection + routing
+5. Guardrail proxy port
+
+The wizard no longer prompts for model selection or API keys — the fetch
+interceptor detects the active provider and injects the correct key
+automatically from OpenClaw's `auth-profiles.json`.
 
 Non-interactive mode supports all options as flags:
 
