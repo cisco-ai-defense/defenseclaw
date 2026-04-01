@@ -969,6 +969,8 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
+    from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
+
     standalone = app.cfg.openshell.is_standalone()
 
     click.echo()
@@ -979,27 +981,12 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         click.echo("  ⚠ Sandbox mode: skipping OpenClaw config restore and plugin removal")
         click.echo("    Run 'defenseclaw sandbox setup' to remove the guardrail plugin from the sandbox")
     else:
-        from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
-
-        # Restore OpenClaw config (model + remove defenseclaw provider + plugins.allow)
-        if gc.original_model:
-            if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
-                click.echo(f"  ✓ OpenClaw model restored to: {gc.original_model}")
-            else:
-                click.echo(f"  ✗ Could not restore OpenClaw config: {app.cfg.claw.config_file}")
-                click.echo("    The file may be missing or contain invalid JSON.")
-                warnings.append(
-                    f"Manually edit {app.cfg.claw.config_file}: "
-                    f"set agents.defaults.model.primary to \"{gc.original_model}\" "
-                    "and remove the \"defenseclaw\" provider from models.providers"
-                )
+        # Remove defenseclaw plugin entries from openclaw.json
+        if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
+            click.echo(f"  ✓ OpenClaw plugin removed from: {app.cfg.claw.config_file}")
         else:
-            click.echo("  ⚠ No original model on record — cannot revert LLM routing")
-            click.echo("    The model in openclaw.json may still point to defenseclaw/...")
-            warnings.append(
-                f"Check {app.cfg.claw.config_file} and set agents.defaults.model.primary "
-                "to your desired model (e.g. anthropic/claude-sonnet-4-20250514)"
-            )
+            click.echo(f"  ✗ Could not update OpenClaw config: {app.cfg.claw.config_file}")
+            warnings.append(f"Manually remove defenseclaw from plugins.allow in {app.cfg.claw.config_file}")
 
         # Uninstall OpenClaw plugin
         openclaw_home = app.cfg.claw.home_dir
