@@ -364,7 +364,7 @@ func (p *Provider) RecordApproval(ctx context.Context, result string, auto, dang
 
 // RecordLLMTokens records token consumption metrics per OTel GenAI semconv.
 // gen_ai.client.token.usage histogram with gen_ai.token.type = "input"/"output".
-func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model string, prompt, completion int64) {
+func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName string, prompt, completion int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
@@ -372,6 +372,9 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 		attribute.String("gen_ai.operation.name", operationName),
 		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.request.model", model),
+	}
+	if agentName != "" {
+		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.name", agentName))
 	}
 	if prompt > 0 {
 		attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", "input")}, commonAttrs...)
@@ -385,15 +388,19 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 
 // RecordLLMDuration records LLM call duration per OTel GenAI semconv.
 // gen_ai.client.operation.duration histogram, unit=seconds.
-func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, providerName, model string, durationSeconds float64) {
+func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, providerName, model, agentName string, durationSeconds float64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.genAIOperationDuration.Record(ctx, durationSeconds, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("gen_ai.operation.name", operationName),
 		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.request.model", model),
-	))
+	}
+	if agentName != "" {
+		attrs = append(attrs, attribute.String("gen_ai.agent.name", agentName))
+	}
+	p.metrics.genAIOperationDuration.Record(ctx, durationSeconds, metric.WithAttributes(attrs...))
 }
 
 // RecordAlert records a runtime alert metric.

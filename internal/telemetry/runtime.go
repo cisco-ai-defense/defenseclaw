@@ -286,11 +286,12 @@ func (p *Provider) EndLLMSpan(
 	guardrail, guardrailResult string,
 	providerName string,
 	startTime time.Time,
+	agentName string,
 ) {
 	ctx := context.Background()
 	durationSec := time.Since(startTime).Seconds()
-	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, int64(promptTokens), int64(completionTokens))
-	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, durationSec)
+	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, int64(promptTokens), int64(completionTokens))
+	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, durationSec)
 
 	if span == nil {
 		return

@@ -128,8 +128,8 @@ func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p.RecordToolDuration(ctx, "shell", "builtin", 50)
 	p.RecordToolError(ctx, "shell", 1)
 	p.RecordApproval(ctx, "approved", true, false)
-	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", 100, 200)
-	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", 0.5)
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "", 100, 200)
+	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", "", 0.5)
 	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern")
 	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block")
 	p.RecordGuardrailLatency(ctx, "ai-defense", 100)
@@ -793,8 +793,8 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", 150, 75)
-	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", 200, 0) // no completion tokens
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "test-agent", 150, 75)
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "test-agent", 200, 0) // no completion tokens
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -829,6 +829,14 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	}
 	if outputSum != 75 {
 		t.Errorf("output token sum = %v, want 75", outputSum)
+	}
+
+	// Verify gen_ai.agent.name attribute is present on data points.
+	for _, dp := range hist.DataPoints {
+		hasAgentName := hasAttribute(dp.Attributes, "gen_ai.agent.name", "test-agent")
+		if !hasAgentName {
+			t.Error("histogram data point missing attribute gen_ai.agent.name=test-agent")
+		}
 	}
 }
 

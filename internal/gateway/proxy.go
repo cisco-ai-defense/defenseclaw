@@ -405,7 +405,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime)
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw")
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return
@@ -478,7 +478,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 					promptTok = int(resp.Usage.PromptTokens)
 					completionTok = int(resp.Usage.CompletionTokens)
 				}
-				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime)
+				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, "openclaw")
 			}
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 			p.writeBlockedResponse(w, aliasModel, msg)
@@ -498,7 +498,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			promptTok = int(resp.Usage.PromptTokens)
 			completionTok = int(resp.Usage.CompletionTokens)
 		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime)
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -590,7 +590,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime)
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw")
 			llmSpan = nil
 		}
 	}
@@ -652,7 +652,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			promptTok = int(usage.PromptTokens)
 			completionTok = int(usage.CompletionTokens)
 		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, 0, guardrail, guardrailResult, system, llmStartTime)
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, 0, guardrail, guardrailResult, system, llmStartTime, "openclaw")
 	}
 
 	fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -941,7 +941,7 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 			p.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", verdict.Action)
 		}
 		if tokIn != nil || tokOut != nil {
-			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, ptrOr(tokIn, 0), ptrOr(tokOut, 0))
+			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, "openclaw", ptrOr(tokIn, 0), ptrOr(tokOut, 0))
 		}
 	}
 }

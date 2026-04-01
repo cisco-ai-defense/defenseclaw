@@ -1024,7 +1024,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", tIn, tOut)
 		}
 	}
 

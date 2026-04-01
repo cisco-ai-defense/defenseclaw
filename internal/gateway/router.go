@@ -371,6 +371,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				finishReasons, toolCallCount,
 				"none", "",
 				system, now,
+				"openclaw",
 			)
 
 			// Store LLM context so tool_call spans become children of this LLM span.
