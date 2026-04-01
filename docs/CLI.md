@@ -103,6 +103,12 @@ Use `<binary> --help` for any command.
 |---------|-------------|
 | `codeguard install-skill` | Install the CodeGuard skill into the OpenClaw workspace |
 
+### upgrade
+
+| Command | Description |
+|---------|-------------|
+| `upgrade` | Upgrade DefenseClaw in-place with config backup and restore |
+
 ### sandbox
 
 | Command | Description |
@@ -310,6 +316,52 @@ defenseclaw alerts [-n limit]
 ```
 
 Displays recent security alerts. Default limit: 25.
+
+### upgrade
+
+```
+defenseclaw upgrade [flags]
+```
+
+Performs an in-place upgrade of DefenseClaw without losing configuration.
+Backs up all config files and `openclaw.json`, restores OpenClaw to its
+pre-DefenseClaw state, rebuilds from source (or installs from a local
+dist), and re-configures the guardrail with your existing settings.
+
+**Upgrade steps:**
+
+1. Save current guardrail settings (mode, port, scanner-mode, block-message)
+2. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
+3. Restore `openclaw.json` to pre-DefenseClaw state (prefers `.bak` if clean, otherwise programmatic cleanup)
+4. Stop `defenseclaw-gateway` and remove the OpenClaw plugin
+5. Pull latest source and rebuild (`make gateway-install` + `pip install -e .`), or install from local dist
+6. Re-configure guardrail with saved settings (`setup guardrail --non-interactive`)
+7. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the new plugin
+
+**Flags:**
+- `--source-dir DIR` — path to defenseclaw source repo (auto-detected if omitted)
+- `--skip-pull` — skip `git pull` before rebuilding
+- `--local DIR` — install from a pre-built `dist/` directory instead of rebuilding from source
+- `--yes`, `-y` — skip confirmation prompts
+
+**Examples:**
+
+```bash
+# Standard upgrade from source
+defenseclaw upgrade --yes
+
+# Upgrade from a specific source directory
+defenseclaw upgrade --source-dir ~/projects/defenseclaw
+
+# Upgrade without pulling (use current local source)
+defenseclaw upgrade --skip-pull --yes
+
+# Install from pre-built artifacts
+defenseclaw upgrade --local ./dist --yes
+```
+
+The equivalent shell script is available at `scripts/upgrade.sh` with
+identical options (`--source-dir`, `--skip-pull`, `--local`, `--yes`).
 
 ### doctor
 
