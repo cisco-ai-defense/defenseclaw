@@ -114,7 +114,6 @@ firewall:
     - 443
 
 enforcement:
-  update_sandbox_policy: true
   max_enforcement_delay_seconds: 1
 
 audit:

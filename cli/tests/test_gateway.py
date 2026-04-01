@@ -43,6 +43,20 @@ class TestOrchestratorClientInit(unittest.TestCase):
             client._session.headers["X-DefenseClaw-Client"], "python-cli"
         )
 
+    def test_no_auth_header_without_token(self):
+        client = OrchestratorClient()
+        self.assertNotIn("Authorization", client._session.headers)
+
+    def test_auth_header_with_token(self):
+        client = OrchestratorClient(token="secret-123")
+        self.assertEqual(
+            client._session.headers["Authorization"], "Bearer secret-123"
+        )
+
+    def test_empty_token_no_auth_header(self):
+        client = OrchestratorClient(token="")
+        self.assertNotIn("Authorization", client._session.headers)
+
 
 def _make_client() -> tuple[OrchestratorClient, MagicMock]:
     """Create a client with a mocked session for testing."""

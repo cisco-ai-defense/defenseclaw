@@ -40,14 +40,15 @@ type SubsystemHealth struct {
 }
 
 type HealthSnapshot struct {
-	StartedAt time.Time       `json:"started_at"`
-	UptimeMs  int64           `json:"uptime_ms"`
-	Gateway   SubsystemHealth `json:"gateway"`
-	Watcher   SubsystemHealth `json:"watcher"`
-	API       SubsystemHealth `json:"api"`
-	Guardrail SubsystemHealth `json:"guardrail"`
-	Telemetry SubsystemHealth `json:"telemetry"`
-	Splunk    SubsystemHealth `json:"splunk"`
+	StartedAt time.Time        `json:"started_at"`
+	UptimeMs  int64            `json:"uptime_ms"`
+	Gateway   SubsystemHealth  `json:"gateway"`
+	Watcher   SubsystemHealth  `json:"watcher"`
+	API       SubsystemHealth  `json:"api"`
+	Guardrail SubsystemHealth  `json:"guardrail"`
+	Telemetry SubsystemHealth  `json:"telemetry"`
+	Splunk    SubsystemHealth  `json:"splunk"`
+	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
 }
 
 type SidecarHealth struct {
@@ -58,6 +59,7 @@ type SidecarHealth struct {
 	guardrail SubsystemHealth
 	telemetry SubsystemHealth
 	splunk    SubsystemHealth
+	sandbox   *SubsystemHealth
 	startedAt time.Time
 }
 
@@ -142,6 +144,17 @@ func (h *SidecarHealth) SetSplunk(state SubsystemState, lastErr string, details 
 	}
 }
 
+func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sandbox = &SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+}
+
 func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -154,5 +167,6 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Guardrail: h.guardrail,
 		Telemetry: h.telemetry,
 		Splunk:    h.splunk,
+		Sandbox:   h.sandbox,
 	}
 }

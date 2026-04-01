@@ -35,13 +35,14 @@ from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
+from defenseclaw.commands.cmd_sandbox import sandbox
 from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
 from defenseclaw.context import AppContext
 
-SKIP_LOAD_COMMANDS = {"init"}
+SKIP_LOAD_COMMANDS = {"init", "sandbox"}
 
 
 def _is_help_invocation(ctx: click.Context) -> bool:
@@ -116,6 +117,7 @@ cli.add_command(alerts)
 cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(doctor)
+cli.add_command(sandbox)
 
 
 def _ensure_codeguard_skill(cfg) -> None:

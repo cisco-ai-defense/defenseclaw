@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,12 @@ type Sidecar struct {
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, otel *telemetry.Provider) (*Sidecar, error) {
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+
+	// In standalone sandbox mode the veth link is point-to-point;
+	// TLS is not needed and OpenClaw serves plain WS.
+	if !cfg.Gateway.RequiresTLSWithMode(&cfg.OpenShell) {
+		cfg.Gateway.NoTLS = true
+	}
 
 	client, err := NewClient(&cfg.Gateway)
 	if err != nil {
@@ -132,6 +139,9 @@ func (s *Sidecar) Run(ctx context.Context) error {
 
 	// Report Splunk HEC health — not a goroutine, just state
 	s.reportSplunkHealth()
+
+	// Report sandbox health — only present when standalone mode is active
+	s.reportSandboxHealth(ctx)
 
 	// Wait for context cancellation (signal handler in CLI layer)
 	<-ctx.Done()
@@ -377,7 +387,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
-	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Gateway.APIPort)
+	bind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		bind = s.cfg.Gateway.APIBind
+	} else if s.cfg.OpenShell.IsStandalone() && s.cfg.Guardrail.Host != "" && s.cfg.Guardrail.Host != "localhost" {
+		bind = s.cfg.Guardrail.Host
+	}
+	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	return api.Run(ctx)
@@ -474,6 +490,63 @@ func (s *Sidecar) reportTelemetryHealth() {
 	}
 
 	s.health.SetTelemetry(StateRunning, "", details)
+}
+
+// reportSandboxHealth sets the sandbox subsystem health when standalone mode is active.
+// It starts a background goroutine that probes the sandbox endpoint and
+// transitions the state to running once reachable, or error on timeout.
+func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
+	if !s.cfg.OpenShell.IsStandalone() {
+		return
+	}
+
+	details := map[string]interface{}{
+		"sandbox_ip":    s.cfg.Gateway.Host,
+		"openclaw_port": s.cfg.Gateway.Port,
+	}
+	s.health.SetSandbox(StateStarting, "", details)
+
+	go s.probeSandbox(ctx, details)
+}
+
+// probeSandbox tries to TCP-dial the sandbox endpoint with back-off.
+// On success it transitions sandbox health to running; on context
+// cancellation or too many failures it transitions to error/stopped.
+func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface{}) {
+	addr := net.JoinHostPort(s.cfg.Gateway.Host, fmt.Sprintf("%d", s.cfg.Gateway.Port))
+	const maxAttempts = 20
+	backoff := 500 * time.Millisecond
+
+	for i := 0; i < maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			s.health.SetSandbox(StateStopped, "context cancelled", details)
+			return
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err == nil {
+			conn.Close()
+			fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe succeeded (%s reachable)\n", addr)
+			s.health.SetSandbox(StateRunning, "", details)
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe attempt %d/%d failed: %v\n", i+1, maxAttempts, err)
+
+		select {
+		case <-ctx.Done():
+			s.health.SetSandbox(StateStopped, "context cancelled", details)
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Second {
+			backoff = backoff * 3 / 2
+		}
+	}
+
+	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
 }
 
 // reportSplunkHealth sets the Splunk HEC subsystem health based on config.

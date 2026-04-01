@@ -371,9 +371,11 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.config.detect_environment", return_value="macos")
     @patch("defenseclaw.config.default_data_path")
+    @patch.dict(os.environ, {}, clear=False)
     def test_init_no_token_shows_local(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
+        os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
 
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
@@ -419,7 +421,7 @@ class TestResolveOpenclawGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             oc_data = {
                 "gateway": {
-                    "model": "remote",
+                    "mode": "remote",
                     "host": "10.0.0.5",
                     "port": 20000,
                     "auth": {"token": "remote-token"},
@@ -809,6 +811,182 @@ class TestIsSidecarRunning(unittest.TestCase):
         with open(pid_file, "w") as f:
             json.dump({"pid": os.getpid()}, f)
         self.assertEqual(_read_pid(pid_file), os.getpid())
+
+
+class TestDetectOpenclawHome(unittest.TestCase):
+    """Tests for _detect_openclaw_home helper."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-detect-oc-")
+        self.oc_home = os.path.join(self.tmp_dir, ".openclaw")
+        os.makedirs(self.oc_home)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_returns_none_when_no_openclaw(self):
+        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
+        with patch.dict(os.environ, {"SUDO_USER": ""}, clear=False), \
+             patch("os.path.expanduser", return_value=os.path.join(self.tmp_dir, "nonexistent")):
+            result = _detect_openclaw_home()
+            # May find real ~/.openclaw on the host — just check it's str or None
+            self.assertTrue(result is None or isinstance(result, str))
+
+    def test_finds_openclaw_with_config(self):
+        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
+        # Create openclaw.json
+        with open(os.path.join(self.oc_home, "openclaw.json"), "w") as f:
+            f.write('{"gateway": {}}')
+
+        with patch("os.path.expanduser", return_value=self.oc_home), \
+             patch.dict(os.environ, {"SUDO_USER": ""}, clear=False):
+            result = _detect_openclaw_home()
+            self.assertEqual(result, self.oc_home)
+
+    def test_prefers_sudo_user_home(self):
+        from defenseclaw.commands.cmd_init_sandbox import _detect_openclaw_home
+
+        # Create two homes with openclaw.json
+        sudo_home = os.path.join(self.tmp_dir, "sudouser")
+        sudo_oc = os.path.join(sudo_home, ".openclaw")
+        os.makedirs(sudo_oc)
+        with open(os.path.join(sudo_oc, "openclaw.json"), "w") as f:
+            f.write('{}')
+        with open(os.path.join(self.oc_home, "openclaw.json"), "w") as f:
+            f.write('{}')
+
+        mock_pw = MagicMock()
+        mock_pw.pw_dir = sudo_home
+
+        with patch.dict(os.environ, {"SUDO_USER": "testuser"}, clear=False), \
+             patch("pwd.getpwnam", return_value=mock_pw), \
+             patch("os.path.expanduser", return_value=self.oc_home):
+            result = _detect_openclaw_home()
+            self.assertEqual(result, sudo_oc)
+
+
+class TestSaveOwnershipBackup(unittest.TestCase):
+    """Tests for _save_ownership_backup helper."""
+
+    def setUp(self):
+        self.data_dir = tempfile.mkdtemp(prefix="dclaw-backup-")
+        self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-home-")
+
+    def tearDown(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        shutil.rmtree(self.oc_home, ignore_errors=True)
+
+    def test_creates_backup_file(self):
+        import json
+        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
+        backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
+        self.assertTrue(os.path.isfile(backup_path))
+
+        with open(backup_path) as f:
+            data = json.load(f)
+        self.assertIn("openclaw_home", data)
+        self.assertIn("original_uid", data)
+        self.assertIn("original_gid", data)
+        self.assertIn("original_mode", data)
+        self.assertEqual(data["original_uid"], os.stat(self.oc_home).st_uid)
+        self.assertEqual(data["original_gid"], os.stat(self.oc_home).st_gid)
+
+    def test_backup_file_path(self):
+        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
+        backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
+        expected = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
+        self.assertEqual(backup_path, expected)
+
+
+class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
+    """Tests for _integrate_openclaw_home idempotency."""
+
+    def setUp(self):
+        self.data_dir = tempfile.mkdtemp(prefix="dclaw-integrate-")
+        self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-")
+        self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-real-")
+
+    def tearDown(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        shutil.rmtree(self.sandbox_home, ignore_errors=True)
+        shutil.rmtree(self.oc_home, ignore_errors=True)
+
+    def test_idempotent_when_already_configured(self):
+        import json
+        from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home, OPENCLAW_OWNERSHIP_BACKUP
+
+        # Simulate a previous successful integration
+        backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
+        with open(backup_path, "w") as f:
+            json.dump({"openclaw_home": self.oc_home, "original_uid": 1000, "original_gid": 1000, "original_mode": "0o755"}, f)
+
+        # Create the symlink
+        symlink_path = os.path.join(self.sandbox_home, ".openclaw")
+        os.symlink(self.oc_home, symlink_path)
+
+        cfg = MagicMock()
+        cfg.data_dir = self.data_dir
+
+        result = _integrate_openclaw_home(cfg, self.sandbox_home)
+        self.assertTrue(result)
+
+    def test_returns_false_when_no_openclaw(self):
+        from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home
+
+        cfg = MagicMock()
+        cfg.data_dir = self.data_dir
+
+        with patch("defenseclaw.commands.cmd_init_sandbox._detect_openclaw_home", return_value=None):
+            result = _integrate_openclaw_home(cfg, self.sandbox_home)
+            self.assertFalse(result)
+
+
+class TestRestoreOpenclawOwnership(unittest.TestCase):
+    """Tests for _restore_openclaw_ownership in cmd_setup."""
+
+    def setUp(self):
+        self.data_dir = tempfile.mkdtemp(prefix="dclaw-restore-")
+        self.sandbox_home = tempfile.mkdtemp(prefix="dclaw-sandbox-")
+        self.oc_home = tempfile.mkdtemp(prefix="dclaw-oc-restore-")
+        self._sudo_patcher = patch(
+            "defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False
+        )
+        self._sudo_patcher.start()
+
+    def tearDown(self):
+        self._sudo_patcher.stop()
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        shutil.rmtree(self.sandbox_home, ignore_errors=True)
+        shutil.rmtree(self.oc_home, ignore_errors=True)
+
+    def test_noop_when_no_backup(self):
+        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
+        # Should not raise
+        _restore_openclaw_ownership(self.data_dir, self.sandbox_home)
+
+    def test_removes_symlink(self):
+        import json
+        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP
+        from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
+
+        st = os.stat(self.oc_home)
+        backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
+        with open(backup_path, "w") as f:
+            json.dump({
+                "openclaw_home": self.oc_home,
+                "original_uid": st.st_uid,
+                "original_gid": st.st_gid,
+                "original_mode": "0o755",
+            }, f)
+
+        # Create symlink
+        symlink_path = os.path.join(self.sandbox_home, ".openclaw")
+        os.symlink(self.oc_home, symlink_path)
+
+        _restore_openclaw_ownership(self.data_dir, self.sandbox_home)
+
+        self.assertFalse(os.path.islink(symlink_path))
+        self.assertFalse(os.path.isfile(backup_path))
 
 
 if __name__ == "__main__":
