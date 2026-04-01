@@ -231,10 +231,10 @@ Runtime events from the OpenClaw gateway (WebSocket events routed through
 ### 5a. Span Hierarchy
 
 ```
-[Agent Session Span]                       root span (long-lived)
-  ├── [LLM Call Span]                      from llm_call / llm_result hooks
-  │     └── [Tool Call Span]               from tool_call / tool_result events
-  │           └── [Exec Approval Span]     from exec.approval.requested / resolved
+[Agent Session Span]                       root span (planned — not yet implemented)
+  ├── [LLM Call Span]                      planned — awaiting OpenClaw llm_call/llm_result events
+  │     └── [Tool Call Span]               ✓ implemented — from tool_call / tool_result events
+  │           └── [Exec Approval Span]     ✓ implemented — from exec.approval.requested / resolved
   ├── [LLM Call Span]
   │     ├── [Tool Call Span]
   │     └── [Tool Call Span]
@@ -300,9 +300,14 @@ Nested under the tool call span, or standalone if no parent.
 | `defenseclaw.approval.auto` | bool | was auto-approved |
 | `defenseclaw.approval.dangerous` | bool | matched dangerous pattern |
 
-### 5d. LLM Call Span
+### 5d. LLM Call Span ⚠️ PLANNED
 
-Emitted when OpenClaw hooks or the LLM gateway interceptor capture
+> **Status**: Code implemented (`StartLLMSpan`/`EndLLMSpan` in
+> `internal/telemetry/runtime.go`) but **not wired** — OpenClaw does not
+> yet emit `llm_call`/`llm_result` WebSocket events. See §9c and
+> [OTEL-IMPLEMENTATION-STATUS.md](OTEL-IMPLEMENTATION-STATUS.md) for details.
+
+Will be emitted when OpenClaw hooks or the LLM gateway interceptor capture
 LLM request/response pairs.
 
 | Field | Value |
