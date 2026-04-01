@@ -359,22 +359,28 @@ def _rebuild_from_source(source_dir: str, skip_pull: bool) -> None:
         click.echo("  ✗ make gateway-install failed", err=True)
         raise SystemExit(1)
 
-    # Reinstall Python CLI
+    # Reinstall Python CLI — uninstall old wheel first so stale site-packages
+    # (e.g. old guardrail.py that writes models.providers.defenseclaw) can't
+    # shadow the new source.
     click.echo("  → Installing Python CLI ...")
     venv = os.path.expanduser("~/.defenseclaw/.venv")
-    uv = os.path.join(venv, "bin", "uv") if os.path.isfile(os.path.join(venv, "bin", "uv")) else "uv"
+    venv_uv = os.path.join(venv, "bin", "uv")
     venv_python = os.path.join(venv, "bin", "python")
+    uv = venv_uv if os.path.isfile(venv_uv) else (shutil.which("uv") or "uv")
     python = venv_python if os.path.isfile(venv_python) else sys.executable
 
-    pip_cmd = None
-    if shutil.which(uv) or os.path.isfile(uv):
-        result = subprocess.run(
-            [uv, "pip", "install", "-e", source_dir, "--python", python, "--quiet"],
-            check=False,
-        )
-        if result.returncode == 0:
-            pip_cmd = "uv"
-    if pip_cmd is None:
+    # Step 1: uninstall old wheel so editable install takes full effect.
+    subprocess.run(
+        [uv, "pip", "uninstall", "defenseclaw", "--python", python, "-q"],
+        check=False, capture_output=True,
+    )
+
+    # Step 2: install editable from current source.
+    result = subprocess.run(
+        [uv, "pip", "install", "-e", source_dir, "--python", python, "--quiet"],
+        check=False,
+    )
+    if result.returncode != 0:
         subprocess.run(
             [python, "-m", "pip", "install", "-e", source_dir, "--quiet"],
             check=True,
