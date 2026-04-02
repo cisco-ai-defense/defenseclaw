@@ -30,8 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheme", default="https", help="Splunk management API scheme. Default: https")
     parser.add_argument("--host", default="127.0.0.1", help="Splunk management API host. Default: 127.0.0.1")
     parser.add_argument("--port", default="8089", help="Splunk management API port. Default: 8089")
-    parser.add_argument("--username", required=True, help="Splunk username")
-    parser.add_argument("--password", required=True, help="Splunk password")
+    parser.add_argument("--username", default="", help="Optional Splunk username")
+    parser.add_argument("--password", default="", help="Optional Splunk password")
     parser.add_argument("--services-owner", default="nobody", help="Splunk services owner namespace. Default: nobody")
     parser.add_argument("--services-app", default="defenseclaw_local_mode", help="Splunk services app namespace. Default: defenseclaw_local_mode")
     parser.add_argument("--query", required=True, help="SPL search string to run")
@@ -105,14 +105,16 @@ def main() -> int:
             "output_mode": args.output_mode,
         }
     ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    if args.username or args.password:
+        headers["Authorization"] = authorization_header(args.username, args.password)
     request = urllib.request.Request(
         endpoint,
         data=data,
         method="POST",
-        headers={
-            "Authorization": authorization_header(args.username, args.password),
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers=headers,
     )
     context = None
     if endpoint.startswith("https://") and not args.verify_tls:

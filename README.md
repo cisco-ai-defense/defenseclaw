@@ -303,13 +303,12 @@ Splunk runtime through this preset, local Splunk usage is subject to the
 Splunk General Terms and the local-mode scope guardrails documented in
 [docs/INSTALL.md](docs/INSTALL.md).
 
-The bundled local runtime starts as a local Splunk Enterprise Trial. After the
-60-day trial period, you can continue using the same local single-instance
-workflow in Splunk Free mode. In Splunk Free mode, alerting is disabled,
-authentication and RBAC are removed, and the local user credentials printed by
-the setup command no longer apply. Existing Splunk license and ingest limits
-still apply in every mode. To keep using full Splunk Enterprise features after
-the trial, apply a valid Splunk Enterprise license. For more details, see
+The bundled local runtime starts directly in Splunk Free mode from day 1. In
+Splunk Free mode, alerting is disabled, authentication and RBAC are removed,
+and the default bundled profile does not require local user credentials.
+Existing Splunk license and ingest limits still apply. To use full Splunk
+Enterprise features later, apply a valid Splunk Enterprise license. For more
+details, see
 [About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
 
 That command also installs the local Splunk app automatically. The app gives
@@ -323,12 +322,14 @@ These values can vary if the preset or config is overridden:
 - index `defenseclaw_local`
 - source `defenseclaw`
 - sourcetype `defenseclaw:json`
+- Splunk starts directly in **Free mode** from day 1
+- Splunk Web does not require local user credentials in the default bundled profile
 
 Recommended local flow:
 
 1. Run `defenseclaw setup splunk --logs --accept-splunk-license --non-interactive`
 2. Start the DefenseClaw sidecar
-3. Open local Splunk with the URL and credentials printed by the setup command
+3. Open local Splunk with the URL printed by the setup command
 4. Validate events in local Splunk
 
 Scope guardrails for this local Splunk preset:

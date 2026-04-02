@@ -1438,7 +1438,7 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--o11y", "enable_o11y", is_flag=True, default=False,
               help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
 @click.option("--logs", "enable_logs", is_flag=True, default=False,
-              help="Enable local Splunk Enterprise via Docker (HEC logs + dashboards)")
+              help="Enable local Splunk via Docker (HEC logs + dashboards, Free mode)")
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
 @click.option("--access-token", default=None, help="Splunk O11y access token")
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
@@ -1466,8 +1466,9 @@ def setup_splunk(
       --o11y   Splunk Observability Cloud (traces + metrics via OTLP HTTP)
                No local infrastructure needed. Requires a Splunk access token.
     \b
-      --logs   Local Splunk Enterprise (Docker, HEC logs + dashboards)
-               Spins up a local Splunk container. Requires Docker.
+      --logs   Local Splunk (Docker, HEC logs + dashboards)
+               Starts the bundled profile in Splunk Free mode from day 1.
+               Requires Docker.
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
@@ -1536,9 +1537,9 @@ def _interactive_splunk_setup(
     click.echo("     Sends traces + metrics + logs via OTLP HTTP directly to Splunk cloud.")
     click.echo("     No local infrastructure needed. Requires a Splunk O11y access token.")
     click.echo()
-    click.echo("  2. Local Splunk Enterprise (Logs)")
-    click.echo("     Spins up a local Splunk container via Docker. Audit events are sent")
-    click.echo("     via HEC. Includes pre-built dashboards for DefenseClaw.")
+    click.echo("  2. Local Splunk (Logs)")
+    click.echo("     Spins up a local Splunk container via Docker in Free mode from day 1.")
+    click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
     click.echo("     Requires Docker.")
     click.echo()
 
@@ -1550,7 +1551,7 @@ def _interactive_splunk_setup(
         did_o11y = True
         click.echo()
 
-    if click.confirm("  Enable local Splunk Enterprise (Docker, HEC logs)?", default=False):
+    if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
         did_logs = _interactive_logs(app)
 
     if not did_o11y and not did_logs:
@@ -1620,8 +1621,8 @@ def _prompt_splunk_token(current: str | None) -> str:
 
 def _interactive_logs(app: AppContext) -> bool:
     click.echo()
-    click.echo("  Local Splunk Enterprise")
-    click.echo("  ───────────────────────")
+    click.echo("  Local Splunk")
+    click.echo("  ────────────")
     click.echo()
 
     if not _accept_splunk_license_interactive():
@@ -1698,7 +1699,7 @@ def _setup_logs(
         sourcetype="defenseclaw:json",
         bootstrap_bridge=True,
     )
-    click.echo("  Local Splunk Enterprise configured")
+    click.echo("  Local Splunk configured (Free mode from day 1)")
     return True
 
 
@@ -1845,9 +1846,10 @@ def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
-        username = contract.get("username", "")
-        if username:
-            click.echo(f"    Username: {username}")
+        if str(contract.get("license_group", "")).lower() == "free":
+            click.echo("    License: Free")
+        if contract.get("web_login_required") is False:
+            click.echo("    Web login: not required")
         return contract
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 5 minutes")
@@ -2021,6 +2023,8 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
+        click.echo("       Free mode is active, so no local Splunk login is required.")
+        click.echo("    3. Validate data in local Splunk")
     click.echo()
     click.echo("  To disable:")
     if did_o11y and did_logs:

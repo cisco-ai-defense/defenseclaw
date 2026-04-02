@@ -56,14 +56,12 @@ access, or use the software.
 Scope guardrails for the local Splunk preset:
 
 - use it only for local, single-instance workflows
-- expect the bundled runtime to start in a local Splunk Enterprise Trial mode
-- after the 60-day trial, continue using the same local single-instance setup
-  in Splunk Free mode
+- the bundled runtime starts directly in Splunk Free mode from day 1
 - in Splunk Free mode, alerting is disabled
 - in Splunk Free mode, authentication and RBAC are removed, so the
-  setup-printed local user credentials no longer apply
-- to keep using full Splunk Enterprise features after the trial, apply a valid
-  Splunk Enterprise license
+  default bundled profile does not require local user credentials
+- to use full Splunk Enterprise features later, apply a valid Splunk
+  Enterprise license
 - assume existing Splunk license limits still apply
 - do not treat it as an endorsed path to multi-instance or long-term
   deployment
@@ -489,7 +487,7 @@ defenseclaw setup splunk
 | Flag | Description |
 |------|-------------|
 | `--o11y` | Enable Splunk Observability Cloud (OTLP traces + metrics) |
-| `--logs` | Enable local Splunk Enterprise via Docker (HEC) |
+| `--logs` | Enable local Splunk via Docker (HEC) |
 | `--realm REALM` | Splunk O11y realm |
 | `--access-token TOKEN` | Splunk O11y access token |
 | `--app-name NAME` | Application name for traces |
@@ -497,12 +495,10 @@ defenseclaw setup splunk
 | `--non-interactive` | Requires at least `--o11y` or `--logs` |
 
 The `--logs` option requires Docker and sets up a local Splunk runtime with the
-DefenseClaw Splunk bridge (`splunk-claw-bridge`). By default, that runtime
-starts in a local Splunk Enterprise Trial mode. After the 60-day trial period,
-you can continue using the same local single-instance workflow in Splunk Free
-mode. In Splunk Free mode, alerting is disabled and authentication is not
-required. To keep using full Splunk Enterprise features after the trial, apply
-a valid Splunk Enterprise license. For more details, see
+DefenseClaw Splunk bridge (`splunk-claw-bridge`). That runtime starts directly
+in Splunk Free mode from day 1. In Splunk Free mode, alerting is disabled and
+authentication is not required. To use full Splunk Enterprise features later,
+apply a valid Splunk Enterprise license. For more details, see
 https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free
 
 ```bash
