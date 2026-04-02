@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -161,6 +162,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", p.handleChatCompletion)
 	mux.HandleFunc("/chat/completions", p.handleChatCompletion)
+	mux.HandleFunc("/v1/messages", p.handleAnthropicMessages)
 	mux.HandleFunc("/v1/models", p.handleModels)
 	mux.HandleFunc("/models", p.handleModels)
 	mux.HandleFunc("/health/liveliness", p.handleHealth)
@@ -338,6 +340,351 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		p.handleStreamingRequest(w, r, &req, mode, customBlockMsg)
 	} else {
 		p.handleNonStreamingRequest(w, r, &req, mode, customBlockMsg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic-native /v1/messages handler
+// ---------------------------------------------------------------------------
+// Accepts Anthropic Messages API format directly. Extracts text content from
+// Anthropic's content block structure for scanner inspection, then forwards
+// the original request body to the upstream untouched. Responses use
+// RawResponse (non-streaming) or raw SSE forwarding (streaming).
+
+// anthropicMessagesRequest is a minimal parse of the Anthropic Messages API
+// request — just enough to extract scannable content and control flow.
+type anthropicMessagesRequest struct {
+	Model     string          `json:"model"`
+	Messages  json.RawMessage `json:"messages"`
+	System    json.RawMessage `json:"system,omitempty"`
+	MaxTokens int             `json:"max_tokens"`
+	Stream    bool            `json:"stream"`
+}
+
+// anthropicContentBlock represents a single block in an Anthropic message's
+// content array. Different block types use different fields.
+type anthropicContentBlock struct {
+	Type    string          `json:"type"`
+	Text    string          `json:"text,omitempty"`
+	ID      string          `json:"id,omitempty"`
+	Name    string          `json:"name,omitempty"`
+	Input   json.RawMessage `json:"input,omitempty"`   // tool_use: function arguments
+	Content json.RawMessage `json:"content,omitempty"` // tool_result: result content
+}
+
+// anthropicMessageItem is one message in the Anthropic messages array.
+type anthropicMessageItem struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"` // string or []anthropicContentBlock
+}
+
+// extractAnthropicText walks Anthropic message content blocks and extracts
+// all scannable text — plain text, tool inputs (JSON that could contain
+// injections), and tool results.
+func extractAnthropicText(msgs []anthropicMessageItem, system json.RawMessage) (userText string, allText string, chatMsgs []ChatMessage) {
+	var sb strings.Builder
+	var lastUser strings.Builder
+
+	// System prompt
+	if len(system) > 0 {
+		var sysStr string
+		if json.Unmarshal(system, &sysStr) == nil {
+			sb.WriteString(sysStr)
+			sb.WriteString("\n")
+			chatMsgs = append(chatMsgs, ChatMessage{Role: "system", Content: sysStr})
+		}
+	}
+
+	for _, msg := range msgs {
+		var msgText strings.Builder
+
+		// Content can be a plain string or an array of blocks.
+		var plainStr string
+		if json.Unmarshal(msg.Content, &plainStr) == nil {
+			msgText.WriteString(plainStr)
+		} else {
+			var blocks []anthropicContentBlock
+			if json.Unmarshal(msg.Content, &blocks) == nil {
+				for _, block := range blocks {
+					switch block.Type {
+					case "text":
+						msgText.WriteString(block.Text)
+						msgText.WriteString("\n")
+					case "tool_use":
+						msgText.WriteString(string(block.Input))
+						msgText.WriteString("\n")
+					case "tool_result":
+						// Tool results carry content in the "content" field.
+						var resultText string
+						if json.Unmarshal(block.Content, &resultText) == nil {
+							msgText.WriteString(resultText)
+						} else {
+							msgText.WriteString(string(block.Content))
+						}
+						msgText.WriteString("\n")
+					}
+				}
+			}
+		}
+
+		text := msgText.String()
+		sb.WriteString(text)
+		sb.WriteString("\n")
+		chatMsgs = append(chatMsgs, ChatMessage{Role: msg.Role, Content: text})
+
+		if msg.Role == "user" {
+			lastUser.Reset()
+			lastUser.WriteString(text)
+		}
+	}
+
+	return strings.TrimSpace(lastUser.String()), strings.TrimSpace(sb.String()), chatMsgs
+}
+
+// writeAnthropicError writes a JSON error response in Anthropic's error format.
+func writeAnthropicError(w http.ResponseWriter, status int, errType, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"type": "error",
+		"error": map[string]string{
+			"type":    errType,
+			"message": msg,
+		},
+	})
+}
+
+func (p *GuardrailProxy) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !p.authenticateRequest(r) {
+		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[guardrail] ← POST /v1/messages (%d bytes)\n", len(body))
+
+	var antReq anthropicMessagesRequest
+	if err := json.Unmarshal(body, &antReq); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
+		return
+	}
+
+	var msgs []anthropicMessageItem
+	if err := json.Unmarshal(antReq.Messages, &msgs); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid messages array")
+		return
+	}
+
+	userText, _, chatMsgs := extractAnthropicText(msgs, antReq.System)
+
+	p.reloadRuntimeConfig()
+	p.rtMu.RLock()
+	mode := p.mode
+	customBlockMsg := p.blockMessage
+	p.rtMu.RUnlock()
+
+	// Pre-call inspection.
+	if userText != "" {
+		t0 := time.Now()
+		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, chatMsgs, antReq.Model, mode)
+		elapsed := time.Since(t0)
+
+		p.logPreCall(antReq.Model, chatMsgs, verdict, elapsed)
+		p.recordTelemetry("prompt", antReq.Model, verdict, elapsed, nil, nil)
+
+		if verdict.Action == "block" && mode == "action" {
+			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":          "msg_blocked",
+				"type":        "message",
+				"role":        "assistant",
+				"model":       antReq.Model,
+				"content":     []map[string]string{{"type": "text", "text": msg}},
+				"stop_reason": "end_turn",
+			})
+			return
+		}
+	}
+
+	// Forward original request body to upstream untouched.
+	prov, _ := p.provider.(*anthropicProvider)
+	base := "https://api.anthropic.com"
+	var apiKey string
+	if prov != nil {
+		if prov.baseURL != "" {
+			base = prov.baseURL
+		}
+		apiKey = prov.apiKey
+	}
+
+	upstreamURL := base + "/v1/messages"
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, strings.NewReader(string(body)))
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "failed to create upstream request")
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("x-api-key", apiKey)
+	}
+	httpReq.Header.Set("anthropic-version", r.Header.Get("anthropic-version"))
+	if httpReq.Header.Get("anthropic-version") == "" {
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	}
+
+	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (Anthropic) model=%q stream=%v\n", antReq.Model, antReq.Stream)
+
+	resp, err := providerHTTPClient.Do(httpReq)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "upstream request failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	if antReq.Stream {
+		p.handleAnthropicStream(w, r, resp, antReq.Model, mode, customBlockMsg)
+	} else {
+		p.handleAnthropicNonStream(w, r, resp, antReq.Model, mode)
+	}
+}
+
+func (p *GuardrailProxy) handleAnthropicNonStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model, mode string) {
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "failed to read upstream response")
+		return
+	}
+
+	// Extract text content from Anthropic response for post-call inspection.
+	var antResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text,omitempty"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	var responseText strings.Builder
+	if json.Unmarshal(respBody, &antResp) == nil {
+		for _, block := range antResp.Content {
+			if block.Type == "text" {
+				responseText.WriteString(block.Text)
+			}
+		}
+	}
+
+	if responseText.Len() > 0 {
+		content := responseText.String()
+		t0 := time.Now()
+		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
+		verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, model, mode)
+		elapsed := time.Since(t0)
+
+		tokIn := antResp.Usage.InputTokens
+		tokOut := antResp.Usage.OutputTokens
+		p.logPostCall(model, content, verdict, elapsed, &ChatUsage{
+			PromptTokens: tokIn, CompletionTokens: tokOut,
+		})
+		p.recordTelemetry("completion", model, verdict, elapsed, &tokIn, &tokOut)
+	}
+
+	// Write raw upstream response — Anthropic format preserved.
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+}
+
+func (p *GuardrailProxy) handleAnthropicStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model, mode, customBlockMsg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	var accumulated strings.Builder
+	lastScanLen := 0
+	const scanInterval = 500
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 256*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Forward every line as-is (preserves event: and data: lines).
+		fmt.Fprintf(w, "%s\n", line)
+		if line == "" {
+			flusher.Flush()
+		}
+
+		// Extract text content for inspection.
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			var evt struct {
+				Type  string `json:"type"`
+				Delta struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"delta"`
+				Usage *struct {
+					InputTokens  int64 `json:"input_tokens"`
+					OutputTokens int64 `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal([]byte(data), &evt) == nil {
+				if evt.Type == "content_block_delta" && evt.Delta.Type == "text_delta" {
+					accumulated.WriteString(evt.Delta.Text)
+				}
+
+				// Mid-stream inspection in action mode.
+				if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
+					midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+						[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, model, mode)
+					if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
+						fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
+							midVerdict.Severity, midVerdict.Reason)
+						p.recordTelemetry("completion", model, midVerdict, 0, nil, nil)
+						return
+					}
+					lastScanLen = accumulated.Len()
+				}
+			}
+		}
+	}
+
+	// Post-stream inspection.
+	if accumulated.Len() > 0 {
+		content := accumulated.String()
+		t0 := time.Now()
+		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
+		verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, model, mode)
+		elapsed := time.Since(t0)
+		p.logPostCall(model, content, verdict, elapsed, nil)
+		p.recordTelemetry("completion", model, verdict, elapsed, nil, nil)
 	}
 }
 
