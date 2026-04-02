@@ -1,6 +1,6 @@
 # DefenseClaw OpenTelemetry Specification
 
-DefenseClaw exports four categories of telemetry to **Splunk Observability**
+DefenseClaw exports four categories of telemetry to **Splunk Observability Cloud**
 via OTLP (gRPC or HTTP/protobuf). This document is the canonical reference
 for attribute names, signal types, payload schemas, and configuration.
 
@@ -575,7 +575,7 @@ Add to `~/.defenseclaw/config.yaml` under the `otel` key:
 otel:
   enabled: false
   protocol: "grpc"                                      # "grpc" or "http"
-  endpoint: "https://ingest.us1.signalfx.com"           # Splunk Observability OTLP endpoint
+  endpoint: "https://ingest.us1.signalfx.com"           # Splunk Observability Cloud OTLP endpoint
   headers:
     "X-SF-TOKEN": "${SPLUNK_ACCESS_TOKEN}"              # env var substitution
   tls:
@@ -604,7 +604,7 @@ otel:
 
 | Variable | Purpose |
 |---|---|
-| `SPLUNK_ACCESS_TOKEN` | Splunk Observability ingest token |
+| `SPLUNK_ACCESS_TOKEN` | Splunk Observability Cloud ingest token |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Override `otel.endpoint` |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Override `otel.headers` |
 | `OTEL_RESOURCE_ATTRIBUTES` | Additional resource attributes |
@@ -761,7 +761,7 @@ audit.Logger
 
 ### Attribute → Splunk Field
 
-| OTEL Concept | Splunk Observability |
+| OTEL Concept | Splunk Observability Cloud |
 |---|---|
 | Resource attributes | Indexed dimensions on all signals |
 | Log `SeverityText` | `severity` in Log Observer |
