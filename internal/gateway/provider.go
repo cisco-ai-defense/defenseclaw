@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -803,13 +805,37 @@ func mapAnthropicStopReason(reason string) string {
 	}
 }
 
-var providerHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
-	Transport: &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-	},
+var providerHTTPClient = newProviderHTTPClient()
+
+// newProviderHTTPClient builds the shared HTTP client used by all providers.
+// It respects HTTP_PROXY / HTTPS_PROXY environment variables and loads a
+// custom CA certificate from SSL_CERT_FILE when set — both are needed when
+// the provider sits behind an HTTPS credential-injection proxy.
+func newProviderHTTPClient() *http.Client {
+	tlsCfg := &tls.Config{}
+
+	if caFile := os.Getenv("SSL_CERT_FILE"); caFile != "" {
+		caCert, err := os.ReadFile(caFile)
+		if err == nil {
+			pool, _ := x509.SystemCertPool()
+			if pool == nil {
+				pool = x509.NewCertPool()
+			}
+			pool.AppendCertsFromPEM(caCert)
+			tlsCfg.RootCAs = pool
+		}
+	}
+
+	return &http.Client{
+		Timeout: 5 * time.Minute,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			TLSClientConfig:     tlsCfg,
+			MaxIdleConns:        20,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 }
 
 // ResolveAPIKey reads the API key from the named environment variable,
