@@ -213,6 +213,53 @@ func TestResolveValue(t *testing.T) {
 	}
 }
 
+func TestTemporalitySelector(t *testing.T) {
+	kinds := []sdkmetric.InstrumentKind{
+		sdkmetric.InstrumentKindCounter,
+		sdkmetric.InstrumentKindUpDownCounter,
+		sdkmetric.InstrumentKindHistogram,
+		sdkmetric.InstrumentKindGauge,
+		sdkmetric.InstrumentKindObservableCounter,
+		sdkmetric.InstrumentKindObservableUpDownCounter,
+		sdkmetric.InstrumentKindObservableGauge,
+	}
+
+	t.Run("delta", func(t *testing.T) {
+		sel := temporalitySelector("delta")
+		for _, k := range kinds {
+			if got := sel(k); got != metricdata.DeltaTemporality {
+				t.Errorf("temporalitySelector(\"delta\")(%v) = %v, want Delta", k, got)
+			}
+		}
+	})
+
+	t.Run("empty defaults to delta", func(t *testing.T) {
+		sel := temporalitySelector("")
+		for _, k := range kinds {
+			if got := sel(k); got != metricdata.DeltaTemporality {
+				t.Errorf("temporalitySelector(\"\")(%v) = %v, want Delta", k, got)
+			}
+		}
+	})
+
+	t.Run("cumulative", func(t *testing.T) {
+		sel := temporalitySelector("cumulative")
+		// Should return the SDK default (cumulative for all kinds).
+		for _, k := range kinds {
+			if got := sel(k); got != metricdata.CumulativeTemporality {
+				t.Errorf("temporalitySelector(\"cumulative\")(%v) = %v, want Cumulative", k, got)
+			}
+		}
+	})
+
+	t.Run("case insensitive", func(t *testing.T) {
+		sel := temporalitySelector("Cumulative")
+		if got := sel(sdkmetric.InstrumentKindHistogram); got != metricdata.CumulativeTemporality {
+			t.Errorf("temporalitySelector(\"Cumulative\") should be case-insensitive, got %v", got)
+		}
+	})
+}
+
 func TestBuildSampler(t *testing.T) {
 	tests := []struct {
 		name string

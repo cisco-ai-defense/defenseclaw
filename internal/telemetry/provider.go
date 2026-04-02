@@ -34,6 +34,7 @@ import (
 	metricNoop "go.opentelemetry.io/otel/metric/noop"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -293,17 +294,32 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 	), nil
 }
 
+// temporalitySelector returns a TemporalitySelector based on the config value.
+// "delta" (default) prevents cumulative re-export of exemplars on every flush,
+// so each metric data point is exported exactly once.
+// "cumulative" preserves the Go SDK default behaviour.
+func temporalitySelector(mode string) sdkmetric.TemporalitySelector {
+	if strings.EqualFold(mode, "cumulative") {
+		return sdkmetric.DefaultTemporalitySelector
+	}
+	return func(sdkmetric.InstrumentKind) metricdata.Temporality {
+		return metricdata.DeltaTemporality
+	}
+}
+
 func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string) (*sdkmetric.MeterProvider, error) {
 	var exporter sdkmetric.Exporter
 	var err error
 
 	endpoint := resolveValue(cfg.Metrics.Endpoint, cfg.Endpoint)
 	protocol := resolveValue(cfg.Metrics.Protocol, cfg.Protocol)
+	tsel := temporalitySelector(cfg.Metrics.Temporality)
 
 	if protocol == "http" {
 		opts := []metrichttp.Option{
 			metrichttp.WithEndpoint(endpoint),
 			metrichttp.WithHeaders(headers),
+			metrichttp.WithTemporalitySelector(tsel),
 		}
 		if cfg.Metrics.URLPath != "" {
 			opts = append(opts, metrichttp.WithURLPath(cfg.Metrics.URLPath))
@@ -323,6 +339,7 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 		opts := []metricgrpc.Option{
 			metricgrpc.WithEndpoint(endpoint),
 			metricgrpc.WithHeaders(headers),
+			metricgrpc.WithTemporalitySelector(tsel),
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, metricgrpc.WithInsecure())

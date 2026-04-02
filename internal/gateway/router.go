@@ -47,8 +47,6 @@ type activeAgent struct {
 	ctx        context.Context
 	startTime  time.Time
 	sessionKey string
-	provider   string
-	model      string
 }
 
 // EventRouter dispatches gateway events to the appropriate handlers and logs
