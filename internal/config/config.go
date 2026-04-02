@@ -309,6 +309,7 @@ type GuardrailConfig struct {
 	Model         string      `mapstructure:"model"           yaml:"model"`
 	ModelName     string      `mapstructure:"model_name"      yaml:"model_name"`
 	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
+	APIBase       string      `mapstructure:"api_base"        yaml:"api_base"`
 	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
 	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
 	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`

@@ -172,7 +172,7 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 	}
 	switch provider {
 	case "anthropic":
-		return &anthropicProvider{model: modelID, apiKey: apiKey}, nil
+		return &anthropicProvider{model: modelID, apiKey: apiKey, baseURL: ""}, nil
 	case "openai":
 		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	default:
@@ -350,8 +350,9 @@ func readOpenAISSE(r io.Reader, cb func(StreamChunk)) (*ChatUsage, error) {
 // ---------------------------------------------------------------------------
 
 type anthropicProvider struct {
-	model  string
-	apiKey string
+	model   string
+	apiKey  string
+	baseURL string // Custom base URL (e.g. for proxied providers). Default: https://api.anthropic.com
 }
 
 type anthropicRequest struct {
@@ -404,13 +405,19 @@ func (p *anthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 		return nil, fmt.Errorf("provider: marshal request: %w", err)
 	}
 
+	base := p.baseURL
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+		base+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	if p.apiKey != "" {
+		httpReq.Header.Set("x-api-key", p.apiKey)
+	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)
@@ -424,12 +431,19 @@ func (p *anthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("provider: read response: %w", err)
+	}
+
 	var aResp anthropicResponse
-	if err := json.NewDecoder(resp.Body).Decode(&aResp); err != nil {
+	if err := json.Unmarshal(rawBody, &aResp); err != nil {
 		return nil, fmt.Errorf("provider: decode response: %w", err)
 	}
 
-	return p.translateResponse(&aResp, req.Model), nil
+	chatResp := p.translateResponse(&aResp, req.Model)
+	chatResp.RawResponse = rawBody
+	return chatResp, nil
 }
 
 func (p *anthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
@@ -441,13 +455,19 @@ func (p *anthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatR
 		return nil, fmt.Errorf("provider: marshal request: %w", err)
 	}
 
+	base := p.baseURL
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+		base+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	if p.apiKey != "" {
+		httpReq.Header.Set("x-api-key", p.apiKey)
+	}
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)

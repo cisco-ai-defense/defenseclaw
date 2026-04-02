@@ -101,13 +101,26 @@ func NewGuardrailProxy(
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("proxy: guardrail.model is required")
 	}
-	if apiKey == "" {
+	if apiKey == "" && cfg.APIBase == "" {
 		return nil, fmt.Errorf("proxy: no API key available (set guardrail.api_key_env and provide the key in ~/.defenseclaw/.env or environment)")
 	}
 
-	provider, err := NewProvider(cfg.Model, apiKey)
-	if err != nil {
-		return nil, fmt.Errorf("proxy: create provider: %w", err)
+	var provider LLMProvider
+	if cfg.APIBase != "" {
+		// Custom base URL — used for local model servers (Ollama) or proxied
+		// providers where the upstream injects credentials.
+		prov, modelID := splitModel(cfg.Model)
+		if prov == "anthropic" || inferProvider(modelID, apiKey) == "anthropic" {
+			provider = &anthropicProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(cfg.APIBase, "/")}
+		} else {
+			provider = NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
+		}
+	} else {
+		var err error
+		provider, err = NewProvider(cfg.Model, apiKey)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: create provider: %w", err)
+		}
 	}
 
 	var cisco *CiscoInspectClient
