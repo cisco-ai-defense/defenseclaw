@@ -411,9 +411,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var accumulated strings.Builder
 	lastScanLen := 0
 	const scanInterval = 500
+	isRawPassthrough := false
 
 	usage, err := p.provider.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
 		chunk.Model = aliasModel
+		if chunk.RawSSELine != "" {
+			isRawPassthrough = true
+		}
 
 		// Accumulate content for post-stream inspection.
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
@@ -434,8 +438,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			lastScanLen = accumulated.Len()
 		}
 
-		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+		if chunk.RawSSELine != "" {
+			// Anthropic SSE passthrough — forward the original event format.
+			fmt.Fprintf(w, "%s\n\n", chunk.RawSSELine)
+		} else {
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
 		flusher.Flush()
 	})
 	if err != nil {
@@ -461,7 +470,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		p.recordTelemetry("completion", aliasModel, verdict, elapsed, tokIn, tokOut)
 	}
 
-	fmt.Fprintf(w, "data: [DONE]\n\n")
+	if !isRawPassthrough {
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	}
 	flusher.Flush()
 }
 

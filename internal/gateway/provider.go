@@ -157,6 +157,10 @@ type StreamChunk struct {
 	Model   string       `json:"model"`
 	Choices []ChatChoice `json:"choices"`
 	Usage   *ChatUsage   `json:"usage,omitempty"`
+	// RawSSELine, if set, is written directly to the client instead of
+	// JSON-marshaling this struct. Used for Anthropic streaming passthrough
+	// where the upstream SSE format must be preserved exactly.
+	RawSSELine string `json:"-"`
 }
 
 // LLMProvider abstracts the upstream LLM API.
@@ -664,13 +668,26 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 	}
 	var toolCallIndex int
 	var currentTool *pendingToolCall
+	var pendingEventType string // Captures "event: xxx" lines for raw SSE passthrough
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		// Capture SSE event type lines for raw passthrough.
+		if strings.HasPrefix(line, "event: ") {
+			pendingEventType = line
+			continue
+		}
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
+
+		// Build the raw SSE event (event type + data line) for passthrough.
+		rawSSE := line
+		if pendingEventType != "" {
+			rawSSE = pendingEventType + "\n" + line
+			pendingEventType = ""
+		}
 
 		var evt struct {
 			Type         string          `json:"type"`
@@ -684,6 +701,13 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 			continue
 		}
 
+		// emit wraps the callback to attach the raw SSE line for passthrough.
+		emitRaw := rawSSE
+		emit := func(chunk StreamChunk) {
+			chunk.RawSSELine = emitRaw
+			cb(chunk)
+		}
+
 		switch evt.Type {
 		case "message_start":
 			var msgStart struct {
@@ -695,7 +719,7 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 				model = modelAlias
 			}
 			role := "assistant"
-			cb(StreamChunk{
+			emit(StreamChunk{
 				ID: msgID, Object: "chat.completion.chunk", Created: created, Model: model,
 				Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: role}}},
 			})
@@ -723,7 +747,7 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 						"arguments": "",
 					},
 				}})
-				cb(StreamChunk{
+				emit(StreamChunk{
 					ID: msgID, Object: "chat.completion.chunk", Created: created, Model: model,
 					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{ToolCalls: tcJSON}}},
 				})
@@ -737,7 +761,7 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 			}
 			if json.Unmarshal(evt.Delta, &delta) == nil {
 				if delta.Type == "text_delta" {
-					cb(StreamChunk{
+					emit(StreamChunk{
 						ID: msgID, Object: "chat.completion.chunk", Created: created, Model: model,
 						Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: delta.Text}}},
 					})
@@ -750,7 +774,7 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 							"arguments": delta.PartialJSON,
 						},
 					}})
-					cb(StreamChunk{
+					emit(StreamChunk{
 						ID: msgID, Object: "chat.completion.chunk", Created: created, Model: model,
 						Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{ToolCalls: tcJSON}}},
 					})
@@ -778,7 +802,7 @@ func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb 
 				}
 				usage = chunk.Usage
 			}
-			cb(chunk)
+			emit(chunk)
 
 		case "message_stop":
 			// handled by the caller after we return
