@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,6 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-
 
 import argparse
 import csv
@@ -34,7 +34,7 @@ BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-from product_telemetry_sender import emit_event, emit_result
+from product_telemetry_sender import DEFAULT_DESTINATION_URL, emit_event, emit_result
 
 
 INSTANCE_ID_PATH = Path("/opt/splunk/etc/apps/defenseclaw_local_mode/local/.product_telemetry_instance_id")
@@ -168,7 +168,7 @@ def main() -> int:
         defenseclaw_integration_enabled="true" if parse_bool(os.environ.get("DEFENSECLAW_INTEGRATION_ENABLED", "false")) else "false",
         event_details_json=summary,
         output=args.output,
-        hec_url=os.environ.get("PHONE_HOME_HEC_URL", ""),
+        hec_url=os.environ.get("PHONE_HOME_HEC_URL", DEFAULT_DESTINATION_URL),
         hec_token=os.environ.get("PHONE_HOME_HEC_TOKEN", ""),
         enabled=os.environ.get("PHONE_HOME_ENABLED", "true"),
         timeout=10,

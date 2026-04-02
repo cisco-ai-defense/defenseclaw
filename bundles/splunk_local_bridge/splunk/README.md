@@ -45,12 +45,19 @@ mode, and it does not proxy or replace a direct O11y integration.
   - assigns the restricted role
   - sets `defaultApp=defenseclaw_local_mode`
 
+## Product Telemetry
+
+- product telemetry is enabled by default and can be disabled with `PHONE_HOME_ENABLED=false`
+- the shipped path uses Splunk's built-in `deployment.app` collection rather than the older custom daily sender
+- `bin/splunk-claw-bridge telemetry-trigger` can be used for immediate validation without waiting for the built-in collection window
+- the bundled app only marks install state and inventory metadata; it does not patch the built-in `splunk_instrumentation` app and it does not send customer event content
+
 ## Supported Pattern
 
 This repo uses the native `docker-splunk` / `splunk-ansible` bootstrap path first:
 
 - app installation uses `splunk.apps_location`
 - config files are emitted from `default.yml`
-- the remaining custom Ansible is limited to the restricted local user bootstrap
+- the remaining custom Ansible is limited to the restricted local user bootstrap and product-telemetry install-state sync
 
 That is intentional. If a future change can be expressed through `docker-splunk` or `splunk-ansible` configuration, prefer that over new custom tasks.

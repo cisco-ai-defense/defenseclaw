@@ -6,12 +6,21 @@
     group: splunk
     mode: "0700"
 
-- name: Configure DefenseClaw product telemetry scheduled-search override
+- name: Read DefenseClaw product telemetry generated context
+  slurp:
+    src: /opt/splunk-claw-bridge/splunk/build/defenseclaw_product_telemetry_context.json
+  register: defenseclaw_product_telemetry_context_raw
+
+- name: Parse DefenseClaw product telemetry generated context
+  set_fact:
+    defenseclaw_product_telemetry_context: "{{ defenseclaw_product_telemetry_context_raw.content | b64decode | from_json }}"
+
+- name: Configure DefenseClaw product telemetry install state override
   copy:
-    dest: /opt/splunk/etc/apps/defenseclaw_local_mode/local/savedsearches.conf
+    dest: /opt/splunk/etc/apps/defenseclaw_local_mode/local/app.conf
     owner: splunk
     group: splunk
     mode: "0600"
     content: |
-      [DefenseClaw Internal - Daily Product Telemetry Usage Summary]
-      disabled = {{ '0' if (lookup('env', 'PHONE_HOME_ENABLED') | default('true', true) | lower) in ['1', 'true', 'yes', 'on'] else '1' }}
+      [install]
+      is_configured = {{ '1' if defenseclaw_product_telemetry_context.phone_home_enabled | default(true) else '0' }}

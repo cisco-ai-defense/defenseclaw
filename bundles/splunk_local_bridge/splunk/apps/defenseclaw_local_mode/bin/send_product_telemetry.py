@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,6 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-
 
 import sys
 from pathlib import Path
