@@ -86,16 +86,9 @@ class MainWindowController: NSWindowController, TabStripViewDelegate {
             contentView.addSubview(hosting)
             currentHostingView = hosting
         } else {
-            let emptyView = VStack {
-                Text("No Active Session")
-                    .font(.title)
-                    .foregroundStyle(.secondary)
-                Button("New Session") {
-                    self.appViewModel.showNewSessionSheet = true
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            let hosting = NSHostingView(rootView: AnyView(emptyView))
+            let dashboardView = DashboardView()
+                .environment(appViewModel)
+            let hosting = NSHostingView(rootView: AnyView(dashboardView))
             hosting.frame = contentView.bounds
             hosting.autoresizingMask = [.width, .height]
             contentView.addSubview(hosting)
