@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.build/master.swiftdeps"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.derived/runner.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.build/runner.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKitPackageTests.build/runner.dia"
+  }
+}

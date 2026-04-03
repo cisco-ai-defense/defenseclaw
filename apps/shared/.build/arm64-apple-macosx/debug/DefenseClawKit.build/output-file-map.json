@@ -1,0 +1,152 @@
+{
+  "": {
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/master.swiftdeps"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/AgentSession.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/AgentSession.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/AgentSession.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/AgentSession~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/AgentSession.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/AgentSession.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/ConfigManager.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigManager.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigManager.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigManager.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigManager.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/DefenseClawKit.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/DefenseClawKit.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/DefenseClawKit.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/DefenseClawKit~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/DefenseClawKit.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/DefenseClawKit.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/LaunchAgentManager.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/LaunchAgentManager.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/LaunchAgentManager.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/LaunchAgentManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/LaunchAgentManager.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/LaunchAgentManager.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/Alert.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Alert.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Alert.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Alert~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Alert.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Alert.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/ChatMessage.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ChatMessage.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ChatMessage.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ChatMessage~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ChatMessage.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ChatMessage.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/ConfigModels.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigModels.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigModels.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigModels.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ConfigModels.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/EnforceModels.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/EnforceModels.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/EnforceModels.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/EnforceModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/EnforceModels.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/EnforceModels.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/GuardrailModels.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/GuardrailModels.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/GuardrailModels.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/GuardrailModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/GuardrailModels.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/GuardrailModels.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/HealthSnapshot.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/HealthSnapshot.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/HealthSnapshot.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/HealthSnapshot~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/HealthSnapshot.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/HealthSnapshot.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/MCPServer.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/MCPServer.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/MCPServer.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/MCPServer~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/MCPServer.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/MCPServer.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/Plugin.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Plugin.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Plugin.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Plugin~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Plugin.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Plugin.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/PolicyModels.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/PolicyModels.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/PolicyModels.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/PolicyModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/PolicyModels.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/PolicyModels.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/ScanResult.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ScanResult.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ScanResult.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ScanResult~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ScanResult.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ScanResult.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/SessionConfig.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SessionConfig.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SessionConfig.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SessionConfig~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SessionConfig.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SessionConfig.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/Severity.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Severity.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Severity.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Severity~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Severity.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Severity.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/Skill.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Skill.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Skill.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Skill~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Skill.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/Skill.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/ToolEntry.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEntry.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEntry.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEntry~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEntry.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEntry.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/Models/ToolEvent.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEvent.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEvent.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEvent~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEvent.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ToolEvent.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/ProcessRunner.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ProcessRunner.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ProcessRunner.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ProcessRunner~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ProcessRunner.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/ProcessRunner.dia"
+  },
+  "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/Sources/DefenseClawKit/SidecarClient.swift": {
+    "dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SidecarClient.d",
+    "object": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SidecarClient.swift.o",
+    "swiftmodule": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SidecarClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SidecarClient.swiftdeps",
+    "diagnostics": "/Users/nghodki/workspace/defenseclaw/.worktrees/macos-app/apps/shared/.build/arm64-apple-macosx/debug/DefenseClawKit.build/SidecarClient.dia"
+  }
+}
