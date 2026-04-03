@@ -25,7 +25,7 @@ final class ConfigManagerTests: XCTestCase {
         config.gateway = GatewayFullConfig()
         config.gateway?.host = "127.0.0.1"
         config.gateway?.port = 18789
-        config.gateway?.apiPort = 18790
+        config.gateway?.apiPort = 18970
         config.guardrail = GuardrailFullConfig()
         config.guardrail?.enabled = false
         config.guardrail?.mode = "observe"

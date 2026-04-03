@@ -1,12 +1,12 @@
 import Foundation
 
-/// HTTP client for the DefenseClaw sidecar REST API at localhost:18790.
+/// HTTP client for the DefenseClaw sidecar REST API at localhost:18970.
 public actor SidecarClient {
     private let baseURL: URL
     private let session: URLSession
     private let decoder: JSONDecoder
 
-    public init(host: String = "127.0.0.1", port: Int = 18790) {
+    public init(host: String = "127.0.0.1", port: Int = 18970) {
         self.baseURL = URL(string: "http://\(host):\(port)")!
         self.session = URLSession(configuration: .ephemeral)
         let dec = JSONDecoder()

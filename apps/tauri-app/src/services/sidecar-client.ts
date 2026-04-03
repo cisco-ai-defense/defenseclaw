@@ -7,7 +7,7 @@ import type {
   GuardrailConfig,
 } from '@/types';
 
-const SIDECAR_BASE_URL = 'http://127.0.0.1:18790';
+const SIDECAR_BASE_URL = 'http://127.0.0.1:18970';
 
 export class SidecarClient {
   private baseUrl: string;

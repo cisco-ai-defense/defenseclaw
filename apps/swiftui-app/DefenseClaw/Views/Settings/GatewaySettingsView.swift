@@ -33,7 +33,7 @@ struct GatewaySettingsView: View {
         do {
             config = try manager.load()
             host = config?.gateway?.host ?? "127.0.0.1"
-            port = String(config?.gateway?.port ?? 18790)
+            port = String(config?.gateway?.port ?? 18970)
         } catch {
             print("Error loading config: \(error)")
             config = AppConfig()

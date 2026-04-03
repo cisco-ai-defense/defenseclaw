@@ -3,7 +3,7 @@ import XCTest
 
 final class SidecarClientTests: XCTestCase {
     func testBaseURLConstruction() {
-        let _ = SidecarClient(host: "127.0.0.1", port: 18790)
+        let _ = SidecarClient(host: "127.0.0.1", port: 18970)
         let _ = SidecarClient(host: "10.200.0.1", port: 19000)
     }
 
