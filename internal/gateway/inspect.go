@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -283,6 +284,27 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
 			verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode),
 		traceID)
+
+	// Write structured record to inspected_tool_calls for efficient querying.
+	if a.store != nil {
+		argsSummary := string(req.Args)
+		if len(argsSummary) > 512 {
+			argsSummary = argsSummary[:512]
+		}
+		findingsStr := strings.Join(verdict.Findings, "; ")
+		_ = a.store.InsertToolInspection(audit.InspectedToolCall{
+			ToolName:    req.Tool,
+			ArgsSummary: argsSummary,
+			Action:      verdict.Action,
+			Severity:    verdict.Severity,
+			Confidence:  verdict.Confidence,
+			Findings:    findingsStr,
+			Reason:      verdict.Reason,
+			Mode:        mode,
+			ElapsedUs:   elapsed.Microseconds(),
+			InspectedAt: time.Now().UTC(),
+		})
+	}
 
 	a.emitCodeGuardOTel(&req, verdict, elapsed)
 

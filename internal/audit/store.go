@@ -150,6 +150,22 @@ func (s *Store) Init() error {
 	CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 	CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+
+	CREATE TABLE IF NOT EXISTS inspected_tool_calls (
+		id TEXT PRIMARY KEY,
+		tool_name TEXT NOT NULL,
+		args_summary TEXT,
+		action TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		confidence REAL,
+		findings TEXT,
+		reason TEXT,
+		mode TEXT,
+		elapsed_us INTEGER,
+		inspected_at DATETIME NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_itc_inspected_at ON inspected_tool_calls(inspected_at);
+	CREATE INDEX IF NOT EXISTS idx_itc_action ON inspected_tool_calls(action);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -620,12 +636,14 @@ func (s *Store) ListFindingsByScan(scanID string) ([]FindingRow, error) {
 }
 
 type Counts struct {
-	BlockedSkills int
-	AllowedSkills int
-	BlockedMCPs   int
-	AllowedMCPs   int
-	Alerts        int
-	TotalScans    int
+	BlockedSkills    int
+	AllowedSkills    int
+	BlockedMCPs      int
+	AllowedMCPs      int
+	Alerts           int
+	TotalScans       int
+	ToolInspections  int
+	ToolBlocks       int
 }
 
 func (s *Store) GetCounts() (Counts, error) {
@@ -640,6 +658,8 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedMCPs},
 		{`SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, &c.TotalScans},
+		{`SELECT COUNT(*) FROM inspected_tool_calls`, &c.ToolInspections},
+		{`SELECT COUNT(*) FROM inspected_tool_calls WHERE action = 'block'`, &c.ToolBlocks},
 	}
 	for _, q := range queries {
 		if err := s.db.QueryRow(q.sql).Scan(q.dest); err != nil {
@@ -691,4 +711,117 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// --- Inspected Tool Calls ---
+
+// InspectedToolCall records a single tool inspection verdict.
+type InspectedToolCall struct {
+	ID          string    `json:"id"`
+	ToolName    string    `json:"tool_name"`
+	ArgsSummary string    `json:"args_summary"`
+	Action      string    `json:"action"`
+	Severity    string    `json:"severity"`
+	Confidence  float64   `json:"confidence"`
+	Findings    string    `json:"findings"`
+	Reason      string    `json:"reason"`
+	Mode        string    `json:"mode"`
+	ElapsedUs   int64     `json:"elapsed_us"`
+	InspectedAt time.Time `json:"inspected_at"`
+}
+
+// InsertToolInspection records a tool inspection verdict.
+func (s *Store) InsertToolInspection(tc InspectedToolCall) error {
+	if tc.ID == "" {
+		tc.ID = uuid.New().String()
+	}
+	if tc.InspectedAt.IsZero() {
+		tc.InspectedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO inspected_tool_calls
+		 (id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		tc.ID, tc.ToolName, tc.ArgsSummary, tc.Action, tc.Severity,
+		tc.Confidence, tc.Findings, tc.Reason, tc.Mode, tc.ElapsedUs,
+		tc.InspectedAt.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert tool inspection: %w", err)
+	}
+	return nil
+}
+
+// ListToolInspections returns recent tool inspection records.
+func (s *Store) ListToolInspections(limit int) ([]InspectedToolCall, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at
+		 FROM inspected_tool_calls ORDER BY inspected_at DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list tool inspections: %w", err)
+	}
+	defer rows.Close()
+
+	var results []InspectedToolCall
+	for rows.Next() {
+		var tc InspectedToolCall
+		var argsSummary, findings, reason, mode sql.NullString
+		var confidence sql.NullFloat64
+		var elapsedUs sql.NullInt64
+		if err := rows.Scan(
+			&tc.ID, &tc.ToolName, &argsSummary, &tc.Action, &tc.Severity,
+			&confidence, &findings, &reason, &mode, &elapsedUs, &tc.InspectedAt,
+		); err != nil {
+			return nil, fmt.Errorf("audit: scan tool inspection row: %w", err)
+		}
+		tc.ArgsSummary = argsSummary.String
+		tc.Confidence = confidence.Float64
+		tc.Findings = findings.String
+		tc.Reason = reason.String
+		tc.Mode = mode.String
+		tc.ElapsedUs = elapsedUs.Int64
+		results = append(results, tc)
+	}
+	return results, rows.Err()
+}
+
+// ListToolInspectionsByAction returns tool inspections filtered by action (allow/alert/block).
+func (s *Store) ListToolInspectionsByAction(action string, limit int) ([]InspectedToolCall, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at
+		 FROM inspected_tool_calls WHERE action = ? ORDER BY inspected_at DESC LIMIT ?`, action, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list tool inspections by action: %w", err)
+	}
+	defer rows.Close()
+
+	var results []InspectedToolCall
+	for rows.Next() {
+		var tc InspectedToolCall
+		var argsSummary, findings, reason, mode sql.NullString
+		var confidence sql.NullFloat64
+		var elapsedUs sql.NullInt64
+		if err := rows.Scan(
+			&tc.ID, &tc.ToolName, &argsSummary, &tc.Action, &tc.Severity,
+			&confidence, &findings, &reason, &mode, &elapsedUs, &tc.InspectedAt,
+		); err != nil {
+			return nil, fmt.Errorf("audit: scan tool inspection row: %w", err)
+		}
+		tc.ArgsSummary = argsSummary.String
+		tc.Confidence = confidence.Float64
+		tc.Findings = findings.String
+		tc.Reason = reason.String
+		tc.Mode = mode.String
+		tc.ElapsedUs = elapsedUs.Int64
+		results = append(results, tc)
+	}
+	return results, rows.Err()
 }
