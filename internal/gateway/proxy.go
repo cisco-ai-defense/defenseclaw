@@ -902,9 +902,14 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 	if p.masterKey == "" {
 		return true
 	}
+	// Accept both Authorization: Bearer (OpenAI convention) and
+	// x-api-key (Anthropic convention) for the master key.
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ") == p.masterKey
+	}
+	if apiKey := r.Header.Get("x-api-key"); apiKey != "" {
+		return apiKey == p.masterKey
 	}
 	return false
 }
