@@ -166,6 +166,7 @@ func (s *Store) Init() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_itc_inspected_at ON inspected_tool_calls(inspected_at);
 	CREATE INDEX IF NOT EXISTS idx_itc_action ON inspected_tool_calls(action);
+	CREATE INDEX IF NOT EXISTS idx_itc_tool_name ON inspected_tool_calls(tool_name);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -635,6 +636,7 @@ func (s *Store) ListFindingsByScan(scanID string) ([]FindingRow, error) {
 	return findings, rows.Err()
 }
 
+// Counts holds aggregate counts for the TUI dashboard and management API.
 type Counts struct {
 	BlockedSkills    int
 	AllowedSkills    int
@@ -752,17 +754,11 @@ func (s *Store) InsertToolInspection(tc InspectedToolCall) error {
 	return nil
 }
 
-// ListToolInspections returns recent tool inspection records.
-func (s *Store) ListToolInspections(limit int) ([]InspectedToolCall, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.db.Query(
-		`SELECT id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at
-		 FROM inspected_tool_calls ORDER BY inspected_at DESC LIMIT ?`, limit,
-	)
+// queryToolInspections executes a query and scans the results into InspectedToolCall structs.
+func (s *Store) queryToolInspections(query string, args ...any) ([]InspectedToolCall, error) {
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("audit: list tool inspections: %w", err)
+		return nil, fmt.Errorf("audit: query tool inspections: %w", err)
 	}
 	defer rows.Close()
 
@@ -789,39 +785,24 @@ func (s *Store) ListToolInspections(limit int) ([]InspectedToolCall, error) {
 	return results, rows.Err()
 }
 
+// ListToolInspections returns recent tool inspection records.
+func (s *Store) ListToolInspections(limit int) ([]InspectedToolCall, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	return s.queryToolInspections(
+		`SELECT id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at
+		 FROM inspected_tool_calls ORDER BY inspected_at DESC LIMIT ?`, limit,
+	)
+}
+
 // ListToolInspectionsByAction returns tool inspections filtered by action (allow/alert/block).
 func (s *Store) ListToolInspectionsByAction(action string, limit int) ([]InspectedToolCall, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(
+	return s.queryToolInspections(
 		`SELECT id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at
 		 FROM inspected_tool_calls WHERE action = ? ORDER BY inspected_at DESC LIMIT ?`, action, limit,
 	)
-	if err != nil {
-		return nil, fmt.Errorf("audit: list tool inspections by action: %w", err)
-	}
-	defer rows.Close()
-
-	var results []InspectedToolCall
-	for rows.Next() {
-		var tc InspectedToolCall
-		var argsSummary, findings, reason, mode sql.NullString
-		var confidence sql.NullFloat64
-		var elapsedUs sql.NullInt64
-		if err := rows.Scan(
-			&tc.ID, &tc.ToolName, &argsSummary, &tc.Action, &tc.Severity,
-			&confidence, &findings, &reason, &mode, &elapsedUs, &tc.InspectedAt,
-		); err != nil {
-			return nil, fmt.Errorf("audit: scan tool inspection row: %w", err)
-		}
-		tc.ArgsSummary = argsSummary.String
-		tc.Confidence = confidence.Float64
-		tc.Findings = findings.String
-		tc.Reason = reason.String
-		tc.Mode = mode.String
-		tc.ElapsedUs = elapsedUs.Int64
-		results = append(results, tc)
-	}
-	return results, rows.Err()
 }

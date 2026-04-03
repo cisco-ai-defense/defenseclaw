@@ -289,7 +289,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if a.store != nil {
 		argsSummary := string(req.Args)
 		if len(argsSummary) > 512 {
-			argsSummary = argsSummary[:512]
+			argsSummary = strings.ToValidUTF8(argsSummary[:512], "")
 		}
 		findingsStr := strings.Join(verdict.Findings, "; ")
 		_ = a.store.InsertToolInspection(audit.InspectedToolCall{
