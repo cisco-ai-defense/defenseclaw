@@ -113,6 +113,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc("/api/v1/tools/register", a.handleToolRegister)
+	mux.HandleFunc("/api/v1/tools/catalog", a.handleToolCatalogV1)
+	mux.HandleFunc("/api/v1/tools/unregister", a.handleToolUnregister)
 
 	handler := a.metricsMiddleware(csrfProtect(mux))
 	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
@@ -676,23 +679,38 @@ func (a *APIServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.client == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+	if a.client != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		data, err := a.client.GetSkillsStatus(ctx)
+		if err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data)
+			return
+		}
+		// Fall through to registered_tools on error
+	}
+
+	// Fallback: query registered_tools for skills
+	if a.store != nil {
+		tools, err := a.store.ListRegisteredTools("")
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		var skills []audit.RegisteredTool
+		for _, t := range tools {
+			if t.Type == "skill" {
+				skills = append(skills, t)
+			}
+		}
+		a.writeJSON(w, http.StatusOK, skills)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	data, err := a.client.GetSkillsStatus(ctx)
-	if err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
 }
 
 func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
@@ -701,18 +719,32 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.scannerCfg == nil {
-		a.writeJSON(w, http.StatusOK, []config.MCPServerEntry{})
+	if a.scannerCfg != nil {
+		servers, err := a.scannerCfg.ReadMCPServers()
+		if err == nil && len(servers) > 0 {
+			a.writeJSON(w, http.StatusOK, servers)
+			return
+		}
+	}
+
+	// Fallback: query registered_tools for MCPs
+	if a.store != nil {
+		tools, err := a.store.ListRegisteredTools("")
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		var mcps []audit.RegisteredTool
+		for _, t := range tools {
+			if t.Type == "mcp" {
+				mcps = append(mcps, t)
+			}
+		}
+		a.writeJSON(w, http.StatusOK, mcps)
 		return
 	}
 
-	servers, err := a.scannerCfg.ReadMCPServers()
-	if err != nil {
-		a.writeJSON(w, http.StatusOK, []config.MCPServerEntry{})
-		return
-	}
-
-	a.writeJSON(w, http.StatusOK, servers)
+	a.writeJSON(w, http.StatusOK, []config.MCPServerEntry{})
 }
 
 func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
@@ -721,23 +753,197 @@ func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.client == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+	if a.client != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		data, err := a.client.GetToolsCatalog(ctx)
+		if err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data)
+			return
+		}
+		// Fall through to registered_tools on error
+	}
+
+	// Fallback: query registered_tools
+	if a.store != nil {
+		tools, err := a.store.ListRegisteredTools("")
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		a.writeJSON(w, http.StatusOK, tools)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
+	a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+}
 
-	data, err := a.client.GetToolsCatalog(ctx)
+// ---------------------------------------------------------------------------
+// POST /api/v1/tools/register — register tools from an external platform
+// ---------------------------------------------------------------------------
+
+type toolRegisterRequest struct {
+	Platform string                `json:"platform"`
+	Tools    []toolRegisterEntry   `json:"tools"`
+}
+
+type toolRegisterEntry struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Source      string `json:"source,omitempty"`
+	Description string `json:"description,omitempty"`
+	RiskLevel   string `json:"risk_level,omitempty"`
+}
+
+func (a *APIServer) handleToolRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if a.store == nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audit store not available"})
+		return
+	}
+
+	var req toolRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Platform == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "platform is required"})
+		return
+	}
+	if len(req.Tools) == 0 {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tools array is required and must not be empty"})
+		return
+	}
+
+	tools := make([]audit.RegisteredTool, 0, len(req.Tools))
+	for _, entry := range req.Tools {
+		if entry.Name == "" {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "each tool must have a name"})
+			return
+		}
+		if entry.Type == "" {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "each tool must have a type"})
+			return
+		}
+		tools = append(tools, audit.RegisteredTool{
+			Platform:    req.Platform,
+			Name:        entry.Name,
+			Type:        entry.Type,
+			Source:      entry.Source,
+			Description: entry.Description,
+			RiskLevel:   entry.RiskLevel,
+			Enabled:     true,
+		})
+	}
+
+	if err := a.store.BulkRegisterTools(tools); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if a.logger != nil {
+		_ = a.logger.LogAction("tools-register", req.Platform, fmt.Sprintf("registered %d tools", len(tools)))
+	}
+	a.writeJSON(w, http.StatusOK, map[string]int{"registered": len(tools)})
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/tools/catalog — list registered tools with optional platform filter
+// ---------------------------------------------------------------------------
+
+func (a *APIServer) handleToolCatalogV1(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if a.store == nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audit store not available"})
+		return
+	}
+
+	platform := r.URL.Query().Get("platform")
+	tools, err := a.store.ListRegisteredTools(platform)
 	if err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if tools == nil {
+		tools = []audit.RegisteredTool{}
+	}
+
+	// Collect unique platforms.
+	seen := map[string]struct{}{}
+	for _, t := range tools {
+		seen[t.Platform] = struct{}{}
+	}
+	platforms := make([]string, 0, len(seen))
+	for p := range seen {
+		platforms = append(platforms, p)
+	}
+
+	a.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"tools":     tools,
+		"count":     len(tools),
+		"platforms": platforms,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v1/tools/unregister — remove tools by platform and names
+// ---------------------------------------------------------------------------
+
+type toolUnregisterRequest struct {
+	Platform string   `json:"platform"`
+	Names    []string `json:"names"`
+}
+
+func (a *APIServer) handleToolUnregister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	if a.store == nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "audit store not available"})
+		return
+	}
+
+	var req toolUnregisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Platform == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "platform is required"})
+		return
+	}
+	if len(req.Names) == 0 {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "names array is required and must not be empty"})
+		return
+	}
+
+	removed := 0
+	for _, name := range req.Names {
+		if err := a.store.UnregisterTool(req.Platform, name); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		removed++
+	}
+
+	if a.logger != nil {
+		_ = a.logger.LogAction("tools-unregister", req.Platform, fmt.Sprintf("unregistered %d tools", removed))
+	}
+	a.writeJSON(w, http.StatusOK, map[string]int{"unregistered": removed})
 }
 
 // ---------------------------------------------------------------------------

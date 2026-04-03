@@ -167,6 +167,22 @@ func (s *Store) Init() error {
 	CREATE INDEX IF NOT EXISTS idx_itc_inspected_at ON inspected_tool_calls(inspected_at);
 	CREATE INDEX IF NOT EXISTS idx_itc_action ON inspected_tool_calls(action);
 	CREATE INDEX IF NOT EXISTS idx_itc_tool_name ON inspected_tool_calls(tool_name);
+
+	CREATE TABLE IF NOT EXISTS registered_tools (
+		id TEXT PRIMARY KEY,
+		platform TEXT NOT NULL DEFAULT 'unknown',
+		name TEXT NOT NULL,
+		type TEXT NOT NULL,
+		source TEXT,
+		description TEXT,
+		risk_level TEXT DEFAULT 'unknown',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		scan_status TEXT DEFAULT 'unscanned',
+		registered_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_rt_platform_name ON registered_tools(platform, name);
+	CREATE INDEX IF NOT EXISTS idx_rt_type ON registered_tools(type);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -805,4 +821,212 @@ func (s *Store) ListToolInspectionsByAction(action string, limit int) ([]Inspect
 		`SELECT id, tool_name, args_summary, action, severity, confidence, findings, reason, mode, elapsed_us, inspected_at
 		 FROM inspected_tool_calls WHERE action = ? ORDER BY inspected_at DESC LIMIT ?`, action, limit,
 	)
+}
+
+// --- Registered Tools ---
+
+// RegisteredTool represents a tool registered by an external platform.
+type RegisteredTool struct {
+	ID           string    `json:"id"`
+	Platform     string    `json:"platform"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"`
+	Source       string    `json:"source,omitempty"`
+	Description  string    `json:"description,omitempty"`
+	RiskLevel    string    `json:"risk_level"`
+	Enabled      bool      `json:"enabled"`
+	ScanStatus   string    `json:"scan_status"`
+	RegisteredAt time.Time `json:"registered_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// RegisterTool upserts a tool registration (INSERT OR REPLACE on platform+name).
+func (s *Store) RegisterTool(tool RegisteredTool) error {
+	if tool.ID == "" {
+		tool.ID = uuid.New().String()
+	}
+	now := time.Now().UTC()
+	if tool.RegisteredAt.IsZero() {
+		tool.RegisteredAt = now
+	}
+	tool.UpdatedAt = now
+	if tool.RiskLevel == "" {
+		tool.RiskLevel = "unknown"
+	}
+	if tool.ScanStatus == "" {
+		tool.ScanStatus = "unscanned"
+	}
+
+	enabled := 0
+	if tool.Enabled {
+		enabled = 1
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO registered_tools (id, platform, name, type, source, description, risk_level, enabled, scan_status, registered_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(platform, name) DO UPDATE SET
+		   type = excluded.type,
+		   source = excluded.source,
+		   description = excluded.description,
+		   risk_level = excluded.risk_level,
+		   enabled = excluded.enabled,
+		   scan_status = excluded.scan_status,
+		   updated_at = excluded.updated_at`,
+		tool.ID, tool.Platform, tool.Name, tool.Type,
+		nullStr(tool.Source), nullStr(tool.Description),
+		tool.RiskLevel, enabled, tool.ScanStatus,
+		tool.RegisteredAt, tool.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: register tool: %w", err)
+	}
+	return nil
+}
+
+// BulkRegisterTools registers multiple tools in a single transaction.
+func (s *Store) BulkRegisterTools(tools []RegisteredTool) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("audit: begin bulk register: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO registered_tools (id, platform, name, type, source, description, risk_level, enabled, scan_status, registered_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(platform, name) DO UPDATE SET
+		   type = excluded.type,
+		   source = excluded.source,
+		   description = excluded.description,
+		   risk_level = excluded.risk_level,
+		   enabled = excluded.enabled,
+		   scan_status = excluded.scan_status,
+		   updated_at = excluded.updated_at`,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: prepare bulk register: %w", err)
+	}
+	defer stmt.Close()
+
+	now := time.Now().UTC()
+	for i := range tools {
+		if tools[i].ID == "" {
+			tools[i].ID = uuid.New().String()
+		}
+		if tools[i].RegisteredAt.IsZero() {
+			tools[i].RegisteredAt = now
+		}
+		tools[i].UpdatedAt = now
+		if tools[i].RiskLevel == "" {
+			tools[i].RiskLevel = "unknown"
+		}
+		if tools[i].ScanStatus == "" {
+			tools[i].ScanStatus = "unscanned"
+		}
+
+		enabled := 0
+		if tools[i].Enabled {
+			enabled = 1
+		}
+
+		if _, err := stmt.Exec(
+			tools[i].ID, tools[i].Platform, tools[i].Name, tools[i].Type,
+			nullStr(tools[i].Source), nullStr(tools[i].Description),
+			tools[i].RiskLevel, enabled, tools[i].ScanStatus,
+			tools[i].RegisteredAt, tools[i].UpdatedAt,
+		); err != nil {
+			return fmt.Errorf("audit: bulk register tool %q: %w", tools[i].Name, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("audit: commit bulk register: %w", err)
+	}
+	return nil
+}
+
+// UnregisterTool deletes a tool registration by platform and name.
+func (s *Store) UnregisterTool(platform, name string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM registered_tools WHERE platform = ? AND name = ?`,
+		platform, name,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: unregister tool: %w", err)
+	}
+	return nil
+}
+
+// ListRegisteredTools returns all registered tools, optionally filtered by platform.
+func (s *Store) ListRegisteredTools(platform string) ([]RegisteredTool, error) {
+	var query string
+	var args []any
+	if platform != "" {
+		query = `SELECT id, platform, name, type, source, description, risk_level, enabled, scan_status, registered_at, updated_at
+			 FROM registered_tools WHERE platform = ? ORDER BY name`
+		args = append(args, platform)
+	} else {
+		query = `SELECT id, platform, name, type, source, description, risk_level, enabled, scan_status, registered_at, updated_at
+			 FROM registered_tools ORDER BY platform, name`
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list registered tools: %w", err)
+	}
+	defer rows.Close()
+
+	var tools []RegisteredTool
+	for rows.Next() {
+		var t RegisteredTool
+		var source, description, riskLevel, scanStatus sql.NullString
+		var enabled int
+		if err := rows.Scan(&t.ID, &t.Platform, &t.Name, &t.Type, &source, &description, &riskLevel, &enabled, &scanStatus, &t.RegisteredAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("audit: scan registered tool row: %w", err)
+		}
+		t.Source = source.String
+		t.Description = description.String
+		t.RiskLevel = riskLevel.String
+		if t.RiskLevel == "" {
+			t.RiskLevel = "unknown"
+		}
+		t.Enabled = enabled != 0
+		t.ScanStatus = scanStatus.String
+		if t.ScanStatus == "" {
+			t.ScanStatus = "unscanned"
+		}
+		tools = append(tools, t)
+	}
+	return tools, rows.Err()
+}
+
+// GetRegisteredTool returns a single registered tool by platform and name, or nil if not found.
+func (s *Store) GetRegisteredTool(platform, name string) (*RegisteredTool, error) {
+	var t RegisteredTool
+	var source, description, riskLevel, scanStatus sql.NullString
+	var enabled int
+	err := s.db.QueryRow(
+		`SELECT id, platform, name, type, source, description, risk_level, enabled, scan_status, registered_at, updated_at
+		 FROM registered_tools WHERE platform = ? AND name = ?`,
+		platform, name,
+	).Scan(&t.ID, &t.Platform, &t.Name, &t.Type, &source, &description, &riskLevel, &enabled, &scanStatus, &t.RegisteredAt, &t.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("audit: get registered tool: %w", err)
+	}
+	t.Source = source.String
+	t.Description = description.String
+	t.RiskLevel = riskLevel.String
+	if t.RiskLevel == "" {
+		t.RiskLevel = "unknown"
+	}
+	t.Enabled = enabled != 0
+	t.ScanStatus = scanStatus.String
+	if t.ScanStatus == "" {
+		t.ScanStatus = "unscanned"
+	}
+	return &t, nil
 }
