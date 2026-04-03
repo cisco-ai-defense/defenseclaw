@@ -3,19 +3,21 @@ export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
 
 // Subsystem health status
 export interface SubsystemHealth {
-  name: string;
-  status: 'healthy' | 'degraded' | 'down';
-  message?: string;
-  lastCheck: string; // ISO timestamp
+  state: 'starting' | 'running' | 'reconnecting' | 'stopped' | 'error' | 'disabled';
+  since: string; // ISO timestamp
+  details?: Record<string, unknown>;
 }
 
 // Overall health snapshot from sidecar
 export interface HealthSnapshot {
-  timestamp: string; // ISO timestamp
-  sidecar: SubsystemHealth;
+  started_at: string; // ISO timestamp
+  uptime_ms: number;
   gateway: SubsystemHealth;
-  scanners: SubsystemHealth;
-  sandbox?: SubsystemHealth; // Optional on macOS
+  watcher: SubsystemHealth;
+  api: SubsystemHealth;
+  guardrail: SubsystemHealth;
+  telemetry: SubsystemHealth;
+  splunk: SubsystemHealth;
 }
 
 // Alert from audit log

@@ -67,89 +67,79 @@ export class SidecarClient {
     return this.request<Skill[]>('/skills');
   }
 
-  async scanSkill(skillId: string): Promise<ScanResult> {
-    return this.request<ScanResult>(`/skills/${skillId}/scan`, {
+  async scanSkill(path: string): Promise<ScanResult> {
+    return this.request<ScanResult>('/v1/skill/scan', {
       method: 'POST',
+      body: JSON.stringify({ path }),
     });
   }
 
-  async blockSkill(skillId: string): Promise<void> {
-    await this.request(`/skills/${skillId}/block`, { method: 'POST' });
+  async blockSkill(path: string): Promise<void> {
+    await this.request('/enforce/block', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'skill', path }),
+    });
   }
 
-  async allowSkill(skillId: string): Promise<void> {
-    await this.request(`/skills/${skillId}/allow`, { method: 'POST' });
-  }
-
-  async quarantineSkill(skillId: string): Promise<void> {
-    await this.request(`/skills/${skillId}/quarantine`, { method: 'POST' });
+  async allowSkill(path: string): Promise<void> {
+    await this.request('/enforce/allow', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'skill', path }),
+    });
   }
 
   // MCP Server endpoints
   async getMCPServers(): Promise<MCPServer[]> {
-    return this.request<MCPServer[]>('/mcp-servers');
+    return this.request<MCPServer[]>('/mcps');
   }
 
-  async scanMCPServer(serverId: string): Promise<ScanResult> {
-    return this.request<ScanResult>(`/mcp-servers/${serverId}/scan`, {
+  async scanMCPServer(path: string): Promise<ScanResult> {
+    return this.request<ScanResult>('/v1/mcp/scan', {
       method: 'POST',
+      body: JSON.stringify({ path }),
     });
   }
 
-  async blockMCPServer(serverId: string): Promise<void> {
-    await this.request(`/mcp-servers/${serverId}/block`, { method: 'POST' });
-  }
-
-  async allowMCPServer(serverId: string): Promise<void> {
-    await this.request(`/mcp-servers/${serverId}/allow`, { method: 'POST' });
-  }
-
-  async quarantineMCPServer(serverId: string): Promise<void> {
-    await this.request(`/mcp-servers/${serverId}/quarantine`, {
+  async blockMCPServer(path: string): Promise<void> {
+    await this.request('/enforce/block', {
       method: 'POST',
+      body: JSON.stringify({ type: 'mcp', path }),
+    });
+  }
+
+  async allowMCPServer(path: string): Promise<void> {
+    await this.request('/enforce/allow', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'mcp', path }),
     });
   }
 
   // Guardrail configuration endpoints
   async getGuardrailConfig(): Promise<GuardrailConfig> {
-    return this.request<GuardrailConfig>('/config/guardrails');
+    return this.request<GuardrailConfig>('/v1/guardrail/config');
   }
 
   async updateGuardrailConfig(
     config: Partial<GuardrailConfig>
   ): Promise<GuardrailConfig> {
-    return this.request<GuardrailConfig>('/config/guardrails', {
+    return this.request<GuardrailConfig>('/v1/guardrail/config', {
       method: 'PUT',
       body: JSON.stringify(config),
     });
   }
 
-  // Scan result history
-  async getScanHistory(params?: {
-    limit?: number;
-    targetType?: 'skill' | 'mcp-server' | 'tool';
-  }): Promise<ScanResult[]> {
-    const query = new URLSearchParams();
-    if (params?.limit) query.set('limit', params.limit.toString());
-    if (params?.targetType) query.set('targetType', params.targetType);
-
-    const queryString = query.toString();
-    return this.request<ScanResult[]>(
-      `/scan-history${queryString ? `?${queryString}` : ''}`
-    );
+  // Block/Allow list endpoints
+  async getBlockedItems(): Promise<Array<{ type: string; path: string }>> {
+    return this.request('/enforce/blocked');
   }
 
-  // Inventory endpoints
-  async getInventory(): Promise<{
-    skills: Skill[];
-    mcpServers: MCPServer[];
-    lastSync: string;
-  }> {
-    return this.request('/inventory');
+  async getAllowedItems(): Promise<Array<{ type: string; path: string }>> {
+    return this.request('/enforce/allowed');
   }
 
-  async refreshInventory(): Promise<void> {
-    await this.request('/inventory/refresh', { method: 'POST' });
+  // Policy reload
+  async reloadPolicy(): Promise<void> {
+    await this.request('/policy/reload', { method: 'POST' });
   }
 }
 
