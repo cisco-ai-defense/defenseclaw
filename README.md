@@ -306,6 +306,8 @@ Splunk General Terms and the local-mode scope guardrails documented in
 The bundled local runtime starts directly in Splunk Free mode from day 1. In
 Splunk Free mode, alerting is disabled, authentication and RBAC are removed,
 and the default bundled profile does not require local user credentials.
+When you open Splunk Web in a browser, Splunk can briefly route through its
+account page before it auto-enters the app without asking for credentials.
 Existing Splunk license and ingest limits still apply. To use full Splunk
 Enterprise features later, apply a valid Splunk Enterprise license. For more
 details, see

@@ -60,6 +60,8 @@ Scope guardrails for the local Splunk preset:
 - in Splunk Free mode, alerting is disabled
 - in Splunk Free mode, authentication and RBAC are removed, so the
   default bundled profile does not require local user credentials
+- when you open Splunk Web in a browser, Splunk can briefly route through its
+  account page before it auto-enters the app without asking for credentials
 - to use full Splunk Enterprise features later, apply a valid Splunk
   Enterprise license
 - assume existing Splunk license limits still apply

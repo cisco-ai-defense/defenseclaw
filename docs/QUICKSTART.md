@@ -107,6 +107,7 @@ These values can vary if the preset or config is overridden:
 - sourcetype `defenseclaw:json`
 - Splunk starts directly in **Free mode** from day 1
 - Splunk Web does not require local user credentials in the default bundled profile
+- A browser can briefly route through Splunk's account page before it auto-enters the app
 
 Recommended local flow:
 

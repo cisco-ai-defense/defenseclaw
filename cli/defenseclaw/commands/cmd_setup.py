@@ -2024,6 +2024,7 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
     if did_logs:
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
         click.echo("       Free mode is active, so no local Splunk login is required.")
+        click.echo("       A browser might briefly load Splunk's account page before it auto-enters Web.")
         click.echo("    3. Validate data in local Splunk")
     click.echo()
     click.echo("  To disable:")

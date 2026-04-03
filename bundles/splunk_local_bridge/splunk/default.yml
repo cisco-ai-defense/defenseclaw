@@ -51,6 +51,8 @@ splunk:
       value:
         directory: /opt/splunk/etc/system/local
         content:
+          general:
+            allowRemoteLogin: always
           kvstore:
             disabled: true
     - key: limits
