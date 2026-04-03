@@ -2,7 +2,7 @@
   "$schema": "https://tauri.app/v2/schemas/tauri.config.json",
   "productName": "DefenseClaw",
   "version": "0.1.0",
-  "identifier": "com.defenseclaw.app",
+  "identifier": "com.defenseclaw.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",

@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::process::Command;
-use tauri::Manager;
+
 
 /// Install the DefenseClaw launchagent (macOS only)
 #[tauri::command]
@@ -63,7 +63,6 @@ async fn run_cli(args: Vec<String>) -> Result<String, String> {
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             launchagent_install,
             launchagent_uninstall,
