@@ -37,6 +37,11 @@ public struct ClawConfig: Codable, Sendable {
     public var mode: String?
     public var homeDir: String?
     public var configFile: String?
+
+    public init(mode: String? = nil, homeDir: String? = nil, configFile: String? = nil) {
+        self.mode = mode; self.homeDir = homeDir; self.configFile = configFile
+    }
+
     enum CodingKeys: String, CodingKey { case mode; case homeDir = "home_dir"; case configFile = "config_file" }
 }
 
@@ -62,6 +67,15 @@ public struct SkillScannerConfig: Codable, Sendable {
     public var binary: String?; public var useLlm: Bool?; public var useBehavioral: Bool?
     public var enableMeta: Bool?; public var useTrigger: Bool?; public var useVirustotal: Bool?
     public var useAidefense: Bool?; public var llmConsensusRuns: Int?; public var policy: String?; public var lenient: Bool?
+
+    public init(binary: String? = nil, useLlm: Bool? = nil, useBehavioral: Bool? = nil,
+                enableMeta: Bool? = nil, useTrigger: Bool? = nil, useVirustotal: Bool? = nil,
+                useAidefense: Bool? = nil, llmConsensusRuns: Int? = nil, policy: String? = nil, lenient: Bool? = nil) {
+        self.binary = binary; self.useLlm = useLlm; self.useBehavioral = useBehavioral
+        self.enableMeta = enableMeta; self.useTrigger = useTrigger; self.useVirustotal = useVirustotal
+        self.useAidefense = useAidefense; self.llmConsensusRuns = llmConsensusRuns; self.policy = policy; self.lenient = lenient
+    }
+
     enum CodingKeys: String, CodingKey {
         case binary; case policy; case lenient; case useLlm = "use_llm"; case useBehavioral = "use_behavioral"
         case enableMeta = "enable_meta"; case useTrigger = "use_trigger"; case useVirustotal = "use_virustotal"
@@ -72,6 +86,13 @@ public struct SkillScannerConfig: Codable, Sendable {
 public struct MCPScannerConfig: Codable, Sendable {
     public var binary: String?; public var analyzers: String?
     public var scanPrompts: Bool?; public var scanResources: Bool?; public var scanInstructions: Bool?
+
+    public init(binary: String? = nil, analyzers: String? = nil, scanPrompts: Bool? = nil,
+                scanResources: Bool? = nil, scanInstructions: Bool? = nil) {
+        self.binary = binary; self.analyzers = analyzers; self.scanPrompts = scanPrompts
+        self.scanResources = scanResources; self.scanInstructions = scanInstructions
+    }
+
     enum CodingKeys: String, CodingKey {
         case binary; case analyzers; case scanPrompts = "scan_prompts"
         case scanResources = "scan_resources"; case scanInstructions = "scan_instructions"
@@ -81,6 +102,13 @@ public struct MCPScannerConfig: Codable, Sendable {
 public struct ScannersConfig: Codable, Sendable {
     public var skillScanner: SkillScannerConfig?; public var mcpScanner: MCPScannerConfig?
     public var pluginScanner: String?; public var codeguard: String?
+
+    public init(skillScanner: SkillScannerConfig? = nil, mcpScanner: MCPScannerConfig? = nil,
+                pluginScanner: String? = nil, codeguard: String? = nil) {
+        self.skillScanner = skillScanner; self.mcpScanner = mcpScanner
+        self.pluginScanner = pluginScanner; self.codeguard = codeguard
+    }
+
     enum CodingKeys: String, CodingKey {
         case skillScanner = "skill_scanner"; case mcpScanner = "mcp_scanner"
         case pluginScanner = "plugin_scanner"; case codeguard
@@ -120,6 +148,17 @@ public struct GuardrailFullConfig: Codable, Sendable {
     public var host: String?; public var port: Int?; public var model: String?
     public var modelName: String?; public var apiKeyEnv: String?; public var originalModel: String?
     public var blockMessage: String?; public var judge: JudgeConfig?
+
+    public init(enabled: Bool? = nil, mode: String? = nil, scannerMode: String? = nil,
+                host: String? = nil, port: Int? = nil, model: String? = nil,
+                modelName: String? = nil, apiKeyEnv: String? = nil, originalModel: String? = nil,
+                blockMessage: String? = nil, judge: JudgeConfig? = nil) {
+        self.enabled = enabled; self.mode = mode; self.scannerMode = scannerMode
+        self.host = host; self.port = port; self.model = model
+        self.modelName = modelName; self.apiKeyEnv = apiKeyEnv; self.originalModel = originalModel
+        self.blockMessage = blockMessage; self.judge = judge
+    }
+
     enum CodingKeys: String, CodingKey {
         case enabled; case mode; case host; case port; case model; case judge
         case scannerMode = "scanner_mode"; case modelName = "model_name"
@@ -158,6 +197,19 @@ public struct GatewayFullConfig: Codable, Sendable {
     public var autoApproveSafe: Bool?; public var reconnectMs: Int?; public var maxReconnectMs: Int?
     public var approvalTimeoutS: Int?; public var apiPort: Int?; public var apiBind: String?
     public var watcher: GatewayWatcherConfig?
+
+    public init(host: String? = nil, port: Int? = nil, token: String? = nil, tokenEnv: String? = nil,
+                tls: Bool? = nil, tlsSkipVerify: Bool? = nil, deviceKeyFile: String? = nil,
+                autoApproveSafe: Bool? = nil, reconnectMs: Int? = nil, maxReconnectMs: Int? = nil,
+                approvalTimeoutS: Int? = nil, apiPort: Int? = nil, apiBind: String? = nil,
+                watcher: GatewayWatcherConfig? = nil) {
+        self.host = host; self.port = port; self.token = token; self.tokenEnv = tokenEnv
+        self.tls = tls; self.tlsSkipVerify = tlsSkipVerify; self.deviceKeyFile = deviceKeyFile
+        self.autoApproveSafe = autoApproveSafe; self.reconnectMs = reconnectMs; self.maxReconnectMs = maxReconnectMs
+        self.approvalTimeoutS = approvalTimeoutS; self.apiPort = apiPort; self.apiBind = apiBind
+        self.watcher = watcher
+    }
+
     enum CodingKeys: String, CodingKey {
         case host; case port; case token; case tls; case watcher
         case tokenEnv = "token_env"; case tlsSkipVerify = "tls_skip_verify"
