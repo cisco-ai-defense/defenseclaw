@@ -73,6 +73,9 @@ Scope guardrails for the local Splunk preset:
 - do not assume this local preset proxies or replaces a direct O11y
   integration
 
+For more details on the Free-tier behavior and limits, see
+[About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
+
 ---
 
 ## Building from Source

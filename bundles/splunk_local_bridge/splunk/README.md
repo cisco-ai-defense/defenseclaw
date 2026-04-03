@@ -56,6 +56,10 @@ The bundled DefenseClaw local profile starts Splunk directly in **Free mode**.
 That means:
 
 - no temporary 60-day trial period
+- alerts are disabled in Free mode
 - no local Splunk user bootstrap inside the bundle
 - no credential prompt for Splunk Web in the default local profile
 - if someone needs Enterprise behavior later, they must install a real Enterprise license
+
+For more detail on the Free-tier behavior and limits, see
+[About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
