@@ -33,6 +33,24 @@ import click
 from defenseclaw.context import AppContext, pass_ctx
 
 
+def _api_bind_host(app: AppContext) -> str:
+    """Resolve the API bind address, mirroring sidecar.runAPI in Go."""
+    if app.cfg.openshell.is_standalone() and app.cfg.guardrail.host not in ("", "localhost"):
+        return app.cfg.guardrail.host
+    return "127.0.0.1"
+
+
+def _sidecar_client(app: AppContext):
+    """Build an OrchestratorClient from the app's gateway config."""
+    from defenseclaw.gateway import OrchestratorClient
+
+    return OrchestratorClient(
+        host=_api_bind_host(app),
+        port=app.cfg.gateway.api_port,
+        token=app.cfg.gateway.resolved_token(),
+    )
+
+
 @click.group()
 def plugin() -> None:
     """Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore."""
@@ -201,7 +219,6 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
 
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-    from defenseclaw.gateway import OrchestratorClient
     from defenseclaw.registry import (
         RegistryError,
         SourceType,
@@ -332,10 +349,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
                             click.echo("[install] quarantine failed", err=True)
 
                     if action_cfg.runtime == "disable":
-                        client = OrchestratorClient(
-                            host=app.cfg.gateway.host,
-                            port=app.cfg.gateway.api_port,
-                        )
+                        client = _sidecar_client(app)
                         try:
                             client.disable_plugin(plugin_name)
                             applied_actions.append("disabled via gateway")
@@ -645,8 +659,10 @@ def _resolve_plugin_dir(name_or_path: str, plugin_dir: str) -> str | None:
 def _get_openclaw_plugin_info(name: str) -> dict | None:
     """Run ``openclaw plugins info <name> --json`` and return the plugin dict."""
     try:
+        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+        prefix = openclaw_cmd_prefix()
         proc = subprocess.run(
-            ["openclaw", "plugins", "info", name, "--json"],
+            [*prefix, openclaw_bin(), "plugins", "info", name, "--json"],
             capture_output=True, text=True, timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -717,8 +733,10 @@ def _list_defenseclaw_plugins(plugin_dir: str) -> list[str]:
 def _list_openclaw_plugins() -> list[dict]:
     """Query ``openclaw plugins list --json`` for the active OpenClaw plugins."""
     try:
+        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+        prefix = openclaw_cmd_prefix()
         proc = subprocess.run(
-            ["openclaw", "plugins", "list", "--json"],
+            [*prefix, openclaw_bin(), "plugins", "list", "--json"],
             capture_output=True, text=True, timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -865,14 +883,10 @@ def disable(app: AppContext, name: str, reason: str) -> None:
     Requires the gateway to be running.
     """
     from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.gateway import OrchestratorClient
 
     plugin_name = _resolve_openclaw_plugin_id(name)
 
-    client = OrchestratorClient(
-        host=app.cfg.gateway.host,
-        port=app.cfg.gateway.api_port,
-    )
+    client = _sidecar_client(app)
     try:
         resp = client.disable_plugin(plugin_name)
     except Exception as exc:
@@ -908,14 +922,10 @@ def enable(app: AppContext, name: str) -> None:
     This is a runtime-only action.
     """
     from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.gateway import OrchestratorClient
 
     plugin_name = _resolve_openclaw_plugin_id(name)
 
-    client = OrchestratorClient(
-        host=app.cfg.gateway.host,
-        port=app.cfg.gateway.api_port,
-    )
+    client = _sidecar_client(app)
     try:
         resp = client.enable_plugin(plugin_name)
     except Exception as exc:

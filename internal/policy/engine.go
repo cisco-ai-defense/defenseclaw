@@ -255,7 +255,26 @@ func loadStore(regoDir string) (storage.Store, error) {
 		return nil, fmt.Errorf("policy: parse data.json: %w", err)
 	}
 
+	mergeSupplementalData(regoDir, data, "data-sandbox.json")
+
 	return inmem.NewFromObject(data), nil
+}
+
+// mergeSupplementalData reads a JSON file from regoDir and merges its
+// top-level keys into data. Missing files are silently skipped.
+func mergeSupplementalData(regoDir string, data map[string]interface{}, filename string) {
+	path := filepath.Join(regoDir, filename)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var extra map[string]interface{}
+	if err := json.Unmarshal(raw, &extra); err != nil {
+		return
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
 }
 
 func readModules(regoDir string) (map[string]string, error) {

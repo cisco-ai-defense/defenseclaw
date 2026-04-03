@@ -54,6 +54,9 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/nav/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
+    "_data/scripts/*.sh",
+    "_data/policies/openshell/*.rego",
+    "_data/policies/openshell/*.yaml",
 ]
 
 [tool.uv]

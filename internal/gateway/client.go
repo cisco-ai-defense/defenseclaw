@@ -24,6 +24,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -419,6 +420,10 @@ func (c *Client) request(ctx context.Context, method string, params interface{})
 
 	ch := make(chan *ResponseFrame, 1)
 	c.mu.Lock()
+	if c.conn == nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("gateway: not connected")
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
@@ -492,6 +497,8 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[gateway] connect failed (attempt #%d): %v (retry in %s)\n",
 			attempt, err, backoff)
 
+		c.tryAuthRepair(err)
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -500,6 +507,93 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 
 		backoff = time.Duration(math.Min(float64(backoff)*1.7, float64(maxBackoff)))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Auth auto-repair: when the OpenClaw gateway rejects a connect handshake
+// with an auth error (token_missing, token_mismatch, unauthorized, etc.),
+// the sidecar can self-heal by:
+//
+//  1. Re-injecting its device entry into OpenClaw's devices/paired.json
+//     (handles NOT_PAIRED after OpenClaw restarts and clears pairing state)
+//  2. Re-reading the shared gateway.auth.token from openclaw.json
+//     (handles token_mismatch if the token was rotated)
+//
+// OpenClaw auth checks the shared gateway.auth.token first; the per-device
+// token in device-auth.json is a Node.js client-side cache irrelevant here.
+//
+// Only activates in standalone sandbox mode (cfg.SandboxHome != "").
+// ---------------------------------------------------------------------------
+
+// tryAuthRepair attempts to repair device pairing and refresh the shared
+// gateway token when a connect attempt fails with an auth-related error.
+// No-op when sandbox mode is inactive or the error is not auth-related.
+func (c *Client) tryAuthRepair(connectErr error) {
+	if !c.shouldAutoRepair(connectErr) {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — repairing device pairing and token ...\n")
+
+	if err := c.device.RepairPairing(c.cfg.SandboxHome); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] repair pairing failed: %v\n", err)
+	}
+
+	if newToken, ok := readOpenClawGatewayToken(c.cfg.SandboxHome); ok && newToken != c.cfg.Token {
+		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
+		c.cfg.Token = newToken
+	}
+}
+
+// shouldAutoRepair returns true when auth auto-repair should be attempted.
+func (c *Client) shouldAutoRepair(err error) bool {
+	if c.cfg.SandboxHome == "" {
+		return false
+	}
+	return isAuthError(err)
+}
+
+// isAuthError returns true if the error message indicates the OpenClaw
+// gateway rejected the connect handshake due to a missing/invalid token
+// or device pairing.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"token_missing", "token_mismatch",
+		"unauthorized", "pairing_required", "not paired",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// readOpenClawGatewayToken reads gateway.auth.token from the OpenClaw
+// config file inside the sandbox home directory.
+func readOpenClawGatewayToken(sandboxHome string) (string, bool) {
+	path := filepath.Join(sandboxHome, ".openclaw", "openclaw.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	var cfg struct {
+		Gateway struct {
+			Auth struct {
+				Token string `json:"token"`
+			} `json:"auth"`
+		} `json:"gateway"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", false
+	}
+	if cfg.Gateway.Auth.Token == "" {
+		return "", false
+	}
+	return cfg.Gateway.Auth.Token, true
 }
 
 func truncateBytes(b []byte, maxLen int) string {

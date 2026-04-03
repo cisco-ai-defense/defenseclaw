@@ -1,9 +1,9 @@
 ```
-    ____       ____                     ________
-   / __ \___  / __/__  ____  ________  / ____/ /___ __      __
-  / / / / _ \/ /_/ _ \/ __ \/ ___/ _ \/ /   / / __ `/ | /| / /
- / /_/ /  __/ __/  __/ / / (__  )  __/ /___/ / /_/ /| |/ |/ /
-/_____/\___/_/  \___/_/ /_/____/\___/\____/_/\__,_/ |__/|__/
+     ____         ____                       ____  _
+    / __ \  ___  / __/___   ___   ___  ___  / ___|| | __ _ __      __
+   / / / / / _ \/ /_// _ \ / _ \ / __|/ _ \| |    | |/ _` |\ \ /\ / /
+  / /_/ / /  __/ __//  __/| | | |\__ \  __/| |___ | | (_| | \ V  V /
+ /_____/  \___/_/   \___/ |_| |_||___/\___| \____||_|\__,_|  \_/\_/
 
   ╔═══════════════════════════════════════════════════════════════╗
   ║  DefenseClaw — Security Governance for Agentic AI             ║
@@ -12,9 +12,15 @@
 
 # DefenseClaw
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&logoColor=white)](https://discord.com/invite/nKWtDcXxtx)
+[![Cisco AI Defense](https://img.shields.io/badge/Cisco-AI%20Defense-049fd9?logo=cisco&logoColor=white)](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html)
+[![AI Security and Safety Framework](https://img.shields.io/badge/AI%20Security-Framework-orange)](https://learn-cloudsecurity.cisco.com/ai-security-framework)
+
 **AI agents are powerful. Unchecked, they're dangerous.**
 
-Large language model agents — like those built on [OpenClaw](https://github.com/nvidia/openclaw) — can install skills, call MCP servers, execute code, and reach the network. Every one of those actions is an attack surface. A single malicious skill can exfiltrate data. A compromised MCP server can inject hidden instructions. Generated code can contain hardcoded secrets or command injection.
+Large language model agents — like those built on [OpenClaw](https://github.com/openclaw/openclaw) — can install skills, call MCP servers, execute code, and reach the network. Every one of those actions is an attack surface. A single malicious skill can exfiltrate data. A compromised MCP server can inject hidden instructions. Generated code can contain hardcoded secrets or command injection.
 
 **DefenseClaw is the enterprise governance layer for OpenClaw.** It sits between your AI agents and the infrastructure they run on, enforcing a simple principle: **nothing runs until it's scanned, and anything dangerous is blocked automatically.**
 
@@ -59,7 +65,7 @@ Large language model agents — like those built on [OpenClaw](https://github.co
 
 ### Skill, MCP, and Plugin Scanning
 
-DefenseClaw scans every skill, MCP server, and plugin **before** it is allowed to run. The CLI wraps [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners (`skill-scanner`, `mcp-scanner`) and an AI bill-of-materials generator (`aibom`) to produce a unified `ScanResult` with severity-ranked findings. Scan results feed into the admission gate — HIGH/CRITICAL findings auto-block the component, MEDIUM/LOW findings install with a warning, and clean components pass through. All outcomes are logged to the SQLite audit store and forwarded to SIEM.
+DefenseClaw scans every skill, MCP server, and plugin **before** it is allowed to run. The CLI wraps [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) scanners ([`skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner), [`mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner)) and an AI bill-of-materials generator ([`aibom`](https://github.com/cisco-ai-defense/aibom)) to produce a unified `ScanResult` with severity-ranked findings. Scan results feed into the admission gate — HIGH/CRITICAL findings auto-block the component, MEDIUM/LOW findings install with a warning, and clean components pass through. All outcomes are logged to the SQLite audit store and forwarded to SIEM.
 
 ```bash
 defenseclaw skill scan web-search        # scan a skill by name
@@ -223,6 +229,59 @@ Severity thresholds are configurable in `~/.defenseclaw/config.yaml` under `skil
 
 ---
 
+## OpenShell Sandbox
+
+Run OpenClaw inside an NVIDIA OpenShell sandbox with full DefenseClaw governance. The sandbox provides OS-level isolation (Linux namespaces, Landlock, seccomp) while DefenseClaw adds scanning, policy enforcement, and audit logging.
+
+**Security layers:**
+
+- **Network isolation** — isolated network namespace with veth pair, forced HTTP CONNECT proxy
+- **Filesystem access control** — Landlock LSM restrictions
+- **System call filtering** — seccomp-BPF profiles
+- **Network policy** — OPA-based per-connection rules (destination, binary, L7)
+- **LLM guardrails** — all LLM traffic inspected before reaching provider
+- **Skill/plugin admission gate** — nothing runs until scanned
+
+### Initialize sandbox
+
+```bash
+sudo defenseclaw sandbox init
+```
+
+This creates the `sandbox` system user, moves OpenClaw under sandbox ownership, installs the DefenseClaw plugin, and copies default OpenShell policies.
+
+### Start sandbox
+
+```bash
+# Start the sandbox
+sudo systemctl start defenseclaw-sandbox.target
+
+# Start the gateway (separate terminal or use & to background)
+defenseclaw-gateway start
+```
+
+Access the OpenClaw UI at `http://localhost:18789` (forwarded from the sandbox automatically).
+
+### Monitor sandbox
+
+```bash
+# Check health
+defenseclaw status
+
+# View logs
+journalctl -u openshell-sandbox -f
+tail -f ~/.defenseclaw/gateway.log
+
+# Verify network
+ip link show | grep veth-h
+```
+
+For full setup, architecture, monitoring, and debugging details, see [docs/SANDBOX.md](docs/SANDBOX.md).
+
+**Note:** Sandbox mode requires Linux with systemd and root access. Not available on macOS/Windows.
+
+---
+
 ## SIEM Integration
 
 ### Splunk HEC
@@ -243,6 +302,15 @@ By downloading or installing `DefenseClaw`, and by launching the bundled local
 Splunk runtime through this preset, local Splunk usage is subject to the
 Splunk General Terms and the local-mode scope guardrails documented in
 [docs/INSTALL.md](docs/INSTALL.md).
+
+The bundled local runtime starts as a local Splunk Enterprise Trial. After the
+60-day trial period, you can continue using the same local single-instance
+workflow in Splunk Free mode. In Splunk Free mode, alerting is disabled,
+authentication and RBAC are removed, and the local user credentials printed by
+the setup command no longer apply. Existing Splunk license and ingest limits
+still apply in every mode. To keep using full Splunk Enterprise features after
+the trial, apply a valid Splunk Enterprise license. For more details, see
+[About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
 
 That command also installs the local Splunk app automatically. The app gives
 users a purpose-built investigation surface for DefenseClaw audit activity,

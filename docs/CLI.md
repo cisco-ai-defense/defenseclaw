@@ -103,6 +103,15 @@ Use `<binary> --help` for any command.
 |---------|-------------|
 | `codeguard install-skill` | Install the CodeGuard skill into the OpenClaw workspace |
 
+### sandbox
+
+| Command | Description |
+|---------|-------------|
+| `sandbox init` | Initialize OpenShell sandbox (Linux only) |
+| `sandbox setup` | Configure sandbox networking and policies |
+
+See [SANDBOX.md](SANDBOX.md) for full sandbox setup guide.
+
 ---
 
 ## Go Gateway CLI (`defenseclaw-gateway`)
@@ -135,6 +144,20 @@ The Go binary runs the sidecar daemon and provides additional commands.
 | `policy evaluate-firewall` | Dry-run firewall policy for a given destination |
 | `policy reload` | Tell the running sidecar to hot-reload OPA policies |
 | `policy domains` | List firewall domain allowlist and blocklist |
+
+### sandbox
+
+| Command | Description |
+|---------|-------------|
+| `sandbox start` | Start sandbox and sidecar via systemd |
+| `sandbox stop` | Stop sandbox and sidecar via systemd |
+| `sandbox restart` | Restart sandbox (sidecar reconnects automatically) |
+| `sandbox status` | Show sandbox and sidecar systemd status |
+| `sandbox exec -- <command>` | Run a command as the sandbox user |
+| `sandbox shell` | Open an interactive shell as the sandbox user |
+| `sandbox policy` | Compare active sandbox policy against configured endpoints |
+
+See [SANDBOX.md](SANDBOX.md) for full sandbox architecture, setup, and troubleshooting.
 
 ---
 
