@@ -344,7 +344,47 @@ def scan_source_files(
     profile: str,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes)."""
-    ts_files = collect_files(directory, [".ts", ".js", ".mjs"])
+    symlink_escapes: list[str] = []
+    depth_truncations: list[str] = []
+    ts_files = collect_files(
+        directory,
+        [".ts", ".js", ".mjs"],
+        _symlink_escapes=symlink_escapes,
+        _depth_truncations=depth_truncations,
+    )
+
+    # Surface symlink escape attempts
+    for esc in symlink_escapes:
+        rel = esc.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="STRUCT-SYMLINK-ESCAPE",
+            severity="HIGH",
+            confidence=0.95,
+            title="Symlink escapes plugin directory",
+            description=f"Symlink at '{rel}' points outside the plugin root. "
+                        "This could allow the plugin to read host files.",
+            location=rel,
+            remediation="Remove symlinks that reference paths outside the plugin directory.",
+            tags=["supply-chain"],
+        ))
+
+    # Warn when directory depth was truncated
+    for trunc in depth_truncations:
+        rel = trunc.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="SCAN-DEPTH-LIMIT",
+            severity="MEDIUM",
+            confidence=0.9,
+            title="Directory depth limit reached during scan",
+            description=f"Directory '{rel}' was not scanned because it exceeds the depth limit. "
+                        "A plugin may hide malicious code in deeply nested directories.",
+            location=rel,
+            remediation="Inspect deeply nested directories manually.",
+            tags=["supply-chain"],
+        ))
+
     total_bytes = 0
 
     for file_path in ts_files:
@@ -1171,7 +1211,42 @@ def scan_json_configs(
     directory: str,
     findings: list[Finding],
 ) -> None:
-    json_files = collect_files(directory, [".json"], 3)
+    symlink_escapes: list[str] = []
+    depth_truncations: list[str] = []
+    json_files = collect_files(
+        directory,
+        [".json"],
+        _symlink_escapes=symlink_escapes,
+        _depth_truncations=depth_truncations,
+    )
+
+    for esc in symlink_escapes:
+        rel = esc.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="STRUCT-SYMLINK-ESCAPE",
+            severity="HIGH",
+            confidence=0.95,
+            title="Symlink escapes plugin directory (JSON scan)",
+            description=f"Symlink at '{rel}' points outside the plugin root.",
+            location=rel,
+            remediation="Remove symlinks that reference paths outside the plugin directory.",
+            tags=["supply-chain"],
+        ))
+
+    for trunc in depth_truncations:
+        rel = trunc.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="SCAN-DEPTH-LIMIT",
+            severity="MEDIUM",
+            confidence=0.9,
+            title="Directory depth limit reached during JSON scan",
+            description=f"Directory '{rel}' was not scanned because it exceeds the depth limit.",
+            location=rel,
+            remediation="Inspect deeply nested directories manually.",
+            tags=["supply-chain"],
+        ))
 
     for file_path in json_files:
         basename = os.path.basename(file_path)

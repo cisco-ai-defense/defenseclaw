@@ -127,14 +127,47 @@ def downgrade(severity: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Directories that are always safe to skip (build artifacts, VCS, IDE config).
+_SKIP_DIRS: frozenset[str] = frozenset({
+    "node_modules", "dist", "build", "coverage",
+    ".git", ".svn", ".hg",
+    ".vscode", ".idea",
+    ".tox", "__pycache__", ".mypy_cache",
+})
+
+# Safety cap — high enough for any real plugin tree, low enough to bound cost.
+_MAX_DEPTH = 20
+
+
 def collect_files(
     directory: str,
     extensions: list[str],
-    max_depth: int = 4,
+    max_depth: int = _MAX_DEPTH,
     _depth: int = 0,
+    *,
+    _scan_root: str | None = None,
+    _seen_inodes: set[int] | None = None,
+    _symlink_escapes: list[str] | None = None,
+    _depth_truncations: list[str] | None = None,
 ) -> list[str]:
-    """Recursively collect files with given extensions, skipping node_modules/dist/dotdirs."""
+    """Recursively collect files with given extensions.
+
+    - Symlinked dirs/files that escape *scan_root* are skipped and recorded.
+    - Inode tracking prevents symlink cycles.
+    - Only known-benign directories are skipped; other dot-prefixed dirs are scanned.
+    - Depth limit raised to 20; truncated directories are recorded.
+    """
+    if _scan_root is None:
+        _scan_root = os.path.realpath(directory)
+    if _seen_inodes is None:
+        _seen_inodes = set()
+    if _symlink_escapes is None:
+        _symlink_escapes = []
+    if _depth_truncations is None:
+        _depth_truncations = []
+
     if _depth >= max_depth:
+        _depth_truncations.append(directory)
         return []
 
     files: list[str] = []
@@ -144,13 +177,39 @@ def collect_files(
         return files
 
     for entry in entries:
-        if entry in ("node_modules", "dist") or entry.startswith("."):
+        # Skip known-benign directories only; scan other dot-prefixed dirs
+        if entry in _SKIP_DIRS:
             continue
 
         full_path = os.path.join(directory, entry)
         try:
+            # --- Symlink containment ---
+            if os.path.islink(full_path):
+                real = os.path.realpath(full_path)
+                # Block symlinks that escape the scan root
+                if not real.startswith(_scan_root + os.sep) and real != _scan_root:
+                    _symlink_escapes.append(full_path)
+                    continue
+                # Cycle detection via inode
+                try:
+                    ino = os.stat(real).st_ino
+                except OSError:
+                    continue
+                if ino in _seen_inodes:
+                    continue
+                _seen_inodes.add(ino)
+
             if os.path.isdir(full_path):
-                nested = collect_files(full_path, extensions, max_depth, _depth + 1)
+                nested = collect_files(
+                    full_path,
+                    extensions,
+                    max_depth,
+                    _depth + 1,
+                    _scan_root=_scan_root,
+                    _seen_inodes=_seen_inodes,
+                    _symlink_escapes=_symlink_escapes,
+                    _depth_truncations=_depth_truncations,
+                )
                 files.extend(nested)
             elif any(entry.endswith(ext) for ext in extensions):
                 files.append(full_path)
