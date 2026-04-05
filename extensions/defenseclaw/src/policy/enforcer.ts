@@ -18,7 +18,6 @@
 
 import { execFile } from "node:child_process";
 import { DaemonClient } from "../client.js";
-import { scanPlugin } from "../scanners/plugin_scanner/index.js";
 import { scanMCPServer } from "../scanners/mcp-scanner.js";
 import type {
   ScanResult,
@@ -71,6 +70,53 @@ export function runSkillScan(
           });
         } catch {
           reject(new Error("failed to parse skill scan output"));
+        }
+      },
+    );
+  });
+}
+
+export function runPluginScan(
+  target: string,
+  timeoutMs = 120_000,
+): Promise<ScanResult> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "defenseclaw",
+      ["plugin", "scan", target, "--json"],
+      { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const code = error && "code" in error ? (error.code as number) : 0;
+        if (code !== 0 && !stdout.trim()) {
+          reject(
+            new Error(
+              `defenseclaw plugin scan exited ${code}: ${stderr.trim().slice(0, 200)}`,
+            ),
+          );
+          return;
+        }
+        try {
+          const data = JSON.parse(stdout);
+          const findings: Finding[] = (data.findings ?? []).map(
+            (f: Record<string, unknown>) => ({
+              id: (f.id as string) ?? "",
+              severity: (f.severity as string) ?? "INFO",
+              title: (f.title as string) ?? "",
+              description: (f.description as string) ?? "",
+              location: (f.location as string) ?? "",
+              remediation: (f.remediation as string) ?? "",
+              scanner: (f.scanner as string) ?? "plugin-scanner",
+              tags: (f.tags as string[]) ?? [],
+            }),
+          );
+          resolve({
+            scanner: "plugin-scanner",
+            target,
+            timestamp: new Date().toISOString(),
+            findings,
+          });
+        } catch {
+          reject(new Error("failed to parse plugin scan output"));
         }
       },
     );
@@ -168,7 +214,7 @@ export class PolicyEnforcer {
     pluginName: string,
   ): Promise<AdmissionResult> {
     return this.evaluate("plugin", pluginName, pluginDir, () =>
-      scanPlugin(pluginDir),
+      runPluginScan(pluginDir),
     );
   }
 

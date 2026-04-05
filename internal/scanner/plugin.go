@@ -32,7 +32,7 @@ type PluginScanner struct {
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
 	if binaryPath == "" {
-		binaryPath = "defenseclaw-plugin-scanner"
+		binaryPath = "defenseclaw"
 	}
 	return &PluginScanner{BinaryPath: binaryPath}
 }
@@ -44,7 +44,7 @@ func (s *PluginScanner) SupportedTargets() []string { return []string{"plugin"} 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
 
-	cmd := exec.CommandContext(ctx, s.BinaryPath, target)
+	cmd := exec.CommandContext(ctx, s.BinaryPath, "plugin", "scan", "--json", target)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -61,7 +61,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
-			return nil, fmt.Errorf("scanner: %s not found at %q — build with: cd extensions/defenseclaw && npm run build && npm link", s.Name(), s.BinaryPath)
+			return nil, fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw", s.Name(), s.BinaryPath)
 		}
 		if stdout.Len() == 0 {
 			return nil, fmt.Errorf("scanner: %s failed: %s", s.Name(), stderr.String())
@@ -79,15 +79,13 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	return result, nil
 }
 
-// pluginScanResult matches the ScanResult type from the TypeScript plugin scanner
-// (extensions/defenseclaw/src/types.ts). The scanner outputs a full ScanResult
-// with scanner, target, timestamp, findings, duration_ns, metadata, and assessment.
+// pluginScanResult matches the JSON output from the Python CLI
+// (defenseclaw plugin scan --json).
 type pluginScanResult struct {
-	Scanner    string          `json:"scanner"`
-	Target     string          `json:"target"`
-	Timestamp  string          `json:"timestamp"`
-	Findings   []pluginFinding `json:"findings"`
-	DurationNs int64           `json:"duration_ns"`
+	Scanner   string          `json:"scanner"`
+	Target    string          `json:"target"`
+	Timestamp string          `json:"timestamp"`
+	Findings  []pluginFinding `json:"findings"`
 }
 
 type pluginFinding struct {

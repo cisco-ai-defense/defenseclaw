@@ -16,12 +16,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DaemonClient } from "../client.js";
 import { PolicyEnforcer, type EnforcerConfig } from "../policy/enforcer.js";
+import type { ScanResult } from "../types.js";
+
+// Mock runPluginScan — it now shells out to the Python CLI, so we mock it
+// to return controlled results for deterministic testing.
+const { mockRunPluginScan } = vi.hoisted(() => ({
+  mockRunPluginScan: vi.fn<(target: string) => Promise<ScanResult>>(),
+}));
+
+vi.mock("../policy/enforcer.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../policy/enforcer.js")>();
+  return {
+    ...mod,
+    runPluginScan: mockRunPluginScan,
+    PolicyEnforcer: class extends mod.PolicyEnforcer {
+      async evaluatePlugin(
+        pluginDir: string,
+        pluginName: string,
+      ) {
+        return (this as any).evaluate("plugin", pluginName, pluginDir, () =>
+          mockRunPluginScan(pluginDir),
+        );
+      }
+    },
+  };
+});
 
 let tempDir: string;
 const requests: Array<{ method: string; url: string; body: string }> = [];
@@ -196,6 +221,7 @@ beforeEach(async () => {
   blockedList = [];
   allowedList = [];
   mockClient = new MockDaemonClient() as unknown as DaemonClient;
+  mockRunPluginScan.mockReset();
 });
 
 afterEach(async () => {
@@ -295,6 +321,12 @@ describe("PolicyEnforcer", () => {
           updated_at: new Date().toISOString(),
         },
       ];
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [],
+      });
 
       const enforcer = makeEnforcer();
       const result = await enforcer.evaluatePlugin(tempDir, "daemon-blocked");
@@ -314,16 +346,12 @@ describe("PolicyEnforcer", () => {
     });
 
     it("scans and returns 'clean' for safe plugin", async () => {
-      await writeFile(
-        join(tempDir, "package.json"),
-        JSON.stringify({
-          name: "safe-plugin",
-          version: "1.0.0",
-          permissions: ["fs:read:/data"],
-          dependencies: { lodash: "^4.17.21" },
-        }),
-      );
-      await writeFile(join(tempDir, "package-lock.json"), JSON.stringify({ lockfileVersion: 3 }));
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [],
+      });
 
       const enforcer = makeEnforcer();
       const result = await enforcer.evaluatePlugin(tempDir, "safe-plugin");
@@ -332,13 +360,23 @@ describe("PolicyEnforcer", () => {
     });
 
     it("scans and returns 'rejected' for plugin with HIGH findings", async () => {
-      await writeFile(
-        join(tempDir, "package.json"),
-        JSON.stringify({
-          name: "dangerous-plugin",
-          permissions: ["shell:exec", "fs:*"],
-        }),
-      );
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [
+          {
+            id: "plugin-1",
+            severity: "HIGH",
+            title: "Dangerous permission: fs:*",
+            description: "Plugin requests broad filesystem access",
+            location: "package.json",
+            remediation: "Request specific file paths",
+            scanner: "plugin-scanner",
+            tags: ["permissions"],
+          },
+        ],
+      });
 
       const enforcer = makeEnforcer();
       const result = await enforcer.evaluatePlugin(tempDir, "dangerous-plugin");
@@ -348,14 +386,23 @@ describe("PolicyEnforcer", () => {
     });
 
     it("scans and returns 'warning' for plugin with MEDIUM findings only", async () => {
-      await writeFile(
-        join(tempDir, "package.json"),
-        JSON.stringify({
-          name: "medium-plugin",
-          permissions: ["fs:read"],
-          dependencies: { shelljs: "^0.8.0" },
-        }),
-      );
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [
+          {
+            id: "plugin-1",
+            severity: "MEDIUM",
+            title: "Medium finding",
+            description: "A medium-severity finding",
+            location: "package.json",
+            remediation: "Review",
+            scanner: "plugin-scanner",
+            tags: [],
+          },
+        ],
+      });
 
       const enforcer = makeEnforcer({
         blockOnSeverity: "CRITICAL" as const,
@@ -367,6 +414,8 @@ describe("PolicyEnforcer", () => {
     });
 
     it("returns 'scan-error' when scan throws", async () => {
+      mockRunPluginScan.mockRejectedValue(new Error("scan failed"));
+
       const enforcer = makeEnforcer();
       const result = await enforcer.evaluatePlugin(
         "/nonexistent/path/that/cannot/be/scanned",
@@ -379,13 +428,23 @@ describe("PolicyEnforcer", () => {
     });
 
     it("submits scan results to daemon", async () => {
-      await writeFile(
-        join(tempDir, "package.json"),
-        JSON.stringify({
-          name: "reported",
-          permissions: ["fs:read"],
-        }),
-      );
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [
+          {
+            id: "plugin-1",
+            severity: "LOW",
+            title: "Info finding",
+            description: "A low finding",
+            location: "package.json",
+            remediation: "Review",
+            scanner: "plugin-scanner",
+            tags: [],
+          },
+        ],
+      });
 
       const enforcer = makeEnforcer();
       await enforcer.evaluatePlugin(tempDir, "reported");
@@ -397,13 +456,12 @@ describe("PolicyEnforcer", () => {
     });
 
     it("logs admission event to daemon", async () => {
-      await writeFile(
-        join(tempDir, "package.json"),
-        JSON.stringify({
-          name: "logged",
-          permissions: ["fs:read"],
-        }),
-      );
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [],
+      });
 
       const enforcer = makeEnforcer();
       await enforcer.evaluatePlugin(tempDir, "logged");
@@ -524,10 +582,12 @@ describe("PolicyEnforcer", () => {
 
   describe("result structure", () => {
     it("contains all required fields", async () => {
-      await writeFile(
-        join(tempDir, "package.json"),
-        JSON.stringify({ name: "test", permissions: ["fs:read"] }),
-      );
+      mockRunPluginScan.mockResolvedValue({
+        scanner: "plugin-scanner",
+        target: tempDir,
+        timestamp: new Date().toISOString(),
+        findings: [],
+      });
 
       const enforcer = makeEnforcer();
       const result = await enforcer.evaluatePlugin(tempDir, "test");

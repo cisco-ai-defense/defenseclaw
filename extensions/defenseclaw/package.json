@@ -31,9 +31,6 @@
       "optional": true
     }
   },
-  "bin": {
-    "defenseclaw-plugin-scanner": "./scripts/plugin-scanner.mjs"
-  },
   "license": "Apache-2.0",
   "permissions": [
     "net:connect:localhost"

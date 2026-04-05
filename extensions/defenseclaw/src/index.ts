@@ -30,14 +30,13 @@
  *  - /allow <type> <name> [reason]: allow-list a skill, MCP, or plugin
  *
  * The plugin uses:
- *  1. Native TS scanners for plugins and MCP configs (in-process, fast)
- *  2. CLI shell-out to `defenseclaw` for skill/code scans (full scanner suite)
+ *  1. CLI shell-out to `defenseclaw` for plugin/skill/code scans (full scanner suite)
+ *  2. Native TS scanner for MCP configs (in-process, fast)
  *  3. REST API to the Go sidecar for tool inspection and audit logging
  */
 
 import type { PluginApi } from "@openclaw/plugin-sdk";
-import { PolicyEnforcer, runSkillScan, runCodeScan } from "./policy/enforcer.js";
-import { scanPlugin } from "./scanners/plugin_scanner/index.js";
+import { PolicyEnforcer, runSkillScan, runPluginScan, runCodeScan } from "./policy/enforcer.js";
 import { scanMCPServer } from "./scanners/mcp-scanner.js";
 import type {
   ScanResult,
@@ -247,7 +246,7 @@ export default function (api: PluginApi) {
 
 async function handlePluginScan(target: string): Promise<{ text: string }> {
   try {
-    const result = await scanPlugin(target);
+    const result = await runPluginScan(target);
     return { text: formatScanOutput("Plugin", target, result) };
   } catch (err) {
     return {

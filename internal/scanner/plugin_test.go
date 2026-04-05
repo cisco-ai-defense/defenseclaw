@@ -17,17 +17,18 @@
 package scanner
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"testing"
 )
 
 // TestParsePluginOutput_RealFormat verifies that parsePluginOutput correctly
-// handles the actual JSON output format from the TypeScript plugin scanner
-// (extensions/defenseclaw/src/types.ts ScanResult).
+// handles the JSON output from the Python plugin scanner CLI
+// (defenseclaw plugin scan --json).
 func TestParsePluginOutput_RealFormat(t *testing.T) {
-	// This is the actual output format from defenseclaw-plugin-scanner.
-	// It's a full ScanResult, not just {"findings": [...]}.
 	raw := []byte(`{
-		"scanner": "defenseclaw-plugin-scanner",
+		"scanner": "plugin-scanner",
 		"target": "/tmp/test-plugin",
 		"timestamp": "2026-03-24T12:00:00.000Z",
 		"findings": [
@@ -41,7 +42,7 @@ func TestParsePluginOutput_RealFormat(t *testing.T) {
 				"evidence": "\"permissions\": [\"fs:*\"]",
 				"location": "package.json",
 				"remediation": "Request specific file paths instead of fs:*",
-				"scanner": "defenseclaw-plugin-scanner",
+				"scanner": "plugin-scanner",
 				"tags": ["permissions"],
 				"taxonomy": {"objective": "OB-009", "technique": "AITech-9.1"},
 				"occurrence_count": 1,
@@ -57,7 +58,7 @@ func TestParsePluginOutput_RealFormat(t *testing.T) {
 				"evidence": "eval(userInput)",
 				"location": "src/index.ts:42",
 				"remediation": "Remove eval() usage",
-				"scanner": "defenseclaw-plugin-scanner",
+				"scanner": "plugin-scanner",
 				"tags": ["code-execution"],
 				"taxonomy": {"objective": "OB-005", "technique": "AITech-5.1"},
 				"occurrence_count": 1,
@@ -71,7 +72,7 @@ func TestParsePluginOutput_RealFormat(t *testing.T) {
 				"title": "Possible credential access",
 				"description": "Reads credential files",
 				"location": "src/helper.ts:10",
-				"scanner": "defenseclaw-plugin-scanner",
+				"scanner": "plugin-scanner",
 				"tags": ["credential-theft"],
 				"occurrence_count": 1,
 				"suppressed": true,
@@ -140,7 +141,7 @@ func TestParsePluginOutput_RealFormat(t *testing.T) {
 
 func TestParsePluginOutput_EmptyFindings(t *testing.T) {
 	raw := []byte(`{
-		"scanner": "defenseclaw-plugin-scanner",
+		"scanner": "plugin-scanner",
 		"target": "/tmp/clean-plugin",
 		"timestamp": "2026-03-24T12:00:00.000Z",
 		"findings": [],
@@ -168,9 +169,58 @@ func TestParsePluginOutput_EmptyFindings(t *testing.T) {
 	}
 }
 
+// TestPluginScanner_Integration calls the real Python CLI and verifies
+// Go can parse its output end-to-end. Skipped if defenseclaw is not installed.
+func TestPluginScanner_Integration(t *testing.T) {
+	binary := "defenseclaw"
+	if envBin := os.Getenv("DEFENSECLAW_BIN"); envBin != "" {
+		binary = envBin
+	}
+	if _, err := exec.LookPath(binary); err != nil {
+		t.Skipf("skipping: %s not in PATH", binary)
+	}
+
+	scanner := NewPluginScanner(binary)
+
+	// Scan this repo's extensions/defenseclaw directory as a real target
+	target := "../../extensions/defenseclaw"
+	if _, err := os.Stat(target); err != nil {
+		t.Skipf("skipping: target %s not found", target)
+	}
+
+	result, err := scanner.Scan(context.Background(), target)
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	if result.Scanner != "plugin-scanner" {
+		t.Errorf("Scanner = %q, want plugin-scanner", result.Scanner)
+	}
+	if result.Target != target {
+		t.Errorf("Target = %q, want %q", result.Target, target)
+	}
+	// The extension has real findings (child_process import, localhost refs, etc.)
+	if len(result.Findings) == 0 {
+		t.Error("expected at least 1 finding from scanning extensions/defenseclaw")
+	}
+	for i, f := range result.Findings {
+		if f.ID == "" {
+			t.Errorf("finding[%d].ID is empty", i)
+		}
+		if f.Severity == "" {
+			t.Errorf("finding[%d].Severity is empty", i)
+		}
+		if f.Title == "" {
+			t.Errorf("finding[%d].Title is empty", i)
+		}
+	}
+
+	t.Logf("OK: %d findings, max severity = %s", len(result.Findings), result.MaxSeverity())
+}
+
 func TestParsePluginOutput_AllSuppressed(t *testing.T) {
 	raw := []byte(`{
-		"scanner": "defenseclaw-plugin-scanner",
+		"scanner": "plugin-scanner",
 		"target": "/tmp/suppressed-plugin",
 		"timestamp": "2026-03-24T12:00:00.000Z",
 		"findings": [
@@ -179,7 +229,7 @@ func TestParsePluginOutput_AllSuppressed(t *testing.T) {
 				"severity": "HIGH",
 				"title": "False positive",
 				"description": "Not a real issue",
-				"scanner": "defenseclaw-plugin-scanner",
+				"scanner": "plugin-scanner",
 				"suppressed": true,
 				"suppression_reason": "known safe"
 			}

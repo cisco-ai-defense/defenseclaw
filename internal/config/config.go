@@ -598,7 +598,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.mcp_scanner.scan_prompts", false)
 	viper.SetDefault("scanners.mcp_scanner.scan_resources", false)
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
-	viper.SetDefault("scanners.plugin_scanner", "defenseclaw-plugin-scanner")
+	viper.SetDefault("scanners.plugin_scanner", "defenseclaw")
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
 	viper.SetDefault("openshell.binary", "openshell")
 	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
