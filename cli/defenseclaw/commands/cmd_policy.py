@@ -85,8 +85,19 @@ def _save_policy(path: str, data: dict) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 
+def _sanitize_policy_name(name: str) -> str:
+    """Strip path components from a policy name to prevent traversal."""
+    safe = os.path.basename(name)
+    if not safe or safe != name or ".." in name:
+        raise click.ClickException(
+            f"invalid policy name {name!r} — must be a simple name without path separators"
+        )
+    return safe
+
+
 def _find_policy(app: AppContext, name: str) -> str | None:
     """Find a policy file by name (without .yaml extension)."""
+    name = _sanitize_policy_name(name)
     user_dir = _policies_dir(app)
     candidate = os.path.join(user_dir, f"{name}.yaml")
     if os.path.isfile(candidate):
@@ -154,6 +165,8 @@ def create(
       defenseclaw policy create prod --critical-action block --high-action block --medium-action warn\n
       defenseclaw policy create dev --critical-action block --high-action warn --medium-action allow
     """
+    name = _sanitize_policy_name(name)
+
     if name in BUILTIN_POLICIES:
         click.echo(f"error: cannot overwrite built-in policy '{name}'", err=True)
         raise SystemExit(1)

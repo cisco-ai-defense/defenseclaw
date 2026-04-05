@@ -32,12 +32,17 @@ class PluginEnforcer:
 
     def quarantine(self, plugin_name: str, source_path: str) -> str | None:
         """Move plugin directory to quarantine. Returns quarantine path or None."""
+        safe_name = os.path.basename(plugin_name)
+        if not safe_name or safe_name != plugin_name:
+            return None
         if os.path.islink(source_path):
             return None
         real_path = os.path.realpath(source_path)
         if not os.path.exists(real_path):
             return None
-        dest = os.path.join(self.quarantine_dir, plugin_name)
+        dest = os.path.join(self.quarantine_dir, safe_name)
+        if not os.path.realpath(dest).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+            return None
         if os.path.exists(dest):
             shutil.rmtree(dest)
         shutil.move(real_path, dest)
@@ -45,7 +50,12 @@ class PluginEnforcer:
 
     def restore(self, plugin_name: str, restore_path: str) -> bool:
         """Restore a quarantined plugin to its original location."""
-        src = os.path.join(self.quarantine_dir, plugin_name)
+        safe_name = os.path.basename(plugin_name)
+        if not safe_name or safe_name != plugin_name:
+            return False
+        src = os.path.join(self.quarantine_dir, safe_name)
+        if not os.path.realpath(src).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+            return False
         if not os.path.exists(src):
             return False
         os.makedirs(os.path.dirname(restore_path), exist_ok=True)

@@ -1331,8 +1331,25 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
     skill_name = os.path.basename(name)
+    if not skill_name or ".." in name:
+        click.echo(f"error: invalid skill name {name!r}", err=True)
+        raise SystemExit(1)
 
-    skill_path = name if os.path.isabs(name) else _resolve_path(app, skill_name)
+    if os.path.isabs(name):
+        # Validate absolute paths resolve inside a configured skill directory
+        real = os.path.realpath(name)
+        allowed_roots = [os.path.realpath(c) for c in app.cfg.skill_dirs()]
+        if not any(real.startswith(root + os.sep) or real == root for root in allowed_roots):
+            click.echo(
+                f"error: path {name!r} is not inside a configured skill directory\n"
+                f"  Allowed roots: {', '.join(allowed_roots)}",
+                err=True,
+            )
+            raise SystemExit(1)
+        skill_path: str | None = real
+    else:
+        skill_path = _resolve_path(app, skill_name)
+
     if not skill_path:
         click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
         raise SystemExit(1)
