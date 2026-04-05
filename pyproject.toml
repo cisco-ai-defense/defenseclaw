@@ -65,6 +65,7 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
     "cryptography>=46.0.6",   # CVE-2026-34073 fixed in 46.0.6
+    "litellm==1.83.0",        # CVE-2026-35029, CVE-2026-35030
 ]
 
 [tool.ruff]
