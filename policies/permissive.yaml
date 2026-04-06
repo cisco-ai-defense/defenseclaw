@@ -31,6 +31,14 @@ skill_actions:
 
 scanner_overrides: {}
 
+first_party_allow_list:
+  - target_type: plugin
+    target_name: defenseclaw
+    reason: first-party DefenseClaw plugin
+  - target_type: skill
+    target_name: codeguard
+    reason: first-party DefenseClaw skill
+
 guardrail:
   block_threshold: 4
   alert_threshold: 3

@@ -63,6 +63,9 @@ type EventRouter struct {
 	activeAgentSpans map[string]*activeAgent // keyed by runId
 	activeLLMCtx     context.Context         // context of most recent LLM span, for tool→LLM hierarchy
 	spanMu           sync.Mutex
+
+	activeSessionsMu sync.RWMutex
+	activeSessions   map[string]time.Time // sessionKey → last seen
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
@@ -76,6 +79,7 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		autoApprove:      autoApprove,
 		activeToolSpans:  make(map[string][]*activeSpan),
 		activeAgentSpans: make(map[string]*activeAgent),
+		activeSessions:   make(map[string]time.Time),
 	}
 }
 
@@ -104,6 +108,29 @@ func (r *EventRouter) getToolParentCtx() context.Context {
 		return aa.ctx
 	}
 	return context.Background()
+}
+
+// ActiveSessionKeys returns session keys seen in the last hour.
+func (r *EventRouter) ActiveSessionKeys() []string {
+	r.activeSessionsMu.RLock()
+	defer r.activeSessionsMu.RUnlock()
+	cutoff := time.Now().Add(-1 * time.Hour)
+	var keys []string
+	for k, t := range r.activeSessions {
+		if t.After(cutoff) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func (r *EventRouter) trackSession(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	r.activeSessionsMu.Lock()
+	r.activeSessions[sessionKey] = time.Now()
+	r.activeSessionsMu.Unlock()
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -408,6 +435,8 @@ func (r *EventRouter) handleSessionsChanged(evt EventFrame, seqStr string) {
 	}
 	readLoopLogf("[bifrost] sessions.changed: phase=%s session=%s status=%s model=%s runId=%s msgId=%s",
 		sc.Phase, sc.SessionKey, sc.Session.Status, sc.Session.Model, sc.RunID, sc.MessageID)
+
+	r.trackSession(sc.SessionKey)
 
 	if sc.Session.Status == "failed" || sc.Phase == "error" {
 		readLoopLogf("[bifrost] sessions.changed ERROR: session %s status=failed phase=%s", sc.SessionKey, sc.Phase)

@@ -45,7 +45,8 @@ def setup() -> None:
 @click.option("--use-trigger", is_flag=True, default=None, help="Enable trigger analyzer")
 @click.option("--use-virustotal", is_flag=True, default=None, help="Enable VirusTotal scanner")
 @click.option("--use-aidefense", is_flag=True, default=None, help="Enable AI Defense analyzer")
-@click.option("--llm-provider", default=None, help="LLM provider (anthropic or openai)")
+@click.option("--llm-provider", default=None, type=click.Choice(["anthropic", "openai"]),
+              help="LLM provider (anthropic or openai)")
 @click.option("--llm-model", default=None, help="LLM model name")
 @click.option("--llm-consensus-runs", type=int, default=None, help="LLM consensus runs (0=disabled)")
 @click.option("--policy", default=None, help="Scan policy preset (strict, balanced, permissive)")
@@ -179,10 +180,11 @@ def _configure_inspect_llm(llm, data_dir: str) -> None:
 
     The API key is stored in ~/.defenseclaw/.env, not in config.yaml.
     """
-    from defenseclaw.guardrail import detect_api_key_env
+    from defenseclaw.guardrail import KNOWN_PROVIDERS, detect_api_key_env
     llm.provider = click.prompt(
-        "  LLM provider (anthropic/openai)",
-        default=llm.provider or "anthropic",
+        "  LLM provider",
+        type=click.Choice(KNOWN_PROVIDERS),
+        default=llm.provider if llm.provider in KNOWN_PROVIDERS else "anthropic",
     )
     llm.model = click.prompt("  LLM model name", default=llm.model or "", show_default=False)
     env_name = detect_api_key_env(f"{llm.provider}/{llm.model}")
@@ -312,7 +314,8 @@ def _print_summary(sc, llm, aid) -> None:
 
 @setup.command("mcp-scanner")
 @click.option("--analyzers", default=None, help="Comma-separated analyzer list (yara,api,llm,behavioral,readiness)")
-@click.option("--llm-provider", default=None, help="LLM provider (anthropic or openai)")
+@click.option("--llm-provider", default=None, type=click.Choice(["anthropic", "openai"]),
+              help="LLM provider (anthropic or openai)")
 @click.option("--llm-model", default=None, help="LLM model for semantic analysis")
 @click.option("--scan-prompts", is_flag=True, default=None, help="Scan MCP prompts")
 @click.option("--scan-resources", is_flag=True, default=None, help="Scan MCP resources")

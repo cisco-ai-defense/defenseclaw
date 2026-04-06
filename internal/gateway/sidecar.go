@@ -46,6 +46,7 @@ type Sidecar struct {
 	health *SidecarHealth
 	shell  *sandbox.OpenShell
 	otel   *telemetry.Provider
+	notify *NotificationQueue
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -77,6 +78,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		health: NewSidecarHealth(),
 		shell:  shell,
 		otel:   otel,
+		notify: NewNotificationQueue(),
 	}, nil
 }
 
@@ -324,6 +326,8 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		return
 	}
 
+	var actions []string
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -331,10 +335,82 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
 			r.Event.Name, err)
 	} else {
+		actions = append(actions, "disabled")
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
 		_ = s.logger.LogAction("sidecar-watcher-disable", r.Event.Name,
 			fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
 	}
+
+	if strings.Contains(r.Reason, "quarantine") || strings.Contains(r.Reason, "block") {
+		actions = append(actions, "quarantined", "blocked")
+	}
+
+	go s.sendEnforcementAlert(r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+}
+
+// sendEnforcementAlert sends a security notification to all active sessions
+// via the gateway's sessions.send RPC so each chat learns about the enforcement.
+// Runs in a goroutine to avoid blocking the watcher callback.
+func (s *Sidecar) sendEnforcementAlert(skillName, severity string, findings int, actions []string, reason string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	msg := formatEnforcementMessage(skillName, severity, findings, actions, reason)
+
+	sessionKeys := s.router.ActiveSessionKeys()
+	if len(sessionKeys) == 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: no active sessions tracked, falling back to guardrail injection\n")
+		s.notify.Push(SecurityNotification{
+			SkillName: skillName,
+			Severity:  severity,
+			Findings:  findings,
+			Actions:   actions,
+			Reason:    reason,
+		})
+		return
+	}
+
+	sent := 0
+	for _, key := range sessionKeys {
+		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := s.client.SessionsSend(sendCtx, key, msg); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: send to session %s failed: %v\n", key, err)
+		} else {
+			sent++
+			fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert sent to session %s\n", key)
+		}
+		sendCancel()
+	}
+
+	if sent == 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: all sessions.send failed, falling back to guardrail injection\n")
+		s.notify.Push(SecurityNotification{
+			SkillName: skillName,
+			Severity:  severity,
+			Findings:  findings,
+			Actions:   actions,
+			Reason:    reason,
+		})
+	}
+}
+
+// formatEnforcementMessage builds a human-readable security alert for chat.
+func formatEnforcementMessage(skillName, severity string, findings int, actions []string, reason string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[DefenseClaw Security Alert] Skill %q was blocked.\n", skillName)
+	fmt.Fprintf(&sb, "Severity: %s", severity)
+	if findings > 0 {
+		fmt.Fprintf(&sb, " (%d security finding(s))", findings)
+	}
+	sb.WriteString("\n")
+	if len(actions) > 0 {
+		fmt.Fprintf(&sb, "Actions taken: %s\n", strings.Join(actions, ", "))
+	}
+	if reason != "" {
+		fmt.Fprintf(&sb, "Reason: %s\n", reason)
+	}
+	sb.WriteString("The skill was NOT installed. Do not use it or confirm its installation.")
+	return sb.String()
 }
 
 func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
@@ -370,6 +446,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.store,
 		s.cfg.DataDir,
 		s.cfg.PolicyDir,
+		s.notify,
 	)
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)

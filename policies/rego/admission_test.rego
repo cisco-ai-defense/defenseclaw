@@ -543,6 +543,84 @@ test_production_audit_retention_at_least_90 if {
 	data.audit.retention_days >= 90
 }
 
+test_production_first_party_plugin_allowed if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/defenseclaw",
+		"block_list": [],
+		"allow_list": [],
+	}
+
+	result.verdict == "allowed"
+}
+
+test_production_first_party_skill_allowed if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "codeguard",
+		"path": "/tmp/codeguard",
+		"block_list": [],
+		"allow_list": [],
+	}
+
+	result.verdict == "allowed"
+}
+
+test_first_party_allow_list_bypass_scan if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/defenseclaw",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "MEDIUM", "total_findings": 2, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
+		]
+		with data.actions as {"MEDIUM": {"runtime": "allow", "file": "none", "install": "none"}}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {"MEDIUM": 3}
+
+	result.verdict == "allowed"
+}
+
+test_first_party_block_list_takes_precedence if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/defenseclaw",
+		"block_list": [{"target_type": "plugin", "target_name": "defenseclaw", "reason": "manual block"}],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
+		]
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {}
+
+	result.verdict == "blocked"
+}
+
+test_production_plugin_medium_warns_not_rejects if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "some-plugin",
+		"path": "/tmp/some-plugin",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "MEDIUM", "total_findings": 1, "findings": [
+			{"severity": "MEDIUM", "title": "minor issue", "scanner": "plugin-scanner"},
+		]},
+	}
+
+	result.verdict == "warning"
+}
+
 # --- install_action and file_action output ---
 
 test_install_action_block_on_critical if {

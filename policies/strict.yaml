@@ -45,9 +45,17 @@ scanner_overrides:
       runtime: disable
       install: block
     medium:
-      file: quarantine
-      runtime: disable
-      install: block
+      file: none
+      runtime: enable
+      install: none
+
+first_party_allow_list:
+  - target_type: plugin
+    target_name: defenseclaw
+    reason: first-party DefenseClaw plugin
+  - target_type: skill
+    target_name: codeguard
+    reason: first-party DefenseClaw skill
 
 guardrail:
   block_threshold: 2

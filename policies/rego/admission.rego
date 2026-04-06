@@ -144,6 +144,12 @@ _is_allow_listed if {
 	entry.target_type == input.target_type
 }
 
+_is_allow_listed if {
+	some entry in data.first_party_allow_list
+	entry.target_name == input.target_name
+	entry.target_type == input.target_type
+}
+
 _is_allow_bypassed if {
 	_is_allow_listed
 	data.config.allow_list_bypass_scan == true

@@ -1111,6 +1111,8 @@ func TestHandleAdmissionResultBlocked(t *testing.T) {
 		},
 		client: client,
 		logger: logger,
+		notify: NewNotificationQueue(),
+		router: NewEventRouter(client, nil, logger, false, nil),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1153,6 +1155,8 @@ func TestHandleAdmissionResultRejected(t *testing.T) {
 		},
 		client: client,
 		logger: logger,
+		notify: NewNotificationQueue(),
+		router: NewEventRouter(client, nil, logger, false, nil),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{

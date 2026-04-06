@@ -79,6 +79,7 @@ type GuardrailProxy struct {
 	inspector        ContentInspector
 	masterKey        string
 	gatewayToken     string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
+	notify           *NotificationQueue
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -104,6 +105,7 @@ func NewGuardrailProxy(
 	store *audit.Store,
 	dataDir string,
 	policyDir string,
+	notify *NotificationQueue,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -136,6 +138,7 @@ func NewGuardrailProxy(
 		inspector:    inspector,
 		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
+		notify:       notify,
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
 	}
@@ -862,6 +865,23 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		http.Error(w, `{"error":{"message":"DefenseClaw guardrail is disabled","code":"guardrail_disabled"}}`,
 			http.StatusServiceUnavailable)
 		return
+	}
+
+	// --- Inject pending security notifications as a system message ---
+	if p.notify != nil {
+		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
+			fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into LLM request\n")
+			notification := ChatMessage{Role: "system", Content: sysMsg}
+			req.Messages = append([]ChatMessage{notification}, req.Messages...)
+			if len(req.RawBody) > 0 {
+				if patched, err := injectSystemMessage(req.RawBody, sysMsg); err == nil {
+					req.RawBody = patched
+				}
+			}
+			if p.logger != nil {
+				_ = p.logger.LogAction("guardrail-notify-inject", "", "injected security notification into LLM request")
+			}
+		}
 	}
 
 	// --- Create invoke_agent root span for this request ---
@@ -1871,6 +1891,39 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// injectSystemMessage prepends a system message to the "messages" array in
+// the raw JSON body. This preserves all other fields the client sent.
+func injectSystemMessage(raw json.RawMessage, content string) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("proxy: inject system message: unmarshal: %w", err)
+	}
+
+	msgBytes, ok := m["messages"]
+	if !ok {
+		return nil, fmt.Errorf("proxy: inject system message: no messages field")
+	}
+
+	var messages []json.RawMessage
+	if err := json.Unmarshal(msgBytes, &messages); err != nil {
+		return nil, fmt.Errorf("proxy: inject system message: unmarshal messages: %w", err)
+	}
+
+	sysMsg := ChatMessage{Role: "system", Content: content}
+	sysMsgBytes, err := json.Marshal(sysMsg)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: inject system message: marshal: %w", err)
+	}
+
+	messages = append([]json.RawMessage{sysMsgBytes}, messages...)
+	newMsgBytes, err := json.Marshal(messages)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: inject system message: marshal messages: %w", err)
+	}
+	m["messages"] = newMsgBytes
+	return json.Marshal(m)
+}
 
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")

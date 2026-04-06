@@ -268,7 +268,11 @@ def _skill_status(s: dict[str, Any]) -> str:
     return "inactive"
 
 
-def _skill_status_display(s: dict[str, Any], action_entry: Any = None) -> str:
+def _skill_status_display(
+    s: dict[str, Any],
+    action_entry: Any = None,
+    scan_entry: dict[str, Any] | None = None,
+) -> str:
     if s.get("disabled"):
         return "✗ disabled"
     if s.get("blockedByAllowlist"):
@@ -281,6 +285,14 @@ def _skill_status_display(s: dict[str, Any], action_entry: Any = None) -> str:
             return "✗ blocked"
         if a.runtime == "disable":
             return "✗ disabled"
+        if a.install == "allow":
+            return "✓ allowed"
+    if scan_entry:
+        sev = scan_entry.get("max_severity", "CLEAN")
+        if sev in ("CRITICAL", "HIGH"):
+            return "✗ rejected"
+        if sev in ("MEDIUM", "LOW"):
+            return "⚠ warning"
     if s.get("eligible"):
         return "✓ ready"
     if s.get("source") in ("enforcement", "scan-history"):
@@ -409,7 +421,7 @@ def _print_skill_list_table(
     for s in skills:
         name = s.get("name", "")
         display_name = _skill_display_name(s)
-        status_display = _skill_status_display(s, actions_map.get(name))
+        status_display = _skill_status_display(s, actions_map.get(name), scan_map.get(name))
         desc = s.get("description", "")
         source = s.get("source", "")
 
@@ -543,14 +555,69 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bo
     else:
         _print_result(name, result)
 
+    if not result.is_clean():
+        _apply_scan_enforcement(app, pe, name, scan_dir, result)
+
+
+def _apply_scan_enforcement(
+    app: AppContext,
+    pe,
+    skill_name: str,
+    skill_path: str,
+    result,
+) -> None:
+    """Apply configured skill_actions policy based on scan severity."""
+    from defenseclaw.enforce.skill_enforcer import SkillEnforcer
+
+    sev = result.max_severity()
+    action_cfg = app.cfg.skill_actions.for_severity(sev)
+
+    if action_cfg.file == "none" and action_cfg.runtime != "disable" and action_cfg.install == "none":
+        return
+
+    enforcement_reason = f"post-scan: {len(result.findings)} findings, max={sev}"
+    applied_actions: list[str] = []
+
+    if action_cfg.file == "quarantine":
+        se = SkillEnforcer(app.cfg.quarantine_dir)
+        dest = se.quarantine(skill_name, skill_path)
+        if dest:
+            applied_actions.append(f"quarantined to {dest}")
+            pe.quarantine("skill", skill_name, enforcement_reason)
+        else:
+            click.echo(f"[scan] quarantine failed for {skill_name!r}", err=True)
+
+    if action_cfg.runtime == "disable":
+        try:
+            client = _sidecar_client(app)
+            client.disable_skill(skill_name)
+            applied_actions.append("disabled via gateway")
+        except Exception:
+            pass
+        pe.disable("skill", skill_name, enforcement_reason)
+
+    if action_cfg.install == "block":
+        pe.block("skill", skill_name, enforcement_reason)
+        applied_actions.append("added to block list")
+
+    if applied_actions:
+        actions_str = ", ".join(applied_actions)
+        click.echo(f"[scan] enforcement: {skill_name!r}: {actions_str}")
+        if app.logger:
+            detail = f"severity={sev} findings={len(result.findings)}"
+            app.logger.log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
+
 
 def _scan_all(app: AppContext, scanner, as_json: bool) -> None:
+    from defenseclaw.enforce import PolicyEngine
+
     oc_list = _list_openclaw_skills_full(app)
     if oc_list and oc_list.get("skills"):
         skill_names = [s["name"] for s in oc_list["skills"]]
     else:
         skill_names = []
 
+    pe = PolicyEngine(app.store)
     verdicts = []
 
     if skill_names:
@@ -574,6 +641,8 @@ def _scan_all(app: AppContext, scanner, as_json: bool) -> None:
                 else:
                     _print_result(name, result)
                     click.echo()
+                if not result.is_clean():
+                    _apply_scan_enforcement(app, pe, name, base_dir, result)
             except Exception as exc:
                 click.echo(f"[scan] error scanning {name}: {exc}", err=True)
     else:
@@ -598,6 +667,8 @@ def _scan_all(app: AppContext, scanner, as_json: bool) -> None:
                     else:
                         _print_result(entry, result)
                         click.echo()
+                    if not result.is_clean():
+                        _apply_scan_enforcement(app, pe, entry, path, result)
                 except Exception as exc:
                     click.echo(f"  Error: {exc}")
 
@@ -1017,6 +1088,38 @@ def block(app: AppContext, name: str, reason: str) -> None:
 
     if app.logger:
         app.logger.log_action("skill-block", skill_name, f"reason={reason}")
+
+
+# ---------------------------------------------------------------------------
+# skill unblock
+# ---------------------------------------------------------------------------
+
+@skill.command()
+@click.argument("name")
+@pass_ctx
+def unblock(app: AppContext, name: str) -> None:
+    """Remove a skill from the block list and clear all enforcement state.
+
+    Clears block, quarantine, and disable actions without adding to the
+    allow list — the skill will go through normal scanning on next install.
+
+    To also restore quarantined files, run 'skill restore' after unblocking.
+    """
+    from defenseclaw.enforce import PolicyEngine
+
+    skill_name = os.path.basename(name)
+    pe = PolicyEngine(app.store)
+
+    if not pe.is_blocked("skill", skill_name):
+        click.echo(f"[skill] {skill_name!r} is not on the block list")
+        return
+
+    pe.remove_action("skill", skill_name)
+    click.secho(f"[skill] {skill_name!r} removed from block list (all enforcement cleared)", fg="green")
+    click.echo(f"  Tip: if files are quarantined, run 'defenseclaw skill restore {skill_name}'")
+
+    if app.logger:
+        app.logger.log_action("skill-unblock", skill_name, "manual unblock via CLI")
 
 
 # ---------------------------------------------------------------------------

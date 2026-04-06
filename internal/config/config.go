@@ -687,10 +687,10 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.api_port", 18970)
 	viper.SetDefault("gateway.watcher.enabled", true)
 	viper.SetDefault("gateway.watcher.skill.enabled", true)
-	viper.SetDefault("gateway.watcher.skill.take_action", false)
+	viper.SetDefault("gateway.watcher.skill.take_action", true)
 	viper.SetDefault("gateway.watcher.skill.dirs", []string{})
 	viper.SetDefault("gateway.watcher.plugin.enabled", true)
-	viper.SetDefault("gateway.watcher.plugin.take_action", false)
+	viper.SetDefault("gateway.watcher.plugin.take_action", true)
 	viper.SetDefault("gateway.watcher.plugin.dirs", []string{})
 
 	viper.SetDefault("otel.enabled", false)

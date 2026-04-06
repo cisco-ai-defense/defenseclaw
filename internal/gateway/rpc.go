@@ -210,6 +210,20 @@ func (c *Client) SessionsMessagesSubscribe(ctx context.Context, sessionID string
 	return nil
 }
 
+// SessionsSend sends a message to a specific session via the gateway.
+// The gateway expects "key" (session key) and "message" (text content).
+func (c *Client) SessionsSend(ctx context.Context, sessionKey string, text string) error {
+	params := map[string]interface{}{
+		"key":     sessionKey,
+		"message": text,
+	}
+	_, err := c.Request(ctx, "sessions.send", params)
+	if err != nil {
+		return fmt.Errorf("gateway: sessions.send to %q: %w", sessionKey, err)
+	}
+	return nil
+}
+
 // ResolveApproval approves or rejects an exec approval request.
 func (c *Client) ResolveApproval(ctx context.Context, id string, approved bool, reason string) error {
 	decision := "deny"

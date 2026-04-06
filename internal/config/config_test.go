@@ -123,8 +123,8 @@ func TestDefaultConfig(t *testing.T) {
 	if !cfg.Gateway.Watcher.Skill.Enabled {
 		t.Error("expected gateway watcher skill enabled by default")
 	}
-	if cfg.Gateway.Watcher.Skill.TakeAction {
-		t.Error("expected gateway watcher skill take_action=false by default")
+	if !cfg.Gateway.Watcher.Skill.TakeAction {
+		t.Error("expected gateway watcher skill take_action=true by default")
 	}
 	if cfg.Watch.DebounceMs != 500 {
 		t.Errorf("expected debounce 500ms, got %d", cfg.Watch.DebounceMs)
@@ -137,8 +137,8 @@ func TestDefaultGatewayWatcherPluginConfig(t *testing.T) {
 	if !p.Enabled {
 		t.Errorf("Gateway.Watcher.Plugin.Enabled = %v, want true", p.Enabled)
 	}
-	if p.TakeAction {
-		t.Errorf("Gateway.Watcher.Plugin.TakeAction = %v, want false", p.TakeAction)
+	if !p.TakeAction {
+		t.Errorf("Gateway.Watcher.Plugin.TakeAction = %v, want true", p.TakeAction)
 	}
 	if len(p.Dirs) != 0 {
 		t.Errorf("Gateway.Watcher.Plugin.Dirs = %v, want empty", p.Dirs)

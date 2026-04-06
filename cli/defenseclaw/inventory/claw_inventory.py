@@ -240,6 +240,19 @@ def enrich_with_policy(
 enrich_skills_with_policy = enrich_with_policy
 
 
+_FIRST_PARTY_ALLOW_LIST: list[tuple[str, str, str]] = [
+    ("plugin", "defenseclaw", "first-party DefenseClaw plugin"),
+    ("skill", "codeguard", "first-party DefenseClaw skill"),
+]
+
+
+def _is_first_party(target_type: str, name: str) -> str | None:
+    for ft, fn, reason in _FIRST_PARTY_ALLOW_LIST:
+        if ft == target_type and fn == name:
+            return reason
+    return None
+
+
 def _admission_verdict(
     pe: Any,
     target_type: str,
@@ -256,6 +269,10 @@ def _admission_verdict(
     if pe.is_allowed(target_type, name):
         reason = action_entry.reason if action_entry else "allow list"
         return "allowed", reason
+
+    fp_reason = _is_first_party(target_type, name)
+    if fp_reason is not None:
+        return "allowed", fp_reason
 
     if pe.is_quarantined(target_type, name):
         reason = action_entry.reason if action_entry else "quarantined"

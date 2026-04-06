@@ -70,9 +70,11 @@ const (
 
 // AdmissionResult captures the outcome for a single install event.
 type AdmissionResult struct {
-	Event   InstallEvent
-	Verdict Verdict
-	Reason  string
+	Event        InstallEvent
+	Verdict      Verdict
+	Reason       string
+	MaxSeverity  string
+	FindingCount int
 }
 
 // OnAdmission is called after each install event is processed.
@@ -372,7 +374,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			w.applyPostScanEnforcement(pe, out, evt, targetType, result, s.Name())
 			_ = w.logger.LogScanWithVerdict(result, out.Verdict)
 			w.recordAdmission(ctx, out.Verdict, targetType)
-			return AdmissionResult{Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason}
+			return AdmissionResult{
+				Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
+				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+			}
 		}
 		// On OPA error, fall through to built-in logic.
 	}
@@ -417,7 +422,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		}
 		_ = w.logger.LogScanWithVerdict(result, string(VerdictRejected))
 		w.recordAdmission(ctx, "scan_rejected", targetType)
-		return AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: reason}
+		return AdmissionResult{
+			Event: evt, Verdict: VerdictRejected, Reason: reason,
+			MaxSeverity: string(maxSev), FindingCount: len(result.Findings),
+		}
 	}
 
 	reason := fmt.Sprintf("scan found %s findings — installed with warning", maxSev)
@@ -425,7 +433,10 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, maxSev, s.Name()))
 	_ = w.logger.LogScanWithVerdict(result, string(VerdictWarning))
 	w.recordAdmission(ctx, "scan_warning", targetType)
-	return AdmissionResult{Event: evt, Verdict: VerdictWarning, Reason: reason}
+	return AdmissionResult{
+		Event: evt, Verdict: VerdictWarning, Reason: reason,
+		MaxSeverity: string(maxSev), FindingCount: len(result.Findings),
+	}
 }
 
 // applyPostScanEnforcement takes the OPA verdict after scanning and executes

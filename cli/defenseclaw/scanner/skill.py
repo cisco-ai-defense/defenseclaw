@@ -84,7 +84,10 @@ class SkillScannerWrapper:
         if cfg.use_llm:
             build_kwargs["use_llm"] = True
             if llm.model:
-                build_kwargs["llm_model"] = llm.model
+                model = llm.model
+                if llm.provider and "/" not in model:
+                    model = f"{llm.provider}/{model}"
+                build_kwargs["llm_model"] = model
             if llm.provider:
                 build_kwargs["llm_provider"] = llm.provider
             api_key = llm.resolved_api_key()
@@ -115,9 +118,12 @@ class SkillScannerWrapper:
         cfg = self.config
         llm = self.inspect_llm
         aid = self.cisco_ai_defense
+        llm_model = llm.model
+        if llm_model and llm.provider and "/" not in llm_model:
+            llm_model = f"{llm.provider}/{llm_model}"
         mappings = [
             ("SKILL_SCANNER_LLM_API_KEY", llm.resolved_api_key()),
-            ("SKILL_SCANNER_LLM_MODEL", llm.model),
+            ("SKILL_SCANNER_LLM_MODEL", llm_model),
             ("VIRUSTOTAL_API_KEY", cfg.resolved_virustotal_api_key()),
             ("AI_DEFENSE_API_KEY", aid.resolved_api_key()),
         ]

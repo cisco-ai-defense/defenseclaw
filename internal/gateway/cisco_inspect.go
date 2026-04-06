@@ -30,6 +30,10 @@ import (
 
 var defaultEnabledRules = []map[string]string{
 	{"rule_name": "Prompt Injection"},
+	{"rule_name": "Jailbreak"},
+	{"rule_name": "PII Detection"},
+	{"rule_name": "Sensitive Data"},
+	{"rule_name": "Data Leakage"},
 	{"rule_name": "Harassment"},
 	{"rule_name": "Hate Speech"},
 	{"rule_name": "Profanity"},
