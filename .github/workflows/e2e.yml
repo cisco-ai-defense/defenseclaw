@@ -16,7 +16,7 @@ jobs:
   core:
     name: Core E2E
     if: ${{ github.event_name != 'schedule' }}
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
@@ -226,7 +226,7 @@ jobs:
   full-live:
     name: Full Live E2E
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
