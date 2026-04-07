@@ -26,17 +26,23 @@ The solution is two-layered:
    intercepted traffic, runs pre-call and post-call scanning, and forwards
    to the real upstream provider.
 
-### Auth Design (X-AI-Auth header)
+### Auth Design (three-header contract)
 
-LLM provider keys travel in a dedicated `X-AI-Auth` header, separate from
-`Authorization`. This preserves the `sk-dc-*` master key in `Authorization`
-for DefenseClaw gateway auth, while giving the proxy the real provider key
-for upstream calls.
+The interceptor sets three headers on every proxied request:
 
 ```
-Authorization: Bearer sk-dc-*       ← OpenClaw→DefenseClaw connection
-X-AI-Auth:     Bearer sk-or-*       ← LLM provider key for upstream
+X-DC-Target-URL: https://api.anthropic.com  ← original upstream URL
+X-AI-Auth:       Bearer sk-ant-*            ← real provider key (captured from SDK header)
+X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 ```
+
+`X-AI-Auth` is extracted from whichever header the provider SDK uses:
+- `Authorization: Bearer` — OpenAI, OpenRouter, Gemini compat
+- `x-api-key` — Anthropic
+- `api-key` — Azure OpenAI
+- Query param `?key=` — Gemini native (passed through URL, not header)
+- AWS SigV4 — Bedrock (multiple headers, pass-through)
+- No auth — Ollama
 
 ### Providers Covered
 
@@ -255,8 +261,9 @@ X-AI-Auth:     Bearer sk-or-*       ← LLM provider key for upstream
 │  Owns:                                                              │
 │  ├── Patches globalThis.fetch inside OpenClaw's Node.js process    │
 │  ├── Routes ALL outbound LLM calls through localhost:4000          │
-│  ├── Injects X-AI-Auth header with real provider key               │
-│  │   (from auth-profiles.json, refreshed every 30s)               │
+│  ├── Captures provider auth from SDK headers (Authorization,      │
+│  │   x-api-key, api-key) and forwards as X-AI-Auth               │
+│  ├── Sends X-DC-Auth for proxy authorization (from sidecar config)│
 │  ├── Adds X-DC-Target-URL header with original provider URL       │
 │  └── Activates only when guardrail.enabled = true                  │
 └─────────────────────────────────────────────────────────────────────┘
@@ -325,7 +332,7 @@ internal/gateway/
   config.yaml                       # guardrail section
 
 ~/.openclaw/
-  openclaw.json                     # patched: defenseclaw provider + model reroute
+  openclaw.json                     # patched: plugin registration only (no provider/model changes)
 ```
 
 ## Setup Flow
@@ -392,15 +399,17 @@ defenseclaw setup guardrail --disable
 ## Upgrade
 
 ```
-defenseclaw upgrade [--source-dir DIR] [--skip-pull] [--local DIR] [--yes]
-  1. Save current guardrail settings (mode, port, scanner-mode, block-message)
-  2. Back up ~/.defenseclaw/ and openclaw.json to timestamped directory
-  3. Restore openclaw.json to pre-DefenseClaw state
-  4. Stop gateway, remove plugin
-  5. Rebuild from source (or install from local dist)
-  6. Re-configure guardrail with saved settings
-  7. Start gateway, restart OpenClaw
+defenseclaw upgrade [--yes]
+  1. Back up ~/.defenseclaw/ and openclaw.json to timestamped directory
+  2. Stop services
+  3. Replace gateway binary, Python CLI, and plugin files
+  4. Run version-specific migrations (e.g. v0.3.0: remove legacy provider entries)
+  5. Restart services (gateway + OpenClaw)
 ```
+
+Migrations are keyed to release versions and run automatically when
+upgrading across version boundaries. The migration framework lives in
+`cli/defenseclaw/migrations.py`.
 
 See [CLI Reference — upgrade](CLI.md#upgrade) for full options.
 
@@ -570,8 +579,9 @@ for external callers; the built-in proxy does not require it for normal operatio
 │  Owns:                                                              │
 │  ├── Patches globalThis.fetch inside OpenClaw's Node.js process    │
 │  ├── Routes ALL outbound LLM calls through localhost:4000          │
-│  ├── Injects X-AI-Auth header with real provider key               │
-│  │   (from auth-profiles.json, refreshed every 30s)               │
+│  ├── Captures provider auth from SDK headers (Authorization,      │
+│  │   x-api-key, api-key) and forwards as X-AI-Auth               │
+│  ├── Sends X-DC-Auth for proxy authorization (from sidecar config)│
 │  ├── Adds X-DC-Target-URL header with original provider URL       │
 │  └── Activates only when guardrail.enabled = true                  │
 └─────────────────────────────────────────────────────────────────────┘
@@ -588,14 +598,19 @@ policies/rego/
 cli/defenseclaw/
   guardrail.py                      # config generation, openclaw.json patching, plugin lifecycle
   commands/cmd_setup.py             # `setup guardrail` command (plugin-only, no model changes)
-  commands/cmd_upgrade.py           # `upgrade` command — backup, restore, rebuild, reinstall
+  commands/cmd_upgrade.py           # `upgrade` command — file replacement + version migrations
+  migrations.py                     # Version-specific migration framework (v0.3.0+)
   commands/cmd_init.py              # configures guardrail proxy + OpenClaw integration
   config.py                         # GuardrailConfig + CiscoAIDefenseConfig dataclasses
   paths.py                          # scripts_dir() for locating scripts in dev/wheel installs
 
-plugins/defenseclaw/src/
+internal/configs/
+  providers.json                    # Shared provider config (domains, env keys) — single source of truth
+  embed.go                          # Go embed for providers.json
+
+extensions/defenseclaw/src/
   index.ts                          # Plugin entry — registers interceptor as plugin service
-  fetch-interceptor.ts              # Patches globalThis.fetch, injects X-AI-Auth, routes to proxy
+  fetch-interceptor.ts              # Patches globalThis.fetch, captures auth headers, routes to proxy
   sidecar-config.ts                 # Reads guardrail.port from config
 
 internal/config/
@@ -680,8 +695,8 @@ restart (including Cisco client enable/disable when scanner mode changes).
 5. Guardrail proxy port
 
 The wizard no longer prompts for model selection or API keys — the fetch
-interceptor detects the active provider and injects the correct key
-automatically from OpenClaw's `auth-profiles.json`.
+interceptor captures provider auth headers set by OpenClaw's provider
+SDKs and forwards them to the proxy automatically.
 
 Non-interactive mode supports all options as flags:
 

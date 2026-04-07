@@ -89,8 +89,8 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │     session.message                  tools.catalog / skills.status    │  │
 │  │                                      sessions.list / subscribe        │  │
 │  │                                                                       │  │
-│  │   LLM traffic routed through guardrail proxy via openclaw.json        │  │
-│  │   provider config (baseUrl → http://localhost:4000)                   │  │
+│  │   LLM traffic routed through guardrail proxy via fetch interceptor    │  │
+│  │   plugin (patches globalThis.fetch — no openclaw.json model changes) │  │
 │  └──────────────────────────┬─────────────────────────────────────────────┘ │
 │                              │                                              │
 │                              ▼                                              │

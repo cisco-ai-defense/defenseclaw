@@ -324,44 +324,34 @@ defenseclaw upgrade [flags]
 ```
 
 Performs an in-place upgrade of DefenseClaw without losing configuration.
-Backs up all config files and `openclaw.json`, restores OpenClaw to its
-pre-DefenseClaw state, rebuilds from source (or installs from a local
-dist), and re-configures the guardrail with your existing settings.
+Replaces changed files, runs version-specific migrations, and restarts
+services. No uninstall or full reinstall — your configuration is preserved.
 
 **Upgrade steps:**
 
-1. Save current guardrail settings (mode, port, scanner-mode, block-message)
-2. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
-3. Restore `openclaw.json` to pre-DefenseClaw state (prefers `.bak` if clean, otherwise programmatic cleanup)
-4. Stop `defenseclaw-gateway` and remove the OpenClaw plugin
-5. Pull latest source and rebuild (`make gateway-install` + `pip install -e .`), or install from local dist
-6. Re-configure guardrail with saved settings (`setup guardrail --non-interactive`)
-7. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the new plugin
+1. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
+2. Stop `defenseclaw-gateway`
+3. Replace gateway binary (`make gateway-install`), Python CLI (`uv pip install -e`), and plugin files (`make plugin plugin-install`)
+4. Run version-specific migrations between the installed and new versions
+5. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the updated plugin
+
+**Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
+and run automatically. For example, the v0.3.0 migration removes legacy
+`models.providers.defenseclaw` and `models.providers.litellm` entries from
+`openclaw.json` while preserving plugin registration.
 
 **Flags:**
-- `--source-dir DIR` — path to defenseclaw source repo (auto-detected if omitted)
-- `--skip-pull` — skip `git pull` before rebuilding
-- `--local DIR` — install from a pre-built `dist/` directory instead of rebuilding from source
 - `--yes`, `-y` — skip confirmation prompts
 
 **Examples:**
 
 ```bash
-# Standard upgrade from source
+# Standard upgrade
 defenseclaw upgrade --yes
-
-# Upgrade from a specific source directory
-defenseclaw upgrade --source-dir ~/projects/defenseclaw
-
-# Upgrade without pulling (use current local source)
-defenseclaw upgrade --skip-pull --yes
-
-# Install from pre-built artifacts
-defenseclaw upgrade --local ./dist --yes
 ```
 
 The equivalent shell script is available at `scripts/upgrade.sh` with
-identical options (`--source-dir`, `--skip-pull`, `--local`, `--yes`).
+the same `--yes` flag.
 
 ### doctor
 

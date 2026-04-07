@@ -31,10 +31,11 @@ The wizard walks through:
 - **Mode**: `observe` (log only) or `action` (block threats) — start with `observe`
 - **Port**: guardrail proxy port (default `4000`)
 
-No model or API key prompts — the fetch interceptor plugin automatically
-detects the active provider and injects the correct key from OpenClaw's
-`auth-profiles.json`. All supported providers (Anthropic, OpenAI, Azure,
-Gemini, OpenRouter, Ollama, Bedrock) are covered.
+No model or API key prompts — the fetch interceptor captures provider
+auth headers set by OpenClaw's provider SDKs (`Authorization`,
+`x-api-key`, `api-key`) and forwards them to the proxy as `X-AI-Auth`.
+All supported providers (Anthropic, OpenAI, Azure, Gemini, OpenRouter,
+Ollama, Bedrock) are covered transparently.
 
 ### Non-interactive
 
@@ -302,11 +303,12 @@ This restores direct LLM access:
 3. Restart OpenClaw: `openclaw gateway restart`
 4. Check the sidecar logs for `fetch-interceptor: active` on startup
 
-### Provider key not injected
+### Provider key not forwarded
 
-The fetch interceptor reads keys from `~/.openclaw/auth-profiles.json`.
-Make sure the provider is configured in OpenClaw and has a valid API key.
-The key cache refreshes every 30 seconds.
+The fetch interceptor captures the auth header that OpenClaw's provider
+SDK sets on each request (`Authorization: Bearer`, `x-api-key`, or
+`api-key`). If the proxy receives no `X-AI-Auth`, verify the provider
+is configured in OpenClaw with a valid API key.
 
 ### Upgrading DefenseClaw
 
@@ -316,5 +318,6 @@ Use the built-in upgrade command to update without losing configuration:
 defenseclaw upgrade --yes
 ```
 
-This backs up your config, restores `openclaw.json`, rebuilds, and
-re-configures the guardrail. See [CLI Reference — upgrade](CLI.md#upgrade).
+This backs up config files, replaces changed binaries and plugin files,
+runs version-specific migrations (e.g. cleaning up legacy openclaw.json
+entries), and restarts services. See [CLI Reference — upgrade](CLI.md#upgrade).
