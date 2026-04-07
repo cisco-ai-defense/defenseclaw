@@ -81,9 +81,6 @@ jobs:
             echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
           fi
 
-          # --- Setup Splunk logging ---
-          defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
-
           # --- Setup skill-scanner with behavioral analysis enabled ---
           defenseclaw setup skill-scanner \
             --use-behavioral \
@@ -99,7 +96,7 @@ jobs:
             --non-interactive
           echo "  ✓ mcp-scanner configured (yara + behavioral + instructions)"
 
-          # --- Detect model from OpenClaw and configure guardrail ---
+          # --- Detect model from OpenClaw ---
           OC_MODEL=$(python3 -c "
           import json, os
           try:
@@ -124,30 +121,54 @@ jobs:
             else
               API_KEY_ENV="ANTHROPIC_API_KEY"
             fi
-            python3 -c "
-          import yaml, os
-          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
-          with open(cfg_path) as f:
-              cfg = yaml.safe_load(f)
-          cfg.setdefault('guardrail', {})
-          cfg['guardrail']['enabled'] = True
-          cfg['guardrail']['mode'] = 'action'
-          cfg['guardrail']['model'] = '$OC_MODEL'
-          cfg['guardrail']['model_name'] = '$MODEL_NAME'
-          cfg['guardrail']['api_key_env'] = '$API_KEY_ENV'
-          cfg['skill_actions'] = {
-              'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-              'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-              'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-              'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-          }
-          with open(cfg_path, 'w') as f:
-              yaml.dump(cfg, f, default_flow_style=False)
-          print('  Config written: guardrail=action model=$OC_MODEL quarantine=HIGH+CRITICAL')
-          "
           else
             echo "  WARNING: No model found in openclaw.json — guardrail will be disabled"
           fi
+
+          # --- Write combined config: Splunk + guardrail + skill_actions ---
+          # We skip `defenseclaw setup splunk --logs` because the compose Splunk
+          # container is already running on ports 8000/8088. The --logs command
+          # would fail the port pre-flight check. Write config directly instead.
+          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> ~/.defenseclaw/.env
+          python3 -c "
+          import yaml, os
+          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
+          with open(cfg_path) as f:
+              cfg = yaml.safe_load(f) or {}
+
+          # Splunk HEC (compose container already on :8088)
+          cfg.setdefault('splunk', {})
+          cfg['splunk']['enabled'] = True
+          cfg['splunk']['hec_endpoint'] = 'http://127.0.0.1:8088'
+          cfg['splunk']['index'] = 'defenseclaw_local'
+          cfg['splunk']['source'] = 'defenseclaw'
+          cfg['splunk']['sourcetype'] = 'defenseclaw:json'
+          cfg['splunk']['verify_tls'] = False
+          cfg['splunk']['batch_size'] = 50
+          cfg['splunk']['flush_interval_s'] = 5
+          cfg['splunk']['hec_token_env'] = 'DEFENSECLAW_SPLUNK_HEC_TOKEN'
+
+          # Guardrail + skill_actions (only if model detected)
+          model = '$OC_MODEL'
+          if model:
+              cfg.setdefault('guardrail', {})
+              cfg['guardrail']['enabled'] = True
+              cfg['guardrail']['mode'] = 'action'
+              cfg['guardrail']['model'] = model
+              cfg['guardrail']['model_name'] = '$MODEL_NAME'
+              cfg['guardrail']['api_key_env'] = '$API_KEY_ENV'
+              cfg['skill_actions'] = {
+                  'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
+                  'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
+                  'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
+                  'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
+              }
+
+          with open(cfg_path, 'w') as f:
+              yaml.dump(cfg, f, default_flow_style=False)
+          print('  Config written: splunk=enabled guardrail={} model={}'.format(
+              'action' if model else 'disabled', model or 'none'))
+          "
 
           echo ""
           echo "  === Final config ==="
