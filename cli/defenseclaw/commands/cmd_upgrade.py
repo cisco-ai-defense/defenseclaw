@@ -24,7 +24,6 @@ or reinstall from scratch.
 from __future__ import annotations
 
 import datetime
-import json
 import os
 import shutil
 import subprocess
@@ -36,22 +35,10 @@ from defenseclaw.context import AppContext, pass_ctx
 
 
 @click.command("upgrade")
-@click.option(
-    "--source-dir",
-    default=None,
-    metavar="DIR",
-    help=(
-        "Path to the defenseclaw source repository. "
-        "Defaults to the directory discovered via the installed package."
-    ),
-)
-@click.option("--skip-pull", is_flag=True, help="Skip git pull before rebuilding")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts")
 @pass_ctx
 def upgrade(
     app: AppContext,
-    source_dir: str | None,
-    skip_pull: bool,
     yes: bool,
 ) -> None:
     """Upgrade DefenseClaw to the latest version.
@@ -68,15 +55,13 @@ def upgrade(
 
     # ── Resolve source directory ──────────────────────────────────────────────
 
-    resolved_source = _resolve_source_dir(source_dir)
+    resolved_source = _resolve_source_dir()
     if resolved_source is None:
         click.echo(
-            "  ✗ Could not find the defenseclaw source directory.\n"
-            "    Use --source-dir <path> to specify it explicitly.",
+            "  ✗ Could not find the defenseclaw source directory.",
             err=True,
         )
         raise SystemExit(1)
-    click.echo(f"  ✓ Source directory: {resolved_source}")
 
     # ── Detect versions ───────────────────────────────────────────────────────
 
@@ -96,11 +81,9 @@ def upgrade(
         click.echo()
         click.echo("  This will:")
         click.echo("    1. Back up ~/.defenseclaw/ and ~/.openclaw/openclaw.json")
-        if not skip_pull:
-            click.echo("    2. Pull latest changes from git")
-        click.echo("    3. Replace gateway binary, Python CLI, and plugin files")
-        click.echo("    4. Run version-specific migrations")
-        click.echo("    5. Restart services")
+        click.echo("    2. Replace gateway binary, Python CLI, and plugin files")
+        click.echo("    3. Run version-specific migrations")
+        click.echo("    4. Restart services")
         click.echo()
         if not click.confirm("  Proceed?", default=False):
             click.echo("  Aborted.")
@@ -114,14 +97,6 @@ def upgrade(
 
     backup_dir = _create_backup(app.cfg)
     click.echo(f"  ✓ Backup saved to: {backup_dir}")
-
-    # ── Update source ─────────────────────────────────────────────────────────
-
-    if not skip_pull:
-        click.echo()
-        click.echo("  ── Updating Source ──────────────────────────────────────")
-        click.echo()
-        _git_pull(resolved_source)
 
     # ── Stop services ─────────────────────────────────────────────────────────
 
@@ -198,13 +173,8 @@ def upgrade(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_source_dir(explicit: str | None) -> str | None:
+def _resolve_source_dir() -> str | None:
     """Return the defenseclaw source repository path, or None if not found."""
-    if explicit:
-        if os.path.isdir(explicit) and os.path.isfile(os.path.join(explicit, "Makefile")):
-            return explicit
-        return None
-
     candidate = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
     )
@@ -261,20 +231,6 @@ def _create_backup(cfg) -> str:
         click.echo("  ✓ Backed up: openclaw.json")
 
     return backup_dir
-
-
-def _git_pull(source_dir: str) -> None:
-    """Pull latest changes from git."""
-    if not os.path.isdir(os.path.join(source_dir, ".git")):
-        click.echo("  ⚠ Not a git repository — skipping git pull")
-        return
-
-    click.echo("  → Running git pull ...")
-    result = subprocess.run(["git", "pull"], cwd=source_dir, check=False)
-    if result.returncode == 0:
-        click.echo("  ✓ Source updated")
-    else:
-        click.echo("  ⚠ git pull failed — continuing with current source")
 
 
 def _replace_gateway(source_dir: str) -> None:

@@ -23,12 +23,9 @@
 # or reinstall from scratch.
 #
 # Usage:
-#   ./scripts/upgrade.sh [--source-dir <dir>] [--skip-pull] [--yes] [--help]
+#   ./scripts/upgrade.sh [--yes] [--help]
 #
 # Options:
-#   --source-dir <dir>  Path to the defenseclaw source repository.
-#                       Defaults to the parent directory of this script.
-#   --skip-pull         Skip `git pull` before rebuilding
 #   --yes, -y           Skip confirmation prompts
 #   --help, -h          Show this help
 #
@@ -63,18 +60,14 @@ step()    { echo -e "  ${CYAN}→${NC} $*"; }
 
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
-SOURCE_DIR=""
-SKIP_PULL=0
 YES=0
 
-# Default source directory: parent of scripts/
+# Source directory: parent of scripts/
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --source-dir) SOURCE_DIR="$2"; shift 2 ;;
-        --skip-pull)  SKIP_PULL=1; shift ;;
         --yes|-y)     YES=1; shift ;;
         --help|-h)
             cat <<EOF
@@ -84,8 +77,6 @@ while [[ $# -gt 0 ]]; do
   Usage: $(basename "$0") [OPTIONS]
 
   Options:
-    --source-dir <dir>  Path to defenseclaw source repo (default: $DEFAULT_SOURCE_DIR)
-    --skip-pull         Skip git pull
     --yes, -y           Skip confirmation prompts
     --help, -h          Show this help
 
@@ -95,8 +86,6 @@ EOF
         *) error "Unknown option: $1"; exit 1 ;;
     esac
 done
-
-SOURCE_DIR="${SOURCE_DIR:-$DEFAULT_SOURCE_DIR}"
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
@@ -109,16 +98,10 @@ echo
 
 section "Pre-flight Checks"
 
-if [[ ! -d "$SOURCE_DIR" ]]; then
-    error "Source directory not found: $SOURCE_DIR"
-    error "Use --source-dir <dir> to specify the repository path."
-    exit 1
-fi
 if [[ ! -f "$SOURCE_DIR/Makefile" ]]; then
     error "No Makefile found in $SOURCE_DIR — is this the defenseclaw repository?"
     exit 1
 fi
-info "Source directory: $SOURCE_DIR"
 
 # ── Detect versions ──────────────────────────────────────────────────────────
 
@@ -161,12 +144,9 @@ if [[ "$YES" -eq 0 ]]; then
     echo
     echo -e "  This will:"
     echo -e "    1. Back up ${BOLD}~/.defenseclaw/${NC} and ${BOLD}~/.openclaw/openclaw.json${NC}"
-    if [[ "$SKIP_PULL" -eq 0 ]]; then
-        echo -e "    2. Pull latest changes from git"
-    fi
-    echo -e "    3. Replace gateway binary, Python CLI, and plugin files"
-    echo -e "    4. Run version-specific migrations"
-    echo -e "    5. Restart services"
+    echo -e "    2. Replace gateway binary, Python CLI, and plugin files"
+    echo -e "    3. Run version-specific migrations"
+    echo -e "    4. Restart services"
     echo
     read -r -p "  Proceed? [y/N] " REPLY
     case "$REPLY" in
@@ -202,26 +182,14 @@ fi
 
 info "Backup saved to: $BACKUP_DIR"
 
-# ── Step 2: Update source ────────────────────────────────────────────────────
-
-if [[ "$SKIP_PULL" -eq 0 ]]; then
-    section "Updating Source"
-    if [[ -d "${SOURCE_DIR}/.git" ]]; then
-        step "Running git pull in $SOURCE_DIR ..."
-        (cd "$SOURCE_DIR" && git pull) && info "Source updated" || warn "git pull failed — continuing with current source"
-    else
-        warn "Not a git repository — skipping git pull"
-    fi
-fi
-
-# ── Step 3: Stop services ────────────────────────────────────────────────────
+# ── Step 2: Stop services ────────────────────────────────────────────────────
 
 section "Stopping Services"
 
 step "Stopping defenseclaw-gateway ..."
 defenseclaw-gateway stop 2>/dev/null && info "Gateway stopped" || warn "Gateway was not running"
 
-# ── Step 4: Replace files ────────────────────────────────────────────────────
+# ── Step 3: Replace files ────────────────────────────────────────────────────
 
 section "Replacing Files"
 
@@ -256,7 +224,7 @@ else
     warn "Plugin build failed — run 'make plugin plugin-install' manually"
 fi
 
-# ── Step 5: Run migrations ───────────────────────────────────────────────────
+# ── Step 4: Run migrations ───────────────────────────────────────────────────
 
 section "Running Migrations"
 
@@ -272,7 +240,7 @@ else
     info "Applied $MIGRATION_COUNT migration(s)"
 fi
 
-# ── Step 6: Start services ───────────────────────────────────────────────────
+# ── Step 5: Start services ───────────────────────────────────────────────────
 
 section "Starting Services"
 
