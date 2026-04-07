@@ -109,9 +109,16 @@ jobs:
 
           if [ -n "$OC_MODEL" ]; then
             MODEL_NAME=$(echo "$OC_MODEL" | sed 's|.*/||')
-            API_KEY_ENV="ANTHROPIC_API_KEY"
-            if echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1"; then
+            API_KEY_ENV=""
+            if echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
+              API_KEY_ENV="ANTHROPIC_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
               API_KEY_ENV="OPENAI_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
+              API_KEY_ENV="AWS_ACCESS_KEY_ID"
+              echo "  NOTE: Bedrock model detected — guardrail proxy may not support AWS SigV4 auth"
+            else
+              API_KEY_ENV="ANTHROPIC_API_KEY"
             fi
             python3 -c "
           import yaml, os

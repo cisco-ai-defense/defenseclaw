@@ -10,6 +10,7 @@ services:
       # Safe because Tailscale acts as the firewall — only tailnet devices connect.
       - "0.0.0.0:8000:8000"
       - "0.0.0.0:8088:8088"
+      - "0.0.0.0:8089:8089"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
