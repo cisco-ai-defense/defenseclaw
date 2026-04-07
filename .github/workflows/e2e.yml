@@ -1,0 +1,72 @@
+name: E2E
+
+on:
+  push:
+    branches: [main, demo]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-stack:
+    name: Full Stack E2E
+    runs-on: self-hosted
+    timeout-minutes: 15
+    env:
+      OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+      SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
+      SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      E2E_TELEGRAM_USER_SESSION: ${{ secrets.E2E_TELEGRAM_USER_SESSION }}
+      E2E_TELEGRAM_API_ID: ${{ secrets.E2E_TELEGRAM_API_ID }}
+      E2E_TELEGRAM_API_HASH: ${{ secrets.E2E_TELEGRAM_API_HASH }}
+      E2E_TELEGRAM_BOT_USERNAME: ${{ secrets.E2E_TELEGRAM_BOT_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Phase 0 — Nuke all DefenseClaw state (OpenClaw persists)
+      - name: Clean DefenseClaw
+        run: |
+          defenseclaw-gateway stop 2>/dev/null || true
+          openclaw gateway stop 2>/dev/null || true
+          rm -rf ~/.defenseclaw
+          rm -f ~/.local/bin/defenseclaw-gateway
+          rm -rf ~/.openclaw/extensions/defenseclaw*
+          echo "DefenseClaw fully removed"
+
+      # Phase 1 — Start Splunk Docker (stays running for dashboard browsing via Tailscale)
+      - name: Start Splunk
+        run: |
+          cd bundles/splunk_local_bridge/compose
+          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
+            docker compose -f docker-compose.ci.yml up -d
+          echo "Waiting for Splunk HEC..."
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
+          echo "Splunk HEC ready"
+
+      # Phase 2 — Fresh install from this commit
+      - name: Install DefenseClaw
+        run: make install
+
+      # Phase 3 — Initialize DefenseClaw
+      - name: Init DefenseClaw
+        run: |
+          defenseclaw init --enable-guardrail --yes
+          defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
+          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
+          if [ -n "${SPLUNK_ACCESS_TOKEN}" ]; then
+            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
+            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
+          fi
+
+      # Phase 4 — Unit tests (fast fail before slow E2E)
+      - name: Unit tests
+        run: make test
+
+      # Phase 5 — Full-stack E2E
+      - name: E2E tests
+        run: scripts/test-e2e-full-stack.sh
