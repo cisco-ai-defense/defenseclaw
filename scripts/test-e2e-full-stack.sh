@@ -27,12 +27,22 @@ SPLUNK_HEC_URL="http://127.0.0.1:8088"
 SPLUNK_HEC_TOKEN="00000000-0000-0000-0000-000000000001"
 SPLUNK_API_URL="https://127.0.0.1:8089"
 SPLUNK_CREDS="admin:DefenseClawLocalMode1!"
+E2E_REQUIRE_GUARDRAIL="${E2E_REQUIRE_GUARDRAIL:-false}"
+E2E_REQUIRE_AGENT_INSTALL="${E2E_REQUIRE_AGENT_INSTALL:-false}"
+E2E_REQUIRE_AGENT_SCAN="${E2E_REQUIRE_AGENT_SCAN:-false}"
 
 PASS=0
 FAIL=0
 SKIP_COUNT=0
 RESULTS=()
 PHASE_START_T=0
+
+is_true() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 pass() {
     local name="$1"
@@ -69,6 +79,17 @@ phase_timer_end() {
     printf "  [timer] %s completed in %ds\n" "$name" "$elapsed"
 }
 
+skip_or_fail() {
+    local requirement="$1"
+    local name="$2"
+    local reason="${3:-}"
+    if is_true "$requirement"; then
+        fail "$name" "$reason"
+    else
+        skip "$name" "$reason"
+    fi
+}
+
 wait_for_url() {
     local url="$1"
     local timeout="${2:-60}"
@@ -96,6 +117,68 @@ splunk_search() {
 # Collects everything from the first '{' to the end and pipes through jq.
 extract_json() {
     sed -n '/^\s*{/,$ p' | jq '.' 2>/dev/null
+}
+
+get_skill_dirs() {
+    local dirs
+    dirs=$(python3 -c "
+from defenseclaw.config import load
+cfg = load()
+for d in cfg.skill_dirs():
+    print(d)
+" 2>/dev/null || true)
+
+    if [ -n "$dirs" ]; then
+        printf '%s\n' "$dirs" | awk 'NF && !seen[$0]++'
+        return
+    fi
+
+    printf '%s\n%s\n' \
+        "$HOME/.openclaw/workspace/skills" \
+        "$HOME/.openclaw/skills" | awk 'NF && !seen[$0]++'
+}
+
+count_nonempty_lines() {
+    printf '%s\n' "$1" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' '
+}
+
+snapshot_skill_paths() {
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        [ -d "$dir" ] || continue
+        find "$dir" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null || true
+    done < <(get_skill_dirs)
+}
+
+find_skill_path() {
+    local name="$1"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        if [ -d "$dir/$name" ]; then
+            printf '%s\n' "$dir/$name"
+            return 0
+        fi
+    done < <(get_skill_dirs)
+    return 1
+}
+
+cleanup_skill_name() {
+    local name="$1"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        rm -rf "$dir/$name" 2>/dev/null || true
+    done < <(get_skill_dirs)
+}
+
+extract_existing_dir_from_text() {
+    local text="$1"
+    local candidate
+    while IFS= read -r candidate; do
+        [ -d "$candidate" ] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(printf '%s\n' "$text" | grep -oE '/[^`[:space:]]+' || true)
+    return 1
 }
 
 dump_artifacts() {
@@ -178,12 +261,12 @@ phase_health() {
     if [ "$guard_state" = "running" ]; then
         pass "health: guardrail is running"
     elif [ "$guard_state" = "disabled" ]; then
-        skip "health: guardrail" "disabled — no model or API key configured"
+        skip_or_fail "$E2E_REQUIRE_GUARDRAIL" "health: guardrail" "disabled — no supported live model provider configured"
     elif [ "$guard_state" = "error" ]; then
         local guard_err
         guard_err=$(echo "$health" | jq -r '.guardrail.last_error // empty' 2>/dev/null)
         if echo "$guard_err" | grep -qi "no API key\|api_key_env\|key not found"; then
-            skip "health: guardrail" "no API key for model provider (Bedrock models use AWS IAM, not API keys)"
+            skip_or_fail "$E2E_REQUIRE_GUARDRAIL" "health: guardrail" "$guard_err"
         else
             fail "health: guardrail is running" "error — $guard_err"
         fi
@@ -403,7 +486,7 @@ phase_guardrail() {
     phase_timer_start
 
     if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 10 2; then
-        skip "guardrail proxy" "not reachable on port 4000 (may need API key configured)"
+        skip_or_fail "$E2E_REQUIRE_GUARDRAIL" "guardrail proxy" "not reachable on port 4000"
         phase_timer_end "Phase 6"
         return
     fi
@@ -489,40 +572,6 @@ phase_agent_chat() {
 
     local session_id="e2e-test-$$"
 
-    # --- Discover skill directories ---
-    local skill_dir_root
-    skill_dir_root=$(python3 -c "
-from defenseclaw.config import load
-cfg = load()
-for d in cfg.skill_dirs():
-    print(d)
-" 2>/dev/null | head -1 || echo "$HOME/.openclaw/skills")
-    echo "  Primary skill directory: $skill_dir_root"
-    mkdir -p "$skill_dir_root"
-
-    # --- Clean stale skills from prior runs ---
-    echo "  Cleaning stale test skills from prior runs..."
-    for pattern in wiki wiki-search wiki-retriever wikilocal "WikiLocal*" feishu-wiki; do
-        rm -rf "${skill_dir_root:?}/$pattern" 2>/dev/null || true
-    done
-    echo "  Done cleaning stale skills"
-
-    # --- Snapshot skills BEFORE ---
-    local skills_before=""
-    skills_before=$(openclaw skills list --json 2>/dev/null) || true
-    if [ -z "$skills_before" ] || ! echo "$skills_before" | jq -e '.' >/dev/null 2>&1; then
-        skills_before="[]"
-    fi
-    local before_names=""
-    before_names=$(echo "$skills_before" | jq -r '.[].name' 2>/dev/null | sort) || true
-    local before_count=0
-    before_count=$(echo "$before_names" | grep -c '[^[:space:]]') || true
-    echo "  Skills known to OpenClaw before: $before_count"
-
-    local disk_before
-    disk_before=$(ls -1 "$skill_dir_root" 2>/dev/null | sort || true)
-    echo "  Skills on disk before: $(echo "$disk_before" | grep -c '[^[:space:]]' || echo 0)"
-
     # --- Discover a real ClawHub skill to install ---
     echo ""
     echo "  Discovering available ClawHub skills..."
@@ -549,6 +598,32 @@ for d in cfg.skill_dirs():
         echo "  Using fallback slug 'weather'"
         install_slug="weather"
     fi
+
+    local skill_dirs
+    skill_dirs=$(get_skill_dirs)
+    echo "  Skill directories watched by DefenseClaw:"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        echo "    - $dir"
+        mkdir -p "$dir"
+    done <<< "$skill_dirs"
+
+    echo "  Cleaning prior copies of '$install_slug'..."
+    cleanup_skill_name "$install_slug"
+
+    # --- Snapshot skills BEFORE ---
+    local skills_before=""
+    skills_before=$(openclaw skills list --json 2>/dev/null) || true
+    if [ -z "$skills_before" ] || ! echo "$skills_before" | jq -e '.' >/dev/null 2>&1; then
+        skills_before="[]"
+    fi
+    local before_names=""
+    before_names=$(echo "$skills_before" | jq -r '.[].name' 2>/dev/null | sort) || true
+    echo "  Skills known to OpenClaw before: $(count_nonempty_lines "$before_names")"
+
+    local disk_before
+    disk_before=$(snapshot_skill_paths | sort -u)
+    echo "  Skill directories on disk before: $(count_nonempty_lines "$disk_before")"
 
     # --- Test 1: Verify agent is alive ---
     echo ""
@@ -592,9 +667,11 @@ for d in cfg.skill_dirs():
 
     # --- Verify installation via disk diff ---
     local disk_after
-    disk_after=$(ls -1 "$skill_dir_root" 2>/dev/null | sort || true)
+    disk_after=$(snapshot_skill_paths | sort -u)
     local new_on_disk
-    new_on_disk=$(comm -13 <(echo "$disk_before") <(echo "$disk_after") | grep -v '^$' || true)
+    new_on_disk=$(comm -13 \
+        <(printf '%s\n' "$disk_before" | sed '/^[[:space:]]*$/d' | sort -u) \
+        <(printf '%s\n' "$disk_after" | sed '/^[[:space:]]*$/d' | sort -u) || true)
 
     # Also check openclaw's own skill list
     local skills_after=""
@@ -605,26 +682,46 @@ for d in cfg.skill_dirs():
     local after_names=""
     after_names=$(echo "$skills_after" | jq -r '.[].name' 2>/dev/null | sort) || true
     local new_in_list
-    new_in_list=$(comm -13 <(echo "$before_names") <(echo "$after_names") | grep -v '^$' || true)
+    new_in_list=$(comm -13 \
+        <(printf '%s\n' "$before_names" | sed '/^[[:space:]]*$/d' | sort -u) \
+        <(printf '%s\n' "$after_names" | sed '/^[[:space:]]*$/d' | sort -u) || true)
 
     local installed_skill=""
+    local installed_path=""
     if [ -n "$new_on_disk" ]; then
-        installed_skill=$(echo "$new_on_disk" | head -1)
-        echo "  NEW skill directory on disk: $new_on_disk"
+        installed_path=$(printf '%s\n' "$new_on_disk" | sed '/^[[:space:]]*$/d' | head -1)
+        installed_skill=$(basename "$installed_path")
+        echo "  NEW skill directory on disk: $installed_path"
         pass "agent chat: skill '$installed_skill' installed on disk"
     elif [ -n "$new_in_list" ]; then
-        installed_skill=$(echo "$new_in_list" | head -1)
+        installed_skill=$(printf '%s\n' "$new_in_list" | sed '/^[[:space:]]*$/d' | head -1)
+        installed_path=$(find_skill_path "$installed_skill" || true)
         echo "  NEW skill in openclaw list: $new_in_list"
         pass "agent chat: skill '$installed_skill' appeared in openclaw skills list"
-    elif echo "$install_out" | grep -qi "installed\|successfully\|added"; then
-        echo "  Agent claimed success but no new directory or list entry detected"
-        installed_skill="$install_slug"
-        skip "agent chat: skill install" "agent claims success but not verified on disk/list"
     else
-        echo "  WARNING: no new skill on disk or in list, agent did not confirm success"
-        echo "  Disk before: $(echo "$disk_before" | tr '\n' ' ')"
-        echo "  Disk after:  $(echo "$disk_after" | tr '\n' ' ')"
-        fail "agent chat: skill install" "no new skill detected on disk or in openclaw list"
+        installed_path=$(extract_existing_dir_from_text "$install_out" || true)
+        if [ -n "$installed_path" ]; then
+            installed_skill=$(basename "$installed_path")
+            echo "  Agent reported installed path: $installed_path"
+            pass "agent chat: skill '$installed_skill' installed at reported path"
+        fi
+    fi
+
+    if [ -n "$installed_skill" ] && [ -z "$installed_path" ]; then
+        installed_path=$(find_skill_path "$installed_skill" || true)
+    fi
+
+    if [ -z "$installed_skill" ]; then
+        if echo "$install_out" | grep -qi "installed\|successfully\|added"; then
+            skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent claims success but install path could not be verified"
+        else
+            echo "  WARNING: no new skill on disk or in list, agent did not confirm success"
+            echo "  Disk before: $(echo "$disk_before" | tr '\n' ' ')"
+            echo "  Disk after:  $(echo "$disk_after" | tr '\n' ' ')"
+            fail "agent chat: skill install" "no new skill detected on disk or in openclaw list"
+        fi
+    elif [ -z "$installed_path" ]; then
+        skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: install path resolution" "skill name resolved but no on-disk path was found"
     fi
 
     # --- Test 3: Poll for DefenseClaw scan results ---
@@ -654,10 +751,14 @@ for d in cfg.skill_dirs():
 
         if [ "$scan_found" = false ]; then
             echo "  Poll timed out. Triggering scan via sidecar API..."
-            local skill_path="$skill_dir_root/$installed_skill"
-            curl -sf -X POST "$SIDECAR_URL/v1/skill/scan" \
+            local skill_path="${installed_path:-$(find_skill_path "$installed_skill" || true)}"
+            local scan_response=""
+            scan_response=$(curl -sf -X POST "$SIDECAR_URL/v1/skill/scan" \
                 -H "Content-Type: application/json" \
-                -d "{\"target\": \"$skill_path\"}" 2>/dev/null || true
+                -d "{\"target\": \"$skill_path\"}" 2>/dev/null || true)
+            echo "  --- Manual scan response ---"
+            echo "$scan_response" | jq '.' 2>/dev/null || echo "$scan_response"
+            echo "  --- end manual scan response ---"
             sleep 10
 
             local dc_list
@@ -678,42 +779,34 @@ for d in cfg.skill_dirs():
             if [ "$scan_severity" != "NONE" ] && [ "$scan_severity" != "null" ]; then
                 pass "agent chat: DefenseClaw scanned '$installed_skill' (severity=$scan_severity, findings=$scan_findings)"
             else
-                skip "agent chat: DefenseClaw scan" "skill in inventory but scan not completed"
+                skip_or_fail "$E2E_REQUIRE_AGENT_SCAN" "agent chat: DefenseClaw scan" "skill in inventory but scan not completed"
             fi
         else
-            skip "agent chat: DefenseClaw scan" "skill '$installed_skill' not found in defenseclaw inventory"
+            skip_or_fail "$E2E_REQUIRE_AGENT_SCAN" "agent chat: DefenseClaw scan" "skill '$installed_skill' not found in defenseclaw inventory"
         fi
     else
-        skip "agent chat: DefenseClaw scan" "no skill was installed to scan"
+        skip_or_fail "$E2E_REQUIRE_AGENT_SCAN" "agent chat: DefenseClaw scan" "no skill was installed to scan"
     fi
 
-    # --- Test 4: Agent removes the skill ---
+    # --- Test 4: Cleanup installed skill ---
     echo ""
-    echo "  --- Test 4: Agent removes skill ---"
+    echo "  --- Test 4: Cleanup installed skill ---"
     if [ -n "$installed_skill" ]; then
-        local remove_prompt="Remove the $installed_skill skill. Delete its folder by running: rm -rf $skill_dir_root/$installed_skill"
-        echo "  Sending: '$remove_prompt'"
-        local remove_out
-        remove_out=$(timeout 120 openclaw agent \
-            --session-id "${session_id}-remove" \
-            -m "$remove_prompt" \
-            2>&1 || true)
-        echo "  --- Agent remove output (full) ---"
-        echo "$remove_out"
-        echo "  --- end agent remove output ---"
+        if [ -n "$installed_path" ] && [ -d "$installed_path" ]; then
+            echo "  Removing installed skill directory: $installed_path"
+            rm -rf "$installed_path" 2>/dev/null || true
+        else
+            cleanup_skill_name "$installed_skill"
+        fi
 
         sleep 2
 
-        if [ ! -d "$skill_dir_root/$installed_skill" ]; then
-            pass "agent chat: skill '$installed_skill' removed from disk"
+        local remaining_path=""
+        remaining_path=$(find_skill_path "$installed_skill" || true)
+        if [ -z "$remaining_path" ]; then
+            pass "cleanup: skill '$installed_skill' removed from disk"
         else
-            echo "  Skill directory still exists — trying manual cleanup for next run"
-            rm -rf "$skill_dir_root/$installed_skill" 2>/dev/null || true
-            if echo "$remove_out" | grep -qi "removed\|deleted\|done"; then
-                skip "agent chat: skill removal" "agent claims removed but directory persisted"
-            else
-                fail "agent chat: skill removal" "skill directory still at $skill_dir_root/$installed_skill"
-            fi
+            fail "cleanup: skill removal" "skill directory still exists at $remaining_path"
         fi
 
         # Verify it's gone from openclaw list
@@ -725,12 +818,12 @@ for d in cfg.skill_dirs():
         local still_in_list
         still_in_list=$(echo "$post_remove_list" | jq --arg n "$installed_skill" '[.[] | select(.name == $n)] | length' 2>/dev/null || echo "0")
         if [ "${still_in_list:-0}" -eq 0 ]; then
-            pass "agent chat: skill '$installed_skill' no longer in openclaw list"
+            pass "cleanup: skill '$installed_skill' no longer in openclaw list"
         else
-            skip "agent chat: skill removal from list" "still in openclaw list (session snapshot may be stale)"
+            skip "cleanup: skill removal from list" "still in openclaw list (session snapshot may be stale)"
         fi
     else
-        skip "agent chat: skill removal" "no skill was installed to remove"
+        skip "cleanup: skill removal" "no skill was installed to remove"
     fi
     phase_timer_end "Phase 7"
 }

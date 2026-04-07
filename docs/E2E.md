@@ -7,7 +7,7 @@ Full-stack end-to-end tests for DefenseClaw running on a persistent AWS EC2 inst
 ```
 GitHub push  ──►  .github/workflows/e2e.yml
                         │
-                        ▼  runs-on: self-hosted
+                        ▼  runs-on: [self-hosted, Linux, ARM64]
                ┌──────────────────────────────────────┐
                │  AWS EC2 t3.small (Ubuntu 24.04)     │
                │                                       │
@@ -19,8 +19,7 @@ GitHub push  ──►  .github/workflows/e2e.yml
                └──────────────────────────────────────┘
                         │
                         ▼
-               Telegram Bot API  (api.telegram.org)
-               Splunk O11y Cloud (optional)
+               ClawHub / model provider / Splunk O11y
 ```
 
 ## Prerequisites
@@ -45,7 +44,7 @@ The EC2 instance needs the following installed. All commands assume Ubuntu 24.04
 - **Type**: `t3.small` (2 vCPU, 2 GB RAM)
 - **Storage**: 20 GB gp3 EBS
 - **Security Group**: SSH restricted to your IP only. No other inbound rules needed — the GitHub Actions runner communicates outbound-only, and Tailscale handles private access.
-- **IAM Role**: Attach a role with `bedrock:InvokeModel` permission for LLM access (no API keys needed).
+- **IAM Role**: Optional for OpenClaw models hosted on Bedrock. The current live guardrail E2E phase only runs against OpenAI or Anthropic providers with API-key auth.
 
 ### 2. Install System Dependencies
 
@@ -118,9 +117,10 @@ Go to **repo Settings > Secrets and variables > Actions** and add:
 | Secret | Required | Source |
 |--------|----------|--------|
 | `OPENCLAW_GATEWAY_TOKEN` | Yes | `jq -r .token ~/.openclaw/openclaw.json` on the EC2 |
+| `ANTHROPIC_API_KEY` | Optional | Required only if you want the live guardrail phase to exercise Anthropic models |
+| `OPENAI_API_KEY` | Optional | Required only if you want the live guardrail phase to exercise OpenAI models |
 | `SPLUNK_ACCESS_TOKEN` | No | Splunk O11y org settings (for cloud export) |
 | `SPLUNK_REALM` | No | e.g., `us1` (for Splunk O11y cloud export) |
-| `E2E_TELEGRAM_USER_SESSION` | No | See Telegram section below |
 
 ### 6. Install OpenClaw (One-Time)
 
@@ -132,6 +132,11 @@ openclaw init
 ```
 
 Configure your Telegram channel, agent definitions, and model settings as needed. These persist in `~/.openclaw/` and are not touched by E2E runs.
+
+DefenseClaw watches both OpenClaw skill locations during E2E runs:
+
+- `~/.openclaw/workspace/skills`
+- `~/.openclaw/skills`
 
 ## Telegram Session Setup (One-Time)
 
@@ -195,16 +200,27 @@ OpenClaw is the only stateful thing:
 - Device pairing (`paired.json`)
 - Telegram channel login
 
+### Guardrail Provider Support
+
+The live guardrail proxy phase is only enabled when the persisted OpenClaw model
+uses an OpenAI- or Anthropic-compatible provider and the matching GitHub secret
+is present. If the runner is using Bedrock-backed models, the workflow leaves
+`guardrail.enabled=false` and skips the live proxy phase instead of booting the
+sidecar into a permanent guardrail error state.
+
 ### Test Phases
 
 | Phase | What It Tests |
 |-------|--------------|
 | 1. Start stack | OpenClaw gateway + DefenseClaw sidecar startup |
-| 2. Health assertions | `/health` JSON, `/status` WebSocket handshake, Telegram channel |
-| 3. Agent round-trip | Sidecar -> gateway -> guardrail proxy -> LLM -> back |
-| 4. Telegram round-trip | Telegram -> OpenClaw -> guardrail -> LLM -> Telegram |
-| 5. Splunk assertions | HEC ingest, event count, guardrail audit events |
-| 6. Teardown | Stop services, print summary |
+| 2. Health assertions | `/health` JSON for gateway, watcher, API, guardrail, and Splunk |
+| 3. Skill scanner | Live scans against clean and malicious skill fixtures |
+| 4. MCP scanner | Live MCP scan against a configured server |
+| 5. Quarantine flow | Place, quarantine, restore, and verify a malicious skill fixture |
+| 6. Guardrail proxy | Live prompt round-trip when a compatible provider is configured |
+| 7. Agent chat | Real OpenClaw agent ping, skill install, and DefenseClaw scan verification |
+| 8. Splunk assertions | HEC ingest, event count, and audit action visibility |
+| 9. Teardown | Stop services, print summary |
 
 ## Accessing Services via Tailscale
 
@@ -231,7 +247,7 @@ Go to **Actions > E2E > Run workflow** in the GitHub UI. Select the branch and c
 cd ~/actions-runner/_work/defenseclaw/defenseclaw
 git pull
 make install
-defenseclaw init --enable-guardrail --yes
+defenseclaw init
 scripts/test-e2e-full-stack.sh
 ```
 

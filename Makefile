@@ -62,9 +62,10 @@ dev-install:
 pycli:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	uv venv $(VENV) --python 3.12
+	uv venv $(VENV) --python 3.12 --clear
 	uv pip install -e . --python $(VENV)/bin/python
 	@mkdir -p $(INSTALL_DIR)
+	@ln -sf $(CURDIR)/$(VENV)/bin/defenseclaw $(INSTALL_DIR)/defenseclaw
 	@ln -sf $(CURDIR)/$(VENV)/bin/litellm $(INSTALL_DIR)/litellm 2>/dev/null || true
 
 dev-pycli: pycli

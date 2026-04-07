@@ -12,7 +12,7 @@ concurrency:
 jobs:
   full-stack:
     name: Full Stack E2E
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 20
     env:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
@@ -20,6 +20,9 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      E2E_REQUIRE_AGENT_INSTALL: "true"
+      E2E_REQUIRE_AGENT_SCAN: "true"
+      E2E_REQUIRE_GUARDRAIL: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.OPENAI_API_KEY != '' }}
     defaults:
       run:
         shell: bash
@@ -34,6 +37,49 @@ jobs:
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          cfg_path = Path(os.path.expanduser('~/.openclaw/openclaw.json'))
+          if not cfg_path.exists():
+              raise SystemExit(0)
+
+          with cfg_path.open() as f:
+              cfg = json.load(f)
+
+          changed = False
+          workspace = Path(
+              cfg.get('agents', {}).get('defaults', {}).get('workspace')
+              or os.path.expanduser('~/.openclaw/workspace')
+          )
+          global_skills = Path(os.path.expanduser('~/.openclaw/skills'))
+
+          skills = cfg.setdefault('skills', {}).setdefault('entries', {})
+          kept_skills = {
+              name: meta
+              for name, meta in skills.items()
+              if (workspace / 'skills' / name).is_dir() or (global_skills / name).is_dir()
+          }
+          if kept_skills != skills:
+              cfg['skills']['entries'] = kept_skills
+              changed = True
+
+          plugins = cfg.setdefault('plugins', {})
+          for section in ('entries', 'installs'):
+              bucket = plugins.get(section)
+              if isinstance(bucket, dict) and bucket.pop('defenseclaw', None) is not None:
+                  changed = True
+
+          if changed:
+              with cfg_path.open('w') as f:
+                  json.dump(cfg, f, indent=2)
+                  f.write('\n')
+              print('OpenClaw config normalized for persistent E2E runner')
+          else:
+              print('OpenClaw config already clean')
+          PY
           echo "DefenseClaw fully removed"
 
       # Phase 1 — Start Splunk Docker (stays running for dashboard browsing via Tailscale)
@@ -110,21 +156,38 @@ jobs:
           ")
           echo "  OpenClaw model: ${OC_MODEL:-<not found>}"
 
+          MODEL_NAME=""
+          API_KEY_ENV=""
+          GUARDRAIL_ENABLED=false
+          GUARDRAIL_REASON="no compatible live provider detected"
+
           if [ -n "$OC_MODEL" ]; then
             MODEL_NAME=$(echo "$OC_MODEL" | sed 's|.*/||')
-            API_KEY_ENV=""
             if echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
               API_KEY_ENV="ANTHROPIC_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
               API_KEY_ENV="OPENAI_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
-              API_KEY_ENV="AWS_ACCESS_KEY_ID"
-              echo "  NOTE: Bedrock model detected — guardrail proxy may not support AWS SigV4 auth"
+              GUARDRAIL_REASON="Bedrock model detected — live guardrail proxy does not yet support SigV4 auth"
             else
-              API_KEY_ENV="ANTHROPIC_API_KEY"
+              GUARDRAIL_REASON="model provider is not supported by the live guardrail proxy"
+            fi
+
+            if [ -n "$API_KEY_ENV" ] && [ -n "${!API_KEY_ENV:-}" ]; then
+              GUARDRAIL_ENABLED=true
+              GUARDRAIL_REASON=""
+            elif [ -n "$API_KEY_ENV" ]; then
+              GUARDRAIL_REASON="missing ${API_KEY_ENV} secret for live guardrail proxy"
             fi
           else
             echo "  WARNING: No model found in openclaw.json — guardrail will be disabled"
+            GUARDRAIL_REASON="no model found in openclaw.json"
+          fi
+
+          if [ "$GUARDRAIL_ENABLED" = true ]; then
+            echo "  Guardrail proxy will run against $OC_MODEL via $API_KEY_ENV"
+          else
+            echo "  NOTE: Guardrail proxy disabled for this run — $GUARDRAIL_REASON"
           fi
 
           # --- Write combined config: Splunk + guardrail + skill_actions ---
@@ -132,13 +195,15 @@ jobs:
           # container is already running on ports 8000/8088. The --logs command
           # would fail the port pre-flight check. Write config directly instead.
           echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> ~/.defenseclaw/.env
-          python3 -c "
-          import yaml, os
+          export OC_MODEL MODEL_NAME API_KEY_ENV GUARDRAIL_ENABLED GUARDRAIL_REASON
+          python3 - <<'PY'
+          import os
+          import yaml
+
           cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          # Splunk HEC (compose container already on :8088)
           cfg.setdefault('splunk', {})
           cfg['splunk']['enabled'] = True
           cfg['splunk']['hec_endpoint'] = 'http://127.0.0.1:8088'
@@ -150,15 +215,16 @@ jobs:
           cfg['splunk']['flush_interval_s'] = 5
           cfg['splunk']['hec_token_env'] = 'DEFENSECLAW_SPLUNK_HEC_TOKEN'
 
-          # Guardrail + skill_actions (only if model detected)
-          model = '$OC_MODEL'
-          if model:
-              cfg.setdefault('guardrail', {})
+          cfg.setdefault('guardrail', {})
+          cfg['guardrail']['enabled'] = False
+          cfg['guardrail']['mode'] = 'observe'
+
+          if os.environ.get('GUARDRAIL_ENABLED', '').lower() == 'true':
               cfg['guardrail']['enabled'] = True
               cfg['guardrail']['mode'] = 'action'
-              cfg['guardrail']['model'] = model
-              cfg['guardrail']['model_name'] = '$MODEL_NAME'
-              cfg['guardrail']['api_key_env'] = '$API_KEY_ENV'
+              cfg['guardrail']['model'] = os.environ.get('OC_MODEL', '')
+              cfg['guardrail']['model_name'] = os.environ.get('MODEL_NAME', '')
+              cfg['guardrail']['api_key_env'] = os.environ.get('API_KEY_ENV', '')
               cfg['skill_actions'] = {
                   'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
                   'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
@@ -168,9 +234,15 @@ jobs:
 
           with open(cfg_path, 'w') as f:
               yaml.dump(cfg, f, default_flow_style=False)
-          print('  Config written: splunk=enabled guardrail={} model={}'.format(
-              'action' if model else 'disabled', model or 'none'))
-          "
+
+          print(
+              '  Config written: splunk=enabled guardrail={} model={} reason={}'.format(
+                  'action' if cfg['guardrail']['enabled'] else 'disabled',
+                  os.environ.get('OC_MODEL', '') or 'none',
+                  os.environ.get('GUARDRAIL_REASON', '') or 'n/a',
+              )
+          )
+          PY
 
           echo ""
           echo "  === Final config ==="

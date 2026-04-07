@@ -447,8 +447,11 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 
 func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 	dirs := SkillDirsForMode(ClawOpenClaw, "/tmp/nonexistent-home")
-	if len(dirs) == 0 {
-		t.Fatal("expected at least one skill dir")
+	if len(dirs) < 2 {
+		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
+	}
+	if dirs[0] != "/tmp/nonexistent-home/workspace/skills" {
+		t.Errorf("first dir = %q, want /tmp/nonexistent-home/workspace/skills", dirs[0])
 	}
 	if dirs[len(dirs)-1] != "/tmp/nonexistent-home/skills" {
 		t.Errorf("last dir = %q, want /tmp/nonexistent-home/skills", dirs[len(dirs)-1])
@@ -457,11 +460,12 @@ func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 
 func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 	tmpDir := t.TempDir()
+	workspaceDir := filepath.Join(tmpDir, "project-workspace")
 
 	ocConfig := map[string]interface{}{
 		"agents": map[string]interface{}{
 			"defaults": map[string]interface{}{
-				"workspace": tmpDir,
+				"workspace": workspaceDir,
 			},
 		},
 		"skills": map[string]interface{}{
@@ -490,7 +494,7 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 		t.Errorf("expected /tmp/extra-skills in dirs: %v", dirs)
 	}
 
-	wsSkills := filepath.Join(tmpDir, "skills")
+	wsSkills := filepath.Join(workspaceDir, "skills")
 	foundWs := false
 	for _, d := range dirs {
 		if d == wsSkills {
@@ -500,6 +504,9 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 	}
 	if !foundWs {
 		t.Errorf("expected workspace/skills %q in dirs: %v", wsSkills, dirs)
+	}
+	if dirs[len(dirs)-1] != filepath.Join(tmpDir, "skills") {
+		t.Errorf("expected global skill dir last, got %v", dirs)
 	}
 }
 
