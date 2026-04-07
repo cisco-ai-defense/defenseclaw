@@ -13,15 +13,13 @@ jobs:
   full-stack:
     name: Full Stack E2E
     runs-on: self-hosted
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
-      E2E_TELEGRAM_USER_SESSION: ${{ secrets.E2E_TELEGRAM_USER_SESSION }}
-      E2E_TELEGRAM_API_ID: ${{ secrets.E2E_TELEGRAM_API_ID }}
-      E2E_TELEGRAM_API_HASH: ${{ secrets.E2E_TELEGRAM_API_HASH }}
-      E2E_TELEGRAM_BOT_USERNAME: ${{ secrets.E2E_TELEGRAM_BOT_USERNAME }}
     defaults:
       run:
         shell: bash
@@ -61,21 +59,43 @@ jobs:
           echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # Phase 3 — Initialize DefenseClaw
+      # Phase 3 — Initialize DefenseClaw + configure scanners + guardrail
       - name: Init DefenseClaw
         run: |
           defenseclaw init
-          defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
 
-          # Write secrets to .env BEFORE guardrail setup
+          # --- Write ALL secrets to .env BEFORE any setup ---
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
-          if [ -n "${SPLUNK_ACCESS_TOKEN}" ]; then
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
             echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
           fi
 
-          # Read model from openclaw.json and inject into defenseclaw config
-          # (setup guardrail --non-interactive can't set model — no CLI flag)
+          # --- Setup Splunk logging ---
+          defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
+
+          # --- Setup skill-scanner with behavioral analysis enabled ---
+          defenseclaw setup skill-scanner \
+            --use-behavioral \
+            --policy balanced \
+            --non-interactive \
+            --no-verify
+          echo "  ✓ skill-scanner configured (behavioral + balanced policy)"
+
+          # --- Setup mcp-scanner with yara + behavioral + instructions ---
+          defenseclaw setup mcp-scanner \
+            --analyzers yara,behavioral \
+            --scan-instructions \
+            --non-interactive
+          echo "  ✓ mcp-scanner configured (yara + behavioral + instructions)"
+
+          # --- Detect model from OpenClaw and configure guardrail ---
           OC_MODEL=$(python3 -c "
           import json, os
           try:
@@ -104,7 +124,6 @@ jobs:
           cfg['guardrail']['model'] = '$OC_MODEL'
           cfg['guardrail']['model_name'] = '$MODEL_NAME'
           cfg['guardrail']['api_key_env'] = '$API_KEY_ENV'
-          # Enforce quarantine on HIGH/CRITICAL findings for E2E testing
           cfg['skill_actions'] = {
               'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
               'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
@@ -119,11 +138,15 @@ jobs:
             echo "  WARNING: No model found in openclaw.json — guardrail will be disabled"
           fi
 
-          echo "  Config:"
-          cat ~/.defenseclaw/config.yaml | head -30
+          echo ""
+          echo "  === Final config ==="
+          cat ~/.defenseclaw/config.yaml | head -40
+          echo ""
+          echo "  === .env keys present ==="
+          grep -oP '^\w+(?==)' ~/.defenseclaw/.env || true
 
-          # Restart gateway to pick up guardrail + token + enforcement config
-          defenseclaw-gateway restart
+          # Restart gateway to pick up all config
+          defenseclaw-gateway restart || defenseclaw-gateway start
           sleep 5
           defenseclaw-gateway status
 
