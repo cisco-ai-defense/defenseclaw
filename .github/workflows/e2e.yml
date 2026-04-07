@@ -269,6 +269,8 @@ jobs:
       E2E_REQUIRE_RECOVERY: "false"
       OPENCLAW_MODEL_PATCHED: "false"
       OPENCLAW_MODEL_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.backup.json
+      OPENCLAW_AUTH_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.backup.json
+      OPENCLAW_AUTH_BACKUP_MISSING_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.missing
     defaults:
       run:
         shell: bash
@@ -277,6 +279,21 @@ jobs:
 
       - name: Clean DefenseClaw
         run: |
+          if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw
+            cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
+            rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw/agents/main/agent
+            cp "${OPENCLAW_AUTH_BACKUP_PATH}" ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
+          fi
+
           defenseclaw-gateway stop 2>/dev/null || true
           openclaw gateway stop 2>/dev/null || true
           rm -rf ~/.defenseclaw
@@ -392,12 +409,21 @@ jobs:
           install -m 0755 /tmp/opa "$HOME/.local/bin/opa"
           opa version
 
-      - name: Prepare OpenClaw Anthropic model
+      - name: Prepare OpenClaw Anthropic model + auth
         run: |
           if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
             mkdir -p ~/.openclaw
             cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
             rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw/agents/main/agent
+            cp "${OPENCLAW_AUTH_BACKUP_PATH}" ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
 
           python3 - <<'PY'
@@ -406,15 +432,35 @@ jobs:
           from pathlib import Path
 
           target_model = "anthropic/claude-sonnet-4-5"
-          cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
+          state_dir = Path(os.path.expanduser("~/.openclaw"))
+          cfg_path = state_dir / "openclaw.json"
+          auth_path = state_dir / "agents" / "main" / "agent" / "auth-profiles.json"
           if not cfg_path.exists():
               raise SystemExit("openclaw.json not found; full-live requires a configured OpenClaw home")
 
           backup_path = Path(os.environ["OPENCLAW_MODEL_BACKUP_PATH"])
           backup_path.write_text(cfg_path.read_text())
+          auth_backup_path = Path(os.environ["OPENCLAW_AUTH_BACKUP_PATH"])
+          auth_missing_path = Path(os.environ["OPENCLAW_AUTH_BACKUP_MISSING_PATH"])
+          if auth_backup_path.exists():
+              auth_backup_path.unlink()
+          if auth_missing_path.exists():
+              auth_missing_path.unlink()
+          if auth_path.exists():
+              auth_backup_path.write_text(auth_path.read_text())
+          else:
+              auth_missing_path.write_text("")
 
           with cfg_path.open() as f:
               cfg = json.load(f)
+
+          auth_cfg = cfg.setdefault("auth", {})
+          auth_profiles = auth_cfg.setdefault("profiles", {})
+          auth_profiles["anthropic:default"] = {
+              "provider": "anthropic",
+              "mode": "api_key",
+          }
+          auth_cfg.setdefault("order", {})["anthropic"] = ["anthropic:default"]
 
           agents = cfg.setdefault("agents", {})
           defaults = agents.setdefault("defaults", {})
@@ -427,6 +473,29 @@ jobs:
           with cfg_path.open("w") as f:
               json.dump(cfg, f, indent=2)
               f.write("\n")
+
+          auth_path.parent.mkdir(parents=True, exist_ok=True)
+          auth_store = {
+              "version": 1,
+              "profiles": {
+                  "anthropic:default": {
+                      "type": "api_key",
+                      "provider": "anthropic",
+                      "keyRef": {
+                          "source": "env",
+                          "provider": "default",
+                          "id": "ANTHROPIC_API_KEY",
+                      },
+                  }
+              },
+              "order": {
+                  "anthropic": ["anthropic:default"],
+              },
+          }
+          with auth_path.open("w") as f:
+              json.dump(auth_store, f, indent=2)
+              f.write("\n")
+          auth_path.chmod(0o600)
           PY
 
           echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
@@ -566,4 +635,13 @@ jobs:
             mkdir -p ~/.openclaw
             cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
             rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw/agents/main/agent
+            cp "${OPENCLAW_AUTH_BACKUP_PATH}" ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi

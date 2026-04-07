@@ -281,7 +281,9 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	if err := a.client.DisablePlugin(ctx, req.PluginName); err != nil {
+	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+		return a.client.DisablePlugin(callCtx, req.PluginName)
+	}); err != nil {
 		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -316,7 +318,9 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	if err := a.client.EnablePlugin(ctx, req.PluginName); err != nil {
+	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+		return a.client.EnablePlugin(callCtx, req.PluginName)
+	}); err != nil {
 		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -325,6 +329,42 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogAction("api-plugin-enable", req.PluginName, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "pluginName": req.PluginName})
+}
+
+const gatewayMutationRetryDelay = 750 * time.Millisecond
+const gatewayMutationMaxAttempts = 4
+
+func isRetryableGatewayMutationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "gateway: not connected") ||
+		strings.Contains(msg, "websocket: close sent") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "connection refused")
+}
+
+func (a *APIServer) retryGatewayMutation(ctx context.Context, fn func(context.Context) error) error {
+	var lastErr error
+	for attempt := 1; attempt <= gatewayMutationMaxAttempts; attempt++ {
+		lastErr = fn(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableGatewayMutationError(lastErr) || attempt == gatewayMutationMaxAttempts {
+			return lastErr
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gatewayMutationRetryDelay):
+		}
+	}
+	return lastErr
 }
 
 type configPatchRequest struct {
