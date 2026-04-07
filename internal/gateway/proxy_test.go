@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -143,16 +144,18 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 	store, logger := testStoreAndLogger(t)
 	health := NewSidecarHealth()
 
-	return &GuardrailProxy{
+	p := &GuardrailProxy{
 		cfg:       cfg,
 		logger:    logger,
 		health:    health,
 		store:     store,
 		dataDir:   t.TempDir(),
-		primary:   prov,
 		inspector: insp,
 		mode:      mode,
 	}
+	// Inject the mock provider — bypasses header-based resolution.
+	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return prov }
+	return p
 }
 
 func postChat(t *testing.T, proxy *GuardrailProxy, body []byte) *httptest.ResponseRecorder {
@@ -1111,62 +1114,84 @@ func TestPatchRawResponseModel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// resolveProvider unit tests
+// resolveProviderFromHeaders unit tests
 // ---------------------------------------------------------------------------
 
-func TestResolveProvider_AzureHeader(t *testing.T) {
-	// When api-key header is present, handleChatCompletion should set
-	// TargetAPIKey from the header and TargetURL = "azure" sentinel.
-	// Verify this by inspecting resolveProvider directly with a pre-built request.
-	prov := &mockProvider{}
-	insp := newMockInspector()
-	proxy := newTestProxy(t, prov, insp, "observe")
-
-	// Direct unit test: build a ChatRequest as handleChatCompletion would.
-	req := &ChatRequest{
-		Model:        "gpt-4.1",
-		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
-		TargetAPIKey: "azure-test-key",
-		TargetURL:    "azure",
-	}
-
-	provider := proxy.resolveProvider(req)
-	if provider == nil {
-		t.Fatal("resolveProvider returned nil for azure sentinel")
-	}
-	azProv, ok := provider.(*azureOpenAIProvider)
-	if !ok {
-		t.Fatalf("resolveProvider returned %T, want *azureOpenAIProvider", provider)
-	}
-	if azProv.apiKey != "azure-test-key" {
-		t.Errorf("azureOpenAIProvider.apiKey = %q, want azure-test-key", azProv.apiKey)
-	}
-	if azProv.model != "gpt-4.1" {
-		t.Errorf("azureOpenAIProvider.model = %q, want gpt-4.1", azProv.model)
-	}
-}
-
 func TestResolveProvider_FetchInterceptor(t *testing.T) {
-	// When X-DC-Target-URL is set (fetch interceptor path), resolveProvider
-	// should return a provider based on the inferred provider from the URL.
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "observe")
+	// Use the real resolver for this test (not the mock injected by newTestProxy).
+	proxy.resolveProviderFn = proxy.resolveProviderFromHeaders
 
-	req := &ChatRequest{
-		Model:        "gpt-4",
-		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
-		TargetAPIKey: "sk-openai-key",
-		TargetURL:    "https://api.openai.com",
+	tests := []struct {
+		name      string
+		targetURL string
+		apiKey    string
+		model     string
+		wantNil   bool
+		wantType  string
+	}{
+		{
+			name:      "openai",
+			targetURL: "https://api.openai.com",
+			apiKey:    "sk-openai-key",
+			model:     "gpt-4",
+			wantType:  "*gateway.openaiProvider",
+		},
+		{
+			name:      "azure",
+			targetURL: "https://myresource.openai.azure.com",
+			apiKey:    "azure-test-key",
+			model:     "gpt-4.1",
+			wantType:  "*gateway.azureOpenAIProvider",
+		},
+		{
+			name:      "anthropic",
+			targetURL: "https://api.anthropic.com",
+			apiKey:    "sk-ant-key",
+			model:     "claude-opus-4-5",
+			wantType:  "*gateway.anthropicProvider",
+		},
+		{
+			name:      "missing_target_url",
+			targetURL: "",
+			apiKey:    "sk-key",
+			model:     "gpt-4",
+			wantNil:   true,
+		},
+		{
+			name:      "unknown_domain",
+			targetURL: "https://unknown-llm.example.com",
+			apiKey:    "sk-key",
+			model:     "gpt-4",
+			wantNil:   true,
+		},
 	}
 
-	provider := proxy.resolveProvider(req)
-	if provider == nil {
-		t.Fatal("resolveProvider returned nil for fetch interceptor path")
-	}
-	// Should not be primary (mock) — should be a real provider built from prefix+model.
-	if provider == prov {
-		t.Error("resolveProvider should not return primary mock when TargetURL is set")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &ChatRequest{
+				Model:        tt.model,
+				Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+				TargetAPIKey: tt.apiKey,
+				TargetURL:    tt.targetURL,
+			}
+			got := proxy.resolveProviderFn(req)
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("expected nil, got %T", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected %s, got nil", tt.wantType)
+			}
+			gotType := fmt.Sprintf("%T", got)
+			if gotType != tt.wantType {
+				t.Errorf("got %s, want %s", gotType, tt.wantType)
+			}
+		})
 	}
 }
 

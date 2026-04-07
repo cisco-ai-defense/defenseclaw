@@ -75,10 +75,14 @@ type GuardrailProxy struct {
 	store     *audit.Store
 	dataDir   string
 
-	primary          LLMProvider
 	inspector        ContentInspector
 	masterKey        string
 	gatewayToken     string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
+
+	// resolveProviderFn selects the upstream LLMProvider for a request.
+	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
+	// Tests can override this to inject a mock provider.
+	resolveProviderFn func(req *ChatRequest) LLMProvider
 
 	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
 	// endpoint on the API server writes guardrail_runtime.json; the proxy
@@ -88,9 +92,8 @@ type GuardrailProxy struct {
 	blockMessage string
 }
 
-// NewGuardrailProxy constructs and wires a proxy. guardrail.model is optional:
-// when omitted the proxy relies on the fetch interceptor's X-DC-Target-URL and
-// X-AI-Auth headers to route all requests at runtime.
+// NewGuardrailProxy constructs and wires a proxy. All provider routing is
+// handled by the fetch interceptor's X-DC-Target-URL and X-AI-Auth headers.
 func NewGuardrailProxy(
 	cfg *config.GuardrailConfig,
 	ciscoAID *config.CiscoAIDefenseConfig,
@@ -102,23 +105,6 @@ func NewGuardrailProxy(
 	policyDir string,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
-
-	// primary is optional: when guardrail.model is empty the proxy relies
-	// entirely on the fetch interceptor supplying X-DC-Target-URL and
-	// X-AI-Auth at runtime. A nil primary causes resolveProvider to return
-	// an error only for requests that lack those headers.
-	var primary LLMProvider
-	if cfg.Model != "" {
-		// Resolve the API key. Try .env first, then fall back to reading the
-		// key directly from OpenClaw's auth-profiles.json (same source the
-		// fetch interceptor uses). This ensures the primary provider works
-		// even before OpenClaw is restarted to load the fetch interceptor.
-		apiKey := ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
-		if apiKey == "" {
-			apiKey = resolveKeyFromOpenClawProfiles(cfg.Model)
-		}
-		primary = NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
-	}
 
 	var cisco *CiscoInspectClient
 	if cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
@@ -132,20 +118,21 @@ func NewGuardrailProxy(
 	masterKey := deriveMasterKey(dataDir)
 	gatewayToken := ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
 
-	return &GuardrailProxy{
+	p := &GuardrailProxy{
 		cfg:          cfg,
 		logger:       logger,
 		health:       health,
 		otel:         otel,
 		store:        store,
 		dataDir:      dataDir,
-		primary:      primary,
 		inspector:    inspector,
 		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
-	}, nil
+	}
+	p.resolveProviderFn = p.resolveProviderFromHeaders
+	return p, nil
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
@@ -504,51 +491,26 @@ func inferProviderFromURL(targetURL string) string {
 	return ""
 }
 
-// resolveProvider selects the upstream LLMProvider for the given request.
-// When X-DC-Target-URL is present (set by the plugin's fetch interceptor),
-// it is used as the authoritative routing signal. Falls back to primary.
-func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
-	// Azure: detected via api-key header (req.TargetURL == "azure" sentinel).
-	if req.TargetURL == "azure" {
-		// Resolve base URL: .env → openclaw.json providers → default
-		baseURL := ResolveAPIKey("AZURE_OPENAI_ENDPOINT", filepath.Join(p.dataDir, ".env"))
-		if baseURL == "" {
-			baseURL = resolveAzureEndpointFromOpenClaw()
-		}
-		if baseURL == "" {
-			baseURL = "https://api.openai.azure.com"
-		}
-		return &azureOpenAIProvider{
-			model:   req.Model,
-			apiKey:  req.TargetAPIKey,
-			baseURL: baseURL,
-		}
+// resolveProviderFromHeaders selects the upstream LLMProvider for the given
+// request. The fetch interceptor sets X-DC-Target-URL on every outbound LLM
+// call; we infer the provider from that URL and use X-AI-Auth as the API key.
+func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvider {
+	if req.TargetURL == "" {
+		return nil
 	}
 
-	// Fetch interceptor path: X-DC-Target-URL set by plugin.
-	// The interceptor forwards OpenClaw's Authorization header (which
-	// already contains the real provider key) as X-AI-Auth.
-	if req.TargetURL != "" {
-		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
-			// Azure requires the specific resource endpoint as baseURL.
-			// Use X-DC-Target-URL directly instead of the generic fallback.
-			baseURL := ""
-			if prefix == "azure" {
-				baseURL = req.TargetURL
-			}
-			return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, baseURL)
-		}
+	prefix := inferProviderFromURL(req.TargetURL)
+	if prefix == "" {
+		return nil
 	}
 
-	// Real provider key passed through (not sk-dc-* master key).
-	prefix, _ := splitModel(req.Model)
-	if prefix != "" && req.TargetAPIKey != "" && !strings.HasPrefix(req.TargetAPIKey, "sk-dc-") {
-		return NewProviderWithBase(req.Model, req.TargetAPIKey, "")
+	// Azure requires the specific resource endpoint as baseURL.
+	baseURL := ""
+	if prefix == "azure" {
+		baseURL = req.TargetURL
 	}
 
-	// p.primary is nil when guardrail.model is not configured; the fetch
-	// interceptor is expected to supply X-DC-Target-URL for all requests.
-	return p.primary
+	return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, baseURL)
 }
 
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
@@ -589,23 +551,11 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// proxy the real upstream URL the request was originally destined for.
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
 
-	// Extract the LLM provider key for upstream forwarding.
-	//
-	// Priority order:
-	//  1. X-AI-Auth — set by the fetch interceptor with the real provider key
-	//     (normalized to "Bearer <key>" regardless of the original header name).
-	//  2. api-key — Azure OpenAI sends its key in this header.
-	//  3. x-api-key — Anthropic sends its key in this header.
-	//  4. Authorization Bearer — fallback when fetch interceptor is not active.
+	// X-AI-Auth carries the real provider API key, normalized to
+	// "Bearer <key>" by the fetch interceptor regardless of which header
+	// the provider SDK originally used (Authorization, x-api-key, api-key).
 	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
-	} else if azureKey := r.Header.Get("api-key"); azureKey != "" {
-		req.TargetAPIKey = azureKey
-		req.TargetURL = "azure" // signal azureProvider routing
-	} else if xApiKey := r.Header.Get("x-api-key"); xApiKey != "" {
-		req.TargetAPIKey = xApiKey
-	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		req.TargetAPIKey = strings.TrimPrefix(auth, "Bearer ")
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] parsed: model=%q stream=%v messages=%d\n",
@@ -693,7 +643,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Forward to upstream provider ---
-	upstream := p.resolveProvider(&req)
+	upstream := p.resolveProviderFn(&req)
 	if upstream == nil {
 		provName, _ := splitModel(req.Model)
 		msg := fmt.Sprintf("provider %q is not supported by DefenseClaw guardrail — traffic blocked", provName)
@@ -1339,74 +1289,6 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 		return strings.TrimPrefix(auth, "Bearer ") == p.masterKey
 	}
 	return false
-}
-
-// resolveAzureEndpointFromOpenClaw reads the Azure base URL from openclaw.json.
-func resolveAzureEndpointFromOpenClaw() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
-	if err != nil {
-		return ""
-	}
-	var cfg struct {
-		Models struct {
-			Providers map[string]struct {
-				BaseURL string `json:"baseUrl"`
-			} `json:"providers"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return ""
-	}
-	for _, prov := range cfg.Models.Providers {
-		if strings.Contains(prov.BaseURL, "openai.azure.com") {
-			return prov.BaseURL
-		}
-	}
-	return ""
-}
-
-
-// resolveKeyFromOpenClawProfiles reads the API key for a given model's provider
-// from OpenClaw's auth-profiles.json (~/.openclaw/agents/main/agent/auth-profiles.json).
-// Used only at proxy startup to resolve the key for guardrail.model (the primary
-// provider). At runtime, the fetch interceptor forwards OpenClaw's Authorization
-// header via X-AI-Auth, so no per-request key resolution is needed.
-func resolveKeyFromOpenClawProfiles(model string) string {
-	providerName, _ := splitModel(model)
-	if providerName == "" {
-		providerName = inferProvider(model, "")
-	}
-	return resolveKeyFromOpenClawProfilesForProvider(providerName)
-}
-
-func resolveKeyFromOpenClawProfilesForProvider(providerName string) string {
-	profileID := providerName + ":default"
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	profilesPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
-	data, err := os.ReadFile(profilesPath)
-	if err != nil {
-		return ""
-	}
-	var profiles struct {
-		Profiles map[string]struct {
-			Key string `json:"key"`
-		} `json:"profiles"`
-	}
-	if err := json.Unmarshal(data, &profiles); err != nil {
-		return ""
-	}
-	if p, ok := profiles.Profiles[profileID]; ok && p.Key != "" {
-		return p.Key
-	}
-	return ""
 }
 
 // deriveMasterKey produces a deterministic master key from the device key
