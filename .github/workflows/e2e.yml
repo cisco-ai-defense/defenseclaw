@@ -2,7 +2,7 @@ name: E2E
 
 on:
   push:
-    branches: [main, demo]
+    branches: [main, demo, feat/e2e-ci]
   workflow_dispatch:
 
 concurrency:
