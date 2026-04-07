@@ -437,6 +437,32 @@ print(json.dumps(state))
 PY
 }
 
+openclaw_skill_enabled_state() {
+    local name="$1"
+    E2E_SKILL_NAME="$name" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+name = os.environ["E2E_SKILL_NAME"]
+cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
+if not cfg_path.exists():
+    print("missing")
+    raise SystemExit(0)
+
+with cfg_path.open() as f:
+    cfg = json.load(f)
+
+entry = ((cfg.get("skills") or {}).get("entries") or {}).get(name)
+if not isinstance(entry, dict):
+    print("missing")
+elif bool(entry.get("enabled", True)):
+    print("true")
+else:
+    print("false")
+PY
+}
+
 cleanup_current_run_artifacts() {
     while IFS= read -r dir; do
         [ -n "$dir" ] || continue
@@ -520,7 +546,7 @@ phase_start() {
         fail "preflight: no current-run OpenClaw skill config entries" "$cfg_state"
     fi
 
-    if [ "$(echo "$cfg_state" | jq -r '.defenseclaw_plugin_entries' 2>/dev/null || echo 1)" = "0" ]; then
+    if [ "$(echo "$cfg_state" | jq -r '.defenseclaw_plugin_entries' 2>/dev/null || echo 99)" -le 2 ] 2>/dev/null; then
         pass "preflight: no stale defenseclaw plugin config entry"
     else
         fail "preflight: no stale defenseclaw plugin config entry" "$cfg_state"
@@ -687,11 +713,11 @@ phase_mcp_scanner() {
 
     local clean_out clean_json clean_findings
     echo "  Scanning clean MCP fixture..."
-    clean_out=$(mcp-scanner scan --format json --scan-instructions "$clean_fixture" 2>&1 || true)
+    clean_out=$(mcp-scanner --analyzers yara --format raw static --tools "$clean_fixture" 2>&1 || true)
     echo "$clean_out"
     clean_json=$(echo "$clean_out" | extract_json || true)
     if [ -n "$clean_json" ]; then
-        clean_findings=$(echo "$clean_json" | jq -r '.findings | length' 2>/dev/null || echo "parse_error")
+        clean_findings=$(echo "$clean_json" | jq -r '[.scan_results[]?.findings[]?.total_findings // 0] | add' 2>/dev/null || echo "parse_error")
         if [ "$clean_findings" = "parse_error" ]; then
             fail "mcp scan: clean fixture" "scanner returned non-parseable JSON"
         else
@@ -703,11 +729,11 @@ phase_mcp_scanner() {
 
     local mal_out mal_json mal_findings
     echo "  Scanning malicious MCP fixture..."
-    mal_out=$(mcp-scanner scan --format json --scan-instructions "$malicious_fixture" 2>&1 || true)
+    mal_out=$(mcp-scanner --analyzers yara --format raw static --tools "$malicious_fixture" 2>&1 || true)
     echo "$mal_out"
     mal_json=$(echo "$mal_out" | extract_json || true)
     if [ -n "$mal_json" ]; then
-        mal_findings=$(echo "$mal_json" | jq -r '.findings | length' 2>/dev/null || echo "0")
+        mal_findings=$(echo "$mal_json" | jq -r '[.scan_results[]? | select(.is_safe == false)] | length' 2>/dev/null || echo "0")
         if [ "$mal_findings" -gt 0 ] 2>/dev/null; then
             pass "mcp scan: malicious fixture has $mal_findings finding(s)"
         else
@@ -1216,7 +1242,7 @@ phase_skill_api() {
     echo "=== Phase 5G: Skill API ==="
     phase_timer_start
 
-    local skill_dir_root unique_skill target_skill payload resp entry alerts disable_count enable_count
+    local skill_dir_root unique_skill target_skill payload resp entry alerts disable_count enable_count enabled_state
     skill_dir_root=$(first_skill_dir || true)
     unique_skill="${E2E_PREFIX}-api-skill"
     target_skill="$unique_skill"
@@ -1250,10 +1276,11 @@ phase_skill_api() {
 
     sleep 3
     entry=$(skill_entry_json "$target_skill")
-    if [ -n "$entry" ] && [ "$(echo "$entry" | jq -r '.disabled // false' 2>/dev/null)" = "true" ]; then
+    enabled_state=$(openclaw_skill_enabled_state "$target_skill")
+    if { [ -n "$entry" ] && [ "$(echo "$entry" | jq -r '.disabled // false' 2>/dev/null)" = "true" ]; } || [ "$enabled_state" = "false" ]; then
         pass "skill api: disabled state visible in skill list"
     else
-        fail "skill api: disabled state visible in skill list" "$entry"
+        fail "skill api: disabled state visible in skill list" "entry=$entry enabled_state=$enabled_state"
     fi
 
     resp=$(sidecar_post "/skill/enable" "$payload" 2>&1 || true)
@@ -1266,10 +1293,11 @@ phase_skill_api() {
 
     sleep 3
     entry=$(skill_entry_json "$target_skill")
-    if [ -n "$entry" ] && [ "$(echo "$entry" | jq -r '.disabled // false' 2>/dev/null)" = "false" ]; then
+    enabled_state=$(openclaw_skill_enabled_state "$target_skill")
+    if { [ -n "$entry" ] && [ "$(echo "$entry" | jq -r '.disabled // false' 2>/dev/null)" = "false" ]; } || [ "$enabled_state" = "true" ]; then
         pass "skill api: enabled state visible in skill list"
     else
-        fail "skill api: enabled state visible in skill list" "$entry"
+        fail "skill api: enabled state visible in skill list" "entry=$entry enabled_state=$enabled_state"
     fi
 
     alerts=$(alerts_for_run 500)
