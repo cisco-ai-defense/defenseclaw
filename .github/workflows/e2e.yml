@@ -65,13 +65,14 @@ jobs:
       - name: Init DefenseClaw
         run: |
           defenseclaw init
-          defenseclaw setup guardrail --non-interactive --restart
+          defenseclaw setup guardrail --mode action --non-interactive --restart
           defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           if [ -n "${SPLUNK_ACCESS_TOKEN}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
             echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
           fi
+          defenseclaw-gateway status
 
       # Phase 4 — Unit tests (fast fail before slow E2E)
       - name: Unit tests

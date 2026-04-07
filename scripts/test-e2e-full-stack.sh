@@ -72,9 +72,18 @@ phase_start() {
     OPENCLAW_PID=$!
     sleep 3
 
-    echo "  Starting DefenseClaw sidecar..."
-    defenseclaw-gateway start
+    echo "  Checking if DefenseClaw sidecar is already running..."
+    if curl -sf --max-time 3 "$SIDECAR_URL/health" >/dev/null 2>&1; then
+        echo "  Sidecar already running — restarting to pick up fresh state..."
+        defenseclaw-gateway restart
+    else
+        echo "  Starting DefenseClaw sidecar..."
+        defenseclaw-gateway start
+    fi
     sleep 2
+
+    echo "  Sidecar status:"
+    defenseclaw-gateway status || true
 
     echo "  Waiting for sidecar health..."
     if wait_for_url "$SIDECAR_URL/health" 60 3; then
@@ -257,6 +266,9 @@ phase_splunk() {
 phase_teardown() {
     echo ""
     echo "=== Phase 6: Teardown ==="
+
+    echo "  Final sidecar status:"
+    defenseclaw-gateway status 2>/dev/null || true
 
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
