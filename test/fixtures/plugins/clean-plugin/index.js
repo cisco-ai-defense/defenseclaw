@@ -1,7 +1,8 @@
-"use strict";
-
-function describeFixture() {
-  return "clean plugin fixture";
+export default function register(_api) {
+  return {
+    id: "clean-plugin",
+    describeFixture() {
+      return "clean plugin fixture";
+    },
+  };
 }
-
-module.exports = { describeFixture };

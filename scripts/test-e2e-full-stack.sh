@@ -581,6 +581,21 @@ with path.open("w") as f:
     f.write("\n")
 PY
     fi
+    if [ -f "$dest_root/$dest_name/openclaw.plugin.json" ]; then
+        PLUGIN_MANIFEST_PATH="$dest_root/$dest_name/openclaw.plugin.json" PLUGIN_FIXTURE_NAME="$dest_name" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["PLUGIN_MANIFEST_PATH"])
+with path.open() as f:
+    data = json.load(f)
+data["id"] = os.environ["PLUGIN_FIXTURE_NAME"]
+with path.open("w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+    fi
 }
 
 prune_openclaw_config_for_prefix() {
@@ -1916,7 +1931,7 @@ phase_plugin_lifecycle() {
     local malicious_plugin="${E2E_PREFIX}-malicious-plugin"
     local clean_source="$staging_root/$clean_plugin"
     local malicious_source="$staging_root/$malicious_plugin"
-    local clean_path malicious_path runtime_root runtime_clean_path
+    local clean_path malicious_path runtime_install_out runtime_clean_path
     local clean_entry malicious_entry
     local install_out agent_out scan_out scan_json findings
     local disable_out enable_out resp payload
@@ -1995,19 +2010,13 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: plugin allow state recorded" "allow action missing for $clean_plugin"
     fi
 
-    runtime_root=$(first_runtime_plugin_dir || true)
-    if [ -z "$runtime_root" ]; then
-        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: runtime staging" "OpenClaw extensions directory unavailable"
-        phase_timer_end "Phase 7B"
-        return
-    fi
-    mkdir -p "$runtime_root/$clean_plugin"
-    cp -R "$clean_source"/. "$runtime_root/$clean_plugin/"
+    runtime_install_out=$(openclaw plugins install "$clean_source" 2>&1 || true)
+    echo "$runtime_install_out"
     runtime_clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
     if [ -n "$runtime_clean_path" ]; then
-        pass "plugin lifecycle: clean plugin staged in OpenClaw extensions"
+        pass "plugin lifecycle: clean plugin installed in OpenClaw runtime"
     else
-        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: runtime staging" "failed to copy clean plugin into $runtime_root"
+        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: runtime install" "$runtime_install_out"
         phase_timer_end "Phase 7B"
         return
     fi
@@ -2070,6 +2079,7 @@ phase_plugin_lifecycle() {
     else
         fail "plugin lifecycle: plugin remove removed clean plugin" "$install_out"
     fi
+    openclaw plugins uninstall "$clean_plugin" >/dev/null 2>&1 || true
 
     if [ "$(alerts_action_count "plugin-install" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
         pass "plugin lifecycle: plugin install audit event recorded"
@@ -2141,12 +2151,13 @@ phase_recovery() {
     phase_timer_start
 
     local health gateway_state watcher_state api_state
-    local before_connected after_connected
+    local before_connected after_connected before_disconnected
     local watcher_skill="${E2E_PREFIX}-recovery-watcher-skill"
     local watcher_fixture="$REPO_ROOT/test/fixtures/skills/malicious-skill"
     local skill_dir_root
 
     before_connected=$(alerts_action_count "sidecar-connected")
+    before_disconnected=$(alerts_action_count "sidecar-disconnected")
 
     openclaw gateway stop 2>/dev/null || true
     local gateway_deadline=$((SECONDS + 30))
@@ -2155,6 +2166,10 @@ phase_recovery() {
         health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
         gateway_state=$(echo "$health" | jq -r '.gateway.state // .gateway // empty' 2>/dev/null || true)
         if [ -n "$gateway_state" ] && [ "$gateway_state" != "running" ]; then
+            gateway_left_running=true
+            break
+        fi
+        if [ "$(alerts_action_count "sidecar-disconnected")" -gt "${before_disconnected:-0}" ] 2>/dev/null; then
             gateway_left_running=true
             break
         fi
