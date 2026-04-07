@@ -498,6 +498,8 @@ jobs:
           auth_path.chmod(0o600)
           PY
 
+          systemctl --user import-environment ANTHROPIC_API_KEY OPENAI_API_KEY OPENCLAW_GATEWAY_TOKEN || true
+
           echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
           echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
 
@@ -631,6 +633,7 @@ jobs:
       - name: Restore OpenClaw Anthropic model
         if: always()
         run: |
+          systemctl --user unset-environment ANTHROPIC_API_KEY OPENAI_API_KEY OPENCLAW_GATEWAY_TOKEN || true
           if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
             mkdir -p ~/.openclaw
             cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
