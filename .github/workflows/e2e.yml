@@ -39,11 +39,15 @@ jobs:
       # Phase 1 — Start Splunk Docker (stays running for dashboard browsing via Tailscale)
       - name: Start Splunk
         run: |
-          cd bundles/splunk_local_bridge/compose
+          cd bundles/splunk_local_bridge
+          # Package the local-mode Splunk app BEFORE starting the container.
+          # Without this tarball Ansible's "Infer app filepath" task fails (exit 2).
+          bash splunk/package_local_mode_app.sh
+          cd compose
           SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
             docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
