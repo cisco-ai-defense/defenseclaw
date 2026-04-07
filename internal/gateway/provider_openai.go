@@ -66,7 +66,7 @@ func (p *openaiProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -113,7 +113,7 @@ func (p *openaiProvider) ChatCompletionStream(ctx context.Context, req *ChatRequ
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -122,7 +122,7 @@ func (p *openaiProvider) ChatCompletionStream(ctx context.Context, req *ChatRequ
 
 func readOpenAISSE(r io.Reader, cb func(StreamChunk)) (*ChatUsage, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 256*1024)
+	scanner.Buffer(make([]byte, SSEScannerBufferSize), SSEScannerMaxSize)
 	var usage *ChatUsage
 
 	for scanner.Scan() {

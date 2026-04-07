@@ -195,7 +195,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	case err := <-errCh:
 		p.health.SetGuardrail(StateError, err.Error(), nil)
 		return fmt.Errorf("proxy: listen %s: %w", addr, err)
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(ServerStartProbeDelay):
 		p.health.SetGuardrail(StateRunning, "", map[string]interface{}{
 			"port": p.cfg.Port,
 			"mode": p.mode,
@@ -211,7 +211,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		return fmt.Errorf("proxy: server error: %w", err)
 	case <-ctx.Done():
 		p.health.SetGuardrail(StateStopped, "", nil)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
@@ -262,14 +262,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	targetOrigin := r.Header.Get("X-DC-Target-URL")
+	targetOrigin := r.Header.Get(HeaderTargetURL)
 	if targetOrigin == "" {
 		// No target URL — not from the fetch interceptor; reject.
 		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBodySize))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
@@ -368,13 +368,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
 	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
 	upstreamAuth := ""
-	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
+	if aiAuth := r.Header.Get(HeaderAIAuth); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
 		upstreamAuth = aiAuth
 	}
 	if upstreamAuth == "" {
-		if azKey := r.Header.Get("api-key"); azKey != "" {
+		if azKey := r.Header.Get(HeaderAzureAPIKey); azKey != "" {
 			upstreamAuth = "Bearer " + azKey
-		} else if xKey := r.Header.Get("x-api-key"); xKey != "" {
+		} else if xKey := r.Header.Get(HeaderAnthropicAPIKey); xKey != "" {
 			upstreamAuth = "Bearer " + xKey
 		} else if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
 			upstreamAuth = auth
@@ -417,7 +417,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(resp.StatusCode)
 	if flusher, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 4096)
+		buf := make([]byte, StreamingFlushBufferSize)
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
@@ -516,7 +516,7 @@ func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 			baseURL = resolveAzureEndpointFromOpenClaw()
 		}
 		if baseURL == "" {
-			baseURL = "https://api.openai.azure.com"
+			baseURL = DefaultAzureBaseURL
 		}
 		return &azureOpenAIProvider{
 			model:   req.Model,
@@ -564,7 +564,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBodySize))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
@@ -573,8 +573,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	fmt.Fprintf(os.Stderr, "[guardrail] ── INCOMING REQUEST ──────────────────────────────────\n")
 	fmt.Fprintf(os.Stderr, "[guardrail] headers: Authorization=%s api-key=%s X-DC-Target-URL=%s\n",
 		truncateLog(r.Header.Get("Authorization"), 20),
-		truncateLog(r.Header.Get("api-key"), 20),
-		r.Header.Get("X-DC-Target-URL"))
+		truncateLog(r.Header.Get(HeaderAzureAPIKey), 20),
+		r.Header.Get(HeaderTargetURL))
 	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n", len(body), truncateLog(string(body), 2000))
 
 	var req ChatRequest
@@ -587,7 +587,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// X-DC-Target-URL is set by the plugin's fetch interceptor and tells the
 	// proxy the real upstream URL the request was originally destined for.
-	req.TargetURL = r.Header.Get("X-DC-Target-URL")
+	req.TargetURL = r.Header.Get(HeaderTargetURL)
 
 	// Extract the LLM provider key for upstream forwarding.
 	//
@@ -597,12 +597,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	//  2. api-key — Azure OpenAI sends its key in this header.
 	//  3. x-api-key — Anthropic sends its key in this header.
 	//  4. Authorization Bearer — fallback when fetch interceptor is not active.
-	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
+	if aiAuth := r.Header.Get(HeaderAIAuth); strings.HasPrefix(aiAuth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
-	} else if azureKey := r.Header.Get("api-key"); azureKey != "" {
+	} else if azureKey := r.Header.Get(HeaderAzureAPIKey); azureKey != "" {
 		req.TargetAPIKey = azureKey
 		req.TargetURL = "azure" // signal azureProvider routing
-	} else if xApiKey := r.Header.Get("x-api-key"); xApiKey != "" {
+	} else if xApiKey := r.Header.Get(HeaderAnthropicAPIKey); xApiKey != "" {
 		req.TargetAPIKey = xApiKey
 	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(auth, "Bearer ")
@@ -893,7 +893,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 	var accumulated strings.Builder
 	lastScanLen := 0
-	const scanInterval = 500
 	streamFinishReasons := []string{}
 
 	usage, err := upstream.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
@@ -911,7 +910,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 
 		// Periodic mid-stream scan for streaming content.
-		if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
+		if accumulated.Len()-lastScanLen >= StreamingScanInterval && mode == "action" {
 			midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
@@ -1323,7 +1322,7 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 
 	// For non-loopback (remote proxy deployments): accept X-DC-Auth with the
 	// defenseclaw gateway token (sent by the fetch interceptor).
-	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
+	if dcAuth := r.Header.Get(HeaderDCAuth); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if p.gatewayToken != "" && token == p.gatewayToken {
 			return true
@@ -1417,13 +1416,13 @@ func deriveMasterKey(dataDir string) string {
 	if err != nil {
 		return ""
 	}
-	mac := hmac.New(sha256.New, []byte("defenseclaw-proxy-master-key"))
+	mac := hmac.New(sha256.New, []byte(MasterKeyHMACLabel))
 	mac.Write(data)
 	digest := fmt.Sprintf("%x", mac.Sum(nil))
-	if len(digest) > 32 {
-		digest = digest[:32]
+	if len(digest) > MasterKeyLength {
+		digest = digest[:MasterKeyLength]
 	}
-	return "sk-dc-" + digest
+	return MasterKeyPrefix + digest
 }
 
 // ---------------------------------------------------------------------------
@@ -1436,13 +1435,13 @@ var (
 	runtimeCacheTs time.Time
 )
 
-const runtimeCacheTTL = 5 * time.Second
+// runtimeCacheTTL is now RuntimeCacheTTL in constants.go
 
 func (p *GuardrailProxy) reloadRuntimeConfig() {
 	runtimeCacheMu.Lock()
 	defer runtimeCacheMu.Unlock()
 
-	if time.Since(runtimeCacheTs) < runtimeCacheTTL && runtimeCache != nil {
+	if time.Since(runtimeCacheTs) < RuntimeCacheTTL && runtimeCache != nil {
 		p.applyRuntime(runtimeCache)
 		return
 	}
@@ -1576,8 +1575,8 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 		direction, verdict.Action, verdict.Severity, len(verdict.Findings), elapsedMs)
 	if verdict.Reason != "" {
 		reason := verdict.Reason
-		if len(reason) > 120 {
-			reason = reason[:120]
+		if len(reason) > MaxReasonTruncateLength {
+			reason = reason[:MaxReasonTruncateLength]
 		}
 		details += fmt.Sprintf(" reason=%s", reason)
 	}

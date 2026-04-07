@@ -29,6 +29,7 @@ import subprocess
 
 import click
 
+from defenseclaw.constants import DEFAULT_OPENCLAW_PORT, DEFAULT_SIDECAR_HOST
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
@@ -1139,7 +1140,7 @@ def _is_pid_alive(pid_file: str) -> bool:
         return False
 
 
-def _restart_services(data_dir: str, oc_host: str = "127.0.0.1", oc_port: int = 18789) -> None:
+def _restart_services(data_dir: str, oc_host: str = DEFAULT_SIDECAR_HOST, oc_port: int = DEFAULT_OPENCLAW_PORT) -> None:
     """Restart defenseclaw-gateway and verify openclaw gateway health."""
     click.echo("  Restarting services...")
     click.echo("  ──────────────────────")
@@ -1189,7 +1190,7 @@ def _openclaw_gateway_healthy(host: str, port: int, timeout: float = 5.0) -> boo
         return False
 
 
-def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
+def _check_openclaw_gateway(host: str = DEFAULT_SIDECAR_HOST, port: int = DEFAULT_OPENCLAW_PORT) -> None:
     """Verify the OpenClaw gateway remains healthy after a config change.
 
     OpenClaw watches openclaw.json and auto-restarts on certain changes

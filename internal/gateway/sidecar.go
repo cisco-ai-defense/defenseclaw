@@ -324,7 +324,7 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), RPCTimeout)
 	defer cancel()
 
 	if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
@@ -346,7 +346,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), RPCTimeout)
 	defer cancel()
 
 	if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
@@ -402,7 +402,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 // subscribeToSessions lists active sessions and subscribes to each one
 // so we receive session.tool events for tool call/result tracing.
 func (s *Sidecar) subscribeToSessions(ctx context.Context) {
-	subCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	subCtx, cancel := context.WithTimeout(ctx, RPCTimeout)
 	defer cancel()
 
 	raw, err := s.client.SessionsList(subCtx)
@@ -440,7 +440,7 @@ func (s *Sidecar) subscribeToSessions(ctx context.Context) {
 	fmt.Fprintf(os.Stderr, "[sidecar] found %d active sessions, subscribing for tool events...\n", len(sessions))
 
 	for _, sess := range sessions {
-		subCtx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+		subCtx2, cancel2 := context.WithTimeout(ctx, ShutdownTimeout)
 		if err := s.client.SessionsSubscribe(subCtx2, sess.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] subscribe to session %s failed: %v\n", sess.ID, err)
 		} else {
@@ -514,10 +514,9 @@ func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
 // cancellation or too many failures it transitions to error/stopped.
 func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface{}) {
 	addr := net.JoinHostPort(s.cfg.Gateway.Host, fmt.Sprintf("%d", s.cfg.Gateway.Port))
-	const maxAttempts = 20
-	backoff := 500 * time.Millisecond
+	backoff := SandboxProbeInitialBackoff
 
-	for i := 0; i < maxAttempts; i++ {
+	for i := 0; i < MaxSandboxProbeAttempts; i++ {
 		select {
 		case <-ctx.Done():
 			s.health.SetSandbox(StateStopped, "context cancelled", details)
@@ -525,7 +524,7 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 		default:
 		}
 
-		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		conn, err := net.DialTimeout("tcp", addr, SandboxProbeTimeout)
 		if err == nil {
 			conn.Close()
 			fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe succeeded (%s reachable)\n", addr)
@@ -533,7 +532,7 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 			return
 		}
 
-		fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe attempt %d/%d failed: %v\n", i+1, maxAttempts, err)
+		fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe attempt %d/%d failed: %v\n", i+1, MaxSandboxProbeAttempts, err)
 
 		select {
 		case <-ctx.Done():
@@ -541,12 +540,12 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 			return
 		case <-time.After(backoff):
 		}
-		if backoff < 5*time.Second {
+		if backoff < SandboxProbeMaxBackoff {
 			backoff = backoff * 3 / 2
 		}
 	}
 
-	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
+	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", MaxSandboxProbeAttempts, addr), details)
 }
 
 // reportSplunkHealth sets the Splunk HEC subsystem health based on config.

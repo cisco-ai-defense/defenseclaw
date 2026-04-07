@@ -252,10 +252,7 @@ var allRuleCategories = []struct {
 	{"trust-exploit", trustExploitRules},
 }
 
-// severityRank maps severity strings to numeric ranks for comparison.
-var severityRank = map[string]int{
-	"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4,
-}
+// severityRank is defined in constants.go
 
 // knownExecTools lists tool names that are known execution tools. When the
 // tool name matches, confidence for command rules is boosted. When it does

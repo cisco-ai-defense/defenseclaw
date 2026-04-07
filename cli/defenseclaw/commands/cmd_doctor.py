@@ -30,6 +30,7 @@ import urllib.request
 
 import click
 
+from defenseclaw.constants import DEFAULT_SIDECAR_HOST
 from defenseclaw.context import AppContext, pass_ctx
 
 _PASS = click.style("PASS", fg="green", bold=True)
@@ -145,7 +146,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> None:
-    bind = "127.0.0.1"
+    bind = DEFAULT_SIDECAR_HOST
     if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
         bind = getattr(cfg.guardrail, "host", None) or bind
     url = f"http://{bind}:{cfg.gateway.api_port}/health"
@@ -195,7 +196,7 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         r.record("skip")
         return
 
-    host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+    host = getattr(cfg.guardrail, "host", None) or DEFAULT_SIDECAR_HOST
     url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:

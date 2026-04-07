@@ -27,6 +27,7 @@ import subprocess
 
 import click
 
+from defenseclaw.constants import DEFAULT_OPENCLAW_HOME, DEFAULT_OPENCLAW_PORT, DEFAULT_SIDECAR_HOST
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_rego_dir, bundled_splunk_bridge_dir
 
@@ -160,7 +161,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
                 app.cfg = cfg
                 ctx = click.Context(setup_sandbox, parent=click.get_current_context())
                 ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
-                           sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
+                           sandbox_home=None, openclaw_port=DEFAULT_OPENCLAW_PORT, dns="8.8.8.8,1.1.1.1",
                            policy="default", no_auto_pair=False, disable=False,
                            non_interactive=True)
 
@@ -313,8 +314,8 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
     from defenseclaw.config import _read_openclaw_config
 
     result: dict[str, str | int] = {
-        "host": "127.0.0.1",
-        "port": 18789,
+        "host": DEFAULT_SIDECAR_HOST,
+        "port": DEFAULT_OPENCLAW_PORT,
         "token": "",
     }
 
@@ -328,9 +329,9 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
 
     mode = gw.get("mode", "local")
     if mode == "local":
-        result["host"] = "127.0.0.1"
+        result["host"] = DEFAULT_SIDECAR_HOST
     else:
-        result["host"] = gw.get("host", "127.0.0.1")
+        result["host"] = gw.get("host", DEFAULT_SIDECAR_HOST)
 
     if "port" in gw:
         try:
@@ -542,7 +543,7 @@ def _start_gateway(cfg, logger) -> None:
         click.echo("                 check: defenseclaw-gateway status")
 
     if started:
-        bind = "127.0.0.1"
+        bind = DEFAULT_SIDECAR_HOST
         if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
             bind = cfg.guardrail.host
         _check_sidecar_health(cfg.gateway.api_port, bind=bind)
@@ -574,7 +575,7 @@ def _read_pid(pid_file: str) -> int | None:
         return None
 
 
-def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.1") -> None:
+def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = DEFAULT_SIDECAR_HOST) -> None:
     """Briefly poll the sidecar REST API to confirm it started."""
     import time
     import urllib.error

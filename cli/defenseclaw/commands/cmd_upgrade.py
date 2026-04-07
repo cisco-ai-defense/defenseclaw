@@ -31,6 +31,7 @@ import sys
 
 import click
 
+from defenseclaw.constants import DEFAULT_DATA_DIR, DEFAULT_OPENCLAW_HOME
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -141,7 +142,7 @@ def upgrade(
     click.echo()
 
     openclaw_home = os.path.expanduser(
-        app.cfg.claw.home_dir if app.cfg else "~/.openclaw"
+        app.cfg.claw.home_dir if app.cfg else DEFAULT_OPENCLAW_HOME
     )
 
     from defenseclaw.migrations import run_migrations
@@ -230,7 +231,7 @@ def _read_source_version(source_dir: str) -> str:
 
 def _create_backup(cfg) -> str:
     """Back up ~/.defenseclaw/ config files and ~/.openclaw/openclaw.json."""
-    data_dir = cfg.data_dir if cfg else os.path.expanduser("~/.defenseclaw")
+    data_dir = cfg.data_dir if cfg else os.path.expanduser(DEFAULT_DATA_DIR)
     backup_root = os.path.join(data_dir, "backups")
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     backup_dir = os.path.join(backup_root, f"upgrade-{timestamp}")
@@ -247,7 +248,7 @@ def _create_backup(cfg) -> str:
         shutil.copytree(policies_dir, os.path.join(backup_dir, "policies"))
         click.echo("  ✓ Backed up: policies/")
 
-    openclaw_home = os.path.expanduser(cfg.claw.home_dir) if cfg else os.path.expanduser("~/.openclaw")
+    openclaw_home = os.path.expanduser(cfg.claw.home_dir) if cfg else os.path.expanduser(DEFAULT_OPENCLAW_HOME)
     oc_json = os.path.join(openclaw_home, "openclaw.json")
     if os.path.isfile(oc_json):
         shutil.copy2(oc_json, os.path.join(backup_dir, "openclaw.json"))

@@ -61,12 +61,12 @@ func NewCiscoInspectClient(cfg *config.CiscoAIDefenseConfig, dotenvPath string) 
 
 	endpoint := strings.TrimRight(cfg.Endpoint, "/")
 	if endpoint == "" {
-		endpoint = "https://us.api.inspect.aidefense.security.cisco.com"
+		endpoint = DefaultCiscoAIDefenseEndpoint
 	}
 
 	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 3 * time.Second
+		timeout = DefaultCiscoInspectTimeout
 	}
 
 	var rules []map[string]string
@@ -104,7 +104,7 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 		payload["config"] = map[string]interface{}{"enabled_rules": c.enabledRules}
 	}
 
-	url := c.endpoint + "/api/v1/inspect/chat"
+	url := c.endpoint + CiscoInspectChatPath
 
 	// Retry once without rules config if the key has pre-configured rules.
 	triedWithoutRules := false
@@ -120,7 +120,7 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("X-Cisco-AI-Defense-API-Key", c.apiKey)
+		req.Header.Set(HeaderCiscoAIDefenseAPIKey, c.apiKey)
 
 		resp, err := c.client.Do(req)
 		if err != nil {
@@ -128,7 +128,7 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 			return nil
 		}
 
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxCiscoResponseSize))
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusBadRequest && !triedWithoutRules {
@@ -203,8 +203,8 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 	reason := "cisco: content flagged"
 	if len(findings) > 0 {
 		top := findings
-		if len(top) > 5 {
-			top = top[:5]
+		if len(top) > MaxFindingsInReason {
+			top = top[:MaxFindingsInReason]
 		}
 		reason = "cisco: " + strings.Join(top, ", ")
 	}

@@ -17,7 +17,7 @@ import (
 // native generateContent / streamGenerateContent API.
 // ---------------------------------------------------------------------------
 
-const geminiDefaultBase = "https://generativelanguage.googleapis.com/v1beta"
+// geminiDefaultBase is now DefaultGeminiBaseURL in constants.go
 
 // --- Gemini API request types ---
 
@@ -96,7 +96,7 @@ func (p *geminiNativeProvider) effectiveBase() string {
 	if p.baseURL != "" {
 		return p.baseURL
 	}
-	return geminiDefaultBase
+	return DefaultGeminiBaseURL
 }
 
 func (p *geminiNativeProvider) generateURL(stream bool) string {
@@ -131,7 +131,7 @@ func (p *geminiNativeProvider) ChatCompletion(ctx context.Context, req *ChatRequ
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -165,7 +165,7 @@ func (p *geminiNativeProvider) ChatCompletionStream(ctx context.Context, req *Ch
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -378,7 +378,7 @@ func translateGeminiResponse(gResp *geminiResponse, modelAlias string) *ChatResp
 
 func readGeminiSSE(r io.Reader, modelAlias string, cb func(StreamChunk)) (*ChatUsage, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 256*1024)
+	scanner.Buffer(make([]byte, SSEScannerBufferSize), SSEScannerMaxSize)
 	var usage *ChatUsage
 	created := time.Now().Unix()
 	chunkID := "chatcmpl-gemini-stream"

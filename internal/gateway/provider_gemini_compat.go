@@ -9,7 +9,7 @@ import (
 	"net/http"
 )
 
-const geminiCompatDefaultBase = "https://generativelanguage.googleapis.com/v1beta/openai"
+// geminiCompatDefaultBase is now DefaultGeminiCompatBaseURL in constants.go
 
 type geminiCompatProvider struct {
 	model   string
@@ -21,7 +21,7 @@ func (p *geminiCompatProvider) effectiveBase() string {
 	if p.baseURL != "" {
 		return p.baseURL
 	}
-	return geminiCompatDefaultBase
+	return DefaultGeminiCompatBaseURL
 }
 
 func (p *geminiCompatProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
@@ -53,7 +53,7 @@ func (p *geminiCompatProvider) ChatCompletion(ctx context.Context, req *ChatRequ
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -98,7 +98,7 @@ func (p *geminiCompatProvider) ChatCompletionStream(ctx context.Context, req *Ch
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

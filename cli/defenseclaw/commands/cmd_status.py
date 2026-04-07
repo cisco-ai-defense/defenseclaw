@@ -25,6 +25,7 @@ import shutil
 
 import click
 
+from defenseclaw.constants import DEFAULT_SIDECAR_HOST
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -91,7 +92,7 @@ def status(app: AppContext) -> None:
     # Sidecar status
     click.echo()
     from defenseclaw.gateway import OrchestratorClient
-    bind = "127.0.0.1"
+    bind = DEFAULT_SIDECAR_HOST
     if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
         bind = cfg.guardrail.host
     client = OrchestratorClient(

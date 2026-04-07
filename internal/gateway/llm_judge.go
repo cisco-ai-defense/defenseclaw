@@ -70,7 +70,7 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content string) *Sc
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = DefaultJudgeTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -157,7 +157,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 			{Role: "system", Content: injectionSystemPrompt},
 			{Role: "user", Content: content},
 		},
-		MaxTokens: intPtr(1024),
+		MaxTokens: intPtr(DefaultJudgeMaxTokens),
 	})
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection error: %v\n", err)
@@ -266,7 +266,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content string) *ScanVerdict
 			{Role: "system", Content: piiSystemPrompt},
 			{Role: "user", Content: content},
 		},
-		MaxTokens: intPtr(1024),
+		MaxTokens: intPtr(DefaultJudgeMaxTokens),
 	})
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii error: %v\n", err)

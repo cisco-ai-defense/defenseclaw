@@ -144,7 +144,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		return fmt.Errorf("api: listen %s: %w", a.addr, err)
 	case <-ctx.Done():
 		a.health.SetAPI(StateStopped, "", nil)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
@@ -204,7 +204,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
@@ -239,7 +239,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
@@ -278,7 +278,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
@@ -315,7 +315,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
@@ -333,8 +333,6 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 
 const gatewayMutationRetryDelay = 2 * time.Second
 const gatewayMutationMaxAttempts = 20
-const pluginGatewayMutationTimeout = 90 * time.Second
-
 func isRetryableGatewayMutationError(err error) bool {
 	if err == nil {
 		return false
@@ -425,7 +423,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
@@ -604,7 +602,7 @@ func (a *APIServer) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 50
+	limit := DefaultAlertsLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {
@@ -722,7 +720,7 @@ func (a *APIServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	data, err := a.client.GetSkillsStatus(ctx)
@@ -767,7 +765,7 @@ func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), RPCTimeout)
 	defer cancel()
 
 	data, err := a.client.GetToolsCatalog(ctx)
@@ -822,7 +820,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 
 	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner, a.scannerCfg.InspectLLM, a.scannerCfg.CiscoAIDefense)
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), ScanTimeout)
 	defer cancel()
 
 	result, err := ss.Scan(ctx, req.Target)
@@ -874,7 +872,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 
 	ms := scanner.NewMCPScanner(a.scannerCfg.Scanners.MCPScanner, a.scannerCfg.InspectLLM, a.scannerCfg.CiscoAIDefense)
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), ScanTimeout)
 	defer cancel()
 
 	result, err := ms.Scan(ctx, req.Target)
@@ -1331,7 +1329,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			token = strings.TrimPrefix(auth, "Bearer ")
 		}
 		if token == "" {
-			token = r.Header.Get("X-DefenseClaw-Token")
+			token = r.Header.Get(HeaderDefenseClawToken)
 		}
 
 		expected := a.scannerCfg.Gateway.Token
@@ -1358,7 +1356,7 @@ func csrfProtect(next http.Handler) http.Handler {
 			return
 		}
 
-		if r.Header.Get("X-DefenseClaw-Client") == "" {
+		if r.Header.Get(HeaderDefenseClawClient) == "" {
 			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}

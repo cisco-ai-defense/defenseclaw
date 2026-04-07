@@ -29,6 +29,8 @@ from collections.abc import Callable
 
 import click
 
+from defenseclaw.constants import LEGACY_PROVIDER_KEYS, LEGACY_PROVIDER_PREFIXES
+
 
 def _ver_tuple(v: str) -> tuple[int, ...]:
     """Parse a semver string like '0.3.0' into a comparable tuple."""
@@ -66,7 +68,7 @@ def _migrate_0_2_0(openclaw_home: str) -> None:
 
     # Remove legacy provider entries
     providers = cfg.get("models", {}).get("providers", {})
-    for key in ("defenseclaw", "litellm"):
+    for key in LEGACY_PROVIDER_KEYS:
         if key in providers:
             del providers[key]
             changes.append(f"removed providers.{key}")
@@ -75,7 +77,7 @@ def _migrate_0_2_0(openclaw_home: str) -> None:
     # Restore model.primary if it was redirected through defenseclaw/litellm
     model = cfg.get("agents", {}).get("defaults", {}).get("model", {})
     primary = model.get("primary", "")
-    if primary.startswith(("defenseclaw/", "litellm/")):
+    if primary.startswith(LEGACY_PROVIDER_PREFIXES):
         # Strip the defenseclaw/ or litellm/ prefix to restore the real model
         restored = primary.split("/", 1)[1]
         model["primary"] = restored

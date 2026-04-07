@@ -20,6 +20,11 @@ import { execFile } from "node:child_process";
 import { DaemonClient } from "../client.js";
 import { scanPlugin } from "../scanners/plugin_scanner/index.js";
 import { scanMCPServer } from "../scanners/mcp-scanner.js";
+import {
+  SKILL_SCAN_TIMEOUT_MS,
+  CODE_SCAN_TIMEOUT_MS,
+  MAX_EXEC_BUFFER,
+} from "../constants.js";
 import type {
   ScanResult,
   Finding,
@@ -32,13 +37,13 @@ import { compareSeverity, maxSeverity } from "../types.js";
 
 export function runSkillScan(
   target: string,
-  timeoutMs = 120_000,
+  timeoutMs = SKILL_SCAN_TIMEOUT_MS,
 ): Promise<ScanResult> {
   return new Promise((resolve, reject) => {
     execFile(
       "defenseclaw",
       ["skill", "scan", target, "--json"],
-      { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+      { timeout: timeoutMs, maxBuffer: MAX_EXEC_BUFFER },
       (error, stdout, stderr) => {
         const code = error && "code" in error ? (error.code as number) : 0;
         if (code !== 0 && !stdout.trim()) {
@@ -84,7 +89,7 @@ export function runSkillScan(
 export async function runCodeScan(
   target: string,
   sidecarBaseUrl: string,
-  timeoutMs = 30_000,
+  timeoutMs = CODE_SCAN_TIMEOUT_MS,
 ): Promise<ScanResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -30,6 +30,7 @@ from typing import Any
 
 import click
 
+from defenseclaw.constants import DEFAULT_SIDECAR_HOST
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -37,7 +38,7 @@ def _api_bind_host(app: AppContext) -> str:
     """Resolve the API bind address, mirroring sidecar.runAPI in Go."""
     if app.cfg.openshell.is_standalone() and app.cfg.guardrail.host not in ("", "localhost"):
         return app.cfg.guardrail.host
-    return "127.0.0.1"
+    return DEFAULT_SIDECAR_HOST
 
 
 def _sidecar_client(app: AppContext):
