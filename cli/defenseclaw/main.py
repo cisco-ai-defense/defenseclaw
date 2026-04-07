@@ -90,7 +90,7 @@ def cli(ctx: click.Context) -> None:
         click.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
-    app.logger = Logger(app.store)
+    app.logger = Logger(app.store, app.cfg.splunk)
 
 
 @cli.result_callback()

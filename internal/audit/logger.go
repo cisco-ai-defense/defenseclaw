@@ -91,6 +91,7 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
 			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
 		Severity: string(result.MaxSeverity()),
+		RunID:    currentRunID(),
 	}
 
 	if err := l.store.LogEvent(event); err != nil {
@@ -126,6 +127,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 		Target:    target,
 		Details:   details,
 		Severity:  "INFO",
+		RunID:     currentRunID(),
 		TraceID:   traceID,
 	}
 	if err := l.store.LogEvent(event); err != nil {
@@ -157,6 +159,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Target:    target,
 		Details:   details,
 		Severity:  "INFO",
+		RunID:     currentRunID(),
 	}
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {

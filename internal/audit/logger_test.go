@@ -16,7 +16,10 @@
 
 package audit
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestInferTargetType(t *testing.T) {
 	tests := []struct {
@@ -92,5 +95,34 @@ func TestContains(t *testing.T) {
 				t.Errorf("contains(%q, %q) = %v, want %v", tt.s, tt.substr, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoggerLogActionIncludesRunID(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "logger-run-id")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	if err := logger.LogAction("skill-block", "test-skill", "reason=test"); err != nil {
+		t.Fatalf("LogAction: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if got := events[0].RunID; got != "logger-run-id" {
+		t.Fatalf("RunID = %q, want %q", got, "logger-run-id")
 	}
 }
