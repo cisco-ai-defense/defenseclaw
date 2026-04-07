@@ -364,16 +364,19 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, upstreamURL)
 
 	// Resolve the key to use for the upstream provider.
-	// Priority: (1) X-AI-Auth from the fetch interceptor (authoritative — the
-	// interceptor already resolved the real provider key from auth-profiles.json),
-	// (2) original Authorization — skipping any sk-dc-* master keys which are
-	// internal to the defenseclaw proxy layer.
+	// Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
+	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
+	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
 	upstreamAuth := ""
 	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
 		upstreamAuth = aiAuth
 	}
 	if upstreamAuth == "" {
-		if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
+		if azKey := r.Header.Get("api-key"); azKey != "" {
+			upstreamAuth = "Bearer " + azKey
+		} else if xKey := r.Header.Get("x-api-key"); xKey != "" {
+			upstreamAuth = "Bearer " + xKey
+		} else if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
 			upstreamAuth = auth
 		}
 	}
@@ -523,8 +526,8 @@ func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 	}
 
 	// Fetch interceptor path: X-DC-Target-URL set by plugin.
-	// The interceptor already resolved the real provider key from
-	// auth-profiles.json and sends it via X-AI-Auth (req.TargetAPIKey).
+	// The interceptor forwards OpenClaw's Authorization header (which
+	// already contains the real provider key) as X-AI-Auth.
 	if req.TargetURL != "" {
 		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
 			// Azure requires the specific resource endpoint as baseURL.
@@ -589,17 +592,18 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// Extract the LLM provider key for upstream forwarding.
 	//
 	// Priority order:
-	//  1. X-AI-Auth — set by the fetch interceptor with the real provider key.
-	//     Authorization stays as sk-dc-* for connection auth; X-AI-Auth carries
-	//     the actual LLM key. This separation supports remote DefenseClaw gateways
-	//     where the connection key must be validated independently of the LLM key.
+	//  1. X-AI-Auth — set by the fetch interceptor with the real provider key
+	//     (normalized to "Bearer <key>" regardless of the original header name).
 	//  2. api-key — Azure OpenAI sends its key in this header.
-	//  3. Authorization Bearer — fallback when fetch interceptor is not active.
+	//  3. x-api-key — Anthropic sends its key in this header.
+	//  4. Authorization Bearer — fallback when fetch interceptor is not active.
 	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
 	} else if azureKey := r.Header.Get("api-key"); azureKey != "" {
 		req.TargetAPIKey = azureKey
 		req.TargetURL = "azure" // signal azureProvider routing
+	} else if xApiKey := r.Header.Get("x-api-key"); xApiKey != "" {
+		req.TargetAPIKey = xApiKey
 	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(auth, "Bearer ")
 	}
@@ -1368,8 +1372,9 @@ func resolveAzureEndpointFromOpenClaw() string {
 
 // resolveKeyFromOpenClawProfiles reads the API key for a given model's provider
 // from OpenClaw's auth-profiles.json (~/.openclaw/agents/main/agent/auth-profiles.json).
-// This is the same source the fetch interceptor uses, ensuring keys are always
-// sourced from OpenClaw without needing a separate .env entry.
+// Used only at proxy startup to resolve the key for guardrail.model (the primary
+// provider). At runtime, the fetch interceptor forwards OpenClaw's Authorization
+// header via X-AI-Auth, so no per-request key resolution is needed.
 func resolveKeyFromOpenClawProfiles(model string) string {
 	providerName, _ := splitModel(model)
 	if providerName == "" {

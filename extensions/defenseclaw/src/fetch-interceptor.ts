@@ -89,26 +89,77 @@ function isAlreadyProxied(url: string, guardrailPort: number): boolean {
 }
 
 /**
+ * Extract the provider API key from whichever header the provider SDK uses.
+ * Different providers use different auth mechanisms:
+ *   - OpenAI / OpenRouter / Gemini compat: Authorization: Bearer <key>
+ *   - Anthropic: x-api-key: <key>
+ *   - Azure OpenAI: api-key: <key>
+ *   - Gemini native: ?key= query param (handled separately, not in headers)
+ *   - Bedrock: AWS SigV4 (multiple headers, not a simple key)
+ *   - Ollama: no auth
+ *
+ * Returns the key prefixed with "Bearer " for consistency, or empty string.
+ */
+function extractProviderKey(headers: Headers): string {
+  // Authorization: Bearer <key> — most providers
+  const auth = headers.get("Authorization") ?? "";
+  if (auth && !auth.startsWith("Bearer sk-dc-")) {
+    return auth;
+  }
+  // x-api-key — Anthropic
+  const xApiKey = headers.get("x-api-key") ?? "";
+  if (xApiKey) {
+    return `Bearer ${xApiKey}`;
+  }
+  // api-key — Azure OpenAI
+  const apiKey = headers.get("api-key") ?? "";
+  if (apiKey) {
+    return `Bearer ${apiKey}`;
+  }
+  return "";
+}
+
+/**
+ * Same as extractProviderKey but for Node http.request headers (plain object,
+ * case-sensitive keys).
+ */
+function extractProviderKeyFromRecord(hdrs: Record<string, string>): string {
+  const auth = hdrs["Authorization"] ?? hdrs["authorization"] ?? "";
+  if (auth && !auth.startsWith("Bearer sk-dc-")) {
+    return auth;
+  }
+  const xApiKey = hdrs["x-api-key"] ?? hdrs["X-Api-Key"] ?? "";
+  if (xApiKey) {
+    return `Bearer ${xApiKey}`;
+  }
+  const apiKey = hdrs["api-key"] ?? hdrs["Api-Key"] ?? "";
+  if (apiKey) {
+    return `Bearer ${apiKey}`;
+  }
+  return "";
+}
+
+/**
  * Build the proxy-hop headers (X-DC-Target-URL, X-AI-Auth, X-DC-Auth) that
  * the guardrail proxy expects. Used by both the fetch and https.request
  * interceptors so the logic lives in one place.
  *
- * OpenClaw already resolves the real provider API key (from auth-profiles.json
- * or env vars) and sets it as the Authorization header on outgoing requests.
- * We simply forward that as X-AI-Auth, filtering out sk-dc-* master keys.
+ * OpenClaw already resolves the real provider API key and sets it in the
+ * appropriate header for each provider SDK. We extract it from whichever
+ * header is used and forward it as X-AI-Auth for uniform proxy handling.
  */
 function buildProxyHeaders(
   targetOrigin: string,
-  existingAuth: string,
+  providerKey: string,
 ): Record<string, string> {
   const hdrs: Record<string, string> = {
     [TARGET_URL_HEADER]: targetOrigin,
   };
 
-  // Forward the real provider key from Authorization as X-AI-Auth.
-  // Skip sk-dc-* master keys — the proxy resolves those itself.
-  if (existingAuth && !existingAuth.startsWith("Bearer sk-dc-")) {
-    hdrs[AI_AUTH_HEADER] = existingAuth;
+  // Forward the real provider key as X-AI-Auth so the proxy has a single
+  // unified header to read for all providers.
+  if (providerKey) {
+    hdrs[AI_AUTH_HEADER] = providerKey;
   }
 
   // X-DC-Auth: proxy authentication token for remote deployments.
@@ -159,8 +210,8 @@ export function createFetchInterceptor(guardrailPort: number) {
       const headers = new Headers(
         input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
       );
-      const existingAuth = headers.get("Authorization") ?? "";
-      const proxyHdrs = buildProxyHeaders(original.origin, existingAuth);
+      const providerKey = extractProviderKey(headers);
+      const proxyHdrs = buildProxyHeaders(original.origin, providerKey);
       for (const [k, v] of Object.entries(proxyHdrs)) {
         headers.set(k, v);
       }
@@ -222,8 +273,8 @@ export function createFetchInterceptor(guardrailPort: number) {
         }
 
         const hdrs = opts.headers as Record<string, string> ?? {};
-        const existingAuth = hdrs["authorization"] ?? hdrs["Authorization"] ?? "";
-        const proxyHdrs = buildProxyHeaders(originalUrl.origin, existingAuth);
+        const providerKey = extractProviderKeyFromRecord(hdrs);
+        const proxyHdrs = buildProxyHeaders(originalUrl.origin, providerKey);
 
         const newOpts: NodeRequestOptions = {
           ...opts,
