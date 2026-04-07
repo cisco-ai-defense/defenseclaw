@@ -27,9 +27,6 @@
  * the proxy can route to the correct upstream after inspection.
  */
 
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { createRequire } from "node:module";
 import { loadSidecarConfig } from "./sidecar-config.js";
 // Canonical provider config — single source of truth shared with the Go proxy.
@@ -92,115 +89,25 @@ function isAlreadyProxied(url: string, guardrailPort: number): boolean {
 }
 
 /**
- * Domain substring → auth-profiles.json profile id mapping, built from
- * providers.json. OpenClaw stores one profile per provider under
- * agents/main/agent/auth-profiles.json.
- */
-const DOMAIN_TO_PROFILE: Record<string, string> = {};
-/** Domain substring → env var names for the API key (fallback when auth-profiles has no entry). */
-const DOMAIN_TO_ENV_KEYS: Record<string, string[]> = {};
-for (const p of providersConfig.providers) {
-  for (const d of p.domains) {
-    if (p.profile_id) {
-      DOMAIN_TO_PROFILE[d] = p.profile_id;
-    }
-    if (p.env_keys?.length) {
-      DOMAIN_TO_ENV_KEYS[d] = p.env_keys;
-    }
-  }
-}
-
-// Provider keys loaded once at interceptor start. OpenClaw restarts the
-// process whenever keys change, so there is no need for TTL-based reload.
-let providerKeyCache: Record<string, string> = {};
-
-function loadProviderKeys(): void {
-  try {
-    const profilesPath = join(
-      homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json"
-    );
-    const data = JSON.parse(readFileSync(profilesPath, "utf8"));
-    const profiles = data?.profiles ?? {};
-
-    const fresh: Record<string, string> = {};
-    // (1) Static domain → profile mapping.
-    for (const [domain, profileId] of Object.entries(DOMAIN_TO_PROFILE)) {
-      const key = profiles[profileId]?.key;
-      if (key) fresh[domain] = key;
-    }
-    // (2) Dynamic scan: any profile with metadata.endpoint gets its hostname
-    // added to the cache (covers Azure AI Foundry and other custom endpoints).
-    for (const profile of Object.values(profiles) as Array<{ key?: string; metadata?: { endpoint?: string } }>) {
-      const endpoint = profile.metadata?.endpoint;
-      if (endpoint && profile.key) {
-        try {
-          const hostname = new URL(endpoint).hostname;
-          if (hostname) fresh[hostname] = profile.key;
-        } catch {
-          // ignore malformed endpoint URLs
-        }
-      }
-    }
-    // (3) Env-var fallback: for any domain not yet resolved from
-    // auth-profiles.json, check well-known env vars (e.g. OPENAI_API_KEY).
-    // This covers setups where the key is in the shell environment but
-    // not in auth-profiles.json.
-    for (const [domain, envKeys] of Object.entries(DOMAIN_TO_ENV_KEYS)) {
-      if (!fresh[domain]) {
-        for (const envKey of envKeys) {
-          const val = process.env[envKey];
-          if (val) {
-            fresh[domain] = val;
-            break;
-          }
-        }
-      }
-    }
-    providerKeyCache = fresh;
-  } catch (err) {
-    // auth-profiles.json not found or unreadable — fall back to env vars only.
-    console.log(`[defenseclaw] could not load auth-profiles: ${err}`);
-    const envOnly: Record<string, string> = {};
-    for (const [domain, envKeys] of Object.entries(DOMAIN_TO_ENV_KEYS)) {
-      for (const envKey of envKeys) {
-        const val = process.env[envKey];
-        if (val) {
-          envOnly[domain] = val;
-          break;
-        }
-      }
-    }
-    providerKeyCache = envOnly;
-  }
-}
-
-/** Return the real provider key for a URL if we have it, else empty string. */
-function getRealKeyForUrl(urlStr: string): string {
-  for (const [domain, key] of Object.entries(providerKeyCache)) {
-    if (urlStr.includes(domain)) return key;
-  }
-  return "";
-}
-
-/**
  * Build the proxy-hop headers (X-DC-Target-URL, X-AI-Auth, X-DC-Auth) that
  * the guardrail proxy expects. Used by both the fetch and https.request
  * interceptors so the logic lives in one place.
+ *
+ * OpenClaw already resolves the real provider API key (from auth-profiles.json
+ * or env vars) and sets it as the Authorization header on outgoing requests.
+ * We simply forward that as X-AI-Auth, filtering out sk-dc-* master keys.
  */
 function buildProxyHeaders(
   targetOrigin: string,
-  urlStr: string,
   existingAuth: string,
 ): Record<string, string> {
   const hdrs: Record<string, string> = {
     [TARGET_URL_HEADER]: targetOrigin,
   };
 
-  // X-AI-Auth: real LLM provider key, separate from Authorization.
-  const realKey = getRealKeyForUrl(urlStr);
-  if (realKey) {
-    hdrs[AI_AUTH_HEADER] = `Bearer ${realKey}`;
-  } else if (existingAuth && !existingAuth.startsWith("Bearer sk-dc-")) {
+  // Forward the real provider key from Authorization as X-AI-Auth.
+  // Skip sk-dc-* master keys — the proxy resolves those itself.
+  if (existingAuth && !existingAuth.startsWith("Bearer sk-dc-")) {
     hdrs[AI_AUTH_HEADER] = existingAuth;
   }
 
@@ -226,11 +133,6 @@ export function createFetchInterceptor(guardrailPort: number) {
   function start(): void {
     if (originalFetch) return; // already started
     originalFetch = globalThis.fetch;
-
-    // Load real provider keys from OpenClaw's auth-profiles.json so we can
-    // inject them when OpenClaw sends requests via the defenseclaw provider
-    // (which uses sk-dc-* master key as Bearer, not the real provider key).
-    loadProviderKeys();
 
     globalThis.fetch = async (
       input: RequestInfo | URL,
@@ -258,7 +160,7 @@ export function createFetchInterceptor(guardrailPort: number) {
         input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
       );
       const existingAuth = headers.get("Authorization") ?? "";
-      const proxyHdrs = buildProxyHeaders(original.origin, urlStr, existingAuth);
+      const proxyHdrs = buildProxyHeaders(original.origin, existingAuth);
       for (const [k, v] of Object.entries(proxyHdrs)) {
         headers.set(k, v);
       }
@@ -321,7 +223,7 @@ export function createFetchInterceptor(guardrailPort: number) {
 
         const hdrs = opts.headers as Record<string, string> ?? {};
         const existingAuth = hdrs["authorization"] ?? hdrs["Authorization"] ?? "";
-        const proxyHdrs = buildProxyHeaders(originalUrl.origin, urlStr, existingAuth);
+        const proxyHdrs = buildProxyHeaders(originalUrl.origin, existingAuth);
 
         const newOpts: NodeRequestOptions = {
           ...opts,
