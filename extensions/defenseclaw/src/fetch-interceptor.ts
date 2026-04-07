@@ -29,12 +29,6 @@
 
 import { createRequire } from "node:module";
 import { loadSidecarConfig } from "./sidecar-config.js";
-import {
-  HEADER_TARGET_URL,
-  HEADER_AI_AUTH,
-  HEADER_DC_AUTH,
-  LOOPBACK_ADDRESS,
-} from "./constants.js";
 // Canonical provider config — single source of truth shared with the Go proxy.
 // Copied from internal/configs/providers.json by `make plugin`.
 import providersConfig from "./providers.json" with { type: "json" };
@@ -59,14 +53,14 @@ const LLM_DOMAINS: string[] = providersConfig.providers.flatMap(
 const OLLAMA_PORTS: string[] = providersConfig.ollama_ports.map(String);
 
 /** Header name the proxy reads to determine the real upstream URL. */
-export const TARGET_URL_HEADER = HEADER_TARGET_URL;
+export const TARGET_URL_HEADER = "X-DC-Target-URL";
 
 /**
  * Header carrying the real LLM provider key to the proxy.
  * Kept separate from Authorization so the original Authorization header
  * (which may carry a different token) is preserved verbatim.
  */
-export const AI_AUTH_HEADER = HEADER_AI_AUTH;
+export const AI_AUTH_HEADER = "X-AI-Auth";
 
 /**
  * Header carrying the defenseclaw proxy authentication token (the openclaw
@@ -74,7 +68,7 @@ export const AI_AUTH_HEADER = HEADER_AI_AUTH;
  * The proxy validates this for non-loopback connections; loopback connections
  * are trusted by network topology alone.
  */
-export const DC_AUTH_HEADER = HEADER_DC_AUTH;
+export const DC_AUTH_HEADER = "X-DC-Auth";
 
 function isLLMUrl(url: string, guardrailPort: number): boolean {
   if (LLM_DOMAINS.some(domain => url.includes(domain))) return true;
@@ -183,7 +177,7 @@ function buildProxyHeaders(
  * Call stop() to restore the original fetch.
  */
 export function createFetchInterceptor(guardrailPort: number) {
-  const proxyBase = `http://${LOOPBACK_ADDRESS}:${guardrailPort}`;
+  const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
 
@@ -284,7 +278,7 @@ export function createFetchInterceptor(guardrailPort: number) {
 
         const newOpts: NodeRequestOptions = {
           ...opts,
-          hostname: LOOPBACK_ADDRESS,
+          hostname: "127.0.0.1",
           port: guardrailPort,
           protocol: "http:",
           path: `${originalUrl.pathname}${originalUrl.search}`,

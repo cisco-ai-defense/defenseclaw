@@ -26,27 +26,17 @@ from typing import Any
 
 import requests
 
-from defenseclaw.constants import (
-    CLIENT_NAME,
-    DEFAULT_SIDECAR_HOST,
-    DEFAULT_SIDECAR_PORT,
-    DEFAULT_TIMEOUT,
-    HEADER_CLIENT,
-    SKILL_SCAN_TIMEOUT,
-)
-
 PLUGIN_MUTATION_TIMEOUT = 90
 
 
 class OrchestratorClient:
-    def __init__(self, host: str = DEFAULT_SIDECAR_HOST, port: int = DEFAULT_SIDECAR_PORT,
-                 timeout: int = DEFAULT_TIMEOUT, token: str = "",
-                 plugin_timeout: int | None = None) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5,
+                 token: str = "", plugin_timeout: int | None = None) -> None:
         self.base_url = f"http://{host}:{port}"
         self.timeout = timeout
         self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
         self._session = requests.Session()
-        self._session.headers[HEADER_CLIENT] = CLIENT_NAME
+        self._session.headers["X-DefenseClaw-Client"] = "python-cli"
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
 
@@ -124,7 +114,7 @@ class OrchestratorClient:
         resp = self._session.post(
             f"{self.base_url}/v1/skill/scan",
             json={"target": target, "name": name},
-            timeout=SKILL_SCAN_TIMEOUT,
+            timeout=120,
         )
         resp.raise_for_status()
         return resp.json()

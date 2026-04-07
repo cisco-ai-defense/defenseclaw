@@ -25,14 +25,14 @@ import (
 // The WebSocket read loop must stay responsive: if stderr is a slow writer
 // (e.g. daemon mode appending both streams to one log file), synchronous
 // fmt.Fprintf(os.Stderr) can block and stall RPC delivery (including connect).
-// readLoopStderrQueue is now ReadLoopStderrQueueSize in constants.go
+const readLoopStderrQueue = 2048
 
 var readLoopStderrOnce sync.Once
 var readLoopStderrCh chan string
 
 func startReadLoopStderrDrainer() {
 	readLoopStderrOnce.Do(func() {
-		readLoopStderrCh = make(chan string, ReadLoopStderrQueueSize)
+		readLoopStderrCh = make(chan string, readLoopStderrQueue)
 		go func() {
 			for line := range readLoopStderrCh {
 				_, _ = fmt.Fprint(os.Stderr, line)

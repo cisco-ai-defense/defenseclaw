@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // ChatMessage is the OpenAI-compatible message format used as the canonical
@@ -174,7 +175,7 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 	case "anthropic":
 		return &anthropicProvider{model: modelID, apiKey: apiKey}, nil
 	case "openai":
-		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: DefaultOpenAIBaseURL}, nil
+		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	case "openrouter":
 		return &openrouterProvider{model: modelID, apiKey: apiKey}, nil
 	case "gemini-openai":
@@ -184,7 +185,7 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 	case "azure":
 		return nil, fmt.Errorf("provider: azure requires api_base; use NewProviderWithBase")
 	default:
-		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: DefaultOpenAIBaseURL}, nil
+		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
 	}
 }
 
@@ -251,11 +252,11 @@ func splitModel(model string) (provider, modelID string) {
 }
 
 var providerHTTPClient = &http.Client{
-	Timeout: ProviderHTTPTimeout,
+	Timeout: 5 * time.Minute,
 	Transport: &http.Transport{
-		MaxIdleConns:        ProviderMaxIdleConns,
-		MaxIdleConnsPerHost: ProviderMaxIdleConnsPerHost,
-		IdleConnTimeout:     ProviderIdleConnTimeout,
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
 	},
 }
 

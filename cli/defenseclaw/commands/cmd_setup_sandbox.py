@@ -17,12 +17,6 @@ from defenseclaw.commands.cmd_init_sandbox import (
     _sudo_prefix,
     _sudo_write,
 )
-from defenseclaw.constants import (
-    DEFAULT_OPENCLAW_CONFIG,
-    DEFAULT_OPENCLAW_HOME,
-    DEFAULT_OPENCLAW_PORT,
-    DEFAULT_SIDECAR_HOST,
-)
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -100,7 +94,7 @@ def _find_openclaw_binary() -> str:
 @click.option("--sandbox-ip", default="10.200.0.2", help="Bridge IP of the sandbox (default: 10.200.0.2)")
 @click.option("--host-ip", default="10.200.0.1", help="Bridge IP of the host (default: 10.200.0.1)")
 @click.option("--sandbox-home", default=None, help="Sandbox user home directory (default: /home/sandbox)")
-@click.option("--openclaw-port", type=int, default=DEFAULT_OPENCLAW_PORT, help="OpenClaw gateway port inside sandbox")
+@click.option("--openclaw-port", type=int, default=18789, help="OpenClaw gateway port inside sandbox")
 @click.option(
     "--policy",
     type=click.Choice(["default", "strict", "permissive"]),
@@ -467,7 +461,7 @@ def _disable_sandbox(app: AppContext) -> None:
     # gateway.host may already be reset to 127.0.0.1 if --disable ran before,
     # so fall back to the well-known default sandbox IP.
     cfg_host = app.cfg.gateway.host
-    sandbox_ip = cfg_host if cfg_host not in (DEFAULT_SIDECAR_HOST, "localhost", "") else "10.200.0.2"
+    sandbox_ip = cfg_host if cfg_host not in ("127.0.0.1", "localhost", "") else "10.200.0.2"
     openclaw_port = int(app.cfg.gateway.port)
 
     # 1. Stop and disable systemd units
@@ -489,12 +483,12 @@ def _disable_sandbox(app: AppContext) -> None:
     _restore_openclaw_ownership(app.cfg.data_dir, sandbox_home)
 
     app.cfg.openshell.mode = ""
-    app.cfg.gateway.host = DEFAULT_SIDECAR_HOST
-    app.cfg.gateway.port = DEFAULT_OPENCLAW_PORT
+    app.cfg.gateway.host = "127.0.0.1"
+    app.cfg.gateway.port = 18789
     app.cfg.guardrail.host = "localhost"
     app.cfg.gateway.watcher.enabled = False
-    app.cfg.claw.home_dir = DEFAULT_OPENCLAW_HOME
-    app.cfg.claw.config_file = DEFAULT_OPENCLAW_CONFIG
+    app.cfg.claw.home_dir = "~/.openclaw"
+    app.cfg.claw.config_file = "~/.openclaw/openclaw.json"
     app.cfg.claw.openclaw_home_original = ""
     app.cfg.save()
     click.echo("  Sandbox mode disabled. Config reverted to host mode.")
@@ -828,7 +822,7 @@ def _restore_openclaw_gateway(openclaw_config: str) -> bool:
 
     gw = cfg.get("gateway", {})
     gw["mode"] = "local"
-    gw["port"] = DEFAULT_OPENCLAW_PORT
+    gw["port"] = 18789
     gw["bind"] = "loopback"
 
     dc_provider = cfg.get("models", {}).get("providers", {}).get("defenseclaw", {})

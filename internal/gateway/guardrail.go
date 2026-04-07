@@ -244,8 +244,8 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	}
 
 	top := flags
-	if len(top) > MaxFindingsInReason {
-		top = top[:MaxFindingsInReason]
+	if len(top) > 5 {
+		top = top[:5]
 	}
 
 	return &ScanVerdict{

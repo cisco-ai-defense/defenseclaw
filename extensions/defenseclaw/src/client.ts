@@ -26,10 +26,8 @@ import type {
   AdmissionResult,
 } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
-import {
-  REQUEST_TIMEOUT_MS,
-  MAX_RESPONSE_BYTES,
-} from "./constants.js";
+const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 type RequestImpl = typeof httpRequest;
 
 interface ClientOptions {

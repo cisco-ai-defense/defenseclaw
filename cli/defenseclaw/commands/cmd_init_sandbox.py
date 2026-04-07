@@ -12,7 +12,6 @@ from pathlib import Path
 
 import click
 
-from defenseclaw.constants import DEFAULT_OPENCLAW_HOME, DEFAULT_OPENCLAW_PORT
 from defenseclaw.context import AppContext, pass_ctx
 
 OPENCLAW_OWNERSHIP_BACKUP = "openclaw-ownership-backup.json"
@@ -147,7 +146,7 @@ def sandbox_init_cmd(app: AppContext) -> None:
             from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
             ctx = click.Context(setup_sandbox, parent=click.get_current_context())
             ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
-                       sandbox_home=None, openclaw_port=DEFAULT_OPENCLAW_PORT, dns="8.8.8.8,1.1.1.1",
+                       sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
                        policy="default", no_auto_pair=False,
                        no_host_networking=not cfg.openshell.host_networking,
                        no_guardrail=not cfg.guardrail.enabled,

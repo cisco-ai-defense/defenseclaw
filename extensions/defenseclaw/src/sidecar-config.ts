@@ -20,16 +20,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import yaml from "js-yaml";
-import {
-  DEFAULT_SIDECAR_HOST,
-  DEFAULT_SIDECAR_API_PORT,
-  DEFAULT_GUARDRAIL_PORT,
-  TOKEN_ENV_VAR,
-} from "./constants.js";
 
-const DEFAULT_HOST = DEFAULT_SIDECAR_HOST;
-const DEFAULT_API_PORT = DEFAULT_SIDECAR_API_PORT;
-const DEFAULT_TOKEN_ENV = TOKEN_ENV_VAR;
+const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_API_PORT = 18970;
+const DEFAULT_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
 
 interface SidecarConfig {
   host: string;
@@ -53,7 +47,7 @@ export function loadSidecarConfig(): SidecarConfig {
 
   let host = DEFAULT_HOST;
   let apiPort = DEFAULT_API_PORT;
-  let guardrailPort = DEFAULT_GUARDRAIL_PORT;
+  let guardrailPort = 4000;
   let token = "";
 
   try {

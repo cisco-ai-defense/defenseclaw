@@ -63,7 +63,7 @@ type Client struct {
 	OnEvent func(EventFrame)
 }
 
-// connectRPCTimeout is now ConnectRPCTimeout in constants.go
+const connectRPCTimeout = 45 * time.Second
 
 // NewClient creates a gateway client. The device identity is loaded or created
 // automatically from the configured key file path.
@@ -102,7 +102,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	t0 := time.Now()
 
 	dialer := websocket.Dialer{
-		HandshakeTimeout: WebSocketHandshakeTimeout,
+		HandshakeTimeout: 10 * time.Second,
 	}
 	if c.cfg.RequiresTLS() {
 		dialer.TLSClientConfig = &tls.Config{
@@ -201,7 +201,7 @@ func (c *Client) dispatchEvent(evt EventFrame) {
 func (c *Client) waitForChallenge(ctx context.Context) (string, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		deadline = time.Now().Add(ChallengeReadTimeout)
+		deadline = time.Now().Add(10 * time.Second)
 	}
 	_ = c.conn.SetReadDeadline(deadline)
 
@@ -282,7 +282,7 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 	}
 
 	fmt.Fprintf(os.Stderr, "[gateway] waiting for connect response ...\n")
-	handshakeCtx, cancel := context.WithTimeout(ctx, ConnectRPCTimeout)
+	handshakeCtx, cancel := context.WithTimeout(ctx, connectRPCTimeout)
 	defer cancel()
 	resp, err := c.request(handshakeCtx, "connect", params)
 	if err != nil {

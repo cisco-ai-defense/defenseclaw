@@ -33,15 +33,6 @@ from typing import Any
 
 import yaml
 
-from defenseclaw.constants import (
-    DEFAULT_GUARDRAIL_PORT,
-    DEFAULT_OPENCLAW_CONFIG,
-    DEFAULT_OPENCLAW_HOME,
-    DEFAULT_OPENCLAW_PORT,
-    DEFAULT_SIDECAR_HOST,
-    DEFAULT_SIDECAR_PORT,
-)
-
 _log = logging.getLogger(__name__)
 
 DATA_DIR_NAME = ".defenseclaw"
@@ -186,8 +177,8 @@ class MCPServerEntry:
 @dataclass
 class ClawConfig:
     mode: str = "openclaw"
-    home_dir: str = DEFAULT_OPENCLAW_HOME
-    config_file: str = DEFAULT_OPENCLAW_CONFIG
+    home_dir: str = "~/.openclaw"
+    config_file: str = "~/.openclaw/openclaw.json"
     openclaw_home_original: str = ""
 
 
@@ -411,8 +402,8 @@ class GatewayWatcherConfig:
 
 @dataclass
 class GatewayConfig:
-    host: str = DEFAULT_SIDECAR_HOST
-    port: int = DEFAULT_OPENCLAW_PORT
+    host: str = "127.0.0.1"
+    port: int = 18789
     token: str = ""
     token_env: str = ""
     device_key_file: str = ""
@@ -420,7 +411,7 @@ class GatewayConfig:
     reconnect_ms: int = 800
     max_reconnect_ms: int = 15000
     approval_timeout_s: int = 30
-    api_port: int = DEFAULT_SIDECAR_PORT
+    api_port: int = 18970
     watcher: GatewayWatcherConfig = field(default_factory=GatewayWatcherConfig)
 
     def resolved_token(self) -> str:
@@ -545,7 +536,7 @@ class GuardrailConfig:
     mode: str = "observe"           # observe | action
     scanner_mode: str = "local"     # local | remote | both
     host: str = "localhost"         # host where guardrail proxy is reachable (bridge IP in sandbox mode)
-    port: int = DEFAULT_GUARDRAIL_PORT
+    port: int = 4000
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
     model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
     api_key_env: str = ""           # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
@@ -1030,8 +1021,8 @@ def load() -> Config:
         environment=raw.get("environment", detect_environment()),
         claw=ClawConfig(
             mode=raw.get("claw", {}).get("mode", "openclaw"),
-            home_dir=raw.get("claw", {}).get("home_dir", DEFAULT_OPENCLAW_HOME),
-            config_file=raw.get("claw", {}).get("config_file", DEFAULT_OPENCLAW_CONFIG),
+            home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
+            config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
             openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
@@ -1079,8 +1070,8 @@ def load() -> Config:
         ),
         otel=_merge_otel(raw.get("otel")),
         gateway=GatewayConfig(
-            host=gw_raw.get("host", DEFAULT_SIDECAR_HOST),
-            port=gw_raw.get("port", DEFAULT_OPENCLAW_PORT),
+            host=gw_raw.get("host", "127.0.0.1"),
+            port=gw_raw.get("port", 18789),
             token=gw_raw.get("token", ""),
             token_env=gw_raw.get("token_env", ""),
             device_key_file=gw_raw.get("device_key_file", os.path.join(data_dir, "device.key")),
@@ -1088,7 +1079,7 @@ def load() -> Config:
             reconnect_ms=gw_raw.get("reconnect_ms", 800),
             max_reconnect_ms=gw_raw.get("max_reconnect_ms", 15000),
             approval_timeout_s=gw_raw.get("approval_timeout_s", 30),
-            api_port=gw_raw.get("api_port", DEFAULT_SIDECAR_PORT),
+            api_port=gw_raw.get("api_port", 18970),
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
         ),
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),

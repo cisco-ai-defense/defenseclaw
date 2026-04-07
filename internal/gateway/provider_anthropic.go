@@ -72,13 +72,13 @@ func (p *anthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		DefaultAnthropicBaseURL+DefaultAnthropicMessagesPath, bytes.NewReader(body))
+		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(HeaderAnthropicAPIKey, p.apiKey)
-	httpReq.Header.Set(HeaderAnthropicVersion, AnthropicAPIVersion)
+	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -87,7 +87,7 @@ func (p *anthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -109,13 +109,13 @@ func (p *anthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatR
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		DefaultAnthropicBaseURL+DefaultAnthropicMessagesPath, bytes.NewReader(body))
+		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(HeaderAnthropicAPIKey, p.apiKey)
-	httpReq.Header.Set(HeaderAnthropicVersion, AnthropicAPIVersion)
+	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -124,7 +124,7 @@ func (p *anthropicProvider) ChatCompletionStream(ctx context.Context, req *ChatR
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -194,7 +194,7 @@ func (p *anthropicProvider) translateRequest(req *ChatRequest) *anthropicRequest
 		msgs = append(msgs, anthropicMessage{Role: m.Role, Content: contentJSON})
 	}
 
-	maxTokens := DefaultAnthropicMaxTokens
+	maxTokens := 4096
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		maxTokens = *req.MaxTokens
 	}
@@ -295,7 +295,7 @@ func (p *anthropicProvider) translateResponse(aResp *anthropicResponse, modelAli
 
 func (p *anthropicProvider) readAnthropicSSE(r io.Reader, modelAlias string, cb func(StreamChunk)) (*ChatUsage, error) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, SSEScannerBufferSize), SSEScannerMaxSize)
+	scanner.Buffer(make([]byte, 64*1024), 256*1024)
 	var msgID, model string
 	var usage *ChatUsage
 	created := time.Now().Unix()

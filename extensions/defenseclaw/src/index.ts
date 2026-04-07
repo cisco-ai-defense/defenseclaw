@@ -47,10 +47,6 @@ import type {
 import { compareSeverity, maxSeverity } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
-import {
-  INSPECT_TIMEOUT_MS,
-  INSPECT_TOOL_PATH,
-} from "./constants.js";
 
 function formatFindings(findings: Finding[], limit = 15): string[] {
   const lines: string[] = [];
@@ -78,7 +74,7 @@ export default function (api: PluginApi) {
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   const SIDECAR_TOKEN = sidecarConfig.token;
-  // Timeout imported from constants.ts
+  const INSPECT_TIMEOUT_MS = 2_000;
 
   // ─── LLM fetch interceptor ───
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
@@ -105,7 +101,7 @@ export default function (api: PluginApi) {
       if (SIDECAR_TOKEN) {
         headers["Authorization"] = `Bearer ${SIDECAR_TOKEN}`;
       }
-      const res = await fetch(`${SIDECAR_API}${INSPECT_TOOL_PATH}`, {
+      const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),

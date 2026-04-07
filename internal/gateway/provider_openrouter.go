@@ -9,8 +9,11 @@ import (
 	"net/http"
 )
 
-// openrouterDefaultBase, openrouterReferer, openrouterTitle are now
-// DefaultOpenRouterBaseURL, OpenRouterReferer, OpenRouterTitle in constants.go
+const (
+	openrouterDefaultBase = "https://openrouter.ai/api"
+	openrouterReferer     = "https://github.com/defenseclaw/defenseclaw"
+	openrouterTitle       = "defenseclaw"
+)
 
 type openrouterProvider struct {
 	model   string
@@ -22,7 +25,7 @@ func (p *openrouterProvider) effectiveBase() string {
 	if p.baseURL != "" {
 		return p.baseURL
 	}
-	return DefaultOpenRouterBaseURL
+	return openrouterDefaultBase
 }
 
 func (p *openrouterProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
@@ -46,8 +49,8 @@ func (p *openrouterProvider) ChatCompletion(ctx context.Context, req *ChatReques
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("HTTP-Referer", OpenRouterReferer)
-	httpReq.Header.Set("X-Title", OpenRouterTitle)
+	httpReq.Header.Set("HTTP-Referer", openrouterReferer)
+	httpReq.Header.Set("X-Title", openrouterTitle)
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -56,7 +59,7 @@ func (p *openrouterProvider) ChatCompletion(ctx context.Context, req *ChatReques
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -93,8 +96,8 @@ func (p *openrouterProvider) ChatCompletionStream(ctx context.Context, req *Chat
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("HTTP-Referer", OpenRouterReferer)
-	httpReq.Header.Set("X-Title", OpenRouterTitle)
+	httpReq.Header.Set("HTTP-Referer", openrouterReferer)
+	httpReq.Header.Set("X-Title", openrouterTitle)
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -103,7 +106,7 @@ func (p *openrouterProvider) ChatCompletionStream(ctx context.Context, req *Chat
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

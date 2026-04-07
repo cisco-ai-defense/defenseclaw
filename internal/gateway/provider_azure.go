@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// azureAPIVersion is now AzureAPIVersion in constants.go
+const azureAPIVersion = "2025-01-01-preview"
 
 type azureOpenAIProvider struct {
 	model   string
@@ -31,7 +31,7 @@ func (p *azureOpenAIProvider) chatURL() string {
 	}
 	base = strings.TrimRight(base, "/")
 	return fmt.Sprintf("%s/openai/deployments/%s/chat/completions?api-version=%s",
-		base, p.model, AzureAPIVersion)
+		base, p.model, azureAPIVersion)
 }
 
 func (p *azureOpenAIProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
@@ -53,7 +53,7 @@ func (p *azureOpenAIProvider) ChatCompletion(ctx context.Context, req *ChatReque
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(HeaderAzureAPIKey, p.apiKey)
+	httpReq.Header.Set("api-key", p.apiKey)
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -62,7 +62,7 @@ func (p *azureOpenAIProvider) ChatCompletion(ctx context.Context, req *ChatReque
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -97,7 +97,7 @@ func (p *azureOpenAIProvider) ChatCompletionStream(ctx context.Context, req *Cha
 		return nil, fmt.Errorf("provider: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(HeaderAzureAPIKey, p.apiKey)
+	httpReq.Header.Set("api-key", p.apiKey)
 
 	resp, err := providerHTTPClient.Do(httpReq)
 	if err != nil {
@@ -106,7 +106,7 @@ func (p *azureOpenAIProvider) ChatCompletionStream(ctx context.Context, req *Cha
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorResponseSize))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("provider: upstream returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
