@@ -9,7 +9,7 @@ splunk:
   admin_user: admin
   http_port: 8000
   apps_location:
-    - /opt/splunk-claw-bridge/splunk/build/defenseclaw_local_mode.tgz
+    - file:///opt/splunk-claw-bridge/splunk/build/defenseclaw_local_mode.tgz
   hec:
     enable: true
     ssl: false
