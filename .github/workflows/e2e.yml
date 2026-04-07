@@ -62,7 +62,7 @@ jobs:
       # Phase 3 — Initialize DefenseClaw
       - name: Init DefenseClaw
         run: |
-          defenseclaw init --enable-guardrail --yes
+          defenseclaw init --enable-guardrail
           defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           if [ -n "${SPLUNK_ACCESS_TOKEN}" ]; then
