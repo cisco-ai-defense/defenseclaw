@@ -36,10 +36,10 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
 
 
 # ---------------------------------------------------------------------------
-# Migration: 0.3.0
+# Migration: 0.2.0
 # ---------------------------------------------------------------------------
 
-def _migrate_0_3_0(openclaw_home: str) -> None:
+def _migrate_0_2_0(openclaw_home: str) -> None:
     """Remove legacy defenseclaw model/provider entries from openclaw.json.
 
     Prior to 0.3.0 the guardrail setup added models.providers.defenseclaw
@@ -101,7 +101,7 @@ def _migrate_0_3_0(openclaw_home: str) -> None:
 # Ordered list of (version, description, callable).
 # Each callable takes openclaw_home as its single argument.
 MIGRATIONS: list[tuple[str, str, Callable[[str], None]]] = [
-    ("0.3.0", "Remove legacy model provider entries from openclaw.json", _migrate_0_3_0),
+    ("0.2.0", "Remove legacy model provider entries from openclaw.json", _migrate_0_2_0),
 ]
 
 
@@ -110,7 +110,11 @@ def run_migrations(
     to_version: str,
     openclaw_home: str,
 ) -> int:
-    """Run all migrations between from_version (exclusive) and to_version (inclusive).
+    """Run all applicable migrations up to to_version.
+
+    When from_version == to_version (re-apply / same-version upgrade),
+    migrations at that exact version are still executed so that cleanup
+    migrations ship with the version they fix.
 
     Returns the number of migrations applied.
     """
@@ -120,7 +124,7 @@ def run_migrations(
 
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)
-        if from_t < ver_t <= to_t:
+        if ver_t <= to_t and (from_t < ver_t or from_t == to_t):
             click.echo(f"  → Migration {ver}: {desc}")
             fn(openclaw_home)
             applied += 1

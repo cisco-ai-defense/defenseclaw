@@ -337,10 +337,10 @@ services. No uninstall or full reinstall — your configuration is preserved.
 6. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the updated plugin
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
-and run automatically. For example, the v0.3.0 migration removes legacy
-`models.providers.defenseclaw`, `models.providers.litellm`, and
-`agents.defaults.model.primary` prefixed entries from `openclaw.json` while
-preserving plugin registration.
+and run automatically even during same-version upgrades. For example, the
+v0.2.0 migration removes legacy `models.providers.defenseclaw`,
+`models.providers.litellm`, and `agents.defaults.model.primary` prefixed
+entries from `openclaw.json` while preserving plugin registration.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
