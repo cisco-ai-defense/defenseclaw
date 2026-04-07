@@ -97,7 +97,7 @@ phase_health() {
 
     for subsystem in gateway watcher api guardrail; do
         local state
-        state=$(echo "$health" | jq -r ".$subsystem // empty" 2>/dev/null)
+        state=$(echo "$health" | jq -r ".${subsystem}.state // .${subsystem} // empty" 2>/dev/null)
         if [ "$state" = "running" ]; then
             pass "health: $subsystem is running"
         else
