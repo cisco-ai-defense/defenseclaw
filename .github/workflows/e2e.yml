@@ -22,6 +22,9 @@ jobs:
       E2E_TELEGRAM_API_ID: ${{ secrets.E2E_TELEGRAM_API_ID }}
       E2E_TELEGRAM_API_HASH: ${{ secrets.E2E_TELEGRAM_API_HASH }}
       E2E_TELEGRAM_BOT_USERNAME: ${{ secrets.E2E_TELEGRAM_BOT_USERNAME }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -51,6 +54,10 @@ jobs:
       # Phase 2 — Fresh install from this commit
       - name: Install DefenseClaw
         run: make install
+
+      # Add venv to PATH for all subsequent steps
+      - name: Activate venv
+        run: echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
 
       # Phase 3 — Initialize DefenseClaw
       - name: Init DefenseClaw
