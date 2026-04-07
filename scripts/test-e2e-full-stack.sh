@@ -2020,6 +2020,11 @@ phase_plugin_lifecycle() {
         phase_timer_end "Phase 7B"
         return
     fi
+    if wait_for_sidecar_subsystems_running 120; then
+        pass "plugin lifecycle: sidecar recovered after runtime install restart"
+    else
+        fail "plugin lifecycle: sidecar recovered after runtime install restart" "sidecar did not return to running after plugin install restart"
+    fi
 
     disable_out=$(defenseclaw plugin disable "$clean_plugin" --reason "E2E plugin disable" 2>&1 || true)
     echo "$disable_out"
