@@ -3,32 +3,38 @@
     {
       "name": "anthropic",
       "domains": ["api.anthropic.com"],
-      "profile_id": "anthropic:default"
+      "profile_id": "anthropic:default",
+      "env_keys": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
     },
     {
       "name": "openrouter",
       "domains": ["openrouter.ai"],
-      "profile_id": "openrouter:default"
+      "profile_id": "openrouter:default",
+      "env_keys": ["OPENROUTER_API_KEY"]
     },
     {
       "name": "openai",
       "domains": ["api.openai.com"],
-      "profile_id": "openai:default"
+      "profile_id": "openai:default",
+      "env_keys": ["OPENAI_API_KEY"]
     },
     {
       "name": "azure",
       "domains": ["openai.azure.com"],
-      "profile_id": "azure:default"
+      "profile_id": "azure:default",
+      "env_keys": ["AZURE_OPENAI_API_KEY"]
     },
     {
       "name": "gemini",
       "domains": ["generativelanguage.googleapis.com", "googleapis.com/v1/projects"],
-      "profile_id": "google:default"
+      "profile_id": "google:default",
+      "env_keys": ["GOOGLE_API_KEY", "GEMINI_API_KEY"]
     },
     {
       "name": "bedrock",
       "domains": ["amazonaws.com"],
-      "profile_id": null
+      "profile_id": null,
+      "env_keys": []
     }
   ],
   "ollama_ports": [11434]

@@ -97,10 +97,15 @@ function isAlreadyProxied(url: string, guardrailPort: number): boolean {
  * agents/main/agent/auth-profiles.json.
  */
 const DOMAIN_TO_PROFILE: Record<string, string> = {};
+/** Domain substring → env var names for the API key (fallback when auth-profiles has no entry). */
+const DOMAIN_TO_ENV_KEYS: Record<string, string[]> = {};
 for (const p of providersConfig.providers) {
-  if (p.profile_id) {
-    for (const d of p.domains) {
+  for (const d of p.domains) {
+    if (p.profile_id) {
       DOMAIN_TO_PROFILE[d] = p.profile_id;
+    }
+    if (p.env_keys?.length) {
+      DOMAIN_TO_ENV_KEYS[d] = p.env_keys;
     }
   }
 }
@@ -136,10 +141,36 @@ function loadProviderKeys(): void {
         }
       }
     }
+    // (3) Env-var fallback: for any domain not yet resolved from
+    // auth-profiles.json, check well-known env vars (e.g. OPENAI_API_KEY).
+    // This covers setups where the key is in the shell environment but
+    // not in auth-profiles.json.
+    for (const [domain, envKeys] of Object.entries(DOMAIN_TO_ENV_KEYS)) {
+      if (!fresh[domain]) {
+        for (const envKey of envKeys) {
+          const val = process.env[envKey];
+          if (val) {
+            fresh[domain] = val;
+            break;
+          }
+        }
+      }
+    }
     providerKeyCache = fresh;
   } catch (err) {
-    // auth-profiles.json not found or unreadable — log so it's diagnosable
-    console.log(`[defenseclaw] could not load provider keys: ${err}`);
+    // auth-profiles.json not found or unreadable — fall back to env vars only.
+    console.log(`[defenseclaw] could not load auth-profiles: ${err}`);
+    const envOnly: Record<string, string> = {};
+    for (const [domain, envKeys] of Object.entries(DOMAIN_TO_ENV_KEYS)) {
+      for (const envKey of envKeys) {
+        const val = process.env[envKey];
+        if (val) {
+          envOnly[domain] = val;
+          break;
+        }
+      }
+    }
+    providerKeyCache = envOnly;
   }
 }
 

@@ -19,6 +19,7 @@ type Provider struct {
 	Name      string   `json:"name"`
 	Domains   []string `json:"domains"`
 	ProfileID *string  `json:"profile_id"` // nil when no auth-profile exists (e.g. bedrock)
+	EnvKeys   []string `json:"env_keys"`   // env var names for the API key, checked in order
 }
 
 // ProvidersConfig is the top-level structure of providers.json.
