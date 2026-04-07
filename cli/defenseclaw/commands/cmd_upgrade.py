@@ -63,6 +63,24 @@ def upgrade(
         )
         raise SystemExit(1)
 
+    # ── Pull latest changes ───────────────────────────────────────────────────
+
+    if _is_git_repo(resolved_source):
+        click.echo("  → Pulling latest changes from git ...")
+        result = subprocess.run(
+            ["git", "pull"],
+            cwd=resolved_source,
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if result.returncode == 0:
+            click.echo("  ✓ Source updated (git pull)")
+        else:
+            click.echo("  ⚠ git pull failed — upgrading from current local state")
+            if result.stderr:
+                click.echo(f"    {result.stderr.strip()}")
+    else:
+        click.echo("  ✓ Source directory: not a git repo — using local files")
+
     # ── Detect versions ───────────────────────────────────────────────────────
 
     new_version = _read_source_version(resolved_source)
@@ -189,6 +207,11 @@ def _resolve_source_dir() -> str | None:
             return path
 
     return None
+
+
+def _is_git_repo(path: str) -> bool:
+    """Return True if path is inside a git repository."""
+    return os.path.isdir(os.path.join(path, ".git"))
 
 
 def _read_source_version(source_dir: str) -> str:

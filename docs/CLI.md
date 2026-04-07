@@ -330,15 +330,17 @@ services. No uninstall or full reinstall — your configuration is preserved.
 **Upgrade steps:**
 
 1. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
-2. Stop `defenseclaw-gateway`
-3. Replace gateway binary (`make gateway-install`), Python CLI (`uv pip install -e`), and plugin files (`make plugin plugin-install`)
-4. Run version-specific migrations between the installed and new versions
-5. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the updated plugin
+2. Pull latest changes (`git pull`) if installed from a git repository
+3. Stop `defenseclaw-gateway`
+4. Replace gateway binary (`make gateway-install`), Python CLI (`uv pip install -e`), and plugin files (`make plugin plugin-install`)
+5. Run version-specific migrations between the installed and new versions
+6. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the updated plugin
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run automatically. For example, the v0.3.0 migration removes legacy
-`models.providers.defenseclaw` and `models.providers.litellm` entries from
-`openclaw.json` while preserving plugin registration.
+`models.providers.defenseclaw`, `models.providers.litellm`, and
+`agents.defaults.model.primary` prefixed entries from `openclaw.json` while
+preserving plugin registration.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts

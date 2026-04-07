@@ -103,6 +103,19 @@ if [[ ! -f "$SOURCE_DIR/Makefile" ]]; then
     exit 1
 fi
 
+# ── Pull latest changes ──────────────────────────────────────────────────
+
+if [[ -d "$SOURCE_DIR/.git" ]]; then
+    step "Pulling latest changes from git ..."
+    if (cd "$SOURCE_DIR" && git pull 2>/dev/null); then
+        info "Source updated (git pull)"
+    else
+        warn "git pull failed — upgrading from current local state"
+    fi
+else
+    info "Source directory: not a git repo — using local files"
+fi
+
 # ── Detect versions ──────────────────────────────────────────────────────────
 
 CURRENT_VERSION=""

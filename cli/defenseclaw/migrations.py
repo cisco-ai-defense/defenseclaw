@@ -40,10 +40,12 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
 # ---------------------------------------------------------------------------
 
 def _migrate_0_3_0(openclaw_home: str) -> None:
-    """Remove legacy model provider entries from openclaw.json.
+    """Remove legacy defenseclaw model/provider entries from openclaw.json.
 
     Prior to 0.3.0 the guardrail setup added models.providers.defenseclaw
-    and/or models.providers.litellm to openclaw.json to redirect traffic.
+    and/or models.providers.litellm to openclaw.json to redirect traffic,
+    and set agents.defaults.model.primary to "defenseclaw/<model>".
+
     The fetch interceptor now handles routing transparently, so these
     entries are unnecessary and should be cleaned up.
 
@@ -59,22 +61,37 @@ def _migrate_0_3_0(openclaw_home: str) -> None:
     except (OSError, json.JSONDecodeError):
         return
 
+    changed = False
+    changes = []
+
+    # Remove legacy provider entries
     providers = cfg.get("models", {}).get("providers", {})
-    removed = []
     for key in ("defenseclaw", "litellm"):
         if key in providers:
             del providers[key]
-            removed.append(key)
+            changes.append(f"removed providers.{key}")
+            changed = True
 
-    if not removed:
-        click.echo("    (no legacy provider entries found — nothing to remove)")
+    # Restore model.primary if it was redirected through defenseclaw/litellm
+    model = cfg.get("agents", {}).get("defaults", {}).get("model", {})
+    primary = model.get("primary", "")
+    if primary.startswith(("defenseclaw/", "litellm/")):
+        # Strip the defenseclaw/ or litellm/ prefix to restore the real model
+        restored = primary.split("/", 1)[1]
+        model["primary"] = restored
+        changes.append(f"restored model.primary: {primary} → {restored}")
+        changed = True
+
+    if not changed:
+        click.echo("    (no legacy entries found — nothing to change)")
         return
 
     with open(oc_json, "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    click.echo(f"    Removed legacy provider entries: {', '.join(removed)}")
+    for c in changes:
+        click.echo(f"    {c}")
 
 
 # ---------------------------------------------------------------------------
