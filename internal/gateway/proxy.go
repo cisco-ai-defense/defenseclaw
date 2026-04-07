@@ -1085,6 +1085,22 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 		}
 	}
 
+	// --- Post-call inspection: tool call arguments ---
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		if verdict := p.inspectToolCalls(resp.Choices[0].Message.ToolCalls); verdict != nil {
+			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
+			if verdict.Action == "block" && mode == "action" {
+				if p.otel != nil && llmSpan != nil {
+					p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+				}
+				msg := blockMessage(customBlockMsg, "completion",
+					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				p.writeBlockedResponse(w, aliasModel, msg)
+				return
+			}
+		}
+	}
+
 	// --- Emit execute_tool spans for any tool_calls in the response ---
 	if p.otel != nil && llmCtx != nil && len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		p.emitToolCallSpans(r.Context(), llmCtx, resp.Choices[0].Message.ToolCalls, aliasModel, mode)
@@ -1150,6 +1166,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}
 
 	var accumulated strings.Builder
+	var accToolCalls json.RawMessage
 	lastScanLen := 0
 	const scanInterval = 500
 	streamFinishReasons := []string{}
@@ -1157,9 +1174,12 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	usage, err := upstream.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
 		chunk.Model = aliasModel
 
-		// Accumulate content for post-stream inspection.
+		// Accumulate content and tool calls for post-stream inspection.
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
 			accumulated.WriteString(chunk.Choices[0].Delta.Content)
+			if len(chunk.Choices[0].Delta.ToolCalls) > 0 {
+				accToolCalls = mergeToolCallChunks(accToolCalls, chunk.Choices[0].Delta.ToolCalls)
+			}
 		}
 		// Collect finish reasons from stream chunks.
 		for _, c := range chunk.Choices {
@@ -1176,7 +1196,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
 					midVerdict.Severity, midVerdict.Reason)
 				p.recordTelemetry("completion", aliasModel, midVerdict, 0, nil, nil)
-				// Stop sending chunks — the client will see a truncated stream.
 				return
 			}
 			lastScanLen = accumulated.Len()
@@ -1252,6 +1271,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			completionTok = int(usage.CompletionTokens)
 		}
 		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, 0, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+	}
+
+	// Final post-stream inspection: tool calls.
+	if len(accToolCalls) > 0 {
+		if verdict := p.inspectToolCalls(accToolCalls); verdict != nil {
+			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
+		}
 	}
 
 	fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -1923,6 +1949,97 @@ func injectSystemMessage(raw json.RawMessage, content string) (json.RawMessage, 
 	}
 	m["messages"] = newMsgBytes
 	return json.Marshal(m)
+}
+
+// ---------------------------------------------------------------------------
+// Tool call inspection (defense-in-depth)
+//
+// When the LLM responds with tool_calls, inspect each tool's name and
+// arguments with the same ScanAllRules engine used by the inspect endpoint.
+// This catches dangerous tool calls (write_file with /etc/passwd, shell with
+// reverse shells, etc.) even when the OpenClaw plugin is not loaded.
+// ---------------------------------------------------------------------------
+
+// inspectToolCalls scans tool call arguments in an OpenAI-format tool_calls
+// JSON array. Returns a block verdict if any HIGH/CRITICAL findings, nil
+// otherwise.
+func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVerdict {
+	if len(toolCallsJSON) == 0 {
+		return nil
+	}
+
+	var toolCalls []struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
+		return nil
+	}
+
+	var allFindings []RuleFinding
+	for _, tc := range toolCalls {
+		toolName := tc.Function.Name
+		args := tc.Function.Arguments
+
+		findings := ScanAllRules(args, toolName)
+		allFindings = append(allFindings, findings...)
+	}
+
+	if len(allFindings) == 0 {
+		return nil
+	}
+
+	severity := HighestSeverity(allFindings)
+	confidence := HighestConfidence(allFindings, severity)
+
+	action := "alert"
+	if severity == "HIGH" || severity == "CRITICAL" {
+		action = "block"
+	}
+
+	top := make([]string, 0, 5)
+	for i, f := range allFindings {
+		if i >= 5 {
+			break
+		}
+		top = append(top, f.RuleID+":"+f.Title)
+	}
+
+	fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT action=%s severity=%s findings=%d reason=%s\n",
+		action, severity, len(allFindings), strings.Join(top, ", "))
+
+	if p.logger != nil {
+		for _, tc := range toolCalls {
+			_ = p.logger.LogAction("guardrail-tool-call-inspect", tc.Function.Name,
+				fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence))
+		}
+	}
+
+	if p.otel != nil {
+		p.otel.RecordGuardrailEvaluation(context.Background(), "tool-call-inspect", action)
+	}
+
+	return &ScanVerdict{
+		Action:         action,
+		Severity:       severity,
+		Reason:         strings.Join(top, ", "),
+		Findings:       FindingStrings(allFindings),
+		ScannerSources: []string{"tool-call-inspect"},
+	}
+}
+
+// mergeToolCallChunks appends streaming tool_calls delta chunks into an
+// accumulated JSON array. Streaming deltas arrive as partial arrays; we
+// concatenate the raw JSON for post-stream inspection.
+func mergeToolCallChunks(existing json.RawMessage, chunk json.RawMessage) json.RawMessage {
+	if len(existing) == 0 {
+		return chunk
+	}
+	return append(append(existing[:len(existing)-1], ','), chunk[1:]...)
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {

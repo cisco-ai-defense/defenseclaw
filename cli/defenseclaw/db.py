@@ -103,8 +103,11 @@ def _validate(field: str, value: str) -> None:
 
 class Store:
     def __init__(self, db_path: str) -> None:
-        self.db = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
+        self.db = sqlite3.connect(
+            db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=5.0,
+        )
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
 
     def init(self) -> None:
         self.db.executescript(SCHEMA)

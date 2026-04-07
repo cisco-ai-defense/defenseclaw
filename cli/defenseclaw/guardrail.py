@@ -445,6 +445,11 @@ def _register_plugin_in_config(openclaw_config: str, source_dir: str) -> None:
     if install_path not in paths:
         paths.append(install_path)
 
+    # plugins.allow — required when an allowlist is active
+    allow = plugins.setdefault("allow", [])
+    if "defenseclaw" not in allow:
+        allow.append("defenseclaw")
+
     # plugins.installs — record install metadata
     version = "0.0.0"
     try:

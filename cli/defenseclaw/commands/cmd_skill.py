@@ -566,7 +566,15 @@ def _apply_scan_enforcement(
     skill_path: str,
     result,
 ) -> None:
-    """Apply configured skill_actions policy based on scan severity."""
+    """Apply configured skill_actions policy based on scan severity.
+
+    Allow-listed skills are exempt from auto-enforcement — only a manual
+    ``skill block`` can override an allow entry.
+    """
+    if pe.is_allowed("skill", skill_name):
+        click.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
+        return
+
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
     sev = result.max_severity()
@@ -1145,6 +1153,13 @@ def allow(app: AppContext, name: str, reason: str) -> None:
         reason = "manual allow via CLI"
 
     pe.allow("skill", skill_name, reason)
+
+    # Clear residual auto-enforcement state (quarantine / disable) so the
+    # allow actually takes full effect.  Only a manual ``skill block`` can
+    # override an allow entry.
+    pe.clear_quarantine("skill", skill_name)
+    pe.enable("skill", skill_name)
+
     skill_path = _resolve_path(app, skill_name)
     if skill_path:
         pe.set_source_path("skill", skill_name, skill_path)

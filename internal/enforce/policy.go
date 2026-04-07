@@ -60,7 +60,14 @@ func (e *PolicyEngine) Allow(targetType, name, reason string) error {
 	if e.store == nil {
 		return nil
 	}
-	return e.store.SetActionField(targetType, name, "install", "allow", reason)
+	if err := e.store.SetActionField(targetType, name, "install", "allow", reason); err != nil {
+		return err
+	}
+	// Clear residual auto-enforcement state (quarantine / disable) so the
+	// allow actually takes full effect.  Only a manual Block can override.
+	_ = e.store.ClearActionField(targetType, name, "file")
+	_ = e.store.ClearActionField(targetType, name, "runtime")
+	return nil
 }
 
 func (e *PolicyEngine) Unblock(targetType, name string) error {

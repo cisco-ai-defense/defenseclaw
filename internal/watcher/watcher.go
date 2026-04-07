@@ -302,8 +302,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		// On OPA error fall through to scan (best-effort).
 	} else {
 		// Fallback: built-in Go block/allow check when OPA is unavailable.
-		blocked, err := pe.IsBlocked(targetType, evt.Name)
-		if err == nil && blocked {
+		blocked, bErr := pe.IsBlocked(targetType, evt.Name)
+		if bErr == nil && blocked {
 			reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 			_ = w.logger.LogAction("install-rejected", evt.Path,
 				fmt.Sprintf("type=%s reason=blocked", targetType))
@@ -312,13 +312,24 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			return AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: reason}
 		}
 
-		allowed, err := pe.IsAllowed(targetType, evt.Name)
-		if err == nil && allowed {
+		allowed, aErr := pe.IsAllowed(targetType, evt.Name)
+		if aErr == nil && allowed {
 			reason := fmt.Sprintf("%s %q is on the allow list — skipping scan", targetType, evt.Name)
 			_ = w.logger.LogAction("install-allowed", evt.Path,
 				fmt.Sprintf("type=%s reason=allow-listed", targetType))
 			w.recordAdmission(ctx, "allowed", targetType)
 			return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: reason}
+		}
+
+		// If both checks returned errors (e.g. SQLITE_BUSY), do NOT fall
+		// through to scan — we cannot safely enforce without knowing the
+		// allow/block status.
+		if bErr != nil && aErr != nil {
+			reason := fmt.Sprintf("store unavailable — skipping admission for %s %q", targetType, evt.Name)
+			fmt.Fprintf(os.Stderr, "[watch] block/allow check failed (db busy?): block=%v allow=%v\n", bErr, aErr)
+			_ = w.logger.LogAction("install-deferred", evt.Path, reason)
+			w.recordAdmission(ctx, "scan-error", targetType)
+			return AdmissionResult{Event: evt, Verdict: VerdictScanError, Reason: reason}
 		}
 	}
 
@@ -391,6 +402,21 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		return AdmissionResult{Event: evt, Verdict: VerdictClean, Reason: "scan clean"}
 	}
 
+	// Re-check allow list: the item may have been allowed between the
+	// pre-scan check and now (race with CLI ``skill allow``).  Only a
+	// manual block can override an allow entry.
+	if allowed, aErr := pe.IsAllowed(targetType, evt.Name); aErr == nil && allowed {
+		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
+		_ = w.logger.LogAction("install-allowed-skip-enforce", evt.Path,
+			fmt.Sprintf("type=%s %s is allow-listed post-scan", targetType, evt.Name))
+		_ = w.logger.LogScanWithVerdict(result, string(VerdictWarning))
+		w.recordAdmission(ctx, "scan_warning", targetType)
+		return AdmissionResult{
+			Event: evt, Verdict: VerdictWarning, Reason: reason,
+			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+		}
+	}
+
 	maxSev := result.MaxSeverity()
 	if maxSev == scanner.SeverityHigh || maxSev == scanner.SeverityCritical {
 		reason := fmt.Sprintf("scan found %s findings — auto-blocking", maxSev)
@@ -442,7 +468,18 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 // applyPostScanEnforcement takes the OPA verdict after scanning and executes
 // the enforcement side-effects (block, quarantine, disable) that OPA cannot
 // perform itself. It respects file_action and install_action from OPA output.
+//
+// Allow-listed items are exempt from auto-enforcement; only a manual block
+// can override an allow entry.
 func (w *InstallWatcher) applyPostScanEnforcement(pe *enforce.PolicyEngine, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
+	// Re-check allow list to guard against races where the item became
+	// allowed between the pre-scan check and post-scan enforcement.
+	if allowed, err := pe.IsAllowed(targetType, evt.Name); err == nil && allowed {
+		_ = w.logger.LogAction("install-allowed-skip-enforce", evt.Path,
+			fmt.Sprintf("type=%s %s is allow-listed — skipping auto-enforcement", targetType, evt.Name))
+		return
+	}
+
 	switch out.Verdict {
 	case "clean":
 		_ = w.logger.LogAction("install-clean", evt.Path,

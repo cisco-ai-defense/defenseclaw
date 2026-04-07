@@ -66,7 +66,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] device identity loaded (id=%s)\n", client.device.DeviceID)
 
+	notify := NewNotificationQueue()
+
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
+	router.notify = notify
 	client.OnEvent = router.Route
 
 	return &Sidecar{
@@ -78,7 +81,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		health: NewSidecarHealth(),
 		shell:  shell,
 		otel:   otel,
-		notify: NewNotificationQueue(),
+		notify: notify,
 	}, nil
 }
 

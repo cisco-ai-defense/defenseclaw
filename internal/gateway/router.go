@@ -57,6 +57,7 @@ type EventRouter struct {
 	logger *audit.Logger
 	policy *enforce.PolicyEngine
 	otel   *telemetry.Provider
+	notify *NotificationQueue
 
 	autoApprove      bool
 	activeToolSpans  map[string][]*activeSpan
@@ -724,7 +725,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	// Use the shared rule engine — no tool-name gating.
 	findings := ScanAllRules(string(payload.Args), payload.Tool)
-	dangerous := len(findings) > 0 && severityRank[HighestSeverity(findings)] >= severityRank["HIGH"]
+	severity := HighestSeverity(findings)
+	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
 	flaggedPattern := ""
 	if dangerous {
 		flaggedPattern = findings[0].RuleID
@@ -732,6 +734,35 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			fmt.Sprintf("reason=%s severity=%s confidence=%.2f",
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
+
+		if r.notify != nil {
+			top := make([]string, 0, 3)
+			for i, f := range findings {
+				if i >= 3 {
+					break
+				}
+				top = append(top, f.Title)
+			}
+			r.notify.Push(SecurityNotification{
+				SkillName: payload.Tool,
+				Severity:  severity,
+				Findings:  len(findings),
+				Actions:   []string{fmt.Sprintf("tool call flagged: %s", strings.Join(top, "; "))},
+				Reason:    fmt.Sprintf("tool %q matched %s", payload.Tool, flaggedPattern),
+			})
+		}
+
+		if r.otel != nil {
+			r.otel.EmitRuntimeAlert(
+				telemetry.AlertToolCallFlagged,
+				severity,
+				telemetry.SourceToolInspect,
+				fmt.Sprintf("Dangerous tool call: %s — %s", payload.Tool, findings[0].Title),
+				map[string]string{"tool": payload.Tool},
+				map[string]string{"rule_id": flaggedPattern, "action": "flagged"},
+				"", "",
+			)
+		}
 	}
 
 	if r.otel != nil {
