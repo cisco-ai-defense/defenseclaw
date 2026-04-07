@@ -190,3 +190,33 @@ func TestLoggerSplunkForwardingIncludesDefaultedFields(t *testing.T) {
 		t.Fatalf("forwarded event mismatch: %+v", env.Event)
 	}
 }
+
+func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var payload []byte
+	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		payload = append([]byte(nil), body...)
+		w.WriteHeader(http.StatusOK)
+	})
+	forwarder.cfg.BatchSize = 50
+
+	logger := NewLogger(store)
+	logger.SetSplunkForwarder(forwarder)
+	if err := logger.LogAction("watch-start", "", "dirs=3 debounce=500ms"); err != nil {
+		t.Fatalf("LogAction: %v", err)
+	}
+
+	if len(bytes.TrimSpace(payload)) == 0 {
+		t.Fatal("expected watch-start to flush to Splunk immediately")
+	}
+}

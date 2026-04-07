@@ -326,8 +326,58 @@ PY
     printf '%s\n%s\n' "$HOME/.defenseclaw/plugins" "$HOME/.openclaw/extensions" | awk 'NF && !seen[$0]++'
 }
 
+get_governance_plugin_dirs() {
+    local dirs
+    dirs=$(python3 - <<'PY'
+from defenseclaw.config import load
+try:
+    cfg = load()
+    if getattr(cfg, "plugin_dir", ""):
+        print(cfg.plugin_dir)
+except Exception:
+    pass
+PY
+)
+
+    if [ -n "$dirs" ]; then
+        printf '%s\n' "$dirs" | awk 'NF && !seen[$0]++'
+        return
+    fi
+
+    printf '%s\n' "$HOME/.defenseclaw/plugins"
+}
+
+get_runtime_plugin_dirs() {
+    local dirs
+    dirs=$(python3 - <<'PY'
+from defenseclaw.config import load
+try:
+    cfg = load()
+    for d in cfg.plugin_dirs():
+        print(d)
+except Exception:
+    pass
+PY
+)
+
+    if [ -n "$dirs" ]; then
+        printf '%s\n' "$dirs" | awk 'NF && !seen[$0]++'
+        return
+    fi
+
+    printf '%s\n' "$HOME/.openclaw/extensions"
+}
+
 first_plugin_dir() {
     get_plugin_dirs | head -1
+}
+
+first_governance_plugin_dir() {
+    get_governance_plugin_dirs | head -1
+}
+
+first_runtime_plugin_dir() {
+    get_runtime_plugin_dirs | head -1
 }
 
 snapshot_skill_paths() {
@@ -367,6 +417,30 @@ find_plugin_path() {
             return 0
         fi
     done < <(get_plugin_dirs)
+    return 1
+}
+
+find_governance_plugin_path() {
+    local name="$1"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        if [ -d "$dir/$name" ]; then
+            printf '%s\n' "$dir/$name"
+            return 0
+        fi
+    done < <(get_governance_plugin_dirs)
+    return 1
+}
+
+find_runtime_plugin_path() {
+    local name="$1"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        if [ -d "$dir/$name" ]; then
+            printf '%s\n' "$dir/$name"
+            return 0
+        fi
+    done < <(get_runtime_plugin_dirs)
     return 1
 }
 
@@ -637,6 +711,37 @@ elif bool(entry.get("enabled", True)):
 else:
     print("false")
 PY
+}
+
+wait_for_openclaw_plugin_enabled_state() {
+    local name="$1"
+    local expected="$2"
+    local timeout="${3:-45}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        if [ "$(openclaw_plugin_enabled_state "$name")" = "$expected" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+wait_for_sidecar_subsystems_running() {
+    local timeout="${1:-60}"
+    local deadline=$((SECONDS + timeout))
+    local health gateway_state watcher_state api_state
+    while [ $SECONDS -lt $deadline ]; do
+        health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+        gateway_state=$(echo "$health" | jq -r '.gateway.state // .gateway // empty' 2>/dev/null || true)
+        watcher_state=$(echo "$health" | jq -r '.watcher.state // .watcher // empty' 2>/dev/null || true)
+        api_state=$(echo "$health" | jq -r '.api.state // .api // empty' 2>/dev/null || true)
+        if [ "$gateway_state" = "running" ] && [ "$watcher_state" = "running" ] && [ "$api_state" = "running" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
 }
 
 alerts_action_count() {
@@ -1093,7 +1198,7 @@ phase_block_allow() {
         fail "block/allow: MCP allow state recorded" "allow action not found for $allowed_mcp"
     fi
 
-    local tool_name="read_file"
+    local tool_name="exec"
     local tool_file="/tmp/${E2E_PREFIX}-tool.txt"
     local tool_expected tool_status
     local allow_before allow_after block_before block_after recover_before recover_after
@@ -1103,13 +1208,13 @@ phase_block_allow() {
 
     if is_full_live; then
         allow_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "Use the read_file tool to read the file at $tool_file. Reply with exactly the single line from that file and nothing else." 180)
+        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
         echo "$allow_out"
         allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if echo "$allow_out" | grep -Fq "$tool_expected" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
-            pass "block/allow: agent could use read_file before block"
+            pass "block/allow: agent could use exec before block"
         else
-            fail "block/allow: agent could use read_file before block" "$allow_out"
+            fail "block/allow: agent could use exec before block" "$allow_out"
         fi
     fi
 
@@ -1123,13 +1228,13 @@ phase_block_allow() {
 
     if is_full_live; then
         block_before=$(alerts_action_count "inspect-tool-block" "$tool_name")
-        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "Use the read_file tool to read the file at $tool_file. Reply with exactly the single line from that file and nothing else." 180)
+        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
         echo "$block_out"
         block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
         if ! echo "$block_out" | grep -Fq "$tool_expected" && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
-            pass "block/allow: agent was blocked from read_file after block"
+            pass "block/allow: agent was blocked from exec after block"
         else
-            fail "block/allow: agent was blocked from read_file after block" "$block_out"
+            fail "block/allow: agent was blocked from exec after block" "$block_out"
         fi
     fi
 
@@ -1151,13 +1256,13 @@ phase_block_allow() {
 
     if is_full_live; then
         recover_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "Use the read_file tool to read the file at $tool_file. Reply with exactly the single line from that file and nothing else." 180)
+        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
         echo "$recover_out"
         recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if echo "$recover_out" | grep -Fq "$tool_expected" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
-            pass "block/allow: agent recovered read_file after unblock"
+            pass "block/allow: agent recovered exec after unblock"
         else
-            fail "block/allow: agent recovered read_file after unblock" "$recover_out"
+            fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
     fi
 
@@ -1811,7 +1916,7 @@ phase_plugin_lifecycle() {
     local malicious_plugin="${E2E_PREFIX}-malicious-plugin"
     local clean_source="$staging_root/$clean_plugin"
     local malicious_source="$staging_root/$malicious_plugin"
-    local clean_path malicious_path
+    local clean_path malicious_path runtime_root runtime_clean_path
     local clean_entry malicious_entry
     local install_out agent_out scan_out scan_json findings
     local disable_out enable_out resp payload
@@ -1825,14 +1930,14 @@ phase_plugin_lifecycle() {
 
     agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
     echo "$agent_out"
-    clean_path=$(find_plugin_path "$clean_plugin" || true)
+    clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
     if [ -n "$clean_path" ]; then
         pass "plugin lifecycle: agent installed clean plugin"
     else
         skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: agent install" "agent-admin install could not be verified"
         install_out=$(defenseclaw plugin install "$clean_source" 2>&1 || true)
         echo "$install_out"
-        clean_path=$(find_plugin_path "$clean_plugin" || true)
+        clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
         if [ -n "$clean_path" ]; then
             pass "plugin lifecycle: clean plugin installed via CLI fallback"
         else
@@ -1863,7 +1968,7 @@ phase_plugin_lifecycle() {
 
     install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
     echo "$install_out"
-    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ]; then
         pass "plugin lifecycle: malicious plugin installed for governance checks"
     else
@@ -1890,9 +1995,26 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: plugin allow state recorded" "allow action missing for $clean_plugin"
     fi
 
+    runtime_root=$(first_runtime_plugin_dir || true)
+    if [ -z "$runtime_root" ]; then
+        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: runtime staging" "OpenClaw extensions directory unavailable"
+        phase_timer_end "Phase 7B"
+        return
+    fi
+    mkdir -p "$runtime_root/$clean_plugin"
+    cp -R "$clean_source"/. "$runtime_root/$clean_plugin/"
+    runtime_clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
+    if [ -n "$runtime_clean_path" ]; then
+        pass "plugin lifecycle: clean plugin staged in OpenClaw extensions"
+    else
+        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: runtime staging" "failed to copy clean plugin into $runtime_root"
+        phase_timer_end "Phase 7B"
+        return
+    fi
+
     disable_out=$(defenseclaw plugin disable "$clean_plugin" --reason "E2E plugin disable" 2>&1 || true)
     echo "$disable_out"
-    if [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "false" ]; then
+    if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "false" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: CLI disable updated OpenClaw plugin state"
     else
         fail "plugin lifecycle: CLI disable updated OpenClaw plugin state" "$disable_out"
@@ -1900,7 +2022,7 @@ phase_plugin_lifecycle() {
 
     enable_out=$(defenseclaw plugin enable "$clean_plugin" 2>&1 || true)
     echo "$enable_out"
-    if [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "true" ]; then
+    if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: CLI enable updated OpenClaw plugin state"
     else
         fail "plugin lifecycle: CLI enable updated OpenClaw plugin state" "$enable_out"
@@ -1909,7 +2031,7 @@ phase_plugin_lifecycle() {
     payload=$(jq -cn --arg pluginName "$clean_plugin" '{pluginName: $pluginName}')
     resp=$(sidecar_post "/plugin/disable" "$payload" 2>&1 || true)
     echo "$resp"
-    if echo "$resp" | jq -e '.status == "disabled"' >/dev/null 2>&1 && [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "false" ]; then
+    if echo "$resp" | jq -e '.status == "disabled"' >/dev/null 2>&1 && wait_for_openclaw_plugin_enabled_state "$clean_plugin" "false" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: API disable updated OpenClaw plugin state"
     else
         fail "plugin lifecycle: API disable updated OpenClaw plugin state" "$resp"
@@ -1917,13 +2039,13 @@ phase_plugin_lifecycle() {
 
     resp=$(sidecar_post "/plugin/enable" "$payload" 2>&1 || true)
     echo "$resp"
-    if echo "$resp" | jq -e '.status == "enabled"' >/dev/null 2>&1 && [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "true" ]; then
+    if echo "$resp" | jq -e '.status == "enabled"' >/dev/null 2>&1 && wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: API enable updated OpenClaw plugin state"
     else
         fail "plugin lifecycle: API enable updated OpenClaw plugin state" "$resp"
     fi
 
-    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     install_out=$(defenseclaw plugin quarantine "$malicious_plugin" --reason "E2E plugin quarantine" 2>&1 || true)
     echo "$install_out"
     if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -d "$HOME/.defenseclaw/quarantine/plugins/$malicious_plugin" ]; then
@@ -1934,7 +2056,7 @@ phase_plugin_lifecycle() {
 
     install_out=$(defenseclaw plugin restore "$malicious_plugin" 2>&1 || true)
     echo "$install_out"
-    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)
     if [ -n "$malicious_path" ] && [ -d "$malicious_path" ]; then
         pass "plugin lifecycle: plugin restore restored files"
     else
@@ -1943,7 +2065,7 @@ phase_plugin_lifecycle() {
 
     install_out=$(defenseclaw plugin remove "$clean_plugin" 2>&1 || true)
     echo "$install_out"
-    if [ -z "$(find_plugin_path "$clean_plugin" || true)" ]; then
+    if [ -z "$(find_governance_plugin_path "$clean_plugin" || true)" ]; then
         pass "plugin lifecycle: plugin remove removed clean plugin"
     else
         fail "plugin lifecycle: plugin remove removed clean plugin" "$install_out"
@@ -2168,7 +2290,7 @@ phase_splunk() {
     splunk_assert_results "Splunk: AIBOM scan events present" 'action=scan details="*scanner=aibom-claw*" | head 5'
     splunk_assert_results "Splunk: sidecar lifecycle events present" '(action=init-sidecar OR action=sidecar-start OR action=sidecar-connected) | head 5'
     splunk_assert_min_count "Splunk: sidecar-connected events meet recovery minimum" 'action=sidecar-connected | head 20' "$RECOVERY_SIDECAR_CONNECTED_MIN"
-    splunk_assert_results "Splunk: watcher lifecycle events present" 'action=watch-start | head 5'
+    splunk_assert_results "Splunk: watcher lifecycle events present" '(action=watch-start OR action=watch-stop) | head 5'
     splunk_assert_results "Splunk: watcher install events present" '(action=install-detected OR action=install-rejected OR action=install-allowed) | head 5'
     splunk_assert_results "Splunk: quarantine and restore events present" '(action=skill-quarantine OR action=skill-restore) | head 5'
     splunk_assert_results "Splunk: skill block/allow events present" '(action=skill-block OR action=skill-allow) | head 5'

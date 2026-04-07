@@ -192,6 +192,23 @@ func (l *Logger) forwardToSplunk(e Event) {
 	}
 	if err := l.splunk.ForwardEvent(e); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: splunk forward: %v\n", err)
+		return
+	}
+	if shouldFlushSplunkImmediately(e.Action) {
+		if err := l.splunk.Flush(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: splunk flush: %v\n", err)
+		}
+	}
+}
+
+func shouldFlushSplunkImmediately(action string) bool {
+	switch action {
+	case "watch-start", "watch-stop",
+		"sidecar-start", "sidecar-stop",
+		"sidecar-connected", "sidecar-disconnected":
+		return true
+	default:
+		return false
 	}
 }
 
