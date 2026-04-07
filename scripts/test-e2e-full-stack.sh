@@ -34,6 +34,12 @@ E2E_REQUIRE_GUARDRAIL="${E2E_REQUIRE_GUARDRAIL:-false}"
 E2E_REQUIRE_AGENT_INSTALL="${E2E_REQUIRE_AGENT_INSTALL:-false}"
 E2E_REQUIRE_AGENT_SCAN="${E2E_REQUIRE_AGENT_SCAN:-false}"
 E2E_REQUIRE_LIVE_MCP="${E2E_REQUIRE_LIVE_MCP:-false}"
+E2E_ENABLE_PLUGIN_LIFECYCLE="${E2E_ENABLE_PLUGIN_LIFECYCLE:-false}"
+E2E_REQUIRE_PLUGIN_LIFECYCLE="${E2E_REQUIRE_PLUGIN_LIFECYCLE:-false}"
+E2E_ENABLE_RECOVERY="${E2E_ENABLE_RECOVERY:-false}"
+E2E_REQUIRE_RECOVERY="${E2E_REQUIRE_RECOVERY:-false}"
+OPENCLAW_MODEL_PATCHED="${OPENCLAW_MODEL_PATCHED:-false}"
+OPENCLAW_MODEL_BACKUP_PATH="${OPENCLAW_MODEL_BACKUP_PATH:-/tmp/defenseclaw-openclaw.full-live.backup.json}"
 
 sanitize_name() {
     printf '%s' "$1" | tr -cs '[:alnum:]._-' '-'
@@ -56,6 +62,7 @@ RESULTS=()
 PHASE_START_T=0
 GATEWAY_TOKEN_CACHE="__unset__"
 OPENCLAW_PID=""
+RECOVERY_SIDECAR_CONNECTED_MIN=1
 
 is_true() {
     case "${1:-}" in
@@ -174,6 +181,24 @@ splunk_assert_results() {
     fi
 }
 
+splunk_assert_min_count() {
+    local name="$1"
+    local query="$2"
+    local min_count="$3"
+    local results
+    local count
+    results=$(splunk_run_results_json "$query")
+    count=$(echo "$results" | jq 'length' 2>/dev/null || echo "0")
+    echo "  --- Splunk query: $query ---"
+    echo "$results" | jq '.' 2>/dev/null || echo "$results"
+    echo "  --- end Splunk results ---"
+    if [ "${count:-0}" -ge "$min_count" ] 2>/dev/null; then
+        pass "$name"
+    else
+        fail "$name" "expected at least $min_count Splunk result(s) for run_id=$DEFENSECLAW_RUN_ID query=$query, got $count"
+    fi
+}
+
 get_gateway_token() {
     if [ "$GATEWAY_TOKEN_CACHE" != "__unset__" ]; then
         printf '%s\n' "$GATEWAY_TOKEN_CACHE"
@@ -278,6 +303,33 @@ first_skill_dir() {
     get_skill_dirs | head -1
 }
 
+get_plugin_dirs() {
+    local dirs
+    dirs=$(python3 - <<'PY'
+from defenseclaw.config import load
+try:
+    cfg = load()
+    if getattr(cfg, "plugin_dir", ""):
+        print(cfg.plugin_dir)
+    for d in cfg.plugin_dirs():
+        print(d)
+except Exception:
+    pass
+PY
+)
+
+    if [ -n "$dirs" ]; then
+        printf '%s\n' "$dirs" | awk 'NF && !seen[$0]++'
+        return
+    fi
+
+    printf '%s\n%s\n' "$HOME/.defenseclaw/plugins" "$HOME/.openclaw/extensions" | awk 'NF && !seen[$0]++'
+}
+
+first_plugin_dir() {
+    get_plugin_dirs | head -1
+}
+
 snapshot_skill_paths() {
     while IFS= read -r dir; do
         [ -n "$dir" ] || continue
@@ -298,6 +350,26 @@ find_skill_path() {
     return 1
 }
 
+snapshot_plugin_paths() {
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        [ -d "$dir" ] || continue
+        find "$dir" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null || true
+    done < <(get_plugin_dirs)
+}
+
+find_plugin_path() {
+    local name="$1"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        if [ -d "$dir/$name" ]; then
+            printf '%s\n' "$dir/$name"
+            return 0
+        fi
+    done < <(get_plugin_dirs)
+    return 1
+}
+
 cleanup_skill_name() {
     local name="$1"
     while IFS= read -r dir; do
@@ -307,13 +379,31 @@ cleanup_skill_name() {
     rm -rf "$HOME/.defenseclaw/quarantine/skills/$name" 2>/dev/null || true
 }
 
+cleanup_plugin_name() {
+    local name="$1"
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        rm -rf "$dir/$name" 2>/dev/null || true
+    done < <(get_plugin_dirs)
+    rm -rf "$HOME/.defenseclaw/quarantine/plugins/$name" 2>/dev/null || true
+}
+
 skill_list_json() {
     defenseclaw skill list --json 2>/dev/null || echo "[]"
+}
+
+plugin_list_json() {
+    defenseclaw plugin list --json 2>/dev/null || echo "[]"
 }
 
 skill_entry_json() {
     local name="$1"
     skill_list_json | jq --arg n "$name" '[.[] | select(.name == $n)][0] // empty' 2>/dev/null || true
+}
+
+plugin_entry_json() {
+    local name="$1"
+    plugin_list_json | jq --arg n "$name" '[.[] | select(.id == $n or .name == $n)][0] // empty' 2>/dev/null || true
 }
 
 wait_for_skill_entry() {
@@ -323,6 +413,22 @@ wait_for_skill_entry() {
     while [ $SECONDS -lt $deadline ]; do
         local entry
         entry=$(skill_entry_json "$name")
+        if [ -n "$entry" ] && [ "$entry" != "null" ]; then
+            printf '%s\n' "$entry"
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
+
+wait_for_plugin_entry() {
+    local name="$1"
+    local timeout="${2:-60}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        local entry
+        entry=$(plugin_entry_json "$name")
         if [ -n "$entry" ] && [ "$entry" != "null" ]; then
             printf '%s\n' "$entry"
             return 0
@@ -352,12 +458,55 @@ wait_for_skill_scan() {
     return 1
 }
 
+wait_for_plugin_scan() {
+    local name="$1"
+    local timeout="${2:-60}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        local entry
+        entry=$(plugin_entry_json "$name")
+        if [ -n "$entry" ] && [ "$entry" != "null" ]; then
+            local has_scan
+            has_scan=$(echo "$entry" | jq -r '.scan // empty' 2>/dev/null || true)
+            if [ -n "$has_scan" ] && [ "$has_scan" != "null" ]; then
+                printf '%s\n' "$entry"
+                return 0
+            fi
+        fi
+        sleep 5
+    done
+    return 1
+}
+
 copy_skill_fixture() {
     local fixture_dir="$1"
     local dest_root="$2"
     local dest_name="$3"
     mkdir -p "$dest_root/$dest_name"
     cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
+}
+
+copy_plugin_fixture() {
+    local fixture_dir="$1"
+    local dest_root="$2"
+    local dest_name="$3"
+    mkdir -p "$dest_root/$dest_name"
+    cp -R "$fixture_dir"/. "$dest_root/$dest_name/"
+    if [ -f "$dest_root/$dest_name/package.json" ]; then
+        PLUGIN_FIXTURE_PATH="$dest_root/$dest_name/package.json" PLUGIN_FIXTURE_NAME="$dest_name" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["PLUGIN_FIXTURE_PATH"])
+with path.open() as f:
+    data = json.load(f)
+data["name"] = os.environ["PLUGIN_FIXTURE_NAME"]
+with path.open("w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+    fi
 }
 
 prune_openclaw_config_for_prefix() {
@@ -463,16 +612,80 @@ else:
 PY
 }
 
+openclaw_plugin_enabled_state() {
+    local name="$1"
+    E2E_PLUGIN_NAME="$name" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+name = os.environ["E2E_PLUGIN_NAME"]
+cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
+if not cfg_path.exists():
+    print("missing")
+    raise SystemExit(0)
+
+with cfg_path.open() as f:
+    cfg = json.load(f)
+
+plugins = cfg.get("plugins") or {}
+entry = (plugins.get("entries") or {}).get(name)
+if not isinstance(entry, dict):
+    print("missing")
+elif bool(entry.get("enabled", True)):
+    print("true")
+else:
+    print("false")
+PY
+}
+
+alerts_action_count() {
+    local action="$1"
+    local target="${2:-}"
+    local alerts
+    alerts=$(alerts_for_run 500)
+    if [ -n "$target" ]; then
+        echo "$alerts" | jq -r --arg action "$action" --arg target "$target" '[.[] | select(.action == $action and .target == $target)] | length' 2>/dev/null || echo "0"
+    else
+        echo "$alerts" | jq -r --arg action "$action" '[.[] | select(.action == $action)] | length' 2>/dev/null || echo "0"
+    fi
+}
+
+agent_session_id() {
+    sanitize_name "${E2E_PREFIX}-$1-$$"
+}
+
+run_agent_prompt() {
+    local session_id="$1"
+    local prompt="$2"
+    local timeout_s="${3:-180}"
+    timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
+}
+
+restore_openclaw_model_backup() {
+    if [ ! -f "$OPENCLAW_MODEL_BACKUP_PATH" ]; then
+        return 0
+    fi
+    mkdir -p "$HOME/.openclaw"
+    cp "$OPENCLAW_MODEL_BACKUP_PATH" "$HOME/.openclaw/openclaw.json"
+    rm -f "$OPENCLAW_MODEL_BACKUP_PATH"
+    OPENCLAW_MODEL_PATCHED=false
+}
+
 cleanup_current_run_artifacts() {
     while IFS= read -r dir; do
         [ -n "$dir" ] || continue
         rm -rf "$dir"/"$E2E_PREFIX"* 2>/dev/null || true
     done < <(get_skill_dirs)
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        rm -rf "$dir"/"$E2E_PREFIX"* 2>/dev/null || true
+    done < <(get_plugin_dirs)
 
     rm -rf "$HOME/.defenseclaw/quarantine/skills"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf "$HOME/.defenseclaw/quarantine/plugins"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf "$HOME/.openclaw/extensions"/"$E2E_PREFIX"* 2>/dev/null || true
-    rm -f /tmp/"$E2E_PREFIX"* 2>/dev/null || true
+    rm -rf /tmp/"$E2E_PREFIX"* 2>/dev/null || true
     prune_openclaw_config_for_prefix
 }
 
@@ -501,8 +714,14 @@ dump_artifacts() {
     alerts_for_run 500 | jq '.' 2>/dev/null || alerts_for_run 500
     echo "--- openclaw skills list ---"
     openclaw skills list --json 2>/dev/null || echo "[]"
+    echo "--- defenseclaw plugin list ---"
+    plugin_list_json | jq '.' 2>/dev/null || plugin_list_json
     echo "--- current test skill directories ---"
     snapshot_skill_paths | grep "$E2E_PREFIX" || echo "  (none)"
+    echo "--- current test plugin directories ---"
+    snapshot_plugin_paths | grep "$E2E_PREFIX" || echo "  (none)"
+    echo "--- ~/.openclaw/openclaw.json ---"
+    cat ~/.openclaw/openclaw.json 2>/dev/null || echo "  (not found)"
     echo "--- Splunk current-run actions ---"
     splunk_run_results_json 'action=* | head 20' | jq '.' 2>/dev/null || echo "[]"
     echo "--- splunk container logs (last 30) ---"
@@ -515,16 +734,22 @@ dump_artifacts() {
 # ---------------------------------------------------------------------------
 phase_start() {
     echo ""
-    echo "=== Phase 1: Start Stack ==="
+    echo "=== Phase 1: Start Stack [CLI/API] ==="
     phase_timer_start
 
     echo "  Profile: $E2E_PROFILE"
     echo "  Run ID:  $DEFENSECLAW_RUN_ID"
 
+    if is_full_live && ! is_true "$OPENCLAW_MODEL_PATCHED" && [ -f "$OPENCLAW_MODEL_BACKUP_PATH" ]; then
+        echo "  Restoring stale OpenClaw model backup from prior full-live run..."
+        restore_openclaw_model_backup
+    fi
+
     cleanup_current_run_artifacts
 
-    local stale_skills stale_quarantine cfg_state
+    local stale_skills stale_plugins stale_quarantine cfg_state
     stale_skills=$(snapshot_skill_paths | grep "/$E2E_PREFIX" || true)
+    stale_plugins=$(snapshot_plugin_paths | grep "/$E2E_PREFIX" || true)
     stale_quarantine=$(find "$HOME/.defenseclaw/quarantine" -mindepth 1 -maxdepth 3 -name "${E2E_PREFIX}*" 2>/dev/null || true)
     cfg_state=$(openclaw_config_state_json)
 
@@ -532,6 +757,12 @@ phase_start() {
         pass "preflight: no stale current-run skill directories"
     else
         fail "preflight: no stale current-run skill directories" "$stale_skills"
+    fi
+
+    if [ -z "$stale_plugins" ]; then
+        pass "preflight: no stale current-run plugin directories"
+    else
+        fail "preflight: no stale current-run plugin directories" "$stale_plugins"
     fi
 
     if [ -z "$stale_quarantine" ]; then
@@ -544,6 +775,12 @@ phase_start() {
         pass "preflight: no current-run OpenClaw skill config entries"
     else
         fail "preflight: no current-run OpenClaw skill config entries" "$cfg_state"
+    fi
+
+    if [ "$(echo "$cfg_state" | jq -r '.current_prefix_plugin_entries' 2>/dev/null || echo 1)" = "0" ]; then
+        pass "preflight: no current-run OpenClaw plugin config entries"
+    else
+        fail "preflight: no current-run OpenClaw plugin config entries" "$cfg_state"
     fi
 
     if [ "$(echo "$cfg_state" | jq -r '.defenseclaw_plugin_entries' 2>/dev/null || echo 99)" -le 2 ] 2>/dev/null; then
@@ -582,7 +819,7 @@ phase_start() {
 # ---------------------------------------------------------------------------
 phase_health() {
     echo ""
-    echo "=== Phase 2: Health Assertions ==="
+    echo "=== Phase 2: Health Assertions [API] ==="
     phase_timer_start
 
     local health
@@ -641,7 +878,7 @@ phase_health() {
 # ---------------------------------------------------------------------------
 phase_skill_scanner() {
     echo ""
-    echo "=== Phase 3: Skill Scanner (CLI) ==="
+    echo "=== Phase 3: Skill Scanner [CLI] ==="
     phase_timer_start
 
     local clean_skill="$REPO_ROOT/test/fixtures/skills/clean-skill"
@@ -693,7 +930,7 @@ phase_skill_scanner() {
 # ---------------------------------------------------------------------------
 phase_mcp_scanner() {
     echo ""
-    echo "=== Phase 4: MCP Scanner ==="
+    echo "=== Phase 4: MCP Scanner [CLI] ==="
     phase_timer_start
 
     local clean_fixture="$REPO_ROOT/test/fixtures/mcps/clean-mcp.json"
@@ -774,7 +1011,7 @@ phase_mcp_scanner() {
 # ---------------------------------------------------------------------------
 phase_block_allow() {
     echo ""
-    echo "=== Phase 4B: Block/Allow Enforcement ==="
+    echo "=== Phase 4B: Block/Allow Enforcement [Hybrid] ==="
     phase_timer_start
 
     local skill_dir_root
@@ -858,16 +1095,21 @@ phase_block_allow() {
 
     local tool_name="read_file"
     local tool_file="/tmp/${E2E_PREFIX}-tool.txt"
-    local tool_args allow_verdict block_verdict final_verdict tool_status
-    printf 'tool block test\n' > "$tool_file"
-    tool_args=$(jq -cn --arg path "$tool_file" '{path: $path}')
+    local tool_expected tool_status
+    local allow_before allow_after block_before block_after recover_before recover_after
+    local allow_out block_out recover_out
+    tool_expected="tool-block-test-${RUN_SLUG}"
+    printf '%s\n' "$tool_expected" > "$tool_file"
 
     if is_full_live; then
-        allow_verdict=$(inspect_tool "$tool_name" "$tool_args" 2>/dev/null || echo '{}')
-        if [ "$(echo "$allow_verdict" | jq -r '.action // empty' 2>/dev/null)" = "allow" ]; then
-            pass "block/allow: runtime tool inspection allowed safe call"
+        allow_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
+        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "Use the read_file tool to read the file at $tool_file. Reply with exactly the single line from that file and nothing else." 180)
+        echo "$allow_out"
+        allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
+        if echo "$allow_out" | grep -Fq "$tool_expected" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
+            pass "block/allow: agent could use read_file before block"
         else
-            fail "block/allow: runtime tool inspection allowed safe call" "$allow_verdict"
+            fail "block/allow: agent could use read_file before block" "$allow_out"
         fi
     fi
 
@@ -880,11 +1122,14 @@ phase_block_allow() {
     fi
 
     if is_full_live; then
-        block_verdict=$(inspect_tool "$tool_name" "$tool_args" 2>/dev/null || echo '{}')
-        if [ "$(echo "$block_verdict" | jq -r '.action // empty' 2>/dev/null)" = "block" ]; then
-            pass "block/allow: runtime tool inspection blocked unsafe call"
+        block_before=$(alerts_action_count "inspect-tool-block" "$tool_name")
+        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "Use the read_file tool to read the file at $tool_file. Reply with exactly the single line from that file and nothing else." 180)
+        echo "$block_out"
+        block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
+        if ! echo "$block_out" | grep -Fq "$tool_expected" && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
+            pass "block/allow: agent was blocked from read_file after block"
         else
-            fail "block/allow: runtime tool inspection blocked unsafe call" "$block_verdict"
+            fail "block/allow: agent was blocked from read_file after block" "$block_out"
         fi
     fi
 
@@ -905,11 +1150,14 @@ phase_block_allow() {
     fi
 
     if is_full_live; then
-        final_verdict=$(inspect_tool "$tool_name" "$tool_args" 2>/dev/null || echo '{}')
-        if [ "$(echo "$final_verdict" | jq -r '.action // empty' 2>/dev/null)" = "allow" ]; then
-            pass "block/allow: runtime tool inspection recovered after unblock"
+        recover_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
+        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "Use the read_file tool to read the file at $tool_file. Reply with exactly the single line from that file and nothing else." 180)
+        echo "$recover_out"
+        recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
+        if echo "$recover_out" | grep -Fq "$tool_expected" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
+            pass "block/allow: agent recovered read_file after unblock"
         else
-            fail "block/allow: runtime tool inspection recovered after unblock" "$final_verdict"
+            fail "block/allow: agent recovered read_file after unblock" "$recover_out"
         fi
     fi
 
@@ -984,7 +1232,7 @@ phase_block_allow() {
 # ---------------------------------------------------------------------------
 phase_quarantine() {
     echo ""
-    echo "=== Phase 5: Quarantine Flow ==="
+    echo "=== Phase 5: Quarantine Flow [CLI] ==="
     phase_timer_start
 
     local malicious_skill="$REPO_ROOT/test/fixtures/skills/malicious-skill"
@@ -1045,7 +1293,7 @@ phase_quarantine() {
 # ---------------------------------------------------------------------------
 phase_watcher_auto_scan() {
     echo ""
-    echo "=== Phase 5B: Watcher Auto-Scan ==="
+    echo "=== Phase 5B: Watcher Auto-Scan [API/Filesystem] ==="
     phase_timer_start
 
     local malicious_skill="$REPO_ROOT/test/fixtures/skills/malicious-skill"
@@ -1100,7 +1348,7 @@ phase_watcher_auto_scan() {
 # ---------------------------------------------------------------------------
 phase_codeguard() {
     echo ""
-    echo "=== Phase 5C: CodeGuard ==="
+    echo "=== Phase 5C: CodeGuard [API] ==="
     phase_timer_start
 
     local fixture="$REPO_ROOT/test/fixtures/code/hardcoded-secret.py"
@@ -1141,7 +1389,7 @@ phase_codeguard() {
 # ---------------------------------------------------------------------------
 phase_status_doctor() {
     echo ""
-    echo "=== Phase 5D: Status + Doctor ==="
+    echo "=== Phase 5D: Status + Doctor [CLI] ==="
     phase_timer_start
 
     local status_out status_rc doctor_out doctor_rc
@@ -1177,7 +1425,7 @@ phase_status_doctor() {
 # ---------------------------------------------------------------------------
 phase_aibom() {
     echo ""
-    echo "=== Phase 5E: AIBOM ==="
+    echo "=== Phase 5E: AIBOM [CLI] ==="
     phase_timer_start
 
     local out json key_check alerts count
@@ -1205,7 +1453,7 @@ phase_aibom() {
 # ---------------------------------------------------------------------------
 phase_policy() {
     echo ""
-    echo "=== Phase 5F: Policy ==="
+    echo "=== Phase 5F: Policy [CLI] ==="
     phase_timer_start
 
     local list_out test_out test_rc
@@ -1239,7 +1487,7 @@ phase_policy() {
 # ---------------------------------------------------------------------------
 phase_skill_api() {
     echo ""
-    echo "=== Phase 5G: Skill API ==="
+    echo "=== Phase 5G: Skill API [API] ==="
     phase_timer_start
 
     local skill_dir_root unique_skill target_skill payload resp entry alerts disable_count enable_count enabled_state
@@ -1327,7 +1575,7 @@ phase_guardrail() {
     fi
 
     echo ""
-    echo "=== Phase 6: Guardrail Proxy ==="
+    echo "=== Phase 6: Guardrail Proxy [API] ==="
     phase_timer_start
 
     if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 10 2; then
@@ -1372,26 +1620,30 @@ except OSError:
 PY
 )
 
-    response=$(curl -sf --max-time 45 \
+    response=$(curl -sS --max-time 45 \
         -H "Authorization: Bearer $master_key" \
         -H "Content-Type: application/json" \
         -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
         "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
 
+    err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+    if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
+        echo "  Retrying guardrail request after transient provider error..."
+        sleep 5
+        response=$(curl -sS --max-time 45 \
+            -H "Authorization: Bearer $master_key" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
+            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
+    fi
+
     echo "$response" | jq '.' 2>/dev/null || echo "$response"
     content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-
+    err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
     if echo "$content" | grep -q "E2E_OK"; then
         pass "guardrail round-trip: LLM responded with E2E_OK"
     else
-        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if [ -n "$err" ] && echo "$err" | grep -qi "credit\|quota\|rate\|key"; then
-            pass "guardrail round-trip: proxy forwarded request (provider limitation: $err)"
-        elif [ -n "$content" ]; then
-            pass "guardrail round-trip: LLM responded (content: $content)"
-        else
-            fail "guardrail round-trip: LLM responded" "err='$err' response='$response'"
-        fi
+        fail "guardrail round-trip: LLM responded" "err='$err' response='$response'"
     fi
     phase_timer_end "Phase 6"
 }
@@ -1405,7 +1657,7 @@ phase_agent_chat() {
     fi
 
     echo ""
-    echo "=== Phase 7: OpenClaw Agent Chat ==="
+    echo "=== Phase 7: OpenClaw Agent Chat [Agent] ==="
     phase_timer_start
 
     if ! command -v openclaw >/dev/null 2>&1; then
@@ -1504,16 +1756,29 @@ phase_agent_chat() {
     fi
 
     if [ -n "${installed_skill:-}" ]; then
-        if [ -n "${installed_path:-}" ] && [ -d "$installed_path" ]; then
-            rm -rf "$installed_path" 2>/dev/null || true
+        local cleanup_prompt cleanup_out
+        if [ -n "${installed_path:-}" ]; then
+            cleanup_prompt="Remove the installed skill ${installed_skill} by deleting the directory ${installed_path}. Reply with exactly REMOVED once the directory is gone."
         else
-            cleanup_skill_name "$installed_skill"
+            cleanup_prompt="Remove the installed skill ${installed_skill}. Reply with exactly REMOVED once it is gone."
         fi
-        sleep 2
+        cleanup_out=$(run_agent_prompt "$(agent_session_id agent-cleanup)" "$cleanup_prompt" 120)
+        echo "$cleanup_out"
+        sleep 3
         if [ -z "$(find_skill_path "$installed_skill" || true)" ]; then
-            pass "agent chat: installed skill cleaned up"
+            pass "agent chat: installed skill cleaned up by agent"
         else
-            fail "agent chat: installed skill cleaned up" "skill directory still present"
+            if [ -n "${installed_path:-}" ] && [ -d "$installed_path" ]; then
+                rm -rf "$installed_path" 2>/dev/null || true
+            else
+                cleanup_skill_name "$installed_skill"
+            fi
+            sleep 2
+            if [ -z "$(find_skill_path "$installed_skill" || true)" ]; then
+                pass "agent chat: installed skill cleaned up via fallback"
+            else
+                fail "agent chat: installed skill cleaned up" "skill directory still present"
+            fi
         fi
     else
         skip "agent chat: cleanup" "no installed skill to remove"
@@ -1522,11 +1787,355 @@ phase_agent_chat() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 7B — Plugin Lifecycle
+# ---------------------------------------------------------------------------
+phase_plugin_lifecycle() {
+    if ! is_full_live || ! is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
+        return
+    fi
+
+    echo ""
+    echo "=== Phase 7B: Plugin Lifecycle [Hybrid] ==="
+    phase_timer_start
+
+    local clean_fixture="$REPO_ROOT/test/fixtures/plugins/clean-plugin"
+    local malicious_fixture="$REPO_ROOT/test/fixtures/plugins/malicious-plugin"
+    if [ ! -d "$clean_fixture" ] || [ ! -d "$malicious_fixture" ]; then
+        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle" "plugin fixtures not found"
+        phase_timer_end "Phase 7B"
+        return
+    fi
+
+    local staging_root="/tmp/${E2E_PREFIX}-plugins"
+    local clean_plugin="${E2E_PREFIX}-clean-plugin"
+    local malicious_plugin="${E2E_PREFIX}-malicious-plugin"
+    local clean_source="$staging_root/$clean_plugin"
+    local malicious_source="$staging_root/$malicious_plugin"
+    local clean_path malicious_path
+    local clean_entry malicious_entry
+    local install_out agent_out scan_out scan_json findings
+    local disable_out enable_out resp payload
+
+    cleanup_plugin_name "$clean_plugin"
+    cleanup_plugin_name "$malicious_plugin"
+    rm -rf "$staging_root" 2>/dev/null || true
+    mkdir -p "$staging_root"
+    copy_plugin_fixture "$clean_fixture" "$staging_root" "$clean_plugin"
+    copy_plugin_fixture "$malicious_fixture" "$staging_root" "$malicious_plugin"
+
+    agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
+    echo "$agent_out"
+    clean_path=$(find_plugin_path "$clean_plugin" || true)
+    if [ -n "$clean_path" ]; then
+        pass "plugin lifecycle: agent installed clean plugin"
+    else
+        skip_or_fail "$E2E_REQUIRE_PLUGIN_LIFECYCLE" "plugin lifecycle: agent install" "agent-admin install could not be verified"
+        install_out=$(defenseclaw plugin install "$clean_source" 2>&1 || true)
+        echo "$install_out"
+        clean_path=$(find_plugin_path "$clean_plugin" || true)
+        if [ -n "$clean_path" ]; then
+            pass "plugin lifecycle: clean plugin installed via CLI fallback"
+        else
+            fail "plugin lifecycle: clean plugin installed" "plugin directory not found after install"
+        fi
+    fi
+
+    clean_entry=$(wait_for_plugin_entry "$clean_plugin" 30 || true)
+    if [ -n "$clean_entry" ] && [ "$clean_entry" != "null" ]; then
+        pass "plugin lifecycle: clean plugin visible in plugin list"
+    else
+        fail "plugin lifecycle: clean plugin visible in plugin list" "plugin list entry missing for $clean_plugin"
+    fi
+
+    scan_out=$(defenseclaw plugin scan "$malicious_source" --json 2>&1 || true)
+    echo "$scan_out"
+    scan_json=$(echo "$scan_out" | extract_json || true)
+    if [ -n "$scan_json" ]; then
+        findings=$(echo "$scan_json" | jq -r '.findings | length' 2>/dev/null || echo "0")
+        if [ "${findings:-0}" -gt 0 ] 2>/dev/null; then
+            pass "plugin lifecycle: malicious plugin scan produced findings"
+        else
+            fail "plugin lifecycle: malicious plugin scan produced findings" "expected findings but got 0"
+        fi
+    else
+        fail "plugin lifecycle: malicious plugin scan produced findings" "scanner did not produce valid JSON"
+    fi
+
+    install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
+    echo "$install_out"
+    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    if [ -n "$malicious_path" ]; then
+        pass "plugin lifecycle: malicious plugin installed for governance checks"
+    else
+        fail "plugin lifecycle: malicious plugin installed for governance checks" "plugin directory not found after install"
+    fi
+
+    if [ -n "$(wait_for_plugin_scan "$malicious_plugin" 30 || true)" ]; then
+        pass "plugin lifecycle: malicious plugin scan visible in plugin list"
+    else
+        fail "plugin lifecycle: malicious plugin scan visible in plugin list" "scan entry missing for $malicious_plugin"
+    fi
+
+    defenseclaw plugin block "$malicious_plugin" --reason "E2E plugin block" >/dev/null 2>&1 || true
+    if [ "$(db_has_action plugin "$malicious_plugin" install block)" = "true" ]; then
+        pass "plugin lifecycle: plugin block state recorded"
+    else
+        fail "plugin lifecycle: plugin block state recorded" "block action missing for $malicious_plugin"
+    fi
+
+    defenseclaw plugin allow "$clean_plugin" --reason "E2E plugin allow" >/dev/null 2>&1 || true
+    if [ "$(db_has_action plugin "$clean_plugin" install allow)" = "true" ]; then
+        pass "plugin lifecycle: plugin allow state recorded"
+    else
+        fail "plugin lifecycle: plugin allow state recorded" "allow action missing for $clean_plugin"
+    fi
+
+    disable_out=$(defenseclaw plugin disable "$clean_plugin" --reason "E2E plugin disable" 2>&1 || true)
+    echo "$disable_out"
+    if [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "false" ]; then
+        pass "plugin lifecycle: CLI disable updated OpenClaw plugin state"
+    else
+        fail "plugin lifecycle: CLI disable updated OpenClaw plugin state" "$disable_out"
+    fi
+
+    enable_out=$(defenseclaw plugin enable "$clean_plugin" 2>&1 || true)
+    echo "$enable_out"
+    if [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "true" ]; then
+        pass "plugin lifecycle: CLI enable updated OpenClaw plugin state"
+    else
+        fail "plugin lifecycle: CLI enable updated OpenClaw plugin state" "$enable_out"
+    fi
+
+    payload=$(jq -cn --arg pluginName "$clean_plugin" '{pluginName: $pluginName}')
+    resp=$(sidecar_post "/plugin/disable" "$payload" 2>&1 || true)
+    echo "$resp"
+    if echo "$resp" | jq -e '.status == "disabled"' >/dev/null 2>&1 && [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "false" ]; then
+        pass "plugin lifecycle: API disable updated OpenClaw plugin state"
+    else
+        fail "plugin lifecycle: API disable updated OpenClaw plugin state" "$resp"
+    fi
+
+    resp=$(sidecar_post "/plugin/enable" "$payload" 2>&1 || true)
+    echo "$resp"
+    if echo "$resp" | jq -e '.status == "enabled"' >/dev/null 2>&1 && [ "$(openclaw_plugin_enabled_state "$clean_plugin")" = "true" ]; then
+        pass "plugin lifecycle: API enable updated OpenClaw plugin state"
+    else
+        fail "plugin lifecycle: API enable updated OpenClaw plugin state" "$resp"
+    fi
+
+    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    install_out=$(defenseclaw plugin quarantine "$malicious_plugin" --reason "E2E plugin quarantine" 2>&1 || true)
+    echo "$install_out"
+    if [ -n "$malicious_path" ] && [ ! -d "$malicious_path" ] && [ -d "$HOME/.defenseclaw/quarantine/plugins/$malicious_plugin" ]; then
+        pass "plugin lifecycle: plugin quarantine moved files"
+    else
+        fail "plugin lifecycle: plugin quarantine moved files" "$install_out"
+    fi
+
+    install_out=$(defenseclaw plugin restore "$malicious_plugin" 2>&1 || true)
+    echo "$install_out"
+    malicious_path=$(find_plugin_path "$malicious_plugin" || true)
+    if [ -n "$malicious_path" ] && [ -d "$malicious_path" ]; then
+        pass "plugin lifecycle: plugin restore restored files"
+    else
+        fail "plugin lifecycle: plugin restore restored files" "$install_out"
+    fi
+
+    install_out=$(defenseclaw plugin remove "$clean_plugin" 2>&1 || true)
+    echo "$install_out"
+    if [ -z "$(find_plugin_path "$clean_plugin" || true)" ]; then
+        pass "plugin lifecycle: plugin remove removed clean plugin"
+    else
+        fail "plugin lifecycle: plugin remove removed clean plugin" "$install_out"
+    fi
+
+    if [ "$(alerts_action_count "plugin-install" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin install audit event recorded"
+    else
+        fail "plugin lifecycle: plugin install audit event recorded" "no plugin-install event for $clean_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-block" "$malicious_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin block audit event recorded"
+    else
+        fail "plugin lifecycle: plugin block audit event recorded" "no plugin-block event for $malicious_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-allow" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin allow audit event recorded"
+    else
+        fail "plugin lifecycle: plugin allow audit event recorded" "no plugin-allow event for $clean_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-disable" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin disable audit event recorded"
+    else
+        fail "plugin lifecycle: plugin disable audit event recorded" "no plugin-disable event for $clean_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-enable" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin enable audit event recorded"
+    else
+        fail "plugin lifecycle: plugin enable audit event recorded" "no plugin-enable event for $clean_plugin"
+    fi
+    if [ "$(alerts_action_count "api-plugin-disable" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: API disable audit event recorded"
+    else
+        fail "plugin lifecycle: API disable audit event recorded" "no api-plugin-disable event for $clean_plugin"
+    fi
+    if [ "$(alerts_action_count "api-plugin-enable" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: API enable audit event recorded"
+    else
+        fail "plugin lifecycle: API enable audit event recorded" "no api-plugin-enable event for $clean_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-quarantine" "$malicious_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin quarantine audit event recorded"
+    else
+        fail "plugin lifecycle: plugin quarantine audit event recorded" "no plugin-quarantine event for $malicious_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-restore" "$malicious_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin restore audit event recorded"
+    else
+        fail "plugin lifecycle: plugin restore audit event recorded" "no plugin-restore event for $malicious_plugin"
+    fi
+    if [ "$(alerts_action_count "plugin-remove" "$clean_plugin")" -gt 0 ] 2>/dev/null; then
+        pass "plugin lifecycle: plugin remove audit event recorded"
+    else
+        fail "plugin lifecycle: plugin remove audit event recorded" "no plugin-remove event for $clean_plugin"
+    fi
+
+    cleanup_plugin_name "$clean_plugin"
+    cleanup_plugin_name "$malicious_plugin"
+    rm -rf "$staging_root" 2>/dev/null || true
+    phase_timer_end "Phase 7B"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 7C — Recovery
+# ---------------------------------------------------------------------------
+phase_recovery() {
+    if ! is_full_live || ! is_true "$E2E_ENABLE_RECOVERY"; then
+        return
+    fi
+
+    echo ""
+    echo "=== Phase 7C: Recovery [Hybrid] ==="
+    phase_timer_start
+
+    local health gateway_state watcher_state api_state
+    local before_connected after_connected
+    local watcher_skill="${E2E_PREFIX}-recovery-watcher-skill"
+    local watcher_fixture="$REPO_ROOT/test/fixtures/skills/malicious-skill"
+    local skill_dir_root
+
+    before_connected=$(alerts_action_count "sidecar-connected")
+
+    openclaw gateway stop 2>/dev/null || true
+    local gateway_deadline=$((SECONDS + 30))
+    local gateway_left_running=false
+    while [ $SECONDS -lt $gateway_deadline ]; do
+        health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+        gateway_state=$(echo "$health" | jq -r '.gateway.state // .gateway // empty' 2>/dev/null || true)
+        if [ -n "$gateway_state" ] && [ "$gateway_state" != "running" ]; then
+            gateway_left_running=true
+            break
+        fi
+        sleep 2
+    done
+    if [ "$gateway_left_running" = true ]; then
+        pass "recovery: sidecar observed OpenClaw gateway disconnect"
+    else
+        fail "recovery: sidecar observed OpenClaw gateway disconnect" "gateway health never left running"
+    fi
+
+    openclaw gateway --force &
+    OPENCLAW_PID=$!
+    sleep 5
+
+    local reconnect_deadline=$((SECONDS + 60))
+    local reconnect_ok=false
+    while [ $SECONDS -lt $reconnect_deadline ]; do
+        health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+        gateway_state=$(echo "$health" | jq -r '.gateway.state // .gateway // empty' 2>/dev/null || true)
+        watcher_state=$(echo "$health" | jq -r '.watcher.state // .watcher // empty' 2>/dev/null || true)
+        api_state=$(echo "$health" | jq -r '.api.state // .api // empty' 2>/dev/null || true)
+        if [ "$gateway_state" = "running" ] && [ "$watcher_state" = "running" ] && [ "$api_state" = "running" ]; then
+            reconnect_ok=true
+            break
+        fi
+        sleep 3
+    done
+    if [ "$reconnect_ok" = true ]; then
+        pass "recovery: sidecar reconnected after OpenClaw gateway restart"
+    else
+        fail "recovery: sidecar reconnected after OpenClaw gateway restart" "gateway=$gateway_state watcher=$watcher_state api=$api_state"
+    fi
+
+    after_connected=$(alerts_action_count "sidecar-connected")
+    if [ "${after_connected:-0}" -gt "${before_connected:-0}" ] 2>/dev/null; then
+        pass "recovery: reconnect emitted additional sidecar-connected audit event"
+        RECOVERY_SIDECAR_CONNECTED_MIN="$after_connected"
+    else
+        fail "recovery: reconnect emitted additional sidecar-connected audit event" "before=$before_connected after=$after_connected"
+    fi
+
+    defenseclaw-gateway stop 2>/dev/null || true
+    sleep 2
+    if ! wait_for_url "$SIDECAR_URL/health" 8 2; then
+        pass "recovery: sidecar health became unavailable after stop"
+    else
+        fail "recovery: sidecar health became unavailable after stop" "health endpoint still reachable"
+    fi
+
+    defenseclaw-gateway start
+    sleep 5
+    if wait_for_url "$SIDECAR_URL/health" 60 3; then
+        pass "recovery: sidecar restarted after stop"
+    else
+        fail "recovery: sidecar restarted after stop" "sidecar health endpoint did not recover"
+        phase_timer_end "Phase 7C"
+        return
+    fi
+
+    health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    gateway_state=$(echo "$health" | jq -r '.gateway.state // .gateway // empty' 2>/dev/null || true)
+    watcher_state=$(echo "$health" | jq -r '.watcher.state // .watcher // empty' 2>/dev/null || true)
+    api_state=$(echo "$health" | jq -r '.api.state // .api // empty' 2>/dev/null || true)
+    if [ "$gateway_state" = "running" ] && [ "$watcher_state" = "running" ] && [ "$api_state" = "running" ]; then
+        pass "recovery: sidecar subsystems returned to running after restart"
+    else
+        fail "recovery: sidecar subsystems returned to running after restart" "gateway=$gateway_state watcher=$watcher_state api=$api_state"
+    fi
+
+    skill_dir_root=$(first_skill_dir || true)
+    if [ -z "$skill_dir_root" ] || [ ! -d "$watcher_fixture" ]; then
+        skip_or_fail "$E2E_REQUIRE_RECOVERY" "recovery: watcher post-restart scan" "skill fixture or watched directory missing"
+        phase_timer_end "Phase 7C"
+        return
+    fi
+
+    cleanup_skill_name "$watcher_skill"
+    copy_skill_fixture "$watcher_fixture" "$skill_dir_root" "$watcher_skill"
+    local watcher_entry
+    watcher_entry=$(wait_for_skill_scan "$watcher_skill" 90 || true)
+    if [ -n "$watcher_entry" ] && [ "$watcher_entry" != "null" ]; then
+        local watcher_findings
+        watcher_findings=$(echo "$watcher_entry" | jq -r '.scan.total_findings // 0' 2>/dev/null || echo "0")
+        if [ "${watcher_findings:-0}" -gt 0 ] 2>/dev/null; then
+            pass "recovery: watcher scanned a new skill after sidecar restart"
+        else
+            fail "recovery: watcher scanned a new skill after sidecar restart" "scan entry present but findings=$watcher_findings"
+        fi
+    else
+        fail "recovery: watcher scanned a new skill after sidecar restart" "no scan entry found for $watcher_skill"
+    fi
+
+    cleanup_skill_name "$watcher_skill"
+    phase_timer_end "Phase 7C"
+}
+
+# ---------------------------------------------------------------------------
 # Phase 8 — Splunk Log Verification
 # ---------------------------------------------------------------------------
 phase_splunk() {
     echo ""
-    echo "=== Phase 8: Splunk Log Verification ==="
+    echo "=== Phase 8: Splunk Log Verification [API] ==="
     phase_timer_start
 
     local hec_health hec_response schema_result
@@ -1558,6 +2167,7 @@ phase_splunk() {
     splunk_assert_results "Splunk: CodeGuard scan events present" 'action=scan details="*scanner=codeguard*" | head 5'
     splunk_assert_results "Splunk: AIBOM scan events present" 'action=scan details="*scanner=aibom-claw*" | head 5'
     splunk_assert_results "Splunk: sidecar lifecycle events present" '(action=init-sidecar OR action=sidecar-start OR action=sidecar-connected) | head 5'
+    splunk_assert_min_count "Splunk: sidecar-connected events meet recovery minimum" 'action=sidecar-connected | head 20' "$RECOVERY_SIDECAR_CONNECTED_MIN"
     splunk_assert_results "Splunk: watcher lifecycle events present" 'action=watch-start | head 5'
     splunk_assert_results "Splunk: watcher install events present" '(action=install-detected OR action=install-rejected OR action=install-allowed) | head 5'
     splunk_assert_results "Splunk: quarantine and restore events present" '(action=skill-quarantine OR action=skill-restore) | head 5'
@@ -1590,8 +2200,17 @@ phase_splunk() {
     fi
 
     if is_full_live; then
+        splunk_assert_results "Splunk: guardrail verdict events present" 'action=guardrail-verdict | head 5'
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
         splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
+        if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
+            splunk_assert_results "Splunk: plugin scan events present" 'action=scan details="*scanner=plugin-scanner*" | head 5'
+            splunk_assert_results "Splunk: plugin block/allow events present" '(action=plugin-block OR action=plugin-allow) | head 5'
+            splunk_assert_results "Splunk: plugin disable/enable events present" '(action=plugin-disable OR action=plugin-enable) | head 5'
+            splunk_assert_results "Splunk: API plugin disable/enable events present" '(action=api-plugin-disable OR action=api-plugin-enable) | head 5'
+            splunk_assert_results "Splunk: plugin quarantine/restore events present" '(action=plugin-quarantine OR action=plugin-restore) | head 5'
+            splunk_assert_results "Splunk: plugin remove events present" 'action=plugin-remove | head 5'
+        fi
     fi
     phase_timer_end "Phase 8"
 }
@@ -1601,13 +2220,18 @@ phase_splunk() {
 # ---------------------------------------------------------------------------
 phase_teardown() {
     echo ""
-    echo "=== Phase 9: Teardown ==="
+    echo "=== Phase 9: Teardown [CLI/API] ==="
 
     echo "  Final sidecar status:"
     defenseclaw-gateway status 2>/dev/null || true
 
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
+
+    if is_full_live && [ -f "$OPENCLAW_MODEL_BACKUP_PATH" ]; then
+        echo "  Restoring OpenClaw model configuration..."
+        restore_openclaw_model_backup
+    fi
 
     echo "  Services stopped (Splunk container left running for dashboard access)"
 }
@@ -1672,6 +2296,8 @@ main() {
     phase_skill_api
     phase_guardrail
     phase_agent_chat
+    phase_plugin_lifecycle
+    phase_recovery
     phase_splunk
 
     [ "$FAIL" -eq 0 ]

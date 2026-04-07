@@ -31,6 +31,10 @@ jobs:
       E2E_REQUIRE_AGENT_SCAN: "false"
       E2E_REQUIRE_GUARDRAIL: "false"
       E2E_REQUIRE_LIVE_MCP: "false"
+      E2E_ENABLE_PLUGIN_LIFECYCLE: "false"
+      E2E_REQUIRE_PLUGIN_LIFECYCLE: "false"
+      E2E_ENABLE_RECOVERY: "false"
+      E2E_REQUIRE_RECOVERY: "false"
     defaults:
       run:
         shell: bash
@@ -210,6 +214,12 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: TypeScript plugin tests
+        run: make ts-test
+
+      - name: Rego policy tests
+        run: make rego-test
+
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
 
@@ -229,8 +239,14 @@ jobs:
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
       E2E_REQUIRE_AGENT_INSTALL: "true"
       E2E_REQUIRE_AGENT_SCAN: "true"
-      E2E_REQUIRE_GUARDRAIL: "false"
+      E2E_REQUIRE_GUARDRAIL: "true"
       E2E_REQUIRE_LIVE_MCP: "false"
+      E2E_ENABLE_PLUGIN_LIFECYCLE: "true"
+      E2E_REQUIRE_PLUGIN_LIFECYCLE: "false"
+      E2E_ENABLE_RECOVERY: "true"
+      E2E_REQUIRE_RECOVERY: "false"
+      OPENCLAW_MODEL_PATCHED: "false"
+      OPENCLAW_MODEL_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.backup.json
     defaults:
       run:
         shell: bash
@@ -332,6 +348,46 @@ jobs:
           echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Prepare OpenClaw Anthropic model
+        run: |
+          if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw
+            cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
+            rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          target_model = "anthropic/claude-sonnet-4-5"
+          cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
+          if not cfg_path.exists():
+              raise SystemExit("openclaw.json not found; full-live requires a configured OpenClaw home")
+
+          backup_path = Path(os.environ["OPENCLAW_MODEL_BACKUP_PATH"])
+          backup_path.write_text(cfg_path.read_text())
+
+          with cfg_path.open() as f:
+              cfg = json.load(f)
+
+          agents = cfg.setdefault("agents", {})
+          defaults = agents.setdefault("defaults", {})
+          model_cfg = defaults.get("model")
+          if isinstance(model_cfg, dict):
+              model_cfg["primary"] = target_model
+          else:
+              defaults["model"] = {"primary": target_model, "fallbacks": []}
+
+          with cfg_path.open("w") as f:
+              json.dump(cfg, f, indent=2)
+              f.write("\n")
+          PY
+
+          echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
+          echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
+
       - name: Init DefenseClaw
         run: |
           defenseclaw init
@@ -396,7 +452,6 @@ jobs:
             GUARDRAIL_REASON="no model found in openclaw.json"
           fi
 
-          echo "E2E_REQUIRE_GUARDRAIL=${GUARDRAIL_ENABLED}" >> "$GITHUB_ENV"
           echo "GUARDRAIL_REQUEST_MODEL=${OC_MODEL}" >> "$GITHUB_ENV"
           if [ -n "${GUARDRAIL_REASON:-}" ]; then
             echo "Guardrail live check status: ${GUARDRAIL_REASON}"
@@ -451,5 +506,20 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: TypeScript plugin tests
+        run: make ts-test
+
+      - name: Rego policy tests
+        run: make rego-test
+
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
+
+      - name: Restore OpenClaw Anthropic model
+        if: always()
+        run: |
+          if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw
+            cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
+            rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
