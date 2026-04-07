@@ -122,6 +122,8 @@ phase_health() {
 
     local health
     health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    echo "  Full health JSON:"
+    echo "$health" | jq '.' 2>/dev/null || echo "$health"
 
     for subsystem in gateway watcher api; do
         local state
@@ -145,7 +147,7 @@ phase_health() {
         if echo "$guard_err" | grep -qi "no API key\|api_key_env\|key not found"; then
             skip "health: guardrail" "no API key for model provider (Bedrock models use AWS IAM, not API keys)"
         else
-            fail "health: guardrail is running" "error — ${guard_err:0:120}"
+            fail "health: guardrail is running" "error — $guard_err"
         fi
     else
         fail "health: guardrail is running" "got '$guard_state'"
@@ -178,10 +180,12 @@ phase_skill_scanner() {
     echo "  Scanning clean skill..."
     local clean_out
     clean_out=$(defenseclaw skill scan "$clean_skill" --json 2>&1 || true)
-    echo "  Raw clean output (first 300 chars): ${clean_out:0:300}"
+    echo "  --- Clean skill scan output ---"
+    echo "$clean_out"
+    echo "  --- end clean skill output ---"
 
     if echo "$clean_out" | grep -qi "error\|failed\|not found"; then
-        fail "skill scan: clean skill scanned" "scanner error: ${clean_out:0:150}"
+        fail "skill scan: clean skill scanned" "scanner error: $clean_out"
     else
         local clean_json
         clean_json=$(echo "$clean_out" | grep -E '^\s*\{' | head -1 || true)
@@ -200,7 +204,9 @@ phase_skill_scanner() {
     echo "  Scanning malicious skill..."
     local mal_out
     mal_out=$(defenseclaw skill scan "$malicious_skill" --json 2>&1 || true)
-    echo "  Raw malicious output (first 500 chars): ${mal_out:0:500}"
+    echo "  --- Malicious skill scan output ---"
+    echo "$mal_out"
+    echo "  --- end malicious skill output ---"
 
     local mal_json
     mal_json=$(echo "$mal_out" | grep -E '^\s*\{' | head -1 || true)
@@ -228,7 +234,9 @@ phase_mcp_scanner() {
     echo "  Scanning all configured MCP servers..."
     local mcp_out
     mcp_out=$(defenseclaw mcp scan --all --json 2>&1 || true)
-    echo "  Raw MCP output (first 500 chars): ${mcp_out:0:500}"
+    echo "  --- MCP scan output ---"
+    echo "$mcp_out"
+    echo "  --- end MCP scan output ---"
 
     if echo "$mcp_out" | grep -qi "no mcp servers configured"; then
         skip "mcp scanner" "no MCP servers configured in openclaw.json"
@@ -247,7 +255,8 @@ phase_mcp_scanner() {
         if [ "$mcp_findings" = "0" ]; then
             pass "mcp scan: configured servers scanned (0 findings)"
         else
-            pass "mcp scan: scan completed (output: ${mcp_out:0:100})"
+            pass "mcp scan: scan completed"
+            echo "  NOTE: unexpected output format — review logs above"
         fi
     fi
 }
@@ -267,53 +276,58 @@ phase_quarantine() {
         return
     fi
 
-    local skill_dirs
-    skill_dirs=$(python3 -c "
+    local skill_dir_root
+    skill_dir_root=$(python3 -c "
 from defenseclaw.config import load
 cfg = load()
 for d in cfg.skill_dirs():
     print(d)
 " 2>/dev/null | head -1 || true)
 
-    if [ -z "$skill_dirs" ]; then
+    if [ -z "$skill_dir_root" ]; then
         skip "quarantine" "could not determine skill directory"
         return
     fi
 
-    echo "  Copying malicious skill to skill dir: $skill_dirs"
-    mkdir -p "$skill_dirs/$skill_name"
-    cp -r "$malicious_skill"/* "$skill_dirs/$skill_name/" 2>/dev/null || true
+    echo "  Copying malicious skill to skill dir: $skill_dir_root"
+    mkdir -p "$skill_dir_root/$skill_name"
+    cp -r "$malicious_skill"/* "$skill_dir_root/$skill_name/" 2>/dev/null || true
 
-    if [ -d "$skill_dirs/$skill_name" ]; then
+    if [ -d "$skill_dir_root/$skill_name" ]; then
+        echo "  Contents: $(ls "$skill_dir_root/$skill_name/")"
         pass "quarantine: malicious skill placed in skill dir"
     else
-        fail "quarantine: place skill" "failed to copy to $skill_dirs/$skill_name"
+        fail "quarantine: place skill" "failed to copy to $skill_dir_root/$skill_name"
         return
     fi
 
     echo "  Quarantining malicious skill..."
     local q_out
     q_out=$(defenseclaw skill quarantine "$skill_name" --reason "E2E test: data exfiltration pattern" 2>&1 || true)
-    echo "  Quarantine output: ${q_out:0:200}"
+    echo "  --- Quarantine output ---"
+    echo "$q_out"
+    echo "  --- end quarantine output ---"
 
     if echo "$q_out" | grep -qi "quarantine"; then
         pass "quarantine: skill quarantined successfully"
     else
-        fail "quarantine: skill quarantined" "output: ${q_out:0:100}"
+        fail "quarantine: skill quarantined" "output: $q_out"
     fi
 
     echo "  Restoring quarantined skill..."
     local r_out
     r_out=$(defenseclaw skill restore "$skill_name" 2>&1 || true)
-    echo "  Restore output: ${r_out:0:200}"
+    echo "  --- Restore output ---"
+    echo "$r_out"
+    echo "  --- end restore output ---"
 
     if echo "$r_out" | grep -qi "restore"; then
         pass "quarantine: skill restored successfully"
     else
-        skip "quarantine: restore" "output: ${r_out:0:100}"
+        skip "quarantine: restore" "output: $r_out"
     fi
 
-    rm -rf "$skill_dirs/$skill_name" 2>/dev/null || true
+    rm -rf "$skill_dir_root/$skill_name" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -349,6 +363,10 @@ except OSError:
         -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Reply with exactly: E2E_OK"}],"max_tokens":20}' \
         "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
 
+    echo "  --- Guardrail proxy response ---"
+    echo "$response" | jq '.' 2>/dev/null || echo "$response"
+    echo "  --- end guardrail response ---"
+
     local content
     content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
@@ -358,11 +376,11 @@ except OSError:
         local err
         err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null)
         if [ -n "$err" ] && echo "$err" | grep -qi "credit\|quota\|rate\|key"; then
-            pass "guardrail round-trip: proxy forwarded request (LLM billing issue: ${err:0:80})"
+            pass "guardrail round-trip: proxy forwarded request (LLM billing issue: $err)"
         elif [ -n "$content" ]; then
-            pass "guardrail round-trip: LLM responded (content: ${content:0:50})"
+            pass "guardrail round-trip: LLM responded (content: $content)"
         else
-            fail "guardrail round-trip: LLM responded" "err='${err:0:80}' response='${response:0:120}'"
+            fail "guardrail round-trip: LLM responded" "err='$err' response='$response'"
         fi
     fi
 }
@@ -381,63 +399,178 @@ phase_agent_chat() {
 
     local session_id="e2e-test-$$"
 
-    # Test 1: Verify agent is alive
-    echo "  Sending ping to OpenClaw agent..."
+    # --- Snapshot skill directories BEFORE agent runs ---
+    local skill_dirs
+    skill_dirs=$(python3 -c "
+import json, os
+home = os.path.expanduser('~/.openclaw')
+dirs = []
+cfg_path = os.path.join(home, 'openclaw.json')
+if os.path.isfile(cfg_path):
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        ws = cfg.get('agents',{}).get('defaults',{}).get('workspace','')
+        if ws:
+            dirs.append(os.path.join(os.path.expanduser(ws), 'skills'))
+        for d in cfg.get('skills',{}).get('load',{}).get('extraDirs',[]):
+            dirs.append(os.path.expanduser(d))
+    except Exception:
+        pass
+dirs.append(os.path.join(home, 'skills'))
+print(':'.join(dirs))
+" 2>/dev/null)
+    echo "  Skill directories: $skill_dirs"
+
+    local skills_before=""
+    IFS=':' read -ra SDIRS <<< "$skill_dirs"
+    for sd in "${SDIRS[@]}"; do
+        if [ -d "$sd" ]; then
+            skills_before="$skills_before$(ls -1 "$sd" 2>/dev/null | sort)"$'\n'
+        fi
+    done
+    local before_count
+    before_count=$(echo "$skills_before" | grep -c '[^[:space:]]' || echo 0)
+    echo "  Skills on disk before agent chat: $before_count entries"
+    echo "$skills_before" | grep '[^[:space:]]' | head -30 || true
+
+    # --- Test 1: Verify agent is alive ---
+    echo ""
+    echo "  --- Test 1: Agent ping ---"
+    echo "  Sending: 'Reply with exactly one word: PONG'"
     local ping_out
     ping_out=$(timeout 120 openclaw agent \
         --session-id "$session_id" \
         -m "Reply with exactly one word: PONG" \
         2>&1 || true)
-    echo "  Agent output (first 300 chars): ${ping_out:0:300}"
+    echo "  --- Agent ping output (full) ---"
+    echo "$ping_out"
+    echo "  --- end agent ping output ---"
 
     if echo "$ping_out" | grep -qi "PONG"; then
-        pass "agent chat: agent is alive"
+        pass "agent chat: agent is alive (replied PONG)"
     elif [ -n "$ping_out" ] && ! echo "$ping_out" | grep -qi "error\|refused\|timeout"; then
-        pass "agent chat: agent responded (non-deterministic)"
+        pass "agent chat: agent responded (non-deterministic LLM — did not say PONG)"
     else
-        fail "agent chat: agent is alive" "output: ${ping_out:0:150}"
+        fail "agent chat: agent is alive" "no output or error in response"
         return
     fi
 
-    # Test 2: Ask agent to search and install a skill from ClawHub
-    # This is the real E2E: OpenClaw installs via ClawHub → DefenseClaw
-    # watcher detects → scans → enforces → logs to audit store + Splunk
-    echo "  Asking agent to install wiki-search skill from ClawHub..."
+    # --- Test 2: Ask agent to install a skill ---
+    echo ""
+    echo "  --- Test 2: Agent skill install ---"
+    echo "  Sending: 'Search for and install the wiki-search skill.'"
     local install_out
     install_out=$(timeout 180 openclaw agent \
         --session-id "${session_id}-install" \
         -m "Search for and install the wiki-search skill." \
         2>&1 || true)
-    echo "  Agent install output (first 500 chars): ${install_out:0:500}"
+    echo "  --- Agent install output (full) ---"
+    echo "$install_out"
+    echo "  --- end agent install output ---"
 
-    if echo "$install_out" | grep -qi "install\|skill\|clawhub\|wiki\|added\|success"; then
-        pass "agent chat: skill install via ClawHub executed"
+    # --- Snapshot skill directories AFTER agent runs ---
+    local skills_after=""
+    for sd in "${SDIRS[@]}"; do
+        if [ -d "$sd" ]; then
+            skills_after="$skills_after$(ls -1 "$sd" 2>/dev/null | sort)"$'\n'
+        fi
+    done
+    local after_count
+    after_count=$(echo "$skills_after" | grep -c '[^[:space:]]' || echo 0)
+    echo "  Skills on disk after agent chat: $after_count entries"
+    echo "$skills_after" | grep '[^[:space:]]' | head -30 || true
+
+    # Diff to find newly installed skills
+    local new_skills
+    new_skills=$(comm -13 <(echo "$skills_before" | sort) <(echo "$skills_after" | sort) | grep -v '^$' || true)
+
+    if [ -n "$new_skills" ]; then
+        echo "  NEW skills installed by agent:"
+        echo "$new_skills"
+        pass "agent chat: skill installed on disk (new entries: $(echo "$new_skills" | wc -l | tr -d ' '))"
     else
-        skip "agent chat: skill install" "agent may not have found the skill"
+        echo "  WARNING: no new skill directories appeared after agent chat"
+        if echo "$install_out" | grep -qi "installed\|added\|successfully"; then
+            skip "agent chat: skill install" "agent claimed success but no new directory found on disk"
+        else
+            fail "agent chat: skill install" "no new skill on disk and no success confirmation in agent output"
+        fi
     fi
 
-    # Wait for DefenseClaw watcher to detect and scan the new skill
-    echo "  Waiting 10s for DefenseClaw watcher to scan the installed skill..."
-    sleep 10
+    # --- Wait for DefenseClaw watcher ---
+    echo ""
+    echo "  Waiting 15s for DefenseClaw watcher to detect and scan..."
+    sleep 15
 
-    # Test 3: Verify DefenseClaw intercepted the install (check scan results)
-    echo "  Checking if DefenseClaw scanned the installed skill..."
+    # --- Test 3: Verify DefenseClaw has the skill in its inventory ---
+    echo ""
+    echo "  --- Test 3: DefenseClaw skill list ---"
+    echo "  Running: defenseclaw skill list --json"
     local skill_list
     skill_list=$(defenseclaw skill list --json 2>/dev/null || echo "[]")
-    echo "  Skill list (first 300 chars): ${skill_list:0:300}"
+    echo "  --- Full skill list JSON ---"
+    echo "$skill_list"
+    echo "  --- end skill list JSON ---"
 
-    if echo "$skill_list" | grep -qi "wiki-search\|wiki"; then
-        pass "agent chat: DefenseClaw detected installed skill"
+    # Try to find a skill matching "wiki" by name
+    local matched_entry
+    matched_entry=$(echo "$skill_list" | jq '[.[] | select(.name | test("wiki"; "i"))]' 2>/dev/null || echo "[]")
+    local match_count
+    match_count=$(echo "$matched_entry" | jq 'length' 2>/dev/null || echo "0")
 
-        local scan_status
-        scan_status=$(echo "$skill_list" | jq -r '.[] | select(.name | test("wiki"; "i")) | .scan_severity // .severity // "unknown"' 2>/dev/null | head -1)
-        if [ -n "$scan_status" ] && [ "$scan_status" != "null" ]; then
-            pass "agent chat: DefenseClaw scanned skill (severity: $scan_status)"
+    # If no "wiki" match, try matching the disk-diff name
+    if [ "${match_count:-0}" -eq 0 ] && [ -n "$new_skills" ]; then
+        local disk_name
+        disk_name=$(echo "$new_skills" | head -1 | tr -d '[:space:]')
+        echo "  No 'wiki' match in list — trying disk name '$disk_name'..."
+        matched_entry=$(echo "$skill_list" | jq --arg n "$disk_name" '[.[] | select(.name == $n)]' 2>/dev/null || echo "[]")
+        match_count=$(echo "$matched_entry" | jq 'length' 2>/dev/null || echo "0")
+    fi
+
+    echo "  Matched entries: $match_count"
+    if [ "${match_count:-0}" -gt 0 ]; then
+        echo "  --- Matched skill entries ---"
+        echo "$matched_entry" | jq '.' 2>/dev/null
+        echo "  --- end matched entries ---"
+        pass "agent chat: DefenseClaw has installed skill in inventory ($match_count match(es))"
+    else
+        echo "  All skill names in list:"
+        echo "$skill_list" | jq -r '.[].name' 2>/dev/null || true
+        fail "agent chat: DefenseClaw has installed skill in inventory" "skill not found in defenseclaw skill list"
+    fi
+
+    # --- Test 4: Verify DefenseClaw actually scanned the skill ---
+    echo ""
+    echo "  --- Test 4: Scan results ---"
+    if [ "${match_count:-0}" -gt 0 ]; then
+        local has_scan
+        has_scan=$(echo "$matched_entry" | jq -r '.[0].scan // empty' 2>/dev/null)
+
+        if [ -n "$has_scan" ] && [ "$has_scan" != "null" ]; then
+            local scan_severity scan_findings scan_clean scan_target
+            scan_severity=$(echo "$matched_entry" | jq -r '.[0].scan.max_severity // "NONE"' 2>/dev/null)
+            scan_findings=$(echo "$matched_entry" | jq -r '.[0].scan.total_findings // 0' 2>/dev/null)
+            scan_clean=$(echo "$matched_entry" | jq -r '.[0].scan.clean // "unknown"' 2>/dev/null)
+            scan_target=$(echo "$matched_entry" | jq -r '.[0].scan.target // "unknown"' 2>/dev/null)
+            echo "  Scan results:"
+            echo "    severity:  $scan_severity"
+            echo "    findings:  $scan_findings"
+            echo "    clean:     $scan_clean"
+            echo "    target:    $scan_target"
+            pass "agent chat: DefenseClaw scanned skill (severity=$scan_severity, findings=$scan_findings, clean=$scan_clean)"
         else
-            skip "agent chat: scan result" "skill found but scan severity not yet available"
+            echo "  Skill entry has no .scan field — watcher may not have finished scanning"
+            echo "  Checking sidecar alerts for recent scan activity..."
+            local recent_alerts
+            recent_alerts=$(curl -sf "$SIDECAR_URL/alerts?limit=10" 2>/dev/null || echo "[]")
+            echo "  --- Recent sidecar alerts ---"
+            echo "$recent_alerts" | jq '.' 2>/dev/null || echo "$recent_alerts"
+            echo "  --- end sidecar alerts ---"
+            skip "agent chat: DefenseClaw scan result" "skill in inventory but .scan field absent — watcher may still be processing"
         fi
     else
-        skip "agent chat: DefenseClaw scan" "wiki-search not in skill list — may not have installed"
+        skip "agent chat: DefenseClaw scan result" "cannot check scan — skill not in inventory"
     fi
 }
 
@@ -449,32 +582,43 @@ phase_splunk() {
     echo "=== Phase 8: Splunk Log Verification ==="
 
     echo "  Checking Splunk HEC health..."
-    if ! curl -sf "$SPLUNK_HEC_URL/services/collector/health" >/dev/null 2>&1; then
+    local hec_health
+    hec_health=$(curl -sf --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
+    echo "  HEC health response: $hec_health"
+
+    if [ "$hec_health" = "unreachable" ] || [ -z "$hec_health" ]; then
         echo "  Splunk HEC not reachable — checking docker..."
-        docker ps -a --format '{{.Names}} {{.Status}}' 2>/dev/null || true
+        docker ps -a --format '{{.Names}} {{.Status}} {{.Ports}}' 2>/dev/null || true
+
+        echo "  Docker logs (last 30 lines):"
+        docker logs "$(docker ps -aq --filter name=splunk | head -1)" --tail 30 2>/dev/null || echo "  (no container found)"
 
         echo "  Attempting to restart Splunk container..."
         local compose_dir="$REPO_ROOT/bundles/splunk_local_bridge/compose"
         if [ -f "$compose_dir/docker-compose.ci.yml" ]; then
             (cd "$compose_dir" && SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
-                docker compose -f docker-compose.ci.yml up -d 2>/dev/null || true)
-            echo "  Waiting 30s for Splunk to start..."
-            sleep 30
+                docker compose -f docker-compose.ci.yml up -d 2>&1 || true)
+            echo "  Waiting 45s for Splunk to start..."
+            sleep 45
         fi
 
-        if ! curl -sf "$SPLUNK_HEC_URL/services/collector/health" >/dev/null 2>&1; then
+        hec_health=$(curl -sf --max-time 5 "$SPLUNK_HEC_URL/services/collector/health" 2>&1 || echo "unreachable")
+        echo "  HEC health after restart: $hec_health"
+        if [ "$hec_health" = "unreachable" ] || [ -z "$hec_health" ]; then
             skip "Splunk assertions" "Splunk HEC still not reachable after restart"
             return 0
         fi
     fi
     pass "Splunk HEC reachable"
 
+    echo "  Sending test event to HEC..."
     local hec_response
     hec_response=$(curl -sf --max-time 5 \
         -H "Authorization: Splunk $SPLUNK_HEC_TOKEN" \
         -H "Content-Type: application/json" \
         -d "{\"event\":{\"action\":\"e2e-ci-test\",\"source\":\"test-e2e-full-stack\",\"timestamp\":\"$(date -u +%FT%TZ)\"},\"index\":\"defenseclaw_local\"}" \
         "$SPLUNK_HEC_URL/services/collector/event" 2>/dev/null || echo '{"text":"error"}')
+    echo "  HEC response: $hec_response"
 
     if echo "$hec_response" | jq -e '.text == "Success"' >/dev/null 2>&1; then
         pass "Splunk HEC accepts events"
@@ -485,8 +629,10 @@ phase_splunk() {
     echo "  Waiting 10s for events to be indexed..."
     sleep 10
 
+    echo "  Querying Splunk REST API for total event count..."
     local search_result
     search_result=$(splunk_search "| stats count")
+    echo "  Search result: $search_result"
 
     if echo "$search_result" | grep -q "result"; then
         local count
@@ -494,17 +640,19 @@ phase_splunk() {
         if [ "${count:-0}" -gt 0 ]; then
             pass "Splunk: $count total events in defenseclaw_local index"
         else
-            pass "Splunk: search endpoint returned results"
+            pass "Splunk: search endpoint returned results (count may be delayed)"
         fi
     else
-        skip "Splunk search" "port 8089 not reachable — HEC test passed"
+        skip "Splunk search" "REST API on port 8089 not reachable or returned empty — HEC test passed"
         return
     fi
 
-    echo "  Checking for audit events in Splunk..."
+    echo "  Querying Splunk for audit events by action..."
     local audit_events
     audit_events=$(splunk_search "action=* | stats count by action | head 10")
-    echo "  Audit events: ${audit_events:0:300}"
+    echo "  --- Audit events by action ---"
+    echo "$audit_events"
+    echo "  --- end audit events ---"
 
     if echo "$audit_events" | grep -q "result"; then
         pass "Splunk: audit events present"
@@ -538,9 +686,17 @@ print_summary() {
     echo "  E2E Summary: $PASS passed, $FAIL failed"
     echo "============================================================"
 
+    if [ ${#RESULTS[@]} -gt 0 ]; then
+        echo ""
+        echo "  All results:"
+        for r in "${RESULTS[@]}"; do
+            echo "    $r"
+        done
+    fi
+
     if [ "$FAIL" -gt 0 ]; then
         echo ""
-        echo "  Failed:"
+        echo "  FAILURES:"
         for r in "${RESULTS[@]}"; do
             if [[ "$r" == FAIL:* ]]; then
                 echo "    - ${r#FAIL: }"
