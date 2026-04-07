@@ -65,13 +65,66 @@ jobs:
       - name: Init DefenseClaw
         run: |
           defenseclaw init
-          defenseclaw setup guardrail --mode action --non-interactive --restart
           defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
+
+          # Write secrets to .env BEFORE guardrail setup
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           if [ -n "${SPLUNK_ACCESS_TOKEN}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
             echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
           fi
+
+          # Read model from openclaw.json and inject into defenseclaw config
+          # (setup guardrail --non-interactive can't set model — no CLI flag)
+          OC_MODEL=$(python3 -c "
+          import json, os
+          try:
+              with open(os.path.expanduser('~/.openclaw/openclaw.json')) as f:
+                  cfg = json.load(f)
+              print(cfg.get('agents',{}).get('defaults',{}).get('model',{}).get('primary',''))
+          except Exception:
+              print('')
+          ")
+          echo "  OpenClaw model: ${OC_MODEL:-<not found>}"
+
+          if [ -n "$OC_MODEL" ]; then
+            MODEL_NAME=$(echo "$OC_MODEL" | sed 's|.*/||')
+            API_KEY_ENV="ANTHROPIC_API_KEY"
+            if echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1"; then
+              API_KEY_ENV="OPENAI_API_KEY"
+            fi
+            python3 -c "
+          import yaml, os
+          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
+          with open(cfg_path) as f:
+              cfg = yaml.safe_load(f)
+          cfg.setdefault('guardrail', {})
+          cfg['guardrail']['enabled'] = True
+          cfg['guardrail']['mode'] = 'action'
+          cfg['guardrail']['model'] = '$OC_MODEL'
+          cfg['guardrail']['model_name'] = '$MODEL_NAME'
+          cfg['guardrail']['api_key_env'] = '$API_KEY_ENV'
+          # Enforce quarantine on HIGH/CRITICAL findings for E2E testing
+          cfg['skill_actions'] = {
+              'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
+              'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
+              'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
+              'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
+          }
+          with open(cfg_path, 'w') as f:
+              yaml.dump(cfg, f, default_flow_style=False)
+          print('  Config written: guardrail=action model=$OC_MODEL quarantine=HIGH+CRITICAL')
+          "
+          else
+            echo "  WARNING: No model found in openclaw.json — guardrail will be disabled"
+          fi
+
+          echo "  Config:"
+          cat ~/.defenseclaw/config.yaml | head -30
+
+          # Restart gateway to pick up guardrail + token + enforcement config
+          defenseclaw-gateway restart
+          sleep 5
           defenseclaw-gateway status
 
       # Phase 4 — Unit tests (fast fail before slow E2E)

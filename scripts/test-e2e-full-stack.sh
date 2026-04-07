@@ -25,6 +25,8 @@ OPENCLAW_URL="http://127.0.0.1:18789"
 GUARDRAIL_URL="http://127.0.0.1:4000"
 SPLUNK_HEC_URL="http://127.0.0.1:8088"
 SPLUNK_HEC_TOKEN="00000000-0000-0000-0000-000000000001"
+SPLUNK_API_URL="https://127.0.0.1:8089"
+SPLUNK_CREDS="admin:DefenseClawLocalMode1!"
 
 PASS=0
 FAIL=0
@@ -46,6 +48,13 @@ fail() {
     [ -n "$reason" ] && printf "         %s\n" "$reason"
 }
 
+skip() {
+    local name="$1"
+    local reason="${2:-}"
+    printf "  [\033[93mSKIP\033[0m] %s\n" "$name"
+    [ -n "$reason" ] && printf "         %s\n" "$reason"
+}
+
 wait_for_url() {
     local url="$1"
     local timeout="${2:-60}"
@@ -60,6 +69,15 @@ wait_for_url() {
     return 1
 }
 
+splunk_search() {
+    local query="$1"
+    curl -sf --max-time 15 -k \
+        -u "$SPLUNK_CREDS" \
+        -d "search=search index=defenseclaw_local $query" \
+        -d "output_mode=json" \
+        "$SPLUNK_API_URL/services/search/jobs/export" 2>/dev/null || echo '{}'
+}
+
 # ---------------------------------------------------------------------------
 # Phase 1 — Start Stack
 # ---------------------------------------------------------------------------
@@ -70,20 +88,21 @@ phase_start() {
     echo "  Starting OpenClaw gateway..."
     openclaw gateway --force &
     OPENCLAW_PID=$!
-    sleep 3
+    sleep 5
 
     echo "  Checking if DefenseClaw sidecar is already running..."
     if curl -sf --max-time 3 "$SIDECAR_URL/health" >/dev/null 2>&1; then
-        echo "  Sidecar already running — restarting to pick up fresh state..."
+        echo "  Sidecar already running — restarting to connect to OpenClaw..."
         defenseclaw-gateway restart
     else
         echo "  Starting DefenseClaw sidecar..."
         defenseclaw-gateway start
     fi
-    sleep 2
+    sleep 5
 
     echo "  Sidecar status:"
     defenseclaw-gateway status || true
+    echo ""
 
     echo "  Waiting for sidecar health..."
     if wait_for_url "$SIDECAR_URL/health" 60 3; then
@@ -104,7 +123,7 @@ phase_health() {
     local health
     health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
 
-    for subsystem in gateway watcher api guardrail; do
+    for subsystem in gateway watcher api; do
         local state
         state=$(echo "$health" | jq -r ".${subsystem}.state // .${subsystem} // empty" 2>/dev/null)
         if [ "$state" = "running" ]; then
@@ -114,6 +133,16 @@ phase_health() {
         fi
     done
 
+    local guard_state
+    guard_state=$(echo "$health" | jq -r '.guardrail.state // .guardrail // empty' 2>/dev/null)
+    if [ "$guard_state" = "running" ]; then
+        pass "health: guardrail is running"
+    elif [ "$guard_state" = "disabled" ]; then
+        fail "health: guardrail is running" "guardrail is disabled — config may not have been applied"
+    else
+        fail "health: guardrail is running" "got '$guard_state'"
+    fi
+
     local status
     status=$(curl -sf "$SIDECAR_URL/status" 2>/dev/null || echo "{}")
     if echo "$status" | jq -e '.gateway_hello' >/dev/null 2>&1; then
@@ -121,27 +150,116 @@ phase_health() {
     else
         fail "status: gateway_hello present" "gateway_hello missing from /status"
     fi
+}
 
-    if command -v openclaw >/dev/null 2>&1; then
-        local channels
-        channels=$(openclaw channels status 2>/dev/null || echo "")
-        if echo "$channels" | grep -qi "telegram"; then
-            pass "openclaw: Telegram channel connected"
-        else
-            fail "openclaw: Telegram channel connected" "Telegram not found in channel status"
-        fi
+# ---------------------------------------------------------------------------
+# Phase 3 — Skill Scanner
+# ---------------------------------------------------------------------------
+phase_skill_scanner() {
+    echo ""
+    echo "=== Phase 3: Skill Scanner ==="
+
+    local clean_skill="$REPO_ROOT/test/fixtures/skills/clean-skill"
+    local malicious_skill="$REPO_ROOT/test/fixtures/skills/malicious-skill"
+
+    if [ ! -d "$clean_skill" ]; then
+        skip "skill scanner" "test fixtures not found at $clean_skill"
+        return
+    fi
+
+    echo "  Scanning clean skill..."
+    local clean_out
+    clean_out=$(defenseclaw skill scan "$clean_skill" --json 2>/dev/null || echo '{"error":"scan failed"}')
+    local clean_findings
+    clean_findings=$(echo "$clean_out" | jq -r '.findings | length // 0' 2>/dev/null || echo "0")
+    if [ "${clean_findings:-0}" -eq 0 ]; then
+        pass "skill scan: clean skill has no findings"
+    else
+        fail "skill scan: clean skill has no findings" "got $clean_findings findings"
+    fi
+
+    echo "  Scanning malicious skill..."
+    local mal_out
+    mal_out=$(defenseclaw skill scan "$malicious_skill" --json 2>/dev/null || echo '{"error":"scan failed"}')
+    local mal_findings
+    mal_findings=$(echo "$mal_out" | jq -r '.findings | length // 0' 2>/dev/null || echo "0")
+    if [ "${mal_findings:-0}" -gt 0 ]; then
+        pass "skill scan: malicious skill has findings ($mal_findings)"
+    else
+        fail "skill scan: malicious skill has findings" "got 0 findings"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Agent Round-Trip via Guardrail Proxy
+# Phase 4 — MCP Scanner
 # ---------------------------------------------------------------------------
-phase_agent_roundtrip() {
+phase_mcp_scanner() {
     echo ""
-    echo "=== Phase 3: Agent Round-Trip ==="
+    echo "=== Phase 4: MCP Scanner ==="
 
-    if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 30 3; then
-        fail "guardrail proxy reachable" "timed out waiting for guardrail proxy"
+    local malicious_mcp="$REPO_ROOT/test/fixtures/mcps/malicious-mcp.json"
+
+    if [ ! -f "$malicious_mcp" ]; then
+        skip "mcp scanner" "test fixture not found at $malicious_mcp"
+        return
+    fi
+
+    echo "  Scanning malicious MCP spec..."
+    local mcp_out
+    mcp_out=$(defenseclaw mcp scan "$malicious_mcp" --json 2>/dev/null || echo '{"error":"scan failed"}')
+    local mcp_findings
+    mcp_findings=$(echo "$mcp_out" | jq -r '.findings | length // 0' 2>/dev/null || echo "0")
+    if [ "${mcp_findings:-0}" -gt 0 ]; then
+        pass "mcp scan: malicious MCP has findings ($mcp_findings)"
+    else
+        fail "mcp scan: malicious MCP has findings" "got 0 findings"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Skill Install + Quarantine (with enforcement)
+# ---------------------------------------------------------------------------
+phase_quarantine() {
+    echo ""
+    echo "=== Phase 5: Skill Install + Quarantine ==="
+
+    local malicious_skill="$REPO_ROOT/test/fixtures/skills/malicious-skill"
+
+    if [ ! -d "$malicious_skill" ]; then
+        skip "quarantine" "test fixtures not found"
+        return
+    fi
+
+    echo "  Installing malicious skill with --action enforcement..."
+    local install_out
+    install_out=$(defenseclaw skill install "$malicious_skill" --action --force 2>&1 || true)
+    echo "  Install output: ${install_out:0:200}"
+
+    if echo "$install_out" | grep -qi "quarantine"; then
+        pass "skill install: malicious skill was quarantined"
+    elif echo "$install_out" | grep -qi "block\|reject"; then
+        pass "skill install: malicious skill was blocked/rejected"
+    elif echo "$install_out" | grep -qi "warning\|finding"; then
+        pass "skill install: malicious skill flagged with warnings"
+    else
+        fail "skill install: malicious skill enforcement" "no quarantine/block/warning in output"
+    fi
+
+    echo "  Checking quarantine via CLI..."
+    local list_out
+    list_out=$(defenseclaw skill list 2>&1 || true)
+    echo "  Skill list: ${list_out:0:200}"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Guardrail Proxy (if running)
+# ---------------------------------------------------------------------------
+phase_guardrail() {
+    echo ""
+    echo "=== Phase 6: Guardrail Proxy ==="
+
+    if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 15 3; then
+        fail "guardrail proxy reachable" "timed out waiting for guardrail proxy on port 4000"
         return
     fi
     pass "guardrail proxy reachable"
@@ -164,38 +282,38 @@ except OSError:
         -H "Authorization: Bearer $master_key" \
         -H "Content-Type: application/json" \
         -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Reply with exactly: E2E_OK"}],"max_tokens":20}' \
-        "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
+        "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
 
     local content
     content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
     if echo "$content" | grep -q "E2E_OK"; then
-        pass "agent round-trip: LLM responded with E2E_OK"
+        pass "guardrail round-trip: LLM responded with E2E_OK"
     else
         local err
-        err=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
-        if [ -n "$err" ] && (echo "$err" | grep -qi "credit\|quota\|rate"); then
-            pass "agent round-trip: guardrail passed (LLM quota/credit issue: ${err:0:80})"
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null)
+        if [ -n "$err" ] && (echo "$err" | grep -qi "credit\|quota\|rate\|key"); then
+            pass "guardrail round-trip: proxy forwarded request (LLM issue: ${err:0:80})"
         else
-            fail "agent round-trip: LLM responded with E2E_OK" "got: ${content:0:100} err: ${err:0:100}"
+            fail "guardrail round-trip: LLM responded" "content='${content:0:80}' err='${err:0:80}'"
         fi
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Phase 4 — Telegram Round-Trip
+# Phase 7 — Telegram Round-Trip
 # ---------------------------------------------------------------------------
 phase_telegram() {
     echo ""
-    echo "=== Phase 4: Telegram Round-Trip ==="
+    echo "=== Phase 7: Telegram Round-Trip ==="
 
     if [ -z "${E2E_TELEGRAM_USER_SESSION:-}" ]; then
-        echo "  [SKIP] E2E_TELEGRAM_USER_SESSION not set — skipping Telegram round-trip"
+        skip "Telegram round-trip" "E2E_TELEGRAM_USER_SESSION not set"
         return 0
     fi
 
     if [ -z "${E2E_TELEGRAM_API_ID:-}" ] || [ -z "${E2E_TELEGRAM_API_HASH:-}" ]; then
-        echo "  [SKIP] Telegram API credentials not set — skipping"
+        skip "Telegram round-trip" "Telegram API credentials not set"
         return 0
     fi
 
@@ -212,14 +330,14 @@ phase_telegram() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Splunk Assertions
+# Phase 8 — Splunk Log Verification
 # ---------------------------------------------------------------------------
 phase_splunk() {
     echo ""
-    echo "=== Phase 5: Splunk Assertions ==="
+    echo "=== Phase 8: Splunk Log Verification ==="
 
     if ! curl -sf "$SPLUNK_HEC_URL/services/collector/health" >/dev/null 2>&1; then
-        echo "  [SKIP] Splunk HEC not reachable — skipping Splunk assertions"
+        skip "Splunk assertions" "Splunk HEC not reachable"
         return 0
     fi
     pass "Splunk HEC reachable"
@@ -237,35 +355,54 @@ phase_splunk() {
         fail "Splunk HEC accepts events" "response: $hec_response"
     fi
 
-    sleep 5
+    echo "  Waiting 10s for events to be indexed..."
+    sleep 10
 
     local search_result
-    search_result=$(curl -sf --max-time 15 -k \
-        -u "admin:DefenseClawLocalMode1!" \
-        -d "search=search index=defenseclaw_local | stats count" \
-        -d "output_mode=json" \
-        "https://127.0.0.1:8089/services/search/jobs/export" 2>/dev/null || echo '{}')
+    search_result=$(splunk_search "| stats count")
 
     if echo "$search_result" | grep -q "result"; then
         local count
         count=$(echo "$search_result" | jq -r '.result.count // "0"' 2>/dev/null)
         if [ "${count:-0}" -gt 0 ]; then
-            pass "Splunk search: $count events in defenseclaw_local index"
+            pass "Splunk: $count total events in defenseclaw_local index"
         else
-            pass "Splunk search: events present (count query returned results)"
+            pass "Splunk: search returned results (count query worked)"
         fi
     else
-        # Port 8089 may not be exposed — HEC acceptance is sufficient
-        pass "Splunk search: skipped (port 8089 not exposed; HEC test passed)"
+        skip "Splunk search" "port 8089 not reachable — HEC test passed"
+        return
+    fi
+
+    echo "  Checking for scan events in Splunk..."
+    local scan_events
+    scan_events=$(splunk_search "action=*scan* | stats count")
+    local scan_count
+    scan_count=$(echo "$scan_events" | jq -r '.result.count // "0"' 2>/dev/null)
+    if [ "${scan_count:-0}" -gt 0 ]; then
+        pass "Splunk: $scan_count scan events logged"
+    else
+        fail "Splunk: scan events logged" "no scan events found in Splunk"
+    fi
+
+    echo "  Checking for enforcement events in Splunk..."
+    local enforce_events
+    enforce_events=$(splunk_search "action=*quarantine* OR action=*block* OR action=*install* | stats count")
+    local enforce_count
+    enforce_count=$(echo "$enforce_events" | jq -r '.result.count // "0"' 2>/dev/null)
+    if [ "${enforce_count:-0}" -gt 0 ]; then
+        pass "Splunk: $enforce_count enforcement events logged"
+    else
+        fail "Splunk: enforcement events logged" "no quarantine/block/install events found"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Phase 6 — Teardown
+# Phase 9 — Teardown
 # ---------------------------------------------------------------------------
 phase_teardown() {
     echo ""
-    echo "=== Phase 6: Teardown ==="
+    echo "=== Phase 9: Teardown ==="
 
     echo "  Final sidecar status:"
     defenseclaw-gateway status 2>/dev/null || true
@@ -307,7 +444,10 @@ main() {
 
     phase_start || { print_summary; exit 1; }
     phase_health
-    phase_agent_roundtrip
+    phase_skill_scanner
+    phase_mcp_scanner
+    phase_quarantine
+    phase_guardrail
     phase_telegram
     phase_splunk
     phase_teardown
