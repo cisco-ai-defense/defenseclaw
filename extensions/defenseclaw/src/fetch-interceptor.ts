@@ -32,6 +32,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { loadSidecarConfig } from "./sidecar-config.js";
+// Canonical provider config — single source of truth shared with the Go proxy.
+// Copied from internal/configs/providers.json by `make plugin`.
+import providersConfig from "./providers.json" with { type: "json" };
 const _require = createRequire(import.meta.url);
 // Use CommonJS require() for https/http — ESM module objects are frozen and
 // cannot have properties reassigned, but the CJS exports object is mutable.
@@ -40,23 +43,17 @@ const https = _require("https") as typeof import("https");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const http = _require("http") as typeof import("http");
 
-/** Domains that should be intercepted and routed through the guardrail. */
-const LLM_DOMAINS = [
-  "api.anthropic.com",
-  "openrouter.ai",
-  "api.openai.com",
-  "openai.azure.com",       // Azure OpenAI — customer-specific subdomain
-  "generativelanguage.googleapis.com", // Gemini (Google AI Studio)
-  "googleapis.com/v1/projects", // Vertex AI Gemini
-  "amazonaws.com",          // Bedrock: bedrock-runtime.*.amazonaws.com
-];
+/** Domains that should be intercepted, built from providers.json. */
+const LLM_DOMAINS: string[] = providersConfig.providers.flatMap(
+  (p: { domains: string[] }) => p.domains,
+);
 
 /**
  * Ollama runs locally — intercept by matching its default port.
  * We cannot list "localhost" broadly because that would also match
  * the proxy itself (localhost:4000).
  */
-const OLLAMA_PORTS = ["11434"];
+const OLLAMA_PORTS: string[] = providersConfig.ollama_ports.map(String);
 
 /** Header name the proxy reads to determine the real upstream URL. */
 export const TARGET_URL_HEADER = "X-DC-Target-URL";
@@ -95,31 +92,24 @@ function isAlreadyProxied(url: string, guardrailPort: number): boolean {
 }
 
 /**
- * Domain substring → auth-profiles.json profile id mapping.
- * OpenClaw stores one profile per provider under agents/main/agent/auth-profiles.json.
- * Keys are read once at interceptor start and cached for the process lifetime.
+ * Domain substring → auth-profiles.json profile id mapping, built from
+ * providers.json. OpenClaw stores one profile per provider under
+ * agents/main/agent/auth-profiles.json.
  */
-const DOMAIN_TO_PROFILE: Record<string, string> = {
-  "api.anthropic.com":               "anthropic:default",
-  "openrouter.ai":                   "openrouter:default",
-  "api.openai.com":                  "openai:default",
-  "openai.azure.com":                "azure:default",
-  "generativelanguage.googleapis.com": "google:default",
-  "googleapis.com/v1/projects":      "google:default", // Vertex AI
-};
+const DOMAIN_TO_PROFILE: Record<string, string> = {};
+for (const p of providersConfig.providers) {
+  if (p.profile_id) {
+    for (const d of p.domains) {
+      DOMAIN_TO_PROFILE[d] = p.profile_id;
+    }
+  }
+}
 
-// Key cache with TTL — refreshed every 30 seconds so key changes in
-// OpenClaw are picked up without needing to restart.
-const KEY_CACHE_TTL_MS = 30_000;
+// Provider keys loaded once at interceptor start. OpenClaw restarts the
+// process whenever keys change, so there is no need for TTL-based reload.
 let providerKeyCache: Record<string, string> = {};
-let providerKeyCacheTs = 0;
 
 function loadProviderKeys(): void {
-  const now = Date.now();
-  if (now - providerKeyCacheTs < KEY_CACHE_TTL_MS && providerKeyCacheTs > 0) {
-    return; // still fresh
-  }
-
   try {
     const profilesPath = join(
       homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json"
@@ -147,11 +137,9 @@ function loadProviderKeys(): void {
       }
     }
     providerKeyCache = fresh;
-    providerKeyCacheTs = now;
   } catch (err) {
     // auth-profiles.json not found or unreadable — log so it's diagnosable
     console.log(`[defenseclaw] could not load provider keys: ${err}`);
-    providerKeyCacheTs = now; // avoid hammering on every request
   }
 }
 
@@ -161,6 +149,37 @@ function getRealKeyForUrl(urlStr: string): string {
     if (urlStr.includes(domain)) return key;
   }
   return "";
+}
+
+/**
+ * Build the proxy-hop headers (X-DC-Target-URL, X-AI-Auth, X-DC-Auth) that
+ * the guardrail proxy expects. Used by both the fetch and https.request
+ * interceptors so the logic lives in one place.
+ */
+function buildProxyHeaders(
+  targetOrigin: string,
+  urlStr: string,
+  existingAuth: string,
+): Record<string, string> {
+  const hdrs: Record<string, string> = {
+    [TARGET_URL_HEADER]: targetOrigin,
+  };
+
+  // X-AI-Auth: real LLM provider key, separate from Authorization.
+  const realKey = getRealKeyForUrl(urlStr);
+  if (realKey) {
+    hdrs[AI_AUTH_HEADER] = `Bearer ${realKey}`;
+  } else if (existingAuth && !existingAuth.startsWith("Bearer sk-dc-")) {
+    hdrs[AI_AUTH_HEADER] = existingAuth;
+  }
+
+  // X-DC-Auth: proxy authentication token for remote deployments.
+  const sidecarToken = loadSidecarConfig().token;
+  if (sidecarToken) {
+    hdrs[DC_AUTH_HEADER] = `Bearer ${sidecarToken}`;
+  }
+
+  return hdrs;
 }
 
 /**
@@ -193,10 +212,6 @@ export function createFetchInterceptor(guardrailPort: number) {
         return originalFetch!(input, init);
       }
 
-      // Refresh key cache if stale — picks up key changes made in OpenClaw
-      // without requiring a restart.
-      loadProviderKeys();
-
       let original: URL;
       try {
         original = new URL(urlStr);
@@ -207,33 +222,14 @@ export function createFetchInterceptor(guardrailPort: number) {
       // Rewrite: keep path + query, replace scheme://host with proxy.
       const proxied = `${proxyBase}${original.pathname}${original.search}`;
 
-      // Merge all original headers and add X-DC-Target-URL.
+      // Merge all original headers and add proxy-hop headers.
       const headers = new Headers(
         input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
       );
-      headers.set(TARGET_URL_HEADER, original.origin);
-
-      // X-DC-Auth: proxy authentication token (defenseclaw gateway token).
-      // The proxy trusts loopback connections, so this is belt-and-suspenders
-      // for remote proxy deployments.
-      const sidecarToken = loadSidecarConfig().token;
-      if (sidecarToken) {
-        headers.set(DC_AUTH_HEADER, `Bearer ${sidecarToken}`);
-      }
-
-      // X-AI-Auth: real LLM provider key, separate from Authorization so the
-      // proxy can resolve the correct upstream key independently of the header
-      // that openclaw sends for its own auth flows.
-      const realKey = getRealKeyForUrl(urlStr);
-      if (realKey) {
-        headers.set(AI_AUTH_HEADER, `Bearer ${realKey}`);
-      } else {
-        // No cached key — forward original Authorization as X-AI-Auth so the
-        // proxy has it available (e.g. when OpenClaw sends the real key directly).
-        const existingAuth = headers.get("Authorization") ?? "";
-        if (existingAuth && !existingAuth.startsWith("Bearer sk-dc-")) {
-          headers.set(AI_AUTH_HEADER, existingAuth);
-        }
+      const existingAuth = headers.get("Authorization") ?? "";
+      const proxyHdrs = buildProxyHeaders(original.origin, urlStr, existingAuth);
+      for (const [k, v] of Object.entries(proxyHdrs)) {
+        headers.set(k, v);
       }
 
       // Build new init, preserving all original properties.
@@ -270,7 +266,6 @@ export function createFetchInterceptor(guardrailPort: number) {
           : ((urlOrOptions as NodeRequestOptions).hostname as string ?? "");
 
       if (isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort)) {
-        loadProviderKeys();
         let opts: NodeRequestOptions = {};
         let cb = callback;
 
@@ -293,12 +288,9 @@ export function createFetchInterceptor(guardrailPort: number) {
           return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
         }
 
-        const realKey = getRealKeyForUrl(urlStr);
         const hdrs = opts.headers as Record<string, string> ?? {};
         const existingAuth = hdrs["authorization"] ?? hdrs["Authorization"] ?? "";
-        const aiAuth = realKey ? `Bearer ${realKey}`
-          : (existingAuth && !existingAuth.startsWith("Bearer sk-dc-") ? existingAuth : "");
-        const sidecarToken = loadSidecarConfig().token;
+        const proxyHdrs = buildProxyHeaders(originalUrl.origin, urlStr, existingAuth);
 
         const newOpts: NodeRequestOptions = {
           ...opts,
@@ -306,12 +298,7 @@ export function createFetchInterceptor(guardrailPort: number) {
           port: guardrailPort,
           protocol: "http:",
           path: `${originalUrl.pathname}${originalUrl.search}`,
-          headers: {
-            ...hdrs,
-            "X-DC-Target-URL": originalUrl.origin,
-            ...(aiAuth ? { "X-AI-Auth": aiAuth } : {}),
-            ...(sidecarToken ? { "X-DC-Auth": `Bearer ${sidecarToken}` } : {}),
-          },
+          headers: { ...hdrs, ...proxyHdrs },
         };
 
         console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);

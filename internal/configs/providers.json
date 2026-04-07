@@ -1,0 +1,35 @@
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "domains": ["api.anthropic.com"],
+      "profile_id": "anthropic:default"
+    },
+    {
+      "name": "openrouter",
+      "domains": ["openrouter.ai"],
+      "profile_id": "openrouter:default"
+    },
+    {
+      "name": "openai",
+      "domains": ["api.openai.com"],
+      "profile_id": "openai:default"
+    },
+    {
+      "name": "azure",
+      "domains": ["openai.azure.com"],
+      "profile_id": "azure:default"
+    },
+    {
+      "name": "gemini",
+      "domains": ["generativelanguage.googleapis.com", "googleapis.com/v1/projects"],
+      "profile_id": "google:default"
+    },
+    {
+      "name": "bedrock",
+      "domains": ["amazonaws.com"],
+      "profile_id": null
+    }
+  ],
+  "ollama_ports": [11434]
+}

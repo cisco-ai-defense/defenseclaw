@@ -35,6 +35,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -363,19 +364,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, upstreamURL)
 
 	// Resolve the key to use for the upstream provider.
-	// Priority: (1) proxy's configured key (env / auth-profiles), (2) X-AI-Auth
-	// from the fetch interceptor, (3) original Authorization — skipping any
-	// sk-dc-* master keys which are internal to the defenseclaw proxy layer.
+	// Priority: (1) X-AI-Auth from the fetch interceptor (authoritative — the
+	// interceptor already resolved the real provider key from auth-profiles.json),
+	// (2) original Authorization — skipping any sk-dc-* master keys which are
+	// internal to the defenseclaw proxy layer.
 	upstreamAuth := ""
-	if prov := inferProviderFromURL(targetOrigin); prov != "" {
-		if key := resolveConfiguredKeyForProvider(prov, p.dataDir); key != "" {
-			upstreamAuth = "Bearer " + key
-		}
-	}
-	if upstreamAuth == "" {
-		if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
-			upstreamAuth = aiAuth
-		}
+	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
+		upstreamAuth = aiAuth
 	}
 	if upstreamAuth == "" {
 		if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
@@ -471,27 +466,39 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
-// set by the plugin's fetch interceptor) to a provider name. This is the
-// most reliable routing signal when the fetch interceptor is active because
-// it reflects the actual upstream the request was destined for.
-func inferProviderFromURL(targetURL string) string {
-	switch {
-	case strings.Contains(targetURL, "anthropic.com"):
-		return "anthropic"
-	case strings.Contains(targetURL, "openrouter.ai"):
-		return "openrouter"
-	case strings.Contains(targetURL, "openai.com"):
-		return "openai"
-	case strings.Contains(targetURL, "googleapis.com"):
-		return "gemini"
-	case strings.Contains(targetURL, "amazonaws.com"):
-		return "bedrock"
-	case strings.Contains(targetURL, "openai.azure.com"):
-		return "azure"
-	default:
-		return ""
+// providerDomains is built once at init from the embedded providers.json.
+// Each entry maps a domain substring to the provider name.
+var providerDomains []struct {
+	domain string
+	name   string
+}
+
+func init() {
+	cfg, err := configs.LoadProviders()
+	if err != nil {
+		panic("gateway: failed to load embedded providers.json: " + err.Error())
 	}
+	for _, p := range cfg.Providers {
+		for _, d := range p.Domains {
+			providerDomains = append(providerDomains, struct {
+				domain string
+				name   string
+			}{d, p.Name})
+		}
+	}
+}
+
+// inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
+// set by the plugin's fetch interceptor) to a provider name. The domain list
+// is loaded from internal/configs/providers.json — the single source of truth
+// shared with the TypeScript fetch interceptor.
+func inferProviderFromURL(targetURL string) string {
+	for _, pd := range providerDomains {
+		if strings.Contains(targetURL, pd.domain) {
+			return pd.name
+		}
+	}
+	return ""
 }
 
 // resolveProvider selects the upstream LLMProvider for the given request.
@@ -516,23 +523,17 @@ func (p *GuardrailProxy) resolveProvider(req *ChatRequest) LLMProvider {
 	}
 
 	// Fetch interceptor path: X-DC-Target-URL set by plugin.
+	// The interceptor already resolved the real provider key from
+	// auth-profiles.json and sends it via X-AI-Auth (req.TargetAPIKey).
 	if req.TargetURL != "" {
 		if prefix := inferProviderFromURL(req.TargetURL); prefix != "" {
-			// Prefer the key from the proxy's own configured sources (env vars,
-			// .env, auth-profiles.json) over X-AI-Auth from the fetch interceptor,
-			// so the key set up during "defenseclaw setup" / openclaw configure is
-			// always authoritative.
-			key := resolveConfiguredKeyForProvider(prefix, p.dataDir)
-			if key == "" {
-				key = req.TargetAPIKey // fallback: what the interceptor sent
-			}
 			// Azure requires the specific resource endpoint as baseURL.
 			// Use X-DC-Target-URL directly instead of the generic fallback.
 			baseURL := ""
 			if prefix == "azure" {
 				baseURL = req.TargetURL
 			}
-			return NewProviderWithBase(prefix+"/"+req.Model, key, baseURL)
+			return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, baseURL)
 		}
 	}
 
@@ -1364,72 +1365,6 @@ func resolveAzureEndpointFromOpenClaw() string {
 	return ""
 }
 
-// providerEnvVars maps provider name → well-known environment variable names
-// for the API key, checked in order of preference.
-var providerEnvVars = map[string][]string{
-	"openrouter": {"OPENROUTER_API_KEY"},
-	"anthropic":  {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"},
-	"openai":     {"OPENAI_API_KEY"},
-	"gemini":     {"GOOGLE_API_KEY", "GEMINI_API_KEY"},
-	"azure":      {"AZURE_OPENAI_API_KEY"},
-}
-
-// resolveConfiguredKeyForProvider returns the API key for the named provider
-// from the proxy's own configuration sources: env vars (including .env) first,
-// then OpenClaw's auth-profiles.json. This is the "key provided during configure"
-// and is preferred over whatever the fetch interceptor forwards in X-AI-Auth.
-func resolveConfiguredKeyForProvider(providerName, dataDir string) string {
-	dotenvPath := filepath.Join(dataDir, ".env")
-	if vars, ok := providerEnvVars[providerName]; ok {
-		for _, v := range vars {
-			if key := ResolveAPIKey(v, dotenvPath); key != "" {
-				return key
-			}
-		}
-	}
-	// Try the canonical profile name first.
-	if key := resolveKeyFromOpenClawProfilesForProvider(providerName); key != "" {
-		return key
-	}
-	// For Azure: scan all profiles for any with metadata.endpoint pointing at
-	// an Azure domain — covers custom deployments like Azure AI Foundry where
-	// the profile id is "microsoft-foundry:default" rather than "azure:default".
-	if providerName == "azure" {
-		return resolveKeyFromOpenClawProfileByEndpoint("openai.azure.com")
-	}
-	return ""
-}
-
-// resolveKeyFromOpenClawProfileByEndpoint scans all profiles for one whose
-// metadata.endpoint hostname contains the given substring, and returns its key.
-func resolveKeyFromOpenClawProfileByEndpoint(endpointSubstr string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	profilesPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json")
-	data, err := os.ReadFile(profilesPath)
-	if err != nil {
-		return ""
-	}
-	var doc struct {
-		Profiles map[string]struct {
-			Key      string `json:"key"`
-			Metadata struct {
-				Endpoint string `json:"endpoint"`
-			} `json:"metadata"`
-		} `json:"profiles"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return ""
-	}
-	for _, p := range doc.Profiles {
-		if p.Key != "" && strings.Contains(p.Metadata.Endpoint, endpointSubstr) {
-			return p.Key
-		}
-	}
-	return ""
-}
 
 // resolveKeyFromOpenClawProfiles reads the API key for a given model's provider
 // from OpenClaw's auth-profiles.json (~/.openclaw/agents/main/agent/auth-profiles.json).

@@ -5,6 +5,9 @@
 .env.*
 !.env.example
 
+# Generated config copies (canonical source: internal/configs/providers.json)
+extensions/defenseclaw/src/providers.json
+
 # Editor and IDE metadata
 .idea/
 .vscode/

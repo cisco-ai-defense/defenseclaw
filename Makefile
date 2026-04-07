@@ -94,6 +94,7 @@ start: gateway
 
 plugin:
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
+	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
