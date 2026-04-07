@@ -1571,7 +1571,19 @@ phase_splunk() {
     echo "  --- Splunk schema check ---"
     echo "$schema_result" | jq '.' 2>/dev/null || echo "$schema_result"
     echo "  --- end schema check ---"
-    if echo "$schema_result" | jq -e 'length > 0 and (.[0].action // "") != "" and (.[0].target // "") != "" and (.[0].actor // "") != "" and (.[0].details // "") != "" and (.[0].severity // "") != "" and (.[0].run_id // "") != ""' >/dev/null 2>&1; then
+    if echo "$schema_result" | jq -e '
+        length > 0 and
+        (
+            .[0] as $evt |
+            ($evt._raw | fromjson? // {}) as $raw |
+            (($evt.action // $raw.action // "") != "") and
+            (($evt.target // $raw.target // "") != "") and
+            (($evt.actor // $raw.actor // "") != "") and
+            (($evt.details // $raw.details // "") != "") and
+            (($evt.severity // $raw.severity // "") != "") and
+            (($evt.run_id // $raw.run_id // "") != "")
+        )
+    ' >/dev/null 2>&1; then
         pass "Splunk: event schema contains action,target,actor,details,severity,run_id"
     else
         fail "Splunk: event schema contains action,target,actor,details,severity,run_id" "schema check query returned incomplete fields"
