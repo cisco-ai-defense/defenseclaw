@@ -89,12 +89,14 @@ jobs:
             --no-verify
           echo "  ✓ skill-scanner configured (behavioral + balanced policy)"
 
-          # --- Setup mcp-scanner with yara + behavioral + instructions ---
+          # --- Setup mcp-scanner with yara + instructions ---
+          # NOTE: 'behavioral' analyzer requires MCP_SCANNER_LLM_API_KEY which
+          # is not available in CI. Use yara-only to avoid false failures.
           defenseclaw setup mcp-scanner \
-            --analyzers yara,behavioral \
+            --analyzers yara \
             --scan-instructions \
             --non-interactive
-          echo "  ✓ mcp-scanner configured (yara + behavioral + instructions)"
+          echo "  ✓ mcp-scanner configured (yara + instructions)"
 
           # --- Detect model from OpenClaw ---
           OC_MODEL=$(python3 -c "

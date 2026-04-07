@@ -466,6 +466,27 @@ phase_agent_chat() {
         return
     fi
 
+    # --- Ensure OpenClaw gateway is alive ---
+    # The gateway may have died during earlier phases (e.g. SIGTERM from scanner).
+    if ! curl -sf --max-time 3 "$OPENCLAW_URL" >/dev/null 2>&1; then
+        echo "  OpenClaw gateway not responding — restarting..."
+        openclaw gateway stop 2>/dev/null || true
+        sleep 1
+        openclaw gateway --force &
+        OPENCLAW_PID=$!
+        sleep 5
+        if curl -sf --max-time 3 "$OPENCLAW_URL" >/dev/null 2>&1; then
+            echo "  OpenClaw gateway restarted (PID $OPENCLAW_PID)"
+            # Reconnect sidecar to the fresh gateway
+            defenseclaw-gateway restart 2>/dev/null || true
+            sleep 3
+        else
+            echo "  WARNING: OpenClaw gateway still not responding"
+        fi
+    else
+        echo "  OpenClaw gateway alive at $OPENCLAW_URL"
+    fi
+
     local session_id="e2e-test-$$"
 
     # --- Discover skill directories ---
@@ -487,12 +508,15 @@ for d in cfg.skill_dirs():
     echo "  Done cleaning stale skills"
 
     # --- Snapshot skills BEFORE ---
-    local skills_before
-    skills_before=$(openclaw skills list --json 2>/dev/null || echo "[]")
-    local before_names
-    before_names=$(echo "$skills_before" | jq -r '.[].name' 2>/dev/null | sort || true)
-    local before_count
-    before_count=$(echo "$before_names" | grep -c '[^[:space:]]' || echo 0)
+    local skills_before=""
+    skills_before=$(openclaw skills list --json 2>/dev/null) || true
+    if [ -z "$skills_before" ] || ! echo "$skills_before" | jq -e '.' >/dev/null 2>&1; then
+        skills_before="[]"
+    fi
+    local before_names=""
+    before_names=$(echo "$skills_before" | jq -r '.[].name' 2>/dev/null | sort) || true
+    local before_count=0
+    before_count=$(echo "$before_names" | grep -c '[^[:space:]]') || true
     echo "  Skills known to OpenClaw before: $before_count"
 
     local disk_before
@@ -502,17 +526,27 @@ for d in cfg.skill_dirs():
     # --- Discover a real ClawHub skill to install ---
     echo ""
     echo "  Discovering available ClawHub skills..."
-    local search_out
-    search_out=$(timeout 30 openclaw skills search --limit 5 --json 2>/dev/null || echo "[]")
+    local search_out=""
     local install_slug=""
 
-    if echo "$search_out" | jq -e 'length > 0' >/dev/null 2>&1; then
-        install_slug=$(echo "$search_out" | jq -r '.[0].slug // .[0].name // empty' 2>/dev/null)
-        echo "  Found ClawHub skill: $install_slug"
+    # Guard against openclaw commands crashing the script (exit 5 from jq/timeout
+    # can leak through pipefail). Run in a subshell to isolate failures.
+    search_out=$(timeout 30 openclaw skills search --limit 5 --json 2>/dev/null) || true
+
+    if [ -n "$search_out" ]; then
+        # Validate it's actually JSON before feeding to jq
+        if echo "$search_out" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+            install_slug=$(echo "$search_out" | jq -r '.[0].slug // .[0].name // empty' 2>/dev/null) || true
+            echo "  Found ClawHub skill: ${install_slug:-<empty>}"
+        else
+            echo "  Search output is not a JSON array — skipping"
+        fi
+    else
+        echo "  Search returned empty output"
     fi
 
     if [ -z "$install_slug" ]; then
-        echo "  ClawHub search returned no results; using fallback slug 'weather'"
+        echo "  Using fallback slug 'weather'"
         install_slug="weather"
     fi
 
@@ -563,10 +597,13 @@ for d in cfg.skill_dirs():
     new_on_disk=$(comm -13 <(echo "$disk_before") <(echo "$disk_after") | grep -v '^$' || true)
 
     # Also check openclaw's own skill list
-    local skills_after
-    skills_after=$(openclaw skills list --json 2>/dev/null || echo "[]")
-    local after_names
-    after_names=$(echo "$skills_after" | jq -r '.[].name' 2>/dev/null | sort || true)
+    local skills_after=""
+    skills_after=$(openclaw skills list --json 2>/dev/null) || true
+    if [ -z "$skills_after" ] || ! echo "$skills_after" | jq -e '.' >/dev/null 2>&1; then
+        skills_after="[]"
+    fi
+    local after_names=""
+    after_names=$(echo "$skills_after" | jq -r '.[].name' 2>/dev/null | sort) || true
     local new_in_list
     new_in_list=$(comm -13 <(echo "$before_names") <(echo "$after_names") | grep -v '^$' || true)
 
@@ -680,8 +717,11 @@ for d in cfg.skill_dirs():
         fi
 
         # Verify it's gone from openclaw list
-        local post_remove_list
-        post_remove_list=$(openclaw skills list --json 2>/dev/null || echo "[]")
+        local post_remove_list=""
+        post_remove_list=$(openclaw skills list --json 2>/dev/null) || true
+        if [ -z "$post_remove_list" ] || ! echo "$post_remove_list" | jq -e '.' >/dev/null 2>&1; then
+            post_remove_list="[]"
+        fi
         local still_in_list
         still_in_list=$(echo "$post_remove_list" | jq --arg n "$installed_skill" '[.[] | select(.name == $n)] | length' 2>/dev/null || echo "0")
         if [ "${still_in_list:-0}" -eq 0 ]; then
