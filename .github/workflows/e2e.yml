@@ -55,14 +55,17 @@ jobs:
       - name: Install DefenseClaw
         run: make install
 
-      # Add venv to PATH for all subsequent steps
+      # Add venv and ~/.local/bin to PATH for all subsequent steps
       - name: Activate venv
-        run: echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+        run: |
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # Phase 3 — Initialize DefenseClaw
       - name: Init DefenseClaw
         run: |
-          defenseclaw init --enable-guardrail
+          defenseclaw init
+          defenseclaw setup guardrail --non-interactive
           defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
           if [ -n "${SPLUNK_ACCESS_TOKEN}" ]; then
