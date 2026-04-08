@@ -20,6 +20,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/capability"
 )
@@ -186,5 +187,101 @@ func TestMatchConstraints(t *testing.T) {
 				t.Errorf("MatchConstraints() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func newTestEvaluator(t *testing.T) *capability.Evaluator {
+	t.Helper()
+	store := newTestStore(t)
+	fixtureDir := filepath.Join("..", "..", "test", "fixtures", "capabilities")
+	eval, err := capability.NewEvaluator(context.Background(), fixtureDir, store)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	return eval
+}
+
+func TestEvaluateUnknownAgent(t *testing.T) {
+	eval := newTestEvaluator(t)
+	dec := eval.Evaluate(context.Background(), capability.EvalRequest{
+		Agent:    "nonexistent",
+		Resource: "jira.get_issue",
+	})
+	if dec.Allowed {
+		t.Fatal("expected deny for unknown agent")
+	}
+	if dec.Reason != "unknown agent" {
+		t.Errorf("reason = %q, want %q", dec.Reason, "unknown agent")
+	}
+}
+
+func TestEvaluateRestricted(t *testing.T) {
+	eval := newTestEvaluator(t)
+	dec := eval.Evaluate(context.Background(), capability.EvalRequest{
+		Agent:       "readonly-agent",
+		Resource:    "jira.delete_issue",
+		Environment: "production",
+	})
+	if dec.Allowed {
+		t.Fatal("expected deny for restricted resource")
+	}
+}
+
+func TestEvaluateNoCapability(t *testing.T) {
+	eval := newTestEvaluator(t)
+	dec := eval.Evaluate(context.Background(), capability.EvalRequest{
+		Agent:       "support-bot",
+		Resource:    "github.create_pr",
+		Environment: "production",
+		Timestamp:   time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+	})
+	if dec.Allowed {
+		t.Fatal("expected deny for resource with no capability")
+	}
+	if dec.Reason != "no capability for resource" {
+		t.Errorf("reason = %q", dec.Reason)
+	}
+}
+
+func TestEvaluateConstraintMatch(t *testing.T) {
+	eval := newTestEvaluator(t)
+	dec := eval.Evaluate(context.Background(), capability.EvalRequest{
+		Agent:       "support-bot",
+		Resource:    "jira.get_issue",
+		Params:      map[string]any{"project": "ENG-123", "fields": []any{"summary"}},
+		Environment: "production",
+		Timestamp:   time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+	})
+	if !dec.Allowed {
+		t.Fatalf("expected allow, got deny: %s", dec.Reason)
+	}
+	if dec.Capability != "read_jira_ticket" {
+		t.Errorf("capability = %q, want %q", dec.Capability, "read_jira_ticket")
+	}
+}
+
+func TestEvaluateConstraintMismatch(t *testing.T) {
+	eval := newTestEvaluator(t)
+	dec := eval.Evaluate(context.Background(), capability.EvalRequest{
+		Agent:       "support-bot",
+		Resource:    "jira.get_issue",
+		Params:      map[string]any{"project": "SALES-456"},
+		Environment: "production",
+		Timestamp:   time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+	})
+	if dec.Allowed {
+		t.Fatal("expected deny for constraint mismatch")
+	}
+}
+
+func TestEvaluateAdminWildcard(t *testing.T) {
+	eval := newTestEvaluator(t)
+	dec := eval.Evaluate(context.Background(), capability.EvalRequest{
+		Agent:    "admin-agent",
+		Resource: "jira.delete_issue",
+		Params:   map[string]any{},
+	})
+	if !dec.Allowed {
+		t.Fatalf("expected allow for admin wildcard, got deny: %s", dec.Reason)
 	}
 }
