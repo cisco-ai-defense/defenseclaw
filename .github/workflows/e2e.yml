@@ -499,6 +499,11 @@ jobs:
               f.write("\n")
           auth_path.chmod(0o600)
           PY
+          USER_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$USER_RUNTIME_DIR}"
+          export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+          echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}" >> "$GITHUB_ENV"
           mkdir -p "$(dirname "${OPENCLAW_SERVICE_DROPIN_PATH}")"
           python3 - <<'PY'
           import os
