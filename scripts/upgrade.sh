@@ -305,6 +305,11 @@ section "Starting Services"
 step "Starting defenseclaw-gateway ..."
 defenseclaw-gateway start && ok "Gateway started" || warn "Could not start gateway"
 
+step "Restarting OpenClaw gateway ..."
+openclaw gateway restart 2>/dev/null \
+    && ok "OpenClaw gateway restarted" \
+    || warn "Could not restart OpenClaw gateway automatically. Run: openclaw gateway restart"
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 section "Upgrade Complete"
