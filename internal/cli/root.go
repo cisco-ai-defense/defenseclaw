@@ -26,6 +26,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/capability"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -35,6 +36,7 @@ var (
 	auditStore   *audit.Store
 	auditLog     *audit.Logger
 	otelProvider *telemetry.Provider
+	capEvaluator *capability.Evaluator
 	appVersion   string
 )
 
@@ -73,6 +75,7 @@ Run without arguments to start the sidecar daemon.`,
 		loadDotEnvIntoOS(filepath.Join(cfg.DataDir, ".env"))
 		initSplunkForwarder()
 		initOTelProvider()
+		initCapabilityEvaluator()
 		return nil
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
@@ -173,4 +176,20 @@ func initSplunkForwarder() {
 	}
 
 	auditLog.SetSplunkForwarder(fwd)
+}
+
+func initCapabilityEvaluator() {
+	if cfg == nil {
+		return
+	}
+	dir := cfg.CapabilityPolicyDir
+	if dir == "" {
+		return
+	}
+	eval, err := capability.NewEvaluator(context.Background(), dir, auditStore)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: capability evaluator init: %v\n", err)
+		return
+	}
+	capEvaluator = eval
 }
