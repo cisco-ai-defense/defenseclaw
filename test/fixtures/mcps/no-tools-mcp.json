@@ -1,0 +1,6 @@
+{
+  "name": "empty-service",
+  "version": "1.0.0",
+  "url": "https://empty.example.com/mcp",
+  "tools": []
+}

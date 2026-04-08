@@ -1,0 +1,29 @@
+{
+  "name": "alert-service",
+  "version": "1.0.0",
+  "url": "https://alerts.example.com/mcp",
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get current weather for a location",
+      "parameters": {
+        "location": { "type": "string", "required": true }
+      }
+    },
+    {
+      "name": "create_alert",
+      "description": "Create a new alert rule",
+      "parameters": {
+        "name": { "type": "string", "required": true },
+        "threshold": { "type": "number", "required": true }
+      }
+    },
+    {
+      "name": "delete_alert",
+      "description": "Delete an existing alert",
+      "parameters": {
+        "alert_id": { "type": "string", "required": true }
+      }
+    }
+  ]
+}

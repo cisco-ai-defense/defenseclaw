@@ -1,0 +1,10 @@
+name: permissioned-skill
+version: "1.0.0"
+description: A skill with read-only permissions for testing
+author: test-user
+
+capabilities:
+  - text-generation
+
+permissions:
+  - read-only
