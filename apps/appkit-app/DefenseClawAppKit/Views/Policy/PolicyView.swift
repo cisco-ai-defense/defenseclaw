@@ -7,6 +7,10 @@ struct PolicyView: View {
     @State private var isDryRun = false
     @State private var dryRunResults = ""
     @State private var error: String?
+    @State private var evalTargetType = "skill"
+    @State private var evalTargetName = ""
+
+    private let targetTypes = ["skill", "mcp", "plugin"]
 
     var body: some View {
         VStack(spacing: 16) {
@@ -21,10 +25,10 @@ struct PolicyView: View {
                 }
                 .disabled(isLoading)
 
-                Button("Dry Run") {
-                    runDryRun()
+                Button("Reload Policy") {
+                    reloadPolicy()
                 }
-                .disabled(policyContent.isEmpty || isDryRun)
+                .disabled(isLoading)
             }
             .padding()
 
@@ -46,9 +50,31 @@ struct PolicyView: View {
             }
             .padding()
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Policy Evaluation")
+                    .font(.headline)
+
+                HStack {
+                    Picker("Target Type", selection: $evalTargetType) {
+                        ForEach(targetTypes, id: \.self) { type in
+                            Text(type.capitalized).tag(type)
+                        }
+                    }
+                    .frame(width: 150)
+
+                    TextField("Target Name", text: $evalTargetName)
+
+                    Button("Evaluate") {
+                        runEvaluation()
+                    }
+                    .disabled(evalTargetName.isEmpty || isDryRun)
+                }
+            }
+            .padding()
+
             if !dryRunResults.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Dry Run Results")
+                    Text("Evaluation Results")
                         .font(.headline)
 
                     ScrollView {
@@ -66,6 +92,7 @@ struct PolicyView: View {
             Spacer()
         }
         .navigationTitle("Policies")
+        .task { loadPolicy() }
     }
 
     private func loadPolicy() {
@@ -89,26 +116,55 @@ struct PolicyView: View {
         }
     }
 
-    private func runDryRun() {
-        isDryRun = true
-        dryRunResults = ""
+    private func reloadPolicy() {
+        isLoading = true
+        error = nil
 
         Task {
             let client = SidecarClient()
             do {
-                let result = try await client.policyEvaluate(targetType: "skill", targetName: "test")
+                try await client.policyReload()
                 await MainActor.run {
-                    dryRunResults = "Policy evaluation result: \(result.verdict)\n"
-                    dryRunResults += "Allow: \(result.allow)\n"
+                    isLoading = false
+                }
+                // Reload the policy content after reload
+                loadPolicy()
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    isLoading = false
+                }
+            }
+        }
+    }
+
+    private func runEvaluation() {
+        isDryRun = true
+        dryRunResults = ""
+        error = nil
+
+        Task {
+            let client = SidecarClient()
+            do {
+                let result = try await client.policyEvaluate(targetType: evalTargetType, targetName: evalTargetName)
+                await MainActor.run {
+                    dryRunResults = "Verdict: \(result.verdict)\n"
+                    dryRunResults += "Allowed: \(result.allow)\n"
                     if let reason = result.reason {
                         dryRunResults += "Reason: \(reason)\n"
+                    }
+                    if let fa = result.fileAction {
+                        dryRunResults += "File Action: \(fa)\n"
+                    }
+                    if let ia = result.installAction {
+                        dryRunResults += "Install Action: \(ia)\n"
                     }
                     isDryRun = false
                 }
             } catch {
                 await MainActor.run {
                     self.error = error.localizedDescription
-                    dryRunResults = "Dry run failed: \(error.localizedDescription)"
+                    dryRunResults = "Evaluation failed: \(error.localizedDescription)"
                     isDryRun = false
                 }
             }

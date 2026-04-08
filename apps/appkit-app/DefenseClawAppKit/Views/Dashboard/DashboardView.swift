@@ -36,22 +36,40 @@ struct DashboardView: View {
     // MARK: - Chat Header
 
     private var chatHeader: some View {
-        HStack {
+        HStack(spacing: 10) {
+            Image(systemName: "shield.checkered")
+                .font(.system(size: 16))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.blue, .indigo],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
             Text("DefenseClaw")
                 .font(.headline)
             Spacer()
             HStack(spacing: 6) {
                 Circle()
-                    .fill(viewModel.isConnected ? Color.green : Color.orange)
+                    .fill(gatewayStatusColor)
                     .frame(width: 8, height: 8)
-                Text(viewModel.isConnected ? "Gateway Connected" : "Gateway Offline")
+                    .shadow(color: gatewayStatusColor.opacity(0.5), radius: 3)
+                Text(gatewayStatusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+            )
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // MARK: - Chat Messages
@@ -61,22 +79,36 @@ struct DashboardView: View {
             ScrollViewReader { proxy in
                 LazyVStack(alignment: .leading, spacing: 12) {
                     if viewModel.messages.isEmpty {
-                        VStack(spacing: 12) {
+                        VStack(spacing: 16) {
                             Image(systemName: "shield.checkered")
-                                .font(.system(size: 48))
-                                .foregroundStyle(.tertiary)
-                            Text("Agent Chat")
+                                .font(.system(size: 52))
+                                .foregroundStyle(
+                                    LinearGradient(
+                                        colors: [.blue.opacity(0.6), .indigo.opacity(0.4)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                            Text("DefenseClaw Agent")
                                 .font(.title2)
                                 .fontWeight(.semibold)
-                            Text("Send a message to interact with your AI agent through the OpenClaw gateway.")
+                            Text("Send a message to interact with your AI agent\nthrough the OpenClaw gateway.")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
+                                .lineSpacing(2)
                             if !viewModel.isConnected {
-                                Label("Gateway is offline — messages will be sent when it reconnects", systemImage: "exclamationmark.triangle")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                                    .padding(.top, 4)
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Text("Gateway is offline — messages will be sent when it reconnects")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.orange.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                             }
                         }
                         .frame(maxWidth: .infinity)
@@ -102,86 +134,73 @@ struct DashboardView: View {
 
     // MARK: - Chat Input
 
+    private var canSend: Bool {
+        !viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var chatInput: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextEditor(text: $viewModel.inputText)
+        VStack(spacing: 0) {
+            HStack(alignment: .bottom, spacing: 8) {
+                ChatTextView(
+                    text: $viewModel.inputText,
+                    placeholder: "Send a message... (Enter to send, Shift+Enter for new line)",
+                    onSubmit: {
+                        if canSend {
+                            viewModel.sendMessage()
+                        }
+                    }
+                )
                 .frame(minHeight: 36, maxHeight: 100)
-                .padding(4)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
 
-            if viewModel.isStreaming {
-                Button {
-                    viewModel.stopStreaming()
-                } label: {
-                    Image(systemName: "stop.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.red)
+                if viewModel.isStreaming {
+                    Button {
+                        viewModel.stopStreaming()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Stop response")
+                } else {
+                    Button {
+                        viewModel.sendMessage()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundStyle(canSend ? Color.accentColor : Color.gray.opacity(0.4))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!canSend)
+                    .help("Send message")
                 }
-                .buttonStyle(.borderless)
-            } else {
-                Button {
-                    viewModel.sendMessage()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(Color.accentColor)
-                }
-                .buttonStyle(.borderless)
-                .disabled(viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // MARK: - Governance Panel
 
     private var governancePanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Health section
-                healthSection
-
-                Divider()
-
-                // Alerts section
-                alertsSection
-
-                Divider()
-
-                // Skills section
-                skillsSection
-
-                Divider()
-
-                // MCP Servers section
-                mcpSection
-
-                Divider()
-
-                // Quick Actions
-                quickActionsSection
-            }
-            .padding()
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    private var healthSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: 0) {
+            // Panel header
             HStack {
-                Text("Subsystem Health")
+                Image(systemName: "shield.checkered")
+                    .foregroundStyle(.blue)
+                    .font(.caption)
+                Text("Governance")
                     .font(.headline)
                 Spacer()
-                if let h = viewModel.health {
-                    Text(formatUptime(h.uptimeMs))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 Button {
                     Task { await viewModel.refreshAll() }
                 } label: {
@@ -189,10 +208,44 @@ struct DashboardView: View {
                         .font(.caption)
                 }
                 .buttonStyle(.borderless)
+                .help("Refresh all")
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
 
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 12) {
+                    healthCard
+                    alertsCard
+                    skillsCard
+                    mcpCard
+                    quickActionsCard
+                }
+                .padding(12)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var healthCard: some View {
+        SidebarCard(title: "Subsystem Health", icon: "heart.text.square", iconColor: .green) {
             if let h = viewModel.health {
                 VStack(spacing: 6) {
+                    if let uptime = formatUptime(h.uptimeMs) as String? {
+                        HStack {
+                            Text("Uptime")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                            Text(uptime)
+                                .font(.caption2)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.bottom, 2)
+                    }
                     SubsystemRow(name: "Gateway", health: h.gateway)
                     SubsystemRow(name: "Watcher", health: h.watcher)
                     SubsystemRow(name: "API", health: h.api)
@@ -204,24 +257,26 @@ struct DashboardView: View {
                     }
                 }
             } else {
-                Label("Sidecar offline", systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.caption)
+                    Text("Sidecar offline")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
 
-    private var alertsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Alerts")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-
+    private var alertsCard: some View {
+        SidebarCard(title: "Alerts", icon: "bell.badge", iconColor: .orange, badge: viewModel.alerts.isEmpty ? nil : "\(viewModel.alerts.count)") {
             if viewModel.alerts.isEmpty {
                 HStack(spacing: 6) {
-                    Image(systemName: "checkmark.shield")
+                    Image(systemName: "checkmark.shield.fill")
                         .foregroundStyle(.green)
-                    Text("No alerts")
+                        .font(.caption)
+                    Text("No active alerts")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -237,19 +292,27 @@ struct DashboardView: View {
                         Spacer()
                         Text(alert.severity.rawValue)
                             .font(.caption2)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(severityColor(alert.severity).opacity(0.12))
                             .foregroundStyle(severityColor(alert.severity))
+                            .clipShape(Capsule())
                     }
+                }
+                if viewModel.alerts.count > 5 {
+                    Button("View All \(viewModel.alerts.count) Alerts") {
+                        (NSApp.delegate as? AppDelegate)?.showAlerts()
+                    }
+                    .font(.caption2)
+                    .buttonStyle(.borderless)
                 }
             }
         }
     }
 
-    private var skillsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Skills (\(viewModel.skills.count))")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-
+    private var skillsCard: some View {
+        SidebarCard(title: "Skills", icon: "wand.and.stars", iconColor: .purple, badge: viewModel.skills.isEmpty ? nil : "\(viewModel.skills.count)") {
             if viewModel.skills.isEmpty {
                 Text("No skills discovered")
                     .font(.caption)
@@ -264,18 +327,21 @@ struct DashboardView: View {
                             .font(.caption)
                             .lineLimit(1)
                         Spacer()
+                        Button {
+                            Task { await viewModel.toggleSkill(skill) }
+                        } label: {
+                            Text(skill.blocked ? "Enable" : "Disable")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
             }
         }
     }
 
-    private var mcpSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("MCP Servers (\(viewModel.mcpServers.count))")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-
+    private var mcpCard: some View {
+        SidebarCard(title: "MCP Servers", icon: "server.rack", iconColor: .teal, badge: viewModel.mcpServers.isEmpty ? nil : "\(viewModel.mcpServers.count)") {
             if viewModel.mcpServers.isEmpty {
                 Text("No MCP servers")
                     .font(.caption)
@@ -290,44 +356,65 @@ struct DashboardView: View {
                             .font(.caption)
                             .lineLimit(1)
                         Spacer()
+                        Button {
+                            Task { await viewModel.toggleMCP(server) }
+                        } label: {
+                            Text(server.blocked ? "Enable" : "Disable")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
             }
         }
     }
 
-    private var quickActionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Quick Actions")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-
-            HStack(spacing: 8) {
-                Button {
+    private var quickActionsCard: some View {
+        SidebarCard(title: "Quick Actions", icon: "bolt.fill", iconColor: .yellow) {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                QuickActionButton(title: "Alerts", icon: "bell", color: .orange) {
+                    (NSApp.delegate as? AppDelegate)?.showAlerts()
+                }
+                QuickActionButton(title: "Scan", icon: "magnifyingglass", color: .blue) {
                     (NSApp.delegate as? AppDelegate)?.showScan()
-                } label: {
-                    Label("Scan", systemImage: "magnifyingglass")
-                        .font(.caption)
                 }
-
-                Button {
+                QuickActionButton(title: "Policies", icon: "doc.text", color: .indigo) {
                     (NSApp.delegate as? AppDelegate)?.showPolicy()
-                } label: {
-                    Label("Policies", systemImage: "doc.text")
-                        .font(.caption)
                 }
-
-                Button {
+                QuickActionButton(title: "Tools", icon: "wrench.and.screwdriver", color: .teal) {
+                    (NSApp.delegate as? AppDelegate)?.showTools()
+                }
+                QuickActionButton(title: "Settings", icon: "gearshape", color: .gray) {
                     (NSApp.delegate as? AppDelegate)?.showSettings()
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                        .font(.caption)
+                }
+                QuickActionButton(title: "Logs", icon: "doc.text.magnifyingglass", color: .green) {
+                    (NSApp.delegate as? AppDelegate)?.showLogs()
                 }
             }
         }
     }
 
     // MARK: - Helpers
+
+    private var gatewayStatusColor: Color {
+        guard let h = viewModel.health else { return .red }
+        switch h.gateway.state {
+        case .running: return .green
+        case .reconnecting: return .yellow
+        case .starting: return .yellow
+        default: return .red
+        }
+    }
+
+    private var gatewayStatusText: String {
+        guard let h = viewModel.health else { return "Sidecar Offline" }
+        switch h.gateway.state {
+        case .running: return "Gateway Connected"
+        case .reconnecting: return "Sidecar Running (no gateway server)"
+        case .starting: return "Gateway Starting..."
+        default: return "Gateway \(h.gateway.state.rawValue)"
+        }
+    }
 
     private func formatUptime(_ ms: Int64) -> String {
         let seconds = Int(ms / 1000)
@@ -361,10 +448,12 @@ class DashboardViewModel {
     var skills: [Skill] = []
     var mcpServers: [MCPServer] = []
     var sessionViewModel: SessionViewModel?
+    var sidecarStatus = "Connecting..."
 
     private var session: AgentSession?
     private let sidecarClient = SidecarClient()
     private var pollingTask: Task<Void, Never>?
+    private let log = AppLogger.shared
 
     var messages: [ChatMessage] {
         session?.messages ?? []
@@ -416,10 +505,45 @@ class DashboardViewModel {
 
     @MainActor
     func refreshAll() async {
-        do { health = try await sidecarClient.health() } catch { health = nil }
+        do {
+            health = try await sidecarClient.health()
+            sidecarStatus = "Connected"
+        } catch {
+            health = nil
+            sidecarStatus = "Sidecar offline: \(error.localizedDescription)"
+            log.warn("dashboard", "Health poll failed", details: "\(error.localizedDescription)")
+        }
         do { alerts = try await sidecarClient.alerts() } catch { alerts = [] }
         do { skills = try await sidecarClient.skills() } catch { skills = [] }
         do { mcpServers = try await sidecarClient.mcpServers() } catch { mcpServers = [] }
+    }
+
+    @MainActor
+    func toggleSkill(_ skill: Skill) async {
+        do {
+            if skill.blocked {
+                try await sidecarClient.enableSkill(key: skill.id)
+            } else {
+                try await sidecarClient.disableSkill(key: skill.id)
+            }
+            await refreshAll()
+        } catch {
+            log.error("dashboard", "Toggle skill failed", details: "\(error)")
+        }
+    }
+
+    @MainActor
+    func toggleMCP(_ server: MCPServer) async {
+        do {
+            if server.blocked {
+                try await sidecarClient.enablePlugin(key: server.id)
+            } else {
+                try await sidecarClient.disablePlugin(key: server.id)
+            }
+            await refreshAll()
+        } catch {
+            log.error("dashboard", "Toggle MCP failed", details: "\(error)")
+        }
     }
 }
 
@@ -433,13 +557,19 @@ struct SubsystemRow: View {
         HStack(spacing: 8) {
             Circle()
                 .fill(stateColor)
-                .frame(width: 8, height: 8)
+                .frame(width: 7, height: 7)
+                .shadow(color: stateColor.opacity(0.4), radius: 2)
             Text(name)
                 .font(.caption)
             Spacer()
             Text(health.state.rawValue)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .fontWeight(.medium)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(stateColor.opacity(0.1))
+                .foregroundStyle(stateColor)
+                .clipShape(Capsule())
         }
     }
 
@@ -450,5 +580,34 @@ struct SubsystemRow: View {
         case .disabled, .stopped: return .gray
         case .error: return .red
         }
+    }
+}
+
+struct QuickActionButton: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 14))
+                    .foregroundStyle(color)
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(color.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(color.opacity(0.1), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }

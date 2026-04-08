@@ -1,5 +1,11 @@
 import Foundation
 
+/// Wrapper matching the sidecar's expected `{"input": {...}}` envelope.
+public struct PolicyEvaluateRequest: Codable, Sendable {
+    public let input: AdmissionInput
+    public init(input: AdmissionInput) { self.input = input }
+}
+
 public struct AdmissionInput: Codable, Sendable {
     public let targetType: String
     public let targetName: String
@@ -15,14 +21,26 @@ public struct AdmissionInput: Codable, Sendable {
     }
 }
 
-public struct AdmissionOutput: Codable, Sendable {
-    public let allow: Bool
-    public let reason: String?
-    public let verdict: String
-    public let severity: Severity
+/// Envelope: `{"ok": true, "data": {...}}`
+public struct PolicyEvaluateResponse: Codable, Sendable {
+    public let ok: Bool
+    public let data: AdmissionOutput
+}
 
-    public init(allow: Bool, reason: String?, verdict: String = "", severity: Severity = .none) {
-        self.allow = allow; self.reason = reason; self.verdict = verdict; self.severity = severity
+public struct AdmissionOutput: Codable, Sendable {
+    public let verdict: String
+    public let reason: String?
+    public let fileAction: String?
+    public let installAction: String?
+
+    public var allow: Bool { verdict != "blocked" && verdict != "rejected" }
+
+    public init(verdict: String = "", reason: String? = nil, fileAction: String? = nil, installAction: String? = nil) {
+        self.verdict = verdict; self.reason = reason; self.fileAction = fileAction; self.installAction = installAction
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case verdict; case reason; case fileAction = "file_action"; case installAction = "install_action"
     }
 }
 

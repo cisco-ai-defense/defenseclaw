@@ -7,11 +7,11 @@ public struct Alert: Codable, Identifiable, Sendable {
     public let severity: Severity
     public let details: String
     public let timestamp: Date
-    public let source: String
-    public let message: String
+    public let actor: String
+    public var message: String { details }
 
-    public init(id: String, action: String, target: String, severity: Severity, details: String, timestamp: Date, source: String = "", message: String = "") {
+    public init(id: String, action: String, target: String, severity: Severity, details: String, timestamp: Date, actor: String = "defenseclaw") {
         self.id = id; self.action = action; self.target = target; self.severity = severity
-        self.details = details; self.timestamp = timestamp; self.source = source; self.message = message
+        self.details = details; self.timestamp = timestamp; self.actor = actor
     }
 }

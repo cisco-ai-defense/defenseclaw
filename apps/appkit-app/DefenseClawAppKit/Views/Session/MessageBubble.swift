@@ -6,25 +6,92 @@ struct MessageBubble: View {
     let viewModel: SessionViewModel
 
     var body: some View {
-        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
-            HStack {
-                if message.role == .user {
-                    Spacer()
+        HStack(alignment: .top, spacing: 10) {
+            if message.role == .user {
+                Spacer(minLength: 60)
+            } else {
+                // Assistant avatar
+                Image(systemName: "shield.checkered")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        LinearGradient(
+                            colors: [Color.blue, Color.indigo],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .clipShape(Circle())
+            }
+
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
+                // Role label + timestamp
+                HStack(spacing: 6) {
+                    Text(message.role == .user ? "You" : "DefenseClaw")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+                    Text(message.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
 
+                // Content blocks
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(message.blocks) { block in
                         contentView(for: block)
                     }
                 }
                 .padding(12)
-                .background(message.role == .user ? Color.blue.opacity(0.1) : Color.gray.opacity(0.1))
-                .cornerRadius(12)
+                .background(bubbleBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(bubbleBorder, lineWidth: 0.5)
+                )
 
-                if message.role == .assistant {
-                    Spacer()
+                // Streaming indicator
+                if message.isStreaming {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("Responding...")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
+
+            if message.role == .user {
+                // User avatar
+                Image(systemName: "person.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Color.accentColor)
+                    .clipShape(Circle())
+            } else {
+                Spacer(minLength: 60)
+            }
+        }
+    }
+
+    private var bubbleBackground: some View {
+        Group {
+            if message.role == .user {
+                Color.accentColor.opacity(0.08)
+            } else {
+                Color(nsColor: .textBackgroundColor)
+            }
+        }
+    }
+
+    private var bubbleBorder: Color {
+        if message.role == .user {
+            return Color.accentColor.opacity(0.15)
+        } else {
+            return Color(nsColor: .separatorColor).opacity(0.5)
         }
     }
 

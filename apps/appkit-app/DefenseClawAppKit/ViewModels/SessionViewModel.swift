@@ -10,6 +10,7 @@ class SessionViewModel {
     var mcpServers: [MCPServer] = []
 
     private let sidecarClient = SidecarClient()
+    private let log = AppLogger.shared
 
     init(session: AgentSession) {
         self.session = session
@@ -43,7 +44,7 @@ class SessionViewModel {
             skills = try await sidecarClient.skills()
             mcpServers = try await sidecarClient.mcpServers()
         } catch {
-            print("Error refreshing governance: \(error)")
+            log.warn("session", "Governance refresh failed", details: "\(error)")
         }
     }
 

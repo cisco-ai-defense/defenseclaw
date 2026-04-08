@@ -1,13 +1,16 @@
 import Foundation
 
 public struct GuardrailConfig: Codable, Sendable {
-    public var enabled: Bool
     public var mode: String
     public var scannerMode: String
     public var blockMessage: String?
 
     enum CodingKeys: String, CodingKey {
-        case enabled, mode; case scannerMode = "scanner_mode"; case blockMessage = "block_message"
+        case mode; case scannerMode = "scanner_mode"; case blockMessage = "block_message"
+    }
+
+    public init(mode: String = "observe", scannerMode: String = "local", blockMessage: String? = nil) {
+        self.mode = mode; self.scannerMode = scannerMode; self.blockMessage = blockMessage
     }
 }
 

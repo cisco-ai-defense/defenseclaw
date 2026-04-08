@@ -41,8 +41,11 @@ struct GatewaySettingsView: View {
     @State private var autoStart = true
     @State private var statusMessage = ""
     @State private var isLoading = false
+    @State private var sidecarRunning = false
+    @State private var isRestarting = false
 
     private let configManager = ConfigManager()
+    private let launchAgent = LaunchAgentManager()
 
     var body: some View {
         Form {
@@ -53,10 +56,77 @@ struct GatewaySettingsView: View {
                 Toggle("Auto-start Gateway", isOn: $autoStart)
             }
 
+            Section("Service Control") {
+                HStack(spacing: 12) {
+                    // DefenseClaw Sidecar
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(sidecarRunning ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text("DefenseClaw Sidecar")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                        Text(sidecarRunning ? "Running" : "Stopped")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        restartSidecar()
+                    } label: {
+                        Label("Restart Sidecar", systemImage: "arrow.clockwise")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isRestarting)
+                }
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color.gray)
+                                .frame(width: 8, height: 8)
+                            Text("OpenClaw Gateway")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                        Text("Managed by sidecar")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        restartOpenClawGateway()
+                    } label: {
+                        Label("Restart Gateway", systemImage: "arrow.clockwise")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isRestarting)
+                }
+
+                if isRestarting {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Restarting...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             if !statusMessage.isEmpty {
                 Section {
                     Text(statusMessage)
-                        .foregroundColor(statusMessage.contains("Error") ? .red : .green)
+                        .foregroundColor(statusMessage.contains("Error") || statusMessage.contains("failed") ? .red : .green)
                         .font(.caption)
                 }
             }
@@ -73,7 +143,12 @@ struct GatewaySettingsView: View {
         .padding()
         .onAppear {
             loadSettings()
+            refreshStatus()
         }
+    }
+
+    private func refreshStatus() {
+        sidecarRunning = launchAgent.isRunning
     }
 
     private func loadSettings() {
@@ -111,104 +186,327 @@ struct GatewaySettingsView: View {
         }
         isLoading = false
     }
+
+    private func restartSidecar() {
+        isRestarting = true
+        statusMessage = ""
+        Task.detached {
+            // Kill the sidecar process directly
+            let pkill = Process()
+            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pkill.arguments = ["-f", "defenseclaw"]
+            pkill.standardOutput = Pipe()
+            pkill.standardError = Pipe()
+            try? pkill.run()
+            pkill.waitUntilExit()
+            try? await Task.sleep(for: .seconds(1))
+
+            // Restart via launchctl if installed
+            if launchAgent.isInstalled {
+                try? launchAgent.unload()
+                try? await Task.sleep(for: .seconds(1))
+                try? launchAgent.load()
+            }
+            try? await Task.sleep(for: .seconds(2))
+
+            await MainActor.run {
+                refreshStatus()
+                statusMessage = "DefenseClaw sidecar restarted"
+                isRestarting = false
+            }
+        }
+    }
+
+    private func restartOpenClawGateway() {
+        isRestarting = true
+        statusMessage = ""
+        Task.detached {
+            // Kill the openclaw-gateway process; the sidecar should respawn it
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            process.arguments = ["-f", "openclaw.*gateway"]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                try? await Task.sleep(for: .seconds(2))
+                await MainActor.run {
+                    statusMessage = "OpenClaw gateway restart signal sent"
+                    isRestarting = false
+                }
+            } catch {
+                await MainActor.run {
+                    statusMessage = "Restart failed: \(error.localizedDescription)"
+                    isRestarting = false
+                }
+            }
+        }
+    }
 }
 
 struct GuardrailSettingsView: View {
     @State private var enabled = false
-    @State private var mode = "enforce"
-    @State private var scannerMode = "full"
     @State private var statusMessage = ""
     @State private var isLoading = false
+    @State private var isRestarting = false
+    @State private var liveMode = "observe"
+    @State private var liveScannerMode = "local"
 
     private let configManager = ConfigManager()
-    private let modes = ["enforce", "observe", "disabled"]
-    private let scannerModes = ["full", "fast", "minimal"]
+    private let sidecarClient = SidecarClient()
+    private let launchAgent = LaunchAgentManager()
+
+    // Sidecar API accepts: "observe" (log only) or "action" (block)
+    private let liveModes = ["observe", "action"]
+    private let liveScannerModeOptions = ["local", "remote", "both"]
 
     var body: some View {
         Form {
-            Section("Guardrail Configuration") {
-                Toggle("Enabled", isOn: $enabled)
-                Picker("Mode", selection: $mode) {
-                    ForEach(modes, id: \.self) { m in
-                        Text(m.capitalized).tag(m)
+            // Master enable/disable — equivalent to `defenseclaw setup guardrail --disable --restart`
+            Section("Guardrail") {
+                Toggle("Enable Guardrail", isOn: $enabled)
+                    .onChange(of: enabled) { _, newValue in
+                        toggleGuardrail(enable: newValue)
                     }
-                }
-                Picker("Scanner Mode", selection: $scannerMode) {
-                    ForEach(scannerModes, id: \.self) { m in
-                        Text(m.capitalized).tag(m)
+
+                Text(enabled
+                     ? "Guardrail is active. Requests are scanned based on the mode below."
+                     : "Guardrail is disabled. No requests will be scanned or blocked.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if isRestarting {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Saving config and restarting sidecar...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
 
-            Section {
-                Text("Enforce: Block malicious requests")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Observe: Log only, no blocking")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Disabled: No guardrail checks")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            if enabled {
+                Section("Live Mode (takes effect immediately)") {
+                    Picker("Mode", selection: $liveMode) {
+                        Text("Observe — log only, no blocking").tag("observe")
+                        Text("Action — block malicious requests").tag("action")
+                    }
+                    .onChange(of: liveMode) { _, newMode in
+                        applyLiveMode(mode: newMode)
+                    }
+
+                    Picker("Scanner Mode", selection: $liveScannerMode) {
+                        ForEach(liveScannerModeOptions, id: \.self) { m in
+                            Text(m.capitalized).tag(m)
+                        }
+                    }
+                    .onChange(of: liveScannerMode) { _, newSM in
+                        applyLiveScannerMode(scannerMode: newSM)
+                    }
+                }
+
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Observe: Scans and logs threats but allows all requests through")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("Action: Scans and blocks requests that match threat patterns")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
 
             if !statusMessage.isEmpty {
                 Section {
                     Text(statusMessage)
-                        .foregroundColor(statusMessage.contains("Error") ? .red : .green)
+                        .foregroundColor(statusMessage.contains("Error") || statusMessage.contains("failed") ? .red : .green)
                         .font(.caption)
                 }
             }
-
-            HStack {
-                Spacer()
-                Button("Save") {
-                    saveSettings()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isLoading)
-            }
         }
         .padding()
+        .disabled(isRestarting)
         .onAppear {
-            loadSettings()
+            loadAll()
         }
     }
 
-    private func loadSettings() {
+    /// Load both file config (enabled flag) and live sidecar config (mode, scanner_mode)
+    private func loadAll() {
         isLoading = true
+        // File config → enabled flag
         do {
             let config = try configManager.load()
             enabled = config.guardrail?.enabled ?? false
-            mode = config.guardrail?.mode ?? "enforce"
-            scannerMode = config.guardrail?.scannerMode ?? "full"
-            statusMessage = ""
         } catch {
             enabled = false
-            mode = "enforce"
-            scannerMode = "full"
-            statusMessage = "Using defaults (config not found)"
         }
         isLoading = false
+
+        // Live sidecar config → mode + scanner_mode
+        Task {
+            do {
+                let config = try await sidecarClient.guardrailConfig()
+                await MainActor.run {
+                    liveMode = config.mode
+                    liveScannerMode = config.scannerMode
+                }
+            } catch {
+                // Sidecar may be offline — that's OK, keep defaults
+            }
+        }
     }
 
-    private func saveSettings() {
-        isLoading = true
+    /// Toggle guardrail enabled/disabled by running the defenseclaw CLI command,
+    /// equivalent to `defenseclaw setup guardrail [--disable] --restart`.
+    /// Falls back to manual config write + process restart if CLI is not found.
+    private func toggleGuardrail(enable: Bool) {
+        isRestarting = true
         statusMessage = ""
-        do {
-            var config = (try? configManager.load()) ?? AppConfig()
-            if config.guardrail == nil {
-                config.guardrail = GuardrailFullConfig()
+
+        Task.detached {
+            // Try the CLI command first — this is the canonical way to toggle guardrail
+            let cliSuccess = await runDefenseClawCLI(enable: enable)
+
+            if cliSuccess {
+                await MainActor.run {
+                    statusMessage = enable
+                        ? "Guardrail enabled — sidecar restarted"
+                        : "Guardrail disabled — sidecar restarted"
+                    isRestarting = false
+                }
+                return
             }
-            config.guardrail?.enabled = enabled
-            config.guardrail?.mode = mode
-            config.guardrail?.scannerMode = scannerMode
-            try configManager.save(config)
-            statusMessage = "Settings saved successfully"
-        } catch {
-            statusMessage = "Error saving settings: \(error.localizedDescription)"
+
+            // Fallback: write config manually + kill/restart process
+            do {
+                // 1. Write enabled flag to config file
+                var config = (try? configManager.load()) ?? AppConfig()
+                if config.guardrail == nil {
+                    config.guardrail = GuardrailFullConfig()
+                }
+                config.guardrail?.enabled = enable
+                try configManager.save(config)
+
+                // 2. Kill the sidecar process so it restarts with new config
+                await killProcess(name: "defenseclaw")
+
+                // 3. Try launchctl restart if plist is installed
+                if launchAgent.isInstalled {
+                    try? launchAgent.unload()
+                    try? await Task.sleep(for: .seconds(1))
+                    try? launchAgent.load()
+                    try? await Task.sleep(for: .seconds(2))
+                } else {
+                    // Give process manager time to restart
+                    try? await Task.sleep(for: .seconds(3))
+                }
+
+                await MainActor.run {
+                    statusMessage = enable
+                        ? "Guardrail enabled — sidecar restarted (fallback)"
+                        : "Guardrail disabled — sidecar restarted (fallback)"
+                    isRestarting = false
+                }
+            } catch {
+                await MainActor.run {
+                    statusMessage = "Error: \(error.localizedDescription)"
+                    isRestarting = false
+                }
+            }
         }
-        isLoading = false
+    }
+
+    /// Run `defenseclaw setup guardrail [--disable] --restart` via the CLI binary.
+    private func runDefenseClawCLI(enable: Bool) async -> Bool {
+        let searchPaths = [
+            "\(NSHomeDirectory())/.local/bin/defenseclaw",
+            "/usr/local/bin/defenseclaw",
+            "/opt/homebrew/bin/defenseclaw"
+        ]
+
+        guard let binaryPath = searchPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        if enable {
+            process.arguments = ["setup", "guardrail", "--restart"]
+        } else {
+            process.arguments = ["setup", "guardrail", "--disable", "--restart"]
+        }
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        // Ensure PATH includes common locations
+        process.environment = ProcessInfo.processInfo.environment
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            // Give the sidecar time to fully restart
+            try? await Task.sleep(for: .seconds(2))
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Kill a process by name using pkill.
+    private func killProcess(name: String) async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        process.arguments = ["-f", name]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            try? await Task.sleep(for: .seconds(1))
+        } catch {
+            // Process may not be running — that's OK
+        }
+    }
+
+    /// Apply mode change to live sidecar via PATCH /v1/guardrail/config
+    private func applyLiveMode(mode: String) {
+        statusMessage = ""
+        Task {
+            do {
+                try await sidecarClient.updateGuardrailConfig(mode: mode)
+                await MainActor.run {
+                    statusMessage = "Mode changed to \(mode)"
+                }
+            } catch {
+                await MainActor.run {
+                    statusMessage = "Error updating mode: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Apply scanner mode change to live sidecar via PATCH /v1/guardrail/config
+    private func applyLiveScannerMode(scannerMode: String) {
+        statusMessage = ""
+        Task {
+            do {
+                try await sidecarClient.updateGuardrailConfig(scannerMode: scannerMode)
+                await MainActor.run {
+                    statusMessage = "Scanner mode changed to \(scannerMode)"
+                }
+            } catch {
+                await MainActor.run {
+                    statusMessage = "Error updating scanner mode: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 }
 
@@ -543,6 +841,7 @@ struct DiagnosticsView: View {
     @State private var errorMessage = ""
 
     private let sidecarClient = SidecarClient()
+    private let log = AppLogger.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -555,6 +854,9 @@ struct DiagnosticsView: View {
                 }
                 Button("Export Logs") {
                     exportLogs()
+                }
+                Button("View Logs") {
+                    (NSApp.delegate as? AppDelegate)?.showLogs()
                 }
             }
 
@@ -670,24 +972,34 @@ struct DiagnosticsView: View {
 
     private func exportLogs() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "gateway.log"
+        let timestamp = {
+            let f = DateFormatter()
+            f.dateFormat = "yyyy-MM-dd_HHmmss"
+            return f.string(from: Date())
+        }()
+        panel.nameFieldStringValue = "defenseclaw-logs-\(timestamp).log"
         panel.allowedContentTypes = [.log, .text]
         panel.canCreateDirectories = true
 
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
 
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            let logPath = "\(home)/.defenseclaw/gateway.log"
-            let logURL = URL(fileURLWithPath: logPath)
-
             do {
-                if FileManager.default.fileExists(atPath: logPath) {
-                    try FileManager.default.copyItem(at: logURL, to: url)
-                    errorMessage = "Logs exported successfully"
-                } else {
-                    errorMessage = "Log file not found at \(logPath)"
+                // Combine app logs + gateway log into one export
+                var combined = "=== DefenseClaw App Logs ===\n"
+                combined += log.exportLogContent()
+
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                let gatewayLogPath = "\(home)/.defenseclaw/gateway.log"
+                if FileManager.default.fileExists(atPath: gatewayLogPath),
+                   let gatewayLogs = try? String(contentsOfFile: gatewayLogPath, encoding: .utf8) {
+                    combined += "\n\n=== Gateway Sidecar Logs ===\n"
+                    combined += gatewayLogs
                 }
+
+                try combined.write(to: url, atomically: true, encoding: .utf8)
+                errorMessage = "Logs exported successfully"
+                log.info("app", "Diagnostics logs exported", details: url.path)
             } catch {
                 errorMessage = "Error exporting logs: \(error.localizedDescription)"
             }

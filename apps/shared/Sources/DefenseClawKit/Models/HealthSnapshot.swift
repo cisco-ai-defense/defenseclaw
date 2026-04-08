@@ -34,18 +34,39 @@ public struct HealthSnapshot: Codable, Sendable {
         case gateway, watcher, api, guardrail, telemetry, splunk, sandbox
     }
 
+    /// The sidecar is healthy if its core subsystems (api, watcher) are running.
+    /// The gateway subsystem connects to OpenClaw — it may be reconnecting if
+    /// the OpenClaw gateway isn't started yet, but the sidecar itself is still operational.
     public var isHealthy: Bool {
-        let active = [gateway, watcher, api, guardrail, telemetry, splunk]
-        return active.allSatisfy { $0.state == .running || $0.state == .disabled }
+        let core = [api, watcher]
+        let coreOK = core.allSatisfy { $0.state == .running || $0.state == .disabled }
+        let optional = [guardrail, telemetry, splunk]
+        let optionalOK = optional.allSatisfy { $0.state == .running || $0.state == .disabled || $0.state == .reconnecting }
+        return coreOK && optionalOK
+    }
+
+    /// Whether the OpenClaw gateway subsystem inside the sidecar has a live connection.
+    public var isGatewayConnected: Bool {
+        gateway.state == .running
     }
 
     public var alertCount: Int { 0 }
 }
 
-public struct AnyCodable: Codable, Sendable {
+public struct AnyCodable: Codable, Sendable, CustomStringConvertible {
     public let value: Any
 
     public init(_ value: Any) { self.value = value }
+
+    public var description: String {
+        switch value {
+        case let s as String: return s
+        case let i as Int: return "\(i)"
+        case let d as Double: return "\(d)"
+        case let b as Bool: return b ? "true" : "false"
+        default: return String(describing: value)
+        }
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()

@@ -34,4 +34,25 @@ public struct ConfigManager: Sendable {
     public var exists: Bool {
         FileManager.default.fileExists(atPath: configPath)
     }
+
+    /// Ensures ~/.defenseclaw/ directory and default config.yaml exist.
+    /// Safe to call multiple times — only writes if config is missing.
+    public func ensureInitialized() throws {
+        let url = URL(fileURLWithPath: configPath)
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        // Create subdirectories the sidecar expects
+        let dataDir = dir.path
+        for sub in ["quarantine", "plugins", "policies", "codeguard-rules"] {
+            let subDir = URL(fileURLWithPath: dataDir).appendingPathComponent(sub)
+            try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        }
+
+        // Write default config if none exists
+        if !exists {
+            let defaultConfig = AppConfig()
+            try save(defaultConfig)
+        }
+    }
 }

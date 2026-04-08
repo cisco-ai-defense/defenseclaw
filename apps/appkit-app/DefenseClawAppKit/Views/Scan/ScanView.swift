@@ -8,7 +8,7 @@ struct ScanView: View {
     @State private var results: [Finding] = []
     @State private var error: String?
 
-    private let scanTypes = ["skill", "mcp", "aibom"]
+    private let scanTypes = ["skill", "mcp", "code"]
 
     var body: some View {
         VStack(spacing: 16) {
@@ -64,7 +64,7 @@ struct ScanView: View {
                     scanResult = try await client.scanSkill(path: targetPath)
                 case "mcp":
                     scanResult = try await client.scanMCP(url: targetPath)
-                case "aibom":
+                case "code":
                     scanResult = try await client.scanCode(path: targetPath)
                 default:
                     scanResult = try await client.scanSkill(path: targetPath)

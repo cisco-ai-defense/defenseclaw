@@ -10,6 +10,7 @@ class AppViewModel {
 
     private var pollingTask: Task<Void, Never>?
     private let sidecarClient = SidecarClient()
+    private let log = AppLogger.shared
 
     init() {
         startPolling()
@@ -39,11 +40,13 @@ class AppViewModel {
 
     @MainActor
     func addSession(workspace: String, agentName: String) async throws {
+        log.info("app", "Creating new agent session", details: "workspace=\(workspace) agent=\(agentName)")
         let session = AgentSession()
         try await session.connect()
         sessions.append(session)
         activeSessionIndex = sessions.count - 1
         showNewSessionSheet = false
+        log.info("app", "Agent session created")
     }
 
     var activeSession: AgentSession? {
