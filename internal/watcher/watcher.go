@@ -28,6 +28,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/capability"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -91,6 +92,8 @@ type InstallWatcher struct {
 	shell      *sandbox.OpenShell
 	opa        *policy.Engine
 	otel       *telemetry.Provider
+	capDir     string
+	capEval    *capability.Evaluator
 	debounce   time.Duration
 	onAdmit    OnAdmission
 
@@ -124,6 +127,16 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 // SetOTelProvider attaches the OTel provider for watcher metrics.
 func (w *InstallWatcher) SetOTelProvider(p *telemetry.Provider) {
 	w.otel = p
+}
+
+// SetCapabilityDir sets the directory where auto-generated capability policies are written.
+func (w *InstallWatcher) SetCapabilityDir(dir string) {
+	w.capDir = dir
+}
+
+// SetCapabilityEvaluator sets the evaluator to reload after generating policies.
+func (w *InstallWatcher) SetCapabilityEvaluator(eval *capability.Evaluator) {
+	w.capEval = eval
 }
 
 // Run starts watching configured directories. It blocks until ctx is cancelled.
@@ -250,6 +263,95 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	}
 }
 
+// generateCapabilityPolicy creates an auto-generated capability policy for the
+// given install event, if no manual or auto policy already exists.
+func (w *InstallWatcher) generateCapabilityPolicy(evt InstallEvent, scanResult *scanner.ScanResult) {
+	if w.capDir == "" {
+		return
+	}
+
+	name := evt.Name
+
+	// Skip if manual policy already exists
+	manualPath := filepath.Join(w.capDir, name+".capability.yaml")
+	if _, err := os.Stat(manualPath); err == nil {
+		return
+	}
+
+	// Skip if auto policy already exists
+	autoPath := filepath.Join(w.capDir, "auto-"+name+".capability.yaml")
+	if _, err := os.Stat(autoPath); err == nil {
+		return
+	}
+
+	// Introspect manifest
+	var tools []capability.ToolInfo
+	var skillInfo *capability.SkillInfo
+
+	switch evt.Type {
+	case InstallMCP:
+		manifestPath := filepath.Join(evt.Path, "manifest.json")
+		if t, err := capability.IntrospectMCP(manifestPath); err == nil {
+			tools = t
+		}
+	case InstallSkill:
+		if si, err := capability.IntrospectSkill(evt.Path); err == nil {
+			skillInfo = si
+		}
+	}
+
+	// Build scan summary
+	var scanSummary *capability.ScanResultSummary
+	if scanResult != nil {
+		scanSummary = &capability.ScanResultSummary{
+			MaxSeverity:   string(scanResult.MaxSeverity()),
+			TotalFindings: len(scanResult.Findings),
+		}
+	}
+
+	// Generate policy
+	req := capability.GenerateRequest{
+		Name:       name,
+		Type:       string(evt.Type),
+		Tools:      tools,
+		SkillInfo:  skillInfo,
+		ScanResult: scanSummary,
+	}
+	pol := capability.GeneratePolicy(req)
+
+	// Write to disk
+	writtenPath, err := capability.WritePolicy(pol, w.capDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[watch] generate capability policy for %s: %v\n", name, err)
+		return
+	}
+
+	// Log audit event
+	source := "fallback"
+	if len(tools) > 0 {
+		source = "mcp-introspect"
+	} else if skillInfo != nil {
+		source = "skill-introspect"
+	}
+	posture := "permissive"
+	if scanSummary != nil {
+		switch scanSummary.MaxSeverity {
+		case "HIGH", "CRITICAL":
+			posture = "restrictive"
+		case "MEDIUM", "LOW":
+			posture = "cautious"
+		}
+	}
+	_ = w.logger.LogAction("capability_generated", name,
+		fmt.Sprintf("posture=%s, capabilities=%d, source=%s, path=%s",
+			posture, len(pol.Capabilities), source, writtenPath))
+
+	// Reload evaluator
+	if w.capEval != nil {
+		_ = w.capEval.Reload(context.Background(), "")
+	}
+}
+
 // runAdmission applies the full admission gate: block → allow → scan.
 // When the OPA engine is available it delegates the verdict decision to
 // Rego policy; otherwise it falls back to the built-in Go logic.
@@ -293,6 +395,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 				_ = w.logger.LogAction("install-allowed", evt.Path,
 					fmt.Sprintf("type=%s reason=allow-listed", targetType))
 				w.recordAdmission(ctx, "allowed", targetType)
+				w.generateCapabilityPolicy(evt, nil)
 				return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 			}
 			// verdict == "scan" → proceed to scanning below
@@ -316,6 +419,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			_ = w.logger.LogAction("install-allowed", evt.Path,
 				fmt.Sprintf("type=%s reason=allow-listed", targetType))
 			w.recordAdmission(ctx, "allowed", targetType)
+			w.generateCapabilityPolicy(evt, nil)
 			return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: reason}
 		}
 	}
@@ -372,6 +476,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			w.applyPostScanEnforcement(pe, out, evt, targetType, result, s.Name())
 			_ = w.logger.LogScanWithVerdict(result, out.Verdict)
 			w.recordAdmission(ctx, out.Verdict, targetType)
+			if out.Verdict == "clean" || out.Verdict == "warning" {
+				w.generateCapabilityPolicy(evt, result)
+			}
 			return AdmissionResult{Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason}
 		}
 		// On OPA error, fall through to built-in logic.
@@ -383,6 +490,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			fmt.Sprintf("type=%s scanner=%s", targetType, s.Name()))
 		_ = w.logger.LogScanWithVerdict(result, string(VerdictClean))
 		w.recordAdmission(ctx, "scan_clean", targetType)
+		w.generateCapabilityPolicy(evt, result)
 		return AdmissionResult{Event: evt, Verdict: VerdictClean, Reason: "scan clean"}
 	}
 
@@ -425,6 +533,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, maxSev, s.Name()))
 	_ = w.logger.LogScanWithVerdict(result, string(VerdictWarning))
 	w.recordAdmission(ctx, "scan_warning", targetType)
+	w.generateCapabilityPolicy(evt, result)
 	return AdmissionResult{Event: evt, Verdict: VerdictWarning, Reason: reason}
 }
 
