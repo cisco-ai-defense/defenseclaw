@@ -23,6 +23,8 @@ import "time"
 type AgentPolicy struct {
 	Agent        string       `yaml:"agent"`
 	Description  string       `yaml:"description"`
+	Generated    bool         `yaml:"generated,omitempty"`
+	Approved     bool         `yaml:"approved,omitempty"`
 	Capabilities []Capability `yaml:"capabilities"`
 	Restrictions []string     `yaml:"restrictions"`
 	Conditions   Conditions   `yaml:"conditions"`
@@ -74,4 +76,34 @@ func Deny(reason string) Decision {
 // Allow creates an allow decision for the given capability.
 func Allow(capName string) Decision {
 	return Decision{Allowed: true, Reason: "capability matched", Capability: capName}
+}
+
+// ToolInfo holds metadata for a single tool discovered from an MCP manifest.
+type ToolInfo struct {
+	Name        string
+	Description string
+	Parameters  map[string]any
+}
+
+// SkillInfo holds metadata extracted from a skill manifest.
+type SkillInfo struct {
+	Name        string
+	Permissions []string
+}
+
+// ScanResultSummary is a lightweight view of scanner.ScanResult
+// to avoid importing the scanner package into capability.
+type ScanResultSummary struct {
+	MaxSeverity   string // "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", ""
+	TotalFindings int
+}
+
+// GenerateRequest bundles the inputs for policy generation.
+// Uses primitive types to avoid circular dependency with watcher package.
+type GenerateRequest struct {
+	Name       string             // skill/MCP name (from InstallEvent.Name)
+	Type       string             // "skill" or "mcp"
+	Tools      []ToolInfo         // from introspection (nil if introspection failed)
+	SkillInfo  *SkillInfo         // from skill introspection (nil for MCP)
+	ScanResult *ScanResultSummary // scan posture summary
 }
