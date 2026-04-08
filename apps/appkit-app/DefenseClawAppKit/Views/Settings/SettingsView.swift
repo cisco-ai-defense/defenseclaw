@@ -711,14 +711,24 @@ struct EnforcementView: View {
 
     private func removeBlocked(_ entry: BlockEntry) async {
         errorMessage = ""
-        blockedList.removeAll { $0.id == entry.id }
-        await loadLists()
+        do {
+            let req = EnforceRequest(type: entry.targetType, name: entry.targetName)
+            try await sidecarClient.unblock(req)
+            await loadLists()
+        } catch {
+            errorMessage = "Error removing blocked entry: \(error.localizedDescription)"
+        }
     }
 
     private func removeAllowed(_ entry: AllowEntry) async {
         errorMessage = ""
-        allowedList.removeAll { $0.id == entry.id }
-        await loadLists()
+        do {
+            let req = EnforceRequest(type: entry.targetType, name: entry.targetName)
+            try await sidecarClient.unallow(req)
+            await loadLists()
+        } catch {
+            errorMessage = "Error removing allowed entry: \(error.localizedDescription)"
+        }
     }
 
     private func resetNewEntry() {

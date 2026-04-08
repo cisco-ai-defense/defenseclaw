@@ -482,7 +482,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -501,20 +501,31 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reason := req.Reason
-	if reason == "" {
-		reason = "allowed via REST API"
-	}
-
 	pe := enforce.NewPolicyEngine(a.store)
-	if err := pe.Allow(req.TargetType, req.TargetName, reason); err != nil {
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+	switch r.Method {
+	case http.MethodPost:
+		reason := req.Reason
+		if reason == "" {
+			reason = "allowed via REST API"
+		}
+		if err := pe.Allow(req.TargetType, req.TargetName, reason); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if a.logger != nil {
+			_ = a.logger.LogAction("api-enforce-allow", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+		}
+		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
+	case http.MethodDelete:
+		if err := pe.Unblock(req.TargetType, req.TargetName); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if a.logger != nil {
+			_ = a.logger.LogAction("api-enforce-unallow", req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
+		}
+		a.writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
-	if a.logger != nil {
-		_ = a.logger.LogAction("api-enforce-allow", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
-	}
-	a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 }
 
 func (a *APIServer) handleEnforceBlocked(w http.ResponseWriter, r *http.Request) {

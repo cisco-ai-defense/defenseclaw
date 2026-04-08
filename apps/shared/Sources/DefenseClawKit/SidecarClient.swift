@@ -120,6 +120,8 @@ public actor SidecarClient {
     public func scanCode(path: String) async throws -> ScanResult { try await post("/api/v1/scan/code", body: ["path": path]) }
     public func block(_ request: EnforceRequest) async throws { try await postVoid("/enforce/block", body: request) }
     public func allow(_ request: EnforceRequest) async throws { try await postVoid("/enforce/allow", body: request) }
+    public func unblock(_ request: EnforceRequest) async throws { try await deleteVoid("/enforce/block", body: request) }
+    public func unallow(_ request: EnforceRequest) async throws { try await deleteVoid("/enforce/allow", body: request) }
     public func blockedList() async throws -> [BlockEntry] { try await get("/enforce/blocked") }
     public func allowedList() async throws -> [AllowEntry] { try await get("/enforce/allowed") }
     public func policyEvaluate(input: AdmissionInput) async throws -> AdmissionOutput {
@@ -232,6 +234,23 @@ public actor SidecarClient {
             throw SidecarError.requestFailed(endpoint: path, detail: msg)
         }
         log.debug("sidecar", "POST \(path) OK")
+    }
+
+    private func deleteVoid<B: Encodable>(_ path: String, body: B) async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("macos-app", forHTTPHeaderField: "X-DefenseClaw-Client")
+        if let token = authToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try JSONEncoder().encode(body)
+        log.debug("sidecar", "DELETE \(path)")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let msg = String(data: data, encoding: .utf8) ?? "unknown error"
+            log.error("sidecar", "DELETE \(path) failed", details: "status=\((response as? HTTPURLResponse)?.statusCode ?? 0) body=\(msg.prefix(200))")
+            throw SidecarError.requestFailed(endpoint: path, detail: msg)
+        }
+        log.debug("sidecar", "DELETE \(path) OK")
     }
 
     /// Read gateway token from OpenClaw config (~/.openclaw/openclaw.json → gateway.auth.token).
