@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/capability"
 )
 
 const (
@@ -54,11 +55,12 @@ type Model struct {
 	statusBar StatusBar
 
 	store           *audit.Store
+	capEvaluator    *capability.Evaluator
 	openshellBinary string
 	anchorName      string
 }
 
-func New(store *audit.Store, openshellBinary, anchorName string) Model {
+func New(store *audit.Store, capEval *capability.Evaluator, openshellBinary, anchorName string) Model {
 	m := Model{
 		alerts:          NewAlertsPanel(store),
 		skills:          NewSkillsPanel(store),
@@ -67,6 +69,7 @@ func New(store *audit.Store, openshellBinary, anchorName string) Model {
 		detail:          NewDetailModal(),
 		statusBar:       NewStatusBar(),
 		store:           store,
+		capEvaluator:    capEval,
 		openshellBinary: openshellBinary,
 		anchorName:      anchorName,
 	}
@@ -202,6 +205,9 @@ func (m Model) View() string {
 }
 
 func (m *Model) refresh() {
+	if m.capEvaluator != nil {
+		m.agents.SetPolicies(m.capEvaluator.Policies())
+	}
 	m.alerts.Refresh()
 	m.skills.Refresh()
 	m.mcps.Refresh()

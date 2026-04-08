@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/capability"
 )
 
 type AgentItem struct {
@@ -32,18 +33,24 @@ type AgentItem struct {
 	Restrictions int
 	Decisions    int
 	LastDecision string
+	Status       string // "approved", "pending review", or "manual"
 }
 
 type AgentsPanel struct {
-	items  []AgentItem
-	cursor int
-	width  int
-	height int
-	store  *audit.Store
+	items    []AgentItem
+	cursor   int
+	width    int
+	height   int
+	store    *audit.Store
+	policies map[string]*capability.AgentPolicy
 }
 
 func NewAgentsPanel(store *audit.Store) AgentsPanel {
 	return AgentsPanel{store: store}
+}
+
+func (p *AgentsPanel) SetPolicies(policies map[string]*capability.AgentPolicy) {
+	p.policies = policies
 }
 
 func (p *AgentsPanel) SetSize(w, h int) {
@@ -61,7 +68,6 @@ func (p *AgentsPanel) Refresh() {
 		return
 	}
 
-	// Aggregate by agent
 	agentMap := make(map[string]*AgentItem)
 	for _, d := range decisions {
 		item, ok := agentMap[d.Agent]
@@ -76,6 +82,32 @@ func (p *AgentsPanel) Refresh() {
 			} else {
 				item.LastDecision = "denied: " + d.Reason
 			}
+		}
+	}
+
+	// Merge agents from policies that have no decisions yet
+	for name := range p.policies {
+		if _, ok := agentMap[name]; !ok {
+			agentMap[name] = &AgentItem{Agent: name, LastDecision: "-"}
+		}
+	}
+
+	// Resolve status from policies
+	for name, item := range agentMap {
+		pol, hasPol := p.policies[name]
+		if !hasPol {
+			item.Status = "manual"
+			continue
+		}
+		item.Capabilities = len(pol.Capabilities)
+		item.Restrictions = len(pol.Restrictions)
+		switch {
+		case pol.Generated && !pol.Approved:
+			item.Status = "pending review"
+		case pol.Generated && pol.Approved:
+			item.Status = "approved"
+		default:
+			item.Status = "manual"
 		}
 	}
 
@@ -119,13 +151,14 @@ func (p AgentsPanel) View() string {
 	}
 
 	var b strings.Builder
-	header := fmt.Sprintf("  %-20s %-12s %s", "AGENT", "DECISIONS", "LAST DECISION")
+	header := fmt.Sprintf("  %-20s %-16s %-12s %s", "AGENT", "STATUS", "DECISIONS", "LAST DECISION")
 	b.WriteString(HeaderStyle.Render(header))
 	b.WriteString("\n")
 
 	for i, item := range p.items {
-		line := fmt.Sprintf("  %-20s %-12d %s",
-			item.Agent, item.Decisions, item.LastDecision)
+		statusStr := renderStatus(item.Status)
+		line := fmt.Sprintf("  %-20s %-16s %-12d %s",
+			item.Agent, statusStr, item.Decisions, item.LastDecision)
 
 		if i == p.cursor {
 			b.WriteString(SelectedStyle.Render(line))
@@ -136,4 +169,13 @@ func (p AgentsPanel) View() string {
 	}
 
 	return b.String()
+}
+
+func renderStatus(status string) string {
+	switch status {
+	case "pending review":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render(status)
+	default:
+		return status
+	}
 }
