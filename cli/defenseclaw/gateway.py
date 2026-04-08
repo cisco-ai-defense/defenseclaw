@@ -26,7 +26,6 @@ from typing import Any
 
 import requests
 
-
 PLUGIN_MUTATION_TIMEOUT = 90
 
 

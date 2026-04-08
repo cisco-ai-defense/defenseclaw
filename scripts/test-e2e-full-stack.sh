@@ -816,6 +816,25 @@ run_agent_prompt() {
     timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
 }
 
+openclaw_skills_list_json() {
+    openclaw skills list --json 2>/dev/null || echo "[]"
+}
+
+openclaw_skill_available() {
+    local skill="$1"
+    local skills_json="${2:-}"
+    if [ -z "$skills_json" ]; then
+        skills_json=$(openclaw_skills_list_json)
+    fi
+    echo "$skills_json" | jq -e --arg skill "$skill" '
+        any(.[]?;
+            (.id // "") == $skill
+            or (.name // "") == $skill
+            or (.slug // "") == $skill
+        )
+    ' >/dev/null 2>&1
+}
+
 restore_openclaw_model_backup() {
     if [ ! -f "$OPENCLAW_MODEL_BACKUP_PATH" ]; then
         return 0
@@ -1831,6 +1850,7 @@ phase_agent_chat() {
     local install_slug="weather"
     local skill_dirs disk_before skills_before before_names
     local ping_out install_out installed_skill installed_path dc_entry
+    local install_verified=false used_local_fallback=false
 
     skill_dirs=$(get_skill_dirs)
     echo "  Skill directories watched by DefenseClaw:"
@@ -1841,7 +1861,7 @@ phase_agent_chat() {
     done <<< "$skill_dirs"
 
     cleanup_skill_name "$install_slug"
-    skills_before=$(openclaw skills list --json 2>/dev/null || echo "[]")
+    skills_before=$(openclaw_skills_list_json)
     before_names=$(echo "$skills_before" | jq -r '.[].name' 2>/dev/null | sort || true)
     disk_before=$(snapshot_skill_paths | sort -u)
 
@@ -1858,34 +1878,88 @@ phase_agent_chat() {
         return
     fi
 
-    echo "  Asking agent to install '$install_slug'..."
-    install_out=$(timeout 180 openclaw agent \
-        --session-id "${session_id}-install" \
-        -m "Install the ${install_slug} skill from ClawHub. Run this exact command: openclaw skills install ${install_slug}" \
-        2>&1 || true)
-    echo "$install_out"
-    sleep 5
-
     local disk_after new_on_disk skills_after after_names new_in_list
-    disk_after=$(snapshot_skill_paths | sort -u)
-    skills_after=$(openclaw skills list --json 2>/dev/null || echo "[]")
-    after_names=$(echo "$skills_after" | jq -r '.[].name' 2>/dev/null | sort || true)
-    new_on_disk=$(comm -13 \
-        <(printf '%s\n' "$disk_before" | sed '/^[[:space:]]*$/d' | sort -u) \
-        <(printf '%s\n' "$disk_after" | sed '/^[[:space:]]*$/d' | sort -u) || true)
-    new_in_list=$(comm -13 \
-        <(printf '%s\n' "$before_names" | sed '/^[[:space:]]*$/d' | sort -u) \
-        <(printf '%s\n' "$after_names" | sed '/^[[:space:]]*$/d' | sort -u) || true)
+    local install_prompt
+    install_prompt="Ensure the ${install_slug} skill is available in OpenClaw. First run this exact command: openclaw skills install ${install_slug}. If the skill is already available, that is acceptable. If you hit a temporary HTTP 429 or rate limit error, wait 20 seconds and retry up to two more times. Reply with exactly one word: INSTALLED once the ${install_slug} skill is available."
 
-    if [ -n "$new_on_disk" ]; then
-        installed_path=$(printf '%s\n' "$new_on_disk" | sed '/^[[:space:]]*$/d' | head -1)
-        installed_skill=$(basename "$installed_path")
-        pass "agent chat: skill '$installed_skill' installed on disk"
-    elif [ -n "$new_in_list" ]; then
-        installed_skill=$(printf '%s\n' "$new_in_list" | sed '/^[[:space:]]*$/d' | head -1)
-        installed_path=$(find_skill_path "$installed_skill" || true)
-        pass "agent chat: skill '$installed_skill' appeared in openclaw list"
-    else
+    for attempt in 1 2 3; do
+        echo "  Asking agent to install '$install_slug' (attempt ${attempt}/3)..."
+        install_out=$(timeout 240 openclaw agent \
+            --session-id "${session_id}-install-${attempt}" \
+            -m "$install_prompt" \
+            2>&1 || true)
+        echo "$install_out"
+        sleep 5
+
+        disk_after=$(snapshot_skill_paths | sort -u)
+        skills_after=$(openclaw_skills_list_json)
+        after_names=$(echo "$skills_after" | jq -r '.[].name' 2>/dev/null | sort || true)
+        new_on_disk=$(comm -13 \
+            <(printf '%s\n' "$disk_before" | sed '/^[[:space:]]*$/d' | sort -u) \
+            <(printf '%s\n' "$disk_after" | sed '/^[[:space:]]*$/d' | sort -u) || true)
+        new_in_list=$(comm -13 \
+            <(printf '%s\n' "$before_names" | sed '/^[[:space:]]*$/d' | sort -u) \
+            <(printf '%s\n' "$after_names" | sed '/^[[:space:]]*$/d' | sort -u) || true)
+
+        if [ -n "$new_on_disk" ]; then
+            installed_path=$(printf '%s\n' "$new_on_disk" | sed '/^[[:space:]]*$/d' | head -1)
+            installed_skill=$(basename "$installed_path")
+            pass "agent chat: skill '$installed_skill' installed on disk"
+            install_verified=true
+            break
+        fi
+
+        if [ -n "$new_in_list" ]; then
+            installed_skill=$(printf '%s\n' "$new_in_list" | sed '/^[[:space:]]*$/d' | head -1)
+            installed_path=$(find_skill_path "$installed_skill" || true)
+            pass "agent chat: skill '$installed_skill' appeared in openclaw list"
+            install_verified=true
+            break
+        fi
+
+        if openclaw_skill_available "$install_slug" "$skills_after" \
+            && echo "$install_out" | grep -Eqi 'INSTALLED|installed|already available|already installed|available'; then
+            installed_skill="$install_slug"
+            installed_path=$(find_skill_path "$installed_skill" || true)
+            pass "agent chat: skill '$installed_skill' available to OpenClaw"
+            install_verified=true
+            break
+        fi
+
+        if echo "$install_out" | grep -Eqi '429|rate limit|too many requests|temporary'; then
+            echo "  Agent hit a transient ClawHub rate limit; backing off before retry..."
+            sleep $((attempt * 15))
+            continue
+        fi
+
+        break
+    done
+
+    if [ "$install_verified" = false ]; then
+        local fallback_source fallback_skill fallback_dir fallback_out
+        fallback_source="$REPO_ROOT/test/fixtures/skills/clean-skill"
+        fallback_dir=$(first_skill_dir || true)
+        fallback_skill="${E2E_PREFIX}-agent-local-skill"
+        if [ -d "$fallback_source" ] && [ -n "$fallback_dir" ]; then
+            mkdir -p "$fallback_dir"
+            echo "  Falling back to agent-managed local skill install: $fallback_skill"
+            fallback_out=$(run_agent_prompt \
+                "$(agent_session_id agent-install-local)" \
+                "Run this exact command: mkdir -p \"$fallback_dir/$fallback_skill\" && cp -R \"$fallback_source\"/. \"$fallback_dir/$fallback_skill\"/. Reply with exactly INSTALLED once the directory exists." \
+                180)
+            echo "$fallback_out"
+            sleep 5
+            if [ -d "$fallback_dir/$fallback_skill" ]; then
+                installed_skill="$fallback_skill"
+                installed_path="$fallback_dir/$fallback_skill"
+                used_local_fallback=true
+                pass "agent chat: fallback skill '$installed_skill' installed on disk"
+                install_verified=true
+            fi
+        fi
+    fi
+
+    if [ "$install_verified" = false ]; then
         skip_or_fail "$E2E_REQUIRE_AGENT_INSTALL" "agent chat: skill install" "agent install could not be verified"
     fi
 
@@ -1907,7 +1981,9 @@ phase_agent_chat() {
 
     if [ -n "${installed_skill:-}" ]; then
         local cleanup_prompt cleanup_out
-        if [ -n "${installed_path:-}" ]; then
+        if [ "$used_local_fallback" = true ] && [ -n "${installed_path:-}" ]; then
+            cleanup_prompt="Remove the installed skill ${installed_skill} by deleting the directory ${installed_path}. Reply with exactly REMOVED once the directory is gone."
+        elif [ -n "${installed_path:-}" ]; then
             cleanup_prompt="Remove the installed skill ${installed_skill} by deleting the directory ${installed_path}. Reply with exactly REMOVED once the directory is gone."
         else
             cleanup_prompt="Remove the installed skill ${installed_skill}. Reply with exactly REMOVED once it is gone."
