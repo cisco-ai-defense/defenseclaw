@@ -271,6 +271,8 @@ jobs:
       OPENCLAW_MODEL_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.backup.json
       OPENCLAW_AUTH_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.backup.json
       OPENCLAW_AUTH_BACKUP_MISSING_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.missing
+      OPENCLAW_SERVICE_ENV_PATH: /home/ubuntu/.openclaw/openclaw-service.env
+      OPENCLAW_SERVICE_DROPIN_PATH: /home/ubuntu/.config/systemd/user/openclaw-gateway.service.d/defenseclaw-e2e.conf
     defaults:
       run:
         shell: bash
@@ -497,8 +499,24 @@ jobs:
               f.write("\n")
           auth_path.chmod(0o600)
           PY
+          mkdir -p "$(dirname "${OPENCLAW_SERVICE_DROPIN_PATH}")"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
 
-          systemctl --user import-environment ANTHROPIC_API_KEY OPENAI_API_KEY OPENCLAW_GATEWAY_TOKEN || true
+          env_path = Path(os.environ["OPENCLAW_SERVICE_ENV_PATH"])
+          dropin_path = Path(os.environ["OPENCLAW_SERVICE_DROPIN_PATH"])
+          env_path.parent.mkdir(parents=True, exist_ok=True)
+          lines = []
+          for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCLAW_GATEWAY_TOKEN"):
+              value = os.environ.get(key, "")
+              if value:
+                  lines.append(f"{key}={value}")
+          env_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+          env_path.chmod(0o600)
+          dropin_path.write_text("[Service]\nEnvironmentFile=%h/.openclaw/openclaw-service.env\n")
+          PY
+          systemctl --user daemon-reload
 
           echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
           echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
@@ -633,7 +651,8 @@ jobs:
       - name: Restore OpenClaw Anthropic model
         if: always()
         run: |
-          systemctl --user unset-environment ANTHROPIC_API_KEY OPENAI_API_KEY OPENCLAW_GATEWAY_TOKEN || true
+          rm -f "${OPENCLAW_SERVICE_ENV_PATH}" "${OPENCLAW_SERVICE_DROPIN_PATH}"
+          systemctl --user daemon-reload || true
           if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
             mkdir -p ~/.openclaw
             cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json

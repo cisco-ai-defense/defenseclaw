@@ -135,6 +135,22 @@ wait_for_url() {
     return 1
 }
 
+start_openclaw_gateway() {
+    if is_full_live; then
+        openclaw gateway start
+        OPENCLAW_PID=""
+    else
+        openclaw gateway --force &
+        OPENCLAW_PID=$!
+    fi
+}
+
+restart_openclaw_gateway() {
+    openclaw gateway stop 2>/dev/null || true
+    sleep 1
+    start_openclaw_gateway
+}
+
 extract_json() {
     sed -n '/^\s*[{[]/,$ p' | jq '.' 2>/dev/null
 }
@@ -910,8 +926,7 @@ phase_start() {
     fi
 
     echo "  Starting OpenClaw gateway..."
-    openclaw gateway --force &
-    OPENCLAW_PID=$!
+    start_openclaw_gateway
     sleep 5
 
     echo "  Starting DefenseClaw sidecar..."
@@ -1788,10 +1803,7 @@ phase_agent_chat() {
 
     if ! curl -sf --max-time 3 "$OPENCLAW_URL" >/dev/null 2>&1; then
         echo "  OpenClaw gateway not responding — restarting..."
-        openclaw gateway stop 2>/dev/null || true
-        sleep 1
-        openclaw gateway --force &
-        OPENCLAW_PID=$!
+        restart_openclaw_gateway
         sleep 5
         defenseclaw-gateway restart 2>/dev/null || true
         sleep 3
@@ -2186,8 +2198,7 @@ phase_recovery() {
         fail "recovery: sidecar observed OpenClaw gateway disconnect" "gateway health never left running"
     fi
 
-    openclaw gateway --force &
-    OPENCLAW_PID=$!
+    start_openclaw_gateway
     sleep 5
 
     local reconnect_deadline=$((SECONDS + 60))
