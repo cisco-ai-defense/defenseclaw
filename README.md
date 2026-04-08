@@ -340,7 +340,7 @@ Events are batched (default 50) and flushed every 5 seconds. Each event includes
 
 ### OTLP Export
 
-The daemon exports logs, spans, and metrics via OTLP HTTP to any compatible collector (Jaeger, Grafana, Datadog, etc.):
+The daemon exports logs, spans, and metrics via OTLP HTTP to any compatible collector (Splunk Observability Cloud, Jaeger, Grafana, etc.):
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
