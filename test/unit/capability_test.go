@@ -109,3 +109,82 @@ func TestLoadAllPolicies(t *testing.T) {
 		t.Error("missing readonly-agent policy")
 	}
 }
+
+func TestMatchConstraints(t *testing.T) {
+	tests := []struct {
+		name        string
+		constraints map[string]any
+		params      map[string]any
+		want        bool
+	}{
+		{
+			name:        "empty constraints match anything",
+			constraints: map[string]any{},
+			params:      map[string]any{"project": "ENG-123"},
+			want:        true,
+		},
+		{
+			name:        "glob match success",
+			constraints: map[string]any{"project": "ENG-*"},
+			params:      map[string]any{"project": "ENG-123"},
+			want:        true,
+		},
+		{
+			name:        "glob match failure",
+			constraints: map[string]any{"project": "ENG-*"},
+			params:      map[string]any{"project": "SALES-456"},
+			want:        false,
+		},
+		{
+			name:        "exact match success",
+			constraints: map[string]any{"channel": "#support"},
+			params:      map[string]any{"channel": "#support"},
+			want:        true,
+		},
+		{
+			name:        "exact match failure",
+			constraints: map[string]any{"channel": "#support"},
+			params:      map[string]any{"channel": "#general"},
+			want:        false,
+		},
+		{
+			name:        "list membership all present",
+			constraints: map[string]any{"fields": []any{"summary", "status"}},
+			params:      map[string]any{"fields": []any{"summary"}},
+			want:        true,
+		},
+		{
+			name:        "list membership not in allowed",
+			constraints: map[string]any{"fields": []any{"summary", "status"}},
+			params:      map[string]any{"fields": []any{"password"}},
+			want:        false,
+		},
+		{
+			name:        "missing param key is denied",
+			constraints: map[string]any{"project": "ENG-*"},
+			params:      map[string]any{},
+			want:        false,
+		},
+		{
+			name:        "nil params with constraints is denied",
+			constraints: map[string]any{"project": "ENG-*"},
+			params:      nil,
+			want:        false,
+		},
+		{
+			name:        "nil constraints match anything",
+			constraints: nil,
+			params:      map[string]any{"anything": "goes"},
+			want:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := capability.MatchConstraints(tt.constraints, tt.params)
+			if got != tt.want {
+				t.Errorf("MatchConstraints() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
