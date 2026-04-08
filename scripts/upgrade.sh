@@ -18,16 +18,23 @@
 #
 # DefenseClaw Upgrade Script
 #
-# Replaces changed files (gateway binary, Python CLI, TS plugin), runs
-# version-specific migrations, and restarts services. Does NOT uninstall
-# or reinstall from scratch.
+# Downloads release artifacts from GitHub and replaces the gateway binary,
+# Python CLI wheel, and OpenClaw plugin. Runs version-specific migrations
+# and restarts services. Does NOT require a local source checkout.
 #
 # Usage:
-#   ./scripts/upgrade.sh [--yes] [--help]
+#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--local <dir>] [--help]
 #
 # Options:
-#   --yes, -y           Skip confirmation prompts
-#   --help, -h          Show this help
+#   --yes, -y             Skip confirmation prompts
+#   --version VERSION     Upgrade to a specific release (default: latest)
+#   --local <dir>         Install from a local dist/ directory instead of GitHub
+#   --help, -h            Show this help
+#
+# Environment variables:
+#   VERSION               Same as --version
+#   DEFENSECLAW_HOME      Override install directory (default: ~/.defenseclaw)
+#   OPENCLAW_HOME         Override OpenClaw config dir (default: ~/.openclaw)
 #
 set -euo pipefail
 
@@ -37,8 +44,10 @@ main() {
 
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 readonly DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"
+readonly INSTALL_DIR="${HOME}/.local/bin"
 readonly OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 readonly BACKUP_ROOT="${DEFENSECLAW_HOME}/backups"
+readonly REPO="cisco-ai-defense/defenseclaw"
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -52,23 +61,39 @@ fi
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
-info()    { echo -e "  ${GREEN}✓${NC} $*"; }
-warn()    { echo -e "  ${YELLOW}⚠${NC} $*"; }
-error()   { echo -e "  ${RED}✗${NC} $*" >&2; }
-section() { echo; echo -e "  ${BOLD}── $* ${DIM}─────────────────────────────────────────────────${NC}"; echo; }
-step()    { echo -e "  ${CYAN}→${NC} $*"; }
+info()    { printf "${BLUE}  ▸${NC} %s\n" "$*"; }
+ok()      { printf "${GREEN}  ✓${NC} %s\n" "$*"; }
+warn()    { printf "${YELLOW}  !${NC} %s\n" "$*"; }
+err()     { printf "${RED}  ✗${NC} %s\n" "$*" >&2; }
+section() { printf "\n${BOLD}${CYAN}─── %s${NC}\n\n" "$*"; }
+step()    { printf "  ${CYAN}→${NC} %s\n" "$*"; }
+
+die() { err "$@"; exit 1; }
+has() { command -v "$1" &>/dev/null; }
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
+extract_version() {
+    local input="${1:-}"
+    echo "${input}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | awk 'NR==1' || true
+}
 
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
 YES=0
-
-# Source directory: parent of scripts/
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOCAL_DIR=""
+RELEASE_VERSION="${VERSION:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --yes|-y)     YES=1; shift ;;
+        --yes|-y)   YES=1; shift ;;
+        --version)
+            [[ $# -lt 2 ]] && die "--version requires a value"
+            RELEASE_VERSION="$2"; shift 2 ;;
+        --local)
+            [[ $# -lt 2 ]] && die "--local requires a directory argument"
+            LOCAL_DIR="$(cd "$2" && pwd)" || die "Directory not found: $2"
+            shift 2 ;;
         --help|-h)
             cat <<EOF
 
@@ -77,73 +102,93 @@ while [[ $# -gt 0 ]]; do
   Usage: $(basename "$0") [OPTIONS]
 
   Options:
-    --yes, -y           Skip confirmation prompts
-    --help, -h          Show this help
+    --yes, -y             Skip confirmation prompts
+    --version VERSION     Upgrade to a specific release (e.g. 0.2.0)
+    --local <dir>         Use a local dist/ directory instead of GitHub releases
+    --help, -h            Show this help
+
+  Environment variables:
+    VERSION               Same as --version
+    DEFENSECLAW_HOME      Override install directory (default: ~/.defenseclaw)
+    OPENCLAW_HOME         Override OpenClaw config dir (default: ~/.openclaw)
 
 EOF
-            exit 0
-            ;;
-        *) error "Unknown option: $1"; exit 1 ;;
+                exit 0 ;;
+        *) err "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
-echo
-echo -e "  ${BOLD}DefenseClaw Upgrade${NC}"
-echo -e "  ${DIM}Replaces files, runs migrations, and restarts services${NC}"
-echo
+printf "\n"
+printf "${BOLD}  DefenseClaw Upgrade${NC}\n"
+printf "  ${DIM}Downloads release artifacts from GitHub and replaces installed files${NC}\n"
+printf "\n"
 
-# ── Pre-flight Checks ─────────────────────────────────────────────────────────
+# ── Platform Detection ────────────────────────────────────────────────────────
 
-section "Pre-flight Checks"
+section "Detecting Platform"
 
-if [[ ! -f "$SOURCE_DIR/Makefile" ]]; then
-    error "No Makefile found in $SOURCE_DIR — is this the defenseclaw repository?"
-    exit 1
-fi
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
 
-# ── Pull latest changes ──────────────────────────────────────────────────
+case "${ARCH}" in
+    x86_64|amd64)  ARCH_NORM="amd64" ;;
+    aarch64|arm64) ARCH_NORM="arm64" ;;
+    *) die "Unsupported architecture: ${ARCH}" ;;
+esac
 
-if [[ -d "$SOURCE_DIR/.git" ]]; then
-    step "Pulling latest changes from git ..."
-    if (cd "$SOURCE_DIR" && git pull 2>/dev/null); then
-        info "Source updated (git pull)"
+case "${OS}" in
+    darwin) OS_NAME="macOS" ;;
+    linux)  OS_NAME="Linux" ;;
+    *)      die "Unsupported OS: ${OS}" ;;
+esac
+
+ok "${OS_NAME} (${ARCH_NORM})"
+
+# ── Resolve target release version ───────────────────────────────────────────
+
+section "Resolving Release Version"
+
+if [[ -n "${LOCAL_DIR}" ]]; then
+    # Derive version from the wheel filename in the local dir
+    local_whl="$(ls "${LOCAL_DIR}"/defenseclaw-*.whl 2>/dev/null | head -1 || true)"
+    if [[ -n "${local_whl}" ]]; then
+        RELEASE_VERSION="$(basename "${local_whl}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "local")"
     else
-        warn "git pull failed — upgrading from current local state"
+        RELEASE_VERSION="${RELEASE_VERSION:-local}"
     fi
+    info "Using local dist directory: ${LOCAL_DIR} (version ${RELEASE_VERSION})"
+elif [[ -n "${RELEASE_VERSION}" ]]; then
+    # Strip leading 'v' if present
+    RELEASE_VERSION="${RELEASE_VERSION#v}"
+    ok "Target version: ${RELEASE_VERSION}"
 else
-    info "Source directory: not a git repo — using local files"
+    info "Fetching latest release from GitHub..."
+    RELEASE_VERSION=$(curl -sSf "https://api.github.com/repos/${REPO}/releases/latest" \
+        | grep -oE '"tag_name": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') \
+        || die "Failed to fetch latest release. Set VERSION=x.y.z or use --local <dir>."
+    [[ -n "${RELEASE_VERSION}" ]] \
+        || die "Could not parse latest release version. Use --version x.y.z to specify explicitly."
+    ok "Latest release: ${RELEASE_VERSION}"
 fi
 
-# ── Detect versions ──────────────────────────────────────────────────────────
+# ── Detect currently installed version ───────────────────────────────────────
 
-CURRENT_VERSION=""
-if command -v defenseclaw >/dev/null 2>&1; then
-    CURRENT_VERSION=$(python3 -c "
-try:
-    from defenseclaw import __version__
-    print(__version__)
-except Exception:
-    print('unknown')
-" 2>/dev/null || echo "unknown")
+CURRENT_VERSION="unknown"
+if has defenseclaw; then
+    CURRENT_VERSION=$(defenseclaw --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+        || python3 -c "from defenseclaw import __version__; print(__version__)" 2>/dev/null \
+        || echo "unknown")
 fi
 CURRENT_VERSION="${CURRENT_VERSION:-unknown}"
 
-NEW_VERSION=$(python3 -c "
-import re
-with open('$SOURCE_DIR/pyproject.toml') as f:
-    for line in f:
-        m = re.match(r'^version\s*=\s*[\"'']([^\"'']+)', line.strip())
-        if m: print(m.group(1)); break
-" 2>/dev/null || echo "unknown")
+ok "Installed version : ${CURRENT_VERSION}"
+ok "Upgrade target    : ${RELEASE_VERSION}"
 
-info "Installed version: $CURRENT_VERSION"
-info "New version:       $NEW_VERSION"
-
-if [[ "$CURRENT_VERSION" == "$NEW_VERSION" && "$YES" -eq 0 ]]; then
-    echo
-    echo -e "  Already at the latest version."
+if [[ "${CURRENT_VERSION}" == "${RELEASE_VERSION}" && "${YES}" -eq 0 ]]; then
+    printf "\n  Already at version ${RELEASE_VERSION}.\n"
     read -r -p "  Re-apply upgrade anyway? [y/N] " REPLY
     case "$REPLY" in
         [Yy]*) ;;
@@ -151,16 +196,39 @@ if [[ "$CURRENT_VERSION" == "$NEW_VERSION" && "$YES" -eq 0 ]]; then
     esac
 fi
 
+# ── Artifact helpers ──────────────────────────────────────────────────────────
+
+artifact_path() {
+    local name="$1"
+    if [[ -n "${LOCAL_DIR}" ]]; then
+        local match
+        match="$(ls "${LOCAL_DIR}"/${name} 2>/dev/null | head -1 || true)"
+        [[ -z "${match}" ]] && die "Artifact not found: ${LOCAL_DIR}/${name}"
+        echo "${match}"
+    else
+        echo "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${name}"
+    fi
+}
+
+fetch_artifact() {
+    local source="$1" dest="$2"
+    if [[ -n "${LOCAL_DIR}" ]]; then
+        cp "${source}" "${dest}"
+    else
+        curl -sSfL "${source}" -o "${dest}" \
+            || die "Failed to download: ${source}"
+    fi
+}
+
 # ── Confirm ───────────────────────────────────────────────────────────────────
 
-if [[ "$YES" -eq 0 ]]; then
-    echo
-    echo -e "  This will:"
-    echo -e "    1. Back up ${BOLD}~/.defenseclaw/${NC} and ${BOLD}~/.openclaw/openclaw.json${NC}"
-    echo -e "    2. Replace gateway binary, Python CLI, and plugin files"
-    echo -e "    3. Run version-specific migrations"
-    echo -e "    4. Restart services"
-    echo
+if [[ "${YES}" -eq 0 ]]; then
+    printf "\n  This will:\n"
+    printf "    1. Back up config files in ${BOLD}~/.defenseclaw/${NC}\n"
+    printf "    2. Download and replace gateway binary, Python CLI wheel, and plugin\n"
+    printf "       ${DIM}Source: github.com/${REPO}/releases/tag/${RELEASE_VERSION}${NC}\n"
+    printf "    3. Run version-specific migrations\n"
+    printf "    4. Restart services\n\n"
     read -r -p "  Proceed? [y/N] " REPLY
     case "$REPLY" in
         [Yy]*) ;;
@@ -168,111 +236,142 @@ if [[ "$YES" -eq 0 ]]; then
     esac
 fi
 
-# ── Step 1: Create backup ────────────────────────────────────────────────────
+# ── Step 1: Create backup ─────────────────────────────────────────────────────
 
 section "Creating Backup"
 
 TIMESTAMP=$(date +%Y%m%dT%H%M%S)
 BACKUP_DIR="${BACKUP_ROOT}/upgrade-${TIMESTAMP}"
-mkdir -p "$BACKUP_DIR"
+mkdir -p "${BACKUP_DIR}"
 
-if [[ -d "$DEFENSECLAW_HOME" ]]; then
+if [[ -d "${DEFENSECLAW_HOME}" ]]; then
     for f in config.yaml .env guardrail_runtime.json device.key; do
         src="${DEFENSECLAW_HOME}/$f"
-        [[ -f "$src" ]] && cp "$src" "$BACKUP_DIR/" && info "Backed up: $f"
+        [[ -f "${src}" ]] && cp "${src}" "${BACKUP_DIR}/" && ok "Backed up: $f"
     done
     if [[ -d "${DEFENSECLAW_HOME}/policies" ]]; then
         cp -r "${DEFENSECLAW_HOME}/policies" "${BACKUP_DIR}/policies"
-        info "Backed up: policies/"
+        ok "Backed up: policies/"
     fi
 fi
 
 OPENCLAW_JSON="${OPENCLAW_HOME}/openclaw.json"
-if [[ -f "$OPENCLAW_JSON" ]]; then
-    cp "$OPENCLAW_JSON" "${BACKUP_DIR}/openclaw.json"
-    info "Backed up: openclaw.json"
+if [[ -f "${OPENCLAW_JSON}" ]]; then
+    cp "${OPENCLAW_JSON}" "${BACKUP_DIR}/openclaw.json"
+    ok "Backed up: openclaw.json"
 fi
 
-info "Backup saved to: $BACKUP_DIR"
+ok "Backup saved to: ${BACKUP_DIR}"
 
-# ── Step 2: Stop services ────────────────────────────────────────────────────
+# ── Step 2: Stop services ─────────────────────────────────────────────────────
 
 section "Stopping Services"
 
 step "Stopping defenseclaw-gateway ..."
-defenseclaw-gateway stop 2>/dev/null && info "Gateway stopped" || warn "Gateway was not running"
+defenseclaw-gateway stop 2>/dev/null && ok "Gateway stopped" || warn "Gateway was not running"
 
-# ── Step 3: Replace files ────────────────────────────────────────────────────
+# ── Step 3: Download and replace gateway binary ───────────────────────────────
 
-section "Replacing Files"
+section "Replacing Gateway Binary"
 
-# Gateway binary
-step "Building defenseclaw-gateway ..."
-(cd "$SOURCE_DIR" && make gateway-install) && info "Gateway binary replaced" || { error "make gateway-install failed"; exit 1; }
+step "Downloading defenseclaw-gateway from release ${RELEASE_VERSION} ..."
+mkdir -p "${INSTALL_DIR}"
 
-# Python CLI
-step "Updating Python CLI ..."
+tmp_gw="$(mktemp -d)"
+url="$(artifact_path "defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz")"
+fetch_artifact "${url}" "${tmp_gw}/gateway.tar.gz"
+tar -xzf "${tmp_gw}/gateway.tar.gz" -C "${tmp_gw}"
+cp "${tmp_gw}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
+chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
+rm -rf "${tmp_gw}"
+
+if [[ "${OS}" == "darwin" ]]; then
+    codesign -f -s - "${INSTALL_DIR}/defenseclaw-gateway" 2>/dev/null || true
+fi
+
+ok "Gateway binary replaced"
+
+# ── Step 4: Replace Python CLI from wheel ────────────────────────────────────
+
+section "Replacing Python CLI"
+
 UV_BIN="$(command -v uv 2>/dev/null || true)"
-if [[ -z "$UV_BIN" ]]; then
-    error "uv not found on PATH — cannot update Python CLI"
-    error "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
+if [[ -z "${UV_BIN}" ]]; then
+    die "uv not found on PATH — cannot update Python CLI. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+fi
+
+if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
+    step "Creating venv at ${DEFENSECLAW_VENV} ..."
+    "${UV_BIN}" venv "${DEFENSECLAW_VENV}" --python 3.12
 fi
 
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
 
-if [[ ! -d "$DEFENSECLAW_VENV" ]]; then
-    step "Creating venv at $DEFENSECLAW_VENV ..."
-    "$UV_BIN" venv "$DEFENSECLAW_VENV" --python 3.12
-fi
+step "Downloading Python CLI wheel for ${RELEASE_VERSION} ..."
+whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
+tmp_whl="$(mktemp -d)"
+fetch_artifact "$(artifact_path "${whl_name}")" "${tmp_whl}/${whl_name}"
+"${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${tmp_whl}/${whl_name}" \
+    || die "Failed to install CLI wheel"
+rm -rf "${tmp_whl}"
 
-"$UV_BIN" pip install -e "$SOURCE_DIR" --python "$VENV_PYTHON"
-info "Python CLI updated"
+ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
+ok "Python CLI replaced"
 
-# Plugin
-step "Rebuilding OpenClaw plugin ..."
-if (cd "$SOURCE_DIR" && make plugin plugin-install 2>/dev/null); then
-    info "Plugin files replaced"
-else
-    warn "Plugin build failed — run 'make plugin plugin-install' manually"
-fi
+# ── Step 5: Replace OpenClaw plugin ──────────────────────────────────────────
 
-# ── Step 4: Run migrations ───────────────────────────────────────────────────
+section "Replacing OpenClaw Plugin"
+
+step "Downloading plugin tarball for ${RELEASE_VERSION} ..."
+plugin_dest="${DEFENSECLAW_HOME}/extensions/defenseclaw"
+rm -rf "${plugin_dest}"
+mkdir -p "${plugin_dest}"
+
+tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
+tmp_plugin="$(mktemp -d)"
+fetch_artifact "$(artifact_path "${tarball_name}")" "${tmp_plugin}/${tarball_name}"
+tar -xzf "${tmp_plugin}/${tarball_name}" -C "${plugin_dest}"
+rm -rf "${tmp_plugin}"
+
+ok "Plugin replaced"
+
+# ── Step 6: Run migrations ────────────────────────────────────────────────────
 
 section "Running Migrations"
 
 MIGRATION_COUNT=$(python3 -c "
 from defenseclaw.migrations import run_migrations
-count = run_migrations('$CURRENT_VERSION', '$NEW_VERSION', '$OPENCLAW_HOME')
+count = run_migrations('${CURRENT_VERSION}', '${RELEASE_VERSION}', '${OPENCLAW_HOME}')
 print(count)
 " 2>/dev/null || echo "0")
 
-if [[ "$MIGRATION_COUNT" -eq 0 ]]; then
-    info "No migrations needed"
+if [[ "${MIGRATION_COUNT}" -eq 0 ]]; then
+    ok "No migrations needed"
 else
-    info "Applied $MIGRATION_COUNT migration(s)"
+    ok "Applied ${MIGRATION_COUNT} migration(s)"
 fi
 
-# ── Step 5: Start services ───────────────────────────────────────────────────
+# ── Step 7: Start services ────────────────────────────────────────────────────
 
 section "Starting Services"
 
 step "Starting defenseclaw-gateway ..."
-defenseclaw-gateway start && info "Gateway started" || warn "Could not start gateway"
+defenseclaw-gateway start && ok "Gateway started" || warn "Could not start gateway"
 
 step "Restarting OpenClaw gateway to load updated plugin ..."
 openclaw gateway restart 2>/dev/null \
-    && info "OpenClaw gateway restarted — DefenseClaw plugin loaded" \
+    && ok "OpenClaw gateway restarted — DefenseClaw plugin loaded" \
     || warn "Could not restart OpenClaw gateway automatically. Run: openclaw gateway restart"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 section "Upgrade Complete"
-info "DefenseClaw upgraded: $CURRENT_VERSION → $NEW_VERSION"
-echo
-echo -e "  Backup saved to: ${DIM}$BACKUP_DIR${NC}"
-echo -e "  Run ${BOLD}defenseclaw status${NC} to verify all components are healthy."
-echo
+
+ok "DefenseClaw upgraded: ${CURRENT_VERSION} → ${RELEASE_VERSION}"
+printf "\n"
+printf "  Backup saved to: ${DIM}${BACKUP_DIR}${NC}\n"
+printf "  Run ${BOLD}defenseclaw status${NC} to verify all components are healthy.\n"
+printf "\n"
 
 } # end main()
 
