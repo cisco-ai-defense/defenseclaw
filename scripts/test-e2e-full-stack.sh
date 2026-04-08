@@ -787,6 +787,24 @@ alerts_action_count() {
     fi
 }
 
+wait_for_alert_action_increase() {
+    local action="$1"
+    local before_count="${2:-0}"
+    local timeout_s="${3:-60}"
+    local target="${4:-}"
+    local interval="${5:-2}"
+    local deadline=$((SECONDS + timeout_s))
+    local current=0
+    while [ $SECONDS -lt $deadline ]; do
+        current=$(alerts_action_count "$action" "$target")
+        if [ "${current:-0}" -gt "${before_count:-0}" ] 2>/dev/null; then
+            return 0
+        fi
+        sleep "$interval"
+    done
+    return 1
+}
+
 agent_session_id() {
     sanitize_name "${E2E_PREFIX}-$1-$$"
 }
@@ -1947,6 +1965,7 @@ phase_plugin_lifecycle() {
     local clean_entry malicious_entry
     local install_out agent_out scan_out scan_json findings
     local disable_out enable_out resp payload
+    local runtime_connected_before
 
     cleanup_plugin_name "$clean_plugin"
     cleanup_plugin_name "$malicious_plugin"
@@ -2022,6 +2041,7 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: plugin allow state recorded" "allow action missing for $clean_plugin"
     fi
 
+    runtime_connected_before=$(alerts_action_count "sidecar-connected")
     runtime_install_out=$(openclaw plugins install "$clean_source" 2>&1 || true)
     echo "$runtime_install_out"
     runtime_clean_path=$(find_runtime_plugin_path "$clean_plugin" || true)
@@ -2032,7 +2052,7 @@ phase_plugin_lifecycle() {
         phase_timer_end "Phase 7B"
         return
     fi
-    if wait_for_sidecar_subsystems_running 120; then
+    if wait_for_alert_action_increase "sidecar-connected" "${runtime_connected_before:-0}" 120 && wait_for_sidecar_subsystems_running 120; then
         pass "plugin lifecycle: sidecar recovered after runtime install restart"
     else
         fail "plugin lifecycle: sidecar recovered after runtime install restart" "sidecar did not return to running after plugin install restart"
