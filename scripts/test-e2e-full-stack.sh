@@ -1965,7 +1965,7 @@ phase_plugin_lifecycle() {
     local clean_entry malicious_entry
     local install_out agent_out scan_out scan_json findings
     local disable_out enable_out resp payload
-    local runtime_connected_before
+    local runtime_connected_before cli_disable_connected_before cli_enable_connected_before
 
     cleanup_plugin_name "$clean_plugin"
     cleanup_plugin_name "$malicious_plugin"
@@ -2058,17 +2058,23 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: sidecar recovered after runtime install restart" "sidecar did not return to running after plugin install restart"
     fi
 
+    cli_disable_connected_before=$(alerts_action_count "sidecar-connected")
     disable_out=$(defenseclaw plugin disable "$clean_plugin" --reason "E2E plugin disable" 2>&1 || true)
     echo "$disable_out"
-    if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "false" 45 && wait_for_sidecar_subsystems_running 60; then
+    if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "false" 45 \
+        && wait_for_alert_action_increase "sidecar-connected" "${cli_disable_connected_before:-0}" 120 \
+        && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: CLI disable updated OpenClaw plugin state"
     else
         fail "plugin lifecycle: CLI disable updated OpenClaw plugin state" "$disable_out"
     fi
 
+    cli_enable_connected_before=$(alerts_action_count "sidecar-connected")
     enable_out=$(defenseclaw plugin enable "$clean_plugin" 2>&1 || true)
     echo "$enable_out"
-    if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 && wait_for_sidecar_subsystems_running 60; then
+    if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 \
+        && wait_for_alert_action_increase "sidecar-connected" "${cli_enable_connected_before:-0}" 120 \
+        && wait_for_sidecar_subsystems_running 60; then
         pass "plugin lifecycle: CLI enable updated OpenClaw plugin state"
     else
         fail "plugin lifecycle: CLI enable updated OpenClaw plugin state" "$enable_out"
