@@ -1955,7 +1955,7 @@ phase_plugin_lifecycle() {
     copy_plugin_fixture "$clean_fixture" "$staging_root" "$clean_plugin"
     copy_plugin_fixture "$malicious_fixture" "$staging_root" "$malicious_plugin"
 
-    agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
+    agent_out=$(run_agent_prompt "$(agent_session_id plugin-install)" "Run this exact command: DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID defenseclaw plugin install $clean_source. Reply with exactly INSTALLED once the command succeeds." 180)
     echo "$agent_out"
     clean_path=$(find_governance_plugin_path "$clean_plugin" || true)
     if [ -n "$clean_path" ]; then
