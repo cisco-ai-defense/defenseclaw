@@ -150,6 +150,28 @@ func (s *Store) Init() error {
 	CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 	CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+
+	CREATE TABLE IF NOT EXISTS capability_decisions (
+		id          TEXT PRIMARY KEY,
+		timestamp   DATETIME NOT NULL,
+		agent       TEXT NOT NULL,
+		resource    TEXT NOT NULL,
+		params_json TEXT,
+		allowed     INTEGER NOT NULL,
+		reason      TEXT NOT NULL,
+		capability  TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS capability_calls (
+		id        TEXT PRIMARY KEY,
+		agent     TEXT NOT NULL,
+		resource  TEXT NOT NULL,
+		timestamp DATETIME NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_cap_decisions_agent ON capability_decisions(agent);
+	CREATE INDEX IF NOT EXISTS idx_cap_decisions_ts ON capability_decisions(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_cap_calls_agent_ts ON capability_calls(agent, timestamp);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -687,6 +709,95 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// --- Capability Decisions ---
+
+// CapabilityDecisionRow represents a logged capability evaluation outcome.
+type CapabilityDecisionRow struct {
+	ID         string    `json:"id"`
+	Timestamp  time.Time `json:"timestamp"`
+	Agent      string    `json:"agent"`
+	Resource   string    `json:"resource"`
+	ParamsJSON string    `json:"params_json,omitempty"`
+	Allowed    bool      `json:"allowed"`
+	Reason     string    `json:"reason"`
+	Capability string    `json:"capability,omitempty"`
+}
+
+// LogCapabilityDecision inserts a capability evaluation outcome.
+func (s *Store) LogCapabilityDecision(agent, resource, paramsJSON string, allowed bool, reason, capName string) error {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	allowedInt := 0
+	if allowed {
+		allowedInt = 1
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO capability_decisions (id, timestamp, agent, resource, params_json, allowed, reason, capability)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, now, agent, resource, nullStr(paramsJSON), allowedInt, reason, nullStr(capName),
+	)
+	if err != nil {
+		return fmt.Errorf("audit: log capability decision: %w", err)
+	}
+	return nil
+}
+
+// ListCapabilityDecisions returns the most recent capability decisions.
+func (s *Store) ListCapabilityDecisions(limit int) ([]CapabilityDecisionRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(
+		`SELECT id, timestamp, agent, resource, params_json, allowed, reason, capability
+		 FROM capability_decisions ORDER BY timestamp DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list capability decisions: %w", err)
+	}
+	defer rows.Close()
+
+	var results []CapabilityDecisionRow
+	for rows.Next() {
+		var r CapabilityDecisionRow
+		var paramsJSON, capName sql.NullString
+		var allowedInt int
+		if err := rows.Scan(&r.ID, &r.Timestamp, &r.Agent, &r.Resource, &paramsJSON, &allowedInt, &r.Reason, &capName); err != nil {
+			return nil, fmt.Errorf("audit: scan capability decision row: %w", err)
+		}
+		r.ParamsJSON = paramsJSON.String
+		r.Capability = capName.String
+		r.Allowed = allowedInt == 1
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// RecordCapabilityCall records a timestamp for rate limiting.
+func (s *Store) RecordCapabilityCall(agent, resource string, ts time.Time) error {
+	id := uuid.New().String()
+	_, err := s.db.Exec(
+		`INSERT INTO capability_calls (id, agent, resource, timestamp) VALUES (?, ?, ?, ?)`,
+		id, agent, resource, ts,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: record capability call: %w", err)
+	}
+	return nil
+}
+
+// CountCapabilityCalls counts calls by an agent within a time window.
+func (s *Store) CountCapabilityCalls(agent string, from, to time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM capability_calls WHERE agent = ? AND timestamp >= ? AND timestamp <= ?`,
+		agent, from, to,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("audit: count capability calls: %w", err)
+	}
+	return count, nil
 }
 
 func (s *Store) Close() error {
