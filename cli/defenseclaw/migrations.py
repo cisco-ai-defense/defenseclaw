@@ -36,18 +36,18 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
 
 
 # ---------------------------------------------------------------------------
-# Migration: 0.2.0
+# Migration: 0.3.0
 # ---------------------------------------------------------------------------
 
-def _migrate_0_2_0(openclaw_home: str) -> None:
+def _migrate_0_3_0(openclaw_home: str) -> None:
     """Remove legacy defenseclaw model/provider entries from openclaw.json.
 
-    Prior to 0.3.0 the guardrail setup added models.providers.defenseclaw
-    and/or models.providers.litellm to openclaw.json to redirect traffic,
-    and set agents.defaults.model.primary to "defenseclaw/<model>".
+    0.2.0's guardrail setup added models.providers.defenseclaw and/or
+    models.providers.litellm to openclaw.json to redirect traffic, and set
+    agents.defaults.model.primary to "defenseclaw/<model>".
 
-    The fetch interceptor now handles routing transparently, so these
-    entries are unnecessary and should be cleaned up.
+    The fetch interceptor introduced in 0.3.0 handles routing transparently,
+    so these entries are no longer needed and must be cleaned up on upgrade.
 
     Plugin registration is preserved.
     """
@@ -101,7 +101,7 @@ def _migrate_0_2_0(openclaw_home: str) -> None:
 # Ordered list of (version, description, callable).
 # Each callable takes openclaw_home as its single argument.
 MIGRATIONS: list[tuple[str, str, Callable[[str], None]]] = [
-    ("0.2.0", "Remove legacy model provider entries from openclaw.json", _migrate_0_2_0),
+    ("0.3.0", "Remove legacy model provider entries from openclaw.json", _migrate_0_3_0),
 ]
 
 

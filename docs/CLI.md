@@ -338,9 +338,10 @@ services. No uninstall or full reinstall — your configuration is preserved.
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run automatically even during same-version upgrades. For example, the
-v0.2.0 migration removes legacy `models.providers.defenseclaw`,
+v0.3.0 migration removes legacy `models.providers.defenseclaw`,
 `models.providers.litellm`, and `agents.defaults.model.primary` prefixed
-entries from `openclaw.json` while preserving plugin registration.
+entries from `openclaw.json` (added by 0.2.0's guardrail setup) while
+preserving plugin registration.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
