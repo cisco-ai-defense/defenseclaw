@@ -6,8 +6,7 @@ services:
     env_file:
       - ${SPLUNK_ENV_FILE:-../env/.env.example}
     ports:
-      # Bound to 0.0.0.0 so Tailscale peers can reach dashboards and HEC.
-      # Safe because Tailscale acts as the firewall — only tailnet devices connect.
+      # Bound to 0.0.0.0 so the runner host can expose dashboards and HEC when needed.
       - "0.0.0.0:8000:8000"
       - "0.0.0.0:8088:8088"
       - "0.0.0.0:8089:8089"

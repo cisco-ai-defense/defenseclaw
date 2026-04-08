@@ -1,57 +1,71 @@
 # Self-Hosted E2E CI — Setup Guide
 
-Full-stack end-to-end tests for DefenseClaw running on a persistent AWS EC2 instance with a GitHub Actions self-hosted runner. Every push to `main` or `demo` triggers a nuke-and-rebuild of DefenseClaw while OpenClaw persists.
+Full-stack end-to-end tests for DefenseClaw run on a persistent AWS EC2 instance with a GitHub Actions self-hosted runner. DefenseClaw is rebuilt from scratch on every run. OpenClaw persists and is treated as the long-lived control plane.
 
 ## Architecture
 
+```text
+GitHub Actions  ──►  .github/workflows/e2e.yml
+                           │
+                           ├─ core
+                           │    push / pull_request / workflow_dispatch
+                           │
+                           └─ full-live
+                                workflow_dispatch / schedule / same-repo pull_request
+
+                                   runs-on: [self-hosted, Linux, ARM64, e2e]
+                                                │
+                                                ▼
+                             ┌──────────────────────────────────────┐
+                             │ AWS EC2 runner (Ubuntu 24.04)       │
+                             │                                      │
+                             │ OpenClaw Gateway       :18789        │
+                             │ DefenseClaw Sidecar    :18970        │
+                             │ Guardrail Proxy        :4000         │
+                             │ Splunk Docker          :8000/:8088   │
+                             └──────────────────────────────────────┘
+                                                │
+                                                ▼
+                            ClawHub / Anthropic / Splunk / OpenClaw
 ```
-GitHub push  ──►  .github/workflows/e2e.yml
-                        │
-                        ▼  runs-on: [self-hosted, Linux, ARM64]
-               ┌──────────────────────────────────────┐
-               │  AWS EC2 t3.small (Ubuntu 24.04)     │
-               │                                       │
-               │  OpenClaw Gateway       :18789        │
-               │  DefenseClaw Sidecar    :18970        │
-               │  Guardrail Proxy        :4000         │
-               │  Splunk Docker          :8000/:8088   │
-               │  Tailscale              100.x.y.z     │
-               └──────────────────────────────────────┘
-                        │
-                        ▼
-               ClawHub / model provider / Splunk O11y
-```
+
+## Profiles
+
+| Profile | Triggers | Purpose |
+|---------|----------|---------|
+| `core` | `push`, `pull_request`, `workflow_dispatch` | Deterministic PR-safe path: scanners, enforcement, watcher, CodeGuard, status, AIBOM, policy, skill API, Splunk verification |
+| `full-live` | `workflow_dispatch`, `schedule`, same-repo `pull_request` | Agent-first path: live guardrail, real OpenClaw agent actions, plugin lifecycle, recovery, and run-scoped Splunk proof |
 
 ## Prerequisites
 
-The EC2 instance needs the following installed. All commands assume Ubuntu 24.04.
+The EC2 instance needs the following installed. Commands below assume Ubuntu 24.04.
 
 | Dependency | Version | Purpose |
 |------------|---------|---------|
 | Go | 1.25+ | Build DefenseClaw gateway |
 | Node.js | 20+ | Build TypeScript plugin |
-| Python | 3.12+ | CLI, E2E scripts |
+| Python | 3.12+ | CLI, tests, E2E helpers |
 | uv | latest | Python package management |
 | Docker | 24+ | Splunk container |
 | jq | any | JSON parsing in shell scripts |
-| Tailscale | latest | Private mesh network access |
+| gh | latest | GitHub CLI for local workflow debugging |
 
 ## EC2 Setup
 
 ### 1. Launch Instance
 
-- **AMI**: Ubuntu 24.04 LTS (`ami-*` — latest from Canonical)
-- **Type**: `t3.small` (2 vCPU, 2 GB RAM)
-- **Storage**: 20 GB gp3 EBS
-- **Security Group**: SSH restricted to your IP only. No other inbound rules needed — the GitHub Actions runner communicates outbound-only, and Tailscale handles private access.
-- **IAM Role**: Optional for OpenClaw models hosted on Bedrock. The current live guardrail E2E phase only runs against OpenAI or Anthropic providers with API-key auth.
+- **AMI**: Ubuntu 24.04 LTS
+- **Type**: `t4g.small` or larger recommended for ARM64 runner stability
+- **Storage**: 20 GB gp3 or larger
+- **Security Group**: no inbound required for Actions itself. If you want shell access, add temporary `22/tcp` ingress restricted to your current public IP.
+- **IAM Role**: optional for Bedrock-backed OpenClaw usage, but current live guardrail E2E is driven by Anthropic API key auth.
 
 ### 2. Install System Dependencies
 
 ```bash
 # Go
-wget -q https://go.dev/dl/go1.25.2.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.25.2.linux-amd64.tar.gz
+wget -q https://go.dev/dl/go1.25.2.linux-arm64.tar.gz
+sudo tar -C /usr/local -xzf go1.25.2.linux-arm64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
 source ~/.bashrc
 
@@ -59,8 +73,8 @@ source ~/.bashrc
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt-get install -y nodejs
 
-# Python + uv
-sudo apt-get install -y python3.12 python3.12-venv
+# Python + uv + jq
+sudo apt-get install -y python3.12 python3.12-venv jq
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Docker
@@ -68,61 +82,40 @@ sudo apt-get install -y docker.io docker-compose-plugin
 sudo usermod -aG docker $USER
 newgrp docker
 
-# jq
-sudo apt-get install -y jq
+# GitHub CLI
+type -p curl >/dev/null || sudo apt-get install -y curl
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+  sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+  sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+sudo apt-get update
+sudo apt-get install -y gh
 
 # Ensure ~/.local/bin is on PATH
 echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### 3. Install and Join Tailscale
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-```
-
-Note your Tailscale IP (`tailscale ip -4`) — you'll use it to access services from your laptop.
-
-On your laptop (macOS):
-
-```bash
-brew install tailscale
-tailscale up
-```
-
-### 4. Register GitHub Actions Runner
+### 3. Register GitHub Actions Runner
 
 Follow [GitHub's self-hosted runner docs](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners) or use the steps below.
 
 ```bash
 mkdir ~/actions-runner && cd ~/actions-runner
-curl -o actions-runner-linux-x64-2.322.0.tar.gz -L \
-  https://github.com/actions/runner/releases/download/v2.322.0/actions-runner-linux-x64-2.322.0.tar.gz
-tar xzf actions-runner-linux-x64-2.322.0.tar.gz
+curl -o actions-runner-linux-arm64-2.322.0.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.322.0/actions-runner-linux-arm64-2.322.0.tar.gz
+tar xzf actions-runner-linux-arm64-2.322.0.tar.gz
 
-# Configure (get the token from repo Settings > Actions > Runners > New self-hosted runner)
-./config.sh --url https://github.com/YOUR_ORG/defenseclaw --token YOUR_TOKEN
+# Configure
+./config.sh --url https://github.com/YOUR_ORG/defenseclaw --token YOUR_TOKEN --labels e2e
 
 # Install and start as systemd service
 sudo ./svc.sh install
 sudo ./svc.sh start
 ```
 
-### 5. Add GitHub Secrets
-
-Go to **repo Settings > Secrets and variables > Actions** and add:
-
-| Secret | Required | Source |
-|--------|----------|--------|
-| `OPENCLAW_GATEWAY_TOKEN` | Yes | `jq -r .token ~/.openclaw/openclaw.json` on the EC2 |
-| `ANTHROPIC_API_KEY` | Optional | Required only if you want the live guardrail phase to exercise Anthropic models |
-| `OPENAI_API_KEY` | Optional | Required only if you want the live guardrail phase to exercise OpenAI models |
-| `SPLUNK_ACCESS_TOKEN` | No | Splunk O11y org settings (for cloud export) |
-| `SPLUNK_REALM` | No | e.g., `us1` (for Splunk O11y cloud export) |
-
-### 6. Install OpenClaw (One-Time)
+### 4. Install OpenClaw Once
 
 OpenClaw persists across E2E runs. Install it once on the EC2:
 
@@ -131,190 +124,214 @@ npm install -g @openclaw/gateway
 openclaw init
 ```
 
-Configure your Telegram channel, agent definitions, and model settings as needed. These persist in `~/.openclaw/` and are not touched by E2E runs.
-
 DefenseClaw watches both OpenClaw skill locations during E2E runs:
 
 - `~/.openclaw/workspace/skills`
 - `~/.openclaw/skills`
 
-## Telegram Session Setup (One-Time)
+### 5. Add GitHub Secrets
 
-The E2E suite includes a Telegram round-trip test that sends a message as a real Telegram user and verifies the bot responds. This requires a Telethon session string.
+Go to **Settings > Secrets and variables > Actions** and add:
 
-### Create Session String
+| Secret | Required | Source |
+|--------|----------|--------|
+| `OPENCLAW_GATEWAY_TOKEN` | Yes | `jq -r .token ~/.openclaw/openclaw.json` on the runner |
+| `ANTHROPIC_API_KEY` | Yes for `full-live` | Anthropic console |
+| `OPENAI_API_KEY` | No | Only needed if you later add OpenAI-backed live checks |
+| `SPLUNK_ACCESS_TOKEN` | No | Splunk Observability Cloud |
+| `SPLUNK_REALM` | No | Splunk Observability Cloud realm |
 
-Run this on any machine where you can authenticate with Telegram (your laptop is fine):
+## What Gets Reset Every Run
+
+Every E2E run rebuilds DefenseClaw from scratch:
+
+- `~/.defenseclaw/`
+- `~/.local/bin/defenseclaw-gateway`
+- `~/.openclaw/extensions/defenseclaw*`
+- run-scoped temp skills, plugins, and quarantine artifacts
+
+Then the workflow:
+
+1. runs `make install`
+2. runs `defenseclaw init`
+3. writes fresh secrets into `~/.defenseclaw/.env`
+4. configures scanners and Splunk
+5. runs unit, TypeScript, Rego, and E2E coverage
+
+## What Persists
+
+OpenClaw remains persistent across runs:
+
+- global OpenClaw install
+- `~/.openclaw/openclaw.json`
+- auth profiles and device pairing
+- non-test skills and plugins
+
+The `full-live` job temporarily rewrites the active OpenClaw model to `anthropic/claude-sonnet-4-5` so guardrail coverage is deterministic, then restores the original config in cleanup.
+
+## Test Coverage
+
+### `core`
+
+`core` runs:
+
+- stack bootstrap and subsystem health
+- skill scanner
+- deterministic MCP fixture scanning
+- skill, MCP, and tool block/allow
+- quarantine and restore
+- watcher auto-scan
+- CodeGuard
+- `defenseclaw status`
+- `defenseclaw doctor`
+- `defenseclaw aibom scan`
+- `defenseclaw policy list` and `policy test`
+- skill disable/enable API
+- run-scoped Splunk verification
+
+### `full-live`
+
+`full-live` runs everything in `core` plus:
+
+- live Anthropic guardrail round-trip
+- real OpenClaw agent ping
+- agent-driven skill install and cleanup
+- agent-driven tool enforcement
+- plugin lifecycle
+- gateway and sidecar recovery
+- live run-scoped Splunk verification for guardrail, agent, plugin, and reconnect events
+
+## Test Phases
+
+| Phase | Coverage |
+|------|----------|
+| 1 | Start stack |
+| 2 | Health assertions |
+| 3 | Skill scanner |
+| 4 | MCP scanner |
+| 4B | Block/allow enforcement |
+| 5 | Quarantine |
+| 5B | Watcher auto-scan |
+| 5C | CodeGuard |
+| 5D | Status + doctor |
+| 5E | AIBOM |
+| 5F | Policy |
+| 5G | Skill API |
+| 6 | Guardrail (`full-live`) |
+| 7 | Agent chat (`full-live`) |
+| 7B | Plugin lifecycle (`full-live`) |
+| 7C | Recovery (`full-live`) |
+| 8 | Splunk verification |
+| 9 | Teardown |
+
+## Accessing the Runner
+
+### SSH
+
+If SSH is enabled for your IP, connect directly:
 
 ```bash
-pip install telethon cryptg
+ssh -i /path/to/openclaw.pem ubuntu@EC2_PUBLIC_IP
 ```
 
-```python
-import asyncio
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+### SSH Port Forwarding
 
-API_ID = 12345        # Get from https://my.telegram.org
-API_HASH = "abc123"   # Get from https://my.telegram.org
+To access services from your laptop without exposing extra inbound ports:
 
-async def main():
-    async with TelegramClient(StringSession(), API_ID, API_HASH) as client:
-        print("Session string:")
-        print(client.session.save())
-
-asyncio.run(main())
+```bash
+ssh -i /path/to/openclaw.pem \
+  -L 8000:127.0.0.1:8000 \
+  -L 18789:127.0.0.1:18789 \
+  -L 18970:127.0.0.1:18970 \
+  ubuntu@EC2_PUBLIC_IP
 ```
 
-This will prompt you to log in with your phone number and 2FA code. Copy the resulting session string and store it as the `E2E_TELEGRAM_USER_SESSION` GitHub secret.
-
-**Important**: Use a dedicated test Telegram account, not your personal account. The session string grants full access to the account.
-
-### Required Environment Variables for Telegram Test
-
-The Telegram test also needs `E2E_TELEGRAM_API_ID`, `E2E_TELEGRAM_API_HASH`, and `E2E_TELEGRAM_BOT_USERNAME` as GitHub secrets.
-
-## How CI Works
-
-### What Gets Nuked Every Run
-
-Every E2E run completely destroys and rebuilds DefenseClaw:
-
-- `~/.defenseclaw/` — config, `.env`, policies, audit DB, quarantine, Splunk bridge
-- `~/.local/bin/defenseclaw-gateway` — gateway binary
-- `~/.openclaw/extensions/defenseclaw/` — TypeScript plugin
-
-Then from the checked-out commit:
-
-1. `make install` builds and installs CLI + gateway + plugin
-2. `defenseclaw init` recreates config, DB schema, default policies
-3. Secrets are injected into the fresh `.env`
-
-### What Persists
-
-OpenClaw is the only stateful thing:
-
-- OpenClaw install (`npm global`)
-- `~/.openclaw/openclaw.json` (config + token)
-- `auth-profiles.json` + `models.json`
-- Device pairing (`paired.json`)
-- Telegram channel login
-
-### Guardrail Provider Support
-
-The live guardrail proxy phase is only enabled when the persisted OpenClaw model
-uses an OpenAI- or Anthropic-compatible provider and the matching GitHub secret
-is present. If the runner is using Bedrock-backed models, the workflow leaves
-`guardrail.enabled=false` and skips the live proxy phase instead of booting the
-sidecar into a permanent guardrail error state.
-
-### Test Phases
-
-| Phase | What It Tests |
-|-------|--------------|
-| 1. Start stack | OpenClaw gateway + DefenseClaw sidecar startup |
-| 2. Health assertions | `/health` JSON for gateway, watcher, API, guardrail, and Splunk |
-| 3. Skill scanner | Live scans against clean and malicious skill fixtures |
-| 4. MCP scanner | Live MCP scan against a configured server |
-| 5. Quarantine flow | Place, quarantine, restore, and verify a malicious skill fixture |
-| 6. Guardrail proxy | Live prompt round-trip when a compatible provider is configured |
-| 7. Agent chat | Real OpenClaw agent ping, skill install, and DefenseClaw scan verification |
-| 8. Splunk assertions | HEC ingest, event count, and audit action visibility |
-| 9. Teardown | Stop services, print summary |
-
-## Accessing Services via Tailscale
-
-Once both your laptop and the EC2 are on the same tailnet, access everything directly:
+Then use:
 
 | URL | Service |
 |-----|---------|
-| `http://100.x.y.z:8000` | Splunk dashboards (admin / `DefenseClawLocalMode1!`) |
-| `http://100.x.y.z:18789` | OpenClaw web UI |
-| `http://100.x.y.z:18970/health` | DefenseClaw sidecar health |
-| `ssh ubuntu@100.x.y.z` | Shell access |
+| `http://127.0.0.1:8000` | Splunk dashboards |
+| `http://127.0.0.1:18789` | OpenClaw gateway |
+| `http://127.0.0.1:18970/health` | DefenseClaw health |
 
-The Splunk container stays running after E2E tests complete so you can browse dashboards at any time.
+### SSM
 
-## Running E2E Locally
+If you prefer no SSH ingress, AWS SSM works fine for runner maintenance and debugging.
 
-### Via GitHub (workflow_dispatch)
+## Running E2E Manually
 
-Go to **Actions > E2E > Run workflow** in the GitHub UI. Select the branch and click "Run workflow".
+### From GitHub
 
-### Directly on the EC2
+Use **Actions > E2E > Run workflow** and select the branch.
+
+### On the Runner
 
 ```bash
 cd ~/actions-runner/_work/defenseclaw/defenseclaw
 git pull
 make install
 defenseclaw init
-scripts/test-e2e-full-stack.sh
+bash scripts/test-e2e-full-stack.sh
 ```
 
-## Splunk Observability Cloud (Optional)
+Useful overrides:
 
-For persistent cloud-based traces/metrics beyond the local Docker Splunk:
+```bash
+export E2E_PROFILE=core
+export DEFENSECLAW_RUN_ID=manual-$(date +%s)
+export E2E_TEST_PREFIX=e2e-manual-$(date +%s)
+```
 
-1. Add `SPLUNK_ACCESS_TOKEN` and `SPLUNK_REALM` to GitHub Actions secrets
-2. The workflow injects them into `~/.defenseclaw/.env`
-3. DefenseClaw's OTEL exporter sends traces and metrics to Splunk O11y
-4. Gives you a permanent view of E2E telemetry even when the Docker container is down
+## Splunk Observability Cloud
+
+Optional cloud export is still supported through `SPLUNK_ACCESS_TOKEN` and `SPLUNK_REALM`. Local Docker Splunk remains the default proof path for CI.
 
 ## Cost
 
 | Item | Cost |
 |------|------|
-| EC2 t3.small (always-on) | ~$15/month |
-| EBS gp3 20 GB | ~$1.60/month |
-| Tailscale (personal) | Free |
-| Splunk Docker (local) | Free |
-| LLM (Bedrock Haiku, 2-3 prompts/run) | ~$0.01/run |
-| Telegram Bot API | Free |
-
-**Tip**: Add a CloudWatch alarm + Lambda to stop the instance after 2 hours of idle CPU, and a second Lambda on the GitHub webhook to start it on push.
+| EC2 ARM64 small instance | roughly `$15-20/month` always-on |
+| EBS gp3 20 GB | roughly `$1-2/month` |
+| Splunk local Docker | free |
+| Anthropic live guardrail calls | low per-run usage |
 
 ## Troubleshooting
 
-### Runner Shows Offline
+### Runner Offline
 
 ```bash
-# On EC2
 sudo systemctl status actions.runner.*
 sudo systemctl restart actions.runner.*
 ```
 
-### Telegram Session Expired
-
-Telegram revokes sessions after extended inactivity (~months). Re-create the session string using the Python snippet above and update the `E2E_TELEGRAM_USER_SESSION` secret.
-
 ### Splunk Container Won't Start
 
 ```bash
-docker logs splunk-claw-bridge-ci-splunk-1
-# Common: port conflict — check if another Splunk container is running
 docker ps -a --filter name=splunk
+docker logs "$(docker ps -aq --filter name=splunk | head -1)"
 docker compose -f bundles/splunk_local_bridge/compose/docker-compose.ci.yml down -v
 ```
 
 ### DefenseClaw Health Check Fails
 
 ```bash
-# Check if sidecar is actually running
-pgrep -f defenseclaw-gateway
-# Check logs
+defenseclaw-gateway status
 tail -50 ~/.defenseclaw/gateway.log
-# Check if OpenClaw gateway is running
 pgrep -f "openclaw gateway"
 ```
 
 ### OpenClaw Gateway Won't Start
 
 ```bash
-# Check if already running
-pgrep -f "openclaw gateway"
-# Check token
 jq .token ~/.openclaw/openclaw.json
-# Restart manually
 openclaw gateway stop
 openclaw gateway --force
 ```
+
+### Guardrail Fails in `full-live`
+
+Check:
+
+- `ANTHROPIC_API_KEY` is present in repo secrets
+- the job restored and repatched `~/.openclaw/openclaw.json` correctly
+- `~/.defenseclaw/config.yaml` has `guardrail.enabled: true`
