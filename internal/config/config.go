@@ -40,26 +40,27 @@ type ClawConfig struct {
 }
 
 type Config struct {
-	DataDir        string               `mapstructure:"data_dir"         yaml:"data_dir"`
-	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string               `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
-	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Splunk         SplunkConfig         `mapstructure:"splunk"           yaml:"splunk"`
-	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	DataDir             string               `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB             string               `mapstructure:"audit_db"              yaml:"audit_db"`
+	QuarantineDir       string               `mapstructure:"quarantine_dir"        yaml:"quarantine_dir"`
+	PluginDir           string               `mapstructure:"plugin_dir"            yaml:"plugin_dir"`
+	PolicyDir           string               `mapstructure:"policy_dir"            yaml:"policy_dir"`
+	CapabilityPolicyDir string               `mapstructure:"capability_policy_dir" yaml:"capability_policy_dir"`
+	Environment         string               `mapstructure:"environment"           yaml:"environment"`
+	Claw                ClawConfig           `mapstructure:"claw"                  yaml:"claw"`
+	InspectLLM          InspectLLMConfig     `mapstructure:"inspect_llm"           yaml:"inspect_llm"`
+	CiscoAIDefense      CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense"      yaml:"cisco_ai_defense"`
+	Scanners            ScannersConfig       `mapstructure:"scanners"              yaml:"scanners"`
+	OpenShell           OpenShellConfig      `mapstructure:"openshell"             yaml:"openshell"`
+	Watch               WatchConfig          `mapstructure:"watch"                 yaml:"watch"`
+	Firewall            FirewallConfig       `mapstructure:"firewall"              yaml:"firewall"`
+	Guardrail           GuardrailConfig      `mapstructure:"guardrail"             yaml:"guardrail"`
+	Splunk              SplunkConfig         `mapstructure:"splunk"                yaml:"splunk"`
+	Gateway             GatewayConfig        `mapstructure:"gateway"               yaml:"gateway"`
+	SkillActions        SkillActionsConfig   `mapstructure:"skill_actions"         yaml:"skill_actions"`
+	MCPActions          MCPActionsConfig     `mapstructure:"mcp_actions"           yaml:"mcp_actions"`
+	PluginActions       PluginActionsConfig  `mapstructure:"plugin_actions"        yaml:"plugin_actions"`
+	OTel                OTelConfig           `mapstructure:"otel"                  yaml:"otel"`
 }
 
 type OTelConfig struct {
@@ -556,6 +557,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("quarantine_dir", filepath.Join(dataDir, "quarantine"))
 	viper.SetDefault("plugin_dir", filepath.Join(dataDir, "plugins"))
 	viper.SetDefault("policy_dir", filepath.Join(dataDir, "policies"))
+	viper.SetDefault("capability_policy_dir", filepath.Join(dataDir, "capabilities"))
 	viper.SetDefault("environment", string(DetectEnvironment()))
 	viper.SetDefault("claw.mode", string(ClawOpenClaw))
 	viper.SetDefault("claw.home_dir", "~/.openclaw")

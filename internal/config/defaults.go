@@ -80,12 +80,13 @@ func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
 	clawMode := ClawOpenClaw
 	return &Config{
-		DataDir:       dataDir,
-		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
-		QuarantineDir: filepath.Join(dataDir, "quarantine"),
-		PluginDir:     filepath.Join(dataDir, "plugins"),
-		PolicyDir:     filepath.Join(dataDir, "policies"),
-		Environment:   string(DetectEnvironment()),
+		DataDir:             dataDir,
+		AuditDB:             filepath.Join(dataDir, DefaultAuditDBName),
+		QuarantineDir:       filepath.Join(dataDir, "quarantine"),
+		PluginDir:           filepath.Join(dataDir, "plugins"),
+		PolicyDir:           filepath.Join(dataDir, "policies"),
+		CapabilityPolicyDir: filepath.Join(dataDir, "capabilities"),
+		Environment:         string(DetectEnvironment()),
 		Claw: ClawConfig{
 			Mode:       clawMode,
 			HomeDir:    "~/.openclaw",
