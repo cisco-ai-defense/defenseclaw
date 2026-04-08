@@ -35,6 +35,7 @@ func init() {
 	capabilityCmd.AddCommand(capShowCmd)
 	capabilityCmd.AddCommand(capEvaluateCmd)
 	capabilityCmd.AddCommand(capValidateCmd)
+	capabilityCmd.AddCommand(capApproveCmd)
 
 	capEvaluateCmd.Flags().StringSlice("param", nil, "Parameters as key=value pairs")
 	capEvaluateCmd.Flags().String("env", "", "Environment label")
@@ -161,6 +162,45 @@ var capValidateCmd = &cobra.Command{
 		}
 		fmt.Printf("Valid: agent=%q, %d capabilities, %d restrictions\n",
 			pol.Agent, len(pol.Capabilities), len(pol.Restrictions))
+		return nil
+	},
+}
+
+// ---------------------------------------------------------------------------
+// capability approve <agent>
+// ---------------------------------------------------------------------------
+
+var capApproveCmd = &cobra.Command{
+	Use:   "approve <agent>",
+	Short: "Approve an auto-generated capability policy",
+	Long: `Approve a pending auto-generated capability policy. This renames
+auto-<agent>.capability.yaml to <agent>.capability.yaml and sets approved: true.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
+		agent := args[0]
+		dir := cfg.CapabilityPolicyDir
+
+		pol, err := capability.ApprovePolicy(dir, agent)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Approved: %s (%d capabilities, %d restrictions)\n",
+			agent, len(pol.Capabilities), len(pol.Restrictions))
+
+		// Reload evaluator if available
+		if capEvaluator != nil {
+			if reloadErr := capEvaluator.Reload(context.Background(), ""); reloadErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: reload evaluator: %v\n", reloadErr)
+			}
+		}
+
+		// Log audit event
+		if auditLog != nil {
+			_ = auditLog.LogAction("capability_approved", agent,
+				fmt.Sprintf("capabilities=%d, restrictions=%d", len(pol.Capabilities), len(pol.Restrictions)))
+		}
+
 		return nil
 	},
 }
