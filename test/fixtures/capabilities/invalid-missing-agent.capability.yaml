@@ -1,0 +1,6 @@
+description: "Missing agent field"
+
+capabilities:
+  - name: read_jira
+    resource: "jira.get_issue"
+    constraints: {}

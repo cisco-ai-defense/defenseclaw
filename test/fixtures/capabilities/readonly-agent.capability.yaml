@@ -1,0 +1,19 @@
+agent: readonly-agent
+description: "Read-only agent for monitoring"
+
+capabilities:
+  - name: read_jira
+    resource: "jira.get_issue"
+    constraints: {}
+
+  - name: read_confluence
+    resource: "confluence.get_page"
+    constraints: {}
+
+restrictions:
+  - "no_write"
+  - "no_delete"
+  - "no_external_http"
+
+conditions:
+  environments: ["production", "staging", "dev"]

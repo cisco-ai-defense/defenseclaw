@@ -1,0 +1,8 @@
+agent: bad-agent
+description: "Bad constraint types"
+
+capabilities:
+  - name: bad_capability
+    resource: ""
+    constraints:
+      field: 123

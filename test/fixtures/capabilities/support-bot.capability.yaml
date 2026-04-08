@@ -1,0 +1,30 @@
+agent: support-bot
+description: "Customer support automation agent"
+
+capabilities:
+  - name: read_jira_ticket
+    resource: "jira.get_issue"
+    constraints:
+      project: "ENG-*"
+      fields: ["summary", "status", "assignee"]
+
+  - name: post_slack_message
+    resource: "slack.post_message"
+    constraints:
+      channel: "#support"
+
+  - name: read_confluence
+    resource: "confluence.get_page"
+    constraints:
+      space: "SUPPORT"
+
+restrictions:
+  - "no_external_http"
+  - "no_bulk_export"
+
+conditions:
+  time_window: "09:00-18:00"
+  environments: ["production", "staging"]
+  rate_limit:
+    max_calls: 100
+    window_seconds: 3600

@@ -1,0 +1,22 @@
+agent: admin-agent
+description: "Administrative agent with broad access"
+
+capabilities:
+  - name: manage_jira
+    resource: "jira.*"
+    constraints: {}
+
+  - name: manage_slack
+    resource: "slack.*"
+    constraints: {}
+
+  - name: manage_confluence
+    resource: "confluence.*"
+    constraints: {}
+
+restrictions: []
+
+conditions:
+  rate_limit:
+    max_calls: 500
+    window_seconds: 3600
