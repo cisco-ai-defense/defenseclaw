@@ -323,38 +323,51 @@ Displays recent security alerts. Default limit: 25.
 defenseclaw upgrade [flags]
 ```
 
-Performs an in-place upgrade of DefenseClaw without losing configuration.
-Replaces changed files, runs version-specific migrations, and restarts
-services. No uninstall or full reinstall — your configuration is preserved.
+Downloads the gateway binary and Python CLI wheel from a GitHub release,
+runs version-specific migrations, and restarts services. No source checkout
+or build toolchain required — your configuration is preserved.
+
+> **Plugin installs are release-specific.** The OpenClaw plugin is installed
+> by `install.sh` as part of the release that ships it (0.3.0+). `upgrade`
+> does not touch the plugin.
 
 **Upgrade steps:**
 
 1. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
-2. Pull latest changes (`git pull`) if installed from a git repository
-3. Stop `defenseclaw-gateway`
-4. Replace gateway binary (`make gateway-install`), Python CLI (`uv pip install -e`), and plugin files (`make plugin plugin-install`)
+2. Stop `defenseclaw-gateway`
+3. Download and replace gateway binary from the GitHub release tarball
+4. Download and replace Python CLI from the GitHub release wheel
 5. Run version-specific migrations between the installed and new versions
-6. Start `defenseclaw-gateway` and restart OpenClaw gateway to load the updated plugin
+6. Start `defenseclaw-gateway` and restart OpenClaw gateway
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
-and run automatically even during same-version upgrades. For example, the
-v0.3.0 migration removes legacy `models.providers.defenseclaw`,
-`models.providers.litellm`, and `agents.defaults.model.primary` prefixed
-entries from `openclaw.json` (added by 0.2.0's guardrail setup) while
-preserving plugin registration.
+and run automatically even during same-version upgrades. Each migration is
+keyed to the release it ships with. For example, the v0.3.0 migration removes
+legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
+`agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
+by 0.2.0's guardrail setup) while preserving plugin registration.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
+- `--version VERSION` — upgrade to a specific release (default: latest)
 
 **Examples:**
 
 ```bash
-# Standard upgrade
+# Upgrade to the latest release
 defenseclaw upgrade --yes
+
+# Upgrade to a specific release
+defenseclaw upgrade --version 0.3.0 --yes
 ```
 
-The equivalent shell script is available at `scripts/upgrade.sh` with
-the same `--yes` flag.
+The equivalent shell script `scripts/upgrade.sh` accepts the same flags:
+
+```bash
+./scripts/upgrade.sh --yes
+./scripts/upgrade.sh --version 0.3.0 --yes
+VERSION=0.3.0 ./scripts/upgrade.sh --yes
+```
 
 ### doctor
 

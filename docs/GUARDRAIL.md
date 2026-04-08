@@ -399,17 +399,36 @@ defenseclaw setup guardrail --disable
 ## Upgrade
 
 ```
-defenseclaw upgrade [--yes]
+defenseclaw upgrade [--yes] [--version VERSION]
   1. Back up ~/.defenseclaw/ and openclaw.json to timestamped directory
-  2. Stop services
-  3. Replace gateway binary, Python CLI, and plugin files
-  4. Run version-specific migrations (e.g. v0.3.0: remove legacy provider entries)
-  5. Restart services (gateway + OpenClaw)
+  2. Stop defenseclaw-gateway
+  3. Download and replace gateway binary from GitHub release tarball
+  4. Download and replace Python CLI from GitHub release wheel
+  5. Run version-specific migrations (e.g. v0.3.0: remove legacy provider entries)
+  6. Start defenseclaw-gateway and restart OpenClaw gateway
 ```
 
-Migrations are keyed to release versions and run automatically when
+Migrations are keyed to the release they ship with and run automatically when
 upgrading across version boundaries. The migration framework lives in
 `cli/defenseclaw/migrations.py`.
+
+> **Plugin installs are release-specific and not part of upgrade.**
+> The OpenClaw plugin is installed by `install.sh` as part of the release
+> that ships it (0.3.0+). Running `upgrade` does not touch the plugin.
+
+The shell-based upgrade script (`scripts/upgrade.sh`) accepts the same flags:
+
+```bash
+# Upgrade to the latest release
+./scripts/upgrade.sh
+
+# Upgrade to a specific release
+./scripts/upgrade.sh --version 0.3.0
+VERSION=0.3.0 ./scripts/upgrade.sh
+
+# Non-interactive
+./scripts/upgrade.sh --yes
+```
 
 See [CLI Reference — upgrade](CLI.md#upgrade) for full options.
 

@@ -315,9 +315,19 @@ is configured in OpenClaw with a valid API key.
 Use the built-in upgrade command to update without losing configuration:
 
 ```bash
+# Upgrade to the latest release
 defenseclaw upgrade --yes
+
+# Upgrade to a specific release
+defenseclaw upgrade --version 0.3.0 --yes
 ```
 
-This backs up config files, replaces changed binaries and plugin files,
-runs version-specific migrations (e.g. cleaning up legacy openclaw.json
-entries), and restarts services. See [CLI Reference — upgrade](CLI.md#upgrade).
+This backs up config files, downloads and replaces the gateway binary and
+Python CLI wheel from the GitHub release, runs version-specific migrations
+(e.g. the v0.3.0 migration cleans up legacy `openclaw.json` provider entries),
+and restarts both the defenseclaw-gateway and the OpenClaw gateway.
+
+> **Note:** The OpenClaw plugin is installed by `install.sh` as part of
+> the release that ships it (0.3.0+) and is not replaced during upgrade.
+
+See [CLI Reference — upgrade](CLI.md#upgrade) for full details.
