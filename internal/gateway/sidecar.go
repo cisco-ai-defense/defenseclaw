@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/capability"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -275,6 +276,15 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	})
 	if s.otel != nil {
 		w.SetOTelProvider(s.otel)
+	}
+
+	// Wire capability auto-generation
+	if s.cfg.CapabilityPolicyDir != "" {
+		w.SetCapabilityDir(s.cfg.CapabilityPolicyDir)
+		eval, err := capability.NewEvaluator(ctx, s.cfg.CapabilityPolicyDir, s.store)
+		if err == nil {
+			w.SetCapabilityEvaluator(eval)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
