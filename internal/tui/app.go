@@ -31,12 +31,13 @@ const (
 	tabAlerts = iota
 	tabSkills
 	tabMCPs
+	tabAgents
 	tabCount
 )
 
 const refreshInterval = 5 * time.Second
 
-var tabNames = [tabCount]string{"Alerts", "Skills", "MCP Servers"}
+var tabNames = [tabCount]string{"Alerts", "Skills", "MCP Servers", "Agents"}
 
 type refreshMsg struct{}
 
@@ -48,6 +49,7 @@ type Model struct {
 	alerts    AlertsPanel
 	skills    SkillsPanel
 	mcps      MCPsPanel
+	agents    AgentsPanel
 	detail    DetailModal
 	statusBar StatusBar
 
@@ -61,6 +63,7 @@ func New(store *audit.Store, openshellBinary, anchorName string) Model {
 		alerts:          NewAlertsPanel(store),
 		skills:          NewSkillsPanel(store),
 		mcps:            NewMCPsPanel(store),
+		agents:          NewAgentsPanel(store),
 		detail:          NewDetailModal(),
 		statusBar:       NewStatusBar(),
 		store:           store,
@@ -95,6 +98,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.alerts.SetSize(m.width, panelH)
 		m.skills.SetSize(m.width, panelH)
 		m.mcps.SetSize(m.width, panelH)
+		m.agents.SetSize(m.width, panelH)
 		m.detail.SetSize(m.width, m.height)
 		m.statusBar.SetSize(m.width)
 		return m, nil
@@ -180,6 +184,8 @@ func (m Model) View() string {
 		b.WriteString(m.skills.View())
 	case tabMCPs:
 		b.WriteString(m.mcps.View())
+	case tabAgents:
+		b.WriteString(m.agents.View())
 	}
 
 	content := b.String()
@@ -199,6 +205,7 @@ func (m *Model) refresh() {
 	m.alerts.Refresh()
 	m.skills.Refresh()
 	m.mcps.Refresh()
+	m.agents.Refresh()
 	m.statusBar.Update(
 		m.alerts.Count(),
 		m.skills.Count(),
@@ -218,6 +225,8 @@ func (m *Model) cursorUp() {
 		m.skills.CursorUp()
 	case tabMCPs:
 		m.mcps.CursorUp()
+	case tabAgents:
+		m.agents.CursorUp()
 	}
 }
 
@@ -229,6 +238,8 @@ func (m *Model) cursorDown() {
 		m.skills.CursorDown()
 	case tabMCPs:
 		m.mcps.CursorDown()
+	case tabAgents:
+		m.agents.CursorDown()
 	}
 }
 
@@ -286,6 +297,8 @@ func (m Model) renderTabBar() string {
 			count = fmt.Sprintf(" (%d)", m.skills.Count())
 		case tabMCPs:
 			count = fmt.Sprintf(" (%d)", m.mcps.Count())
+		case tabAgents:
+			count = fmt.Sprintf(" (%d)", m.agents.Count())
 		}
 		label := name + count
 		if i == m.activeTab {
