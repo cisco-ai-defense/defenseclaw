@@ -247,7 +247,7 @@ jobs:
 
   full-live:
     name: Full Live E2E
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 45
     env:
@@ -672,3 +672,43 @@ jobs:
             rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
             rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
+
+  e2e-required:
+    name: E2E Required
+    if: ${{ github.event_name != 'schedule' }}
+    needs: [core, full-live]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce required E2E checks
+        env:
+          CORE_RESULT: ${{ needs.core.result }}
+          FULL_LIVE_RESULT: ${{ needs.full-live.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          SAME_REPO_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          echo "core=$CORE_RESULT"
+          echo "full_live=$FULL_LIVE_RESULT"
+          echo "event=$EVENT_NAME"
+          echo "same_repo_pr=$SAME_REPO_PR"
+
+          if [ "$CORE_RESULT" != "success" ]; then
+            echo "Core E2E must succeed."
+            exit 1
+          fi
+
+          if [ "$SAME_REPO_PR" = "true" ]; then
+            if [ "$FULL_LIVE_RESULT" != "success" ]; then
+              echo "Full Live E2E must succeed for same-repo pull requests."
+              exit 1
+            fi
+            exit 0
+          fi
+
+          case "$FULL_LIVE_RESULT" in
+            success|skipped)
+              ;;
+            *)
+              echo "Full Live E2E must either succeed or be skipped for this event."
+              exit 1
+              ;;
+          esac
