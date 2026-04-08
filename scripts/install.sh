@@ -317,8 +317,27 @@ install_python_cli() {
 }
 
 # ── Install: OpenClaw Plugin (from tarball) ───────────────────────────────────
+# Plugin releases are independent of gateway/CLI releases — not every release
+# ships a plugin tarball (introduced in 0.3.0). The artifact is probed before
+# attempting install so installs on earlier releases do not fail.
+
+release_has_plugin() {
+    if [[ -n "${LOCAL_DIR}" ]]; then
+        ls "${LOCAL_DIR}"/defenseclaw-plugin-*.tar.gz 2>/dev/null | head -1 | grep -q .
+    else
+        local url="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
+        curl -sSfL --head --output /dev/null "${url}" 2>/dev/null
+    fi
+}
 
 install_plugin() {
+    step "Checking for plugin artifact in release ${RELEASE_VERSION:-local} ..."
+
+    if ! release_has_plugin; then
+        info "No plugin artifact in this release — skipping plugin install"
+        return
+    fi
+
     step "Installing OpenClaw plugin"
 
     local dest="${DEFENSECLAW_HOME}/extensions/defenseclaw"
@@ -327,7 +346,7 @@ install_plugin() {
 
     if [[ -n "${LOCAL_DIR}" ]]; then
         local tarball
-        tarball="$(artifact_path "defenseclaw-plugin-*.tar.gz")"
+        tarball="$(ls "${LOCAL_DIR}"/defenseclaw-plugin-*.tar.gz | head -1)"
         tar -xzf "${tarball}" -C "${dest}"
     else
         local tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
