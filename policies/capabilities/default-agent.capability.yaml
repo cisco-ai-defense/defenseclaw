@@ -1,0 +1,43 @@
+# Default agent capability policy — allow all resources with no constraints.
+# Copy and customize this for specific agents. Place in ~/.defenseclaw/capabilities/
+#
+# Usage:
+#   cp this-file ~/.defenseclaw/capabilities/my-agent.capability.yaml
+#   # Edit agent name, narrow capabilities, add restrictions/conditions
+#   defenseclaw capability validate ~/.defenseclaw/capabilities/my-agent.capability.yaml
+
+agent: default-agent
+description: "Default permissive agent — allows all resources with no constraints"
+
+capabilities:
+  - name: all_jira
+    resource: "jira.*"
+    constraints: {}
+
+  - name: all_slack
+    resource: "slack.*"
+    constraints: {}
+
+  - name: all_confluence
+    resource: "confluence.*"
+    constraints: {}
+
+  - name: all_github
+    resource: "github.*"
+    constraints: {}
+
+  - name: all_http
+    resource: "http.*"
+    constraints: {}
+
+  - name: all_file
+    resource: "file.*"
+    constraints: {}
+
+  - name: all_shell
+    resource: "shell.*"
+    constraints: {}
+
+restrictions: []
+
+conditions: {}
