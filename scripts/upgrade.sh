@@ -18,10 +18,11 @@
 #
 # DefenseClaw Upgrade Script
 #
-# Downloads release artifacts from GitHub and replaces the gateway binary
-# and Python CLI wheel. The OpenClaw plugin is replaced automatically when
-# the release ships a plugin tarball (introduced in 0.3.0).
-# Runs version-specific migrations and restarts services.
+# Downloads the gateway binary and Python CLI wheel from a GitHub release,
+# runs version-specific migrations, and restarts services.
+#
+# Plugin installation is NOT handled here — it is part of the initial
+# release install (install.sh) and is release-specific.
 #
 # Usage:
 #   ./scripts/upgrade.sh [--yes] [--version VERSION] [--help]
@@ -70,20 +71,6 @@ step()    { printf "  ${CYAN}→${NC} %s\n" "$*"; }
 
 die() { err "$@"; exit 1; }
 has() { command -v "$1" &>/dev/null; }
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
-
-extract_version() {
-    local input="${1:-}"
-    echo "${input}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | awk 'NR==1' || true
-}
-
-# Issues a HEAD request for the artifact URL; returns 0 if it exists.
-release_has_artifact() {
-    local name="$1"
-    local url="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${name}"
-    curl -sSfL --head --output /dev/null "${url}" 2>/dev/null
-}
 
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
@@ -158,7 +145,7 @@ else
     info "Fetching latest release from GitHub..."
     RELEASE_VERSION=$(curl -sSf "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep -oE '"tag_name": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') \
-        || die "Failed to fetch latest release. Set VERSION=x.y.z to specify explicitly."
+        || die "Failed to fetch latest release. Use --version x.y.z to specify explicitly."
     [[ -n "${RELEASE_VERSION}" ]] \
         || die "Could not parse latest release version. Use --version x.y.z to specify explicitly."
     ok "Latest release: ${RELEASE_VERSION}"
@@ -187,26 +174,7 @@ if [[ "${CURRENT_VERSION}" == "${RELEASE_VERSION}" && "${YES}" -eq 0 ]]; then
     esac
 fi
 
-# ── Detect whether this release ships a plugin artifact ──────────────────────
-# Plugin releases are independent of gateway/CLI releases. The tarball is
-# probed via a HEAD request; no user flag controls this decision.
-
-tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
-
-PLUGIN_AVAILABLE=0
-step "Checking whether release ${RELEASE_VERSION} includes a plugin artifact ..."
-if release_has_artifact "${tarball_name}"; then
-    PLUGIN_AVAILABLE=1
-    ok "Plugin artifact found — will be replaced"
-else
-    ok "No plugin artifact in this release — plugin will not be touched"
-fi
-
-# ── Artifact helpers ──────────────────────────────────────────────────────────
-
-artifact_url() {
-    echo "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/$1"
-}
+# ── Artifact helper ───────────────────────────────────────────────────────────
 
 fetch_artifact() {
     local url="$1" dest="$2"
@@ -220,13 +188,8 @@ if [[ "${YES}" -eq 0 ]]; then
     printf "\n  This will:\n"
     printf "    1. Back up config files in ${BOLD}~/.defenseclaw/${NC}\n"
     printf "    2. Download and replace gateway binary and Python CLI wheel\n"
-    if [[ "${PLUGIN_AVAILABLE}" -eq 1 ]]; then
-        printf "    3. Download and replace OpenClaw plugin (included in this release)\n"
-    else
-        printf "    3. ${DIM}Skip plugin (not included in this release)${NC}\n"
-    fi
-    printf "    4. Run version-specific migrations\n"
-    printf "    5. Restart services\n"
+    printf "    3. Run version-specific migrations\n"
+    printf "    4. Restart the gateway service\n"
     printf "       ${DIM}Source: github.com/${REPO}/releases/tag/${RELEASE_VERSION}${NC}\n\n"
     read -r -p "  Proceed? [y/N] " REPLY
     case "$REPLY" in
@@ -277,7 +240,8 @@ step "Downloading defenseclaw-gateway from release ${RELEASE_VERSION} ..."
 mkdir -p "${INSTALL_DIR}"
 
 tmp_gw="$(mktemp -d)"
-fetch_artifact "$(artifact_url "defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz")" \
+fetch_artifact \
+    "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz" \
     "${tmp_gw}/gateway.tar.gz"
 tar -xzf "${tmp_gw}/gateway.tar.gz" -C "${tmp_gw}"
 cp "${tmp_gw}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
@@ -308,7 +272,9 @@ VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
 step "Downloading Python CLI wheel for ${RELEASE_VERSION} ..."
 whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
 tmp_whl="$(mktemp -d)"
-fetch_artifact "$(artifact_url "${whl_name}")" "${tmp_whl}/${whl_name}"
+fetch_artifact \
+    "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${whl_name}" \
+    "${tmp_whl}/${whl_name}"
 "${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${tmp_whl}/${whl_name}" \
     || die "Failed to install CLI wheel"
 rm -rf "${tmp_whl}"
@@ -316,30 +282,7 @@ rm -rf "${tmp_whl}"
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
 ok "Python CLI replaced"
 
-# ── Step 5: Replace OpenClaw plugin (when shipped with this release) ──────────
-
-if [[ "${PLUGIN_AVAILABLE}" -eq 1 ]]; then
-    section "Replacing OpenClaw Plugin"
-
-    step "Downloading plugin tarball for ${RELEASE_VERSION} ..."
-    plugin_dest="${DEFENSECLAW_HOME}/extensions/defenseclaw"
-
-    if [[ -d "${plugin_dest}" ]]; then
-        cp -r "${plugin_dest}" "${BACKUP_DIR}/extensions-defenseclaw"
-        ok "Backed up existing plugin to backup dir"
-        rm -rf "${plugin_dest}"
-    fi
-    mkdir -p "${plugin_dest}"
-
-    tmp_plugin="$(mktemp -d)"
-    fetch_artifact "$(artifact_url "${tarball_name}")" "${tmp_plugin}/${tarball_name}"
-    tar -xzf "${tmp_plugin}/${tarball_name}" -C "${plugin_dest}"
-    rm -rf "${tmp_plugin}"
-
-    ok "Plugin replaced"
-fi
-
-# ── Step 6: Run migrations ────────────────────────────────────────────────────
+# ── Step 5: Run migrations ────────────────────────────────────────────────────
 
 section "Running Migrations"
 
@@ -355,19 +298,12 @@ else
     ok "Applied ${MIGRATION_COUNT} migration(s)"
 fi
 
-# ── Step 7: Start services ────────────────────────────────────────────────────
+# ── Step 6: Start services ────────────────────────────────────────────────────
 
 section "Starting Services"
 
 step "Starting defenseclaw-gateway ..."
 defenseclaw-gateway start && ok "Gateway started" || warn "Could not start gateway"
-
-if [[ "${PLUGIN_AVAILABLE}" -eq 1 ]]; then
-    step "Restarting OpenClaw gateway to load updated plugin ..."
-    openclaw gateway restart 2>/dev/null \
-        && ok "OpenClaw gateway restarted — DefenseClaw plugin loaded" \
-        || warn "Could not restart OpenClaw gateway automatically. Run: openclaw gateway restart"
-fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
