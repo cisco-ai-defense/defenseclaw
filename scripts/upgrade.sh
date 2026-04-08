@@ -18,19 +18,17 @@
 #
 # DefenseClaw Upgrade Script
 #
-# Downloads release artifacts from GitHub and replaces the gateway binary,
-# Python CLI wheel, and (when included in the release) the OpenClaw plugin.
+# Downloads release artifacts from GitHub and replaces the gateway binary
+# and Python CLI wheel. The OpenClaw plugin is replaced automatically when
+# the release ships a plugin tarball (introduced in 0.3.0).
 # Runs version-specific migrations and restarts services.
-# Does NOT require a local source checkout.
 #
 # Usage:
-#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--local <dir>] [--help]
+#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--help]
 #
 # Options:
 #   --yes, -y             Skip confirmation prompts
 #   --version VERSION     Upgrade to a specific release (default: latest)
-#   --local <dir>         Install from a local dist/ directory instead of GitHub
-#   --skip-plugin         Skip plugin replacement even if an artifact is present
 #   --help, -h            Show this help
 #
 # Environment variables:
@@ -80,25 +78,17 @@ extract_version() {
     echo "${input}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | awk 'NR==1' || true
 }
 
-# Returns 0 if the named artifact exists in the release, 1 otherwise.
-# For GitHub releases: issues a HEAD request (no download).
-# For local dir: checks for the file by glob pattern.
+# Issues a HEAD request for the artifact URL; returns 0 if it exists.
 release_has_artifact() {
     local name="$1"
-    if [[ -n "${LOCAL_DIR}" ]]; then
-        ls "${LOCAL_DIR}"/${name} 2>/dev/null | head -1 | grep -q .
-    else
-        local url="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${name}"
-        curl -sSfL --head --output /dev/null "${url}" 2>/dev/null
-    fi
+    local url="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${name}"
+    curl -sSfL --head --output /dev/null "${url}" 2>/dev/null
 }
 
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
 YES=0
-LOCAL_DIR=""
 RELEASE_VERSION="${VERSION:-}"
-SKIP_PLUGIN=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -106,11 +96,6 @@ while [[ $# -gt 0 ]]; do
         --version)
             [[ $# -lt 2 ]] && die "--version requires a value"
             RELEASE_VERSION="$2"; shift 2 ;;
-        --local)
-            [[ $# -lt 2 ]] && die "--local requires a directory argument"
-            LOCAL_DIR="$(cd "$2" && pwd)" || die "Directory not found: $2"
-            shift 2 ;;
-        --skip-plugin) SKIP_PLUGIN=1; shift ;;
         --help|-h)
             cat <<EOF
 
@@ -121,8 +106,6 @@ while [[ $# -gt 0 ]]; do
   Options:
     --yes, -y             Skip confirmation prompts
     --version VERSION     Upgrade to a specific release (e.g. 0.2.0)
-    --local <dir>         Use a local dist/ directory instead of GitHub releases
-    --skip-plugin         Skip plugin replacement even if an artifact is present
     --help, -h            Show this help
 
   Environment variables:
@@ -168,22 +151,14 @@ ok "${OS_NAME} (${ARCH_NORM})"
 
 section "Resolving Release Version"
 
-if [[ -n "${LOCAL_DIR}" ]]; then
-    local_whl="$(ls "${LOCAL_DIR}"/defenseclaw-*.whl 2>/dev/null | head -1 || true)"
-    if [[ -n "${local_whl}" ]]; then
-        RELEASE_VERSION="$(basename "${local_whl}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "local")"
-    else
-        RELEASE_VERSION="${RELEASE_VERSION:-local}"
-    fi
-    info "Using local dist directory: ${LOCAL_DIR} (version ${RELEASE_VERSION})"
-elif [[ -n "${RELEASE_VERSION}" ]]; then
+if [[ -n "${RELEASE_VERSION}" ]]; then
     RELEASE_VERSION="${RELEASE_VERSION#v}"
     ok "Target version: ${RELEASE_VERSION}"
 else
     info "Fetching latest release from GitHub..."
     RELEASE_VERSION=$(curl -sSf "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep -oE '"tag_name": *"[^"]+"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') \
-        || die "Failed to fetch latest release. Set VERSION=x.y.z or use --local <dir>."
+        || die "Failed to fetch latest release. Set VERSION=x.y.z to specify explicitly."
     [[ -n "${RELEASE_VERSION}" ]] \
         || die "Could not parse latest release version. Use --version x.y.z to specify explicitly."
     ok "Latest release: ${RELEASE_VERSION}"
@@ -212,43 +187,31 @@ if [[ "${CURRENT_VERSION}" == "${RELEASE_VERSION}" && "${YES}" -eq 0 ]]; then
     esac
 fi
 
-# ── Probe which artifacts this release ships ──────────────────────────────────
+# ── Detect whether this release ships a plugin artifact ──────────────────────
+# Plugin releases are independent of gateway/CLI releases. The tarball is
+# probed via a HEAD request; no user flag controls this decision.
 
 tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
 
 PLUGIN_AVAILABLE=0
-if [[ "${SKIP_PLUGIN}" -eq 0 ]]; then
-    step "Checking whether release ${RELEASE_VERSION} includes a plugin artifact ..."
-    if release_has_artifact "${tarball_name}"; then
-        PLUGIN_AVAILABLE=1
-        ok "Plugin artifact found — will be replaced"
-    else
-        warn "No plugin artifact in this release — plugin will not be touched"
-    fi
+step "Checking whether release ${RELEASE_VERSION} includes a plugin artifact ..."
+if release_has_artifact "${tarball_name}"; then
+    PLUGIN_AVAILABLE=1
+    ok "Plugin artifact found — will be replaced"
+else
+    ok "No plugin artifact in this release — plugin will not be touched"
 fi
 
 # ── Artifact helpers ──────────────────────────────────────────────────────────
 
-artifact_path() {
-    local name="$1"
-    if [[ -n "${LOCAL_DIR}" ]]; then
-        local match
-        match="$(ls "${LOCAL_DIR}"/${name} 2>/dev/null | head -1 || true)"
-        [[ -z "${match}" ]] && die "Artifact not found: ${LOCAL_DIR}/${name}"
-        echo "${match}"
-    else
-        echo "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${name}"
-    fi
+artifact_url() {
+    echo "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/$1"
 }
 
 fetch_artifact() {
-    local source="$1" dest="$2"
-    if [[ -n "${LOCAL_DIR}" ]]; then
-        cp "${source}" "${dest}"
-    else
-        curl -sSfL "${source}" -o "${dest}" \
-            || die "Failed to download: ${source}"
-    fi
+    local url="$1" dest="$2"
+    curl -sSfL "${url}" -o "${dest}" \
+        || die "Failed to download: ${url}"
 }
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
@@ -314,8 +277,8 @@ step "Downloading defenseclaw-gateway from release ${RELEASE_VERSION} ..."
 mkdir -p "${INSTALL_DIR}"
 
 tmp_gw="$(mktemp -d)"
-url="$(artifact_path "defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz")"
-fetch_artifact "${url}" "${tmp_gw}/gateway.tar.gz"
+fetch_artifact "$(artifact_url "defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz")" \
+    "${tmp_gw}/gateway.tar.gz"
 tar -xzf "${tmp_gw}/gateway.tar.gz" -C "${tmp_gw}"
 cp "${tmp_gw}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
 chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
@@ -332,9 +295,8 @@ ok "Gateway binary replaced"
 section "Replacing Python CLI"
 
 UV_BIN="$(command -v uv 2>/dev/null || true)"
-if [[ -z "${UV_BIN}" ]]; then
-    die "uv not found on PATH — cannot update Python CLI. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
-fi
+[[ -z "${UV_BIN}" ]] \
+    && die "uv not found on PATH — cannot update Python CLI. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
 
 if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
     step "Creating venv at ${DEFENSECLAW_VENV} ..."
@@ -346,7 +308,7 @@ VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
 step "Downloading Python CLI wheel for ${RELEASE_VERSION} ..."
 whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
 tmp_whl="$(mktemp -d)"
-fetch_artifact "$(artifact_path "${whl_name}")" "${tmp_whl}/${whl_name}"
+fetch_artifact "$(artifact_url "${whl_name}")" "${tmp_whl}/${whl_name}"
 "${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${tmp_whl}/${whl_name}" \
     || die "Failed to install CLI wheel"
 rm -rf "${tmp_whl}"
@@ -354,32 +316,27 @@ rm -rf "${tmp_whl}"
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
 ok "Python CLI replaced"
 
-# ── Step 5: Replace OpenClaw plugin (only when included in this release) ──────
+# ── Step 5: Replace OpenClaw plugin (when shipped with this release) ──────────
 
 if [[ "${PLUGIN_AVAILABLE}" -eq 1 ]]; then
     section "Replacing OpenClaw Plugin"
 
     step "Downloading plugin tarball for ${RELEASE_VERSION} ..."
     plugin_dest="${DEFENSECLAW_HOME}/extensions/defenseclaw"
-    plugin_backup="${BACKUP_DIR}/extensions-defenseclaw"
 
     if [[ -d "${plugin_dest}" ]]; then
-        cp -r "${plugin_dest}" "${plugin_backup}"
+        cp -r "${plugin_dest}" "${BACKUP_DIR}/extensions-defenseclaw"
         ok "Backed up existing plugin to backup dir"
         rm -rf "${plugin_dest}"
     fi
     mkdir -p "${plugin_dest}"
 
     tmp_plugin="$(mktemp -d)"
-    fetch_artifact "$(artifact_path "${tarball_name}")" "${tmp_plugin}/${tarball_name}"
+    fetch_artifact "$(artifact_url "${tarball_name}")" "${tmp_plugin}/${tarball_name}"
     tar -xzf "${tmp_plugin}/${tarball_name}" -C "${plugin_dest}"
     rm -rf "${tmp_plugin}"
 
     ok "Plugin replaced"
-elif [[ "${SKIP_PLUGIN}" -eq 1 ]]; then
-    info "Plugin replacement skipped (--skip-plugin)"
-else
-    info "Plugin unchanged (not included in release ${RELEASE_VERSION})"
 fi
 
 # ── Step 6: Run migrations ────────────────────────────────────────────────────
