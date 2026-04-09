@@ -187,9 +187,17 @@ def upgrade(
 # ---------------------------------------------------------------------------
 
 def _fetch_latest_version() -> str | None:
-    """Fetch the latest release version from GitHub."""
+    """Fetch the latest release version from GitHub.
+
+    Uses GITHUB_TOKEN / GH_TOKEN for authentication when available to
+    avoid hitting the unauthenticated rate limit (60 req/h).
+    """
     try:
-        resp = requests.get(f"{GITHUB_API}/releases/latest", timeout=15)
+        headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = requests.get(f"{GITHUB_API}/releases/latest", headers=headers, timeout=15)
         resp.raise_for_status()
         tag = resp.json().get("tag_name", "")
         return tag.lstrip("v") if tag else None

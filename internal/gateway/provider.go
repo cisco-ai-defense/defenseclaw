@@ -251,8 +251,12 @@ func splitModel(model string) (provider, modelID string) {
 	return "", model
 }
 
+// providerHTTPClient is used for all upstream LLM provider requests.
+// No client-level Timeout is set because each call site passes a
+// context.WithTimeout (2 min non-streaming, 5 min streaming) — a
+// client-level timeout would race with (and potentially shadow) that
+// context deadline.
 var providerHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
 	Transport: &http.Transport{
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,

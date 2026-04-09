@@ -248,6 +248,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if !p.authenticateRequest(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
+		return
+	}
+
 	// OpenAI-compatible paths (e.g. /api/v1/chat/completions from OpenRouter)
 	// must use handleChatCompletion which has proper streaming SSE support.
 	// Passthrough's io.Copy doesn't flush, breaking streaming responses.
@@ -518,8 +525,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
 						[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
 					if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
-						fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s\n",
-							midVerdict.Severity, midVerdict.Reason)
+						fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
+							midVerdict.Severity, midVerdict.Reason, lastScanLen+len(chunk))
 						p.recordTelemetry("completion", label, midVerdict, 0, nil, nil)
 						break // stop forwarding; client sees truncated stream
 					}
@@ -540,6 +547,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			elapsed := time.Since(t0)
 			p.logPostCall(label, content, verdict, elapsed, nil)
 			p.recordTelemetry("completion", label, verdict, elapsed, nil, nil)
+			if verdict.Action == "block" {
+				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (stream already delivered %d bytes to client — cannot retract)\n",
+					verdict.Severity, verdict.Reason, accumulated.Len())
+			}
 		}
 	}
 }
@@ -756,6 +767,15 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 
 	prefix := inferProviderFromURL(req.TargetURL)
 	if prefix == "" {
+		return nil
+	}
+
+	// Bedrock uses AWS Sigv4 authentication — it cannot be forwarded via the
+	// Chat Completions translation path because the provider wrapper only
+	// supports Bearer-token auth. Bedrock traffic must go through the
+	// passthrough handler which preserves the original SDK-signed request.
+	if prefix == "bedrock" {
+		fmt.Fprintf(os.Stderr, "[guardrail] bedrock traffic must use passthrough — rejecting from chat completions handler\n")
 		return nil
 	}
 
@@ -1293,6 +1313,11 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 		}
 		return
 	}
+	if provider == "gemini" {
+		// Gemini generateContent — return in Gemini-native format.
+		p.writeBlockedResponseGemini(w, msg)
+		return
+	}
 	// OpenAI Responses API (/v1/responses or /openai/v1/responses).
 	if strings.HasSuffix(path, "/responses") {
 		if stream {
@@ -1308,6 +1333,26 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 	} else {
 		p.writeBlockedResponse(w, model, msg)
 	}
+}
+
+// writeBlockedResponseGemini returns a blocked response in Gemini
+// generateContent API format (non-streaming).
+func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg string) {
+	resp := map[string]interface{}{
+		"candidates": []map[string]interface{}{{
+			"content": map[string]interface{}{
+				"parts": []map[string]interface{}{
+					{"text": msg},
+				},
+				"role": "model",
+			},
+			"finishReason": "STOP",
+			"index":        0,
+		}},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeBlockedResponseOpenAIResponses returns a blocked response in OpenAI

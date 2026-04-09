@@ -1961,19 +1961,21 @@ PY
     # ── 6B-2. Bedrock domain narrowing ──
     # Ensure generic amazonaws.com does NOT match as a provider, but bedrock-runtime does.
     local bedrock_generic bedrock_specific
-    bedrock_generic=$(python3 - <<'PY'
+    bedrock_generic=$(REPO_ROOT="$REPO_ROOT" python3 - <<'PY'
 import json
 import os
 
-providers_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath("$0"))), "internal", "configs", "providers.json")
-# Fallback: check common paths
-for p in [
-    os.path.expanduser("~/.defenseclaw/providers.json"),
-    "internal/configs/providers.json",
-]:
-    if os.path.exists(p):
-        providers_path = p
-        break
+repo_root = os.environ.get("REPO_ROOT", ".")
+providers_path = os.path.join(repo_root, "internal", "configs", "providers.json")
+if not os.path.exists(providers_path):
+    # Fallback: check common paths
+    for p in [
+        os.path.expanduser("~/.defenseclaw/providers.json"),
+        "internal/configs/providers.json",
+    ]:
+        if os.path.exists(p):
+            providers_path = p
+            break
 
 try:
     with open(providers_path) as f:
@@ -1995,14 +1997,17 @@ PY
         fail "provider detection: Bedrock uses narrow domain" "generic amazonaws.com still present"
     fi
 
-    bedrock_specific=$(python3 - <<'PY'
+    bedrock_specific=$(REPO_ROOT="$REPO_ROOT" python3 - <<'PY'
 import json
 import os
 
-for p in [
+repo_root = os.environ.get("REPO_ROOT", ".")
+candidates = [
+    os.path.join(repo_root, "internal", "configs", "providers.json"),
     os.path.expanduser("~/.defenseclaw/providers.json"),
     "internal/configs/providers.json",
-]:
+]
+for p in candidates:
     if os.path.exists(p):
         with open(p) as f:
             cfg = json.load(f)
