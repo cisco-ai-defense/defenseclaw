@@ -139,9 +139,7 @@ jobs:
           # Force-apply minFreeSpace for CI runners with limited disk.
           # The default.yml provisioner may not write the [diskUsage] stanza,
           # so we patch server.conf directly and restart Splunk.
-          SPLUNK_CID=$(docker ps -q -f "ancestor=${SPLUNK_IMAGE}")
-          echo "Splunk container: $SPLUNK_CID"
-          docker exec "$SPLUNK_CID" bash -c '
+          docker compose -f docker-compose.ci.yml exec -T splunk bash -c '
             SCONF=/opt/splunk/etc/system/local/server.conf
             echo "--- server.conf before patch ---"
             cat "$SCONF" 2>/dev/null || echo "(file not found)"
@@ -152,7 +150,8 @@ jobs:
               echo "--- minFreeSpace already set ---"
             fi
           '
-          docker exec "$SPLUNK_CID" /opt/splunk/bin/splunk restart --accept-license --answer-yes --no-prompt
+          docker compose -f docker-compose.ci.yml exec -T splunk \
+            /opt/splunk/bin/splunk restart --accept-license --answer-yes --no-prompt
           echo "Waiting for Splunk search API after restart..."
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -k \
@@ -430,9 +429,7 @@ jobs:
           # Force-apply minFreeSpace for CI runners with limited disk.
           # The default.yml provisioner may not write the [diskUsage] stanza,
           # so we patch server.conf directly and restart Splunk.
-          SPLUNK_CID=$(docker ps -q -f "ancestor=${SPLUNK_IMAGE}")
-          echo "Splunk container: $SPLUNK_CID"
-          docker exec "$SPLUNK_CID" bash -c '
+          docker compose -f docker-compose.ci.yml exec -T splunk bash -c '
             SCONF=/opt/splunk/etc/system/local/server.conf
             echo "--- server.conf before patch ---"
             cat "$SCONF" 2>/dev/null || echo "(file not found)"
@@ -443,7 +440,8 @@ jobs:
               echo "--- minFreeSpace already set ---"
             fi
           '
-          docker exec "$SPLUNK_CID" /opt/splunk/bin/splunk restart --accept-license --answer-yes --no-prompt
+          docker compose -f docker-compose.ci.yml exec -T splunk \
+            /opt/splunk/bin/splunk restart --accept-license --answer-yes --no-prompt
           echo "Waiting for Splunk search API after restart..."
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -k \
