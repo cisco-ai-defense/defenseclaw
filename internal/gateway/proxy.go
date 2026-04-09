@@ -118,6 +118,13 @@ func NewGuardrailProxy(
 	masterKey := deriveMasterKey(dataDir)
 	gatewayToken := ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
 
+	if gatewayToken == "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: OPENCLAW_GATEWAY_TOKEN is not set — "+
+			"loopback connections are trusted without authentication. Any local process "+
+			"can relay requests through this proxy using forwarded API keys. "+
+			"Set OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env to require auth on all connections.\n")
+	}
+
 	p := &GuardrailProxy{
 		cfg:          cfg,
 		logger:       logger,
@@ -396,28 +403,253 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	defer resp.Body.Close()
 
-	// Stream response back to caller with flushing for SSE/streaming responses.
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
+	// Determine whether the upstream response is streaming (SSE).
+	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+
+	if !isSSE {
+		// --- Non-streaming: buffer response, inspect, then forward ---
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+		if readErr != nil {
+			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
+			return
 		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	if flusher, ok := w.(http.Flusher); ok {
-		buf := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				_, _ = w.Write(buf[:n])
-				flusher.Flush()
+
+		// Extract assistant text from provider-native response format.
+		content := extractPassthroughResponseContent(respBody, provider)
+
+		if content != "" {
+			t0 := time.Now()
+			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
+			verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, label, mode)
+			elapsed := time.Since(t0)
+			p.logPostCall(label, content, verdict, elapsed, nil)
+			p.recordTelemetry("completion", label, verdict, elapsed, nil, nil)
+
+			if verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
+				return
 			}
-			if err != nil {
+		}
+
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+	} else {
+		// --- Streaming: accumulate text from SSE chunks, periodic + final scan ---
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+
+		flusher, _ := w.(http.Flusher)
+		var accumulated strings.Builder
+		lastScanLen := 0
+		const scanInterval = 500
+		buf := make([]byte, 4096)
+		// lineBuf accumulates partial SSE lines across read boundaries.
+		var lineBuf strings.Builder
+
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				// Forward the raw bytes immediately so the client isn't stalled.
+				_, _ = w.Write(chunk)
+				if flusher != nil {
+					flusher.Flush()
+				}
+
+				// Accumulate text from SSE data lines for inspection.
+				lineBuf.Write(chunk)
+				for {
+					line, rest, found := strings.Cut(lineBuf.String(), "\n")
+					if !found {
+						break
+					}
+					lineBuf.Reset()
+					lineBuf.WriteString(rest)
+
+					line = strings.TrimSpace(line)
+					if !strings.HasPrefix(line, "data: ") {
+						continue
+					}
+					data := strings.TrimPrefix(line, "data: ")
+					if data == "[DONE]" {
+						continue
+					}
+					text := extractSSEChunkText(data, provider)
+					if text != "" {
+						accumulated.WriteString(text)
+					}
+				}
+
+				// Periodic mid-stream scan.
+				if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
+					midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+						[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+					if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
+						fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s\n",
+							midVerdict.Severity, midVerdict.Reason)
+						p.recordTelemetry("completion", label, midVerdict, 0, nil, nil)
+						break // stop forwarding; client sees truncated stream
+					}
+					lastScanLen = accumulated.Len()
+				}
+			}
+			if readErr != nil {
 				break
 			}
 		}
-	} else {
-		_, _ = io.Copy(w, resp.Body)
+
+		// Final post-stream inspection on the full accumulated content.
+		if accumulated.Len() > 0 {
+			content := accumulated.String()
+			t0 := time.Now()
+			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
+			verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, label, mode)
+			elapsed := time.Since(t0)
+			p.logPostCall(label, content, verdict, elapsed, nil)
+			p.recordTelemetry("completion", label, verdict, elapsed, nil, nil)
+		}
 	}
+}
+
+// extractPassthroughResponseContent extracts assistant text from a non-streaming
+// provider-native response body. Supports Anthropic Messages API, Gemini, and
+// OpenAI Responses API formats.
+func extractPassthroughResponseContent(body []byte, provider string) string {
+	switch provider {
+	case "anthropic":
+		// Anthropic: {"content": [{"type": "text", "text": "..."}]}
+		var resp struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			var sb strings.Builder
+			for _, c := range resp.Content {
+				if c.Type == "text" {
+					sb.WriteString(c.Text)
+				}
+			}
+			return sb.String()
+		}
+
+	case "gemini":
+		// Gemini: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+		var resp struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			var sb strings.Builder
+			for _, c := range resp.Candidates {
+				for _, p := range c.Content.Parts {
+					sb.WriteString(p.Text)
+				}
+			}
+			return sb.String()
+		}
+
+	default:
+		// OpenAI Responses API: {"output": [{"content": [{"text": "..."}]}]}
+		var respAPI struct {
+			Output []struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &respAPI) == nil && len(respAPI.Output) > 0 {
+			var sb strings.Builder
+			for _, o := range respAPI.Output {
+				for _, c := range o.Content {
+					sb.WriteString(c.Text)
+				}
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+
+		// OpenAI Chat Completions: {"choices": [{"message": {"content": "..."}}]}
+		var respCC struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(body, &respCC) == nil && len(respCC.Choices) > 0 {
+			return respCC.Choices[0].Message.Content
+		}
+	}
+	return ""
+}
+
+// extractSSEChunkText extracts the assistant text delta from a single SSE
+// data JSON object in a streaming provider-native response.
+func extractSSEChunkText(data string, provider string) string {
+	switch provider {
+	case "anthropic":
+		// Anthropic streaming: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+		var chunk struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil && chunk.Type == "content_block_delta" {
+			return chunk.Delta.Text
+		}
+
+	case "gemini":
+		// Gemini streaming: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+		var chunk struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Candidates) > 0 {
+			var sb strings.Builder
+			for _, p := range chunk.Candidates[0].Content.Parts {
+				sb.WriteString(p.Text)
+			}
+			return sb.String()
+		}
+
+	default:
+		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 {
+			return chunk.Choices[0].Delta.Content
+		}
+	}
+	return ""
 }
 
 func (p *GuardrailProxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -1263,16 +1495,27 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
+//
+// Security boundary — the guardrail proxy forwards real LLM provider API keys
+// (received via X-AI-Auth from the fetch interceptor) to upstream providers.
+// This means any process that can reach the proxy can use those keys.
+//
+// Threat model:
+//   - The proxy binds to 127.0.0.1 only, so remote hosts cannot connect.
+//   - On loopback, ANY local process could reach this port.
+//   - If gatewayToken is configured (OPENCLAW_GATEWAY_TOKEN), we require it on
+//     ALL connections — including loopback — so that a rogue local process
+//     cannot use the proxy as an open relay to LLM providers.
+//   - If gatewayToken is NOT configured (legacy / first-run), loopback is
+//     trusted unconditionally to avoid breaking existing setups. A warning is
+//     logged at startup (see NewGuardrailProxy).
+//   - For non-loopback (sandbox / bridge deployments), authentication is always
+//     required via X-DC-Auth or the master key.
 
 func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
-	// The proxy binds exclusively to 127.0.0.1, so all loopback connections
-	// originate from the local machine and are implicitly trusted.
-	if strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") || strings.HasPrefix(r.RemoteAddr, "[::1]:") {
-		return true
-	}
+	isLoopback := strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") || strings.HasPrefix(r.RemoteAddr, "[::1]:")
 
-	// For non-loopback (remote proxy deployments): accept X-DC-Auth with the
-	// defenseclaw gateway token (sent by the fetch interceptor).
+	// Check X-DC-Auth token (set by the fetch interceptor).
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if p.gatewayToken != "" && token == p.gatewayToken {
@@ -1280,14 +1523,21 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 		}
 	}
 
-	// Fall back to Authorization with the proxy master key.
-	if p.masterKey == "" {
+	// Check Authorization with the proxy master key.
+	if p.masterKey != "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == p.masterKey {
+			return true
+		}
+	}
+
+	// Loopback fallback: allow only when no gatewayToken is configured
+	// (legacy / first-run). When a token exists, require it even on loopback
+	// so rogue local processes cannot relay through the proxy.
+	if isLoopback && p.gatewayToken == "" {
 		return true
 	}
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimPrefix(auth, "Bearer ") == p.masterKey
-	}
+
 	return false
 }
 
