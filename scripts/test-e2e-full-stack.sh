@@ -2856,19 +2856,40 @@ phase_splunk() {
     echo "  Waiting 20s for run-scoped events to be indexed..."
     sleep 20
 
-    # Diagnostic: check if ANY events exist in the index for this run_id.
+    # Diagnostic: test Splunk REST API connectivity first (without -sf to see errors).
+    echo "  [diag] Testing Splunk REST API connectivity..."
+    local diag_api_raw diag_api_http
+    diag_api_http=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -k \
+        -u "$SPLUNK_CREDS" \
+        -d "search=search index=${SPLUNK_INDEX} | head 1" \
+        -d "output_mode=json" \
+        "$SPLUNK_API_URL/services/search/jobs/export" 2>/dev/null || echo "000")
+    echo "  [diag] REST API HTTP status: $diag_api_http"
+
+    if [ "$diag_api_http" != "200" ]; then
+        echo "  [diag] REST API not returning 200 — dumping verbose response..."
+        diag_api_raw=$(curl -s --max-time 10 -k \
+            -u "$SPLUNK_CREDS" \
+            -d "search=search index=${SPLUNK_INDEX} | head 1" \
+            -d "output_mode=json" \
+            "$SPLUNK_API_URL/services/search/jobs/export" 2>&1 || echo '(curl error)')
+        echo "  [diag] Response (first 500 chars): ${diag_api_raw:0:500}"
+        echo "  [diag] Splunk mgmt port check: $(curl -sk --max-time 5 "https://127.0.0.1:8089/services/server/info" -u "$SPLUNK_CREDS" -d output_mode=json 2>&1 | head -c 200 || echo 'unreachable')"
+    fi
+
+    # Check if ANY events exist in the index for this run_id.
     local diag_count
     diag_count=$(splunk_run_results_json '| head 1' | jq 'length' 2>/dev/null || echo "0")
     if [ "${diag_count:-0}" -eq 0 ]; then
         echo "  [diag] WARNING: Splunk has 0 events for run_id=$DEFENSECLAW_RUN_ID"
-        echo "  [diag] Checking total index event count..."
-        local total_raw
-        total_raw=$(splunk_search '| stats count' | jq -cs '[.[] | .result? | select(type == "object")]' 2>/dev/null || echo '[]')
-        echo "  [diag] Total index stats: $total_raw"
-        echo "  [diag] Checking raw events (no field filter)..."
-        local raw_sample
-        raw_sample=$(splunk_search '| head 3')
-        echo "  [diag] Raw sample (first 500 chars): ${raw_sample:0:500}"
+        echo "  [diag] Trying without spath (raw search)..."
+        local diag_raw_nofilt
+        diag_raw_nofilt=$(curl -s --max-time 15 -k \
+            -u "$SPLUNK_CREDS" \
+            -d "search=search index=${SPLUNK_INDEX} | head 3" \
+            -d "output_mode=json" \
+            "$SPLUNK_API_URL/services/search/jobs/export" 2>/dev/null || echo '{}')
+        echo "  [diag] Raw search result (first 500 chars): ${diag_raw_nofilt:0:500}"
     else
         echo "  [diag] Splunk index contains events for this run_id — proceeding with assertions"
     fi
