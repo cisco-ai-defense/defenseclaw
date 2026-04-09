@@ -32,7 +32,7 @@
     },
     {
       "name": "bedrock",
-      "domains": ["amazonaws.com"],
+      "domains": ["bedrock-runtime."],
       "profile_id": null,
       "env_keys": []
     }

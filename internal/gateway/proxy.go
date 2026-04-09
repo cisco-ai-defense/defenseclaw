@@ -375,24 +375,47 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	// Apply a timeout so the proxy doesn't hang indefinitely if the upstream
+	// provider stalls. Streaming responses may take longer, so use 5 minutes;
+	// non-streaming gets 2 minutes (matching typical provider timeouts).
+	passthroughTimeout := 2 * time.Minute
+	if partial.Stream {
+		passthroughTimeout = 5 * time.Minute
+	}
+	upstreamCtx, upstreamCancel := context.WithTimeout(r.Context(), passthroughTimeout)
+	defer upstreamCancel()
+
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
 		return
 	}
 
-	// Copy all original headers except proxy-hop headers.
+	// Copy all original headers except proxy-hop and auth headers.
+	// Auth headers (Authorization, x-api-key, api-key) are stripped to avoid
+	// duplicates — the resolved upstreamAuth is set as the single canonical
+	// Authorization header below.
 	for k, vs := range r.Header {
 		switch strings.ToLower(k) {
-		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host":
+		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
+			"authorization", "x-api-key", "api-key":
 			continue
 		}
 		for _, v := range vs {
 			upstreamReq.Header.Add(k, v)
 		}
 	}
+	// Set the single resolved auth header for the upstream provider.
 	if upstreamAuth != "" {
-		upstreamReq.Header.Set("Authorization", upstreamAuth)
+		// Anthropic expects x-api-key, Azure expects api-key, others use Authorization.
+		switch provider {
+		case "anthropic":
+			upstreamReq.Header.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+		case "azure":
+			upstreamReq.Header.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+		default:
+			upstreamReq.Header.Set("Authorization", upstreamAuth)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", upstreamURL)
@@ -875,6 +898,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Forward to upstream provider ---
+	if p.resolveProviderFn == nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "proxy misconfigured: no provider resolver")
+		return
+	}
 	upstream := p.resolveProviderFn(&req)
 	if upstream == nil {
 		provName, _ := splitModel(req.Model)
