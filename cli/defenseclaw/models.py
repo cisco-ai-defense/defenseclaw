@@ -156,6 +156,7 @@ class Event:
     actor: str = "defenseclaw"
     details: str = ""
     severity: str = ""
+    run_id: str = ""
 
 
 @dataclass

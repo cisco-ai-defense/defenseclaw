@@ -101,7 +101,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     store.init()
     click.echo(f"  Audit DB:      {cfg.audit_db}")
 
-    logger = Logger(store)
+    logger = Logger(store, cfg.splunk)
     logger.log_action("init", cfg.data_dir, f"environment={env}")
 
     click.echo()
@@ -594,5 +594,4 @@ def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.
 
     click.echo("  Health:        not responding")
     click.echo("                 check: defenseclaw-gateway status")
-
 

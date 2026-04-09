@@ -149,7 +149,7 @@ def setup_sandbox(
         from defenseclaw.db import Store
         from defenseclaw.logger import Logger
         app.store = Store(app.cfg.audit_db)
-        app.logger = Logger(app.store)
+        app.logger = Logger(app.store, app.cfg.splunk)
 
     if disable:
         _ensure_sudo_cache()

@@ -565,16 +565,16 @@ func (s *Sidecar) reportSplunkHealth() {
 	if bridgeEnv == nil {
 		bridgeEnv = readDotEnvFile(s.cfg.DataDir)
 	}
-	if url := bridgeEnv["SPLUNK_PASSWORD"]; url != "" {
+	if bridgeEnv["SPLUNK_PASSWORD"] != "" {
 		details["web_url"] = "http://127.0.0.1:8000"
 		details["web_user"] = "admin"
-		details["web_password"] = url
+		details["web_password_set"] = true
 	}
 	if user := bridgeEnv["DEFENSECLAW_LOCAL_USERNAME"]; user != "" {
 		details["username"] = user
 	}
-	if pass := bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"]; pass != "" {
-		details["password"] = pass
+	if bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"] != "" {
+		details["password_set"] = true
 	}
 
 	s.health.SetSplunk(StateRunning, "", details)

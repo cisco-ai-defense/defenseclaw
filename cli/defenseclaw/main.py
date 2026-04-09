@@ -86,11 +86,12 @@ def cli(ctx: click.Context) -> None:
 
     try:
         app.store = Store(app.cfg.audit_db)
+        app.store.init()
     except Exception as exc:
         click.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
-    app.logger = Logger(app.store)
+    app.logger = Logger(app.store, app.cfg.splunk)
 
 
 @cli.result_callback()

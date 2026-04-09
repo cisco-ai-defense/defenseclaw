@@ -100,6 +100,7 @@ type OTelLogsConfig struct {
 type OTelMetricsConfig struct {
 	Enabled         bool   `mapstructure:"enabled"            yaml:"enabled"`
 	ExportIntervalS int    `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
+	Temporality     string `mapstructure:"temporality"         yaml:"temporality"`
 	Endpoint        string `mapstructure:"endpoint"           yaml:"endpoint"`
 	Protocol        string `mapstructure:"protocol"           yaml:"protocol"`
 	URLPath         string `mapstructure:"url_path"           yaml:"url_path"`
@@ -709,6 +710,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("otel.logs.url_path", "")
 	viper.SetDefault("otel.metrics.enabled", true)
 	viper.SetDefault("otel.metrics.export_interval_s", 60)
+	viper.SetDefault("otel.metrics.temporality", "delta")
 	viper.SetDefault("otel.metrics.endpoint", "")
 	viper.SetDefault("otel.metrics.protocol", "")
 	viper.SetDefault("otel.metrics.url_path", "")

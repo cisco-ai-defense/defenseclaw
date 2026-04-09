@@ -23,6 +23,7 @@ can share the same database file.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -38,7 +39,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
     target TEXT,
     actor TEXT NOT NULL DEFAULT 'defenseclaw',
     details TEXT,
-    severity TEXT
+    severity TEXT,
+    run_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS scan_results (
@@ -49,7 +51,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     duration_ms INTEGER,
     finding_count INTEGER,
     max_severity TEXT,
-    raw_json TEXT
+    raw_json TEXT,
+    run_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -105,6 +108,7 @@ class Store:
 
     def init(self) -> None:
         self.db.executescript(SCHEMA)
+        self._ensure_run_id_columns()
         self._migrate_old_lists()
 
     def close(self) -> None:
@@ -143,6 +147,19 @@ class Store:
         self.db.execute("DROP TABLE IF EXISTS allow_list")
         self.db.commit()
 
+    def _ensure_run_id_columns(self) -> None:
+        for table in ("audit_events", "scan_results"):
+            columns = {
+                row[1]
+                for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "run_id" in columns:
+                continue
+            self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
+        self.db.commit()
+
     # -- Audit events --
 
     def log_event(self, event: Event) -> None:
@@ -152,18 +169,20 @@ class Store:
             event.timestamp = datetime.now(timezone.utc)
         if not event.actor:
             event.actor = "defenseclaw"
+        if not event.run_id:
+            event.run_id = _current_run_id()
         self.db.execute(
-            """INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (event.id, event.timestamp.isoformat(), event.action,
              event.target or None, event.actor, event.details or None,
-             event.severity or None),
+             event.severity or None, event.run_id or None),
         )
         self.db.commit()
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id
                FROM audit_events ORDER BY timestamp DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -171,7 +190,7 @@ class Store:
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
                  AND action NOT LIKE 'dismiss%'
@@ -187,12 +206,13 @@ class Store:
         ts: datetime, duration_ms: int, finding_count: int,
         max_severity: str, raw_json: str,
     ) -> None:
+        run_id = _current_run_id()
         self.db.execute(
             """INSERT INTO scan_results
-               (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (scan_id, scanner, target, ts.isoformat(), duration_ms,
-             finding_count, max_severity, raw_json),
+             finding_count, max_severity, raw_json, run_id or None),
         )
         self.db.commit()
 
@@ -443,6 +463,7 @@ class Store:
             actor=row[4],
             details=row[5] or "",
             severity=row[6] or "",
+            run_id=row[7] or "",
         )
 
     @staticmethod
@@ -473,3 +494,7 @@ def _parse_ts(val: Any) -> datetime:
             except ValueError:
                 continue
     return datetime.now(timezone.utc)
+
+
+def _current_run_id() -> str:
+    return os.environ.get("DEFENSECLAW_RUN_ID", "").strip()

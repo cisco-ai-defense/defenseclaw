@@ -41,6 +41,14 @@ type activeSpan struct {
 	provider  string
 }
 
+// activeAgent tracks an invoke_agent span for a running agent session.
+type activeAgent struct {
+	span       trace.Span
+	ctx        context.Context
+	startTime  time.Time
+	sessionKey string
+}
+
 // EventRouter dispatches gateway events to the appropriate handlers and logs
 // everything to the audit store.
 type EventRouter struct {
@@ -50,22 +58,52 @@ type EventRouter struct {
 	policy *enforce.PolicyEngine
 	otel   *telemetry.Provider
 
-	autoApprove     bool
-	activeToolSpans map[string][]*activeSpan
-	spanMu          sync.Mutex
+	autoApprove      bool
+	activeToolSpans  map[string][]*activeSpan
+	activeAgentSpans map[string]*activeAgent // keyed by runId
+	activeLLMCtx     context.Context         // context of most recent LLM span, for tool→LLM hierarchy
+	spanMu           sync.Mutex
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
 func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, autoApprove bool, otel *telemetry.Provider) *EventRouter {
 	return &EventRouter{
-		client:          client,
-		store:           store,
-		logger:          logger,
-		policy:          enforce.NewPolicyEngine(store),
-		otel:            otel,
-		autoApprove:     autoApprove,
-		activeToolSpans: make(map[string][]*activeSpan),
+		client:           client,
+		store:            store,
+		logger:           logger,
+		policy:           enforce.NewPolicyEngine(store),
+		otel:             otel,
+		autoApprove:      autoApprove,
+		activeToolSpans:  make(map[string][]*activeSpan),
+		activeAgentSpans: make(map[string]*activeAgent),
 	}
+}
+
+// getActiveAgentCtx returns the context from the currently active agent span,
+// providing parent-child hierarchy for LLM spans.
+// Falls back to context.Background() if no agent span is active.
+func (r *EventRouter) getActiveAgentCtx() context.Context {
+	r.spanMu.Lock()
+	defer r.spanMu.Unlock()
+	for _, aa := range r.activeAgentSpans {
+		return aa.ctx
+	}
+	return context.Background()
+}
+
+// getToolParentCtx returns the best parent context for tool/approval spans:
+// prefers the most recent LLM span context (for LLM→tool hierarchy),
+// falls back to agent context, then context.Background().
+func (r *EventRouter) getToolParentCtx() context.Context {
+	r.spanMu.Lock()
+	defer r.spanMu.Unlock()
+	if r.activeLLMCtx != nil {
+		return r.activeLLMCtx
+	}
+	for _, aa := range r.activeAgentSpans {
+		return aa.ctx
+	}
+	return context.Background()
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -270,6 +308,10 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			ErrorMessage string          `json:"errorMessage"`
 			Provider     string          `json:"provider"`
 			Model        string          `json:"model"`
+			Usage        *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage,omitempty"`
 		}
 		if err := json.Unmarshal(envelope.Message, &msg); err != nil {
 			readLoopLogf("[bifrost] session.message: has message field but failed to parse: %v", err)
@@ -293,6 +335,50 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		if msg.StopReason == "error" || msg.ErrorMessage != "" {
 			readLoopLogf("[bifrost] session.message ERROR: stopReason=%s error=%q provider=%s model=%s",
 				msg.StopReason, msg.ErrorMessage, msg.Provider, msg.Model)
+		}
+
+		// Emit LLM span for assistant messages with a known model.
+		// This captures LLM invocations that arrive via the WebSocket
+		// (the direct OpenClaw → LLM path, not the guardrail proxy).
+		// Uses the active agent context as parent for proper hierarchy.
+		// Stores the LLM context so subsequent tool spans become children.
+		if r.otel != nil && msg.Role == "assistant" && msg.Model != "" {
+			system := inferSystem(msg.Provider, msg.Model)
+			promptTokens, completionTokens := 0, 0
+			if msg.Usage != nil {
+				promptTokens = msg.Usage.PromptTokens
+				completionTokens = msg.Usage.CompletionTokens
+			}
+			finishReasons := []string{}
+			if msg.StopReason != "" {
+				finishReasons = []string{msg.StopReason}
+			}
+			// Count tool_use blocks in content to populate tool_calls attribute.
+			toolCallCount := countToolUseBlocks(msg.Content)
+
+			parentCtx := r.getActiveAgentCtx()
+			now := time.Now()
+			llmCtx, span := r.otel.StartLLMSpan(
+				parentCtx,
+				system, msg.Model, msg.Provider,
+				0, 0.0,
+			)
+			r.otel.EndLLMSpan(
+				span, msg.Model,
+				promptTokens, completionTokens,
+				finishReasons, toolCallCount,
+				"none", "",
+				system, now,
+				"openclaw",
+			)
+
+			// Store LLM context so tool_call spans become children of this LLM span.
+			r.spanMu.Lock()
+			r.activeLLMCtx = llmCtx
+			r.spanMu.Unlock()
+
+			readLoopLogf("[bifrost] session.message: emitted LLM span model=%s provider=%s system=%s tokens=%d/%d",
+				msg.Model, msg.Provider, system, promptTokens, completionTokens)
 		}
 
 		_ = r.logger.LogAction("gateway-session-message", envelope.SessionKey,
@@ -496,14 +582,66 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 			readLoopLogf("[bifrost] agent lifecycle START runId=%s", se.RunID)
 			_ = r.logger.LogAction("gateway-agent-start", se.SessionKey,
 				fmt.Sprintf("runId=%s", se.RunID))
+
+			// Start invoke_agent span as root of this agent run.
+			if r.otel != nil && se.RunID != "" {
+				// Use sessionKey as conversation.id; fall back to runId.
+				conversationID := se.SessionKey
+				if conversationID == "" {
+					conversationID = se.RunID
+				}
+				agentCtx, agentSpan := r.otel.StartAgentSpan(
+					context.Background(),
+					conversationID, // conversation.id
+					"openclaw",     // agent name
+					"",             // provider filled on session.message
+				)
+				r.spanMu.Lock()
+				r.activeAgentSpans[se.RunID] = &activeAgent{
+					span:       agentSpan,
+					ctx:        agentCtx,
+					startTime:  time.Now(),
+					sessionKey: se.SessionKey,
+				}
+				r.spanMu.Unlock()
+			}
+
 		case "error":
 			readLoopLogf("[bifrost] agent lifecycle ERROR runId=%s error=%q", se.RunID, data.Error)
 			_ = r.logger.LogAction("gateway-agent-error", se.SessionKey,
 				fmt.Sprintf("runId=%s error=%s", se.RunID, truncate(data.Error, 200)))
+
+			// End invoke_agent span with error.
+			if r.otel != nil && se.RunID != "" {
+				r.spanMu.Lock()
+				r.activeLLMCtx = nil
+				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
+					delete(r.activeAgentSpans, se.RunID)
+					r.spanMu.Unlock()
+					r.otel.EndAgentSpan(aa.span, truncate(data.Error, 256))
+				} else {
+					r.spanMu.Unlock()
+				}
+			}
+
 		case "end":
 			readLoopLogf("[bifrost] agent lifecycle END runId=%s", se.RunID)
 			_ = r.logger.LogAction("gateway-agent-end", se.SessionKey,
 				fmt.Sprintf("runId=%s", se.RunID))
+
+			// End invoke_agent span successfully.
+			if r.otel != nil && se.RunID != "" {
+				r.spanMu.Lock()
+				r.activeLLMCtx = nil
+				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
+					delete(r.activeAgentSpans, se.RunID)
+					r.spanMu.Unlock()
+					r.otel.EndAgentSpan(aa.span, "")
+				} else {
+					r.spanMu.Unlock()
+				}
+			}
+
 		default:
 			readLoopLogf("[bifrost] agent lifecycle phase=%s runId=%s", data.Phase, se.RunID)
 		}
@@ -568,8 +706,9 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	}
 
 	if r.otel != nil {
+		parentCtx := r.getToolParentCtx()
 		ctx, span := r.otel.StartToolSpan(
-			context.Background(),
+			parentCtx,
 			payload.Tool, payload.Status, payload.Args,
 			dangerous, flaggedPattern, "builtin", "",
 		)
@@ -638,7 +777,8 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 
 	var approvalSpan trace.Span
 	if r.otel != nil {
-		_, approvalSpan = r.otel.StartApprovalSpan(context.Background(), payload.ID, rawCmd, argv, cwd)
+		parentCtx := r.getToolParentCtx()
+		_, approvalSpan = r.otel.StartApprovalSpan(parentCtx, payload.ID, rawCmd, argv, cwd)
 	}
 
 	cmdFindings := ScanAllRules(rawCmd, "shell")
@@ -804,4 +944,53 @@ func (r *EventRouter) isArgvDangerous(argv []string) bool {
 var dangerousBinaries = []string{
 	"curl", "wget", "nc", "ncat", "netcat",
 	"dd", "mkfs", "rm",
+}
+
+// inferSystem derives the gen_ai.system value from provider and model strings.
+func inferSystem(provider, model string) string {
+	p := strings.ToLower(provider)
+	switch {
+	case strings.Contains(p, "anthropic"):
+		return "anthropic"
+	case strings.Contains(p, "openai"):
+		return "openai"
+	case strings.Contains(p, "google"), strings.Contains(p, "vertex"):
+		return "google"
+	case strings.Contains(p, "nvidia"), strings.Contains(p, "nim"):
+		return "nvidia-nim"
+	}
+	m := strings.ToLower(model)
+	switch {
+	case strings.HasPrefix(m, "claude"):
+		return "anthropic"
+	case strings.HasPrefix(m, "gpt"), strings.HasPrefix(m, "o1"), strings.HasPrefix(m, "o3"), strings.HasPrefix(m, "o4"):
+		return "openai"
+	case strings.HasPrefix(m, "gemini"):
+		return "google"
+	}
+	if provider != "" {
+		return strings.ToLower(provider)
+	}
+	return "unknown"
+}
+
+// countToolUseBlocks counts tool_use content blocks in a JSON content field.
+// Content may be a string (0 tool calls) or an array of objects with "type" fields.
+func countToolUseBlocks(content json.RawMessage) int {
+	if len(content) == 0 || content[0] != '[' {
+		return 0
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return 0
+	}
+	count := 0
+	for _, b := range blocks {
+		if b.Type == "tool_use" || b.Type == "tool_calls" {
+			count++
+		}
+	}
+	return count
 }

@@ -506,7 +506,7 @@ a valid Splunk Enterprise license. For more details, see
 https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free
 
 ```bash
-# Enable Splunk Observability
+# Enable Splunk Observability Cloud
 defenseclaw setup splunk --o11y --realm us1 --access-token $SPLUNK_TOKEN --non-interactive
 
 # Enable local Splunk logs (requires Docker)
