@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DefenseClaw — Capability-Based Access Control Executive Summary</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a2e;
+    --accent: #0f3460;
+    --accent2: #16213e;
+    --green: #10b981;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --gray: #6b7280;
+    --light-gray: #f3f4f6;
+    --border: #e5e7eb;
+    --terminal-bg: #1e1e2e;
+    --terminal-fg: #cdd6f4;
+    --terminal-green: #a6e3a1;
+    --terminal-yellow: #f9e2af;
+    --terminal-red: #f38ba8;
+    --terminal-blue: #89b4fa;
+    --terminal-cyan: #94e2d5;
+    --terminal-dim: #6c7086;
+  }
+
+  @page {
+    size: A4;
+    margin: 15mm;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.6;
+    font-size: 11pt;
+    width: 210mm;
+    margin: 0 auto;
+  }
+
+  /* === Page break controls === */
+  /* Never break inside these elements */
+  .keep-together {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Terminal title + terminal block must stay together */
+  .terminal-group {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Force page break before these */
+  .page-break-before {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  /* Section headers should not be orphaned */
+  h2 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  h3 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  h4 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Cover page */
+  .cover {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    height: 297mm;
+    padding: 30mm 20mm;
+    background: linear-gradient(160deg, #0f3460 0%, #16213e 40%, #1a1a2e 100%);
+    color: white;
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .cover .logo {
+    font-size: 18pt;
+    font-weight: 700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: #94e2d5;
+    margin-bottom: 8mm;
+  }
+
+  .cover h1 {
+    font-size: 26pt;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-bottom: 6mm;
+  }
+
+  .cover .subtitle {
+    font-size: 13pt;
+    color: #a6adc8;
+    max-width: 150mm;
+    margin-bottom: 15mm;
+  }
+
+  .cover .meta {
+    font-size: 10pt;
+    color: #6c7086;
+  }
+
+  .cover .badge {
+    display: inline-block;
+    background: rgba(166, 227, 161, 0.15);
+    border: 1px solid rgba(166, 227, 161, 0.3);
+    color: #a6e3a1;
+    padding: 2mm 5mm;
+    border-radius: 4px;
+    font-size: 9pt;
+    font-weight: 600;
+    letter-spacing: 1px;
+    margin-bottom: 10mm;
+  }
+
+  .cover .phases {
+    display: flex;
+    gap: 6mm;
+    margin-top: 12mm;
+  }
+
+  .cover .phase-box {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    padding: 4mm 6mm;
+    text-align: left;
+    min-width: 65mm;
+  }
+
+  .cover .phase-box .phase-label {
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #94e2d5;
+    font-weight: 600;
+    margin-bottom: 2mm;
+  }
+
+  .cover .phase-box .phase-title {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #cdd6f4;
+  }
+
+  /* Content sections */
+  .section {
+    padding: 5mm 18mm 0 18mm;
+  }
+
+  /* Section headers */
+  h2 {
+    font-size: 16pt;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4mm;
+    padding-bottom: 2mm;
+    border-bottom: 2px solid var(--accent);
+    margin-top: 6mm;
+  }
+
+  h3 {
+    font-size: 12pt;
+    font-weight: 600;
+    color: var(--accent2);
+    margin-top: 5mm;
+    margin-bottom: 3mm;
+  }
+
+  h4 {
+    font-size: 10.5pt;
+    font-weight: 600;
+    color: var(--accent2);
+    margin-top: 3mm;
+    margin-bottom: 2mm;
+  }
+
+  p { margin-bottom: 3mm; }
+
+  /* Terminal / code blocks */
+  .terminal {
+    background: var(--terminal-bg);
+    color: var(--terminal-fg);
+    border-radius: 8px;
+    padding: 4mm 5mm;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 8.5pt;
+    line-height: 1.55;
+    margin: 3mm 0 5mm 0;
+    overflow-x: auto;
+    white-space: pre;
+    border: 1px solid #313244;
+  }
+
+  .terminal .prompt { color: var(--terminal-cyan); font-weight: 500; }
+  .terminal .cmd { color: var(--terminal-fg); font-weight: 500; }
+  .terminal .comment { color: var(--terminal-dim); font-style: italic; }
+  .terminal .green { color: var(--terminal-green); }
+  .terminal .yellow { color: var(--terminal-yellow); }
+  .terminal .red { color: var(--terminal-red); }
+  .terminal .blue { color: var(--terminal-blue); }
+  .terminal .cyan { color: var(--terminal-cyan); }
+  .terminal .dim { color: var(--terminal-dim); }
+  .terminal .bold { font-weight: 700; }
+
+  .terminal-title {
+    background: #313244;
+    color: #a6adc8;
+    padding: 1.5mm 4mm;
+    border-radius: 8px 8px 0 0;
+    font-family: 'Inter', sans-serif;
+    font-size: 8pt;
+    font-weight: 500;
+    margin-top: 3mm;
+    display: flex;
+    align-items: center;
+    gap: 2mm;
+  }
+
+  .terminal-title + .terminal {
+    border-radius: 0 0 8px 8px;
+    margin-top: 0;
+  }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot-r { background: #f38ba8; }
+  .dot-y { background: #f9e2af; }
+  .dot-g { background: #a6e3a1; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 3mm 0 5mm 0;
+    font-size: 9.5pt;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  th {
+    background: var(--accent);
+    color: white;
+    padding: 2mm 3mm;
+    text-align: left;
+    font-weight: 600;
+    font-size: 9pt;
+  }
+
+  td {
+    padding: 2mm 3mm;
+    border-bottom: 1px solid var(--border);
+  }
+
+  tr:nth-child(even) td { background: var(--light-gray); }
+
+  .badge-green {
+    display: inline-block; background: #dcfce7; color: #166534;
+    padding: 0.5mm 2mm; border-radius: 3px; font-size: 8pt; font-weight: 600;
+  }
+  .badge-yellow {
+    display: inline-block; background: #fef3c7; color: #92400e;
+    padding: 0.5mm 2mm; border-radius: 3px; font-size: 8pt; font-weight: 600;
+  }
+  .badge-red {
+    display: inline-block; background: #fecaca; color: #991b1b;
+    padding: 0.5mm 2mm; border-radius: 3px; font-size: 8pt; font-weight: 600;
+  }
+  .badge-blue {
+    display: inline-block; background: #dbeafe; color: #1e40af;
+    padding: 0.5mm 2mm; border-radius: 3px; font-size: 8pt; font-weight: 600;
+  }
+
+  /* Flow diagram */
+  .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2mm;
+    margin: 4mm 0;
+    flex-wrap: wrap;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .flow-box {
+    background: var(--light-gray); border: 1px solid var(--border);
+    border-radius: 6px; padding: 2mm 4mm; font-size: 8.5pt;
+    font-weight: 500; text-align: center; min-width: 22mm;
+  }
+  .flow-box.highlight { background: #dbeafe; border-color: var(--blue); color: var(--accent); }
+  .flow-box.deny { background: #fecaca; border-color: var(--red); color: #991b1b; }
+  .flow-box.allow { background: #dcfce7; border-color: var(--green); color: #166534; }
+
+  .flow-arrow { color: var(--gray); font-size: 14pt; font-weight: 700; }
+
+  .flow-label {
+    font-size: 7.5pt; color: var(--gray); font-style: italic;
+    margin-top: -2mm; margin-bottom: 2mm; text-align: center;
+  }
+
+  /* Stats row */
+  .stats {
+    display: flex; gap: 4mm; margin: 5mm 0;
+    break-inside: avoid; page-break-inside: avoid;
+  }
+
+  .stat-card {
+    flex: 1; background: var(--light-gray); border-radius: 8px;
+    padding: 3mm; text-align: center; border: 1px solid var(--border);
+  }
+  .stat-card .number { font-size: 20pt; font-weight: 700; color: var(--accent); }
+  .stat-card .label {
+    font-size: 7.5pt; color: var(--gray); font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+
+  /* Callout */
+  .callout {
+    background: #eff6ff; border-left: 4px solid var(--blue);
+    padding: 3mm 4mm; margin: 3mm 0 5mm 0;
+    border-radius: 0 6px 6px 0; font-size: 9.5pt;
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  .callout strong { color: var(--accent); }
+
+  ul { margin-left: 5mm; margin-bottom: 3mm; }
+  li { margin-bottom: 1.5mm; }
+
+  .section-gap { height: 5mm; }
+
+  .two-col {
+    display: flex; gap: 5mm;
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  .two-col > div { flex: 1; }
+
+  code {
+    background: var(--light-gray); padding: 0.3mm 1.5mm;
+    border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 9pt;
+  }
+
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== PAGE 1: COVER ==================== -->
+<div class="cover">
+  <div class="logo">DefenseClaw</div>
+  <div class="badge">FEATURE RELEASE</div>
+  <h1>Capability-Based<br>Access Control</h1>
+  <div class="subtitle">
+    Granular, runtime-enforced access control for AI agents with scan-driven
+    automatic policy generation, default-deny evaluation, and constraint matching
+  </div>
+  <div class="phases">
+    <div class="phase-box">
+      <div class="phase-label">Phase 1</div>
+      <div class="phase-title">Capability Evaluator</div>
+      <div style="font-size:8.5pt;color:#a6adc8;margin-top:1mm;">Default-deny, constraints,<br>restrictions, conditions</div>
+    </div>
+    <div class="phase-box">
+      <div class="phase-label">Phase 2</div>
+      <div class="phase-title">Auto-Generation</div>
+      <div style="font-size:8.5pt;color:#a6adc8;margin-top:1mm;">Scan-informed policies,<br>manifest introspection</div>
+    </div>
+  </div>
+  <div class="meta" style="margin-top: 12mm;">
+    April 2026 &nbsp;|&nbsp; v1.0 &nbsp;|&nbsp; Enterprise Governance Layer for AI Agents
+  </div>
+</div>
+
+<!-- ==================== PAGE 2: OVERVIEW + ARCHITECTURE ==================== -->
+<div class="section">
+
+  <div class="keep-together">
+    <h2>1. Executive Overview</h2>
+    <p>
+      DefenseClaw now provides <strong>capability-based access control</strong> for AI agents &mdash; a granular,
+      runtime-enforced system that goes far beyond binary block/allow decisions. Instead of giving an agent
+      full access to an MCP server or none at all, capabilities define <em>exactly</em> what each agent can do,
+      with constraints, restrictions, time windows, and rate limits.
+    </p>
+    <p>
+      The system is built in two phases: <strong>Phase 1</strong> delivers the evaluator engine, policy format,
+      CLI commands, TUI integration, and audit logging. <strong>Phase 2</strong> adds automatic policy generation
+      that introspects MCP/skill manifests and adapts security posture based on scan findings.
+    </p>
+    <div class="stats">
+      <div class="stat-card">
+        <div class="number">6</div>
+        <div class="label">Eval Steps</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">3</div>
+        <div class="label">Postures</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">5</div>
+        <div class="label">CLI Commands</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">15</div>
+        <div class="label">Source Files</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">21+</div>
+        <div class="label">Unit Tests</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h2>2. Architecture</h2>
+    <h3>Enforcement Flow (Phase 1)</h3>
+    <p>Capability evaluation is the <strong>first check</strong> before the existing admission gate. If denied, the tool call never reaches the scan pipeline:</p>
+    <div class="flow">
+      <div class="flow-box">Agent<br>Tool Call</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box highlight">Capability<br>Evaluator</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Block<br>List</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Allow<br>List</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Security<br>Scan</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box allow">Allow / Deny</div>
+    </div>
+    <div class="flow-label">Deny at capability check &rarr; short-circuit (no scan needed)</div>
+  </div>
+
+  <div class="keep-together">
+    <h3>6-Step Evaluation Pipeline</h3>
+    <table>
+      <tr><th>#</th><th>Step</th><th>Action</th><th>Deny Reason</th></tr>
+      <tr><td>1</td><td>Load Agent Policy</td><td>Find <code>.capability.yaml</code> for agent</td><td><code>unknown agent</code></td></tr>
+      <tr><td>2</td><td>Check Restrictions</td><td>Hard blocks (no_write, no_delete, etc.)</td><td><code>restricted</code></td></tr>
+      <tr><td>3</td><td>Check Conditions</td><td>Time window, environment, rate limit</td><td><code>condition: &lt;which&gt;</code></td></tr>
+      <tr><td>4</td><td>Match Capabilities</td><td>Find capability matching resource</td><td><code>no capability for resource</code></td></tr>
+      <tr><td>5</td><td>Evaluate Constraints</td><td>Glob, list membership, range checks</td><td><code>constraint mismatch</code></td></tr>
+      <tr><td>6</td><td>Log Decision</td><td>Write to SQLite audit store</td><td>&mdash;</td></tr>
+    </table>
+  </div>
+
+  <div class="keep-together">
+    <h3>Auto-Generation Flow (Phase 2)</h3>
+    <div class="flow">
+      <div class="flow-box">Skill/MCP<br>Detected</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Security<br>Scan</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box highlight">Admission<br>Verdict</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Introspect<br>Manifest</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box highlight">Generate<br>Policy</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Write<br>YAML</div>
+    </div>
+    <div class="flow-label">Blocked/rejected &rarr; no policy generated | Clean/warning/allowed &rarr; auto-generate</div>
+  </div>
+
+</div>
+
+<!-- ==================== PAGE 3: PHASE 1 - POLICY FORMAT ==================== -->
+<div class="section page-break-before">
+
+  <div class="keep-together">
+    <h2>3. Phase 1: Capability Evaluator</h2>
+    <h3>Policy Manifest Format</h3>
+    <p>Each agent gets a <code>.capability.yaml</code> file in <code>~/.defenseclaw/capabilities/</code>. Policies express <em>what</em> an agent can do with fine-grained constraints:</p>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        support-bot.capability.yaml
+      </div>
+      <div class="terminal"><span class="blue bold">agent:</span> support-bot
+<span class="blue bold">description:</span> "Customer support automation agent"
+
+<span class="blue bold">capabilities:</span>
+  - <span class="green">name:</span> read_jira_ticket
+    <span class="green">resource:</span> "<span class="cyan">jira.get_issue</span>"
+    <span class="green">constraints:</span>
+      project: "<span class="yellow">ENG-*</span>"                  <span class="comment"># glob pattern</span>
+      fields: [summary, status, assignee]  <span class="comment"># list membership</span>
+
+  - <span class="green">name:</span> post_slack_message
+    <span class="green">resource:</span> "<span class="cyan">slack.post_message</span>"
+    <span class="green">constraints:</span>
+      channel: "<span class="yellow">#support</span>"
+      template: approved_templates_only
+
+  - <span class="green">name:</span> read_confluence
+    <span class="green">resource:</span> "<span class="cyan">confluence.get_page</span>"
+    <span class="green">constraints:</span>
+      space: SUPPORT
+
+<span class="blue bold">restrictions:</span>
+  - "<span class="red">no_external_http</span>"
+  - "<span class="red">no_bulk_export</span>"
+
+<span class="blue bold">conditions:</span>
+  <span class="yellow">time_window:</span> "09:00-18:00"           <span class="comment"># UTC</span>
+  <span class="yellow">environments:</span> [production, staging]
+  <span class="yellow">rate_limit:</span>
+    max_calls: 100
+    window_seconds: 3600</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Constraint Matching &amp; Restrictions</h3>
+    <div class="two-col">
+      <div>
+        <h4>String Values &mdash; Glob Patterns</h4>
+        <p>Uses <code>filepath.Match</code> for glob matching. <code>project: "ENG-*"</code> allows <code>ENG-123</code> but denies <code>FIN-456</code>.</p>
+        <h4>Slice Values &mdash; List Membership</h4>
+        <p>All requested fields must be in the allowed list. <code>fields: [summary, status]</code> allows requesting <code>summary</code> but denies <code>comments</code>.</p>
+      </div>
+      <div>
+        <h4>Restrictions &mdash; Hard Blocks</h4>
+        <p>Checked <em>before</em> capabilities. No capability can override a restriction.</p>
+        <table style="font-size:8.5pt;">
+          <tr><th>Restriction</th><th>Blocks</th></tr>
+          <tr><td><code>no_external_http</code></td><td><code>http.*</code>, <code>external_http.*</code></td></tr>
+          <tr><td><code>no_bulk_export</code></td><td><code>*.export_all</code>, <code>*.bulk_export</code></td></tr>
+          <tr><td><code>no_write</code></td><td><code>*.create_*</code>, <code>*.update_*</code>, <code>*.post_*</code></td></tr>
+          <tr><td><code>no_delete</code></td><td><code>*.delete_*</code>, <code>*.remove_*</code></td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Conditions (Agent-Global)</h3>
+    <div class="two-col">
+      <div>
+        <h4>Time Window</h4>
+        <p>UTC-based, supports midnight crossing (e.g., <code>22:00-06:00</code>). Calls outside the window are denied.</p>
+        <h4>Environment</h4>
+        <p>Restricts agent to named environments. Empty list allows all.</p>
+      </div>
+      <div>
+        <h4>Rate Limiting</h4>
+        <p>Sliding window tracked in SQLite <code>capability_calls</code> table. Exceeding the limit &rarr; deny until window clears.</p>
+        <h4>Default-Deny</h4>
+        <p>Unknown agents, unmatched resources, and failed constraints all result in denial.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Key principle:</strong> Capabilities are not tools &mdash; they are <em>constrained permissions</em>. An agent may have access to <code>jira.get_issue</code> but only for project <code>ENG-*</code> during business hours with a 100-call/hour limit.
+    </div>
+  </div>
+
+</div>
+
+<!-- ==================== PAGE 4: PHASE 1 - CLI DEMO ==================== -->
+<div class="section page-break-before">
+
+  <h2>4. Phase 1 Demo: CLI Commands &amp; Evaluation</h2>
+
+  <div class="keep-together">
+    <h3>CLI: List Loaded Policies</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; defenseclaw capability list
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability list</span>
+
+Agent Capability Policies (/Users/nghodki/.defenseclaw/capabilities)
+<span class="dim">────────────────────────────────────────────────────────────</span>
+  <span class="green">alert-service</span>        3 capabilities, 0 restrictions
+  <span class="green">default-agent</span>        7 capabilities, 0 restrictions</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>CLI: Show Policy Details</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; defenseclaw capability show
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability show alert-service</span>
+
+{
+  "Agent": "<span class="blue">alert-service</span>",
+  "Description": "Auto-generated from MCP scan (permissive)",
+  "Generated": true,
+  "Approved": true,
+  "Capabilities": [
+    { "Name": "get_weather",  "Resource": "<span class="cyan">alert-service.get_weather</span>" },
+    { "Name": "create_alert", "Resource": "<span class="cyan">alert-service.create_alert</span>" },
+    { "Name": "delete_alert", "Resource": "<span class="cyan">alert-service.delete_alert</span>" }
+  ],
+  "Restrictions": [],
+  "Conditions": {}
+}</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>CLI: Evaluate &mdash; Allowed</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; Evaluate (Allowed)
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability evaluate alert-service alert-service.get_weather</span>
+
+{
+  "<span class="green">allowed</span>": <span class="green bold">true</span>,
+  "reason": "capability matched",
+  "capability": "get_weather"
+}</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>CLI: Evaluate &mdash; Denied (no matching capability)</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; Evaluate (Denied)
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability evaluate alert-service jira.get_issue</span>
+
+{
+  "<span class="red">allowed</span>": <span class="red bold">false</span>,
+  "reason": "no capability for resource"
+}</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>CLI: Validate Policy File</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; defenseclaw capability validate
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability validate ~/.defenseclaw/capabilities/alert-service.capability.yaml</span>
+<span class="green bold">Valid:</span> alert-service (3 capabilities, 0 restrictions)</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Audit Trail</h3>
+    <p>Every evaluation decision is logged to the SQLite audit store with timestamp, agent, resource, parameters, allowed/denied, and reason. Rate limit calls are tracked in a separate <code>capability_calls</code> table with indexed queries for efficient sliding-window calculations.</p>
+    <div class="callout">
+      <strong>5 CLI commands:</strong> <code>list</code>, <code>show</code>, <code>evaluate</code>, <code>validate</code>, and <code>approve</code> (Phase 2). All follow existing Cobra patterns. Decisions are also forwarded to Splunk HEC and OTel.
+    </div>
+  </div>
+
+</div>
+
+<!-- ==================== PAGE 5: PHASE 2 - INTROSPECTION + GENERATION ==================== -->
+<div class="section page-break-before">
+
+  <div class="keep-together">
+    <h2>5. Phase 2: Scan-Driven Auto-Generation</h2>
+    <p>
+      Without auto-generation, users must manually write <code>.capability.yaml</code> files for every agent.
+      Phase 2 solves this by <strong>introspecting manifests</strong> for per-tool granularity and
+      <strong>adapting security posture based on scan findings</strong>.
+    </p>
+  </div>
+
+  <div class="keep-together">
+    <h3>MCP Manifest Introspection</h3>
+    <p>Parses the MCP server's JSON manifest to discover per-tool metadata:</p>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; MCP Introspection
+      </div>
+      <div class="terminal"><span class="green bold">=== Step 1: MCP Manifest Introspection ===</span>
+Parsed 3 tools from alert-service MCP manifest:
+  <span class="cyan">[tool]</span> get_weather      Get current weather for a location
+  <span class="cyan">[tool]</span> create_alert     Create a new alert rule
+  <span class="cyan">[tool]</span> delete_alert     Delete an existing alert</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Skill Manifest Introspection</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; Skill Introspection
+      </div>
+      <div class="terminal"><span class="green bold">=== Step 2: Skill Manifest Introspection ===</span>
+Parsed skill: <span class="blue">permissioned-skill</span>
+  Permissions: <span class="yellow">[read-only]</span></div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Scan-Informed Posture Matrix</h3>
+    <table>
+      <tr><th>Scan Result</th><th>Posture</th><th>Capabilities</th><th>Restrictions</th><th>Rate Limit</th></tr>
+      <tr>
+        <td><span class="badge-green">Clean</span> No findings</td>
+        <td><strong>Permissive</strong></td>
+        <td>All discovered tools</td>
+        <td>None</td>
+        <td>None</td>
+      </tr>
+      <tr>
+        <td><span class="badge-yellow">LOW / MEDIUM</span></td>
+        <td><strong>Cautious</strong></td>
+        <td>All discovered tools</td>
+        <td>no_bulk_export</td>
+        <td>100 / hour</td>
+      </tr>
+      <tr>
+        <td><span class="badge-red">HIGH / CRITICAL</span></td>
+        <td><strong>Restrictive</strong></td>
+        <td>Read-like tools only</td>
+        <td>no_write, no_delete, no_bulk_export</td>
+        <td>50 / hour</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="keep-together">
+    <h3>Policy Generation Demo &mdash; Three Postures</h3>
+    <div class="two-col">
+      <div>
+        <h4>Permissive (Clean Scan)</h4>
+        <div class="terminal" style="font-size:8pt;">
+<span class="green bold">Permissive (clean scan)</span>
+  Agent:        <span class="blue">auto-alert-service</span>
+  Generated:    <span class="green">true</span>
+  Approved:     <span class="yellow">false</span>
+  Capabilities: <span class="bold">3</span>
+    get_weather    -> alert-service.get_weather
+    create_alert   -> alert-service.create_alert
+    delete_alert   -> alert-service.delete_alert
+  Restrictions: <span class="dim">(none)</span></div>
+      </div>
+      <div>
+        <h4>Cautious (MEDIUM Findings)</h4>
+        <div class="terminal" style="font-size:8pt;">
+<span class="yellow bold">Cautious (MEDIUM findings)</span>
+  Agent:        <span class="blue">auto-data-service</span>
+  Capabilities: <span class="bold">3</span>
+  Restrictions: <span class="yellow">[no_bulk_export]</span>
+  Rate Limit:   <span class="yellow">100 calls / 3600s</span></div>
+        <h4>Restrictive (HIGH Findings)</h4>
+        <div class="terminal" style="font-size:8pt;">
+<span class="red bold">Restrictive (HIGH findings)</span>
+  Agent:        <span class="blue">auto-risky-service</span>
+  Capabilities: <span class="red bold">1</span> (read-like only)
+    get_weather    -> risky-service.get_weather
+  Restrictions: <span class="red">[no_write no_delete no_bulk_export]</span>
+  Rate Limit:   <span class="red">50 calls / 3600s</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Skill Policy with read-only Permission</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; Skill Policy Generation
+      </div>
+      <div class="terminal"><span class="green bold">=== Skill Policy (read-only permissions) ===</span>
+  Agent:        <span class="blue">auto-permissioned-skill</span>
+  Capabilities: <span class="bold">1</span>
+    permissioned-skill -> <span class="cyan">permissioned-skill.*</span>
+  Restrictions: <span class="yellow">[no_write no_delete]</span></div>
+    </div>
+    <div class="callout">
+      <strong>Read-like detection:</strong> Tools with prefixes <code>get_</code>, <code>list_</code>,
+      <code>read_</code>, <code>search_</code>, <code>fetch_</code>, <code>query_</code>,
+      <code>describe_</code>, <code>show_</code> are considered safe for the restrictive posture.
+      All other tools are filtered out when HIGH/CRITICAL findings exist.
+    </div>
+  </div>
+
+</div>
+
+<!-- ==================== PAGE 6: PHASE 2 - APPROVE + TUI ==================== -->
+<div class="section page-break-before">
+
+  <div class="keep-together">
+    <h2>6. Phase 2 Demo: Approval Workflow &amp; TUI</h2>
+    <h3>Approval Flow</h3>
+    <p>Auto-generated policies are active immediately but flagged as <span class="badge-yellow">pending review</span>. The approve command promotes ownership to the user:</p>
+    <div class="flow">
+      <div class="flow-box" style="background:#fef3c7;border-color:#f59e0b;">auto-alert-service<br><small>generated: true, approved: false</small></div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box highlight">capability approve<br>alert-service</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box allow">alert-service<br><small>approved: true</small></div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>CLI: Approve Auto-Generated Policy</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; defenseclaw capability approve
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability approve alert-service</span>
+<span class="green bold">Approved: alert-service (3 capabilities, 0 restrictions)</span>
+
+<span class="prompt">$</span> <span class="cmd">defenseclaw capability list</span>
+
+Agent Capability Policies (/Users/nghodki/.defenseclaw/capabilities)
+<span class="dim">────────────────────────────────────────────────────────────</span>
+  <span class="green">alert-service</span>        3 capabilities, 0 restrictions
+  default-agent        7 capabilities, 0 restrictions</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Error Handling</h3>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; Error Cases
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">defenseclaw capability approve nonexistent</span>
+<span class="red">Error: capability: no pending auto-generated policy for "nonexistent"</span>
+
+<span class="prompt">$</span> <span class="cmd">defenseclaw capability approve alert-service</span>  <span class="comment"># already approved</span>
+<span class="red">Error: capability: manual policy already exists — edit it directly</span></div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>TUI: Agents Panel with Status Column</h3>
+    <p>The TUI "Agents" tab shows policy status with color coding &mdash; <span class="badge-yellow">pending review</span> for unapproved auto-generated policies, <span class="badge-green">approved</span> or <span class="badge-blue">manual</span> otherwise:</p>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        TUI &mdash; Agents Panel
+      </div>
+      <div class="terminal"><span class="bold">  Agents                                              Status</span>
+<span class="dim">  ─────────────────────────────────────────────────────────────</span>
+  <span class="green">alert-service</span>      3 caps, 0 restrictions        <span class="green">approved</span>
+  <span class="blue">default-agent</span>      7 caps, 0 restrictions        <span class="blue">manual</span>
+  <span class="yellow">data-service</span>       3 caps, 1 restriction         <span class="yellow">pending review</span>
+  <span class="yellow">risky-service</span>      1 caps, 3 restrictions        <span class="yellow">pending review</span></div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h3>Watcher Integration</h3>
+    <p>Auto-generation hooks directly into <code>runAdmission()</code> at 5 return points (allowed/clean/warning verdicts). No new goroutines or services &mdash; it runs inline after the admission verdict.</p>
+    <div class="callout">
+      <strong>Conflict resolution:</strong>
+      <ul style="margin-top:2mm;">
+        <li><strong>Manual policy exists</strong> &rarr; skip auto-generation entirely (manual always wins)</li>
+        <li><strong>Auto policy already exists</strong> &rarr; skip (don't overwrite on re-scan)</li>
+        <li><strong>Introspection fails</strong> &rarr; fall back to wildcard <code>&lt;name&gt;.*</code> capability</li>
+        <li><strong>Approve when manual exists</strong> &rarr; error (user should edit manual file)</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<!-- ==================== PAGE 7: TESTS + SUMMARY ==================== -->
+<div class="section page-break-before">
+
+  <div class="keep-together">
+    <h2>7. Test Suite</h2>
+    <div class="terminal-group">
+      <div class="terminal-title">
+        <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+        Terminal &mdash; go test -v (auto-generation tests)
+      </div>
+      <div class="terminal"><span class="prompt">$</span> <span class="cmd">go test ./test/unit/ -run "TestAgentPolicy|TestIntrospect|TestGeneratePolicy|TestApprovePolicy" -v</span>
+
+<span class="green">--- PASS: TestApprovePolicySuccess (0.00s)</span>
+<span class="green">--- PASS: TestApprovePolicyNoAutoFile (0.00s)</span>
+<span class="green">--- PASS: TestApprovePolicyManualExists (0.00s)</span>
+<span class="green">--- PASS: TestAgentPolicyGeneratedApprovedFields (0.00s)</span>
+<span class="green">--- PASS: TestAgentPolicyOmitEmptyGeneratedApproved (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicyCleanMCP (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicyCautiousMCP (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicyRestrictiveMCP (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicyFallbackWildcard (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicySkillReadOnly (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicySkillNoPermissions (0.00s)</span>
+<span class="green">--- PASS: TestGeneratePolicyNilScanResult (0.00s)</span>
+<span class="green">--- PASS: TestIntrospectMCP (0.00s)</span>
+<span class="green">    --- PASS: TestIntrospectMCP/3_tools (0.00s)</span>
+<span class="green">    --- PASS: TestIntrospectMCP/empty_tools_array (0.00s)</span>
+<span class="green">    --- PASS: TestIntrospectMCP/existing_clean_MCP_with_1_tool (0.00s)</span>
+<span class="green">    --- PASS: TestIntrospectMCP/missing_file (0.00s)</span>
+<span class="green">--- PASS: TestIntrospectMCPToolDetails (0.00s)</span>
+<span class="green">--- PASS: TestIntrospectMCPMalformedJSON (0.00s)</span>
+<span class="green">--- PASS: TestIntrospectSkill (0.00s)</span>
+<span class="green">--- PASS: TestIntrospectSkillNoPermissions (0.00s)</span>
+<span class="green bold">PASS</span>
+ok  github.com/defenseclaw/defenseclaw/test/unit</div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <h2>8. Implementation Summary</h2>
+    <div class="two-col">
+      <div>
+        <h3>Phase 1 Files</h3>
+        <table style="font-size:8.5pt;">
+          <tr><th>File</th><th>Purpose</th></tr>
+          <tr><td><code>capability/types.go</code></td><td>Core types: AgentPolicy, Capability, Conditions, EvalRequest, Decision</td></tr>
+          <tr><td><code>capability/evaluator.go</code></td><td>6-step evaluator engine, hot-reload</td></tr>
+          <tr><td><code>capability/constraints.go</code></td><td>Glob, list, exact, range matching</td></tr>
+          <tr><td><code>capability/loader.go</code></td><td>YAML manifest loading + validation</td></tr>
+          <tr><td><code>cli/capability.go</code></td><td>list, show, evaluate, validate commands</td></tr>
+          <tr><td><code>tui/agents.go</code></td><td>Agents panel with decision history</td></tr>
+          <tr><td><code>config/config.go</code></td><td>CapabilityPolicyDir field</td></tr>
+          <tr><td><code>audit/store.go</code></td><td>capability_decisions + capability_calls tables</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>Phase 2 Files</h3>
+        <table style="font-size:8.5pt;">
+          <tr><th>File</th><th>Purpose</th></tr>
+          <tr><td><code>capability/introspect.go</code></td><td>MCP + skill manifest parsing</td></tr>
+          <tr><td><code>capability/generator.go</code></td><td>Scan-informed generation + approve</td></tr>
+          <tr><td><code>watcher/watcher.go</code></td><td>5 admission hooks for auto-gen</td></tr>
+          <tr><td><code>gateway/sidecar.go</code></td><td>Wire evaluator into watcher</td></tr>
+          <tr><td><code>cli/capability.go</code></td><td>approve subcommand</td></tr>
+          <tr><td><code>tui/agents.go</code></td><td>Status column + SetPolicies()</td></tr>
+          <tr><td><code>tui/app.go</code></td><td>Pass evaluator policies to panel</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="keep-together">
+    <div class="callout">
+      <strong>Key Design Decisions:</strong>
+      <ul style="margin-top: 2mm;">
+        <li><strong>Default-deny</strong> &mdash; unknown agents and unmatched resources are always rejected</li>
+        <li><strong>Sidecar/hook mode</strong> &mdash; no MCP proxy required, integrates with existing daemon</li>
+        <li><strong>Scan-informed posture</strong> &mdash; security adapts automatically to scan findings</li>
+        <li><strong>No circular imports</strong> &mdash; GenerateRequest uses primitive types + ScanResultSummary</li>
+        <li><strong>Semi-blocking approval</strong> &mdash; policies active immediately, flagged pending until approved</li>
+        <li><strong>Graceful degradation</strong> &mdash; introspection failures fall back to wildcard capabilities</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
