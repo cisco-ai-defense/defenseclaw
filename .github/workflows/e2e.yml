@@ -129,18 +129,32 @@ jobs:
           done
 
           # Lower minFreeSpace for CI runners with limited disk.
-          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503 on searches.
-          # First create the [diskUsage] stanza (ignore error if it already exists),
-          # then set the value.
+          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503.
           echo "Disk free: $(df -h / | tail -1)"
-          echo "Setting Splunk minFreeSpace=500 via REST API..."
-          curl -sk -u "admin:DefenseClawLocalMode1!" \
-            -X POST -d "name=diskUsage" \
-            "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server" 2>/dev/null || true
-          curl -sk -u "admin:DefenseClawLocalMode1!" \
-            -X POST -d "minFreeSpace=500" \
-            "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server/diskUsage"
-          echo ""
+          docker compose -f docker-compose.ci.yml exec -T -u splunk splunk bash -c '
+            for d in /opt/splunk/etc/system/local /opt/splunk/etc/apps/search/local; do
+              echo "Checking $d/server.conf ..."
+              if [ -d "$d" ]; then
+                mkdir -p "$d"
+                SCONF="$d/server.conf"
+                if ! grep -q "minFreeSpace" "$SCONF" 2>/dev/null; then
+                  printf "\n[diskUsage]\nminFreeSpace = 500\n" >> "$SCONF"
+                  echo "  -> patched $SCONF"
+                else
+                  echo "  -> already has minFreeSpace"
+                fi
+                cat "$SCONF"
+                break
+              fi
+            done
+          '
+          echo "Restarting Splunk to apply minFreeSpace..."
+          docker compose -f docker-compose.ci.yml restart splunk
+          echo "Waiting for Splunk HEC after restart..."
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
 
       - name: Install DefenseClaw
         run: make install
@@ -398,18 +412,32 @@ jobs:
           done
 
           # Lower minFreeSpace for CI runners with limited disk.
-          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503 on searches.
-          # First create the [diskUsage] stanza (ignore error if it already exists),
-          # then set the value.
+          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503.
           echo "Disk free: $(df -h / | tail -1)"
-          echo "Setting Splunk minFreeSpace=500 via REST API..."
-          curl -sk -u "admin:DefenseClawLocalMode1!" \
-            -X POST -d "name=diskUsage" \
-            "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server" 2>/dev/null || true
-          curl -sk -u "admin:DefenseClawLocalMode1!" \
-            -X POST -d "minFreeSpace=500" \
-            "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server/diskUsage"
-          echo ""
+          docker compose -f docker-compose.ci.yml exec -T -u splunk splunk bash -c '
+            for d in /opt/splunk/etc/system/local /opt/splunk/etc/apps/search/local; do
+              echo "Checking $d/server.conf ..."
+              if [ -d "$d" ]; then
+                mkdir -p "$d"
+                SCONF="$d/server.conf"
+                if ! grep -q "minFreeSpace" "$SCONF" 2>/dev/null; then
+                  printf "\n[diskUsage]\nminFreeSpace = 500\n" >> "$SCONF"
+                  echo "  -> patched $SCONF"
+                else
+                  echo "  -> already has minFreeSpace"
+                fi
+                cat "$SCONF"
+                break
+              fi
+            done
+          '
+          echo "Restarting Splunk to apply minFreeSpace..."
+          docker compose -f docker-compose.ci.yml restart splunk
+          echo "Waiting for Splunk HEC after restart..."
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
 
       - name: Install DefenseClaw
         run: make install
