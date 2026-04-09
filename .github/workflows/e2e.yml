@@ -115,44 +115,32 @@ jobs:
               print("OpenClaw config already clean")
           PY
 
-      - name: Reclaim disk space for Splunk
-        run: |
-          echo "Disk before cleanup:"
-          df -h / | tail -1
-          docker system prune -af --volumes 2>/dev/null || true
-          echo "Disk after cleanup:"
-          df -h / | tail -1
-
       - name: Start Splunk
         run: |
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
-          docker compose -f docker-compose.ci.yml up -d
+          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
+            docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
-          # Lower minFreeSpace for CI runners with limited disk via REST API.
-          # Default is 5000MB; CI runners often have < 5GB free → HTTP 503 on searches.
-          echo "Setting minFreeSpace=500 via Splunk REST API..."
+          # Lower minFreeSpace for CI runners with limited disk.
+          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503 on searches.
+          # First create the [diskUsage] stanza (ignore error if it already exists),
+          # then set the value.
+          echo "Disk free: $(df -h / | tail -1)"
+          echo "Setting Splunk minFreeSpace=500 via REST API..."
+          curl -sk -u "admin:DefenseClawLocalMode1!" \
+            -X POST -d "name=diskUsage" \
+            "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server" 2>/dev/null || true
           curl -sk -u "admin:DefenseClawLocalMode1!" \
             -X POST -d "minFreeSpace=500" \
             "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server/diskUsage"
           echo ""
-          # Verify search API is functional
-          for i in $(seq 1 10); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -k \
-              -u "admin:DefenseClawLocalMode1!" \
-              -d "search=| makeresults" -d "output_mode=json" \
-              "https://127.0.0.1:8089/services/search/jobs/export" 2>/dev/null || echo "000")
-            [ "$code" = "200" ] && echo "Search API ready (HTTP $code)" && break
-            echo "  attempt $i: HTTP $code"
-            sleep 3
-          done
 
       - name: Install DefenseClaw
         run: make install
@@ -396,44 +384,32 @@ jobs:
               print("OpenClaw config already clean")
           PY
 
-      - name: Reclaim disk space for Splunk
-        run: |
-          echo "Disk before cleanup:"
-          df -h / | tail -1
-          docker system prune -af --volumes 2>/dev/null || true
-          echo "Disk after cleanup:"
-          df -h / | tail -1
-
       - name: Start Splunk
         run: |
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
-          docker compose -f docker-compose.ci.yml up -d
+          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
+            docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
 
-          # Lower minFreeSpace for CI runners with limited disk via REST API.
-          # Default is 5000MB; CI runners often have < 5GB free → HTTP 503 on searches.
-          echo "Setting minFreeSpace=500 via Splunk REST API..."
+          # Lower minFreeSpace for CI runners with limited disk.
+          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503 on searches.
+          # First create the [diskUsage] stanza (ignore error if it already exists),
+          # then set the value.
+          echo "Disk free: $(df -h / | tail -1)"
+          echo "Setting Splunk minFreeSpace=500 via REST API..."
+          curl -sk -u "admin:DefenseClawLocalMode1!" \
+            -X POST -d "name=diskUsage" \
+            "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server" 2>/dev/null || true
           curl -sk -u "admin:DefenseClawLocalMode1!" \
             -X POST -d "minFreeSpace=500" \
             "https://127.0.0.1:8089/servicesNS/nobody/system/configs/conf-server/diskUsage"
           echo ""
-          # Verify search API is functional
-          for i in $(seq 1 10); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -k \
-              -u "admin:DefenseClawLocalMode1!" \
-              -d "search=| makeresults" -d "output_mode=json" \
-              "https://127.0.0.1:8089/services/search/jobs/export" 2>/dev/null || echo "000")
-            [ "$code" = "200" ] && echo "Search API ready (HTTP $code)" && break
-            echo "  attempt $i: HTTP $code"
-            sleep 3
-          done
 
       - name: Install DefenseClaw
         run: make install

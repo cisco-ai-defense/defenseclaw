@@ -161,11 +161,9 @@ count_nonempty_lines() {
 
 splunk_search() {
     local query="$1"
-    # Use spath to force JSON field extraction before filtering —
-    # belt-and-suspenders alongside the props.conf KV_MODE=json setting.
     curl -sf --max-time 15 -k \
         -u "$SPLUNK_CREDS" \
-        -d "search=search index=${SPLUNK_INDEX} | spath | search $query" \
+        -d "search=search index=${SPLUNK_INDEX} $query" \
         -d "output_mode=json" \
         "$SPLUNK_API_URL/services/search/jobs/export" 2>/dev/null || echo '{}'
 }
