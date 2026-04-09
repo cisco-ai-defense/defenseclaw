@@ -2,7 +2,7 @@ name: E2E
 
 on:
   push:
-    branches: [main, demo, feat/e2e-ci]
+    branches: [main, demo]
   pull_request:
   workflow_dispatch:
   schedule:
