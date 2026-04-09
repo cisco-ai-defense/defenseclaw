@@ -2853,6 +2853,40 @@ func TestHealthHandlerReturnsJSON(t *testing.T) {
 	}
 }
 
+func TestHealthEndpointNoSecrets(t *testing.T) {
+	health := NewSidecarHealth()
+	// Simulate what a fixed reportSplunkHealth should produce: no raw passwords.
+	health.SetSplunk(StateRunning, "", map[string]interface{}{
+		"hec_endpoint":     "https://splunk.example.com:8088",
+		"index":            "defenseclaw",
+		"web_url":          "http://127.0.0.1:8000",
+		"web_user":         "admin",
+		"web_password_set": true,
+		"username":         "defenseclaw_local_user",
+		"password_set":     true,
+	})
+	api := &APIServer{health: health}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	api.handleHealth(w, req)
+
+	body := w.Body.String()
+
+	// The response must never contain actual password values.
+	for _, forbidden := range []string{`"web_password"`, `"password"`} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("health response contains %s — credentials must not be exposed via /health", forbidden)
+		}
+	}
+	// Confirm the boolean indicators are present instead.
+	for _, expected := range []string{`"web_password_set"`, `"password_set"`} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("health response missing %s — expected boolean indicator", expected)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // baseCommand and truncate tests (router helpers)
 // ---------------------------------------------------------------------------
@@ -3127,21 +3161,32 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 		t.Errorf("latency sum = %f, want 12.5", latHist.DataPoints[0].Sum)
 	}
 
-	tokenMetric := findMetric(rm, "defenseclaw.llm.tokens")
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric == nil {
-		t.Fatal("expected defenseclaw.llm.tokens metric")
+		t.Fatal("expected gen_ai.client.token.usage metric")
 	}
-	tokenSum, ok := tokenMetric.Data.(metricdata.Sum[int64])
+	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", tokenMetric.Data)
+		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
 	}
-	promptTok := counterByAttr(tokenSum, "token.type", "prompt")
-	compTok := counterByAttr(tokenSum, "token.type", "completion")
-	if promptTok != 250 {
-		t.Errorf("prompt tokens = %d, want 250", promptTok)
+	var inputSum, outputSum float64
+	for _, dp := range tokenHist.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "gen_ai.token.type" {
+				switch attr.Value.AsString() {
+				case "input":
+					inputSum += dp.Sum
+				case "output":
+					outputSum += dp.Sum
+				}
+			}
+		}
 	}
-	if compTok != 120 {
-		t.Errorf("completion tokens = %d, want 120", compTok)
+	if inputSum != 250 {
+		t.Errorf("input token sum = %v, want 250", inputSum)
+	}
+	if outputSum != 120 {
+		t.Errorf("output token sum = %v, want 120", outputSum)
 	}
 }
 
@@ -3183,16 +3228,16 @@ func TestHandleGuardrailEvent_OTelNoTokensSkipsLLMMetric(t *testing.T) {
 		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
 	}
 
-	tokenMetric := findMetric(rm, "defenseclaw.llm.tokens")
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric != nil {
-		tokenSum, ok := tokenMetric.Data.(metricdata.Sum[int64])
+		tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 		if ok {
-			total := int64(0)
-			for _, dp := range tokenSum.DataPoints {
-				total += dp.Value
+			totalSum := 0.0
+			for _, dp := range tokenHist.DataPoints {
+				totalSum += dp.Sum
 			}
-			if total != 0 {
-				t.Errorf("expected 0 token metrics when tokens_in/out are nil, got %d", total)
+			if totalSum != 0 {
+				t.Errorf("expected 0 token metrics when tokens_in/out are nil, got %v", totalSum)
 			}
 		}
 	}

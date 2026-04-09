@@ -17,8 +17,10 @@
 package audit
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -260,4 +262,30 @@ func TestSplunkForwarder_CloseStopsTicker(t *testing.T) {
 	}
 
 	time.Sleep(100 * time.Millisecond)
+}
+
+func TestSplunkForwardEventIncludesRunID(t *testing.T) {
+	var payload strings.Builder
+	f := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		payload.Write(body)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	event := makeEvent("run-id")
+	event.RunID = "splunk-run-123"
+
+	if err := f.ForwardEvent(event); err != nil {
+		t.Fatalf("ForwardEvent: %v", err)
+	}
+	if err := f.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	if got := payload.String(); !strings.Contains(got, `"run_id":"splunk-run-123"`) {
+		t.Fatalf("expected payload to contain run_id, got %s", got)
+	}
 }

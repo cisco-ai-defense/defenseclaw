@@ -353,13 +353,16 @@ class TestClawPaths(unittest.TestCase):
             config_file="/tmp/nonexistent-oc/openclaw.json",
         ))
         dirs = cfg.skill_dirs()
+        workspace = os.path.join("/tmp/nonexistent-oc", "workspace", "skills")
         expected = os.path.join("/tmp/nonexistent-oc", "skills")
+        self.assertIn(workspace, dirs)
         self.assertIn(expected, dirs)
 
     def test_skill_dirs_with_openclaw_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = os.path.join(tmpdir, "project-workspace")
             oc_data = {
-                "agents": {"defaults": {"workspace": tmpdir}},
+                "agents": {"defaults": {"workspace": workspace}},
                 "skills": {"load": {"extraDirs": ["/tmp/extra-skills"]}},
             }
             oc_json = os.path.join(tmpdir, "openclaw.json")
@@ -371,9 +374,9 @@ class TestClawPaths(unittest.TestCase):
                 config_file=oc_json,
             ))
             dirs = cfg.skill_dirs()
+            self.assertIn(os.path.join(workspace, "skills"), dirs)
             self.assertIn(os.path.join(tmpdir, "skills"), dirs)
             self.assertIn("/tmp/extra-skills", dirs)
-            self.assertIn(os.path.join(tmpdir, "skills"), dirs)
 
     def test_plugin_dirs(self):
         cfg = Config(claw=ClawConfig(home_dir="/tmp/test-oc"))

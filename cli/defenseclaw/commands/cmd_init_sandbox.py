@@ -124,7 +124,7 @@ def sandbox_init_cmd(app: AppContext) -> None:
     from defenseclaw.logger import Logger
 
     store = app.store or Store(cfg.audit_db)
-    logger = app.logger or Logger(store)
+    logger = app.logger or Logger(store, cfg.splunk)
 
     already_configured = cfg.openshell.is_standalone()
     sandbox_ok = False

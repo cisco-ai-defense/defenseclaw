@@ -1980,7 +1980,7 @@ def _print_splunk_status(app: AppContext) -> None:
     sc = app.cfg.splunk
 
     if otel.enabled:
-        click.echo("  Splunk Observability (OTLP):")
+        click.echo("  Splunk Observability Cloud (OTLP):")
         click.echo("    Status:      enabled")
         if otel.traces.endpoint:
             realm = otel.traces.endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
