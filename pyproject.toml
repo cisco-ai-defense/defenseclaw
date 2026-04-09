@@ -64,7 +64,8 @@ default-groups = ["dev"]
 # cisco-ai-skill-scanner 2.0.6 pins rich==14.2.0 but also pins
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
-    "cryptography>=46.0.6",   # CVE-2026-34073 fixed in 46.0.6
+    "cryptography>=46.0.7",   # CVE-2026-34073, CVE-2026-39892
+    "litellm>=1.83.0",        # CVE-2026-35029, CVE-2026-35030, GHSA-69x8-hrgq-fjj8
 ]
 
 [tool.ruff]
