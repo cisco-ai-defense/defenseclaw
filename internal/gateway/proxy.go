@@ -1558,10 +1558,18 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 		}
 	}
 
-	// Loopback fallback: allow only when no gatewayToken is configured
+	// Loopback fallback: allow when no gatewayToken is configured
 	// (legacy / first-run). When a token exists, require it even on loopback
 	// so rogue local processes cannot relay through the proxy.
 	if isLoopback && p.gatewayToken == "" {
+		return true
+	}
+
+	// No auth configured at all (neither gatewayToken nor masterKey) — the
+	// proxy is open. This is the initial state before the user runs
+	// `defenseclaw setup guardrail`. A startup warning is logged urging the
+	// operator to set OPENCLAW_GATEWAY_TOKEN.
+	if p.gatewayToken == "" && p.masterKey == "" {
 		return true
 	}
 
