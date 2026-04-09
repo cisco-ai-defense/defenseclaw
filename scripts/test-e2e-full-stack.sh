@@ -220,7 +220,9 @@ get_gateway_token() {
         printf '%s\n' "$GATEWAY_TOKEN_CACHE"
         return
     fi
-    GATEWAY_TOKEN_CACHE=$(python3 - <<'PY'
+
+    # Strategy 1: resolve via Python config (loads .env + config.yaml).
+    GATEWAY_TOKEN_CACHE=$(python3 - <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 try:
     print(load().gateway.resolved_token())
@@ -228,6 +230,26 @@ except Exception:
     print("")
 PY
 )
+
+    # Strategy 2: env var directly (matches Go sidecar's ResolvedToken).
+    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
+        GATEWAY_TOKEN_CACHE="${OPENCLAW_GATEWAY_TOKEN:-}"
+    fi
+
+    # Strategy 3: read token_env name from config, then check that env var.
+    if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/config.yaml" ]; then
+        local token_env_name
+        token_env_name=$(grep 'token_env:' "$HOME/.defenseclaw/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
+        if [ -n "$token_env_name" ]; then
+            GATEWAY_TOKEN_CACHE="${!token_env_name:-}"
+        fi
+    fi
+
+    # Strategy 4: parse ~/.defenseclaw/.env directly (same as Go loadDotEnvIntoOS).
+    if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/.env" ]; then
+        GATEWAY_TOKEN_CACHE=$(grep '^OPENCLAW_GATEWAY_TOKEN=' "$HOME/.defenseclaw/.env" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" || true)
+    fi
+
     printf '%s\n' "$GATEWAY_TOKEN_CACHE"
 }
 
@@ -259,10 +281,32 @@ sidecar_post() {
     curl_with_gateway_headers POST "$SIDECAR_URL$path" "$body"
 }
 
+# sidecar_api_authenticated performs a lightweight authenticated GET to
+# /alerts?limit=1 and returns 0 if successful, 1 if unauthorized.
+# Call early (e.g. in phase_start) to detect token mismatches before
+# they cascade into dozens of audit-event / Splunk failures.
+sidecar_api_authenticated() {
+    local raw
+    raw=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=1" 2>/dev/null || echo '{"error":"unreachable"}')
+    if echo "$raw" | jq -e '.error' >/dev/null 2>&1; then
+        echo "  [diag] sidecar API probe failed: $raw" >&2
+        echo "  [diag] token resolved by test: '$(get_gateway_token | head -c6)...'" >&2
+        echo "  [diag] OPENCLAW_GATEWAY_TOKEN env: '${OPENCLAW_GATEWAY_TOKEN:+set (${#OPENCLAW_GATEWAY_TOKEN} chars)}${OPENCLAW_GATEWAY_TOKEN:-<empty>}'" >&2
+        return 1
+    fi
+    return 0
+}
+
 alerts_for_run() {
     local limit="${1:-400}"
     local raw
     raw=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=$limit" 2>/dev/null || echo '[]')
+    # Detect API-level errors (auth failures, etc.) and log them for debugging.
+    if echo "$raw" | jq -e '.error' >/dev/null 2>&1; then
+        echo "  [warn] alerts API returned error: $raw" >&2
+        echo '[]'
+        return
+    fi
     printf '%s\n' "$raw" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)]' 2>/dev/null || echo '[]'
 }
 
@@ -271,7 +315,8 @@ db_has_action() {
     local target_name="$2"
     local field="$3"
     local value="$4"
-    DB_TARGET_TYPE="$target_type" DB_TARGET_NAME="$target_name" DB_FIELD="$field" DB_VALUE="$value" python3 - <<'PY'
+    local result
+    result=$(DB_TARGET_TYPE="$target_type" DB_TARGET_NAME="$target_name" DB_FIELD="$field" DB_VALUE="$value" python3 - <<'PY' 2>/dev/null || true
 import os
 from defenseclaw.config import load
 from defenseclaw.db import Store
@@ -290,6 +335,13 @@ try:
 finally:
     store.close()
 PY
+)
+    if [ -z "$result" ]; then
+        echo "  [warn] db_has_action: Python call failed (module unavailable?)" >&2
+        printf 'false'
+    else
+        printf '%s' "$result"
+    fi
 }
 
 get_skill_dirs() {
@@ -983,6 +1035,15 @@ phase_start() {
         phase_timer_end "Phase 1"
         return 1
     fi
+
+    # Probe authenticated API access early — a token mismatch here would
+    # cascade into dozens of audit/Splunk failures downstream.
+    echo "  Verifying sidecar API authentication..."
+    if sidecar_api_authenticated; then
+        pass "sidecar API authenticated"
+    else
+        fail "sidecar API authenticated" "token mismatch — see diagnostic output above"
+    fi
     phase_timer_end "Phase 1"
 }
 
@@ -1535,15 +1596,20 @@ phase_codeguard() {
     response=$(sidecar_post "/api/v1/scan/code" "$payload" 2>/dev/null || echo '{"error":"request failed"}')
     echo "$response" | jq '.' 2>/dev/null || echo "$response"
 
-    findings=$(echo "$response" | jq -r '.findings | length' 2>/dev/null || echo "parse_error")
-    severity=$(echo "$response" | jq -r '[.findings[].severity] | unique | join(",")' 2>/dev/null || echo "none")
-
-    if [ "$findings" = "parse_error" ]; then
-        fail "codeguard: JSON response" "response was not valid scan JSON"
-    elif [ "$findings" -gt 0 ] 2>/dev/null; then
-        pass "codeguard: findings detected ($findings finding(s), severities: $severity)"
+    # Detect auth failure before checking findings — avoids confusing "0 findings".
+    if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+        fail "codeguard: findings detected" "API error: $(echo "$response" | jq -r '.error' 2>/dev/null)"
     else
-        fail "codeguard: findings detected" "expected findings but got 0"
+        findings=$(echo "$response" | jq -r '.findings | length' 2>/dev/null || echo "parse_error")
+        severity=$(echo "$response" | jq -r '[.findings[].severity] | unique | join(",")' 2>/dev/null || echo "none")
+
+        if [ "$findings" = "parse_error" ]; then
+            fail "codeguard: JSON response" "response was not valid scan JSON"
+        elif [ "$findings" -gt 0 ] 2>/dev/null; then
+            pass "codeguard: findings detected ($findings finding(s), severities: $severity)"
+        else
+            fail "codeguard: findings detected" "expected findings but got 0"
+        fi
     fi
 
     alerts=$(alerts_for_run 500)
