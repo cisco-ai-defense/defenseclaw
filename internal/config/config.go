@@ -100,6 +100,7 @@ type OTelLogsConfig struct {
 type OTelMetricsConfig struct {
 	Enabled         bool   `mapstructure:"enabled"            yaml:"enabled"`
 	ExportIntervalS int    `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
+	Temporality     string `mapstructure:"temporality"         yaml:"temporality"`
 	Endpoint        string `mapstructure:"endpoint"           yaml:"endpoint"`
 	Protocol        string `mapstructure:"protocol"           yaml:"protocol"`
 	URLPath         string `mapstructure:"url_path"           yaml:"url_path"`
@@ -211,8 +212,57 @@ type ScannersConfig struct {
 }
 
 type OpenShellConfig struct {
-	Binary    string `mapstructure:"binary"     yaml:"binary"`
-	PolicyDir string `mapstructure:"policy_dir" yaml:"policy_dir"`
+	Binary      string `mapstructure:"binary"        yaml:"binary"`
+	PolicyDir   string `mapstructure:"policy_dir"    yaml:"policy_dir"`
+	Mode        string `mapstructure:"mode"           yaml:"mode,omitempty"`
+	Version     string `mapstructure:"version"        yaml:"version,omitempty"`
+	SandboxHome string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
+	AutoPair    *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
+	HostNetworking *bool `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
+}
+
+const DefaultOpenShellVersion = "0.6.2"
+const DefaultSandboxHome = "/home/sandbox"
+
+// IsStandalone returns true when openshell-sandbox is running in standalone
+// Linux supervisor mode (Landlock + seccomp + network namespace, no Docker).
+func (o *OpenShellConfig) IsStandalone() bool {
+	return o.Mode == "standalone"
+}
+
+// EffectiveVersion returns the configured OpenShell version or the default.
+func (o *OpenShellConfig) EffectiveVersion() string {
+	if o.Version != "" {
+		return o.Version
+	}
+	return DefaultOpenShellVersion
+}
+
+// EffectiveSandboxHome returns the configured sandbox home or the default.
+func (o *OpenShellConfig) EffectiveSandboxHome() string {
+	if o.SandboxHome != "" {
+		return o.SandboxHome
+	}
+	return DefaultSandboxHome
+}
+
+// ShouldAutoPair returns whether device pre-pairing is enabled.
+// Defaults to true when not explicitly set.
+func (o *OpenShellConfig) ShouldAutoPair() bool {
+	if o.AutoPair != nil {
+		return *o.AutoPair
+	}
+	return true
+}
+
+// HostNetworkingEnabled returns whether DefenseClaw should manage host-side
+// iptables rules for the sandbox (DNS forwarding, UI port forwarding,
+// guardrail redirect, MASQUERADE). Defaults to true when not explicitly set.
+func (o *OpenShellConfig) HostNetworkingEnabled() bool {
+	if o.HostNetworking != nil {
+		return *o.HostNetworking
+	}
+	return true
 }
 
 type GatewayWatcherSkillConfig struct {
@@ -255,6 +305,7 @@ type GuardrailConfig struct {
 	Enabled       bool        `mapstructure:"enabled"        yaml:"enabled"`
 	Mode          string      `mapstructure:"mode"            yaml:"mode"`
 	ScannerMode   string      `mapstructure:"scanner_mode"    yaml:"scanner_mode"`
+	Host          string      `mapstructure:"host"             yaml:"host,omitempty"`
 	Port          int         `mapstructure:"port"            yaml:"port"`
 	Model         string      `mapstructure:"model"           yaml:"model"`
 	ModelName     string      `mapstructure:"model_name"      yaml:"model_name"`
@@ -287,6 +338,16 @@ func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
 	return ""
 }
 
+// EffectiveHost returns the hostname clients (e.g. OpenClaw) use to reach the
+// guardrail proxy — same value written to openclaw.json baseUrl. Defaults to
+// "localhost" when not configured.
+func (g *GuardrailConfig) EffectiveHost() string {
+	if g.Host != "" {
+		return g.Host
+	}
+	return "localhost"
+}
+
 type GatewayConfig struct {
 	Host            string               `mapstructure:"host"              yaml:"host"`
 	Port            int                  `mapstructure:"port"              yaml:"port"`
@@ -294,13 +355,16 @@ type GatewayConfig struct {
 	TokenEnv        string               `mapstructure:"token_env"         yaml:"token_env"`
 	TLS             bool                 `mapstructure:"tls"               yaml:"tls"`
 	TLSSkipVerify   bool                 `mapstructure:"tls_skip_verify"   yaml:"tls_skip_verify"`
+	NoTLS           bool                 `mapstructure:"-"                 yaml:"-"`
 	DeviceKeyFile   string               `mapstructure:"device_key_file"   yaml:"device_key_file"`
 	AutoApprove     bool                 `mapstructure:"auto_approve_safe" yaml:"auto_approve_safe"`
 	ReconnectMs     int                  `mapstructure:"reconnect_ms"      yaml:"reconnect_ms"`
 	MaxReconnectMs  int                  `mapstructure:"max_reconnect_ms"  yaml:"max_reconnect_ms"`
 	ApprovalTimeout int                  `mapstructure:"approval_timeout_s" yaml:"approval_timeout_s"`
 	APIPort         int                  `mapstructure:"api_port"           yaml:"api_port"`
+	APIBind         string               `mapstructure:"api_bind"           yaml:"api_bind"`
 	Watcher         GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
+	SandboxHome     string               `mapstructure:"-"                  yaml:"-"`
 }
 
 // defaultOpenClawGatewayTokenEnv matches gateway.auth.token when copied to ~/.defenseclaw/.env.
@@ -320,11 +384,32 @@ func (g *GatewayConfig) ResolvedToken() string {
 	return g.Token
 }
 
-// RequiresTLS returns true when the gateway host is not a loopback address,
-// meaning TLS should be enforced to protect auth tokens in transit.
+// RequiresTLS returns true when TLS should be used for the gateway connection.
+// When gateway.tls is true, TLS is always required. Otherwise, non-loopback hosts
+// require TLS to protect tokens in transit.
 func (g *GatewayConfig) RequiresTLS() bool {
+	if g.NoTLS {
+		return false
+	}
 	if g.TLS {
 		return true
+	}
+	switch g.Host {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return false
+	default:
+		return true
+	}
+}
+
+// RequiresTLSWithMode is like RequiresTLS but treats openshell standalone mode as
+// point-to-point (no TLS) unless gateway.tls forces it on.
+func (g *GatewayConfig) RequiresTLSWithMode(openshell *OpenShellConfig) bool {
+	if g.TLS {
+		return true
+	}
+	if openshell != nil && openshell.IsStandalone() {
+		return false
 	}
 	switch g.Host {
 	case "", "127.0.0.1", "localhost", "::1", "[::1]":
@@ -425,6 +510,10 @@ func Load() (*Config, error) {
 	if err := cfg.PluginActions.Validate(); err != nil {
 		return nil, err
 	}
+	if cfg.OpenShell.IsStandalone() {
+		cfg.Gateway.SandboxHome = cfg.OpenShell.EffectiveSandboxHome()
+	}
+
 	warnPlaintextSecrets(&cfg)
 	return &cfg, nil
 }
@@ -508,6 +597,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
 	viper.SetDefault("openshell.binary", "openshell")
 	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")
+	viper.SetDefault("openshell.version", DefaultOpenShellVersion)
+	viper.SetDefault("openshell.host_networking", true)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)
@@ -575,6 +666,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
 	viper.SetDefault("guardrail.scanner_mode", "local")
+	viper.SetDefault("guardrail.host", "localhost")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.judge.enabled", false)
@@ -619,6 +711,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("otel.logs.url_path", "")
 	viper.SetDefault("otel.metrics.enabled", true)
 	viper.SetDefault("otel.metrics.export_interval_s", 60)
+	viper.SetDefault("otel.metrics.temporality", "delta")
 	viper.SetDefault("otel.metrics.endpoint", "")
 	viper.SetDefault("otel.metrics.protocol", "")
 	viper.SetDefault("otel.metrics.url_path", "")

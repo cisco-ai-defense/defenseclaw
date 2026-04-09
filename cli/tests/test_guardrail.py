@@ -246,7 +246,8 @@ class TestInstallOpenclawPlugin(unittest.TestCase):
             self.assertIn(install_path, plugins.get("load", {}).get("paths", []))
 
     @patch("defenseclaw.guardrail.subprocess.run")
-    def test_cli_install_when_openclaw_available(self, mock_run):
+    @patch("defenseclaw.config.openclaw_bin", return_value="openclaw")
+    def test_cli_install_when_openclaw_available(self, _mock_bin, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin_dir = self._make_built_plugin(tmpdir)
@@ -330,7 +331,8 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
         return oc_home
 
     @patch("defenseclaw.guardrail.subprocess.run")
-    def test_cli_uninstall_when_openclaw_available(self, mock_run):
+    @patch("defenseclaw.config.openclaw_bin", return_value="openclaw")
+    def test_cli_uninstall_when_openclaw_available(self, _mock_bin, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)

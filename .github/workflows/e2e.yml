@@ -1,0 +1,714 @@
+name: E2E
+
+on:
+  push:
+    branches: [main, demo]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * *"
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core E2E
+    if: ${{ github.event_name != 'schedule' }}
+    runs-on: [self-hosted, Linux, ARM64, e2e]
+    timeout-minutes: 30
+    env:
+      OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
+      SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      E2E_PROFILE: core
+      DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-core
+      E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-core
+      E2E_REQUIRE_AGENT_INSTALL: "false"
+      E2E_REQUIRE_AGENT_SCAN: "false"
+      E2E_REQUIRE_GUARDRAIL: "false"
+      E2E_REQUIRE_LIVE_MCP: "false"
+      E2E_ENABLE_PLUGIN_LIFECYCLE: "false"
+      E2E_REQUIRE_PLUGIN_LIFECYCLE: "false"
+      E2E_ENABLE_RECOVERY: "false"
+      E2E_REQUIRE_RECOVERY: "false"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean DefenseClaw
+        run: |
+          defenseclaw-gateway stop 2>/dev/null || true
+          openclaw gateway stop 2>/dev/null || true
+          rm -rf ~/.defenseclaw
+          rm -f ~/.local/bin/defenseclaw-gateway
+          rm -rf ~/.openclaw/extensions/defenseclaw*
+          rm -rf ~/.openclaw/workspace/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          rm -rf ~/.openclaw/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          rm -rf ~/.openclaw/extensions/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          rm -rf /tmp/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          prefix = os.environ["E2E_TEST_PREFIX"]
+          cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
+          quarantine_root = Path(os.path.expanduser("~/.defenseclaw/quarantine"))
+          for sub in ("skills", "plugins"):
+              root = quarantine_root / sub
+              if root.is_dir():
+                  for child in root.iterdir():
+                      if child.name.startswith(prefix):
+                          shutil.rmtree(child, ignore_errors=True)
+
+          if not cfg_path.exists():
+              raise SystemExit(0)
+
+          with cfg_path.open() as f:
+              cfg = json.load(f)
+
+          changed = False
+          workspace = Path(
+              cfg.get("agents", {}).get("defaults", {}).get("workspace")
+              or os.path.expanduser("~/.openclaw/workspace")
+          )
+          global_skills = Path(os.path.expanduser("~/.openclaw/skills"))
+
+          skills = cfg.setdefault("skills", {}).setdefault("entries", {})
+          kept_skills = {
+              name: meta
+              for name, meta in skills.items()
+              if not str(name).startswith(prefix)
+              and ((workspace / "skills" / name).is_dir() or (global_skills / name).is_dir())
+          }
+          if kept_skills != skills:
+              cfg["skills"]["entries"] = kept_skills
+              changed = True
+
+          plugins = cfg.setdefault("plugins", {})
+          for section in ("entries", "installs"):
+              bucket = plugins.get(section)
+              if not isinstance(bucket, dict):
+                  continue
+              next_bucket = {
+                  name: meta
+                  for name, meta in bucket.items()
+                  if not str(name).startswith(prefix) and str(name) != "defenseclaw"
+              }
+              if next_bucket != bucket:
+                  plugins[section] = next_bucket
+                  changed = True
+
+          if changed:
+              with cfg_path.open("w") as f:
+                  json.dump(cfg, f, indent=2)
+                  f.write("\n")
+              print("OpenClaw config normalized for persistent E2E runner")
+          else:
+              print("OpenClaw config already clean")
+          PY
+
+      - name: Start Splunk
+        run: |
+          cd bundles/splunk_local_bridge
+          bash splunk/package_local_mode_app.sh
+          cd compose
+          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
+            docker compose -f docker-compose.ci.yml up -d
+          echo "Waiting for Splunk HEC..."
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
+
+      - name: Install DefenseClaw
+        run: make install
+
+      - name: Activate venv
+        run: |
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OPA
+        run: |
+          if command -v opa >/dev/null 2>&1; then
+            opa version
+            exit 0
+          fi
+
+          case "$(uname -m)" in
+            aarch64|arm64) OPA_ARCH="arm64" ;;
+            x86_64|amd64) OPA_ARCH="amd64" ;;
+            *)
+              echo "Unsupported architecture for OPA: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          curl -fsSL \
+            -o /tmp/opa \
+            "https://openpolicyagent.org/downloads/v1.14.1/opa_linux_${OPA_ARCH}_static"
+          install -m 0755 /tmp/opa "$HOME/.local/bin/opa"
+          opa version
+
+      - name: Init DefenseClaw
+        run: |
+          defenseclaw init
+
+          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
+            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
+            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
+          fi
+
+          defenseclaw setup skill-scanner \
+            --use-behavioral \
+            --policy balanced \
+            --non-interactive \
+            --no-verify
+
+          defenseclaw setup mcp-scanner \
+            --analyzers yara \
+            --scan-instructions \
+            --non-interactive
+
+          OC_MODEL=$(python3 -c "
+          import json, os
+          try:
+              with open(os.path.expanduser('~/.openclaw/openclaw.json')) as f:
+                  cfg = json.load(f)
+              print(cfg.get('agents',{}).get('defaults',{}).get('model',{}).get('primary',''))
+          except Exception:
+              print('')
+          ")
+
+          MODEL_NAME=""
+          API_KEY_ENV=""
+          GUARDRAIL_ENABLED=false
+          GUARDRAIL_REASON="core profile does not require live guardrail"
+
+          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> ~/.defenseclaw/.env
+          export OC_MODEL MODEL_NAME API_KEY_ENV GUARDRAIL_ENABLED GUARDRAIL_REASON
+          python3 - <<'PY'
+          import os
+          import yaml
+
+          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
+          with open(cfg_path) as f:
+              cfg = yaml.safe_load(f) or {}
+
+          cfg.setdefault('splunk', {})
+          cfg['splunk']['enabled'] = True
+          cfg['splunk']['hec_endpoint'] = 'http://127.0.0.1:8088/services/collector/event'
+          cfg['splunk']['index'] = 'defenseclaw_local'
+          cfg['splunk']['source'] = 'defenseclaw'
+          cfg['splunk']['sourcetype'] = 'defenseclaw:json'
+          cfg['splunk']['verify_tls'] = False
+          cfg['splunk']['batch_size'] = 50
+          cfg['splunk']['flush_interval_s'] = 5
+          cfg['splunk']['hec_token_env'] = 'DEFENSECLAW_SPLUNK_HEC_TOKEN'
+
+          cfg.setdefault('guardrail', {})
+          cfg['guardrail']['enabled'] = False
+          cfg['guardrail']['mode'] = 'observe'
+
+          with open(cfg_path, 'w') as f:
+              yaml.dump(cfg, f, default_flow_style=False)
+          PY
+
+          defenseclaw-gateway restart || defenseclaw-gateway start
+          sleep 5
+          defenseclaw-gateway status
+
+      - name: Unit tests
+        run: make test
+
+      - name: TypeScript plugin tests
+        run: make ts-test
+
+      - name: Rego policy tests
+        run: make rego-test
+
+      - name: E2E tests
+        run: bash scripts/test-e2e-full-stack.sh
+
+  full-live:
+    name: Full Live E2E
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, Linux, ARM64, e2e]
+    timeout-minutes: 45
+    env:
+      OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
+      SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
+      E2E_PROFILE: full-live
+      DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
+      E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
+      E2E_REQUIRE_AGENT_INSTALL: "true"
+      E2E_REQUIRE_AGENT_SCAN: "true"
+      E2E_REQUIRE_GUARDRAIL: "true"
+      E2E_REQUIRE_LIVE_MCP: "false"
+      E2E_ENABLE_PLUGIN_LIFECYCLE: "true"
+      E2E_REQUIRE_PLUGIN_LIFECYCLE: "false"
+      E2E_ENABLE_RECOVERY: "true"
+      E2E_REQUIRE_RECOVERY: "false"
+      OPENCLAW_MODEL_PATCHED: "false"
+      OPENCLAW_MODEL_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.backup.json
+      OPENCLAW_AUTH_BACKUP_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.backup.json
+      OPENCLAW_AUTH_BACKUP_MISSING_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.missing
+      OPENCLAW_SERVICE_ENV_PATH: /home/ubuntu/.openclaw/openclaw-service.env
+      OPENCLAW_SERVICE_DROPIN_PATH: /home/ubuntu/.config/systemd/user/openclaw-gateway.service.d/defenseclaw-e2e.conf
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean DefenseClaw
+        run: |
+          if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw
+            cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
+            rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw/agents/main/agent
+            cp "${OPENCLAW_AUTH_BACKUP_PATH}" ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
+          fi
+
+          defenseclaw-gateway stop 2>/dev/null || true
+          openclaw gateway stop 2>/dev/null || true
+          rm -rf ~/.defenseclaw
+          rm -f ~/.local/bin/defenseclaw-gateway
+          rm -rf ~/.openclaw/extensions/defenseclaw*
+          rm -rf ~/.openclaw/workspace/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          rm -rf ~/.openclaw/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          rm -rf ~/.openclaw/extensions/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          rm -rf /tmp/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          prefix = os.environ["E2E_TEST_PREFIX"]
+          cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
+          quarantine_root = Path(os.path.expanduser("~/.defenseclaw/quarantine"))
+          for sub in ("skills", "plugins"):
+              root = quarantine_root / sub
+              if root.is_dir():
+                  for child in root.iterdir():
+                      if child.name.startswith(prefix):
+                          shutil.rmtree(child, ignore_errors=True)
+
+          if not cfg_path.exists():
+              raise SystemExit(0)
+
+          with cfg_path.open() as f:
+              cfg = json.load(f)
+
+          changed = False
+          workspace = Path(
+              cfg.get("agents", {}).get("defaults", {}).get("workspace")
+              or os.path.expanduser("~/.openclaw/workspace")
+          )
+          global_skills = Path(os.path.expanduser("~/.openclaw/skills"))
+
+          skills = cfg.setdefault("skills", {}).setdefault("entries", {})
+          kept_skills = {
+              name: meta
+              for name, meta in skills.items()
+              if not str(name).startswith(prefix)
+              and ((workspace / "skills" / name).is_dir() or (global_skills / name).is_dir())
+          }
+          if kept_skills != skills:
+              cfg["skills"]["entries"] = kept_skills
+              changed = True
+
+          plugins = cfg.setdefault("plugins", {})
+          for section in ("entries", "installs"):
+              bucket = plugins.get(section)
+              if not isinstance(bucket, dict):
+                  continue
+              next_bucket = {
+                  name: meta
+                  for name, meta in bucket.items()
+                  if not str(name).startswith(prefix) and str(name) != "defenseclaw"
+              }
+              if next_bucket != bucket:
+                  plugins[section] = next_bucket
+                  changed = True
+
+          if changed:
+              with cfg_path.open("w") as f:
+                  json.dump(cfg, f, indent=2)
+                  f.write("\n")
+              print("OpenClaw config normalized for persistent E2E runner")
+          else:
+              print("OpenClaw config already clean")
+          PY
+
+      - name: Start Splunk
+        run: |
+          cd bundles/splunk_local_bridge
+          bash splunk/package_local_mode_app.sh
+          cd compose
+          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
+            docker compose -f docker-compose.ci.yml up -d
+          echo "Waiting for Splunk HEC..."
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
+
+      - name: Install DefenseClaw
+        run: make install
+
+      - name: Activate venv
+        run: |
+          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OPA
+        run: |
+          if command -v opa >/dev/null 2>&1; then
+            opa version
+            exit 0
+          fi
+
+          case "$(uname -m)" in
+            aarch64|arm64) OPA_ARCH="arm64" ;;
+            x86_64|amd64) OPA_ARCH="amd64" ;;
+            *)
+              echo "Unsupported architecture for OPA: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          curl -fsSL \
+            -o /tmp/opa \
+            "https://openpolicyagent.org/downloads/v1.14.1/opa_linux_${OPA_ARCH}_static"
+          install -m 0755 /tmp/opa "$HOME/.local/bin/opa"
+          opa version
+
+      - name: Prepare OpenClaw Anthropic model + auth
+        run: |
+          if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw
+            cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
+            rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw/agents/main/agent
+            cp "${OPENCLAW_AUTH_BACKUP_PATH}" ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          target_model = "anthropic/claude-sonnet-4-5"
+          state_dir = Path(os.path.expanduser("~/.openclaw"))
+          cfg_path = state_dir / "openclaw.json"
+          auth_path = state_dir / "agents" / "main" / "agent" / "auth-profiles.json"
+          if not cfg_path.exists():
+              raise SystemExit("openclaw.json not found; full-live requires a configured OpenClaw home")
+
+          backup_path = Path(os.environ["OPENCLAW_MODEL_BACKUP_PATH"])
+          backup_path.write_text(cfg_path.read_text())
+          auth_backup_path = Path(os.environ["OPENCLAW_AUTH_BACKUP_PATH"])
+          auth_missing_path = Path(os.environ["OPENCLAW_AUTH_BACKUP_MISSING_PATH"])
+          if auth_backup_path.exists():
+              auth_backup_path.unlink()
+          if auth_missing_path.exists():
+              auth_missing_path.unlink()
+          if auth_path.exists():
+              auth_backup_path.write_text(auth_path.read_text())
+          else:
+              auth_missing_path.write_text("")
+
+          with cfg_path.open() as f:
+              cfg = json.load(f)
+
+          auth_cfg = cfg.setdefault("auth", {})
+          auth_profiles = auth_cfg.setdefault("profiles", {})
+          auth_profiles["anthropic:default"] = {
+              "provider": "anthropic",
+              "mode": "api_key",
+          }
+          auth_cfg.setdefault("order", {})["anthropic"] = ["anthropic:default"]
+
+          agents = cfg.setdefault("agents", {})
+          defaults = agents.setdefault("defaults", {})
+          model_cfg = defaults.get("model")
+          if isinstance(model_cfg, dict):
+              model_cfg["primary"] = target_model
+          else:
+              defaults["model"] = {"primary": target_model, "fallbacks": []}
+
+          with cfg_path.open("w") as f:
+              json.dump(cfg, f, indent=2)
+              f.write("\n")
+
+          auth_path.parent.mkdir(parents=True, exist_ok=True)
+          auth_store = {
+              "version": 1,
+              "profiles": {
+                  "anthropic:default": {
+                      "type": "api_key",
+                      "provider": "anthropic",
+                      "keyRef": {
+                          "source": "env",
+                          "provider": "default",
+                          "id": "ANTHROPIC_API_KEY",
+                      },
+                  }
+              },
+              "order": {
+                  "anthropic": ["anthropic:default"],
+              },
+          }
+          with auth_path.open("w") as f:
+              json.dump(auth_store, f, indent=2)
+              f.write("\n")
+          auth_path.chmod(0o600)
+          PY
+          USER_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$USER_RUNTIME_DIR}"
+          export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
+          echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}" >> "$GITHUB_ENV"
+          mkdir -p "$(dirname "${OPENCLAW_SERVICE_DROPIN_PATH}")"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          env_path = Path(os.environ["OPENCLAW_SERVICE_ENV_PATH"])
+          dropin_path = Path(os.environ["OPENCLAW_SERVICE_DROPIN_PATH"])
+          env_path.parent.mkdir(parents=True, exist_ok=True)
+          lines = []
+          for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCLAW_GATEWAY_TOKEN"):
+              value = os.environ.get(key, "")
+              if value:
+                  lines.append(f"{key}={value}")
+          env_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+          env_path.chmod(0o600)
+          dropin_path.write_text("[Service]\nEnvironmentFile=%h/.openclaw/openclaw-service.env\n")
+          PY
+          systemctl --user daemon-reload
+
+          echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
+          echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
+
+      - name: Init DefenseClaw
+        run: |
+          defenseclaw init
+
+          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
+            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
+            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
+          fi
+
+          defenseclaw setup skill-scanner \
+            --use-behavioral \
+            --policy balanced \
+            --non-interactive \
+            --no-verify
+
+          defenseclaw setup mcp-scanner \
+            --analyzers yara \
+            --scan-instructions \
+            --non-interactive
+
+          OC_MODEL=$(python3 -c "
+          import json, os
+          try:
+              with open(os.path.expanduser('~/.openclaw/openclaw.json')) as f:
+                  cfg = json.load(f)
+              print(cfg.get('agents',{}).get('defaults',{}).get('model',{}).get('primary',''))
+          except Exception:
+              print('')
+          ")
+
+          MODEL_NAME=""
+          API_KEY_ENV=""
+          GUARDRAIL_ENABLED=false
+          GUARDRAIL_REASON="no compatible live provider detected"
+
+          if [ -n "$OC_MODEL" ]; then
+            MODEL_NAME=$(echo "$OC_MODEL" | sed 's|.*/||')
+            if echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
+              API_KEY_ENV="ANTHROPIC_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
+              API_KEY_ENV="OPENAI_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
+              GUARDRAIL_REASON="Bedrock model detected — live guardrail proxy does not yet support SigV4 auth"
+            else
+              GUARDRAIL_REASON="model provider is not supported by the live guardrail proxy"
+            fi
+
+            if [ -n "$API_KEY_ENV" ] && [ -n "${!API_KEY_ENV:-}" ]; then
+              GUARDRAIL_ENABLED=true
+              GUARDRAIL_REASON=""
+            elif [ -n "$API_KEY_ENV" ]; then
+              GUARDRAIL_REASON="missing ${API_KEY_ENV} secret for live guardrail proxy"
+            fi
+          else
+            GUARDRAIL_REASON="no model found in openclaw.json"
+          fi
+
+          echo "GUARDRAIL_REQUEST_MODEL=${OC_MODEL}" >> "$GITHUB_ENV"
+          if [ -n "${GUARDRAIL_REASON:-}" ]; then
+            echo "Guardrail live check status: ${GUARDRAIL_REASON}"
+          fi
+
+          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> ~/.defenseclaw/.env
+          export OC_MODEL MODEL_NAME API_KEY_ENV GUARDRAIL_ENABLED GUARDRAIL_REASON
+          python3 - <<'PY'
+          import os
+          import yaml
+
+          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
+          with open(cfg_path) as f:
+              cfg = yaml.safe_load(f) or {}
+
+          cfg.setdefault('splunk', {})
+          cfg['splunk']['enabled'] = True
+          cfg['splunk']['hec_endpoint'] = 'http://127.0.0.1:8088/services/collector/event'
+          cfg['splunk']['index'] = 'defenseclaw_local'
+          cfg['splunk']['source'] = 'defenseclaw'
+          cfg['splunk']['sourcetype'] = 'defenseclaw:json'
+          cfg['splunk']['verify_tls'] = False
+          cfg['splunk']['batch_size'] = 50
+          cfg['splunk']['flush_interval_s'] = 5
+          cfg['splunk']['hec_token_env'] = 'DEFENSECLAW_SPLUNK_HEC_TOKEN'
+
+          cfg.setdefault('guardrail', {})
+          cfg['guardrail']['enabled'] = False
+          cfg['guardrail']['mode'] = 'observe'
+
+          if os.environ.get('GUARDRAIL_ENABLED', '').lower() == 'true':
+              cfg['guardrail']['enabled'] = True
+              cfg['guardrail']['mode'] = 'action'
+              cfg['guardrail']['model'] = os.environ.get('OC_MODEL', '')
+              cfg['guardrail']['model_name'] = os.environ.get('MODEL_NAME', '')
+              cfg['guardrail']['api_key_env'] = os.environ.get('API_KEY_ENV', '')
+              cfg['skill_actions'] = {
+                  'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
+                  'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
+                  'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
+                  'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
+              }
+
+          with open(cfg_path, 'w') as f:
+              yaml.dump(cfg, f, default_flow_style=False)
+          PY
+
+          defenseclaw-gateway restart || defenseclaw-gateway start
+          sleep 5
+          defenseclaw-gateway status
+
+      - name: Unit tests
+        run: make test
+
+      - name: TypeScript plugin tests
+        run: make ts-test
+
+      - name: Rego policy tests
+        run: make rego-test
+
+      - name: E2E tests
+        run: bash scripts/test-e2e-full-stack.sh
+
+      - name: Restore OpenClaw Anthropic model
+        if: always()
+        run: |
+          rm -f "${OPENCLAW_SERVICE_ENV_PATH}" "${OPENCLAW_SERVICE_DROPIN_PATH}"
+          systemctl --user daemon-reload || true
+          if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw
+            cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
+            rm -f "${OPENCLAW_MODEL_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_PATH}" ]; then
+            mkdir -p ~/.openclaw/agents/main/agent
+            cp "${OPENCLAW_AUTH_BACKUP_PATH}" ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_PATH}"
+          fi
+          if [ -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}" ]; then
+            rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
+            rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
+          fi
+
+  e2e-required:
+    name: E2E Required
+    if: ${{ github.event_name != 'schedule' }}
+    needs: [core, full-live]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce required E2E checks
+        env:
+          CORE_RESULT: ${{ needs.core.result }}
+          FULL_LIVE_RESULT: ${{ needs.full-live.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          SAME_REPO_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          echo "core=$CORE_RESULT"
+          echo "full_live=$FULL_LIVE_RESULT"
+          echo "event=$EVENT_NAME"
+          echo "same_repo_pr=$SAME_REPO_PR"
+
+          if [ "$CORE_RESULT" != "success" ]; then
+            echo "Core E2E must succeed."
+            exit 1
+          fi
+
+          if [ "$SAME_REPO_PR" = "true" ]; then
+            if [ "$FULL_LIVE_RESULT" != "success" ]; then
+              echo "Full Live E2E must succeed for same-repo pull requests."
+              exit 1
+            fi
+            exit 0
+          fi
+
+          case "$FULL_LIVE_RESULT" in
+            success|skipped)
+              ;;
+            *)
+              echo "Full Live E2E must either succeed or be skipped for this event."
+              exit 1
+              ;;
+          esac

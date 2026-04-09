@@ -10,7 +10,7 @@ dependencies = [
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
-    "cisco-ai-skill-scanner==2.0.6",
+    "cisco-ai-skill-scanner==2.0.8",
     "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
 ]
 
@@ -54,6 +54,9 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/nav/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
+    "_data/scripts/*.sh",
+    "_data/policies/openshell/*.rego",
+    "_data/policies/openshell/*.yaml",
 ]
 
 [tool.uv]
@@ -61,7 +64,7 @@ default-groups = ["dev"]
 # cisco-ai-skill-scanner 2.0.6 pins rich==14.2.0 but also pins
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
-    "cryptography>=46.0.6",   # CVE-2026-34073 fixed in 46.0.6
+    "cryptography>=46.0.7",   # CVE-2026-39892 fixed in 46.0.7
 ]
 
 [tool.ruff]

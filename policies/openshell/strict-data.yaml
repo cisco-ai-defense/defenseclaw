@@ -1,0 +1,18 @@
+# Strict OpenShell sandbox network policy — managed by DefenseClaw.
+#
+# Minimal attack surface: only allows sidecar connectivity.
+# No channel APIs, no npm registry, no direct LLM APIs.
+# Select via: defenseclaw setup sandbox --policy strict
+#
+# Add endpoints as needed and restart the sandbox:
+#   vi <data_dir>/openshell-policy.yaml
+#   sudo systemctl restart openshell-sandbox.service
+
+network_policies:
+  allow_defenseclaw_sidecar:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "10.200.0.1"
+      ports: [18970, 4000]
+      tls: skip

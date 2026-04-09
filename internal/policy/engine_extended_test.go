@@ -64,7 +64,6 @@ func setupExtendedRegoDir(t *testing.T) string {
 			"policy_name":                   "strict",
 			"allow_list_bypass_scan":        false,
 			"scan_on_install":               true,
-			"update_sandbox_policy":         true,
 			"max_enforcement_delay_seconds": 1,
 		},
 		"actions": map[string]interface{}{
@@ -90,7 +89,8 @@ func setupExtendedRegoDir(t *testing.T) string {
 			"allowed_ports":       []int{443},
 		},
 		"sandbox": map[string]interface{}{
-			"default_permissions":    []string{},
+			"update_policy":           true,
+			"default_permissions":     []string{},
 			"denied_endpoints_global": []string{"169.254.169.254"},
 		},
 		"guardrail": map[string]interface{}{

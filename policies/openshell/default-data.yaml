@@ -1,0 +1,55 @@
+# Default OpenShell sandbox network policy — managed by DefenseClaw.
+#
+# Balanced security. Allows sidecar, channels (Slack, Discord, Telegram), npm,
+# and OpenClaw services. LLM providers are NOT included — use guardrail proxy
+# on the host side for LLM traffic inspection.
+#
+# For direct LLM provider access, use: defenseclaw sandbox setup --policy permissive
+
+network_policies:
+  allow_defenseclaw_sidecar:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "10.200.0.1"
+      ports: [18970, 4000]
+      tls: skip
+
+  allow_channels:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "**.telegram.org"
+      ports: [443]
+      tls: skip
+    - host: "**.slack.com"
+      ports: [443]
+      tls: skip
+    - host: "hooks.slack.com"
+      ports: [443]
+      tls: skip
+    - host: "**.discord.com"
+      ports: [443]
+      tls: skip
+    - host: "gateway.discord.gg"
+      ports: [443]
+      tls: skip
+
+  allow_npm_registry:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "registry.npmjs.org"
+      ports: [443]
+      tls: skip
+
+  allow_openclaw:
+    binaries:
+    - path: /**
+    endpoints:
+    - host: "openclaw.ai"
+      ports: [443]
+      tls: skip
+    - host: "**.openclaw.ai"
+      ports: [443]
+      tls: skip

@@ -365,3 +365,68 @@ func TestEngine_Compile(t *testing.T) {
 		t.Errorf("compile failed: %v", err)
 	}
 }
+
+func TestMergeSupplementalData(t *testing.T) {
+	t.Run("file missing is a silent no-op", func(t *testing.T) {
+		data := map[string]interface{}{"existing": "value"}
+		mergeSupplementalData(t.TempDir(), data, "nonexistent.json")
+		if len(data) != 1 {
+			t.Errorf("expected 1 key, got %d", len(data))
+		}
+	})
+
+	t.Run("valid file merges top-level keys", func(t *testing.T) {
+		dir := t.TempDir()
+		extra := `{"sandbox":{"update_policy":false},"firewall":{"default_action":"deny"}}`
+		os.WriteFile(filepath.Join(dir, "extra.json"), []byte(extra), 0o600)
+
+		data := map[string]interface{}{"config": "original"}
+		mergeSupplementalData(dir, data, "extra.json")
+
+		if _, ok := data["sandbox"]; !ok {
+			t.Error("expected sandbox key to be merged")
+		}
+		if _, ok := data["firewall"]; !ok {
+			t.Error("expected firewall key to be merged")
+		}
+		if data["config"] != "original" {
+			t.Error("existing key should be untouched")
+		}
+	})
+
+	t.Run("invalid JSON is a silent no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "bad.json"), []byte("{not json"), 0o600)
+
+		data := map[string]interface{}{"keep": true}
+		mergeSupplementalData(dir, data, "bad.json")
+
+		if len(data) != 1 {
+			t.Errorf("expected 1 key, got %d", len(data))
+		}
+	})
+
+	t.Run("empty file is a silent no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "empty.json"), []byte(""), 0o600)
+
+		data := map[string]interface{}{"keep": true}
+		mergeSupplementalData(dir, data, "empty.json")
+
+		if len(data) != 1 {
+			t.Errorf("expected 1 key, got %d", len(data))
+		}
+	})
+
+	t.Run("overlapping key overwrites", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "overlap.json"), []byte(`{"config":"new"}`), 0o600)
+
+		data := map[string]interface{}{"config": "old"}
+		mergeSupplementalData(dir, data, "overlap.json")
+
+		if data["config"] != "new" {
+			t.Errorf("expected overlapping key to be overwritten, got %v", data["config"])
+		}
+	})
+}

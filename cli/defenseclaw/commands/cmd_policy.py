@@ -348,7 +348,6 @@ def show(app: AppContext, name: str) -> None:
     if enforcement:
         click.echo()
         click.echo("Enforcement:")
-        click.echo(f"  update_sandbox_policy:         {enforcement.get('update_sandbox_policy', True)}")
         click.echo(f"  max_enforcement_delay_seconds: {enforcement.get('max_enforcement_delay_seconds', 2)}")
 
     audit_cfg = data.get("audit", {})
@@ -822,7 +821,6 @@ def _default_policy_data() -> dict:
             "allowed_ports": [443, 80],
         },
         "enforcement": {
-            "update_sandbox_policy": True,
             "max_enforcement_delay_seconds": 2,
         },
         "audit": {
@@ -929,8 +927,6 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         opa_data["config"]["scan_on_install"] = admission["scan_on_install"]
 
     enforcement = policy_data.get("enforcement", {})
-    if "update_sandbox_policy" in enforcement:
-        opa_data["config"]["update_sandbox_policy"] = enforcement["update_sandbox_policy"]
     if "max_enforcement_delay_seconds" in enforcement:
         opa_data["config"]["max_enforcement_delay_seconds"] = enforcement["max_enforcement_delay_seconds"]
 
