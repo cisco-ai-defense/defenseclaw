@@ -247,7 +247,7 @@ class TestSkillList(SkillCommandTestBase):
                  "source": "user", "bundled": False, "homepage": ""},
             ]
         }
-        result = self.invoke(["list"])
+        result = self.invoke(["list", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("web-search", result.output)
         self.assertIn("code-review", result.output)
@@ -316,7 +316,7 @@ class TestSkillList(SkillCommandTestBase):
         pe = PolicyEngine(self.app.store)
         pe.block("skill", "removed-skill", "quarantined after scan")
 
-        result = self.invoke(["list"])
+        result = self.invoke(["list", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("visible-skill", result.output)
         self.assertIn("removed-skill", result.output)
@@ -331,7 +331,7 @@ class TestSkillList(SkillCommandTestBase):
             datetime.now(timezone.utc), 500, 1, "MEDIUM", "{}",
         )
 
-        result = self.invoke(["list"])
+        result = self.invoke(["list", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("ghost-skill", result.output)
 
@@ -360,7 +360,7 @@ class TestSkillList(SkillCommandTestBase):
         pe = PolicyEngine(self.app.store)
         pe.block("skill", "banned-skill", "dangerous")
 
-        result = self.invoke(["list"])
+        result = self.invoke(["list", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("banned-skill", result.output)
         self.assertIn("blocked", result.output)

@@ -99,6 +99,24 @@ test_allowed_no_bypass_falls_through if {
 		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
 		with data.actions as {}
 		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+		with data.severity_ranking as {}
+
+	result.verdict == "allowed"
+}
+
+test_policy_allow_no_bypass_falls_through if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "codeguard",
+		"path": "/tmp/codeguard",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as [{"target_type": "skill", "target_name": "codeguard", "reason": "first-party"}]
 		with data.severity_ranking as {}
 
 	result.verdict == "scan"
@@ -547,7 +565,7 @@ test_production_first_party_plugin_allowed if {
 	result := admission with input as {
 		"target_type": "plugin",
 		"target_name": "defenseclaw",
-		"path": "/tmp/defenseclaw",
+		"path": "/home/user/.openclaw/extensions/defenseclaw",
 		"block_list": [],
 		"allow_list": [],
 	}
@@ -559,7 +577,7 @@ test_production_first_party_skill_allowed if {
 	result := admission with input as {
 		"target_type": "skill",
 		"target_name": "codeguard",
-		"path": "/tmp/codeguard",
+		"path": "/home/user/.defenseclaw/skills/codeguard",
 		"block_list": [],
 		"allow_list": [],
 	}
@@ -606,6 +624,56 @@ test_first_party_block_list_takes_precedence if {
 	result.verdict == "blocked"
 }
 
+test_first_party_bad_provenance_falls_through if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/unrelated/plugin",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party", "source_path_contains": ["defenseclaw", ".defenseclaw"]},
+		]
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {}
+
+	result.verdict == "scan"
+}
+
+test_first_party_temp_dir_does_not_match if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/dclaw-plugin-fetch-abc123/defenseclaw",
+		"block_list": [],
+		"allow_list": [],
+	}
+
+	result.verdict == "scan"
+}
+
+test_first_party_no_constraints_allows if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/anything",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
+		]
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {}
+
+	result.verdict == "allowed"
+}
+
 test_production_plugin_medium_warns_not_rejects if {
 	result := admission with input as {
 		"target_type": "plugin",
@@ -639,6 +707,24 @@ test_install_action_block_on_critical if {
 
 	result.install_action == "block"
 	result.file_action == "quarantine"
+}
+
+test_install_block_alone_triggers_reject if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "partial-block-skill",
+		"path": "/tmp/partial",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "HIGH", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"HIGH": {"runtime": "allow", "file": "none", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {"HIGH": 4}
+
+	result.verdict == "rejected"
+	result.install_action == "block"
 }
 
 test_install_action_none_on_warning if {

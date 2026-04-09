@@ -15,3 +15,36 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """CLI command modules."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def compute_verdict(
+    action_entry: Any | None = None,
+    scan_entry: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Derive a (label, rich_style) verdict from action + scan state.
+
+    Priority: explicit enforcement actions > scan severity > no data.
+    """
+    if action_entry and not action_entry.actions.is_empty():
+        a = action_entry.actions
+        if a.file == "quarantine":
+            return "quarantined", "red"
+        if a.install == "block":
+            return "blocked", "red"
+        if a.runtime == "disable":
+            return "disabled", "red"
+        if a.install == "allow":
+            return "allowed", "green"
+    if scan_entry:
+        sev = scan_entry.get("max_severity", "CLEAN")
+        if sev in ("CRITICAL", "HIGH"):
+            return "rejected", "red"
+        if sev in ("MEDIUM", "LOW"):
+            return "warning", "yellow"
+        if sev == "CLEAN":
+            return "clean", "green"
+    return "-", ""

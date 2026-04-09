@@ -43,12 +43,23 @@ reason := sprintf("%s '%s' is on the block list", [input.target_type, input.targ
 
 verdict := "allowed" if {
 	not _is_blocked
-	_is_allow_listed
+	_is_explicit_allow_listed
+}
+reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
+	not _is_blocked
+	_is_explicit_allow_listed
+}
+
+verdict := "allowed" if {
+	not _is_blocked
+	not _is_explicit_allow_listed
+	_is_policy_allow_listed
 	data.config.allow_list_bypass_scan == true
 }
 reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
 	not _is_blocked
-	_is_allow_listed
+	not _is_explicit_allow_listed
+	_is_policy_allow_listed
 	data.config.allow_list_bypass_scan == true
 }
 
@@ -101,28 +112,89 @@ _is_blocked if {
 	entry.target_type == input.target_type
 }
 
-_is_allow_listed if {
+_is_explicit_allow_listed if {
 	some entry in input.allow_list
 	entry.target_name == input.target_name
 	entry.target_type == input.target_type
 }
 
+_is_policy_allow_listed if {
+	some entry in data.first_party_allow_list
+	entry.target_name == input.target_name
+	entry.target_type == input.target_type
+	_path_matches_provenance(entry)
+}
+
+_path_matches_provenance(entry) if {
+	not entry.source_path_contains
+}
+_path_matches_provenance(entry) if {
+	count(entry.source_path_contains) == 0
+}
+_path_matches_provenance(entry) if {
+	some prefix in entry.source_path_contains
+	contains(lower(input.path), lower(prefix))
+}
+
 _is_allow_bypassed if {
-	_is_allow_listed
+	_is_explicit_allow_listed
+}
+
+_is_allow_bypassed if {
+	_is_policy_allow_listed
 	data.config.allow_list_bypass_scan == true
 }
 
 _has_scan if input.scan_result
 
+verdict := "allowed" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	not _has_scan
+	data.config.scan_on_install == false
+}
+reason := "scan_on_install disabled — allowed without scan" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	not _has_scan
+	data.config.scan_on_install == false
+}
+
+_effective_action := action if {
+	action := data.scanner_overrides[input.target_type][input.scan_result.max_severity]
+} else := action if {
+	action := data.actions[input.scan_result.max_severity]
+}
+
 _should_reject if {
-	data.actions[input.scan_result.max_severity].runtime == "block"
+	_effective_action.runtime == "block"
+}
+
+_should_reject if {
+	_effective_action.install == "block"
 }
 
 file_action := action if {
 	_has_scan
-	action := data.actions[input.scan_result.max_severity].file
+	action := _effective_action.file
 }
 file_action := "none" if {
+	not _has_scan
+}
+
+install_action := action if {
+	_has_scan
+	action := _effective_action.install
+}
+install_action := "none" if {
+	not _has_scan
+}
+
+runtime_action := action if {
+	_has_scan
+	action := _effective_action.runtime
+}
+runtime_action := "allow" if {
 	not _has_scan
 }
 `
@@ -130,13 +202,19 @@ file_action := "none" if {
 	data := map[string]interface{}{
 		"config": map[string]interface{}{
 			"allow_list_bypass_scan": true,
+			"scan_on_install":       true,
 		},
 		"actions": map[string]interface{}{
-			"CRITICAL": map[string]string{"runtime": "block", "file": "quarantine"},
-			"HIGH":     map[string]string{"runtime": "block", "file": "quarantine"},
-			"MEDIUM":   map[string]string{"runtime": "allow", "file": "none"},
-			"LOW":      map[string]string{"runtime": "allow", "file": "none"},
-			"INFO":     map[string]string{"runtime": "allow", "file": "none"},
+			"CRITICAL": map[string]string{"runtime": "block", "file": "quarantine", "install": "block"},
+			"HIGH":     map[string]string{"runtime": "block", "file": "quarantine", "install": "block"},
+			"MEDIUM":   map[string]string{"runtime": "allow", "file": "none", "install": "none"},
+			"LOW":      map[string]string{"runtime": "allow", "file": "none", "install": "none"},
+			"INFO":     map[string]string{"runtime": "allow", "file": "none", "install": "none"},
+		},
+		"scanner_overrides": map[string]interface{}{},
+		"first_party_allow_list": []map[string]string{
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin"},
+			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill"},
 		},
 	}
 
@@ -240,6 +318,12 @@ func TestEngine_ScanRejected_Critical(t *testing.T) {
 	}
 	if out.FileAction != "quarantine" {
 		t.Errorf("expected file_action quarantine, got %q", out.FileAction)
+	}
+	if out.RuntimeAction != "block" {
+		t.Errorf("expected runtime_action block, got %q", out.RuntimeAction)
+	}
+	if out.InstallAction != "block" {
+		t.Errorf("expected install_action block, got %q", out.InstallAction)
 	}
 }
 

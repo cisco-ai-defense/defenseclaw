@@ -30,6 +30,7 @@ from typing import Any
 
 import click
 
+from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -218,6 +219,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
     import tempfile
 
     from defenseclaw.enforce import PolicyEngine
+    from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
     from defenseclaw.registry import (
         RegistryError,
@@ -246,8 +248,20 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
     else:
         plugin_name = ""
 
+    pre_decision = None
+    if plugin_name:
+        pre_install_source = name_or_path if source == SourceType.LOCAL else ""
+        pre_decision = evaluate_admission(
+            pe,
+            policy_dir=app.cfg.policy_dir,
+            target_type="plugin",
+            name=plugin_name,
+            source_path=pre_install_source,
+            fallback_actions=app.cfg.plugin_actions,
+        )
+
     # --- Block list check ---
-    if plugin_name and pe.is_blocked("plugin", plugin_name):
+    if pre_decision is not None and pre_decision.verdict == "blocked":
         if app.logger:
             app.logger.log_action("install-rejected", plugin_name, "reason=blocked")
         click.echo(
@@ -257,10 +271,13 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
         )
         raise SystemExit(1)
 
-    # --- Allow list check (skip scan) ---
-    allowed = plugin_name and pe.is_allowed("plugin", plugin_name)
+    # --- Manual/policy allow check (skip scan) ---
+    allowed = pre_decision is not None and pre_decision.verdict == "allowed"
     if allowed:
-        click.echo(f"[install] {plugin_name!r} is on the allow list — skipping scan")
+        if pre_decision is not None and pre_decision.source == "scan-disabled":
+            click.echo(f"[install] policy allows {plugin_name!r} without scan")
+        else:
+            click.echo(f"[install] {plugin_name!r} is on the allow list — skipping scan")
         if app.logger:
             app.logger.log_action("install-allowed", plugin_name, "reason=allow-listed")
 
@@ -274,7 +291,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
             raise SystemExit(1)
         source_path = name_or_path
     else:
-        tmpdir = tempfile.mkdtemp(prefix="defenseclaw-plugin-")
+        tmpdir = tempfile.mkdtemp(prefix="dclaw-plugin-fetch-")
         try:
             if source == SourceType.NPM:
                 click.echo(f"[install] fetching {name_or_path!r} from npm registry...")
@@ -326,6 +343,16 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
             else:
                 sev = result.max_severity()
                 detail = f"severity={sev} findings={len(result.findings)}"
+                provenance_path = source_path if source == SourceType.LOCAL else ""
+                post_decision = evaluate_admission(
+                    pe,
+                    policy_dir=app.cfg.policy_dir,
+                    target_type="plugin",
+                    name=plugin_name,
+                    source_path=provenance_path,
+                    scan_result=result,
+                    fallback_actions=app.cfg.plugin_actions,
+                )
 
                 if not take_action:
                     click.echo(
@@ -335,46 +362,49 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
                     if app.logger:
                         app.logger.log_action("install-warning", plugin_name, detail)
                 else:
-                    action_cfg = app.cfg.plugin_actions.for_severity(sev)
-                    enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
-                    applied_actions: list[str] = []
+                    if post_decision.verdict == "allowed":
+                        click.echo(f"[install] {plugin_name!r} became allow-listed — skipping post-scan enforcement")
+                    else:
+                        action_cfg = post_decision.action
+                        enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
+                        applied_actions: list[str] = []
 
-                    if action_cfg.file == "quarantine":
-                        se = PluginEnforcer(app.cfg.quarantine_dir)
-                        q_dest = se.quarantine(plugin_name, source_path)
-                        if q_dest:
-                            applied_actions.append(f"quarantined to {q_dest}")
-                            pe.quarantine("plugin", plugin_name, enforcement_reason)
-                        else:
-                            click.echo("[install] quarantine failed", err=True)
+                        if action_cfg.file == "quarantine":
+                            se = PluginEnforcer(app.cfg.quarantine_dir)
+                            q_dest = se.quarantine(plugin_name, source_path)
+                            if q_dest:
+                                applied_actions.append(f"quarantined to {q_dest}")
+                                pe.quarantine("plugin", plugin_name, enforcement_reason)
+                            else:
+                                click.echo("[install] quarantine failed", err=True)
 
-                    if action_cfg.runtime == "disable":
-                        client = _sidecar_client(app)
-                        try:
-                            client.disable_plugin(plugin_name)
-                            applied_actions.append("disabled via gateway")
-                            pe.disable("plugin", plugin_name, enforcement_reason)
-                        except Exception as exc:
-                            click.echo(f"[install] gateway disable failed: {exc}", err=True)
+                        if action_cfg.runtime == "disable":
+                            client = _sidecar_client(app)
+                            try:
+                                client.disable_plugin(plugin_name)
+                                applied_actions.append("disabled via gateway")
+                                pe.disable("plugin", plugin_name, enforcement_reason)
+                            except Exception as exc:
+                                click.echo(f"[install] gateway disable failed: {exc}", err=True)
 
-                    if action_cfg.install == "block":
-                        pe.block("plugin", plugin_name, enforcement_reason)
-                        applied_actions.append("added to block list")
+                        if action_cfg.install == "block":
+                            pe.block("plugin", plugin_name, enforcement_reason)
+                            applied_actions.append("added to block list")
 
-                    if action_cfg.install == "allow":
-                        pe.allow("plugin", plugin_name, enforcement_reason)
-                        applied_actions.append("added to allow list")
+                        if action_cfg.install == "allow":
+                            pe.allow("plugin", plugin_name, enforcement_reason)
+                            applied_actions.append("added to allow list")
 
-                    if applied_actions:
-                        actions_str = ", ".join(applied_actions)
-                        click.echo(f"[install] {plugin_name!r}: {actions_str} ({detail})")
-                        if app.logger:
-                            app.logger.log_action("install-enforced", plugin_name, f"{detail}; {actions_str}")
-                        click.echo(
-                            f"error: plugin {plugin_name!r} had {sev} findings — actions applied: {actions_str}",
-                            err=True,
-                        )
-                        raise SystemExit(1)
+                        if applied_actions:
+                            actions_str = ", ".join(applied_actions)
+                            click.echo(f"[install] {plugin_name!r}: {actions_str} ({detail})")
+                            if app.logger:
+                                app.logger.log_action("install-enforced", plugin_name, f"{detail}; {actions_str}")
+                            click.echo(
+                                f"error: plugin {plugin_name!r} had {sev} findings — actions applied: {actions_str}",
+                                err=True,
+                            )
+                            raise SystemExit(1)
 
                     click.echo(f"[install] warning: {len(result.findings)} {sev} findings in {plugin_name!r}")
                     if app.logger:
@@ -554,6 +584,8 @@ def _print_plugin_list_json(
             ae = actions_map[pid]
             if not ae.actions.is_empty():
                 item["actions"] = ae.actions.to_dict()
+        verdict_label, _ = _compute_verdict(actions_map.get(pid), scan_map.get(pid))
+        item["verdict"] = verdict_label
         items.append(item)
     click.echo(json.dumps(items, indent=2, default=str))
 
@@ -576,6 +608,7 @@ def _print_plugin_list_table(
     table.add_column("Description", max_width=50)
     table.add_column("Origin")
     table.add_column("Severity")
+    table.add_column("Verdict")
     table.add_column("Actions")
 
     for p in plugins:
@@ -602,6 +635,10 @@ def _print_plugin_list_table(
         if pid in actions_map:
             actions_str = actions_map[pid].actions.summary()
 
+        verdict_label, verdict_style = _compute_verdict(
+            actions_map.get(pid), scan_map.get(pid),
+        )
+
         status_style = ""
         if "\u2717" in status_display:
             status_style = "red"
@@ -615,6 +652,7 @@ def _print_plugin_list_table(
             desc[:50] + "\u2026" if len(desc) > 50 else desc,
             origin,
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
+            f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
             actions_str,
         )
 
@@ -856,6 +894,18 @@ def allow(app: AppContext, name: str, reason: str) -> None:
         reason = "manual allow via CLI"
 
     pe.allow("plugin", plugin_name, reason)
+
+    # Best-effort gateway sync so the running process also re-enables.
+    try:
+        client = _sidecar_client(app)
+        client.enable_plugin(plugin_name)
+    except Exception:
+        click.echo(
+            f"[plugin] note: could not re-enable {plugin_name!r} via gateway — "
+            "the sidecar will pick up the DB state on next reconcile, or "
+            "run 'defenseclaw plugin enable' manually", err=True,
+        )
+
     plugin_path = _resolve_plugin_path(app, plugin_name)
     if plugin_path:
         pe.set_source_path("plugin", plugin_name, plugin_path)

@@ -125,13 +125,28 @@ func (r *EventRouter) ActiveSessionKeys() []string {
 	return keys
 }
 
+const maxActiveSessions = 500
+
 func (r *EventRouter) trackSession(sessionKey string) {
 	if sessionKey == "" {
 		return
 	}
 	r.activeSessionsMu.Lock()
 	r.activeSessions[sessionKey] = time.Now()
+	if len(r.activeSessions) > maxActiveSessions {
+		r.pruneSessionsLocked()
+	}
 	r.activeSessionsMu.Unlock()
+}
+
+// pruneSessionsLocked removes stale entries. Caller must hold activeSessionsMu.
+func (r *EventRouter) pruneSessionsLocked() {
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for k, t := range r.activeSessions {
+		if t.Before(cutoff) {
+			delete(r.activeSessions, k)
+		}
+	}
 }
 
 // Route dispatches a single event frame to the correct handler.

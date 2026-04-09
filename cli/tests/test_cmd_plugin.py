@@ -222,7 +222,7 @@ class TestPluginLifecycle(PluginCommandTestBase):
     def test_install_list_remove_list(self, _mock_oc):
         self._install_plugin("lifecycle")
 
-        result = self.invoke(["list"])
+        result = self.invoke(["list", "--json"])
         self.assertIn("lifecycle", result.output)
 
         self.invoke(["remove", "lifecycle"])

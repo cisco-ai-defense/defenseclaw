@@ -1460,28 +1460,11 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 		}
 	}
 
-	if blocked, reason := findPolicyListEntry(input.BlockList, input.TargetType, input.TargetName); blocked {
-		return &policy.AdmissionOutput{Verdict: "blocked", Reason: reason}, nil
+	regoDir := ""
+	if a.scannerCfg != nil {
+		regoDir = a.scannerCfg.PolicyDir
 	}
-	if allowed, reason := findPolicyListEntry(input.AllowList, input.TargetType, input.TargetName); allowed {
-		return &policy.AdmissionOutput{Verdict: "allowed", Reason: reason}, nil
-	}
-	if input.ScanResult == nil {
-		return &policy.AdmissionOutput{Verdict: "scan", Reason: "scan required"}, nil
-	}
-	if input.ScanResult.TotalFindings <= 0 {
-		return &policy.AdmissionOutput{Verdict: "clean", Reason: "scan clean"}, nil
-	}
-	if input.ScanResult.MaxSeverity == "HIGH" || input.ScanResult.MaxSeverity == "CRITICAL" {
-		return &policy.AdmissionOutput{
-			Verdict: "rejected",
-			Reason:  fmt.Sprintf("max severity %s triggers block", input.ScanResult.MaxSeverity),
-		}, nil
-	}
-	return &policy.AdmissionOutput{
-		Verdict: "warning",
-		Reason:  "findings present — allowed with warning",
-	}, nil
+	return policy.EvaluateAdmissionFallback(input, policy.LoadFallbackProfile(regoDir)), nil
 }
 
 func classifyScanError(err error) string {

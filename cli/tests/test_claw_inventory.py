@@ -920,8 +920,9 @@ class TestCLIIntegration(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Warning", result.stderr)
-        self.assertIn("failed", result.stderr)
+        stderr = result.stderr if getattr(result, "stderr_bytes", None) is not None else result.output
+        self.assertIn("Warning", stderr)
+        self.assertIn("failed", stderr)
 
 
 class TestLiveIsFalse(unittest.TestCase):

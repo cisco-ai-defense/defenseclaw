@@ -39,13 +39,37 @@ type Engine struct {
 }
 
 // New creates an Engine. regoDir is the path to the directory containing
-// the Rego modules and data.json (e.g. policies/rego/).
+// the Rego modules and data.json (e.g. policies/rego/). If regoDir itself
+// does not contain .rego files but a "rego" subdirectory does, the
+// subdirectory is used instead.
 func New(regoDir string) (*Engine, error) {
+	regoDir = resolveRegoDir(regoDir)
 	store, err := loadStore(regoDir)
 	if err != nil {
 		return nil, err
 	}
 	return &Engine{regoDir: regoDir, store: store}, nil
+}
+
+// resolveRegoDir returns regoDir if it contains .rego files or data.json,
+// otherwise tries the "rego" subdirectory (policy_dir layout).
+func resolveRegoDir(dir string) string {
+	if hasRegoFiles(dir) {
+		return dir
+	}
+	sub := filepath.Join(dir, "rego")
+	if hasRegoFiles(sub) {
+		return sub
+	}
+	return dir
+}
+
+func hasRegoFiles(dir string) bool {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.rego"))
+	if err != nil {
+		return false
+	}
+	return len(matches) > 0
 }
 
 // Reload re-reads data.json and all .rego files, replacing the in-memory
@@ -81,7 +105,7 @@ func (e *Engine) RegoDir() string {
 // ---------------------------------------------------------------------------
 
 // Evaluate runs the admission policy against the provided input and returns
-// the verdict, reason, file_action, and install_action.
+// the verdict, reason, file_action, install_action, and runtime_action.
 func (e *Engine) Evaluate(ctx context.Context, input AdmissionInput) (*AdmissionOutput, error) {
 	result, err := e.eval(ctx, "data.defenseclaw.admission", input)
 	if err != nil {
@@ -92,6 +116,7 @@ func (e *Engine) Evaluate(ctx context.Context, input AdmissionInput) (*Admission
 		Reason:        stringVal(result, "reason"),
 		FileAction:    stringVal(result, "file_action"),
 		InstallAction: stringVal(result, "install_action"),
+		RuntimeAction: stringVal(result, "runtime_action"),
 	}, nil
 }
 
@@ -244,8 +269,7 @@ func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map
 }
 
 func loadStore(regoDir string) (storage.Store, error) {
-	dataPath := filepath.Join(regoDir, "data.json")
-	raw, err := os.ReadFile(dataPath)
+	raw, err := readDataJSON(regoDir)
 	if err != nil {
 		return nil, fmt.Errorf("policy: read data.json: %w", err)
 	}

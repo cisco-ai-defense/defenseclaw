@@ -872,11 +872,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into LLM request\n")
 			notification := ChatMessage{Role: "system", Content: sysMsg}
-			req.Messages = append([]ChatMessage{notification}, req.Messages...)
 			if len(req.RawBody) > 0 {
 				if patched, err := injectSystemMessage(req.RawBody, sysMsg); err == nil {
 					req.RawBody = patched
+					req.Messages = append([]ChatMessage{notification}, req.Messages...)
+				} else {
+					fmt.Fprintf(os.Stderr, "[guardrail] inject system message into raw body failed: %v\n", err)
 				}
+			} else {
+				req.Messages = append([]ChatMessage{notification}, req.Messages...)
 			}
 			if p.logger != nil {
 				_ = p.logger.LogAction("guardrail-notify-inject", "", "injected security notification into LLM request")
@@ -1166,19 +1170,25 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}
 
 	var accumulated strings.Builder
-	var accToolCalls json.RawMessage
+	var tcAcc toolCallAccumulator
+	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
 	lastScanLen := 0
 	const scanInterval = 500
 	streamFinishReasons := []string{}
+	streamBlocked := false
 
 	usage, err := upstream.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
+		if streamBlocked {
+			return
+		}
 		chunk.Model = aliasModel
 
-		// Accumulate content and tool calls for post-stream inspection.
+		hasToolCalls := false
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
 			accumulated.WriteString(chunk.Choices[0].Delta.Content)
 			if len(chunk.Choices[0].Delta.ToolCalls) > 0 {
-				accToolCalls = mergeToolCallChunks(accToolCalls, chunk.Choices[0].Delta.ToolCalls)
+				tcAcc.Merge(chunk.Choices[0].Delta.ToolCalls)
+				hasToolCalls = true
 			}
 		}
 		// Collect finish reasons from stream chunks.
@@ -1196,12 +1206,29 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
 					midVerdict.Severity, midVerdict.Reason)
 				p.recordTelemetry("completion", aliasModel, midVerdict, 0, nil, nil)
+				streamBlocked = true
 				return
 			}
 			lastScanLen = accumulated.Len()
 		}
 
 		data, _ := json.Marshal(chunk)
+
+		// Buffer tool-call chunks and their finish sentinel so they are
+		// only released after post-stream inspection clears them.
+		// The finish_reason:"tool_calls" chunk carries no delta.ToolCalls
+		// but must stay behind the argument deltas or clients that stop
+		// accumulating on finish_reason will never see the arguments.
+		isToolCallFinish := false
+		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil &&
+			*chunk.Choices[0].FinishReason == "tool_calls" {
+			isToolCallFinish = true
+		}
+		if (hasToolCalls || isToolCallFinish) && mode == "action" {
+			bufferedTCChunks = append(bufferedTCChunks, data)
+			return
+		}
+
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
@@ -1215,6 +1242,24 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 	guardrail := "none"
 	guardrailResult := ""
+
+	if streamBlocked {
+		if p.otel != nil && llmSpan != nil {
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, streamFinishReasons, 0, "defenseclaw", "blocked", system, llmStartTime, "openclaw")
+		}
+		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
+		blockChunk := StreamChunk{
+			ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
+			Created: time.Now().Unix(), Model: aliasModel,
+			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: "\n\n" + msg}}},
+		}
+		data, _ := json.Marshal(blockChunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
 
 	// Final post-stream inspection (apply_guardrail output).
 	if accumulated.Len() > 0 {
@@ -1273,10 +1318,36 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, 0, guardrail, guardrailResult, system, llmStartTime, "openclaw")
 	}
 
-	// Final post-stream inspection: tool calls.
-	if len(accToolCalls) > 0 {
-		if verdict := p.inspectToolCalls(accToolCalls); verdict != nil {
+	// Final post-stream inspection: tool calls (fully reassembled).
+	// Buffered tool-call chunks are released only if inspection passes.
+	assembledTC := tcAcc.JSON()
+	tcBlocked := false
+	if len(assembledTC) > 0 {
+		if verdict := p.inspectToolCalls(assembledTC); verdict != nil {
 			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
+			if verdict.Action == "block" && mode == "action" {
+				tcBlocked = true
+				msg := blockMessage(customBlockMsg, "completion",
+					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				blockChunk := StreamChunk{
+					ID: "chatcmpl-blocked", Object: "chat.completion.chunk",
+					Created: time.Now().Unix(), Model: aliasModel,
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: "\n\n" + msg}}},
+				}
+				data, _ := json.Marshal(blockChunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
+	}
+
+	// Flush buffered tool-call chunks only when inspection passed.
+	if !tcBlocked {
+		for _, buf := range bufferedTCChunks {
+			fmt.Fprintf(w, "data: %s\n\n", buf)
+		}
+		if len(bufferedTCChunks) > 0 {
+			flusher.Flush()
 		}
 	}
 
@@ -1977,7 +2048,16 @@ func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVe
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
-		return nil
+		fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT parse error (alerting): %v\n", err)
+		if p.logger != nil {
+			_ = p.logger.LogAction("guardrail-tool-call-parse-error", "", err.Error())
+		}
+		return &ScanVerdict{
+			Action:         "alert",
+			Severity:       "MEDIUM",
+			Reason:         "tool_calls JSON parse error — cannot inspect",
+			ScannerSources: []string{"tool-call-inspect"},
+		}
 	}
 
 	var allFindings []RuleFinding
@@ -2032,14 +2112,87 @@ func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVe
 	}
 }
 
-// mergeToolCallChunks appends streaming tool_calls delta chunks into an
-// accumulated JSON array. Streaming deltas arrive as partial arrays; we
-// concatenate the raw JSON for post-stream inspection.
+// toolCallAccumulator merges streaming tool-call deltas by index, properly
+// concatenating function.arguments fragments so the final output contains
+// fully-assembled tool calls suitable for inspection.
+type toolCallAccumulator struct {
+	calls []accToolCall
+}
+
+type accToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// Merge incorporates a raw tool_calls delta array from a single SSE chunk.
+func (a *toolCallAccumulator) Merge(delta json.RawMessage) {
+	if len(delta) == 0 {
+		return
+	}
+	var deltas []accToolCall
+	if json.Unmarshal(delta, &deltas) != nil {
+		return
+	}
+	for _, d := range deltas {
+		idx := d.Index
+		for idx >= len(a.calls) {
+			a.calls = append(a.calls, accToolCall{Index: len(a.calls)})
+		}
+		if d.ID != "" {
+			a.calls[idx].ID = d.ID
+		}
+		if d.Type != "" {
+			a.calls[idx].Type = d.Type
+		}
+		if d.Function.Name != "" {
+			a.calls[idx].Function.Name = d.Function.Name
+		}
+		a.calls[idx].Function.Arguments += d.Function.Arguments
+	}
+}
+
+// JSON returns the fully assembled tool calls as a JSON array suitable
+// for inspectToolCalls. Returns nil when no calls have been accumulated.
+func (a *toolCallAccumulator) JSON() json.RawMessage {
+	if len(a.calls) == 0 {
+		return nil
+	}
+	out, err := json.Marshal(a.calls)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// mergeToolCallChunks is a backwards-compatible wrapper used only by tests
+// and non-streaming callers. For streaming, use toolCallAccumulator.
 func mergeToolCallChunks(existing json.RawMessage, chunk json.RawMessage) json.RawMessage {
+	if len(chunk) == 0 {
+		return existing
+	}
 	if len(existing) == 0 {
 		return chunk
 	}
-	return append(append(existing[:len(existing)-1], ','), chunk[1:]...)
+
+	var existingArr []json.RawMessage
+	var chunkArr []json.RawMessage
+	if json.Unmarshal(existing, &existingArr) != nil {
+		return chunk
+	}
+	if json.Unmarshal(chunk, &chunkArr) != nil {
+		return existing
+	}
+	merged := append(existingArr, chunkArr...)
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return existing
+	}
+	return out
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {

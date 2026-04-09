@@ -414,16 +414,23 @@ func TestProxyFieldPassThrough(t *testing.T) {
 			t.Fatalf("got %d chunks, want at least 3", len(chunks))
 		}
 
-		// Second chunk should have tool_calls in delta
-		var chunk1 StreamChunk
-		if err := json.Unmarshal(chunks[1], &chunk1); err != nil {
-			t.Fatalf("unmarshal chunk[1]: %v", err)
+		// Tool-call chunks are buffered and flushed after post-stream
+		// inspection, so they appear after non-tool-call chunks. Verify
+		// that at least one chunk in the response carries tool_calls.
+		foundTC := false
+		for i, raw := range chunks {
+			var c StreamChunk
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Logf("skip chunk[%d] unmarshal: %v", i, err)
+				continue
+			}
+			if len(c.Choices) > 0 && c.Choices[0].Delta != nil && c.Choices[0].Delta.ToolCalls != nil {
+				foundTC = true
+				break
+			}
 		}
-		if len(chunk1.Choices) == 0 || chunk1.Choices[0].Delta == nil {
-			t.Fatal("chunk[1] has no delta")
-		}
-		if chunk1.Choices[0].Delta.ToolCalls == nil {
-			t.Error("tool_calls missing from streaming delta")
+		if !foundTC {
+			t.Error("tool_calls missing from streaming response (expected buffered then flushed)")
 		}
 	})
 

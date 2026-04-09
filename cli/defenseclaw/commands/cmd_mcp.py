@@ -28,6 +28,7 @@ import subprocess
 
 import click
 
+from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.models import ScanResult
@@ -83,6 +84,10 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
                 ae = actions_map[s.name]
                 if not ae.actions.is_empty():
                     entry["actions"] = ae.actions.to_dict()
+            verdict_label, _ = _compute_verdict(
+                actions_map.get(s.name), scan_map.get(s.name),
+            )
+            entry["verdict"] = verdict_label
             out.append(entry)
         click.echo(json.dumps(out, indent=2))
         return
@@ -98,6 +103,7 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
     table.add_column("Command")
     table.add_column("URL")
     table.add_column("Severity")
+    table.add_column("Verdict")
     table.add_column("Actions")
 
     for s in servers:
@@ -117,12 +123,17 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
         if s.name in actions_map:
             actions_str = actions_map[s.name].actions.summary()
 
+        verdict_label, verdict_style = _compute_verdict(
+            actions_map.get(s.name), scan_map.get(s.name),
+        )
+
         table.add_row(
             s.name,
             s.transport or "stdio",
             s.command or "",
             s.url or "",
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
+            f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
             actions_str,
         )
 
@@ -419,9 +430,18 @@ def set_server(
       defenseclaw mcp set untrusted --url http://example.com/mcp --skip-scan
     """
     from defenseclaw.enforce import PolicyEngine
+    from defenseclaw.enforce.admission import evaluate_admission
 
     pe = PolicyEngine(app.store)
-    if pe.is_blocked("mcp", name):
+    pre_decision = evaluate_admission(
+        pe,
+        policy_dir=app.cfg.policy_dir,
+        target_type="mcp",
+        name=name,
+        fallback_actions=app.cfg.mcp_actions,
+    )
+
+    if pre_decision.verdict == "blocked":
         click.secho(f"BLOCKED: {name} — unblock it first with: defenseclaw mcp unblock {name}", fg="red")
         raise SystemExit(1)
 
@@ -451,7 +471,8 @@ def set_server(
             env[k] = v
         entry["env"] = env
 
-    if not skip_scan:
+    scan_required = (not skip_scan) and pre_decision.verdict != "allowed"
+    if scan_required:
         scan_target = url or name
         scan_entry = MCPServerEntry(
             name=name,
@@ -471,7 +492,15 @@ def set_server(
         from defenseclaw.enforce import PolicyEngine
 
         sev = result.max_severity()
-        if not result.is_clean() and app.cfg.mcp_actions.should_install_block(sev):
+        post_decision = evaluate_admission(
+            pe,
+            policy_dir=app.cfg.policy_dir,
+            target_type="mcp",
+            name=name,
+            scan_result=result,
+            fallback_actions=app.cfg.mcp_actions,
+        )
+        if post_decision.verdict == "rejected":
             pe = PolicyEngine(app.store)
             pe.block("mcp", name, f"scan: {len(result.findings)} findings, max={sev}")
             click.secho(
@@ -485,12 +514,25 @@ def set_server(
                     f"severity={sev} findings={len(result.findings)}",
                 )
             raise SystemExit(1)
+    elif pre_decision.verdict == "allowed":
+        if pre_decision.source == "scan-disabled":
+            click.secho(f"Policy allows {name} without scan.", fg="yellow")
+        else:
+            click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
 
     _openclaw_config_set(f"mcp.servers.{name}", json.dumps(entry))
 
-    if not skip_scan:
-        pe = PolicyEngine(app.store)
-        pe.allow("mcp", name, "scan clean or within policy")
+    if scan_required:
+        post_decision = evaluate_admission(
+            pe,
+            policy_dir=app.cfg.policy_dir,
+            target_type="mcp",
+            name=name,
+            scan_result=result,
+            fallback_actions=app.cfg.mcp_actions,
+        )
+        if post_decision.action.install == "allow":
+            pe.allow("mcp", name, "scan clean or within policy")
 
     click.secho(f"Added MCP server: {name}", fg="green")
 

@@ -36,16 +36,44 @@ var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // extractJSON finds the first top-level JSON object in data.
 // Scanner CLIs sometimes print progress text to stdout before the JSON;
 // this isolates the `{...}` payload so json.Unmarshal succeeds.
+// extractJSON locates the first balanced JSON object in data by tracking
+// brace depth while skipping string literals.
 func extractJSON(data []byte) []byte {
 	start := bytes.IndexByte(data, '{')
 	if start < 0 {
 		return data
 	}
-	end := bytes.LastIndexByte(data, '}')
-	if end < start {
-		return data
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(data); i++ {
+		b := data[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if b == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if b == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return data[start : i+1]
+			}
+		}
 	}
-	return data[start : end+1]
+	return data
 }
 
 type SkillScanner struct {

@@ -53,8 +53,17 @@ class PolicyEngine:
             self.store.set_action_field(target_type, name, "install", "block", reason)
 
     def allow(self, target_type: str, name: str, reason: str) -> None:
-        if self.store:
-            self.store.set_action_field(target_type, name, "install", "allow", reason)
+        """Set install=allow and clear residual file/runtime enforcement.
+
+        Mirrors internal/enforce/policy.go Allow() exactly: after allowing,
+        quarantine and disable state are removed so the allow takes full
+        effect.  Only a manual block() can override an allow entry.
+        """
+        if not self.store:
+            return
+        self.store.set_action_field(target_type, name, "install", "allow", reason)
+        self.store.clear_action_field(target_type, name, "file")
+        self.store.clear_action_field(target_type, name, "runtime")
 
     def unblock(self, target_type: str, name: str) -> None:
         if self.store:
@@ -147,10 +156,16 @@ class PolicyEngine:
             self.store.set_action_field("tool", target, "install", "block", reason)
 
     def allow_tool(self, tool_name: str, source: str, reason: str) -> None:
-        """Allow a tool, optionally scoped to a source."""
-        if self.store:
-            target = f"{source}/{tool_name}" if source else tool_name
-            self.store.set_action_field("tool", target, "install", "allow", reason)
+        """Allow a tool, optionally scoped to a source.
+
+        Uses the same cleanup pattern as allow() for consistency.
+        """
+        if not self.store:
+            return
+        target = f"{source}/{tool_name}" if source else tool_name
+        self.store.set_action_field("tool", target, "install", "allow", reason)
+        self.store.clear_action_field("tool", target, "file")
+        self.store.clear_action_field("tool", target, "runtime")
 
     def list_blocked_tools(self) -> list[ActionEntry]:
         """List all tool-level block entries."""

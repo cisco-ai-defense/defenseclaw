@@ -8,6 +8,7 @@ import (
 )
 
 const notificationTTL = 2 * time.Minute
+const maxNotificationQueueSize = 50
 
 // SecurityNotification represents a pending enforcement alert that the
 // guardrail proxy will inject into LLM requests as a system message.
@@ -37,12 +38,16 @@ func NewNotificationQueue() *NotificationQueue {
 	return &NotificationQueue{}
 }
 
-// Push appends a notification with a TTL-based expiry.
+// Push appends a notification with a TTL-based expiry. When the queue
+// exceeds maxNotificationQueueSize, the oldest entries are dropped.
 func (q *NotificationQueue) Push(n SecurityNotification) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	n.ExpiresAt = time.Now().Add(notificationTTL)
 	q.items = append(q.items, n)
+	if len(q.items) > maxNotificationQueueSize {
+		q.items = q.items[len(q.items)-maxNotificationQueueSize:]
+	}
 }
 
 // ActiveNotifications returns all unexpired notifications, pruning expired

@@ -47,6 +47,10 @@ type Sidecar struct {
 	shell  *sandbox.OpenShell
 	otel   *telemetry.Provider
 	notify *NotificationQueue
+
+	alertCtx    context.Context
+	alertCancel context.CancelFunc
+	alertWg     sync.WaitGroup
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -72,16 +76,20 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	router.notify = notify
 	client.OnEvent = router.Route
 
+	alertCtx, alertCancel := context.WithCancel(context.Background())
+
 	return &Sidecar{
-		cfg:    cfg,
-		client: client,
-		router: router,
-		store:  store,
-		logger: logger,
-		health: NewSidecarHealth(),
-		shell:  shell,
-		otel:   otel,
-		notify: notify,
+		cfg:         cfg,
+		client:      client,
+		router:      router,
+		store:       store,
+		logger:      logger,
+		health:      NewSidecarHealth(),
+		shell:       shell,
+		otel:        otel,
+		notify:      notify,
+		alertCtx:    alertCtx,
+		alertCancel: alertCancel,
 	}, nil
 }
 
@@ -152,6 +160,9 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	<-ctx.Done()
 	fmt.Fprintf(os.Stderr, "[sidecar] context cancelled, waiting for subsystems to stop ...\n")
 	wg.Wait()
+
+	s.alertCancel()
+	s.alertWg.Wait()
 
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	_ = s.client.Close()
@@ -348,14 +359,22 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		actions = append(actions, "quarantined", "blocked")
 	}
 
-	go s.sendEnforcementAlert(r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+	s.alertWg.Add(1)
+	go func() {
+		defer s.alertWg.Done()
+		s.sendEnforcementAlert(r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+	}()
 }
 
 // sendEnforcementAlert sends a security notification to all active sessions
 // via the gateway's sessions.send RPC so each chat learns about the enforcement.
 // Runs in a goroutine to avoid blocking the watcher callback.
 func (s *Sidecar) sendEnforcementAlert(skillName, severity string, findings int, actions []string, reason string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	parent := s.alertCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
 	msg := formatEnforcementMessage(skillName, severity, findings, actions, reason)

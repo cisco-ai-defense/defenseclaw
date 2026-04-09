@@ -174,6 +174,7 @@ def enrich_with_policy(
     inv: dict[str, Any],
     store: Any,
     skill_actions: SkillActionsConfig | None = None,
+    policy_dir: str = "",
 ) -> None:
     """Evaluate OPA-style admission gate per item and annotate the inventory.
 
@@ -214,6 +215,7 @@ def enrich_with_policy(
                 pe, target_type, name,
                 scan_entry, actions_map.get(name),
                 skill_actions,
+                policy_dir=policy_dir,
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
@@ -245,10 +247,26 @@ _FIRST_PARTY_ALLOW_LIST: list[tuple[str, str, str]] = [
     ("skill", "codeguard", "first-party DefenseClaw skill"),
 ]
 
+_FIRST_PARTY_SOURCE_PREFIXES: list[str] = [
+    ".defenseclaw",
+    ".openclaw/extensions",
+    ".openclaw/skills",
+]
 
-def _is_first_party(target_type: str, name: str) -> str | None:
+
+def _is_first_party(target_type: str, name: str, source_path: str = "") -> str | None:
+    """Match by name AND verify source path when available.
+
+    When ``source_path`` is provided, the name match is only trusted if the
+    path contains a known DefenseClaw directory component.  This prevents a
+    third-party skill named "codeguard" from being auto-allowed.
+    """
     for ft, fn, reason in _FIRST_PARTY_ALLOW_LIST:
         if ft == target_type and fn == name:
+            if source_path:
+                normalised = source_path.replace("\\", "/").lower()
+                if not any(prefix in normalised for prefix in _FIRST_PARTY_SOURCE_PREFIXES):
+                    return None
             return reason
     return None
 
@@ -260,38 +278,28 @@ def _admission_verdict(
     scan_entry: dict[str, Any] | None,
     action_entry: ActionEntry | None,
     skill_actions: SkillActionsConfig,
+    policy_dir: str = "",
 ) -> tuple[str, str]:
-    """Replicate OPA admission.rego logic in Python for offline evaluation."""
-    if pe.is_blocked(target_type, name):
-        reason = action_entry.reason if action_entry else "block list"
-        return "blocked", reason
+    """Replicate admission ordering for offline inventory evaluation."""
+    from defenseclaw.enforce.admission import evaluate_admission
 
-    if pe.is_allowed(target_type, name):
-        reason = action_entry.reason if action_entry else "allow list"
-        return "allowed", reason
-
-    fp_reason = _is_first_party(target_type, name)
-    if fp_reason is not None:
-        return "allowed", fp_reason
-
-    if pe.is_quarantined(target_type, name):
-        reason = action_entry.reason if action_entry else "quarantined"
-        return "rejected", f"quarantined: {reason}"
-
-    if scan_entry is None:
+    decision = evaluate_admission(
+        pe,
+        policy_dir=policy_dir,
+        target_type=target_type,
+        name=name,
+        scan_result=scan_entry,
+        action_entry=action_entry,
+        fallback_actions=skill_actions,
+        include_quarantine=True,
+    )
+    if decision.verdict == "scan":
         return "unscanned", "no scan result"
-
-    if scan_entry["finding_count"] == 0:
-        return "clean", "scan clean"
-
-    sev = scan_entry["max_severity"]
-    n = scan_entry["finding_count"]
-    action = skill_actions.for_severity(sev)
-
-    if action.install == "block" or action.runtime == "disable":
-        return "rejected", f"{n} findings, max {sev}"
-
-    return "warning", f"{n} findings, max {sev}"
+    if decision.verdict == "blocked" and action_entry is None:
+        return "blocked", "block list"
+    if decision.verdict == "allowed" and action_entry is None and decision.source == "manual-allow":
+        return "allowed", "allow list"
+    return decision.verdict, decision.reason
 
 
 def _build_actions_map_for_type(store: Any, target_type: str) -> dict[str, ActionEntry]:
