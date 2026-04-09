@@ -157,8 +157,8 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.Port != 4000 {
 		t.Errorf("expected guardrail port 4000, got %d", cfg.Guardrail.Port)
 	}
-	if cfg.Guardrail.ScannerMode != "local" {
-		t.Errorf("expected guardrail scanner_mode %q, got %q", "local", cfg.Guardrail.ScannerMode)
+	if cfg.Guardrail.ScannerMode != "both" {
+		t.Errorf("expected guardrail scanner_mode %q, got %q", "both", cfg.Guardrail.ScannerMode)
 	}
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
