@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "click==8.3.1",
+    "click==8.3.2",
     "pyyaml==6.0.3",
     "requests==2.33.0",
     "rich>=13.0",
