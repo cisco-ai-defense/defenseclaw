@@ -531,8 +531,8 @@ test_production_policy_name_is_default if {
 	data.config.policy_name == "default"
 }
 
-test_production_update_sandbox_policy_enabled if {
-	data.config.update_sandbox_policy == true
+test_production_sandbox_update_policy_disabled_by_default if {
+	data.sandbox.update_policy == false
 }
 
 test_production_max_enforcement_delay_is_two if {

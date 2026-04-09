@@ -121,7 +121,13 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 }
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
-	addr := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.Gateway.APIPort)
+	bind := "127.0.0.1"
+	if cfg.Gateway.APIBind != "" {
+		bind = cfg.Gateway.APIBind
+	} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
+		bind = cfg.Guardrail.Host
+	}
+	addr := fmt.Sprintf("http://%s:%d/health", bind, cfg.Gateway.APIPort)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(addr)
@@ -152,6 +158,9 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printSubsystem("Guardrail", snap.Guardrail)
 	printSubsystem("Telemetry", snap.Telemetry)
 	printSubsystem("Splunk", snap.Splunk)
+	if snap.Sandbox != nil {
+		printSubsystem("Sandbox", *snap.Sandbox)
+	}
 
 	return nil
 }
@@ -169,6 +178,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	}
 	if len(h.Details) > 0 {
 		for k, v := range h.Details {
+			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
+				continue
+			}
 			fmt.Printf("             %s: %v\n", k, v)
 		}
 	}

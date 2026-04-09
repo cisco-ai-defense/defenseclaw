@@ -160,6 +160,10 @@ validate_auth_role() {
   esac
 }
 
+bridge_runs_in_free_mode() {
+  [[ "${SPLUNK_LICENSE_URI:-}" == "Free" ]]
+}
+
 load_env_contract() {
   set -a
   # shellcheck disable=SC1090
@@ -250,6 +254,21 @@ wait_for_hec_ready() {
 }
 
 print_up_text() {
+  if bridge_runs_in_free_mode; then
+    cat <<EOF
+profile: ${PROFILE}
+image: ${SPLUNK_IMAGE}
+license_group: Free
+splunk_web_url: http://127.0.0.1:8000
+web_login_required: false
+hec_url: ${DEFENSECLAW_HEC_URL}
+hec_token: ${DEFENSECLAW_HEC_TOKEN}
+index: ${DEFENSECLAW_INDEX}
+sourcetype: ${DEFENSECLAW_SOURCETYPE}
+source: ${DEFENSECLAW_SOURCE}
+EOF
+    return
+  fi
   cat <<EOF
 profile: ${PROFILE}
 image: ${SPLUNK_IMAGE}
@@ -269,18 +288,23 @@ print_up_json() {
 import json
 import os
 
+free_mode = os.environ.get("SPLUNK_LICENSE_URI", "") == "Free"
 payload = {
     "profile": os.environ["PROFILE"],
     "image": os.environ["SPLUNK_IMAGE"],
     "splunk_web_url": "http://127.0.0.1:8000",
     "hec_url": os.environ["DEFENSECLAW_HEC_URL"],
     "hec_token": os.environ["DEFENSECLAW_HEC_TOKEN"],
-    "username": os.environ["DEFENSECLAW_LOCAL_USERNAME"],
-    "password": os.environ["DEFENSECLAW_LOCAL_PASSWORD"],
     "index": os.environ["DEFENSECLAW_INDEX"],
     "sourcetype": os.environ["DEFENSECLAW_SOURCETYPE"],
     "source": os.environ["DEFENSECLAW_SOURCE"],
 }
+if free_mode:
+    payload["license_group"] = "Free"
+    payload["web_login_required"] = False
+else:
+    payload["username"] = os.environ["DEFENSECLAW_LOCAL_USERNAME"]
+    payload["password"] = os.environ["DEFENSECLAW_LOCAL_PASSWORD"]
 print(json.dumps(payload, indent=2))
 PY
 }
@@ -307,6 +331,11 @@ PY
 }
 
 resolve_query_credentials() {
+  if bridge_runs_in_free_mode; then
+    QUERY_USERNAME=""
+    QUERY_PASSWORD=""
+    return
+  fi
   case "${AUTH_ROLE}" in
     local)
       QUERY_USERNAME="${DEFENSECLAW_LOCAL_USERNAME}"
@@ -320,11 +349,19 @@ resolve_query_credentials() {
 }
 
 run_query_helper() {
-  run_compose exec -T -u splunk splunk \
-    /opt/splunk/bin/splunk cmd python /opt/splunk-claw-bridge/splunk/bin/export_search.py \
-    --username "${QUERY_USERNAME}" \
-    --password "${QUERY_PASSWORD}" \
-    --query "${QUERY_STRING}"
+  local -a query_args
+  query_args=(
+    /opt/splunk/bin/splunk
+    cmd
+    python
+    /opt/splunk-claw-bridge/splunk/bin/export_search.py
+    --query
+    "${QUERY_STRING}"
+  )
+  if [[ -n "${QUERY_USERNAME}" || -n "${QUERY_PASSWORD}" ]]; then
+    query_args+=(--username "${QUERY_USERNAME}" --password "${QUERY_PASSWORD}")
+  fi
+  run_compose exec -T -u splunk splunk "${query_args[@]}"
 }
 
 service_is_running() {

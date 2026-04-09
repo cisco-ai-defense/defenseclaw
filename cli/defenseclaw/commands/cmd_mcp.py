@@ -362,8 +362,10 @@ def allow(app: AppContext, target: str, reason: str) -> None:
 
 def _openclaw_config_set(path: str, value: str) -> None:
     """Write a value via ``openclaw config set`` (schema-validated, hot-reloaded)."""
+    from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+    prefix = openclaw_cmd_prefix()
     result = subprocess.run(
-        ["openclaw", "config", "set", path, value, "--strict-json"],
+        [*prefix, openclaw_bin(), "config", "set", path, value, "--strict-json"],
         capture_output=True, text=True, timeout=15,
     )
     if result.returncode != 0:
@@ -373,8 +375,10 @@ def _openclaw_config_set(path: str, value: str) -> None:
 
 def _openclaw_config_unset(path: str) -> None:
     """Remove a value via ``openclaw config unset``."""
+    from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+    prefix = openclaw_cmd_prefix()
     result = subprocess.run(
-        ["openclaw", "config", "unset", path],
+        [*prefix, openclaw_bin(), "config", "unset", path],
         capture_output=True, text=True, timeout=15,
     )
     if result.returncode != 0:

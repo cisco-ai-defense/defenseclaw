@@ -3,7 +3,6 @@
     "policy_name": "default",
     "allow_list_bypass_scan": true,
     "scan_on_install": true,
-    "update_sandbox_policy": true,
     "max_enforcement_delay_seconds": 2
   },
   "actions": {
@@ -70,29 +69,6 @@
     "retention_days": 90,
     "log_all_actions": true,
     "log_scan_results": true
-  },
-  "firewall": {
-    "default_action": "deny",
-    "blocked_destinations": [
-      "169.254.169.254",
-      "fd00:ec2::254"
-    ],
-    "allowed_domains": [
-      "api.github.com",
-      "github.com",
-      "proxy.golang.org",
-      "sum.golang.org",
-      "registry.npmjs.org",
-      "pypi.org",
-      "files.pythonhosted.org"
-    ],
-    "allowed_ports": [
-      443
-    ]
-  },
-  "sandbox": {
-    "default_permissions": [],
-    "denied_endpoints_global": []
   },
   "guardrail": {
     "severity_rank": {

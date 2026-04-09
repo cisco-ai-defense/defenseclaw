@@ -91,7 +91,14 @@ def status(app: AppContext) -> None:
     # Sidecar status
     click.echo()
     from defenseclaw.gateway import OrchestratorClient
-    client = OrchestratorClient(port=cfg.gateway.api_port)
+    bind = "127.0.0.1"
+    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
+        bind = cfg.guardrail.host
+    client = OrchestratorClient(
+        host=bind,
+        port=cfg.gateway.api_port,
+        token=cfg.gateway.resolved_token(),
+    )
     if client.is_running():
         click.secho("  Sidecar:      running", fg="green")
     else:

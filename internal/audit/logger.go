@@ -85,12 +85,15 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	}
 
 	event := Event{
+		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    "scan",
 		Target:    result.Target,
+		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
 			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
 		Severity: string(result.MaxSeverity()),
+		RunID:    currentRunID(),
 	}
 
 	if err := l.store.LogEvent(event); err != nil {
@@ -121,11 +124,14 @@ func (l *Logger) LogAction(action, target, details string) error {
 // cross-system correlation between Splunk O11y and Splunk local.
 func (l *Logger) LogActionWithTrace(action, target, details, traceID string) error {
 	event := Event{
+		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
 		Target:    target,
+		Actor:     "defenseclaw",
 		Details:   details,
 		Severity:  "INFO",
+		RunID:     currentRunID(),
 		TraceID:   traceID,
 	}
 	if err := l.store.LogEvent(event); err != nil {
@@ -152,11 +158,14 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
 	event := Event{
+		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
 		Target:    target,
+		Actor:     "defenseclaw",
 		Details:   details,
 		Severity:  "INFO",
+		RunID:     currentRunID(),
 	}
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {
@@ -183,6 +192,23 @@ func (l *Logger) forwardToSplunk(e Event) {
 	}
 	if err := l.splunk.ForwardEvent(e); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: splunk forward: %v\n", err)
+		return
+	}
+	if shouldFlushSplunkImmediately(e.Action) {
+		if err := l.splunk.Flush(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: splunk flush: %v\n", err)
+		}
+	}
+}
+
+func shouldFlushSplunkImmediately(action string) bool {
+	switch action {
+	case "watch-start", "watch-stop",
+		"sidecar-start", "sidecar-stop",
+		"sidecar-connected", "sidecar-disconnected":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -200,7 +226,7 @@ func inferTargetType(scannerName string) string {
 		return "mcp"
 	case "skill-scanner", "skill_scanner":
 		return "skill"
-	case "codeguard", "aibom",
+	case "codeguard", "aibom", "aibom-claw",
 		"clawshield-vuln", "clawshield-secrets", "clawshield-pii",
 		"clawshield-malware", "clawshield-injection":
 		return "code"

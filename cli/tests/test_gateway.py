@@ -31,17 +31,37 @@ class TestOrchestratorClientInit(unittest.TestCase):
         client = OrchestratorClient()
         self.assertEqual(client.base_url, "http://127.0.0.1:18970")
         self.assertEqual(client.timeout, 5)
+        self.assertEqual(client.plugin_timeout, 90)
 
     def test_custom_params(self):
         client = OrchestratorClient(host="10.0.0.1", port=9999, timeout=15)
         self.assertEqual(client.base_url, "http://10.0.0.1:9999")
         self.assertEqual(client.timeout, 15)
+        self.assertEqual(client.plugin_timeout, 90)
+
+    def test_custom_plugin_timeout(self):
+        client = OrchestratorClient(timeout=15, plugin_timeout=45)
+        self.assertEqual(client.plugin_timeout, 45)
 
     def test_session_has_csrf_header(self):
         client = OrchestratorClient()
         self.assertEqual(
             client._session.headers["X-DefenseClaw-Client"], "python-cli"
         )
+
+    def test_no_auth_header_without_token(self):
+        client = OrchestratorClient()
+        self.assertNotIn("Authorization", client._session.headers)
+
+    def test_auth_header_with_token(self):
+        client = OrchestratorClient(token="secret-123")
+        self.assertEqual(
+            client._session.headers["Authorization"], "Bearer secret-123"
+        )
+
+    def test_empty_token_no_auth_header(self):
+        client = OrchestratorClient(token="")
+        self.assertNotIn("Authorization", client._session.headers)
 
 
 def _make_client() -> tuple[OrchestratorClient, MagicMock]:
@@ -123,7 +143,7 @@ class TestOrchestratorClientPluginOps(unittest.TestCase):
         session.post.assert_called_once_with(
             "http://127.0.0.1:18970/plugin/disable",
             json={"pluginName": "bad-plugin"},
-            timeout=5,
+            timeout=90,
         )
         self.assertTrue(result["ok"])
 
@@ -138,7 +158,7 @@ class TestOrchestratorClientPluginOps(unittest.TestCase):
         session.post.assert_called_once_with(
             "http://127.0.0.1:18970/plugin/enable",
             json={"pluginName": "good-plugin"},
-            timeout=5,
+            timeout=90,
         )
         self.assertTrue(result["ok"])
 

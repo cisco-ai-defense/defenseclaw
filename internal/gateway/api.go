@@ -99,7 +99,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/audit/event", a.handleAuditEvent)
 	mux.HandleFunc("/policy/evaluate", a.handlePolicyEvaluate)
 	mux.HandleFunc("/policy/evaluate/firewall", a.handlePolicyEvaluateFirewall)
-	mux.HandleFunc("/policy/evaluate/sandbox", a.handlePolicyEvaluateSandbox)
 	mux.HandleFunc("/policy/evaluate/audit", a.handlePolicyEvaluateAudit)
 	mux.HandleFunc("/policy/evaluate/skill-actions", a.handlePolicyEvaluateSkillActions)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
@@ -115,9 +114,14 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 
+	handler := a.metricsMiddleware(csrfProtect(mux))
+	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
+		handler = a.tokenAuth(handler)
+	}
+
 	srv := &http.Server{
 		Addr:    a.addr,
-		Handler: a.metricsMiddleware(csrfProtect(mux)),
+		Handler: handler,
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},
@@ -200,7 +204,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
@@ -235,7 +239,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
@@ -274,10 +278,12 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
-	if err := a.client.DisablePlugin(ctx, req.PluginName); err != nil {
+	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+		return a.client.DisablePlugin(callCtx, req.PluginName)
+	}); err != nil {
 		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -309,10 +315,12 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
-	if err := a.client.EnablePlugin(ctx, req.PluginName); err != nil {
+	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+		return a.client.EnablePlugin(callCtx, req.PluginName)
+	}); err != nil {
 		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -321,6 +329,43 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogAction("api-plugin-enable", req.PluginName, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "pluginName": req.PluginName})
+}
+
+const gatewayMutationRetryDelay = 2 * time.Second
+const gatewayMutationMaxAttempts = 20
+const pluginGatewayMutationTimeout = 90 * time.Second
+
+func isRetryableGatewayMutationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "gateway: not connected") ||
+		strings.Contains(msg, "websocket: close sent") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "connection refused")
+}
+
+func (a *APIServer) retryGatewayMutation(ctx context.Context, fn func(context.Context) error) error {
+	var lastErr error
+	for attempt := 1; attempt <= gatewayMutationMaxAttempts; attempt++ {
+		lastErr = fn(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableGatewayMutationError(lastErr) || attempt == gatewayMutationMaxAttempts {
+			return lastErr
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gatewayMutationRetryDelay):
+		}
+	}
+	return lastErr
 }
 
 type configPatchRequest struct {
@@ -1020,7 +1065,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "guardrail-proxy", tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", tIn, tOut)
 		}
 	}
 
@@ -1272,6 +1317,33 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// tokenAuth wraps a handler with Bearer token authentication.
+// GET /health is exempt to allow unauthenticated health checks.
+func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" && r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		token := ""
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		}
+		if token == "" {
+			token = r.Header.Get("X-DefenseClaw-Token")
+		}
+
+		expected := a.scannerCfg.Gateway.Token
+		if token != expected {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // csrfProtect wraps a handler with localhost CSRF defenses. Mutating methods
 // (POST, PUT, PATCH, DELETE) require:
 //  1. X-DefenseClaw-Client header (blocks simple/no-cors browser requests)
@@ -1472,56 +1544,6 @@ func (a *APIServer) handlePolicyEvaluateFirewall(w http.ResponseWriter, r *http.
 		if out.Action == "deny" || out.Action == "block" {
 			a.otel.EmitPolicyDecision("firewall", out.Action, input.Destination, "network", out.RuleName, nil)
 		}
-	}
-
-	a.writeJSON(w, http.StatusOK, out)
-}
-
-// ---------------------------------------------------------------------------
-// POST /policy/evaluate/sandbox
-// ---------------------------------------------------------------------------
-
-func (a *APIServer) handlePolicyEvaluateSandbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var input policy.SandboxInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if input.SkillName == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "skill_name is required"})
-		return
-	}
-
-	start := time.Now()
-	ctx := r.Context()
-	var span trace.Span
-	if a.otel != nil {
-		ctx, span = a.otel.StartPolicySpan(ctx, "sandbox", "skill", input.SkillName)
-	}
-
-	engine, err := a.loadPolicyEngine()
-	if err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	out, err := engine.EvaluateSandbox(ctx, input)
-	if err != nil {
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	if a.otel != nil {
-		verdict := "allow"
-		if len(out.DeniedEndpoints) > 0 || len(out.DeniedFromRequest) > 0 {
-			verdict = "restrict"
-		}
-		a.otel.EndPolicySpan(span, "sandbox", verdict, "", start)
 	}
 
 	a.writeJSON(w, http.StatusOK, out)

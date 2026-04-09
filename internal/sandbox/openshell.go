@@ -98,7 +98,15 @@ func (o *OpenShell) Start(policyPath string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("sandbox: start openshell: %w", err)
 	}
-	return writePidFile(cmd.Process.Pid)
+	if err := writePidFile(cmd.Process.Pid); err != nil {
+		_ = cmd.Process.Kill()
+		return fmt.Errorf("sandbox: write pid file: %w", err)
+	}
+	go func() {
+		_ = cmd.Wait()
+		_ = removePidFile()
+	}()
+	return nil
 }
 
 func (o *OpenShell) Stop() error {
@@ -107,12 +115,12 @@ func (o *OpenShell) Stop() error {
 		return fmt.Errorf("sandbox: no running openshell process found: %w", err)
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
+	if !isOpenShellProcess(pid) {
 		_ = removePidFile()
-		return fmt.Errorf("sandbox: process %d not found: %w", pid, err)
+		return fmt.Errorf("sandbox: stale pid file (process %d is not openshell-sandbox)", pid)
 	}
 
+	proc, _ := os.FindProcess(pid)
 	if err := proc.Signal(os.Interrupt); err != nil {
 		_ = proc.Kill()
 	}
@@ -125,10 +133,10 @@ func (o *OpenShell) IsRunning() bool {
 	if err != nil {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
+	if !isOpenShellProcess(pid) {
 		return false
 	}
+	proc, _ := os.FindProcess(pid)
 	return proc.Signal(nil) == nil
 }
 
@@ -138,7 +146,28 @@ func pidFilePath() string {
 }
 
 func writePidFile(pid int) error {
-	return os.WriteFile(pidFilePath(), []byte(strconv.Itoa(pid)), 0o600)
+	path := pidFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o600)
+}
+
+// isOpenShellProcess checks whether the process at pid is actually an
+// openshell-sandbox process, guarding against PID reuse after the
+// original process has exited.
+func isOpenShellProcess(pid int) bool {
+	// Linux: read /proc/<pid>/cmdline directly (no subprocess).
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err == nil {
+		return strings.Contains(string(cmdline), "openshell-sandbox")
+	}
+	// Fallback (macOS, etc.): ask ps for the command name.
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.TrimSpace(string(out)), "openshell")
 }
 
 func readPidFile() (int, error) {

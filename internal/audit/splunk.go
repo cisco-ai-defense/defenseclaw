@@ -29,26 +29,26 @@ import (
 )
 
 type SplunkConfig struct {
-	HECEndpoint    string `mapstructure:"hec_endpoint"    yaml:"hec_endpoint"`
-	HECToken       string `mapstructure:"hec_token"       yaml:"hec_token"`
-	Index          string `mapstructure:"index"            yaml:"index"`
-	Source         string `mapstructure:"source"           yaml:"source"`
-	SourceType     string `mapstructure:"sourcetype"       yaml:"sourcetype"`
-	VerifyTLS      bool   `mapstructure:"verify_tls"       yaml:"verify_tls"`
-	Enabled        bool   `mapstructure:"enabled"          yaml:"enabled"`
-	BatchSize      int    `mapstructure:"batch_size"       yaml:"batch_size"`
-	FlushInterval  int    `mapstructure:"flush_interval_s" yaml:"flush_interval_s"`
+	HECEndpoint   string `mapstructure:"hec_endpoint"    yaml:"hec_endpoint"`
+	HECToken      string `mapstructure:"hec_token"       yaml:"hec_token"`
+	Index         string `mapstructure:"index"            yaml:"index"`
+	Source        string `mapstructure:"source"           yaml:"source"`
+	SourceType    string `mapstructure:"sourcetype"       yaml:"sourcetype"`
+	VerifyTLS     bool   `mapstructure:"verify_tls"       yaml:"verify_tls"`
+	Enabled       bool   `mapstructure:"enabled"          yaml:"enabled"`
+	BatchSize     int    `mapstructure:"batch_size"       yaml:"batch_size"`
+	FlushInterval int    `mapstructure:"flush_interval_s" yaml:"flush_interval_s"`
 }
 
 func DefaultSplunkConfig() SplunkConfig {
 	return SplunkConfig{
-		HECEndpoint: "https://localhost:8088/services/collector/event",
-		Index:       "defenseclaw",
-		Source:      "defenseclaw",
-		SourceType:  "_json",
-		VerifyTLS:   false,
-		Enabled:     false,
-		BatchSize:   50,
+		HECEndpoint:   "https://localhost:8088/services/collector/event",
+		Index:         "defenseclaw",
+		Source:        "defenseclaw",
+		SourceType:    "_json",
+		VerifyTLS:     false,
+		Enabled:       false,
+		BatchSize:     50,
 		FlushInterval: 5,
 	}
 }
@@ -66,7 +66,7 @@ type splunkEvent struct {
 	Time       float64     `json:"time"`
 	Host       string      `json:"host,omitempty"`
 	Source     string      `json:"source,omitempty"`
-	SourceType string     `json:"sourcetype,omitempty"`
+	SourceType string      `json:"sourcetype,omitempty"`
 	Index      string      `json:"index,omitempty"`
 	Event      interface{} `json:"event"`
 }
@@ -79,6 +79,7 @@ type splunkAuditEvent struct {
 	Actor     string `json:"actor"`
 	Details   string `json:"details"`
 	Severity  string `json:"severity"`
+	RunID     string `json:"run_id,omitempty"`
 	Source    string `json:"source"`
 	TraceID   string `json:"trace_id,omitempty"`
 }
@@ -139,6 +140,7 @@ func (f *SplunkForwarder) ForwardEvent(e Event) error {
 			Actor:     e.Actor,
 			Details:   e.Details,
 			Severity:  e.Severity,
+			RunID:     e.RunID,
 			Source:    "defenseclaw",
 			TraceID:   e.TraceID,
 		},

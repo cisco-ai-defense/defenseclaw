@@ -110,8 +110,10 @@ def _run_openclaw(*args: str) -> str | None:
     to substring extraction when the whole stream isn't valid JSON.
     """
     try:
+        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+        prefix = openclaw_cmd_prefix()
         result = subprocess.run(
-            ["openclaw", *args],
+            [*prefix, openclaw_bin(), *args],
             capture_output=True, text=True, timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -144,13 +146,26 @@ def _run_openclaw(*args: str) -> str | None:
     return None
 
 
+def _api_bind_host(app: AppContext) -> str:
+    """Resolve the API bind address, mirroring sidecar.runAPI in Go.
+
+    In standalone sandbox mode with a non-localhost guardrail host,
+    the Go gateway binds to guardrail.host (the bridge IP) instead
+    of 127.0.0.1.
+    """
+    if app.cfg.openshell.is_standalone() and app.cfg.guardrail.host not in ("", "localhost"):
+        return app.cfg.guardrail.host
+    return "127.0.0.1"
+
+
 def _sidecar_client(app: AppContext):
     """Build an OrchestratorClient from the app's gateway config."""
     from defenseclaw.gateway import OrchestratorClient
 
     return OrchestratorClient(
-        host=app.cfg.gateway.host,
+        host=_api_bind_host(app),
         port=app.cfg.gateway.api_port,
+        token=app.cfg.gateway.resolved_token(),
     )
 
 
@@ -624,12 +639,7 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
     Used when DefenseClaw sidecar runs on a remote host and the CLI connects
     via SSM port-forward or direct network access.
     """
-    from defenseclaw.gateway import OrchestratorClient
-
-    client = OrchestratorClient(
-        host=app.cfg.gateway.host,
-        port=app.cfg.gateway.api_port,
-    )
+    client = _sidecar_client(app)
 
     if not as_json:
         click.echo(f"[scan] remote skill-scanner via sidecar -> {target}")
@@ -1059,14 +1069,9 @@ def disable(app: AppContext, name: str, reason: str) -> None:
     Requires the gateway to be running.
     """
     from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.gateway import OrchestratorClient
-
     skill_name = os.path.basename(name)
 
-    client = OrchestratorClient(
-        host=app.cfg.gateway.host,
-        port=app.cfg.gateway.api_port,
-    )
+    client = _sidecar_client(app)
     try:
         client.disable_skill(skill_name)
     except Exception as exc:
@@ -1098,14 +1103,10 @@ def enable(app: AppContext, name: str) -> None:
     This is a runtime-only action.
     """
     from defenseclaw.enforce import PolicyEngine
-    from defenseclaw.gateway import OrchestratorClient
 
     skill_name = os.path.basename(name)
 
-    client = OrchestratorClient(
-        host=app.cfg.gateway.host,
-        port=app.cfg.gateway.api_port,
-    )
+    client = _sidecar_client(app)
     try:
         client.enable_skill(skill_name)
     except Exception as exc:
@@ -1303,7 +1304,6 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
-    from defenseclaw.gateway import OrchestratorClient
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     skill_name = os.path.basename(name)
@@ -1384,10 +1384,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
             click.echo("[install] quarantine failed", err=True)
 
     if action_cfg.runtime == "disable":
-        client = OrchestratorClient(
-            host=app.cfg.gateway.host,
-            port=app.cfg.gateway.api_port,
-        )
+        client = _sidecar_client(app)
         try:
             client.disable_skill(skill_name)
             applied_actions.append("disabled via gateway")
