@@ -161,9 +161,11 @@ count_nonempty_lines() {
 
 splunk_search() {
     local query="$1"
+    # Use spath to force JSON field extraction before filtering —
+    # belt-and-suspenders alongside the props.conf KV_MODE=json setting.
     curl -sf --max-time 15 -k \
         -u "$SPLUNK_CREDS" \
-        -d "search=search index=${SPLUNK_INDEX} $query" \
+        -d "search=search index=${SPLUNK_INDEX} | spath | search $query" \
         -d "output_mode=json" \
         "$SPLUNK_API_URL/services/search/jobs/export" 2>/dev/null || echo '{}'
 }
@@ -2851,8 +2853,25 @@ phase_splunk() {
         fail "Splunk HEC accepts writes" "response: $hec_response"
     fi
 
-    echo "  Waiting 12s for run-scoped events to be indexed..."
-    sleep 12
+    echo "  Waiting 20s for run-scoped events to be indexed..."
+    sleep 20
+
+    # Diagnostic: check if ANY events exist in the index for this run_id.
+    local diag_count
+    diag_count=$(splunk_run_results_json '| head 1' | jq 'length' 2>/dev/null || echo "0")
+    if [ "${diag_count:-0}" -eq 0 ]; then
+        echo "  [diag] WARNING: Splunk has 0 events for run_id=$DEFENSECLAW_RUN_ID"
+        echo "  [diag] Checking total index event count..."
+        local total_raw
+        total_raw=$(splunk_search '| stats count' | jq -cs '[.[] | .result? | select(type == "object")]' 2>/dev/null || echo '[]')
+        echo "  [diag] Total index stats: $total_raw"
+        echo "  [diag] Checking raw events (no field filter)..."
+        local raw_sample
+        raw_sample=$(splunk_search '| head 3')
+        echo "  [diag] Raw sample (first 500 chars): ${raw_sample:0:500}"
+    else
+        echo "  [diag] Splunk index contains events for this run_id — proceeding with assertions"
+    fi
 
     splunk_assert_results "Splunk: skill scanner audit events present" 'action=scan details="*scanner=skill-scanner*" | head 5'
     splunk_assert_results "Splunk: CodeGuard scan events present" 'action=scan details="*scanner=codeguard*" | head 5'
