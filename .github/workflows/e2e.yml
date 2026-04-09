@@ -254,6 +254,8 @@ jobs:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
       E2E_PROFILE: full-live
@@ -537,6 +539,12 @@ jobs:
           if [ -n "${OPENAI_API_KEY:-}" ]; then
             echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
           fi
+          if [ -n "${GOOGLE_API_KEY:-}" ]; then
+            echo "GOOGLE_API_KEY=${GOOGLE_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
+            echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
           if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
             echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
@@ -574,6 +582,8 @@ jobs:
               API_KEY_ENV="ANTHROPIC_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
               API_KEY_ENV="OPENAI_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "gemini\|google"; then
+              API_KEY_ENV="GOOGLE_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
               GUARDRAIL_REASON="Bedrock model detected — live guardrail proxy does not yet support SigV4 auth"
             else

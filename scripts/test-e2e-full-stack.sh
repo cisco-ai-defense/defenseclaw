@@ -1757,7 +1757,7 @@ phase_guardrail() {
     fi
     pass "guardrail proxy reachable"
 
-    local master_key response content err request_model
+    local master_key response content err request_model gateway_token
     request_model="${GUARDRAIL_REQUEST_MODEL:-}"
     if [ -z "$request_model" ]; then
         request_model=$(python3 - <<'PY'
@@ -1792,6 +1792,9 @@ except OSError:
 PY
 )
 
+    gateway_token="$(get_gateway_token)"
+
+    # ── 6a. Master key auth (legacy path) ──
     response=$(curl -sS --max-time 45 \
         -H "Authorization: Bearer $master_key" \
         -H "Content-Type: application/json" \
@@ -1813,11 +1816,373 @@ PY
     content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
     err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
     if echo "$content" | grep -q "E2E_OK"; then
-        pass "guardrail round-trip: LLM responded with E2E_OK"
+        pass "guardrail round-trip (master key): LLM responded with E2E_OK"
     else
-        fail "guardrail round-trip: LLM responded" "err='$err' response='$response'"
+        fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
+    fi
+
+    # ── 6b. X-DC-Auth header auth (hardened auth path) ──
+    if [ -n "$gateway_token" ]; then
+        sleep 2
+        response=$(curl -sS --max-time 45 \
+            -H "X-DC-Auth: Bearer $gateway_token" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_AUTH_OK"}], max_tokens: 20}')" \
+            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
+
+        echo "$response" | jq '.' 2>/dev/null || echo "$response"
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if echo "$content" | grep -q "E2E_AUTH_OK"; then
+            pass "guardrail round-trip (X-DC-Auth): LLM responded with E2E_AUTH_OK"
+        else
+            fail "guardrail round-trip (X-DC-Auth): LLM responded" "err='$err' response='$response'"
+        fi
+    else
+        skip "guardrail round-trip (X-DC-Auth)" "no OPENCLAW_GATEWAY_TOKEN configured"
+    fi
+
+    # ── 6c. Auth rejection: invalid token must return 401 ──
+    response=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer invalid-token-e2e" \
+        -H "X-DC-Auth: Bearer invalid-token-e2e" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"test","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
+        "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo "000")
+    if [ "$response" = "401" ]; then
+        pass "guardrail auth rejection: invalid token returns 401"
+    else
+        # When neither token nor masterKey is configured the proxy is open (returns 200).
+        if [ -z "$gateway_token" ] && [ -z "$master_key" ]; then
+            skip "guardrail auth rejection" "no auth configured — proxy is open"
+        else
+            fail "guardrail auth rejection: invalid token returns 401" "got HTTP $response"
+        fi
+    fi
+
+    # ── 6d. Passthrough: Anthropic native /v1/messages with response inspection ──
+    if echo "$request_model" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
+        local anthropic_key="${ANTHROPIC_API_KEY:-}"
+        if [ -n "$anthropic_key" ]; then
+            local pt_model
+            pt_model=$(echo "$request_model" | sed 's|^.*/||')
+            sleep 2
+            response=$(curl -sS --max-time 60 \
+                -H "Authorization: Bearer $master_key" \
+                -H "X-DC-Target-URL: https://api.anthropic.com" \
+                -H "X-AI-Auth: Bearer $anthropic_key" \
+                -H "Content-Type: application/json" \
+                -H "anthropic-version: 2023-06-01" \
+                -d "$(jq -cn --arg model "$pt_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_PASSTHROUGH_OK"}], max_tokens: 30}')" \
+                "$GUARDRAIL_URL/v1/messages" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
+
+            echo "$response" | jq '.' 2>/dev/null || echo "$response"
+            content=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)
+            err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+            if echo "$content" | grep -q "E2E_PASSTHROUGH_OK"; then
+                pass "guardrail passthrough (Anthropic /v1/messages): response received"
+            else
+                fail "guardrail passthrough (Anthropic /v1/messages): response received" "err='$err' response='$response'"
+            fi
+        else
+            skip "guardrail passthrough (Anthropic /v1/messages)" "ANTHROPIC_API_KEY not set"
+        fi
+    else
+        skip "guardrail passthrough (Anthropic /v1/messages)" "model is not Anthropic"
     fi
     phase_timer_end "Phase 6"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 6B — Provider Detection & Multi-Provider Auth
+# ---------------------------------------------------------------------------
+phase_provider_detection() {
+    echo ""
+    echo "=== Phase 6B: Provider Detection & Multi-Provider Auth [API] ==="
+    phase_timer_start
+
+    local master_key response http_code gateway_token
+    master_key=$(python3 - <<'PY'
+import hashlib
+import hmac
+import os
+
+key_file = os.path.expanduser("~/.defenseclaw/device.key")
+try:
+    with open(key_file, "rb") as f:
+        data = f.read()
+    digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
+    print(f"sk-dc-{digest}")
+except OSError:
+    print("sk-dc-local-dev")
+PY
+)
+    gateway_token="$(get_gateway_token)"
+
+    # Guardrail proxy must be running for these tests.
+    if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 5 1; then
+        skip "provider detection" "guardrail proxy not reachable"
+        phase_timer_end "Phase 6B"
+        return
+    fi
+
+    # ── 6B-1. Provider domain inference via providers.json ──
+    # Verify that requests with X-DC-Target-URL are correctly routed by checking
+    # that Anthropic domain requests go to the passthrough handler (not 404).
+    # We use a dummy key so upstream will fail with 401, but the proxy routing
+    # itself should produce a 502 (upstream auth failure) not 400/404.
+    local providers_ok=true
+    local test_providers=(
+        "anthropic|https://api.anthropic.com|/v1/messages"
+        "openai|https://api.openai.com|/v1/responses"
+        "gemini|https://generativelanguage.googleapis.com|/v1beta/models/gemini-2.0-flash:generateContent"
+    )
+
+    for entry in "${test_providers[@]}"; do
+        local pname purl ppath
+        IFS='|' read -r pname purl ppath <<< "$entry"
+        http_code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Target-URL: $purl" \
+            -H "X-AI-Auth: Bearer dummy-key-e2e" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"test","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
+            "$GUARDRAIL_URL$ppath" 2>/dev/null || echo "000")
+        # The proxy should attempt the upstream call (502 from upstream auth error)
+        # or return the upstream status — NOT 400 (missing target) or 404 (no handler).
+        if [ "$http_code" != "400" ] && [ "$http_code" != "404" ] && [ "$http_code" != "000" ]; then
+            pass "provider detection: $pname domain routes correctly (HTTP $http_code)"
+        else
+            fail "provider detection: $pname domain routes correctly" "got HTTP $http_code"
+            providers_ok=false
+        fi
+    done
+
+    # ── 6B-2. Bedrock domain narrowing ──
+    # Ensure generic amazonaws.com does NOT match as a provider, but bedrock-runtime does.
+    local bedrock_generic bedrock_specific
+    bedrock_generic=$(python3 - <<'PY'
+import json
+import os
+
+providers_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath("$0"))), "internal", "configs", "providers.json")
+# Fallback: check common paths
+for p in [
+    os.path.expanduser("~/.defenseclaw/providers.json"),
+    "internal/configs/providers.json",
+]:
+    if os.path.exists(p):
+        providers_path = p
+        break
+
+try:
+    with open(providers_path) as f:
+        cfg = json.load(f)
+    domains = []
+    for provider in cfg.get("providers", []):
+        domains.extend(provider.get("domains", []))
+    # Check if generic "amazonaws.com" appears (it should NOT)
+    print("yes" if any(d == "amazonaws.com" for d in domains) else "no")
+except Exception:
+    print("skip")
+PY
+)
+    if [ "$bedrock_generic" = "no" ]; then
+        pass "provider detection: Bedrock uses narrow domain (not generic amazonaws.com)"
+    elif [ "$bedrock_generic" = "skip" ]; then
+        skip "provider detection: Bedrock domain check" "could not read providers.json"
+    else
+        fail "provider detection: Bedrock uses narrow domain" "generic amazonaws.com still present"
+    fi
+
+    bedrock_specific=$(python3 - <<'PY'
+import json
+import os
+
+for p in [
+    os.path.expanduser("~/.defenseclaw/providers.json"),
+    "internal/configs/providers.json",
+]:
+    if os.path.exists(p):
+        with open(p) as f:
+            cfg = json.load(f)
+        for provider in cfg.get("providers", []):
+            if provider.get("name") == "bedrock":
+                domains = provider.get("domains", [])
+                print("yes" if any("bedrock-runtime" in d for d in domains) else "no")
+                raise SystemExit(0)
+print("skip")
+PY
+)
+    if [ "$bedrock_specific" = "yes" ]; then
+        pass "provider detection: Bedrock domain is bedrock-runtime prefix"
+    elif [ "$bedrock_specific" = "skip" ]; then
+        skip "provider detection: Bedrock specific domain" "could not verify"
+    else
+        fail "provider detection: Bedrock domain is bedrock-runtime prefix" "not found in providers.json"
+    fi
+
+    # ── 6B-3. Auth header de-duplication ──
+    # Send a request with BOTH Authorization and x-api-key headers.
+    # The proxy should strip duplicates and only set the correct one per provider.
+    # For Anthropic target, upstream should get x-api-key ONLY.
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        response=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Target-URL: https://api.anthropic.com" \
+            -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "anthropic-version: 2023-06-01" \
+            -d '{"model":"claude-sonnet-4-5-20250514","messages":[{"role":"user","content":"Reply: OK"}],"max_tokens":5}' \
+            "$GUARDRAIL_URL/v1/messages" 2>/dev/null || echo "000")
+        # If the proxy de-dups correctly, Anthropic should accept (200) or
+        # return a model error (4xx) — but NOT 400 from duplicate auth.
+        if [ "$response" != "000" ] && [ "$response" != "400" ]; then
+            pass "provider auth: Anthropic request with duplicate headers succeeds (HTTP $response)"
+        else
+            fail "provider auth: Anthropic request with duplicate headers" "got HTTP $response"
+        fi
+    else
+        skip "provider auth: Anthropic duplicate header dedup" "ANTHROPIC_API_KEY not set"
+    fi
+
+    # ── 6B-4. Extension providers.json matches gateway providers.json ──
+    local providers_match
+    providers_match=$(python3 - <<'PY'
+import json
+import os
+
+ext_path = None
+int_path = None
+for root, dirs, files in os.walk("."):
+    if "providers.json" in files:
+        full = os.path.join(root, "providers.json")
+        if "extensions" in full or "plugin" in full:
+            ext_path = full
+        elif "configs" in full or "internal" in full:
+            int_path = full
+
+if not ext_path or not int_path:
+    print("skip")
+else:
+    with open(ext_path) as f:
+        ext = json.load(f)
+    with open(int_path) as f:
+        internal = json.load(f)
+    if ext == internal:
+        print("match")
+    else:
+        print("mismatch")
+PY
+)
+    if [ "$providers_match" = "match" ]; then
+        pass "provider detection: extension and internal providers.json are in sync"
+    elif [ "$providers_match" = "skip" ]; then
+        skip "provider detection: providers.json sync" "could not find both files"
+    else
+        fail "provider detection: extension and internal providers.json are in sync" "files differ"
+    fi
+
+    phase_timer_end "Phase 6B"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 6C — Upgrade Command
+# ---------------------------------------------------------------------------
+phase_upgrade_command() {
+    echo ""
+    echo "=== Phase 6C: Upgrade Command [CLI] ==="
+    phase_timer_start
+
+    local current_version upgrade_help upgrade_output
+
+    # ── 6C-1. Verify upgrade command exists and has expected flags ──
+    upgrade_help=$(defenseclaw upgrade --help 2>&1 || true)
+    if echo "$upgrade_help" | grep -q "\-\-version"; then
+        pass "upgrade command: --version flag present"
+    else
+        fail "upgrade command: --version flag present" "flag not found in help output"
+    fi
+    if echo "$upgrade_help" | grep -q "\-\-yes\|\-y"; then
+        pass "upgrade command: --yes/-y flag present"
+    else
+        fail "upgrade command: --yes/-y flag present" "flag not found in help output"
+    fi
+
+    # ── 6C-2. Verify current version is importable ──
+    current_version=$(python3 -c "from defenseclaw import __version__; print(__version__)" 2>/dev/null || echo "")
+    if [ -n "$current_version" ]; then
+        pass "upgrade command: current version importable ($current_version)"
+    else
+        fail "upgrade command: current version importable" "could not import __version__"
+    fi
+
+    # ── 6C-3. Upgrade to same version (should detect and show "Already at latest") ──
+    if [ -n "$current_version" ]; then
+        upgrade_output=$(defenseclaw upgrade --version "$current_version" --yes 2>&1 || true)
+        echo "$upgrade_output" | head -20
+        if echo "$upgrade_output" | grep -qi "already\|upgrade complete\|upgraded"; then
+            pass "upgrade command: same-version upgrade handled gracefully"
+        else
+            # The upgrade may fail due to missing GitHub release — that's OK for e2e.
+            # What matters is the command runs and detects the version comparison.
+            if echo "$upgrade_output" | grep -qi "target version.*$current_version\|installed version.*$current_version"; then
+                pass "upgrade command: version detection works (upgrade may fail for unreleased version)"
+            else
+                fail "upgrade command: same-version upgrade handled gracefully" "unexpected output"
+            fi
+        fi
+    else
+        skip "upgrade command: same-version upgrade" "could not determine current version"
+    fi
+
+    # ── 6C-4. Upgrade platform detection ──
+    local platform_output
+    platform_output=$(python3 - <<'PY'
+import platform
+system = platform.system().lower()
+machine = platform.machine().lower()
+if machine in ("x86_64", "amd64"):
+    arch = "amd64"
+elif machine in ("aarch64", "arm64"):
+    arch = "arm64"
+else:
+    arch = "unsupported"
+print(f"{system}/{arch}")
+PY
+)
+    if echo "$platform_output" | grep -Eq "^(darwin|linux)/(amd64|arm64)$"; then
+        pass "upgrade command: platform detection ($platform_output)"
+    else
+        fail "upgrade command: platform detection" "got $platform_output"
+    fi
+
+    # ── 6C-5. Backup creation works ──
+    local backup_dir
+    backup_dir=$(python3 - <<'PY'
+import datetime
+import os
+
+data_dir = os.path.expanduser("~/.defenseclaw")
+backup_root = os.path.join(data_dir, "backups")
+if os.path.isdir(backup_root):
+    entries = sorted(os.listdir(backup_root))
+    if entries:
+        print(os.path.join(backup_root, entries[-1]))
+    else:
+        print("")
+else:
+    print("")
+PY
+)
+    if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
+        pass "upgrade command: backup directory exists ($backup_dir)"
+    else
+        skip "upgrade command: backup directory" "no backups found (expected if upgrade was not fully run)"
+    fi
+
+    phase_timer_end "Phase 6C"
 }
 
 # ---------------------------------------------------------------------------
@@ -2456,6 +2821,8 @@ phase_splunk() {
 
     if is_full_live; then
         splunk_assert_results "Splunk: guardrail verdict events present" 'action=guardrail-verdict | head 5'
+        splunk_assert_results "Splunk: guardrail completion inspection events present" '(action=guardrail-verdict) details="*completion*" | head 5'
+        splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) details="*passthrough*anthropic*" | head 5'
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
         splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
         if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
@@ -2550,6 +2917,8 @@ main() {
     phase_policy
     phase_skill_api
     phase_guardrail
+    phase_provider_detection
+    phase_upgrade_command
     phase_agent_chat
     phase_plugin_lifecycle
     phase_recovery
