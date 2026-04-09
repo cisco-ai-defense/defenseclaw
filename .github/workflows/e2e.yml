@@ -120,8 +120,8 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
-            docker compose -f docker-compose.ci.yml up -d
+          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
@@ -403,8 +403,8 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
-            docker compose -f docker-compose.ci.yml up -d
+          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
