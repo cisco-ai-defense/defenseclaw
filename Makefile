@@ -65,8 +65,8 @@ pycli:
 	uv venv $(VENV) --python 3.12 --clear
 	uv pip install -e . --python $(VENV)/bin/python
 	@mkdir -p $(INSTALL_DIR)
-	@ln -sf $(CURDIR)/$(VENV)/bin/defenseclaw $(INSTALL_DIR)/defenseclaw
-	@ln -sf $(CURDIR)/$(VENV)/bin/litellm $(INSTALL_DIR)/litellm 2>/dev/null || true
+	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
+	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
 
 dev-pycli: pycli
 	uv pip install --group dev --python $(VENV)/bin/python
