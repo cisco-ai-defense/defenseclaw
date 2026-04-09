@@ -115,6 +115,14 @@ jobs:
               print("OpenClaw config already clean")
           PY
 
+      - name: Reclaim disk space for Splunk
+        run: |
+          echo "Disk before cleanup:"
+          df -h / | tail -1
+          docker system prune -af --volumes 2>/dev/null || true
+          echo "Disk after cleanup:"
+          df -h / | tail -1
+
       - name: Start Splunk
         run: |
           cd bundles/splunk_local_bridge
@@ -369,6 +377,14 @@ jobs:
           else:
               print("OpenClaw config already clean")
           PY
+
+      - name: Reclaim disk space for Splunk
+        run: |
+          echo "Disk before cleanup:"
+          df -h / | tail -1
+          docker system prune -af --volumes 2>/dev/null || true
+          echo "Disk after cleanup:"
+          df -h / | tail -1
 
       - name: Start Splunk
         run: |

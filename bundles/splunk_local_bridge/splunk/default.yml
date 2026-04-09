@@ -55,6 +55,8 @@ splunk:
             allowRemoteLogin: always
           kvstore:
             disabled: true
+          diskUsage:
+            minFreeSpace: 500
     - key: limits
       value:
         directory: /opt/splunk/etc/system/local
