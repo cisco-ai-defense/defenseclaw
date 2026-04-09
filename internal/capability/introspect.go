@@ -59,11 +59,7 @@ func IntrospectMCP(path string) ([]ToolInfo, error) {
 
 	tools := make([]ToolInfo, 0, len(manifest.Tools))
 	for _, t := range manifest.Tools {
-		tools = append(tools, ToolInfo{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  t.Parameters,
-		})
+		tools = append(tools, ToolInfo(t))
 	}
 
 	return tools, nil
