@@ -80,12 +80,18 @@ func GeneratePolicy(req GenerateRequest) *AgentPolicy {
 // WritePolicy marshals the policy to YAML and writes it to the given directory.
 // Returns the full path of the written file.
 func WritePolicy(pol *AgentPolicy, dir string) (string, error) {
+	// Sanitize agent name to prevent path traversal
+	base := filepath.Base(pol.Agent)
+	if base != pol.Agent || base == "." || base == ".." {
+		return "", fmt.Errorf("capability: invalid agent name %q", pol.Agent)
+	}
+
 	data, err := yaml.Marshal(pol)
 	if err != nil {
 		return "", fmt.Errorf("capability: marshal policy: %w", err)
 	}
 
-	filename := pol.Agent + ".capability.yaml"
+	filename := base + ".capability.yaml"
 	path := filepath.Join(dir, filename)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -102,8 +108,14 @@ func WritePolicy(pol *AgentPolicy, dir string) (string, error) {
 // ApprovePolicy reads auto-<agent>.capability.yaml, sets approved=true,
 // writes <agent>.capability.yaml, and removes the auto file.
 func ApprovePolicy(dir, agent string) (*AgentPolicy, error) {
-	autoFile := filepath.Join(dir, "auto-"+agent+".capability.yaml")
-	manualFile := filepath.Join(dir, agent+".capability.yaml")
+	// Sanitize agent name to prevent path traversal
+	base := filepath.Base(agent)
+	if base != agent || base == "." || base == ".." {
+		return nil, fmt.Errorf("capability: invalid agent name %q", agent)
+	}
+
+	autoFile := filepath.Join(dir, "auto-"+base+".capability.yaml")
+	manualFile := filepath.Join(dir, base+".capability.yaml")
 
 	// Check manual file doesn't already exist
 	if _, err := os.Stat(manualFile); err == nil {

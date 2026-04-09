@@ -47,6 +47,9 @@ type skillManifest struct {
 // IntrospectMCP parses an MCP server's JSON manifest file and returns
 // per-tool metadata. Returns an empty slice (not error) for empty tools arrays.
 func IntrospectMCP(path string) ([]ToolInfo, error) {
+	// Canonicalize to prevent path traversal
+	path = filepath.Clean(path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("introspect: read MCP manifest %s: %w", path, err)
@@ -69,7 +72,9 @@ func IntrospectMCP(path string) ([]ToolInfo, error) {
 // skill name and declared permissions. The path parameter is the skill
 // directory (containing skill.yaml).
 func IntrospectSkill(dir string) (*SkillInfo, error) {
-	path := filepath.Join(dir, "skill.yaml")
+	// Canonicalize to prevent path traversal
+	path := filepath.Clean(filepath.Join(dir, "skill.yaml"))
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("introspect: read skill manifest %s: %w", path, err)
