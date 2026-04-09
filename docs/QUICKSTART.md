@@ -105,12 +105,15 @@ These values can vary if the preset or config is overridden:
 - index `defenseclaw_local`
 - source `defenseclaw`
 - sourcetype `defenseclaw:json`
+- Splunk starts directly in **Free mode** from day 1
+- Splunk Web does not require local user credentials in the default bundled profile
+- A browser can briefly route through Splunk's account page before it auto-enters the app
 
 Recommended local flow:
 
 1. Run `defenseclaw setup splunk --logs --accept-splunk-license --non-interactive`
 2. Start the DefenseClaw sidecar
-3. Open local Splunk using the printed URL and credentials
+3. Open local Splunk using the printed URL
 4. Validate data in local Splunk
 
 Scope guardrails for this local Splunk preset:

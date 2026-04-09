@@ -688,8 +688,51 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Local Splunk Enterprise configured", result.output)
+        self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
         mock_apply_logs_config.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_bootstrap_bridge_free_mode(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.splunk.enabled)
+        self.assertEqual(self.app.cfg.splunk.hec_endpoint, "http://127.0.0.1:8088/services/collector/event")
+        self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        self.assertIn("Local Splunk is ready", result.output)
+        self.assertIn("License: Free", result.output)
+        self.assertIn("Web login: not required", result.output)
+        self.assertNotIn("Username:", result.output)
+        self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
+        self.assertIn("Free mode is active, so no local Splunk login is required.", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
@@ -705,7 +748,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertFalse(self.app.cfg.splunk.enabled)
-        self.assertNotIn("Local Splunk Enterprise configured", result.output)
+        self.assertNotIn("Local Splunk configured (Free mode from day 1)", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker")
     def test_setup_splunk_logs_interactive_decline_license(self, mock_preflight):

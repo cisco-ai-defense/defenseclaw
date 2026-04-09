@@ -26,12 +26,15 @@ from typing import Any
 
 import requests
 
+PLUGIN_MUTATION_TIMEOUT = 90
+
 
 class OrchestratorClient:
     def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5,
-                 token: str = "") -> None:
+                 token: str = "", plugin_timeout: int | None = None) -> None:
         self.base_url = f"http://{host}:{port}"
         self.timeout = timeout
+        self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
         self._session = requests.Session()
         self._session.headers["X-DefenseClaw-Client"] = "python-cli"
         if token:
@@ -88,7 +91,7 @@ class OrchestratorClient:
         resp = self._session.post(
             f"{self.base_url}/plugin/disable",
             json={"pluginName": plugin_name},
-            timeout=self.timeout,
+            timeout=self.plugin_timeout,
         )
         resp.raise_for_status()
         return resp.json()
@@ -97,7 +100,7 @@ class OrchestratorClient:
         resp = self._session.post(
             f"{self.base_url}/plugin/enable",
             json={"pluginName": plugin_name},
-            timeout=self.timeout,
+            timeout=self.plugin_timeout,
         )
         resp.raise_for_status()
         return resp.json()

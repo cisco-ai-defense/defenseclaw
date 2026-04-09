@@ -27,11 +27,10 @@ mode, and it does not proxy or replace a direct O11y integration.
 
 - [default.yml](default.yml)
   - standalone bootstrap
+  - starts Splunk in Free mode from day 1 through the container env contract
   - direct HEC configuration
   - local index contract
   - retention and runtime guardrails
-  - restricted role definition
-  - default namespace for the restricted user
 - `apps/defenseclaw_local_mode/`
   - source for the local landing app
   - nav, macros, eventtypes, saved searches, and phase-based observability dashboards
@@ -40,17 +39,27 @@ mode, and it does not proxy or replace a direct O11y integration.
   - generated app archive location
 - [package_local_mode_app.sh](package_local_mode_app.sh)
   - packages the app source into `build/defenseclaw_local_mode.tgz`
-- `ansible/create_local_user.yml`
-  - creates or updates `defenseclaw_local_user`
-  - assigns the restricted role
-  - sets `defaultApp=defenseclaw_local_mode`
-
 ## Supported Pattern
 
 This repo uses the native `docker-splunk` / `splunk-ansible` bootstrap path first:
 
 - app installation uses `splunk.apps_location`
 - config files are emitted from `default.yml`
-- the remaining custom Ansible is limited to the restricted local user bootstrap
+- the remaining custom Ansible is limited to product telemetry and support-layer sync
 
 That is intentional. If a future change can be expressed through `docker-splunk` or `splunk-ansible` configuration, prefer that over new custom tasks.
+
+## Free-From-Day-1 Behavior
+
+The bundled DefenseClaw local profile starts Splunk directly in **Free mode**.
+
+That means:
+
+- no temporary 60-day trial period
+- alerts are disabled in Free mode
+- no local Splunk user bootstrap inside the bundle
+- no credential prompt for Splunk Web in the default local profile
+- if someone needs Enterprise behavior later, they must install a real Enterprise license
+
+For more detail on the Free-tier behavior and limits, see
+[About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).

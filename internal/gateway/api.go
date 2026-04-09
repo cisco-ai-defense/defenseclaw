@@ -204,7 +204,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
@@ -239,7 +239,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
@@ -278,10 +278,12 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
-	if err := a.client.DisablePlugin(ctx, req.PluginName); err != nil {
+	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+		return a.client.DisablePlugin(callCtx, req.PluginName)
+	}); err != nil {
 		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -313,10 +315,12 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
-	if err := a.client.EnablePlugin(ctx, req.PluginName); err != nil {
+	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+		return a.client.EnablePlugin(callCtx, req.PluginName)
+	}); err != nil {
 		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -325,6 +329,43 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogAction("api-plugin-enable", req.PluginName, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "pluginName": req.PluginName})
+}
+
+const gatewayMutationRetryDelay = 2 * time.Second
+const gatewayMutationMaxAttempts = 20
+const pluginGatewayMutationTimeout = 90 * time.Second
+
+func isRetryableGatewayMutationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "gateway: not connected") ||
+		strings.Contains(msg, "websocket: close sent") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "connection refused")
+}
+
+func (a *APIServer) retryGatewayMutation(ctx context.Context, fn func(context.Context) error) error {
+	var lastErr error
+	for attempt := 1; attempt <= gatewayMutationMaxAttempts; attempt++ {
+		lastErr = fn(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableGatewayMutationError(lastErr) || attempt == gatewayMutationMaxAttempts {
+			return lastErr
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gatewayMutationRetryDelay):
+		}
+	}
+	return lastErr
 }
 
 type configPatchRequest struct {
@@ -1024,7 +1065,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "guardrail-proxy", tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", tIn, tOut)
 		}
 	}
 

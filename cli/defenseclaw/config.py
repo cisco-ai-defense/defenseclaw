@@ -577,12 +577,16 @@ class Config:
         home = self.claw_home_dir()
         dirs: list[str] = []
         oc = _read_openclaw_config(self.claw.config_file)
+        workspace = os.path.join(home, "workspace")
         if oc:
             ws = oc.get("agents", {}).get("defaults", {}).get("workspace", "")
             if ws:
-                dirs.append(os.path.join(_expand(ws), "skills"))
+                workspace = _expand(ws)
+            dirs.append(os.path.join(workspace, "skills"))
             for d in oc.get("skills", {}).get("load", {}).get("extraDirs", []):
                 dirs.append(_expand(d))
+        else:
+            dirs.append(os.path.join(workspace, "skills"))
         dirs.append(os.path.join(home, "skills"))
         return _dedup(dirs)
 

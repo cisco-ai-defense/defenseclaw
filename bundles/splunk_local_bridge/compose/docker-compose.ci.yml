@@ -6,8 +6,10 @@ services:
     env_file:
       - ${SPLUNK_ENV_FILE:-../env/.env.example}
     ports:
-      - "127.0.0.1:8000:8000"
-      - "127.0.0.1:8088:8088"
+      # Bound to 0.0.0.0 so the runner host can expose dashboards and HEC when needed.
+      - "0.0.0.0:8000:8000"
+      - "0.0.0.0:8088:8088"
+      - "0.0.0.0:8089:8089"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
