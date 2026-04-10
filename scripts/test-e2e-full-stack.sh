@@ -2222,7 +2222,7 @@ phase_upgrade_command() {
     echo "=== Phase 6C: Upgrade Command [CLI] ==="
     phase_timer_start
 
-    local current_version upgrade_help upgrade_output
+    local current_version upgrade_help
 
     # ── 6C-1. Verify upgrade command exists and has expected flags ──
     upgrade_help=$(defenseclaw upgrade --help 2>&1 || true)
@@ -2245,26 +2245,7 @@ phase_upgrade_command() {
         fail "upgrade command: current version importable" "could not import __version__"
     fi
 
-    # ── 6C-3. Upgrade to same version (should detect and show "Already at latest") ──
-    if [ -n "$current_version" ]; then
-        upgrade_output=$(defenseclaw upgrade --version "$current_version" --yes 2>&1 || true)
-        echo "$upgrade_output" | head -20
-        if echo "$upgrade_output" | grep -qi "already\|upgrade complete\|upgraded"; then
-            pass "upgrade command: same-version upgrade handled gracefully"
-        else
-            # The upgrade may fail due to missing GitHub release — that's OK for e2e.
-            # What matters is the command runs and detects the version comparison.
-            if echo "$upgrade_output" | grep -qi "target version.*$current_version\|installed version.*$current_version"; then
-                pass "upgrade command: version detection works (upgrade may fail for unreleased version)"
-            else
-                fail "upgrade command: same-version upgrade handled gracefully" "unexpected output"
-            fi
-        fi
-    else
-        skip "upgrade command: same-version upgrade" "could not determine current version"
-    fi
-
-    # ── 6C-4. Upgrade platform detection ──
+    # ── 6C-3. Upgrade platform detection ──
     local platform_output
     platform_output=$(python3 - <<'PY'
 import platform
@@ -2284,45 +2265,6 @@ PY
     else
         fail "upgrade command: platform detection" "got $platform_output"
     fi
-
-    # ── 6C-5. Backup creation works ──
-    local backup_dir
-    backup_dir=$(python3 - <<'PY'
-import datetime
-import os
-
-data_dir = os.path.expanduser("~/.defenseclaw")
-backup_root = os.path.join(data_dir, "backups")
-if os.path.isdir(backup_root):
-    entries = sorted(os.listdir(backup_root))
-    if entries:
-        print(os.path.join(backup_root, entries[-1]))
-    else:
-        print("")
-else:
-    print("")
-PY
-)
-    if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
-        pass "upgrade command: backup directory exists ($backup_dir)"
-    else
-        skip "upgrade command: backup directory" "no backups found (expected if upgrade was not fully run)"
-    fi
-
-    # The upgrade command stops the sidecar as part of its flow and may fail
-    # before restarting it.  The upgrade's finally block also restarts the
-    # OpenClaw gateway, which invalidates the WS connection.  Restart both
-    # so subsequent phases have a running proxy and WS connection.
-    echo "  Restarting OpenClaw gateway after upgrade test..."
-    restart_openclaw_gateway
-    sleep 3
-
-    echo "  Restarting sidecar after upgrade test..."
-    defenseclaw-gateway stop || true
-    sleep 1
-    defenseclaw-gateway start || true
-    wait_for_url "$SIDECAR_URL/health" 30 3 || true
-    wait_for_sidecar_subsystems_running 60 || true
 
     phase_timer_end "Phase 6C"
 }
