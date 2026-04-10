@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -69,6 +70,7 @@ class _StoreTestBase(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         os.unlink(self.db_path)
+        shutil.rmtree(self.policy_dir, ignore_errors=True)
 
 
 class TestEvaluateAdmissionBlocked(_StoreTestBase):
@@ -158,6 +160,31 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
         )
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
+
+    def test_workspace_codeguard_path_allows(self):
+        rego_dir = os.path.join(self.policy_dir, "rego")
+        self._write_data_json(rego_dir, {
+            "config": {
+                "allow_list_bypass_scan": True,
+                "scan_on_install": True,
+            },
+            "actions": {},
+            "first_party_allow_list": [
+                {
+                    "target_type": "skill",
+                    "target_name": "codeguard",
+                    "reason": "first-party",
+                    "source_path_contains": [".openclaw/workspace/skills", ".openclaw/skills"],
+                },
+            ],
+        })
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="skill", name="codeguard",
+            source_path="/home/user/.openclaw/workspace/skills/codeguard",
+        )
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "policy-allow")
 
 
 class TestEvaluateAdmissionFirstPartyNoBypass(_StoreTestBase):
@@ -335,7 +362,12 @@ class TestLoadAdmissionPolicy(unittest.TestCase):
         policy = load_admission_policy("/nonexistent")
         self.assertTrue(policy.allow_list_bypass_scan)
         self.assertTrue(policy.scan_on_install)
-        self.assertEqual(len(policy.actions), 0)
+        self.assertEqual(policy.actions["HIGH"].install, "block")
+        self.assertEqual(policy.actions["HIGH"].runtime, "disable")
+        self.assertEqual(policy.actions["MEDIUM"].install, "none")
+        self.assertEqual(policy.scanner_overrides["mcp"]["MEDIUM"].install, "block")
+        self.assertIn(("plugin", "defenseclaw"), policy.first_party_allow)
+        self.assertIn(("skill", "codeguard"), policy.first_party_allow)
 
     def test_valid_data_json(self):
         tmp = tempfile.mkdtemp()

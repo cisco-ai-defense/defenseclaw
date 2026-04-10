@@ -27,8 +27,8 @@ type FallbackProfile struct {
 	FirstPartyAllow     map[string]firstPartyEntry
 }
 
-func LoadFallbackProfile(regoDir string) *FallbackProfile {
-	profile := &FallbackProfile{
+func defaultFallbackProfile() *FallbackProfile {
+	return &FallbackProfile{
 		AllowListBypassScan: true,
 		ScanOnInstall:       true,
 		Actions: map[string]fallbackAction{
@@ -38,9 +38,31 @@ func LoadFallbackProfile(regoDir string) *FallbackProfile {
 			"LOW":      {Runtime: "allow", File: "none", Install: "none"},
 			"INFO":     {Runtime: "allow", File: "none", Install: "none"},
 		},
-		ScannerOverrides: map[string]map[string]fallbackAction{},
-		FirstPartyAllow:  map[string]firstPartyEntry{},
+		ScannerOverrides: map[string]map[string]fallbackAction{
+			"mcp": {
+				"MEDIUM": {Runtime: "block", File: "quarantine", Install: "block"},
+				"LOW":    {Runtime: "block", File: "none", Install: "none"},
+			},
+			"plugin": {
+				"HIGH":   {Runtime: "block", File: "quarantine", Install: "block"},
+				"MEDIUM": {Runtime: "allow", File: "none", Install: "none"},
+			},
+		},
+		FirstPartyAllow: map[string]firstPartyEntry{
+			firstPartyKey("plugin", "defenseclaw"): {
+				Reason:             "first-party DefenseClaw plugin",
+				SourcePathContains: []string{".defenseclaw", "extensions/defenseclaw"},
+			},
+			firstPartyKey("skill", "codeguard"): {
+				Reason:             "first-party DefenseClaw skill",
+				SourcePathContains: []string{".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"},
+			},
+		},
 	}
+}
+
+func LoadFallbackProfile(regoDir string) *FallbackProfile {
+	profile := defaultFallbackProfile()
 	if regoDir == "" {
 		return profile
 	}
@@ -57,7 +79,7 @@ func LoadFallbackProfile(regoDir string) *FallbackProfile {
 		} `json:"config"`
 		Actions          map[string]fallbackAction            `json:"actions"`
 		ScannerOverrides map[string]map[string]fallbackAction `json:"scanner_overrides"`
-		FirstPartyAllow []struct {
+		FirstPartyAllow  []struct {
 			TargetType         string   `json:"target_type"`
 			TargetName         string   `json:"target_name"`
 			Reason             string   `json:"reason"`
@@ -98,7 +120,7 @@ func LoadFallbackProfile(regoDir string) *FallbackProfile {
 
 func EvaluateAdmissionFallback(input AdmissionInput, profile *FallbackProfile) *AdmissionOutput {
 	if profile == nil {
-		profile = LoadFallbackProfile("")
+		profile = defaultFallbackProfile()
 	}
 
 	if blocked, reason := fallbackListEntryReason(input.BlockList, input.TargetType, input.TargetName); blocked {

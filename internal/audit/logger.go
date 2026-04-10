@@ -195,9 +195,11 @@ func (l *Logger) forwardToSplunk(e Event) {
 		return
 	}
 	if shouldFlushSplunkImmediately(e.Action) {
-		if err := l.splunk.Flush(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: splunk flush: %v\n", err)
-		}
+		go func() {
+			if err := l.splunk.Flush(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: splunk flush: %v\n", err)
+			}
+		}()
 	}
 }
 

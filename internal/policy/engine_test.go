@@ -212,9 +212,9 @@ runtime_action := "allow" if {
 			"INFO":     map[string]string{"runtime": "allow", "file": "none", "install": "none"},
 		},
 		"scanner_overrides": map[string]interface{}{},
-		"first_party_allow_list": []map[string]string{
-			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin"},
-			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill"},
+		"first_party_allow_list": []map[string]interface{}{
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": []string{".defenseclaw", ".openclaw/extensions"}},
+			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": []string{".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills"}},
 		},
 	}
 

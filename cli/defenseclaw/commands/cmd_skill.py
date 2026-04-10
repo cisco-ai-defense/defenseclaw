@@ -657,6 +657,21 @@ def _apply_scan_enforcement(
             app.logger.log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
 
 
+def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:
+    """Best-effort runtime re-enable; returns True only on confirmed success."""
+    client = _sidecar_client(app)
+    try:
+        resp = client.enable_skill(skill_name)
+    except Exception as exc:
+        click.echo(f"error: gateway enable failed: {exc}", err=True)
+        return False
+
+    if resp.get("status") != "enabled":
+        click.echo(f"error: gateway returned unexpected response: {resp}", err=True)
+        return False
+    return True
+
+
 def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False) -> None:
     from defenseclaw.enforce import PolicyEngine
 
@@ -1052,27 +1067,6 @@ def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
     return (path, None)
 
 
-def _find_skill_in_dir(base: str, skill_name: str) -> str | None:
-    """Find the skill directory after clawhub install."""
-    # Direct match
-    candidate = os.path.join(base, skill_name)
-    if os.path.isdir(candidate):
-        return candidate
-
-    # Might be inside a skills/ subdirectory
-    candidate = os.path.join(base, "skills", skill_name)
-    if os.path.isdir(candidate):
-        return candidate
-
-    # Check if there's a SKILL.md anywhere
-    for root, dirs, files in os.walk(base):
-        if "SKILL.md" in files:
-            return root
-        dirs[:] = [d for d in dirs if d != "node_modules"]
-
-    return None
-
-
 def _print_result(name: str, result) -> None:
     click.echo(f"  Skill:    {name}")
     click.echo(f"  Target:   {result.target}")
@@ -1170,9 +1164,22 @@ def unblock(app: AppContext, name: str) -> None:
 
     entry = pe.get_action("skill", skill_name)
     saved_path = entry.source_path if entry else ""
+    runtime_disabled = bool(entry and entry.actions.runtime == "disable")
 
-    pe.remove_action("skill", skill_name)
-    click.secho(f"[skill] {skill_name!r} all enforcement state cleared (block/quarantine/disable)", fg="green")
+    runtime_cleared = True
+    if runtime_disabled:
+        runtime_cleared = _enable_skill_via_gateway(app, skill_name)
+
+    if runtime_cleared:
+        pe.remove_action("skill", skill_name)
+        click.secho(f"[skill] {skill_name!r} all enforcement state cleared (block/quarantine/disable)", fg="green")
+    else:
+        pe.unblock("skill", skill_name)
+        pe.clear_quarantine("skill", skill_name)
+        click.secho(
+            f"[skill] {skill_name!r} install/file enforcement cleared; runtime disable remains until the gateway is reachable",
+            fg="yellow",
+        )
     if saved_path:
         restore_hint = f"--path \"{saved_path}\""
     else:
@@ -1208,24 +1215,27 @@ def allow(app: AppContext, name: str, reason: str) -> None:
     if not reason:
         reason = "manual allow via CLI"
 
-    pe.allow("skill", skill_name, reason)
+    entry = pe.get_action("skill", skill_name)
+    runtime_disabled = bool(entry and entry.actions.runtime == "disable")
+    runtime_cleared = True
+    if runtime_disabled:
+        runtime_cleared = _enable_skill_via_gateway(app, skill_name)
 
-    # pe.allow() already cleared file/runtime enforcement in the DB.
-    # Best-effort gateway sync so the running process also re-enables.
-    try:
-        client = _sidecar_client(app)
-        client.enable_skill(skill_name)
-    except Exception:
-        click.echo(
-            f"[skill] note: could not re-enable {skill_name!r} via gateway — "
-            "the sidecar will pick up the DB state on next reconcile, or "
-            "run 'defenseclaw skill enable' manually", err=True,
-        )
+    if runtime_cleared:
+        pe.allow("skill", skill_name, reason)
+    else:
+        app.store.set_action_field("skill", skill_name, "install", "allow", reason)
 
     skill_path = _resolve_path(app, skill_name)
     if skill_path:
         pe.set_source_path("skill", skill_name, skill_path)
-    click.secho(f"[skill] {skill_name!r} added to allow list", fg="green")
+    if runtime_cleared:
+        click.secho(f"[skill] {skill_name!r} added to allow list", fg="green")
+    else:
+        click.secho(
+            f"[skill] {skill_name!r} added to allow list; runtime disable remains until the gateway is reachable",
+            fg="yellow",
+        )
 
     if app.logger:
         app.logger.log_action("skill-allow", skill_name, f"reason={reason}")

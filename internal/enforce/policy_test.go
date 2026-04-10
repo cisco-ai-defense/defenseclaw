@@ -121,19 +121,55 @@ func TestPolicyEngineNilStore(t *testing.T) {
 }
 
 func TestPolicyEngineAllowPartialCleanupError(t *testing.T) {
-	store := testStore(t)
+	dbPath := filepath.Join(t.TempDir(), "cleanup-test.db")
+	store, err := audit.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Store.Init: %v", err)
+	}
+
 	pe := NewPolicyEngine(store)
 
-	// Set up quarantine and disable, then close the store to force errors
 	pe.Quarantine("skill", "fail-skill", "test")
 	pe.Disable("skill", "fail-skill", "test")
 
-	// Allow with active store should succeed and clear both
-	err := pe.Allow("skill", "fail-skill", "user")
+	store.Close()
+
+	err = pe.Allow("skill", "fail-skill", "user")
+	if err == nil {
+		t.Fatal("expected error from Allow on closed store")
+	}
+	if !strings.Contains(err.Error(), "database is closed") && !strings.Contains(err.Error(), "partial cleanup") {
+		t.Errorf("expected DB or cleanup error, got: %v", err)
+	}
+}
+
+func TestPolicyEngineAllowCleansUpEnforcement(t *testing.T) {
+	store := testStore(t)
+	pe := NewPolicyEngine(store)
+
+	pe.Quarantine("skill", "q-skill", "test")
+	pe.Disable("skill", "q-skill", "test")
+
+	isQ, _ := pe.IsQuarantined("skill", "q-skill")
+	if !isQ {
+		t.Fatal("expected quarantine before allow")
+	}
+
+	err := pe.Allow("skill", "q-skill", "user approved")
 	if err != nil {
-		// If clear succeeded, no error; if failed, error contains "partial cleanup"
-		if !strings.Contains(err.Error(), "partial cleanup") {
-			t.Errorf("unexpected error: %v", err)
-		}
+		t.Fatalf("Allow: %v", err)
+	}
+
+	isQ, _ = pe.IsQuarantined("skill", "q-skill")
+	if isQ {
+		t.Error("quarantine should be cleared after allow")
+	}
+
+	isA, _ := pe.IsAllowed("skill", "q-skill")
+	if !isA {
+		t.Error("skill should be allowed after Allow call")
 	}
 }

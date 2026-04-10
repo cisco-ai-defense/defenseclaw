@@ -212,13 +212,13 @@ type ScannersConfig struct {
 }
 
 type OpenShellConfig struct {
-	Binary      string `mapstructure:"binary"        yaml:"binary"`
-	PolicyDir   string `mapstructure:"policy_dir"    yaml:"policy_dir"`
-	Mode        string `mapstructure:"mode"           yaml:"mode,omitempty"`
-	Version     string `mapstructure:"version"        yaml:"version,omitempty"`
-	SandboxHome string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
-	AutoPair    *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
-	HostNetworking *bool `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
+	Binary         string `mapstructure:"binary"        yaml:"binary"`
+	PolicyDir      string `mapstructure:"policy_dir"    yaml:"policy_dir"`
+	Mode           string `mapstructure:"mode"           yaml:"mode,omitempty"`
+	Version        string `mapstructure:"version"        yaml:"version,omitempty"`
+	SandboxHome    string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
+	AutoPair       *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
+	HostNetworking *bool  `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
 }
 
 const DefaultOpenShellVersion = "0.6.2"
@@ -665,7 +665,7 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
-	viper.SetDefault("guardrail.scanner_mode", "local")
+	viper.SetDefault("guardrail.scanner_mode", "both")
 	viper.SetDefault("guardrail.host", "localhost")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.block_message", "")

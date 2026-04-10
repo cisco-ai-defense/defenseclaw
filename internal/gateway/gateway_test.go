@@ -33,12 +33,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -2212,6 +2214,98 @@ func TestAPIEnforceAllowList(t *testing.T) {
 	}
 	if allowed[0].TargetType != "mcp" {
 		t.Errorf("target_type = %q, want mcp", allowed[0].TargetType)
+	}
+}
+
+func TestAPIEnforceAllowSkillReenablesRuntimeDisable(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), client: client, store: store, logger: logger}
+
+	pe := enforce.NewPolicyEngine(store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	body := []byte(`{"target_type":"skill","target_name":"blocked-skill","reason":"reviewed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/enforce/allow", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleEnforceAllow(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	rpc := drainRPC(t, received)
+	if rpc.Method != "skills.update" {
+		t.Fatalf("Method = %q, want skills.update", rpc.Method)
+	}
+
+	allowed, err := pe.IsAllowed("skill", "blocked-skill")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected allowed after API allow")
+	}
+
+	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil {
+		t.Fatalf("HasAction: %v", err)
+	}
+	if disabled {
+		t.Fatal("runtime disable should be cleared after successful re-enable")
+	}
+}
+
+func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
+	srv := startMockGW(t, func(t *testing.T, conn *websocket.Conn) {
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req RequestFrame
+			json.Unmarshal(raw, &req)
+			resp, _ := json.Marshal(ResponseFrame{
+				Type: "res", ID: req.ID, OK: false,
+				Error: &FrameError{Code: "INTERNAL", Message: "server error"},
+			})
+			conn.WriteMessage(websocket.TextMessage, resp)
+		}
+	})
+	client := connectToMockGW(t, srv)
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), client: client, store: store, logger: logger}
+
+	pe := enforce.NewPolicyEngine(store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	body := []byte(`{"target_type":"skill","target_name":"blocked-skill","reason":"reviewed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/enforce/allow", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleEnforceAllow(w, req)
+	if w.Result().StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusBadGateway)
+	}
+
+	allowed, err := pe.IsAllowed("skill", "blocked-skill")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if allowed {
+		t.Fatal("skill should not become allowed when gateway re-enable fails")
+	}
+
+	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil {
+		t.Fatalf("HasAction: %v", err)
+	}
+	if !disabled {
+		t.Fatal("runtime disable should remain when gateway re-enable fails")
 	}
 }
 

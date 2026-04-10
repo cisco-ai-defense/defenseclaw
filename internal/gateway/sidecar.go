@@ -308,8 +308,8 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	return err
 }
 
-// handleAdmissionResult processes watcher verdicts. For blocked/rejected skills
-// and plugins, it also disables them at the gateway level when take_action is enabled.
+// handleAdmissionResult processes watcher verdicts. It only forwards runtime
+// disable actions to the gateway when the watcher actually requested them.
 func (s *Sidecar) handleAdmissionResult(r watcher.AdmissionResult) {
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher verdict: %s %s — %s (%s)\n",
 		r.Event.Type, r.Event.Name, r.Verdict, r.Reason)
@@ -342,34 +342,39 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 
 	var actions []string
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
-			r.Event.Name, err)
-	} else {
-		actions = append(actions, "disabled")
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
-		_ = s.logger.LogAction("sidecar-watcher-disable", r.Event.Name,
-			fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
+	if r.FileAction == "quarantine" {
+		actions = append(actions, "quarantined")
+	}
+	if r.Verdict == watcher.VerdictBlocked || r.InstallAction == "block" {
+		actions = append(actions, "blocked")
 	}
 
-	if strings.Contains(r.Reason, "quarantine") || strings.Contains(r.Reason, "block") {
-		actions = append(actions, "quarantined", "blocked")
+	if shouldDisableAtGateway(r) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
+				r.Event.Name, err)
+		} else {
+			actions = append(actions, "disabled")
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
+			_ = s.logger.LogAction("sidecar-watcher-disable", r.Event.Name,
+				fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
+		}
 	}
 
 	s.alertWg.Add(1)
 	go func() {
 		defer s.alertWg.Done()
-		s.sendEnforcementAlert(r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+		s.sendEnforcementAlert("skill", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
 	}()
 }
 
 // sendEnforcementAlert sends a security notification to all active sessions
 // via the gateway's sessions.send RPC so each chat learns about the enforcement.
 // Runs in a goroutine to avoid blocking the watcher callback.
-func (s *Sidecar) sendEnforcementAlert(skillName, severity string, findings int, actions []string, reason string) {
+func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string, findings int, actions []string, reason string) {
 	parent := s.alertCtx
 	if parent == nil {
 		parent = context.Background()
@@ -377,18 +382,27 @@ func (s *Sidecar) sendEnforcementAlert(skillName, severity string, findings int,
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
-	msg := formatEnforcementMessage(skillName, severity, findings, actions, reason)
+	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, reason)
+	notification := SecurityNotification{
+		SubjectType: subjectType,
+		SkillName:   subjectName,
+		Severity:    severity,
+		Findings:    findings,
+		Actions:     actions,
+		Reason:      reason,
+	}
+	if s.notify != nil {
+		s.notify.Push(notification)
+	}
 
-	sessionKeys := s.router.ActiveSessionKeys()
+	sessionKeys := s.activeSessionKeys()
 	if len(sessionKeys) == 0 {
-		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: no active sessions tracked, falling back to guardrail injection\n")
-		s.notify.Push(SecurityNotification{
-			SkillName: skillName,
-			Severity:  severity,
-			Findings:  findings,
-			Actions:   actions,
-			Reason:    reason,
-		})
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: no active sessions tracked, queued for guardrail injection\n")
+		return
+	}
+
+	if s.client == nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: gateway client unavailable, queued for guardrail injection only\n")
 		return
 	}
 
@@ -405,21 +419,15 @@ func (s *Sidecar) sendEnforcementAlert(skillName, severity string, findings int,
 	}
 
 	if sent == 0 {
-		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: all sessions.send failed, falling back to guardrail injection\n")
-		s.notify.Push(SecurityNotification{
-			SkillName: skillName,
-			Severity:  severity,
-			Findings:  findings,
-			Actions:   actions,
-			Reason:    reason,
-		})
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: all sessions.send failed, queued for guardrail injection\n")
 	}
 }
 
 // formatEnforcementMessage builds a human-readable security alert for chat.
-func formatEnforcementMessage(skillName, severity string, findings int, actions []string, reason string) string {
+func formatEnforcementMessage(subjectType, subjectName, severity string, findings int, actions []string, reason string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[DefenseClaw Security Alert] Skill %q was blocked.\n", skillName)
+	fmt.Fprintf(&sb, "[DefenseClaw Security Alert] %s %q was automatically enforced.\n",
+		notificationSubjectLabel(subjectType), subjectName)
 	fmt.Fprintf(&sb, "Severity: %s", severity)
 	if findings > 0 {
 		fmt.Fprintf(&sb, " (%d security finding(s))", findings)
@@ -431,7 +439,8 @@ func formatEnforcementMessage(skillName, severity string, findings int, actions 
 	if reason != "" {
 		fmt.Fprintf(&sb, "Reason: %s\n", reason)
 	}
-	sb.WriteString("The skill was NOT installed. Do not use it or confirm its installation.")
+	sb.WriteString("Do not confirm the component was installed or enabled successfully. ")
+	sb.WriteString("Explain that DefenseClaw detected security issues and took protective action.")
 	return sb.String()
 }
 
@@ -444,17 +453,49 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	var actions []string
 
-	if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable plugin %s failed: %v\n",
-			r.Event.Name, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
-		_ = s.logger.LogAction("sidecar-watcher-disable-plugin", r.Event.Name,
-			fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
+	if r.FileAction == "quarantine" {
+		actions = append(actions, "quarantined")
 	}
+	if r.Verdict == watcher.VerdictBlocked || r.InstallAction == "block" {
+		actions = append(actions, "blocked")
+	}
+
+	if shouldDisableAtGateway(r) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable plugin %s failed: %v\n",
+				r.Event.Name, err)
+		} else {
+			actions = append(actions, "disabled")
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
+			_ = s.logger.LogAction("sidecar-watcher-disable-plugin", r.Event.Name,
+				fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
+		}
+	}
+
+	s.alertWg.Add(1)
+	go func() {
+		defer s.alertWg.Done()
+		s.sendEnforcementAlert("plugin", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+	}()
+}
+
+func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
+	if r.Verdict == watcher.VerdictBlocked {
+		return true
+	}
+	return r.RuntimeAction == "block"
+}
+
+func (s *Sidecar) activeSessionKeys() []string {
+	if s.router == nil {
+		return nil
+	}
+	return s.router.ActiveSessionKeys()
 }
 
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.

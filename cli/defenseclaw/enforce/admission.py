@@ -40,6 +40,34 @@ class AdmissionPolicyData:
     first_party_allow: dict[tuple[str, str], tuple[str, list[str]]] = field(default_factory=dict)
 
 
+def _default_admission_policy() -> AdmissionPolicyData:
+    return AdmissionPolicyData(
+        allow_list_bypass_scan=True,
+        scan_on_install=True,
+        actions={
+            "CRITICAL": SeverityAction(file="quarantine", runtime="disable", install="block"),
+            "HIGH": SeverityAction(file="quarantine", runtime="disable", install="block"),
+            "MEDIUM": SeverityAction(file="none", runtime="enable", install="none"),
+            "LOW": SeverityAction(file="none", runtime="enable", install="none"),
+            "INFO": SeverityAction(file="none", runtime="enable", install="none"),
+        },
+        scanner_overrides={
+            "mcp": {
+                "MEDIUM": SeverityAction(file="quarantine", runtime="disable", install="block"),
+                "LOW": SeverityAction(file="none", runtime="disable", install="none"),
+            },
+            "plugin": {
+                "HIGH": SeverityAction(file="quarantine", runtime="disable", install="block"),
+                "MEDIUM": SeverityAction(file="none", runtime="enable", install="none"),
+            },
+        },
+        first_party_allow={
+            ("plugin", "defenseclaw"): ("first-party DefenseClaw plugin", [".defenseclaw", "extensions/defenseclaw"]),
+            ("skill", "codeguard"): ("first-party DefenseClaw skill", [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"]),
+        },
+    )
+
+
 def evaluate_admission(
     pe: Any,
     *,
@@ -126,7 +154,9 @@ def effective_action_for(
 def load_admission_policy(policy_dir: str) -> AdmissionPolicyData:
     data = _read_policy_data(policy_dir)
     if not data:
-        return AdmissionPolicyData()
+        return _default_admission_policy()
+
+    defaults = _default_admission_policy()
 
     cfg = data.get("config", {}) or {}
     raw_actions = data.get("actions", {}) or {}
@@ -149,7 +179,7 @@ def load_admission_policy(policy_dir: str) -> AdmissionPolicyData:
             if isinstance(raw, dict)
         }
 
-    first_party_allow: dict[tuple[str, str], tuple[str, list[str]]] = {}
+    first_party_allow: dict[tuple[str, str], tuple[str, list[str]]] = dict(defaults.first_party_allow)
     for entry in first_party:
         if not isinstance(entry, dict):
             continue
@@ -162,11 +192,21 @@ def load_admission_policy(policy_dir: str) -> AdmissionPolicyData:
                 source_path_contains = []
             first_party_allow[(target_type, target_name)] = (reason, source_path_contains)
 
+    merged_actions = dict(defaults.actions)
+    merged_actions.update(actions)
+
+    merged_overrides = {
+        target_type: dict(overrides)
+        for target_type, overrides in defaults.scanner_overrides.items()
+    }
+    for target_type, overrides in scanner_overrides.items():
+        merged_overrides.setdefault(target_type, {}).update(overrides)
+
     return AdmissionPolicyData(
-        allow_list_bypass_scan=bool(cfg.get("allow_list_bypass_scan", True)),
-        scan_on_install=bool(cfg.get("scan_on_install", True)),
-        actions=actions,
-        scanner_overrides=scanner_overrides,
+        allow_list_bypass_scan=bool(cfg.get("allow_list_bypass_scan", defaults.allow_list_bypass_scan)),
+        scan_on_install=bool(cfg.get("scan_on_install", defaults.scan_on_install)),
+        actions=merged_actions,
+        scanner_overrides=merged_overrides,
         first_party_allow=first_party_allow,
     )
 

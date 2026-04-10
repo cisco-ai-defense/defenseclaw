@@ -193,9 +193,9 @@ _has_scan if input.scan_result
 # Check scanner_overrides[target_type][severity] first, fall back to global actions.
 
 _effective_action := action if {
-	action := data.scanner_overrides[input.target_type][input.scan_result.max_severity]
+	action := data.scanner_overrides[input.target_type][upper(input.scan_result.max_severity)]
 } else := action if {
-	action := data.actions[input.scan_result.max_severity]
+	action := data.actions[upper(input.scan_result.max_severity)]
 }
 
 _should_reject if {

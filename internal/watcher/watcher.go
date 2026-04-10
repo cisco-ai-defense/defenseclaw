@@ -70,11 +70,14 @@ const (
 
 // AdmissionResult captures the outcome for a single install event.
 type AdmissionResult struct {
-	Event        InstallEvent
-	Verdict      Verdict
-	Reason       string
-	MaxSeverity  string
-	FindingCount int
+	Event         InstallEvent
+	Verdict       Verdict
+	Reason        string
+	MaxSeverity   string
+	FindingCount  int
+	InstallAction string
+	FileAction    string
+	RuntimeAction string
 }
 
 // OnAdmission is called after each install event is processed.
@@ -300,7 +303,22 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			}
 			// verdict == "scan" → proceed to scanning below
 		}
-		// On OPA error fall through to scan (best-effort).
+		// On OPA error, fall back to the built-in pre-scan gate so explicit
+		// block/allow semantics still hold even when Rego is unavailable.
+		fallbackOut := policy.EvaluateAdmissionFallback(input, fallbackProfile)
+		switch fallbackOut.Verdict {
+		case "blocked":
+			_ = w.logger.LogAction("install-rejected", evt.Path,
+				fmt.Sprintf("type=%s reason=blocked", targetType))
+			w.enforceBlock(evt)
+			w.recordAdmission(ctx, "blocked", targetType)
+			return AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: fallbackOut.Reason}
+		case "allowed":
+			_ = w.logger.LogAction("install-allowed", evt.Path,
+				fmt.Sprintf("type=%s reason=allow-listed", targetType))
+			w.recordAdmission(ctx, "allowed", targetType)
+			return AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: fallbackOut.Reason}
+		}
 	} else {
 		input := policy.AdmissionInput{
 			TargetType: targetType,
@@ -358,6 +376,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		return AdmissionResult{
 			Event: evt, Verdict: VerdictBlocked, Reason: reason,
 			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+			InstallAction: "block",
 		}
 	}
 	if allowed, aErr := pe.IsAllowed(targetType, evt.Name); aErr == nil && allowed {
@@ -369,6 +388,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 		return AdmissionResult{
 			Event: evt, Verdict: VerdictAllowed, Reason: reason,
 			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+			InstallAction: "allow",
 		}
 	}
 
@@ -406,6 +426,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			return AdmissionResult{
 				Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
 				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+				InstallAction: out.InstallAction,
+				FileAction:    out.FileAction,
+				RuntimeAction: out.RuntimeAction,
 			}
 		}
 		// On OPA error, fall through to built-in logic.
@@ -431,6 +454,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 	return AdmissionResult{
 		Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
 		MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+		InstallAction: out.InstallAction,
+		FileAction:    out.FileAction,
+		RuntimeAction: out.RuntimeAction,
 	}
 }
 

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -141,11 +142,11 @@ func TestInspectToolCalls_ParseError(t *testing.T) {
 	if verdict == nil {
 		t.Fatal("expected non-nil verdict on parse error")
 	}
-	if verdict.Action != "alert" {
-		t.Errorf("action = %q, want alert", verdict.Action)
+	if verdict.Action != "block" {
+		t.Errorf("action = %q, want block (fail closed)", verdict.Action)
 	}
-	if verdict.Severity != "MEDIUM" {
-		t.Errorf("severity = %q, want MEDIUM", verdict.Severity)
+	if verdict.Severity != "HIGH" {
+		t.Errorf("severity = %q, want HIGH", verdict.Severity)
 	}
 }
 
@@ -246,6 +247,49 @@ func TestStreamingToolCallBlockEnforcement(t *testing.T) {
 	if !strings.Contains(body, "[DONE]") {
 		t.Error("stream should end with [DONE]")
 	}
+	if strings.Contains(body, `"write_file"`) {
+		t.Error("blocked tool-call name should not appear in forwarded chunks")
+	}
+	if strings.Contains(body, `\"path\"`) {
+		t.Error("blocked tool-call arguments JSON should not appear in forwarded chunks")
+	}
+	if !strings.Contains(body, "blocked") {
+		t.Error("response should contain a block notice")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// inspectToolCalls — malformed JSON fails closed
+// ---------------------------------------------------------------------------
+
+func TestInspectToolCallsMalformedJSONBlocks(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	verdict := proxy.inspectToolCalls(json.RawMessage(`{not valid json`))
+	if verdict == nil {
+		t.Fatal("expected non-nil verdict for malformed JSON")
+	}
+	if verdict.Action != "block" {
+		t.Errorf("Action = %q, want block (fail closed on parse error)", verdict.Action)
+	}
+	if verdict.Severity != "HIGH" {
+		t.Errorf("Severity = %q, want HIGH", verdict.Severity)
+	}
+}
+
+func TestInspectToolCallsNilReturnsNil(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	if v := proxy.inspectToolCalls(nil); v != nil {
+		t.Errorf("expected nil verdict for nil input, got %+v", v)
+	}
+	if v := proxy.inspectToolCalls(json.RawMessage(``)); v != nil {
+		t.Errorf("expected nil verdict for empty input, got %+v", v)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +338,46 @@ func TestNotificationInjectBodyDivergence(t *testing.T) {
 			if !strings.Contains(string(forwarded.RawBody), "DEFENSECLAW") {
 				t.Error("Messages has notification but RawBody does not — divergence detected")
 			}
+		}
+	})
+
+	t.Run("fallback_to_messages_on_bad_rawbody", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		proxy := newTestProxy(t, prov, insp, "observe")
+		proxy.notify = NewNotificationQueue()
+		proxy.notify.Push(SecurityNotification{
+			SkillName: "bad-skill",
+			Severity:  "CRITICAL",
+			Findings:  1,
+			Actions:   []string{"blocked"},
+			Reason:    "fallback test",
+		})
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "test"}},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+
+		forwarded := prov.getLastReq()
+		if forwarded == nil {
+			t.Fatal("request should have been forwarded")
+		}
+
+		hasNotifyInMessages := false
+		for _, m := range forwarded.Messages {
+			if m.Role == "system" && strings.Contains(m.Content, "DEFENSECLAW") {
+				hasNotifyInMessages = true
+				break
+			}
+		}
+		if !hasNotifyInMessages {
+			t.Error("notification should appear in Messages as fallback when RawBody inject fails")
 		}
 	})
 }
@@ -716,3 +800,85 @@ func TestStreamingToolCallFinishChunkOrdering(t *testing.T) {
 		t.Errorf("finish chunk (idx=%d) arrived before tool-call deltas (idx=%d)", finishIdx, firstTCIdx)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Buffered tool-call chunks capped at maxBufferedTCBytes
+// ---------------------------------------------------------------------------
+
+func TestBufferedToolCallChunksCapped(t *testing.T) {
+	bigArgs := strings.Repeat("A", 512*1024) // 512 KiB per chunk
+	var chunks []StreamChunk
+	for i := 0; i < 30; i++ { // 30 * 512K = ~15 MiB > 10 MiB cap
+		tc := json.RawMessage(`[{"index":0,"id":"c1","type":"function","function":{"name":"big","arguments":"` + bigArgs + `"}}]`)
+		chunks = append(chunks, StreamChunk{
+			ID: "chatcmpl-big", Object: "chat.completion.chunk", Model: "gpt-4",
+			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{ToolCalls: tc}}},
+		})
+	}
+	fin := "tool_calls"
+	chunks = append(chunks, StreamChunk{
+		ID: "chatcmpl-big", Object: "chat.completion.chunk", Model: "gpt-4",
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &fin}},
+	})
+
+	prov := &mockProvider{streamChunks: chunks}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	reqBody := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "big payload"}},
+		"stream":   true,
+	})
+
+	rec := postChat(t, proxy, reqBody)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "blocked") {
+		t.Error("expected block message when buffered tool-call data exceeds cap")
+	}
+	if !strings.Contains(body, "[DONE]") {
+		t.Error("stream should end with [DONE]")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Stream block ends OTel LLM span
+// ---------------------------------------------------------------------------
+
+func TestStreamBlockEndsLLMSpan(t *testing.T) {
+	prov := &mockProvider{
+		streamChunks: []StreamChunk{
+			{
+				ID: "chatcmpl-1", Object: "chat.completion.chunk", Model: "gpt-4",
+				Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{
+					Role: "assistant", Content: "dangerous content",
+				}}},
+			},
+		},
+	}
+
+	insp := &mockInspectorBlockAll{}
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	reqBody := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "test"}},
+		"stream":   true,
+	})
+
+	rec := postChat(t, proxy, reqBody)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "blocked") {
+		t.Error("expected stream to be blocked")
+	}
+}
+
+type mockInspectorBlockAll struct{}
+
+func (m *mockInspectorBlockAll) Inspect(_ context.Context, _, _ string, _ []ChatMessage, _, _ string) *ScanVerdict {
+	return &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test block"}
+}
+
+func (m *mockInspectorBlockAll) SetScannerMode(_ string) {}

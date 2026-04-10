@@ -367,6 +367,43 @@ def allow(app: AppContext, target: str, reason: str) -> None:
         app.logger.log_action("allow-mcp", target, f"reason={reason}")
 
 
+@mcp.command()
+@click.argument("target")
+@pass_ctx
+def unblock(app: AppContext, target: str) -> None:
+    """Remove an MCP server from the block list and clear enforcement state.
+
+    Unlike 'allow', this does not add the server to the allow list — it
+    simply removes the block so the server goes through normal scanning
+    on the next check.
+    """
+    from defenseclaw.enforce import PolicyEngine
+
+    pe = PolicyEngine(app.store)
+
+    has_state = (
+        pe.is_blocked("mcp", target)
+        or pe.is_quarantined("mcp", target)
+        or app.store.has_action("mcp", target, "runtime", "disable")
+    )
+    if not has_state:
+        click.echo(f"[mcp] {target!r} has no enforcement state to clear")
+        return
+
+    pe.remove_action("mcp", target)
+    click.secho(
+        f"[mcp] {target!r} all enforcement state cleared "
+        f"(block/quarantine/disable)",
+        fg="green",
+    )
+    click.echo(
+        f"  The server will go through normal scanning on next check."
+    )
+
+    if app.logger:
+        app.logger.log_action("mcp-unblock", target, "manual unblock via CLI")
+
+
 # ---------------------------------------------------------------------------
 # set / unset  — delegate writes to ``openclaw config set/unset``
 # ---------------------------------------------------------------------------
@@ -439,6 +476,7 @@ def set_server(
         target_type="mcp",
         name=name,
         fallback_actions=app.cfg.mcp_actions,
+        source_path="",
     )
 
     if pre_decision.verdict == "blocked":
@@ -499,6 +537,7 @@ def set_server(
             name=name,
             scan_result=result,
             fallback_actions=app.cfg.mcp_actions,
+            source_path=cmd or url or "",
         )
         if post_decision.verdict == "rejected":
             pe = PolicyEngine(app.store)
@@ -530,6 +569,7 @@ def set_server(
             name=name,
             scan_result=result,
             fallback_actions=app.cfg.mcp_actions,
+            source_path=cmd or url or "",
         )
         if post_decision.action.install == "allow":
             pe.allow("mcp", name, "scan clean or within policy")

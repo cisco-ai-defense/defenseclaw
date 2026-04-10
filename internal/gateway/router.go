@@ -750,23 +750,6 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
 
-		if r.notify != nil {
-			top := make([]string, 0, 3)
-			for i, f := range findings {
-				if i >= 3 {
-					break
-				}
-				top = append(top, f.Title)
-			}
-			r.notify.Push(SecurityNotification{
-				SkillName: payload.Tool,
-				Severity:  severity,
-				Findings:  len(findings),
-				Actions:   []string{fmt.Sprintf("tool call flagged: %s", strings.Join(top, "; "))},
-				Reason:    fmt.Sprintf("tool %q matched %s", payload.Tool, flaggedPattern),
-			})
-		}
-
 		if r.otel != nil {
 			r.otel.EmitRuntimeAlert(
 				telemetry.AlertToolCallFlagged,

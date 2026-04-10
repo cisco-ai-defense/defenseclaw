@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestInferTargetType(t *testing.T) {
@@ -216,7 +217,12 @@ func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
 		t.Fatalf("LogAction: %v", err)
 	}
 
+	deadline := time.Now().Add(2 * time.Second)
+	for len(bytes.TrimSpace(payload)) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	if len(bytes.TrimSpace(payload)) == 0 {
-		t.Fatal("expected watch-start to flush to Splunk immediately")
+		t.Fatal("expected watch-start to flush to Splunk promptly")
 	}
 }

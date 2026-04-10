@@ -69,12 +69,12 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
-	cfg       *config.GuardrailConfig
-	logger    *audit.Logger
-	health    *SidecarHealth
-	otel      *telemetry.Provider
-	store     *audit.Store
-	dataDir   string
+	cfg     *config.GuardrailConfig
+	logger  *audit.Logger
+	health  *SidecarHealth
+	otel    *telemetry.Provider
+	store   *audit.Store
+	dataDir string
 
 	inspector        ContentInspector
 	masterKey        string
@@ -877,7 +877,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 					req.RawBody = patched
 					req.Messages = append([]ChatMessage{notification}, req.Messages...)
 				} else {
-					fmt.Fprintf(os.Stderr, "[guardrail] inject system message into raw body failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "[guardrail] inject system message into raw body failed: %v — falling back to structured messages\n", err)
+					req.RawBody = nil
+					req.Messages = append([]ChatMessage{notification}, req.Messages...)
 				}
 			} else {
 				req.Messages = append([]ChatMessage{notification}, req.Messages...)
@@ -1095,7 +1097,12 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				if p.otel != nil && llmSpan != nil {
-					p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+					promptTok, completionTok := 0, 0
+					if resp.Usage != nil {
+						promptTok = int(resp.Usage.PromptTokens)
+						completionTok = int(resp.Usage.CompletionTokens)
+					}
+					p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, "openclaw")
 				}
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
@@ -1169,15 +1176,20 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		)
 	}
 
+	const maxBufferedTCBytes = 10 << 20 // 10 MiB cap on buffered tool-call data
+
 	var accumulated strings.Builder
 	var tcAcc toolCallAccumulator
 	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
+	bufferedTCSize := 0
 	lastScanLen := 0
 	const scanInterval = 500
 	streamFinishReasons := []string{}
 	streamBlocked := false
+	streamCtx, streamCancel := context.WithCancel(r.Context())
+	defer streamCancel()
 
-	usage, err := upstream.ChatCompletionStream(r.Context(), req, func(chunk StreamChunk) {
+	usage, err := upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
 		if streamBlocked {
 			return
 		}
@@ -1198,8 +1210,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 
-		// Periodic mid-stream scan for streaming content.
-		if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
+		// In action mode, inspect each newly accumulated content chunk before
+		// forwarding it so short harmful streams cannot slip past a size gate.
+		if accumulated.Len() > lastScanLen && mode == "action" {
 			midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
@@ -1207,6 +1220,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 					midVerdict.Severity, midVerdict.Reason)
 				p.recordTelemetry("completion", aliasModel, midVerdict, 0, nil, nil)
 				streamBlocked = true
+				streamCancel()
 				return
 			}
 			lastScanLen = accumulated.Len()
@@ -1224,7 +1238,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			*chunk.Choices[0].FinishReason == "tool_calls" {
 			isToolCallFinish = true
 		}
-		if (hasToolCalls || isToolCallFinish) && mode == "action" {
+		if mode == "action" && (hasToolCalls || isToolCallFinish || len(bufferedTCChunks) > 0) {
+			bufferedTCSize += len(data)
+			if bufferedTCSize > maxBufferedTCBytes {
+				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK buffered tool-call data exceeds %d bytes\n", maxBufferedTCBytes)
+				streamBlocked = true
+				streamCancel()
+				return
+			}
 			bufferedTCChunks = append(bufferedTCChunks, data)
 			return
 		}
@@ -1232,7 +1253,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
-	if err != nil {
+	if err != nil && !streamBlocked {
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
 			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw")
@@ -1245,7 +1266,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 	if streamBlocked {
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, streamFinishReasons, 0, "defenseclaw", "blocked", system, llmStartTime, "openclaw")
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, "openclaw")
 		}
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
@@ -1308,25 +1329,18 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	// End LLM span with final data.
-	if p.otel != nil && llmSpan != nil {
-		promptTok, completionTok := 0, 0
-		if usage != nil {
-			promptTok = int(usage.PromptTokens)
-			completionTok = int(usage.CompletionTokens)
-		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, 0, guardrail, guardrailResult, system, llmStartTime, "openclaw")
-	}
-
 	// Final post-stream inspection: tool calls (fully reassembled).
 	// Buffered tool-call chunks are released only if inspection passes.
 	assembledTC := tcAcc.JSON()
 	tcBlocked := false
+	toolCallCount := countToolCalls(assembledTC)
 	if len(assembledTC) > 0 {
 		if verdict := p.inspectToolCalls(assembledTC); verdict != nil {
 			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				tcBlocked = true
+				guardrail = "local"
+				guardrailResult = "block"
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
 				blockChunk := StreamChunk{
@@ -1339,6 +1353,16 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				flusher.Flush()
 			}
 		}
+	}
+
+	if p.otel != nil && llmSpan != nil {
+		promptTok, completionTok := 0, 0
+		if usage != nil {
+			promptTok = int(usage.PromptTokens)
+			completionTok = int(usage.CompletionTokens)
+		}
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+		llmSpan = nil
 	}
 
 	// Flush buffered tool-call chunks only when inspection passed.
@@ -2029,6 +2053,11 @@ func injectSystemMessage(raw json.RawMessage, content string) (json.RawMessage, 
 // arguments with the same ScanAllRules engine used by the inspect endpoint.
 // This catches dangerous tool calls (write_file with /etc/passwd, shell with
 // reverse shells, etc.) even when the OpenClaw plugin is not loaded.
+//
+// In "action" mode, tool-call chunks are buffered and only released after
+// post-stream inspection passes. In "observe" mode, tool-call deltas are
+// forwarded to the client as they arrive (by design) and the post-stream
+// scan is purely alerting.
 // ---------------------------------------------------------------------------
 
 // inspectToolCalls scans tool call arguments in an OpenAI-format tool_calls
@@ -2048,14 +2077,14 @@ func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVe
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT parse error (alerting): %v\n", err)
+		fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT parse error (blocking): %v\n", err)
 		if p.logger != nil {
 			_ = p.logger.LogAction("guardrail-tool-call-parse-error", "", err.Error())
 		}
 		return &ScanVerdict{
-			Action:         "alert",
-			Severity:       "MEDIUM",
-			Reason:         "tool_calls JSON parse error — cannot inspect",
+			Action:         "block",
+			Severity:       "HIGH",
+			Reason:         "tool_calls JSON parse error — cannot inspect, failing closed",
 			ScannerSources: []string{"tool-call-inspect"},
 		}
 	}

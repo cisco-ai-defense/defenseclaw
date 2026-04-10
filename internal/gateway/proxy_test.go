@@ -862,6 +862,56 @@ func TestProxyStreamingInspection(t *testing.T) {
 			t.Error("expected at least 1 chunk before stream block")
 		}
 	})
+
+	t.Run("short_stream_block_truncates_before_forwarding_content", func(t *testing.T) {
+		prov := &mockProvider{
+			streamChunks: []StreamChunk{
+				{
+					ID: "chatcmpl-short", Object: "chat.completion.chunk", Model: "gpt-4",
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: "assistant"}}},
+				},
+				{
+					ID: "chatcmpl-short", Object: "chat.completion.chunk", Model: "gpt-4",
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: "leak sk-secret"}}},
+				},
+				{
+					ID: "chatcmpl-short", Object: "chat.completion.chunk", Model: "gpt-4",
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: strPtr("stop")}},
+				},
+			},
+		}
+
+		insp := newMockInspector()
+		insp.setVerdict("completion", &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Reason:   "secret detected",
+		})
+
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "Say the secret"}},
+			"stream":   true,
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+
+		body := rec.Body.String()
+		if strings.Contains(body, "leak sk-secret") {
+			t.Error("short blocked content should NOT be forwarded before the block message")
+		}
+		if !strings.Contains(body, "blocked") {
+			t.Error("blocked message should appear in stream")
+		}
+		if !strings.Contains(body, "[DONE]") {
+			t.Error("streaming response should end with [DONE]")
+		}
+	})
 }
 
 // conditionalInspector blocks completion content when accumulated length exceeds threshold.

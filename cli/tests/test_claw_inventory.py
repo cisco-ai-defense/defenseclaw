@@ -33,7 +33,14 @@ from unittest.mock import patch, MagicMock
 
 from click.testing import CliRunner
 
-from defenseclaw.config import ClawConfig, Config, SkillActionsConfig, SeverityAction
+from defenseclaw.config import (
+    ClawConfig,
+    Config,
+    MCPActionsConfig,
+    PluginActionsConfig,
+    SkillActionsConfig,
+    SeverityAction,
+)
 from defenseclaw.models import ActionEntry, ActionState
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
@@ -1087,26 +1094,25 @@ class TestAdmissionVerdictClean(_StoreWithPolicyMixin, unittest.TestCase):
 
 
 class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
-    """CRITICAL/HIGH produce warnings with permissive defaults,
-    but custom strict actions can escalate them to rejected."""
+    """Central policy defaults reject high-severity findings."""
 
-    def test_critical_warning_with_permissive_defaults(self):
+    def test_critical_rejected_by_policy_defaults(self):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "CRITICAL", "target": "/x"}
         verdict, detail = _admission_verdict(
             pe, "skill", "dangerous", scan, None, self.skill_actions,
         )
-        self.assertEqual(verdict, "warning")
+        self.assertEqual(verdict, "rejected")
         self.assertIn("1 findings", detail)
         self.assertIn("CRITICAL", detail)
 
-    def test_high_warning_with_permissive_defaults(self):
+    def test_high_rejected_by_policy_defaults(self):
         pe = self._pe()
         scan = {"finding_count": 5, "max_severity": "HIGH", "target": "/x"}
         verdict, detail = _admission_verdict(
             pe, "plugin", "risky-plugin", scan, None, self.skill_actions,
         )
-        self.assertEqual(verdict, "warning")
+        self.assertEqual(verdict, "rejected")
         self.assertIn("5 findings", detail)
         self.assertIn("HIGH", detail)
 
@@ -1136,7 +1142,7 @@ class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
 
 
 class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
-    """MEDIUM/LOW findings produce warnings with default config."""
+    """Policy defaults still warn on medium findings without reject actions."""
 
     def test_warning_medium(self):
         pe = self._pe()
@@ -1148,17 +1154,17 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertIn("2 findings", detail)
         self.assertIn("MEDIUM", detail)
 
-    def test_warning_low(self):
+    def test_low_mcp_rejected_by_policy_override(self):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "LOW", "target": "/x"}
         verdict, detail = _admission_verdict(
             pe, "mcp", "minor-issues", scan, None, self.skill_actions,
         )
-        self.assertEqual(verdict, "warning")
+        self.assertEqual(verdict, "rejected")
         self.assertIn("LOW", detail)
 
-    def test_custom_actions_can_reject_medium(self):
-        """Custom SkillActionsConfig can escalate MEDIUM to rejected."""
+    def test_custom_actions_do_not_override_loaded_policy_defaults(self):
+        """When centralized policy data is in effect, config fallback actions do not take precedence."""
         pe = self._pe()
         strict = SkillActionsConfig(
             medium=SeverityAction(file="quarantine", runtime="disable", install="block"),
@@ -1167,7 +1173,7 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         verdict, _ = _admission_verdict(
             pe, "skill", "strict-check", scan, None, strict,
         )
-        self.assertEqual(verdict, "rejected")
+        self.assertEqual(verdict, "warning")
 
 
 # ---------------------------------------------------------------------------
@@ -1226,7 +1232,7 @@ class TestBuildScanMap(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(result["my-skill"]["max_severity"], "HIGH")
 
     def test_basename_keying(self):
-        """Scan targets are keyed by basename, not full path."""
+        """Scan targets are indexed by basename and raw target aliases."""
         import uuid
         from datetime import datetime, timezone
         self.store.insert_scan_result(
@@ -1236,7 +1242,7 @@ class TestBuildScanMap(_StoreWithPolicyMixin, unittest.TestCase):
         )
         result = _build_scan_map_for_type(self.store, "plugin-scanner")
         self.assertIn("web-search", result)
-        self.assertNotIn("/long/path/to/web-search", result)
+        self.assertIn("/long/path/to/web-search", result)
 
     def test_null_severity_defaults_to_info(self):
         import uuid
@@ -1481,7 +1487,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(by_id["discord"]["policy_verdict"], "blocked")
         self.assertEqual(by_id["weather"]["policy_verdict"], "clean")
         self.assertEqual(by_id["new-skill"]["policy_verdict"], "unscanned")
-        self.assertEqual(by_id["peekaboo"]["policy_verdict"], "warning")
+        self.assertEqual(by_id["peekaboo"]["policy_verdict"], "rejected")
 
     def test_scan_data_attached_to_items(self):
         self._seed_store()
@@ -1523,6 +1529,202 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
         self.assertEqual(inv["mcp"][0]["policy_verdict"], "allowed")
 
+    def test_first_party_allows_use_resolved_inventory_paths(self):
+        import uuid
+        from datetime import datetime, timezone
+
+        tmp = tempfile.mkdtemp(prefix="dc-inventory-policy-")
+        try:
+            cfg = Config(
+                data_dir=os.path.join(tmp, ".defenseclaw"),
+                audit_db=os.path.join(tmp, ".defenseclaw", "audit.db"),
+                quarantine_dir=os.path.join(tmp, "q"),
+                plugin_dir=os.path.join(tmp, "p"),
+                policy_dir=os.path.join(tmp, "pol"),
+                claw=ClawConfig(
+                    mode="openclaw",
+                    home_dir=os.path.join(tmp, ".openclaw"),
+                    config_file=os.path.join(tmp, ".openclaw", "openclaw.json"),
+                ),
+            )
+            os.makedirs(os.path.join(cfg.policy_dir, "rego"), exist_ok=True)
+            with open(os.path.join(cfg.policy_dir, "rego", "data.json"), "w") as f:
+                json.dump({
+                    "config": {"allow_list_bypass_scan": True, "scan_on_install": True},
+                    "actions": {},
+                    "scanner_overrides": {},
+                    "first_party_allow_list": [
+                        {
+                            "target_type": "plugin",
+                            "target_name": "defenseclaw",
+                            "reason": "first-party DefenseClaw plugin",
+                            "source_path_contains": [".openclaw/extensions"],
+                        },
+                        {
+                            "target_type": "skill",
+                            "target_name": "codeguard",
+                            "reason": "first-party DefenseClaw skill",
+                            "source_path_contains": [".openclaw/skills"],
+                        },
+                    ],
+                }, f)
+
+            os.makedirs(os.path.join(cfg.claw.home_dir, "skills", "codeguard"), exist_ok=True)
+            os.makedirs(os.path.join(cfg.claw.home_dir, "extensions", "defenseclaw"), exist_ok=True)
+
+            now = datetime.now(timezone.utc)
+            self.store.insert_scan_result(
+                str(uuid.uuid4()), "skill-scanner", "/tmp/downloads/codeguard",
+                now, 100, 0, "INFO", "{}",
+            )
+            self.store.insert_scan_result(
+                str(uuid.uuid4()), "plugin-scanner", "/tmp/dclaw-plugin-fetch-abc123/defenseclaw",
+                now, 100, 0, "INFO", "{}",
+            )
+
+            inv = {
+                "skills": [{"id": "codeguard", "source": "user"}],
+                "plugins": [{"id": "defenseclaw", "enabled": True}],
+                "mcp": [],
+                "summary": {"skills": {"count": 1}, "plugins": {"count": 1}, "mcp": {"count": 0}},
+            }
+
+            enrich_with_policy(
+                inv, self.store, self.skill_actions,
+                policy_dir=cfg.policy_dir, cfg=cfg,
+            )
+
+            self.assertEqual(inv["skills"][0]["policy_verdict"], "allowed")
+            self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_inventory_uses_per_target_fallback_actions_when_policy_missing(self):
+        import uuid
+        from datetime import datetime, timezone
+
+        tmp = tempfile.mkdtemp(prefix="dc-inventory-fallback-")
+        cfg = Config(
+            policy_dir=os.path.join(tmp, "missing-policy"),
+            plugin_actions=PluginActionsConfig(
+                high=SeverityAction(file="quarantine", runtime="disable", install="block"),
+            ),
+            mcp_actions=MCPActionsConfig(
+                high=SeverityAction(file="none", runtime="enable", install="block"),
+            ),
+        )
+
+        now = datetime.now(timezone.utc)
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "plugin-scanner", "/tmp/plugins/risky-plugin",
+            now, 100, 1, "HIGH", "{}",
+        )
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "mcp-scanner", "/tmp/mcp/risky-mcp",
+            now, 100, 1, "HIGH", "{}",
+        )
+
+        inv = {
+            "skills": [],
+            "plugins": [{"id": "risky-plugin", "enabled": True}],
+            "mcp": [{"id": "risky-mcp", "transport": "stdio"}],
+            "summary": {"skills": {"count": 0}, "plugins": {"count": 1}, "mcp": {"count": 1}},
+        }
+
+        enrich_with_policy(
+            inv, self.store, self.skill_actions,
+            policy_dir=cfg.policy_dir, cfg=cfg,
+        )
+
+        self.assertEqual(inv["plugins"][0]["policy_verdict"], "rejected")
+        self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_policy_enrichment_uses_install_name_aliases(self):
+        import uuid
+        from datetime import datetime, timezone
+
+        tmp = tempfile.mkdtemp(prefix="dc-inventory-plugin-alias-")
+        try:
+            cfg = Config(
+                data_dir=os.path.join(tmp, ".defenseclaw"),
+                audit_db=os.path.join(tmp, ".defenseclaw", "audit.db"),
+                quarantine_dir=os.path.join(tmp, "q"),
+                plugin_dir=os.path.join(tmp, "p"),
+                policy_dir=os.path.join(tmp, "missing-policy"),
+                claw=ClawConfig(
+                    mode="openclaw",
+                    home_dir=os.path.join(tmp, ".openclaw"),
+                    config_file=os.path.join(tmp, ".openclaw", "openclaw.json"),
+                ),
+            )
+            os.makedirs(os.path.join(cfg.claw.home_dir, "extensions", "xai-plugin"), exist_ok=True)
+
+            pe = self._pe()
+            pe.allow("plugin", "xai-plugin", "reviewed")
+
+            now = datetime.now(timezone.utc)
+            self.store.insert_scan_result(
+                str(uuid.uuid4()), "plugin-scanner",
+                os.path.join(cfg.claw.home_dir, "extensions", "xai-plugin"),
+                now, 100, 1, "MEDIUM", "{}",
+            )
+
+            inv = {
+                "skills": [],
+                "plugins": [{"id": "xai", "name": "@openclaw/xai-plugin", "enabled": True}],
+                "mcp": [],
+                "summary": {"skills": {"count": 0}, "plugins": {"count": 1}, "mcp": {"count": 0}},
+            }
+
+            enrich_with_policy(
+                inv, self.store, self.skill_actions,
+                policy_dir=cfg.policy_dir, cfg=cfg,
+            )
+
+            self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
+            self.assertEqual(inv["plugins"][0]["scan_findings"], 1)
+            self.assertEqual(inv["plugins"][0]["scan_severity"], "MEDIUM")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_mcp_policy_enrichment_matches_url_scan_targets(self):
+        import uuid
+        from datetime import datetime, timezone
+
+        tmp = tempfile.mkdtemp(prefix="dc-inventory-mcp-url-")
+        try:
+            cfg = Config(
+                policy_dir=os.path.join(tmp, "missing-policy"),
+                mcp_actions=MCPActionsConfig(
+                    high=SeverityAction(file="none", runtime="enable", install="block"),
+                ),
+            )
+
+            now = datetime.now(timezone.utc)
+            self.store.insert_scan_result(
+                str(uuid.uuid4()), "mcp-scanner", "https://example.com/mcp/sse",
+                now, 100, 2, "HIGH", "{}",
+            )
+
+            inv = {
+                "skills": [],
+                "plugins": [],
+                "mcp": [{"id": "remote-mcp", "url": "https://example.com/mcp/sse", "transport": "sse"}],
+                "summary": {"skills": {"count": 0}, "plugins": {"count": 0}, "mcp": {"count": 1}},
+            }
+
+            enrich_with_policy(
+                inv, self.store, self.skill_actions,
+                policy_dir=cfg.policy_dir, cfg=cfg,
+            )
+
+            self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
+            self.assertEqual(inv["mcp"][0]["scan_findings"], 2)
+            self.assertEqual(inv["mcp"][0]["scan_severity"], "HIGH")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_summary_policy_counts(self):
         self._seed_store()
         inv = self._make_inventory()
@@ -1532,8 +1734,8 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(ps["blocked"], 1)
         self.assertEqual(ps["allowed"], 1)
         self.assertEqual(ps["clean"], 1)
-        self.assertEqual(ps.get("rejected", 0), 0)
-        self.assertEqual(ps["warning"], 1)
+        self.assertEqual(ps["rejected"], 1)
+        self.assertEqual(ps.get("warning", 0), 0)
         self.assertEqual(ps["unscanned"], 1)
 
         pp = inv["summary"]["policy_plugins"]

@@ -97,6 +97,64 @@ class TestSkillAllow(SkillCommandTestBase):
         actions = [e for e in events if e.action == "skill-allow"]
         self.assertEqual(len(actions), 1)
 
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_reenables_runtime_disable_before_clearing_db(self, mock_cls):
+        pe = PolicyEngine(self.app.store)
+        pe.disable("skill", "safe-skill", "runtime blocked")
+
+        mock_cls.return_value.enable_skill.return_value = {"status": "enabled"}
+
+        result = self.invoke(["allow", "safe-skill", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(pe.is_allowed("skill", "safe-skill"))
+        self.assertFalse(self.app.store.has_action("skill", "safe-skill", "runtime", "disable"))
+        mock_cls.return_value.enable_skill.assert_called_once_with("safe-skill")
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_preserves_runtime_disable_when_gateway_enable_fails(self, mock_cls):
+        pe = PolicyEngine(self.app.store)
+        pe.disable("skill", "safe-skill", "runtime blocked")
+
+        mock_cls.return_value.enable_skill.side_effect = Exception("timeout")
+
+        result = self.invoke(["allow", "safe-skill", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("gateway enable failed", result.output)
+        self.assertIn("runtime disable remains until the gateway is reachable", result.output)
+        self.assertTrue(pe.is_allowed("skill", "safe-skill"))
+        self.assertTrue(self.app.store.has_action("skill", "safe-skill", "runtime", "disable"))
+
+
+class TestSkillUnblock(SkillCommandTestBase):
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_unblock_reenables_runtime_disable_before_clearing_state(self, mock_cls):
+        pe = PolicyEngine(self.app.store)
+        pe.block("skill", "blocked-skill", "manual block")
+        pe.disable("skill", "blocked-skill", "runtime blocked")
+
+        mock_cls.return_value.enable_skill.return_value = {"status": "enabled"}
+
+        result = self.invoke(["unblock", "blocked-skill"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(pe.get_action("skill", "blocked-skill"))
+        mock_cls.return_value.enable_skill.assert_called_once_with("blocked-skill")
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_unblock_preserves_state_when_gateway_enable_fails(self, mock_cls):
+        pe = PolicyEngine(self.app.store)
+        pe.block("skill", "blocked-skill", "manual block")
+        pe.disable("skill", "blocked-skill", "runtime blocked")
+
+        mock_cls.return_value.enable_skill.side_effect = Exception("timeout")
+
+        result = self.invoke(["unblock", "blocked-skill"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("gateway enable failed", result.output)
+        self.assertIn("runtime disable remains until the gateway is reachable", result.output)
+        self.assertFalse(pe.is_blocked("skill", "blocked-skill"))
+        self.assertFalse(pe.is_quarantined("skill", "blocked-skill"))
+        self.assertTrue(self.app.store.has_action("skill", "blocked-skill", "runtime", "disable"))
+
 
 class TestSkillScan(SkillCommandTestBase):
     @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
@@ -122,6 +180,40 @@ class TestSkillScan(SkillCommandTestBase):
         result = self.invoke(["scan", "allow-me", "--path", skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("ALLOWED", result.output)
+
+
+class TestSkillInstall(SkillCommandTestBase):
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._resolve_path")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_post_scan_allow_skips_warning(self, mock_install, mock_resolve, mock_scan, mock_eval):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        skill_dir = os.path.join(self.tmp_dir, "late-allow")
+        os.makedirs(skill_dir)
+        mock_install.return_value = None
+        mock_resolve.return_value = skill_dir
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="Shell injection", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.5),
+        )
+        mock_eval.side_effect = [
+            AdmissionDecision("scan", "scan required"),
+            AdmissionDecision("allowed", "approved during scan", source="manual-allow"),
+        ]
+
+        result = self.invoke(["install", "late-allow"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("became allow-listed", result.output)
+        self.assertNotIn("no action taken", result.output)
+        events = [e for e in self.app.store.list_events(20) if e.action == "install-allowed"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("allow-listed-post-scan", events[0].details)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

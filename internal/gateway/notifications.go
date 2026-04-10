@@ -13,12 +13,13 @@ const maxNotificationQueueSize = 50
 // SecurityNotification represents a pending enforcement alert that the
 // guardrail proxy will inject into LLM requests as a system message.
 type SecurityNotification struct {
-	SkillName string
-	Severity  string
-	Findings  int
-	Actions   []string
-	Reason    string
-	ExpiresAt time.Time
+	SubjectType string
+	SkillName   string
+	Severity    string
+	Findings    int
+	Actions     []string
+	Reason      string
+	ExpiresAt   time.Time
 }
 
 // NotificationQueue is a thread-safe store for security notifications. The
@@ -91,7 +92,7 @@ func (q *NotificationQueue) FormatSystemMessage() string {
 		if i > 0 {
 			sb.WriteString("\n---\n")
 		}
-		fmt.Fprintf(&sb, "Skill %q was automatically enforced by DefenseClaw.\n", n.SkillName)
+		fmt.Fprintf(&sb, "%s %q was automatically enforced by DefenseClaw.\n", notificationSubjectLabel(n.SubjectType), n.SkillName)
 		fmt.Fprintf(&sb, "Severity: %s", n.Severity)
 		if n.Findings > 0 {
 			fmt.Fprintf(&sb, " (%d finding(s))", n.Findings)
@@ -106,7 +107,18 @@ func (q *NotificationQueue) FormatSystemMessage() string {
 	}
 
 	sb.WriteString("\nYou MUST proactively inform the user about this enforcement action. ")
-	sb.WriteString("Do NOT confirm the skill was installed successfully. ")
+	sb.WriteString("Do NOT claim the component was installed or enabled successfully. ")
 	sb.WriteString("Explain that DefenseClaw detected security issues and took protective action.")
 	return sb.String()
+}
+
+func notificationSubjectLabel(subjectType string) string {
+	switch strings.TrimSpace(strings.ToLower(subjectType)) {
+	case "plugin":
+		return "Plugin"
+	case "tool":
+		return "Tool"
+	default:
+		return "Skill"
+	}
 }

@@ -257,6 +257,48 @@ class TestPluginAllow(PluginCommandTestBase):
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-allow"]
         self.assertEqual(len(events), 1)
 
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_reenables_runtime_disable_before_clearing_db(self, mock_cls):
+        pe = PolicyEngine(self.app.store)
+        pe.disable("plugin", "safe-plugin", "runtime blocked")
+
+        mock_cls.return_value.enable_plugin.return_value = {"status": "enabled"}
+
+        result = self.invoke(["allow", "safe-plugin", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(pe.is_allowed("plugin", "safe-plugin"))
+        self.assertFalse(self.app.store.has_action("plugin", "safe-plugin", "runtime", "disable"))
+        mock_cls.return_value.enable_plugin.assert_called_once_with("safe-plugin")
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_preserves_runtime_disable_when_gateway_enable_fails(self, mock_cls):
+        pe = PolicyEngine(self.app.store)
+        pe.disable("plugin", "safe-plugin", "runtime blocked")
+
+        mock_cls.return_value.enable_plugin.side_effect = Exception("timeout")
+
+        result = self.invoke(["allow", "safe-plugin", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("gateway enable failed", result.output)
+        self.assertIn("runtime disable remains until the gateway is reachable", result.output)
+        self.assertTrue(pe.is_allowed("plugin", "safe-plugin"))
+        self.assertTrue(self.app.store.has_action("plugin", "safe-plugin", "runtime", "disable"))
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins")
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_scoped_name_clears_resolved_runtime_disable(self, mock_cls, mock_list):
+        mock_list.return_value = [{"id": "xai", "name": "@openclaw/xai-plugin"}]
+        pe = PolicyEngine(self.app.store)
+        pe.disable("plugin", "xai", "runtime blocked")
+
+        mock_cls.return_value.enable_plugin.return_value = {"status": "enabled"}
+
+        result = self.invoke(["allow", "@openclaw/xai-plugin", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.enable_plugin.assert_called_once_with("xai")
+        self.assertFalse(self.app.store.has_action("plugin", "xai", "runtime", "disable"))
+        self.assertTrue(pe.is_allowed("plugin", "xai-plugin"))
+
 
 class TestResolveOpenclawPluginId(unittest.TestCase):
     """Tests for _resolve_openclaw_plugin_id name resolution."""
@@ -759,17 +801,18 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_action_permissive_defaults_warns_on_critical(self, mock_fetch, mock_scan):
-        """With permissive default plugin_actions, --action on CRITICAL warns and installs."""
+    def test_install_action_policy_defaults_block_critical(self, mock_fetch, mock_scan):
+        """Without explicit policy data, seeded admission defaults still block CRITICAL plugins."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("danger-pkg")
         mock_fetch.return_value = src
 
         result = self._invoke_install(["install", "--action", "danger-pkg"])
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("warning", result.output)
-        self.assertIn("Installed plugin: danger-pkg", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("added to block list", result.output)
+        self.assertIn("quarantined", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "danger-pkg")))
 
     @patch("defenseclaw.gateway.OrchestratorClient.disable_plugin")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
@@ -804,6 +847,30 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         result = self._invoke_install(["install", "--action", "clean-pkg"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Installed plugin: clean-pkg", result.output)
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    @patch("defenseclaw.registry.fetch_npm_package")
+    def test_install_post_scan_allow_skips_warning_and_installs(self, mock_fetch, mock_scan, mock_eval):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        mock_scan.return_value = self._critical_scan_result()
+        src = self._create_plugin_dir("late-allow-plugin")
+        mock_fetch.return_value = src
+        mock_eval.side_effect = [
+            AdmissionDecision("scan", "scan required"),
+            AdmissionDecision("allowed", "approved during scan", source="manual-allow"),
+        ]
+
+        result = self._invoke_install(["install", "late-allow-plugin"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("became allow-listed", result.output)
+        self.assertNotIn("no action taken", result.output)
+        self.assertIn("Installed plugin: late-allow-plugin", result.output)
+        events = [e for e in self.app.store.list_events(20) if e.action == "install-allowed"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("allow-listed-post-scan", events[0].details)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")

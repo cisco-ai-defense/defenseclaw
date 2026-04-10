@@ -577,7 +577,7 @@ test_production_first_party_skill_allowed if {
 	result := admission with input as {
 		"target_type": "skill",
 		"target_name": "codeguard",
-		"path": "/home/user/.defenseclaw/skills/codeguard",
+		"path": "/home/user/.openclaw/workspace/skills/codeguard",
 		"block_list": [],
 		"allow_list": [],
 	}
@@ -743,6 +743,95 @@ test_install_action_none_on_warning if {
 
 	result.install_action == "none"
 	result.file_action == "none"
+}
+
+test_lowercase_severity_still_rejects if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "lc-skill",
+		"path": "/tmp/lc",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "critical", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"CRITICAL": {"runtime": "block", "file": "quarantine", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.verdict == "rejected"
+	result.runtime_action == "block"
+	result.file_action == "quarantine"
+	result.install_action == "block"
+}
+
+test_mixed_case_severity_still_rejects if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "mc-skill",
+		"path": "/tmp/mc",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "High", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"HIGH": {"runtime": "block", "file": "quarantine", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.verdict == "rejected"
+}
+
+test_high_severity_has_runtime_block if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "risky-skill",
+		"path": "/tmp/risky",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "HIGH", "total_findings": 3, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"HIGH": {"runtime": "block", "file": "quarantine", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.runtime_action == "block"
+}
+
+test_install_only_block_has_runtime_allow if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "install-only-skill",
+		"path": "/tmp/install-only",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "MEDIUM", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"MEDIUM": {"runtime": "allow", "file": "none", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.runtime_action == "allow"
+	result.install_action == "block"
+	result.verdict == "rejected"
+}
+
+test_no_scan_has_runtime_allow if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "clean-skill",
+		"path": "/tmp/clean",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.runtime_action == "allow"
 }
 
 test_no_scan_result_actions_default_none if {

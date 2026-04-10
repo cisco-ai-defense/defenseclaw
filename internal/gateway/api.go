@@ -333,6 +333,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 
 const gatewayMutationRetryDelay = 2 * time.Second
 const gatewayMutationMaxAttempts = 20
+const pluginGatewayMutationTimeout = 45 * time.Second
 func isRetryableGatewayMutationError(err error) bool {
 	if err == nil {
 		return false
@@ -546,14 +547,89 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pe := enforce.NewPolicyEngine(a.store)
-	if err := pe.Allow(req.TargetType, req.TargetName, reason); err != nil {
+	policyName := req.TargetName
+	runtimeName := req.TargetName
+	if req.TargetType == "plugin" {
+		policyName = normalizePluginPolicyName(req.TargetName)
+		runtimeName = resolvePluginRuntimeActionName(pe, req.TargetName, policyName)
+	}
+
+	entry, err := pe.GetAction(req.TargetType, runtimeName)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if entry != nil && entry.Actions.Runtime == "disable" {
+		if a.client == nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway client not configured"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+		defer cancel()
+		switch req.TargetType {
+		case "skill":
+			if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+				return a.client.EnableSkill(callCtx, req.TargetName)
+			}); err != nil {
+				a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				return
+			}
+		case "plugin":
+			if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+				return a.client.EnablePlugin(callCtx, runtimeName)
+			}); err != nil {
+				a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				return
+			}
+			if runtimeName != policyName {
+				if err := pe.Enable("plugin", runtimeName); err != nil {
+					a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+		}
+	}
+	if err := pe.Allow(req.TargetType, policyName, reason); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-enforce-allow", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+		_ = a.logger.LogAction("api-enforce-allow", policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
+}
+
+func normalizePluginPolicyName(name string) string {
+	if name == "" {
+		return ""
+	}
+	base := filepath.Base(name)
+	if base == "." || base == string(filepath.Separator) {
+		return name
+	}
+	return base
+}
+
+func resolvePluginRuntimeActionName(pe *enforce.PolicyEngine, rawName, policyName string) string {
+	candidates := []string{policyName}
+	for _, suffix := range []string{"-plugin", "-provider"} {
+		if strings.HasSuffix(policyName, suffix) {
+			candidates = append(candidates, strings.TrimSuffix(policyName, suffix))
+		}
+	}
+	if rawName != "" && rawName != policyName {
+		candidates = append(candidates, rawName)
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		entry, err := pe.GetAction("plugin", candidate)
+		if err == nil && entry != nil && entry.Actions.Runtime == "disable" {
+			return candidate
+		}
+	}
+	return policyName
 }
 
 func (a *APIServer) handleEnforceBlocked(w http.ResponseWriter, r *http.Request) {
