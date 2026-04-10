@@ -191,6 +191,7 @@ jobs:
           defenseclaw init
 
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
+          echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> ~/.defenseclaw/.env
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
             echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
           fi
@@ -589,6 +590,7 @@ jobs:
           defenseclaw init
 
           echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
+          echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> ~/.defenseclaw/.env
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
             echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
           fi

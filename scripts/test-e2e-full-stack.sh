@@ -1069,7 +1069,6 @@ phase_start() {
     sleep 5
 
     echo "  Starting DefenseClaw sidecar..."
-    echo "  [diag] DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID (shell)"
     defenseclaw-gateway stop 2>/dev/null || true
     defenseclaw-gateway start
     sleep 5
@@ -1094,16 +1093,6 @@ phase_start() {
         pass "sidecar API authenticated"
     else
         fail "sidecar API authenticated" "token mismatch — see diagnostic output above"
-    fi
-
-    # Early run_id diagnostic — check if the sidecar-start event has run_id set.
-    local early_events early_count early_matched
-    early_events=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=10" 2>/dev/null || echo '[]')
-    early_count=$(printf '%s\n' "$early_events" | jq 'length' 2>/dev/null || echo "0")
-    early_matched=$(printf '%s\n' "$early_events" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)] | length' 2>/dev/null || echo "0")
-    echo "  [diag] Phase 1 early events: total=$early_count matched_run_id=$early_matched"
-    if [ "${early_count:-0}" != "0" ] && [ "${early_matched:-0}" = "0" ]; then
-        echo "  [diag] Phase 1 sample: $(printf '%s\n' "$early_events" | jq -r '.[0:3] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)"
     fi
 
     phase_timer_end "Phase 1"
@@ -2326,23 +2315,9 @@ PY
     echo "  Restarting sidecar after upgrade test..."
     defenseclaw-gateway stop || true
     sleep 1
-    echo "  [diag] Shell DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID before start"
     defenseclaw-gateway start || true
     wait_for_url "$SIDECAR_URL/health" 30 3 || true
     wait_for_sidecar_subsystems_running 60 || true
-
-    # Checkpoint: verify events are still visible after sidecar restart
-    local post6c_events post6c_total post6c_matched post6c_with_rid post6c_without_rid
-    post6c_events=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=2000" 2>/dev/null || echo '[]')
-    post6c_total=$(printf '%s\n' "$post6c_events" | jq 'length' 2>/dev/null || echo "0")
-    post6c_matched=$(printf '%s\n' "$post6c_events" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)] | length' 2>/dev/null || echo "0")
-    post6c_with_rid=$(printf '%s\n' "$post6c_events" | jq '[.[] | select(.run_id != null and .run_id != "")] | length' 2>/dev/null || echo "0")
-    post6c_without_rid=$(printf '%s\n' "$post6c_events" | jq '[.[] | select(.run_id == null or .run_id == "")] | length' 2>/dev/null || echo "0")
-    echo "  [diag] Post-6C events: total=$post6c_total matched=$post6c_matched with_run_id=$post6c_with_rid without_run_id=$post6c_without_rid"
-    if [ "${post6c_total:-0}" != "0" ]; then
-        echo "  [diag] Post-6C first 5: $(printf '%s\n' "$post6c_events" | jq -r '.[0:5] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)"
-        echo "  [diag] Post-6C last 5: $(printf '%s\n' "$post6c_events" | jq -r '.[-5:] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)"
-    fi
 
     phase_timer_end "Phase 6C"
 }
@@ -2564,6 +2539,8 @@ phase_plugin_lifecycle() {
     echo "=== Phase 7B: Plugin Lifecycle [Hybrid] ==="
     phase_timer_start
 
+    ensure_sidecar_connected 30
+
     local clean_fixture="$REPO_ROOT/test/fixtures/plugins/clean-plugin"
     local malicious_fixture="$REPO_ROOT/test/fixtures/plugins/malicious-plugin"
     if [ ! -d "$clean_fixture" ] || [ ! -d "$malicious_fixture" ]; then
@@ -2613,21 +2590,6 @@ phase_plugin_lifecycle() {
     else
         fail "plugin lifecycle: clean plugin visible in plugin list" "plugin list entry missing for $clean_plugin"
     fi
-
-    # Targeted run_id diagnostic: query SQLite directly via Python
-    echo "  [diag] run_id in SQLite after plugin-install:"
-    python3 -c "
-import sqlite3, os
-db = os.path.expanduser('~/.defenseclaw/audit.db')
-conn = sqlite3.connect(db)
-rows = conn.execute('SELECT action, run_id FROM audit_events ORDER BY timestamp DESC LIMIT 10').fetchall()
-for action, rid in rows:
-    print(f'    {action} run_id={rid!r}')
-total = conn.execute('SELECT COUNT(*) FROM audit_events').fetchone()[0]
-with_rid = conn.execute('SELECT COUNT(*) FROM audit_events WHERE run_id IS NOT NULL AND run_id != \"\"').fetchone()[0]
-print(f'    totals: all={total} with_run_id={with_rid} without_run_id={total-with_rid}')
-conn.close()
-" 2>&1 || echo "    (python query failed)"
 
     scan_out=$(defenseclaw plugin scan "$malicious_source" --json 2>&1 || true)
     echo "$scan_out"
