@@ -741,7 +741,7 @@ jobs:
 
   e2e-required:
     name: E2E Required
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ always() && github.event_name != 'schedule' }}
     needs: [core, full-live]
     runs-on: ubuntu-latest
     steps:
