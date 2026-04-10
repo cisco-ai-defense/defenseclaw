@@ -1,7 +1,8 @@
 # Architecture
 
-DefenseClaw is a governance layer for OpenClaw. It orchestrates scanning,
-enforcement, and auditing across existing tools without replacing any component.
+DefenseClaw is a governance layer for agent frameworks (OpenClaw, ZeptoClaw,
+and future frameworks). It orchestrates scanning, enforcement, and auditing
+across existing tools without replacing any component.
 
 ## System Diagram
 
@@ -48,9 +49,9 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │  │  SQLite DB       │  │  Guardrail   │             │               │    │
 │  │  │                  │  │  Proxy       │             │               │    │
 │  │  │  Audit events    │  │              │             │               │    │
-│  │  │  Scan results    │  │  Runs        │             │               │    │
-│  │  │  Block/allow     │  │  guardrail   │             │               │    │
-│  │  │  Skill inventory │  │  proxy       │             │               │    │
+│  │  │  Scan results    │  │  Connector   │             │               │    │
+│  │  │  Block/allow     │  │  Router      │             │               │    │
+│  │  │  Skill inventory │  │  + Proxy     │             │               │    │
 │  │  └──────────────────┘  └──────┬───────┘             │               │    │
 │  └──────────────────────────────┼────────────────────┼─────────────────┘    │
 │                                 │                    │                      │
@@ -61,8 +62,11 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │  Guardrail Proxy (port 4000)    │                 │                      │
 │  │                                  │                │                      │
 │  │  ┌────────────────────────────┐  │                │                      │
-│  │  │  DefenseClaw Guardrail     │  │                │                      │
-│  │  │  (built-in Go)             │  │                │                      │
+│  │  │  ConnectorRouter           │  │                │                      │
+│  │  │  OpenClaw → ZeptoClaw →    │  │                │                      │
+│  │  │  Generic (fallback)        │  │                │                      │
+│  │  ├────────────────────────────┤  │                │                      │
+│  │  │  Proxy Core (Go)           │  │                │                      │
 │  │  │                            │  │                │                      │
 │  │  │  pre_call:  prompt scan    │  │                │                      │
 │  │  │  post_call: response scan  │  │                │                      │
@@ -168,30 +172,32 @@ and plugins (read/write via gateway REST API).
 | Block/allow lists | CLI | Gateway (admission gate) |
 | Skill inventory (AIBOM) | CLI | Gateway, plugins, TUI |
 
-### 5. LLM Guardrail (Fetch Interceptor + Go Proxy)
+### 5. LLM Guardrail (Connector Architecture + Go Proxy)
 
-The guardrail intercepts all LLM traffic between OpenClaw and upstream
-providers. A TypeScript fetch interceptor plugin patches `globalThis.fetch`
-inside OpenClaw's Node.js process, routing all outbound LLM calls through
-the Go guardrail reverse proxy regardless of which provider the user selects.
+The guardrail intercepts all LLM traffic between agent frameworks and upstream
+providers using a **connector-based architecture**. Each framework has a
+dedicated Connector that translates its request format into a canonical
+`RoutingDecision` the proxy core processes uniformly.
 
 | Responsibility | Detail |
 |----------------|--------|
-| Universal interception | Fetch interceptor covers all 7 providers (Anthropic, OpenAI, Azure, Gemini, OpenRouter, Ollama, Bedrock) |
+| Multi-framework support | ConnectorRouter auto-detects framework: OpenClaw → ZeptoClaw → Generic |
+| Universal interception | OpenClaw: fetch interceptor covers 7 providers. ZeptoClaw: api_base redirect. Generic: any OpenAI-compatible client |
 | Prompt inspection | Scans every prompt for injection attacks, secrets, PII, data exfiltration patterns before it reaches the LLM |
 | Response inspection | Scans every LLM response for leaked secrets, tool call anomalies |
-| Multi-provider routing | Proxy routes to the correct upstream based on `X-DC-Target-URL` header set by the interceptor |
-| Auth separation | `X-AI-Auth` header carries the real provider key; `Authorization` carries the DefenseClaw gateway key |
+| Multi-provider routing | OpenClaw: `X-DC-Target-URL` header. ZeptoClaw/Generic: model-name prefix inference + config/defaults table |
+| Auth separation | Each connector handles auth extraction per framework convention |
 | Observe mode | Logs findings with colored output, never blocks (default, recommended to start) |
 | Action mode | Blocks prompts/responses that match security policies by raising exceptions |
-| Transparent proxy | No agent code changes required — the interceptor is invisible to OpenClaw |
+| Transparent proxy | No agent code changes required — connectors are invisible to frameworks |
+| Telemetry attribution | Each connector reports its name for per-framework metrics |
 
 **How it connects:**
 
-1. `defenseclaw setup guardrail` registers the plugin in `openclaw.json`
-2. On OpenClaw start, the fetch interceptor activates and patches `globalThis.fetch`
-3. All outbound LLM calls are routed through `localhost:4000` with auth headers injected
-4. The Go proxy inspects traffic, then forwards to the real upstream provider
+1. `defenseclaw setup guardrail [--claw openclaw|zeptoclaw]` configures the framework
+2. Sidecar builds ConnectorRouter from config (`buildConnectorRouter()` in `sidecar.go`)
+3. On request, ConnectorRouter auto-detects which connector handles it
+4. Connector produces RoutingDecision → proxy core inspects → forwards to upstream
 
 See `docs/GUARDRAIL.md` for the full data flow.
 
@@ -227,34 +233,36 @@ See `docs/GUARDRAIL.md` for the full data flow.
 ### LLM Traffic Inspection Flow
 
 ```
-  OpenClaw Agent       Fetch Interceptor       Guardrail Proxy        LLM Provider
-       │              (in-process plugin)     (localhost:4000)      (any provider)
-       │                      │                      │                    │
-       │  1. fetch(provider)  │                      │                    │
-       ├─────────────────────►│                      │                    │
-       │                      │                      │                    │
-       │               2. Redirect to localhost      │                    │
-       │                  + X-AI-Auth (provider key) │                    │
-       │                  + X-DC-Target-URL           │                    │
-       │                      ├─────────────────────►│                    │
-       │                      │                      │                    │
-       │                      │  3. pre_call scan    │                    │
-       │                      │     (injection,      │                    │
-       │                      │      secrets, PII)   │                    │
-       │                      │                      │                    │
-       │                      │  [action: block]     │                    │
-       │                      │                      │                    │
-       │                      │                      │  4. Forward        │
-       │                      │                      ├───────────────────►│
-       │                      │                      │◄───────────────────┤
-       │                      │                      │                    │
-       │                      │  5. post_call scan   │                    │
-       │                      │     (leaked secrets, │                    │
-       │                      │      tool anomalies) │                    │
-       │                      │                      │                    │
-       │  6. Response         │◄─────────────────────┤                    │
-       │◄─────────────────────┤                      │                    │
-       │                      │                      │                    │
+  Agent Framework    ConnectorRouter          Proxy Core           LLM Provider
+  (OpenClaw /       (auto-detect)           (inspect+forward)    (any provider)
+   ZeptoClaw / …)         │                      │                    │
+       │                  │                      │                    │
+       │  POST /v1/...   │                      │                    │
+       ├─────────────────►│                      │                    │
+       │                  │                      │                    │
+       │           1. Detect connector           │                    │
+       │           2. Authenticate               │                    │
+       │           3. Route → RoutingDecision    │                    │
+       │                  │                      │                    │
+       │                  ├─────────────────────►│                    │
+       │                  │                      │                    │
+       │                  │  4. pre_call scan    │                    │
+       │                  │     (injection,      │                    │
+       │                  │      secrets, PII)   │                    │
+       │                  │                      │                    │
+       │                  │  [action: block]     │                    │
+       │                  │                      │                    │
+       │                  │                      │  5. Forward        │
+       │                  │                      ├───────────────────►│
+       │                  │                      │◄───────────────────┤
+       │                  │                      │                    │
+       │                  │  6. post_call scan   │                    │
+       │                  │     (leaked secrets, │                    │
+       │                  │      tool anomalies) │                    │
+       │                  │                      │                    │
+       │  7. Response     │◄─────────────────────┤                    │
+       │◄─────────────────┤                      │                    │
+       │                  │                      │                    │
 ```
 
 ### Admission Gate
@@ -279,9 +287,9 @@ Allow list? ──YES──▶ skip scan, install, log to DB, audit event
 
 ## Claw Mode
 
-DefenseClaw supports multiple agent frameworks ("claw modes"). Currently only
-**OpenClaw** is supported; additional frameworks will be added soon. The active
-mode is set in `~/.defenseclaw/config.yaml`:
+DefenseClaw supports multiple agent frameworks ("claw modes"). Currently
+**OpenClaw** and **ZeptoClaw** are supported; additional frameworks will be
+added via connectors. The active mode is set in `~/.defenseclaw/config.yaml`:
 
 ```yaml
 claw:
@@ -292,6 +300,29 @@ claw:
 All skill and MCP directory resolution, watcher paths, scan targets, and install
 candidate lookups derive from the active claw mode. Adding a new framework
 requires only a new case in `internal/config/claw.go`.
+
+### Guardrail Connectors
+
+The LLM guardrail uses a separate **connector system** that runs independently
+of claw mode. Multiple connectors can be active simultaneously on the same
+proxy port:
+
+```yaml
+guardrail:
+  connectors:
+    openclaw:
+      enabled: true           # default: true (backward compatible)
+    zeptoclaw:
+      enabled: false          # enabled via: defenseclaw setup guardrail --claw zeptoclaw
+      providers:
+        openai:
+          upstream_url: https://api.openai.com
+          auth_header: Authorization
+          auth_scheme: Bearer
+```
+
+Both OpenClaw and ZeptoClaw agents can use the same guardrail proxy
+simultaneously — the ConnectorRouter detects the framework per-request.
 
 ### OpenClaw Skill Resolution Order
 
@@ -317,10 +348,16 @@ requires only a new case in `internal/config/claw.go`.
                         │   runs       │               ┌──────────────┐
                         │   ──────────────────────────▶│  Guardrail   │
                         └──────────────┘               │  Proxy       │
-                                                       │  + Guardrail │
+                                                       │  + Connector │
+                                                       │    Router    │
                                                        └──────┬───────┘
                                                               │
-                                                              ▼
-                                                       LLM Provider
-                                                    (Anthropic, OpenAI…)
+                                          ┌───────────────────┤
+                                          │                   │
+                                          ▼                   ▼
+                                   ┌──────────────┐   ┌──────────────┐
+                                   │  ZeptoClaw   │   │  LLM Provider│
+                                   │  (Rust)      │   │  (Anthropic, │
+                                   └──────────────┘   │   OpenAI…)   │
+                                                      └──────────────┘
 ```

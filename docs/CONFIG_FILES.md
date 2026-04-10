@@ -16,8 +16,14 @@ USER runs: defenseclaw setup guardrail
 
 GO SIDECAR boots: reads config.yaml once
   │
-  ├─ Runs guardrail proxy (goroutine; internal/gateway/sidecar.go:352–375):
+  ├─ Builds ConnectorRouter from guardrail.connectors.* config
+  │    ├─ OpenClaw connector (if connectors.openclaw.enabled)
+  │    ├─ ZeptoClaw connector (if connectors.zeptoclaw.enabled)
+  │    └─ Generic connector (always, as fallback)
+  │
+  ├─ Runs guardrail proxy (goroutine; internal/gateway/sidecar.go):
   │    ├─ Loads guardrail.* and cisco_ai_defense.* from in-memory config
+  │    ├─ Receives ConnectorRouter for multi-framework request detection
   │    ├─ Resolves API keys via ~/.defenseclaw/.env (ResolveAPIKey + loadDotEnv)
   │    └─ Listens on guardrail.port for OpenAI-compatible traffic
   │
@@ -96,6 +102,69 @@ Example contents:
 | **Path derivation (writer)** | `filepath.Join(a.scannerCfg.DataDir, "guardrail_runtime.json")` — uses `DataDir` from Go config. |
 | **Path derivation (reader)** | `filepath.Join(p.dataDir, "guardrail_runtime.json")` — `dataDir` from sidecar config (`internal/gateway/proxy.go:559`). |
 | **Caveat** | The PATCH handler updates the in-memory Go config but does **not** call `cfg.Save()`, so `config.yaml` drifts out of sync after a PATCH. |
+
+---
+
+## Connector Configuration
+
+The guardrail proxy uses a connector-based architecture to support multiple
+agent frameworks. Connector config is under `guardrail.connectors` in
+`config.yaml`.
+
+### `guardrail.connectors.openclaw`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable OpenClaw connector (backward compatible default) |
+| `token_env` | string | `OPENCLAW_GATEWAY_TOKEN` | Env var name for the gateway auth token |
+
+### `guardrail.connectors.zeptoclaw`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable ZeptoClaw connector (must be explicitly enabled via setup) |
+| `token_env` | string | `""` | Env var name for the proxy auth token |
+| `providers` | map | `{}` | Map of provider name → upstream connection details |
+
+Each entry in `providers` has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `upstream_url` | string | Real upstream URL (e.g. `https://api.openai.com`) |
+| `auth_header` | string | Header name for upstream auth (`Authorization`, `x-api-key`, `api-key`) |
+| `auth_scheme` | string | Auth prefix (`Bearer` or `""` for bare key) |
+
+Example config:
+
+```yaml
+guardrail:
+  connectors:
+    openclaw:
+      enabled: true
+      token_env: OPENCLAW_GATEWAY_TOKEN
+    zeptoclaw:
+      enabled: true
+      token_env: ""
+      providers:
+        openai:
+          upstream_url: https://api.openai.com
+          auth_header: Authorization
+          auth_scheme: Bearer
+        anthropic:
+          upstream_url: https://api.anthropic.com
+          auth_header: x-api-key
+          auth_scheme: ""
+        openrouter:
+          upstream_url: https://openrouter.ai/api/v1
+          auth_header: Authorization
+          auth_scheme: Bearer
+```
+
+| | |
+|---|---|
+| **Created by** | `defenseclaw setup guardrail --claw zeptoclaw` populates ZeptoClaw providers from `~/.zeptoclaw/config.json`. OpenClaw defaults are set by `DefaultConnectorsConfig()` in `internal/config/connectors.go`. |
+| **Read by** | **Go sidecar** `buildConnectorRouter()` (`internal/gateway/sidecar.go`) — builds `ConnectorRouter` from these settings at startup. |
+| **Defaults** | OpenClaw enabled with `OPENCLAW_GATEWAY_TOKEN`; ZeptoClaw disabled. If ZeptoClaw is enabled but a provider is missing from the config map, the connector falls back to the embedded default table (`internal/gateway/connector/zeptoclaw_defaults.go` — 19 providers). |
 
 ---
 

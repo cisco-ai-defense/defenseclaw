@@ -1215,7 +1215,7 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 			targetURL: "",
 			apiKey:    "sk-key",
 			model:     "gpt-4",
-			wantNil:   true,
+			wantType:  "*gateway.openaiProvider", // direct-provider fallback uses configured model
 		},
 		{
 			name:      "unknown_domain",

@@ -44,9 +44,12 @@ internal/
   enforce/              Block/allow engine, quarantine, OpenShell policy sync
   tui/                  Bubbletea TUI (four panels: Alerts, Skills, MCP, Status)
   audit/                SQLite audit store + event logger + export + Splunk HEC
-  config/               Viper config loader + defaults + environment detection + claw mode
+  config/               Viper config loader + defaults + environment detection + claw mode + connectors
   inventory/            AIBOM integration
   sandbox/              OpenShell CLI wrapper + policy generation
+  gateway/
+    connector/          Connector interface, router, and per-framework connectors
+                        (OpenClaw, ZeptoClaw, Generic fallback)
 plugins/                Plugin interface, registry, examples
 policies/               Default/strict/permissive YAML policy templates
 schemas/                JSON schemas for audit events and scan results
@@ -62,6 +65,14 @@ test/                   E2E tests, unit tests, fixtures
 - `internal/audit/store.go` — SQLite schema and operations
 - `internal/enforce/policy.go` — Admission gate (block -> allow -> scan)
 - `internal/config/claw.go` — Claw mode resolver (skill dirs, MCP dirs per framework)
+- `internal/config/connectors.go` — Connector config types (OpenClaw, ZeptoClaw)
+- `internal/gateway/connector/connector.go` — Connector interface + RoutingDecision
+- `internal/gateway/connector/router.go` — ConnectorRouter (ordered detection)
+- `internal/gateway/connector/openclaw.go` — OpenClaw connector (X-DC-Target-URL headers)
+- `internal/gateway/connector/zeptoclaw.go` — ZeptoClaw connector (model prefix inference)
+- `internal/gateway/connector/generic.go` — Generic fallback connector
+- `internal/gateway/connector/helpers.go` — Shared utilities (SSRF check, provider inference)
+- `internal/gateway/connector/zeptoclaw_defaults.go` — Embedded provider URL table (19 providers)
 - `internal/tui/app.go` — TUI root model
 
 ## Claw Mode
@@ -75,6 +86,20 @@ All skill/MCP directory resolution derives from the active mode
 1. `~/.openclaw/workspace/skills/` — workspace/project skills
 2. Custom `skills_dir` from `~/.openclaw/openclaw.json` — user-configured path
 3. `~/.openclaw/skills/` — global user skills
+
+## Connector Architecture (LLM Guardrail)
+
+The guardrail proxy uses a connector-based architecture to support multiple
+agent frameworks on the same proxy port. Each framework has a dedicated
+Connector that translates its request format into a canonical `RoutingDecision`.
+
+**Detection order**: OpenClaw → ZeptoClaw → Generic (fallback).
+
+- **OpenClaw Connector** — detects `X-DC-Target-URL` header from fetch interceptor
+- **ZeptoClaw Connector** — detects `X-ZC-Provider` header or standard auth without DC headers; resolves upstream URL from config/defaults
+- **Generic Connector** — fallback for curl, future frameworks; infers provider from model name
+
+Config: `guardrail.connectors.openclaw` (enabled by default), `guardrail.connectors.zeptoclaw` (disabled by default). See `docs/GUARDRAIL.md` for full data flow.
 
 ## Conventions
 

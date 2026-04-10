@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -498,8 +499,55 @@ func (s *Sidecar) activeSessionKeys() []string {
 	return s.router.ActiveSessionKeys()
 }
 
+// buildConnectorRouter creates a connector.Router from the guardrail config.
+// OpenClaw connector is registered first (highest priority — detects via
+// X-DC-Target-URL), then ZeptoClaw if enabled, with Generic as fallback.
+func (s *Sidecar) buildConnectorRouter() *connector.Router {
+	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
+	masterKey := deriveMasterKey(s.cfg.DataDir)
+
+	connCfg := s.cfg.Guardrail.Connectors
+	var connectors []connector.Connector
+
+	// OpenClaw connector.
+	if connCfg.OpenClaw.Enabled {
+		tokenEnv := connCfg.OpenClaw.TokenEnv
+		if tokenEnv == "" {
+			tokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+		}
+		gwToken := ResolveAPIKey(tokenEnv, dotenvPath)
+		connectors = append(connectors, connector.NewOpenClawConnector(gwToken, masterKey))
+	}
+
+	// ZeptoClaw connector.
+	if connCfg.ZeptoClaw.Enabled {
+		var zcToken string
+		if connCfg.ZeptoClaw.TokenEnv != "" {
+			zcToken = ResolveAPIKey(connCfg.ZeptoClaw.TokenEnv, dotenvPath)
+		}
+		// Convert config providers to connector.ZCProviderEntry map.
+		providers := make(map[string]connector.ZCProviderEntry)
+		for name, p := range connCfg.ZeptoClaw.Providers {
+			providers[name] = connector.ZCProviderEntry{
+				UpstreamURL: p.UpstreamURL,
+				AuthHeader:  p.AuthHeader,
+				AuthScheme:  p.AuthScheme,
+			}
+		}
+		connectors = append(connectors, connector.NewZeptoClawConnector(zcToken, masterKey, providers))
+	}
+
+	router := connector.NewRouter(connectors...)
+	router.SetFallback(connector.NewGenericConnector(nil))
+
+	fmt.Fprintf(os.Stderr, "[guardrail] connector router: %v\n", router.ConnectorNames())
+	return router
+}
+
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
+	connRouter := s.buildConnectorRouter()
+
 	proxy, err := NewGuardrailProxy(
 		&s.cfg.Guardrail,
 		&s.cfg.CiscoAIDefense,
@@ -510,6 +558,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.cfg.DataDir,
 		s.cfg.PolicyDir,
 		s.notify,
+		connRouter,
 	)
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)

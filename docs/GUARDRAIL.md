@@ -1,30 +1,91 @@
 # LLM Guardrail — Data Flow & Architecture
 
-The LLM guardrail intercepts all traffic between OpenClaw and LLM providers.
-It combines a TypeScript fetch interceptor plugin (running inside OpenClaw's
-Node.js process) with a Go guardrail reverse proxy
-(`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`) to inspect
-every prompt and response without requiring any changes to OpenClaw or agent
-code.
+The LLM guardrail intercepts all traffic between agent frameworks and LLM
+providers. It uses a **connector-based architecture** where each agent
+framework (OpenClaw, ZeptoClaw, future frameworks) has a dedicated Connector
+that translates its request format into a canonical `RoutingDecision` the
+proxy core processes uniformly.
 
-## Why a Fetch Interceptor + Proxy?
+The Go guardrail reverse proxy (`internal/gateway/proxy.go`,
+`internal/gateway/guardrail.go`) inspects every prompt and response without
+requiring changes to agent code.
+
+## Connector Architecture
+
+```
+                    +----------------------------------+
+                    |   Agent Framework                |
+                    |  (OpenClaw / ZeptoClaw / Future) |
+                    +---------------+------------------+
+                                    | HTTP POST
+                                    v
+                    +----------------------------------+
+                    |   GuardrailProxy HTTP Server      |
+                    +---------------+------------------+
+                                    |
+                           +--------v--------+
+                           | ConnectorRouter  |
+                           | (auto-detect)    |
+                           +--------+--------+
+                            /       |        \
+                  +---------+ +-----+-----+ +----------+
+                  | OpenClaw| | ZeptoClaw | | Generic  |
+                  |Connector| | Connector | |Connector |
+                  +---------+ +-----------+ +----------+
+                         \        |        /
+                          +-------v------+
+                          |RoutingDecision|  (canonical form)
+                          +-------+------+
+                                  |
+                  +---------------v----------------+
+                  |         Proxy Core              |
+                  | 1. Inspect input (rules/judge)  |
+                  | 2. Resolve LLMProvider adapter   |
+                  | 3. Forward to upstream          |
+                  | 4. Inspect output               |
+                  | 5. Return response              |
+                  +--------------------------------+
+```
+
+**Detection order**: OpenClaw (has `X-DC-Target-URL`) → ZeptoClaw (has `X-ZC-Provider` or standard auth without `X-DC-Target-URL`) → Generic (fallback).
+
+### Connector Interface
+
+Each connector implements (`internal/gateway/connector/connector.go`):
+
+| Method | Purpose |
+|--------|---------|
+| `Name()` | Canonical name for telemetry (`"openclaw"`, `"zeptoclaw"`, `"generic"`) |
+| `Detect(r)` | Does this request belong to this connector? First match wins |
+| `Authenticate(r)` | Is the request authorized? (token, master key, or loopback trust) |
+| `Route(r, body)` | Produce a `RoutingDecision` with upstream URL, provider, API key, etc. |
+
+### RoutingDecision (canonical form)
+
+Every connector produces a `RoutingDecision` containing:
+- `UpstreamURL` — full upstream URL (e.g. `https://api.openai.com/v1/chat/completions`)
+- `ProviderName` — canonical name: `"openai"`, `"anthropic"`, `"azure"`, etc.
+- `APIKey`, `AuthHeader`, `AuthScheme` — upstream auth details
+- `Model`, `Stream`, `RawBody` — request metadata
+- `PassthroughMode` — forward verbatim (provider-native paths like Anthropic `/v1/messages`)
+- `ExtraUpstreamHeaders` — additional headers (e.g., `anthropic-version`)
+- `ConnectorName` — source connector for telemetry attribution
+
+## OpenClaw Connector
+
+**File**: `internal/gateway/connector/openclaw.go`
+
+Uses the TypeScript fetch interceptor plugin (running inside OpenClaw's
+Node.js process) that patches `globalThis.fetch`, routing all outbound LLM
+calls through `localhost:4000`.
+
+### Why a Fetch Interceptor?
 
 OpenClaw's `message_sending` plugin hook is broken (issue #26422) — outbound
 messages never fire, making plugin-only interception impossible for LLM
 responses. Additionally, configuring a single proxy provider in
 `openclaw.json` only covers one model — switching to any other provider
-(Anthropic, Azure, Ollama, etc.) in OpenClaw's UI bypasses the proxy
-entirely.
-
-The solution is two-layered:
-
-1. **Fetch interceptor** (`plugins/defenseclaw/fetch-interceptor.ts`) —
-   patches `globalThis.fetch` inside OpenClaw's Node.js process, routing
-   **all** outbound LLM calls through `localhost:4000` regardless of which
-   provider the user selects.
-2. **Guardrail proxy** (`internal/gateway/proxy.go`) — inspects the
-   intercepted traffic, runs pre-call and post-call scanning, and forwards
-   to the real upstream provider.
+bypasses the proxy entirely.
 
 ### Auth Design (three-header contract)
 
@@ -44,6 +105,12 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 - AWS SigV4 — Bedrock (multiple headers, pass-through)
 - No auth — Ollama
 
+| Aspect | Implementation |
+|--------|---------------|
+| **Detect** | `X-DC-Target-URL` header present |
+| **Authenticate** | `X-DC-Auth` token → master key (`sk-dc-*`) → loopback trust → open proxy |
+| **Route** | Extract `X-DC-Target-URL` → upstream URL, `X-AI-Auth` → API key, infer provider from URL domain via `providers.json`, SSRF check |
+
 ### Providers Covered
 
 | Provider | Interception | Format |
@@ -56,9 +123,83 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 | Ollama | localhost:11434 | Pass-through (no key needed) |
 | Bedrock | *.amazonaws.com | AWS SigV4 pass-through |
 
+## ZeptoClaw Connector
+
+**File**: `internal/gateway/connector/zeptoclaw.go`
+
+Handles requests from ZeptoClaw, a Rust-based agent framework that sends
+standard HTTP with no DefenseClaw-specific headers. ZeptoClaw's `api_base`
+config is patched to redirect traffic through the proxy.
+
+| Aspect | Implementation |
+|--------|---------------|
+| **Detect** | `X-ZC-Provider` header present, OR (`X-DC-Target-URL` absent AND standard auth header present) |
+| **Authenticate** | `X-DC-Auth` token → master key → loopback trust → open proxy |
+| **Route** | Resolve provider from `X-ZC-Provider` → model prefix inference → `provider/model` format. Upstream URL from `X-ZC-Upstream` → config map → embedded defaults table |
+
+### Provider Inference from Model Name
+
+```
+"gpt-4o"                    → openai
+"claude-sonnet-4-20250514"  → anthropic
+"gemini-1.5-pro"            → gemini
+"anthropic/claude-3-haiku"  → anthropic (explicit prefix)
+"command-r-plus"            → cohere
+"deepseek-chat"             → deepseek
+```
+
+### Upstream URL Resolution
+
+Since ZeptoClaw replaces the real URL with `api_base: "http://127.0.0.1:4000"`,
+the connector reconstructs the original upstream:
+
+1. `X-ZC-Upstream` header (if ZeptoClaw sends it — optional)
+2. Config `providers` map (populated by `defenseclaw setup guardrail --claw zeptoclaw`)
+3. Embedded default table (`zeptoclaw_defaults.go` — 19 providers)
+
+### Embedded Default Provider Table
+
+Mirrored from ZeptoClaw's `PROVIDER_REGISTRY` — covers OpenAI, Anthropic,
+OpenRouter, Groq, Gemini, Ollama, NVIDIA, DeepSeek, Azure, Bedrock, xAI,
+and more. See `internal/gateway/connector/zeptoclaw_defaults.go`.
+
+## Generic / Fallback Connector
+
+**File**: `internal/gateway/connector/generic.go`
+
+Same model-based provider inference as ZeptoClaw but with relaxed auth
+(always authenticates). Serves as fallback for curl testing, future
+frameworks, or any OpenAI-compatible client.
+
 ## Data Flow
 
-### Fetch Interceptor Flow
+### Connector Router Flow
+
+```
+ ┌──────────────┐     ┌─────────────────────┐     ┌────────────────────┐     ┌──────────────┐
+ │  Agent        │     │  ConnectorRouter    │     │   Proxy Core       │     │  LLM Provider│
+ │  Framework    │     │  (auto-detect)      │     │  (inspect+forward) │     │              │
+ └──────┬───────┘     └──────────┬──────────┘     └──────────┬─────────┘     └──────┬───────┘
+        │                        │                           │                      │
+        │  POST /v1/chat/...     │                           │                      │
+        ├───────────────────────►│                           │                      │
+        │                        │                           │                      │
+        │                  Detect: which connector?          │                      │
+        │                  Authenticate: authorized?         │                      │
+        │                  Route: → RoutingDecision          │                      │
+        │                        │                           │                      │
+        │                        ├──────────────────────────►│                      │
+        │                        │                           │                      │
+        │                        │            PRE-CALL scan  │                      │
+        │                        │                           ├─────────────────────►│
+        │                        │                           │◄─────────────────────┤
+        │                        │            POST-CALL scan │                      │
+        │                        │                           │                      │
+        │  Response              │◄──────────────────────────┤                      │
+        │◄───────────────────────┤                           │                      │
+```
+
+### OpenClaw Fetch Interceptor Flow
 
 ```
  ┌──────────────┐     ┌─────────────────────┐     ┌────────────────────┐     ┌──────────────┐
@@ -74,6 +215,8 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
         │                        │  + adds X-DC-Target-URL   │                      │
         │                        ├──────────────────────────►│                      │
         │                        │                           │                      │
+        │                        │     OpenClaw connector    │                      │
+        │                        │     detects + routes      │                      │
         │                        │            PRE-CALL scan  │                      │
         │                        │                           ├─────────────────────►│
         │                        │                           │◄─────────────────────┤
@@ -81,6 +224,33 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
         │                        │                           │                      │
         │  Response              │◄──────────────────────────┤                      │
         │◄───────────────────────┤                           │                      │
+```
+
+### ZeptoClaw Flow
+
+```
+ ┌──────────────┐                ┌────────────────────┐     ┌──────────────┐
+ │   ZeptoClaw   │                │   Guardrail Proxy  │     │  LLM Provider│
+ │   Agent       │                │  (localhost:4000)  │     │              │
+ └──────┬───────┘                └──────────┬─────────┘     └──────┬───────┘
+        │                                   │                      │
+        │  POST /v1/chat/completions        │                      │
+        │  Authorization: Bearer sk-key     │                      │
+        │  (api_base patched to proxy)      │                      │
+        ├──────────────────────────────────►│                      │
+        │                                   │                      │
+        │                  ZeptoClaw connector detects              │
+        │                  Infers provider from model name         │
+        │                  Resolves upstream from config/defaults  │
+        │                  → RoutingDecision                       │
+        │                                   │                      │
+        │                     PRE-CALL scan │                      │
+        │                                   ├─────────────────────►│
+        │                                   │◄─────────────────────┤
+        │                    POST-CALL scan │                      │
+        │                                   │                      │
+        │  Response                         │                      │
+        │◄──────────────────────────────────┤                      │
 ```
 
 ### Normal Request (observe mode, clean)
@@ -202,7 +372,8 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 │                                                                     │
 │  Owns:                                                              │
 │  ├── guardrail proxy process (start, monitor health, restart)        │
-│  ├── Config: guardrail.enabled, mode, port, model                  │
+│  ├── Config: guardrail.enabled, mode, port, connectors             │
+│  ├── Builds ConnectorRouter from config (sidecar.go:buildConnectorRouter) │
 │  ├── Loads guardrail.* from config; proxy hot-reloads mode from guardrail_runtime.json │
 │  └── Health tracking: guardrail subsystem state                    │
 │                                                                     │
@@ -212,13 +383,32 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Guardrail Proxy (Go)                            │
+│                 ConnectorRouter + Connectors (Go)                    │
+│                 internal/gateway/connector/                          │
 │                                                                     │
 │  Owns:                                                              │
-│  ├── Model routing (config.yaml)                                   │
-│  ├── API key management (reads from env var)                       │
+│  ├── Framework detection (ordered: OpenClaw → ZeptoClaw → Generic)  │
+│  ├── Request authentication (token, master key, loopback trust)    │
+│  ├── Routing decision (upstream URL, provider, API key, auth)       │
+│  ├── Provider inference from URL domain (OpenClaw) or model name   │
+│  │   (ZeptoClaw/Generic)                                            │
+│  ├── Embedded default provider URL table (19 providers)            │
+│  ├── SSRF protection (IsKnownProviderDomain)                       │
+│  └── Telemetry attribution via ConnectorName                       │
+│                                                                     │
+│  Does NOT:                                                          │
+│  ├── Inspect LLM content (proxy core handles inspection)           │
+│  └── Forward requests (proxy core handles upstream communication)  │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Guardrail Proxy Core (Go)                       │
+│                                                                     │
+│  Owns:                                                              │
+│  ├── Receives RoutingDecision from connector and processes it       │
 │  ├── Protocol translation (OpenAI ↔ Anthropic/Google/etc.)         │
-│  └── Inspection pipeline + upstream LLM forwarding                 │
+│  ├── Inspection pipeline + upstream LLM forwarding                 │
+│  └── Falls back to legacy auth when no ConnectorRouter is set      │
 │                                                                     │
 │  Does NOT:                                                          │
 │  ├── Load its own YAML (receives config from sidecar / NewGuardrailProxy) │
@@ -249,14 +439,16 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 │                                                                     │
 │  Owns:                                                              │
 │  ├── `defenseclaw init` — seeds config, policies, optional guardrail setup │
-│  ├── `defenseclaw setup guardrail` — config wizard (plugin-only, no model changes) │
+│  ├── `defenseclaw setup guardrail [--claw openclaw|zeptoclaw]`     │
+│  │   OpenClaw: plugin install + openclaw.json patching             │
+│  │   ZeptoClaw: api_base patching + provider config population     │
 │  ├── `defenseclaw upgrade` — in-place upgrade with backup/restore  │
-│  ├── openclaw.json patching (plugin registration only)             │
-│  └── openclaw.json revert + plugin uninstall on --disable          │
+│  └── --disable: revert patched configs + uninstall plugins         │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                 Fetch Interceptor Plugin (TypeScript)                │
+│                 (OpenClaw only)                                      │
 │                                                                     │
 │  Owns:                                                              │
 │  ├── Patches globalThis.fetch inside OpenClaw's Node.js process    │
@@ -337,18 +529,11 @@ internal/gateway/
 
 ## Setup Flow
 
+### OpenClaw Setup (default)
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  defenseclaw init                                                │
-│                                                                  │
-│  1. Install uv (if needed)                                      │
-│  2. Install scanners (skill-scanner, mcp-scanner, aibom)        │
-│  3. Configure guardrail proxy (Go binary)                       │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  defenseclaw setup guardrail                                     │
+│  defenseclaw setup guardrail [--claw openclaw]                   │
 │                                                                  │
 │  Interactive wizard:                                             │
 │  1. Enable guardrail? → yes                                     │
@@ -359,26 +544,11 @@ internal/gateway/
 │  provider detection and key injection automatically.            │
 │                                                                  │
 │  Generates:                                                      │
-│  ├── ~/.defenseclaw/config.yaml (guardrail section)             │
+│  ├── ~/.defenseclaw/config.yaml (guardrail section + connectors)│
+│  ├── Sets connectors.openclaw.enabled = true                    │
 │  └── Patches ~/.openclaw/openclaw.json                          │
 │      ├── Registers defenseclaw in plugins.allow                 │
 │      └── Enables plugin entry (fetch interceptor loads on start)│
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  defenseclaw-gateway  (or: defenseclaw sidecar)                  │
-│                                                                  │
-│  Starts all subsystems:                                          │
-│  1. Gateway WS connection loop                                   │
-│  2. Skill/MCP watcher                                           │
-│  3. REST API server                                              │
-│  4. Spawns and supervises guardrail proxy (if enabled)          │
-│     ├── Locates guardrail binary                                │
-│     ├── Verifies guardrail settings in config.yaml              │
-│     ├── Starts guardrail proxy with mode + scanner env vars     │
-│     ├── Polls /health/liveliness until 200                      │
-│     └── Restarts on crash (exponential backoff)                 │
 └──────────────────────────────────────────────────────────────────┘
 
 When OpenClaw starts, the fetch interceptor plugin activates and routes
@@ -386,14 +556,66 @@ all outbound LLM calls through the guardrail proxy — regardless of
 which provider the user selects in the UI.
 ```
 
+### ZeptoClaw Setup
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  defenseclaw setup guardrail --claw zeptoclaw                    │
+│                                                                  │
+│  1. Read ~/.zeptoclaw/config.json (discover providers)           │
+│  2. Save original provider configs to                           │
+│     ~/.defenseclaw/zeptoclaw_original_providers.json            │
+│  3. Patch api_base for each provider to                         │
+│     http://127.0.0.1:4000/v1                                   │
+│  4. Write connector config to config.yaml:                       │
+│     connectors.zeptoclaw.enabled = true                          │
+│     connectors.zeptoclaw.providers = {provider → upstream map}  │
+│  5. Restart ZeptoClaw (picks up new api_base)                   │
+└──────────────────────────────────────────────────────────────────┘
+
+No plugin install needed — ZeptoClaw uses api_base redirect, which is
+simpler and less invasive than a fetch interceptor.
+```
+
+### Sidecar Startup (both connectors)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  defenseclaw-gateway  (or: defenseclaw sidecar)                  │
+│                                                                  │
+│  Starts all subsystems:                                          │
+│  1. Gateway WS connection loop                                   │
+│  2. Skill/MCP watcher                                           │
+│  3. REST API server                                              │
+│  4. Builds ConnectorRouter from config:                          │
+│     ├── If connectors.openclaw.enabled → add OpenClawConnector  │
+│     ├── If connectors.zeptoclaw.enabled → add ZeptoClawConnector│
+│     └── Always set GenericConnector as fallback                 │
+│  5. Spawns guardrail proxy with ConnectorRouter (if enabled)    │
+│     ├── Verifies guardrail settings in config.yaml              │
+│     ├── Starts proxy with mode + scanner env vars               │
+│     ├── Polls /health/liveliness until 200                      │
+│     └── Restarts on crash (exponential backoff)                 │
+└──────────────────────────────────────────────────────────────────┘
+```
+
 ## Teardown
 
 ```
+# OpenClaw teardown (default)
 defenseclaw setup guardrail --disable
+defenseclaw setup guardrail --claw openclaw --disable
   1. Remove defenseclaw plugin entries from openclaw.json
   2. Uninstall plugin from ~/.openclaw/extensions/defenseclaw/
-  3. Set guardrail.enabled = false in config.yaml
+  3. Set connectors.openclaw.enabled = false in config.yaml
   4. Restart OpenClaw gateway (fetch interceptor unloads)
+
+# ZeptoClaw teardown
+defenseclaw setup guardrail --claw zeptoclaw --disable
+  1. Read ~/.defenseclaw/zeptoclaw_original_providers.json
+  2. Restore original api_base values in ~/.zeptoclaw/config.json
+  3. Set connectors.zeptoclaw.enabled = false in config.yaml
+  4. Restart ZeptoClaw (restores direct provider access)
 ```
 
 ## Upgrade
@@ -633,15 +855,24 @@ extensions/defenseclaw/src/
   sidecar-config.ts                 # Reads guardrail.port from config
 
 internal/config/
-  config.go                         # GuardrailConfig + CiscoAIDefenseConfig Go structs
+  config.go                         # GuardrailConfig + CiscoAIDefenseConfig + ConnectorsConfig Go structs
+  connectors.go                     # ConnectorsConfig, OpenClawConnectorConfig, ZeptoClawConnectorConfig
 
 internal/policy/
   types.go                          # GuardrailInput / GuardrailOutput types
   engine.go                         # EvaluateGuardrail method
 
 internal/gateway/
+  connector/                        # Connector architecture (NEW)
+    connector.go                    # Connector interface + RoutingDecision struct
+    router.go                       # ConnectorRouter — ordered detection, first match wins
+    openclaw.go                     # OpenClaw connector (X-DC-Target-URL + fetch interceptor)
+    zeptoclaw.go                    # ZeptoClaw connector (model inference + api_base redirect)
+    zeptoclaw_defaults.go           # Embedded default provider table (19 providers)
+    generic.go                      # Generic fallback connector (curl, future frameworks)
+    helpers.go                      # InferProviderFromURL, IsKnownProviderDomain, ExtractAPIKey, IsLoopback
   guardrail.go                      # GuardrailInspector — scanners + OPA finalize
-  proxy.go                          # GuardrailProxy — reverse proxy + passthrough + inspection
+  proxy.go                          # GuardrailProxy — connector-aware reverse proxy + inspection
   provider.go                       # Provider routing (splitModel, inferProvider)
   provider_openai.go                # OpenAI provider
   provider_anthropic.go             # Anthropic provider (passthrough /v1/messages)
@@ -649,14 +880,14 @@ internal/gateway/
   provider_gemini.go                # Gemini (native + OpenAI-compatible)
   provider_openrouter.go            # OpenRouter (attribution headers)
   api.go                            # POST /v1/guardrail/evaluate, /v1/guardrail/event
-  sidecar.go                        # runGuardrail() goroutine
+  sidecar.go                        # runGuardrail() + buildConnectorRouter()
   health.go                         # guardrail subsystem health tracking
 
 scripts/
   upgrade.sh                        # Shell-based upgrade (mirrors `defenseclaw upgrade`)
 
 ~/.defenseclaw/                     # runtime (generated, not in repo)
-  config.yaml                       # guardrail section (incl. scanner_mode, cisco_ai_defense)
+  config.yaml                       # guardrail section (incl. connectors, scanner_mode, cisco_ai_defense)
   backups/                          # timestamped upgrade backups
 ```
 

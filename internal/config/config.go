@@ -302,18 +302,19 @@ func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 }
 
 type GuardrailConfig struct {
-	Enabled       bool        `mapstructure:"enabled"        yaml:"enabled"`
-	Mode          string      `mapstructure:"mode"            yaml:"mode"`
-	ScannerMode   string      `mapstructure:"scanner_mode"    yaml:"scanner_mode"`
-	Host          string      `mapstructure:"host"             yaml:"host,omitempty"`
-	Port          int         `mapstructure:"port"            yaml:"port"`
-	Model         string      `mapstructure:"model"           yaml:"model"`
-	ModelName     string      `mapstructure:"model_name"      yaml:"model_name"`
-	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
-	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
-	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
-	APIBase       string      `mapstructure:"api_base"        yaml:"api_base"`
-	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`
+	Enabled       bool             `mapstructure:"enabled"        yaml:"enabled"`
+	Mode          string           `mapstructure:"mode"            yaml:"mode"`
+	ScannerMode   string           `mapstructure:"scanner_mode"    yaml:"scanner_mode"`
+	Host          string           `mapstructure:"host"             yaml:"host,omitempty"`
+	Port          int              `mapstructure:"port"            yaml:"port"`
+	Model         string           `mapstructure:"model"           yaml:"model"`
+	ModelName     string           `mapstructure:"model_name"      yaml:"model_name"`
+	APIKeyEnv     string           `mapstructure:"api_key_env"     yaml:"api_key_env"`
+	OriginalModel string           `mapstructure:"original_model"  yaml:"original_model"`
+	BlockMessage  string           `mapstructure:"block_message"   yaml:"block_message"`
+	APIBase       string           `mapstructure:"api_base"        yaml:"api_base"`
+	Judge         JudgeConfig      `mapstructure:"judge"           yaml:"judge"`
+	Connectors    ConnectorsConfig `mapstructure:"connectors"      yaml:"connectors"`
 }
 
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
@@ -675,6 +676,11 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.pii_prompt", true)
 	viper.SetDefault("guardrail.judge.pii_completion", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
+
+	// Connector defaults: OpenClaw enabled (backward compat), ZeptoClaw disabled.
+	viper.SetDefault("guardrail.connectors.openclaw.enabled", true)
+	viper.SetDefault("guardrail.connectors.openclaw.token_env", "OPENCLAW_GATEWAY_TOKEN")
+	viper.SetDefault("guardrail.connectors.zeptoclaw.enabled", false)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
