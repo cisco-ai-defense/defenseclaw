@@ -97,9 +97,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
 func (s *Sidecar) Run(ctx context.Context) error {
-	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v)\n",
-		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled)
-	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
+	runID := os.Getenv("DEFENSECLAW_RUN_ID")
+	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
+		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
+	_ = s.logger.LogAction("sidecar-start", "", fmt.Sprintf("starting all subsystems run_id=%s", runID))
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)

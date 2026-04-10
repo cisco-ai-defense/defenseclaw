@@ -312,7 +312,7 @@ alerts_for_run() {
     if [ "${total_count}" != "${matched_count}" ] || [ "${total_count}" = "0" ]; then
         echo "  [diag] alerts_for_run: limit=$limit total=$total_count matched_run_id=$matched_count run_id=$DEFENSECLAW_RUN_ID" >&2
         if [ "${total_count:-0}" != "0" ] && [ "${total_count}" != "?" ] && [ "${matched_count}" = "0" ]; then
-            echo "  [diag] sample run_ids: $(printf '%s\n' "$raw" | jq -r '.[0:3] | .[].run_id // "null"' 2>/dev/null)" >&2
+            echo "  [diag] sample events: $(printf '%s\n' "$raw" | jq -r '.[0:5] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)" >&2
         fi
     fi
     printf '%s\n' "$raw" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)]' 2>/dev/null || echo '[]'
@@ -1054,6 +1054,7 @@ phase_start() {
     sleep 5
 
     echo "  Starting DefenseClaw sidecar..."
+    echo "  [diag] DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID (shell)"
     defenseclaw-gateway stop 2>/dev/null || true
     defenseclaw-gateway start
     sleep 5
@@ -1079,6 +1080,17 @@ phase_start() {
     else
         fail "sidecar API authenticated" "token mismatch — see diagnostic output above"
     fi
+
+    # Early run_id diagnostic — check if the sidecar-start event has run_id set.
+    local early_events early_count early_matched
+    early_events=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=10" 2>/dev/null || echo '[]')
+    early_count=$(printf '%s\n' "$early_events" | jq 'length' 2>/dev/null || echo "0")
+    early_matched=$(printf '%s\n' "$early_events" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)] | length' 2>/dev/null || echo "0")
+    echo "  [diag] Phase 1 early events: total=$early_count matched_run_id=$early_matched"
+    if [ "${early_count:-0}" != "0" ] && [ "${early_matched:-0}" = "0" ]; then
+        echo "  [diag] Phase 1 sample: $(printf '%s\n' "$early_events" | jq -r '.[0:3] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)"
+    fi
+
     phase_timer_end "Phase 1"
 }
 
