@@ -68,6 +68,9 @@ Run without arguments to start the sidecar daemon.`,
 		if err != nil {
 			return fmt.Errorf("failed to open audit store: %w", err)
 		}
+		if err := auditStore.Init(); err != nil {
+			return fmt.Errorf("failed to init audit store: %w", err)
+		}
 
 		auditLog = audit.NewLogger(auditStore)
 		loadDotEnvIntoOS(filepath.Join(cfg.DataDir, ".env"))
