@@ -120,49 +120,49 @@ def upgrade(
 
     _run_silent(["defenseclaw-gateway", "stop"], "Gateway stopped", "Gateway was not running")
 
-    # ── Download and replace files ───────────────────────────────────────────
+    # ── Download, migrate, and restart ────────────────────────────────────────
+    # Wrapped in try/finally so the gateway is always restarted even if the
+    # download or migration step fails (e.g. unreleased version → HTTP 404).
 
-    click.echo()
-    click.echo("  ── Downloading Release Artifacts ────────────────────────")
-    click.echo()
+    try:
+        click.echo()
+        click.echo("  ── Downloading Release Artifacts ────────────────────────")
+        click.echo()
 
-    _replace_gateway_from_release(target_version, os_name, arch)
-    _replace_python_cli_from_release(target_version)
+        _replace_gateway_from_release(target_version, os_name, arch)
+        _replace_python_cli_from_release(target_version)
 
-    # ── Run migrations ───────────────────────────────────────────────────────
+        click.echo()
+        click.echo("  ── Running Migrations ───────────────────────────────────")
+        click.echo()
 
-    click.echo()
-    click.echo("  ── Running Migrations ───────────────────────────────────")
-    click.echo()
+        openclaw_home = os.path.expanduser(
+            app.cfg.claw.home_dir if app.cfg else "~/.openclaw"
+        )
 
-    openclaw_home = os.path.expanduser(
-        app.cfg.claw.home_dir if app.cfg else "~/.openclaw"
-    )
+        from defenseclaw.migrations import run_migrations
+        count = run_migrations(current_version, target_version, openclaw_home)
+        if count == 0:
+            click.echo("  ✓ No migrations needed")
+        else:
+            click.echo(f"  ✓ Applied {count} migration(s)")
 
-    from defenseclaw.migrations import run_migrations
-    count = run_migrations(current_version, target_version, openclaw_home)
-    if count == 0:
-        click.echo("  ✓ No migrations needed")
-    else:
-        click.echo(f"  ✓ Applied {count} migration(s)")
+    finally:
+        click.echo()
+        click.echo("  ── Starting Services ────────────────────────────────────")
+        click.echo()
 
-    # ── Start services ───────────────────────────────────────────────────────
+        _run_silent(["defenseclaw-gateway", "start"], "Gateway started", "Could not start gateway")
 
-    click.echo()
-    click.echo("  ── Starting Services ────────────────────────────────────")
-    click.echo()
-
-    _run_silent(["defenseclaw-gateway", "start"], "Gateway started", "Could not start gateway")
-
-    result = subprocess.run(
-        ["openclaw", "gateway", "restart"],
-        capture_output=True, text=True, timeout=30, check=False,
-    )
-    if result.returncode == 0:
-        click.echo("  ✓ OpenClaw gateway restarted — DefenseClaw plugin loaded")
-    else:
-        click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
-        click.echo("    Run manually: openclaw gateway restart")
+        result = subprocess.run(
+            ["openclaw", "gateway", "restart"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode == 0:
+            click.echo("  ✓ OpenClaw gateway restarted — DefenseClaw plugin loaded")
+        else:
+            click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
+            click.echo("    Run manually: openclaw gateway restart")
 
     # ── Done ─────────────────────────────────────────────────────────────────
 

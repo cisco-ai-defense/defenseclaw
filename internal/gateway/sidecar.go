@@ -165,6 +165,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertWg.Wait()
 
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
+	s.logger.Close()
 	_ = s.client.Close()
 
 	// Return the first non-nil error if any subsystem failed before shutdown
