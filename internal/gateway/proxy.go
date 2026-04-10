@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,6 +271,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// SSRF protection: only forward to domains listed in providers.json.
+	// Reject requests targeting internal hosts (e.g. cloud IMDS, localhost).
+	if !isKnownProviderDomain(targetOrigin) {
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s\n", targetOrigin)
+		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
@@ -362,7 +371,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Forward verbatim to real upstream: reassemble original URL.
 	upstreamURL := strings.TrimRight(targetOrigin, "/") + r.URL.RequestURI()
-	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, upstreamURL)
+	fmt.Fprintf(os.Stderr, "[guardrail] → intercepted %s → %s\n", label, scrubURLSecrets(upstreamURL))
 
 	// Resolve the key to use for the upstream provider.
 	// Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
@@ -425,7 +434,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", upstreamURL)
+	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := providerHTTPClient.Do(upstreamReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
@@ -1763,6 +1772,37 @@ func truncateLog(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + fmt.Sprintf("... (%d more chars)", len(s)-maxLen)
+}
+
+// scrubURLSecrets removes sensitive query parameters (key, api-key, apikey,
+// token) from a URL string before logging.  Returns the original string
+// unmodified when it contains no query string.
+func scrubURLSecrets(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.RawQuery == "" {
+		return raw
+	}
+	q := u.Query()
+	for _, k := range []string{"key", "api-key", "apikey", "token"} {
+		if q.Has(k) {
+			q.Set(k, "REDACTED")
+		}
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// isKnownProviderDomain returns true when targetURL contains a domain
+// substring that matches an entry in the embedded providers.json list.
+// Used to reject passthrough requests to unknown/internal hosts (SSRF
+// protection).
+func isKnownProviderDomain(targetURL string) bool {
+	for _, pd := range providerDomains {
+		if strings.Contains(targetURL, pd.domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // patchRawResponseModel overwrites only the "model" field in raw JSON bytes,
