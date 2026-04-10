@@ -215,6 +215,67 @@ class TestPolicyDelete(PolicyCommandTestBase):
         self.assertEqual(len(actions), 1)
 
 
+class TestSyncOpaDataFirstParty(PolicyCommandTestBase):
+    def test_sync_writes_first_party_allow_list_with_provenance(self):
+        from defenseclaw.commands.cmd_policy import _sync_opa_data
+
+        rego_dir = os.path.join(self.app.cfg.policy_dir, "rego")
+        os.makedirs(rego_dir, exist_ok=True)
+        data_json_path = os.path.join(rego_dir, "data.json")
+        with open(data_json_path, "w") as f:
+            json.dump({
+                "config": {},
+                "actions": {},
+                "first_party_allow_list": [
+                    {
+                        "target_type": "plugin",
+                        "target_name": "defenseclaw",
+                        "reason": "old reason",
+                        "source_path_contains": [".defenseclaw"],
+                    }
+                ],
+            }, f)
+
+        policy_data = {
+            "name": "test-sync",
+            "first_party_allow_list": [
+                {
+                    "target_type": "plugin",
+                    "target_name": "defenseclaw",
+                    "reason": "first-party DefenseClaw plugin",
+                    "source_path_contains": [".defenseclaw", ".openclaw/extensions"],
+                },
+                {
+                    "target_type": "skill",
+                    "target_name": "codeguard",
+                    "reason": "first-party DefenseClaw skill",
+                    "source_path_contains": [".defenseclaw", ".openclaw/skills"],
+                },
+            ],
+        }
+
+        _sync_opa_data(self.app, policy_data)
+
+        with open(data_json_path) as f:
+            result = json.load(f)
+
+        fp_list = result.get("first_party_allow_list", [])
+        self.assertEqual(len(fp_list), 2)
+
+        plugin_entry = next(
+            (e for e in fp_list if e["target_name"] == "defenseclaw"), None
+        )
+        self.assertIsNotNone(plugin_entry)
+        self.assertIn(".openclaw/extensions", plugin_entry["source_path_contains"])
+        self.assertEqual(plugin_entry["reason"], "first-party DefenseClaw plugin")
+
+        skill_entry = next(
+            (e for e in fp_list if e["target_name"] == "codeguard"), None
+        )
+        self.assertIsNotNone(skill_entry)
+        self.assertIn(".openclaw/skills", skill_entry["source_path_contains"])
+
+
 class TestPolicyLifecycle(PolicyCommandTestBase):
     def test_create_show_activate_delete(self):
         # Create

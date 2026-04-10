@@ -1,0 +1,11 @@
+{
+  "id": "clean-plugin",
+  "name": "Clean Plugin Fixture",
+  "version": "1.0.0",
+  "description": "Minimal valid OpenClaw plugin fixture for DefenseClaw E2E tests.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

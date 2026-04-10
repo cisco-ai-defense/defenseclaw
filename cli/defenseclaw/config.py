@@ -542,6 +542,7 @@ class GuardrailConfig:
     api_key_env: str = ""           # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
     original_model: str = ""        # original OpenClaw model (for revert)
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
+    api_base: str = ""              # base URL override for Azure, custom endpoints
     judge: JudgeConfig = field(default_factory=JudgeConfig)
 
 
@@ -577,12 +578,16 @@ class Config:
         home = self.claw_home_dir()
         dirs: list[str] = []
         oc = _read_openclaw_config(self.claw.config_file)
+        workspace = os.path.join(home, "workspace")
         if oc:
             ws = oc.get("agents", {}).get("defaults", {}).get("workspace", "")
             if ws:
-                dirs.append(os.path.join(_expand(ws), "skills"))
+                workspace = _expand(ws)
+            dirs.append(os.path.join(workspace, "skills"))
             for d in oc.get("skills", {}).get("load", {}).get("extraDirs", []):
                 dirs.append(_expand(d))
+        else:
+            dirs.append(os.path.join(workspace, "skills"))
         dirs.append(os.path.join(home, "skills"))
         return _dedup(dirs)
 
@@ -832,6 +837,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         api_key_env=raw.get("api_key_env", ""),
         original_model=raw.get("original_model", ""),
         block_message=raw.get("block_message", ""),
+        api_base=raw.get("api_base", ""),
         judge=_merge_judge(raw.get("judge")),
     )
 

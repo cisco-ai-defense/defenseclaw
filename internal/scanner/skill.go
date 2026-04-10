@@ -24,11 +24,57 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// extractJSON finds the first top-level JSON object in data.
+// Scanner CLIs sometimes print progress text to stdout before the JSON;
+// this isolates the `{...}` payload so json.Unmarshal succeeds.
+// extractJSON locates the first balanced JSON object in data by tracking
+// brace depth while skipping string literals.
+func extractJSON(data []byte) []byte {
+	start := bytes.IndexByte(data, '{')
+	if start < 0 {
+		return data
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(data); i++ {
+		b := data[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if b == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if b == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return data[start : i+1]
+			}
+		}
+	}
+	return data
+}
 
 type SkillScanner struct {
 	Config         config.SkillScannerConfig
@@ -117,6 +163,13 @@ func (s *SkillScanner) scanEnv() []string {
 		}
 	}
 
+	if !existing["NO_COLOR"] {
+		env = append(env, "NO_COLOR=1")
+	}
+	if !existing["TERM"] {
+		env = append(env, "TERM=dumb")
+	}
+
 	return env
 }
 
@@ -175,8 +228,9 @@ type skillFinding struct {
 }
 
 func parseSkillOutput(data []byte) ([]Finding, error) {
+	clean := extractJSON(ansiRe.ReplaceAll(data, nil))
 	var out skillOutput
-	if err := json.Unmarshal(data, &out); err != nil {
+	if err := json.Unmarshal(clean, &out); err != nil {
 		return nil, err
 	}
 

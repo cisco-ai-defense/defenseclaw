@@ -123,8 +123,8 @@ func TestDefaultConfig(t *testing.T) {
 	if !cfg.Gateway.Watcher.Skill.Enabled {
 		t.Error("expected gateway watcher skill enabled by default")
 	}
-	if cfg.Gateway.Watcher.Skill.TakeAction {
-		t.Error("expected gateway watcher skill take_action=false by default")
+	if !cfg.Gateway.Watcher.Skill.TakeAction {
+		t.Error("expected gateway watcher skill take_action=true by default")
 	}
 	if cfg.Watch.DebounceMs != 500 {
 		t.Errorf("expected debounce 500ms, got %d", cfg.Watch.DebounceMs)
@@ -141,8 +141,8 @@ func TestDefaultGatewayWatcherPluginConfig(t *testing.T) {
 	if !p.Enabled {
 		t.Errorf("Gateway.Watcher.Plugin.Enabled = %v, want true", p.Enabled)
 	}
-	if p.TakeAction {
-		t.Errorf("Gateway.Watcher.Plugin.TakeAction = %v, want false", p.TakeAction)
+	if !p.TakeAction {
+		t.Errorf("Gateway.Watcher.Plugin.TakeAction = %v, want true", p.TakeAction)
 	}
 	if len(p.Dirs) != 0 {
 		t.Errorf("Gateway.Watcher.Plugin.Dirs = %v, want empty", p.Dirs)
@@ -161,8 +161,8 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.Port != 4000 {
 		t.Errorf("expected guardrail port 4000, got %d", cfg.Guardrail.Port)
 	}
-	if cfg.Guardrail.ScannerMode != "local" {
-		t.Errorf("expected guardrail scanner_mode %q, got %q", "local", cfg.Guardrail.ScannerMode)
+	if cfg.Guardrail.ScannerMode != "both" {
+		t.Errorf("expected guardrail scanner_mode %q, got %q", "both", cfg.Guardrail.ScannerMode)
 	}
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
@@ -451,8 +451,11 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 
 func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 	dirs := SkillDirsForMode(ClawOpenClaw, "/tmp/nonexistent-home")
-	if len(dirs) == 0 {
-		t.Fatal("expected at least one skill dir")
+	if len(dirs) < 2 {
+		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
+	}
+	if dirs[0] != "/tmp/nonexistent-home/workspace/skills" {
+		t.Errorf("first dir = %q, want /tmp/nonexistent-home/workspace/skills", dirs[0])
 	}
 	if dirs[len(dirs)-1] != "/tmp/nonexistent-home/skills" {
 		t.Errorf("last dir = %q, want /tmp/nonexistent-home/skills", dirs[len(dirs)-1])
@@ -461,11 +464,12 @@ func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 
 func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 	tmpDir := t.TempDir()
+	workspaceDir := filepath.Join(tmpDir, "project-workspace")
 
 	ocConfig := map[string]interface{}{
 		"agents": map[string]interface{}{
 			"defaults": map[string]interface{}{
-				"workspace": tmpDir,
+				"workspace": workspaceDir,
 			},
 		},
 		"skills": map[string]interface{}{
@@ -494,7 +498,7 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 		t.Errorf("expected /tmp/extra-skills in dirs: %v", dirs)
 	}
 
-	wsSkills := filepath.Join(tmpDir, "skills")
+	wsSkills := filepath.Join(workspaceDir, "skills")
 	foundWs := false
 	for _, d := range dirs {
 		if d == wsSkills {
@@ -504,6 +508,9 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 	}
 	if !foundWs {
 		t.Errorf("expected workspace/skills %q in dirs: %v", wsSkills, dirs)
+	}
+	if dirs[len(dirs)-1] != filepath.Join(tmpDir, "skills") {
+		t.Errorf("expected global skill dir last, got %v", dirs)
 	}
 }
 

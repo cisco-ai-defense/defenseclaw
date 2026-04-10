@@ -56,7 +56,7 @@ func TestSkillWatcherConfigDefaults(t *testing.T) {
 	if !cfg.Gateway.Watcher.Skill.Enabled {
 		t.Error("expected skill watcher enabled by default")
 	}
-	if cfg.Gateway.Watcher.Skill.TakeAction {
-		t.Error("expected skill watcher take_action=false by default")
+	if !cfg.Gateway.Watcher.Skill.TakeAction {
+		t.Error("expected skill watcher take_action=true by default")
 	}
 }

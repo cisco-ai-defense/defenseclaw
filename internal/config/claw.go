@@ -159,20 +159,29 @@ func parseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
+func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
+	workspace := filepath.Join(homeDir, "workspace")
+	if oc != nil && oc.Agents.Defaults.Workspace != "" {
+		workspace = expandPath(oc.Agents.Defaults.Workspace)
+	}
+	return filepath.Join(workspace, "skills")
+}
+
 // SkillDirs returns the skill directories for the active claw mode.
-// Order: workspace/skills → extraDirs from openclaw.json → home_dir/skills
+// Order: workspace/skills → extraDirs from openclaw.json → home_dir/skills.
+// OpenClaw defaults the workspace to ~/.openclaw/workspace even when the
+// path is omitted from openclaw.json, so we always include that fallback.
 func (c *Config) SkillDirs() []string {
 	homeDir := expandPath(c.Claw.HomeDir)
 	var dirs []string
 
 	if oc, err := readOpenclawConfig(c.Claw.ConfigFile); err == nil {
-		if oc.Agents.Defaults.Workspace != "" {
-			ws := expandPath(oc.Agents.Defaults.Workspace)
-			dirs = append(dirs, filepath.Join(ws, "skills"))
-		}
+		dirs = append(dirs, workspaceSkillsDir(homeDir, oc))
 		for _, d := range oc.Skills.Load.ExtraDirs {
 			dirs = append(dirs, expandPath(d))
 		}
+	} else {
+		dirs = append(dirs, workspaceSkillsDir(homeDir, nil))
 	}
 
 	dirs = append(dirs, filepath.Join(homeDir, "skills"))
@@ -235,13 +244,12 @@ func SkillDirsForMode(mode ClawMode, homeDir string) []string {
 	var dirs []string
 
 	if oc, err := readOpenclawConfig(configFile); err == nil {
-		if oc.Agents.Defaults.Workspace != "" {
-			ws := expandPath(oc.Agents.Defaults.Workspace)
-			dirs = append(dirs, filepath.Join(ws, "skills"))
-		}
+		dirs = append(dirs, workspaceSkillsDir(homeDir, oc))
 		for _, d := range oc.Skills.Load.ExtraDirs {
 			dirs = append(dirs, expandPath(d))
 		}
+	} else {
+		dirs = append(dirs, workspaceSkillsDir(homeDir, nil))
 	}
 
 	dirs = append(dirs, filepath.Join(homeDir, "skills"))

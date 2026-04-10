@@ -34,13 +34,19 @@ from pathlib import Path
 
 def patch_openclaw_config(
     openclaw_config_file: str,
-    model_name: str,
-    proxy_port: int,
-    master_key: str,
+    model_name: str,  # kept for API compat — no longer used (fetch interceptor handles routing)
+    proxy_port: int,  # kept for API compat — no longer used
+    master_key: str,  # kept for API compat — no longer used
     original_model: str,
     guardrail_host: str = "localhost",
 ) -> str | None:
-    """Patch openclaw.json to route through the guardrail proxy. Returns the original model or None on error."""
+    """Register the DefenseClaw plugin in openclaw.json.
+
+    The fetch interceptor handles all traffic routing transparently —
+    no provider entry or model redirection is needed. This function only
+    registers the plugin so OpenClaw loads it on startup.
+    """
+    _ = model_name, proxy_port, master_key  # unused — fetch interceptor handles routing
     path = _expand(openclaw_config_file)
 
     try:
@@ -55,38 +61,18 @@ def patch_openclaw_config(
         cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
     )
 
-    if "models" not in cfg:
-        cfg["models"] = {}
-    if "providers" not in cfg["models"]:
-        cfg["models"]["providers"] = {}
-
-    cfg["models"]["providers"]["defenseclaw"] = {
-        "baseUrl": f"http://{guardrail_host}:{proxy_port}",
-        "apiKey": master_key,
-        "api": "openai-completions",
-        "models": [
-            {
-                "id": model_name,
-                "name": f"{model_name} (via DefenseClaw)",
-                "reasoning": False,
-                "input": ["text", "image"],
-                "contextWindow": 200000,
-                "maxTokens": 64000,
-            },
-        ],
-    }
-
-    cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
-    cfg["agents"]["defaults"]["model"]["primary"] = f"defenseclaw/{model_name}"
-
     plugins = cfg.setdefault("plugins", {})
     allow = plugins.setdefault("allow", [])
     if "defenseclaw" not in allow:
         allow.append("defenseclaw")
 
-    # Ensure plugins.load.paths includes the install directory so OpenClaw
-    # can discover the plugin even when ``openclaw plugins install`` didn't
-    # set it (or a prior disable/re-enable cycle cleared it).
+    # Re-enable plugin entry (may have been disabled by restore_openclaw_config).
+    entries = plugins.setdefault("entries", {})
+    if "defenseclaw" not in entries:
+        entries["defenseclaw"] = {"enabled": True}
+    else:
+        entries["defenseclaw"]["enabled"] = True
+
     oc_home = os.path.dirname(path)
     install_path = os.path.join(oc_home, "extensions", "defenseclaw")
     load = plugins.setdefault("load", {})
@@ -105,7 +91,11 @@ def patch_openclaw_config(
 
 
 def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> bool:
-    """Revert OpenClaw config to use the original model directly."""
+    """Remove the DefenseClaw plugin registration from openclaw.json.
+
+    The fetch interceptor required no model or provider changes, so there is
+    nothing to revert — just remove the plugin entries.
+    """
     path = _expand(openclaw_config_file)
 
     try:
@@ -116,18 +106,27 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
 
     _backup(path)
 
-    if original_model:
-        cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
-        cfg["agents"]["defaults"]["model"]["primary"] = original_model
-
+    # Remove leftover defenseclaw provider entry if present from older setups.
     if "models" in cfg and "providers" in cfg["models"]:
         cfg["models"]["providers"].pop("defenseclaw", None)
-        cfg["models"]["providers"].pop("litellm", None)  # backward compat
+        cfg["models"]["providers"].pop("litellm", None)
 
-    if "plugins" in cfg and "allow" in cfg["plugins"]:
-        allow = cfg["plugins"]["allow"]
+    if "plugins" in cfg:
+        plugins = cfg["plugins"]
+        # Remove from allow list
+        allow = plugins.get("allow", [])
         if "defenseclaw" in allow:
             allow.remove("defenseclaw")
+        # Disable in entries (stops fetch interceptor from loading)
+        entries = plugins.get("entries", {})
+        if "defenseclaw" in entries:
+            entries["defenseclaw"]["enabled"] = False
+        # Remove from load paths
+        oc_home = os.path.dirname(path)
+        install_path = os.path.join(oc_home, "extensions", "defenseclaw")
+        paths = plugins.get("load", {}).get("paths", [])
+        if install_path in paths:
+            paths.remove(install_path)
 
     with _preserve_ownership(path):
         with open(path, "w") as f:
@@ -264,6 +263,29 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
         return "error"
 
 
+def detect_azure_endpoints(openclaw_config_file: str) -> dict[str, str]:
+    """Read Azure OpenAI base URLs from openclaw.json providers.
+
+    Returns {provider_name: base_url} for any provider whose baseUrl contains
+    'openai.azure.com'. Written to ~/.defenseclaw/.env during setup so the
+    guardrail proxy can forward Azure requests to the correct endpoint without
+    any manual configuration.
+    """
+    path = _expand(openclaw_config_file)
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    result = {}
+    for name, prov in cfg.get("models", {}).get("providers", {}).items():
+        base_url = prov.get("baseUrl", "")
+        if "openai.azure.com" in base_url:
+            result[name] = base_url
+    return result
+
+
 def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     """Read the current model from openclaw.json. Returns (model_id, provider_prefix)."""
     path = _expand(openclaw_config_file)
@@ -282,11 +304,16 @@ def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     return primary, ""
 
 
+
 def detect_api_key_env(model: str) -> str:
     """Guess the API key env var from the model string."""
     lower = model.lower()
     if "anthropic" in lower or "claude" in lower:
         return "ANTHROPIC_API_KEY"
+    if "azure" in lower:
+        return "AZURE_OPENAI_API_KEY"
+    if "openrouter" in lower:
+        return "OPENROUTER_API_KEY"
     if "openai" in lower or "gpt" in lower or "o1" in lower:
         return "OPENAI_API_KEY"
     if "gemini" in lower or "google" in lower:
@@ -299,7 +326,7 @@ def detect_api_key_env(model: str) -> str:
 def model_to_proxy_name(model: str) -> str:
     """Derive a short model alias from a full model string like 'anthropic/claude-opus-4-5'."""
     name = model.split("/")[-1] if "/" in model else model
-    for prefix in ("anthropic-", "openai-", "google-"):
+    for prefix in ("anthropic-", "openai-", "google-", "azure-", "openrouter-", "gemini-", "gemini-openai-"):
         name = name.removeprefix(prefix)
     return name
 
@@ -307,7 +334,7 @@ def model_to_proxy_name(model: str) -> str:
 
 
 # Known provider prefixes for model name heuristics.
-KNOWN_PROVIDERS = ["anthropic", "openai"]
+KNOWN_PROVIDERS = ["anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai"]
 
 
 def guess_provider(model: str) -> str:
@@ -318,8 +345,9 @@ def guess_provider(model: str) -> str:
     if lower.startswith(("gpt", "o1", "o3", "o4")):
         return "openai"
     if lower.startswith("gemini"):
-        return "google"
+        return "gemini"
     return ""
+
 
 
 # ------------------------------------------------------------------
@@ -416,6 +444,11 @@ def _register_plugin_in_config(openclaw_config: str, source_dir: str) -> None:
     paths = load.setdefault("paths", [])
     if install_path not in paths:
         paths.append(install_path)
+
+    # plugins.allow — required when an allowlist is active
+    allow = plugins.setdefault("allow", [])
+    if "defenseclaw" not in allow:
+        allow.append("defenseclaw")
 
     # plugins.installs — record install metadata
     version = "0.0.0"

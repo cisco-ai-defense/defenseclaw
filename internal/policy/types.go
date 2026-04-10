@@ -54,6 +54,7 @@ type AdmissionOutput struct {
 	Reason        string `json:"reason"`
 	FileAction    string `json:"file_action"`
 	InstallAction string `json:"install_action"`
+	RuntimeAction string `json:"runtime_action"`
 }
 
 // GuardrailScanResult is a scanner's verdict passed into the guardrail policy.

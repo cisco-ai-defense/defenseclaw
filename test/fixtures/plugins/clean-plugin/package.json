@@ -1,0 +1,15 @@
+{
+  "name": "clean-plugin",
+  "version": "1.0.0",
+  "description": "Deterministic clean plugin fixture for DefenseClaw E2E tests.",
+  "type": "module",
+  "main": "index.js",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "permissions": [
+    "fs:read:/tmp"
+  ]
+}

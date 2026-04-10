@@ -96,6 +96,13 @@ func (s *MCPScanner) scanEnv() []string {
 		}
 	}
 
+	if !existing["NO_COLOR"] {
+		env = append(env, "NO_COLOR=1")
+	}
+	if !existing["TERM"] {
+		env = append(env, "TERM=dumb")
+	}
+
 	return env
 }
 
@@ -154,8 +161,9 @@ type mcpFinding struct {
 }
 
 func parseMCPOutput(data []byte) ([]Finding, error) {
+	clean := extractJSON(ansiRe.ReplaceAll(data, nil))
 	var out mcpOutput
-	if err := json.Unmarshal(data, &out); err != nil {
+	if err := json.Unmarshal(clean, &out); err != nil {
 		return nil, err
 	}
 

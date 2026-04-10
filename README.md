@@ -1,9 +1,9 @@
 ```
-     ____         __                       ____  _
-    / __ \ ___   / /___   ___   ___  ___  / ___|| | __ _ __      __
-   / / / // _ \ / // _ \ / _ \ / __|/ _ \| |    | |/ _` |\ \ /\ / /
-  / /_/ //  __// //  __/| | | |\__ \  __/| |___ | | (_| | \ V  V /
- /_____/ \___//_/ \___/ |_| |_||___/\___| \____||_|\__,_|  \_/\_/
+     ____         ____                       ____  _
+    / __ \  ___  / __/___   ___   ___  ___  / ___|| | __ _ __      __
+   / / / / / _ \/ /_// _ \ / _ \ / __|/ _ \| |    | |/ _` |\ \ /\ / /
+  / /_/ / /  __/ __//  __/| | | |\__ \  __/| |___ | | (_| | \ V  V /
+ /_____/  \___/_/   \___/ |_| |_||___/\___| \____||_|\__,_|  \_/\_/
 
   ╔═══════════════════════════════════════════════════════════════╗
   ║  DefenseClaw — Security Governance for Agentic AI             ║
@@ -20,7 +20,7 @@
 
 **AI agents are powerful. Unchecked, they're dangerous.**
 
-Large language model agents — like those built on [OpenClaw](https://github.com/nvidia/openclaw) — can install skills, call MCP servers, execute code, and reach the network. Every one of those actions is an attack surface. A single malicious skill can exfiltrate data. A compromised MCP server can inject hidden instructions. Generated code can contain hardcoded secrets or command injection.
+Large language model agents — like those built on [OpenClaw](https://github.com/openclaw/openclaw) — can install skills, call MCP servers, execute code, and reach the network. Every one of those actions is an attack surface. A single malicious skill can exfiltrate data. A compromised MCP server can inject hidden instructions. Generated code can contain hardcoded secrets or command injection.
 
 **DefenseClaw is the enterprise governance layer for OpenClaw.** It sits between your AI agents and the infrastructure they run on, enforcing a simple principle: **nothing runs until it's scanned, and anything dangerous is blocked automatically.**
 
@@ -92,7 +92,7 @@ CodeGuard runs automatically during skill/plugin scans and is also available as 
 
 #### Message Inspection
 
-The guardrail proxy inspects every LLM prompt and completion for secrets, PII, and injection patterns. It operates independently of the plugin — it protects the LLM channel even if the plugin is not installed. In **observe** mode findings are logged; in **action** mode dangerous content is blocked before it reaches the LLM or the user.
+The guardrail proxy inspects every LLM prompt and completion for secrets, PII, and injection patterns across all 7 supported providers (Anthropic, OpenAI, Azure OpenAI, Gemini, OpenRouter, Ollama, Bedrock). The fetch interceptor plugin patches `globalThis.fetch` inside OpenClaw's Node.js process to route **all** outbound LLM calls through the proxy — regardless of which provider the user selects. In **observe** mode findings are logged; in **action** mode dangerous content is blocked before it reaches the LLM or the user.
 
 #### Tool Inspection
 
@@ -119,7 +119,7 @@ DefenseClaw is a multi-component system with three runtimes that work together:
 |-----------|----------|------|
 | **CLI** | Python 3.11+ | Operator-facing tool — runs scanners, manages block/allow lists, TUI dashboard |
 | **Gateway** | Go 1.25+ | Central daemon — REST API, WebSocket bridge to OpenClaw, policy engine, inspection pipeline, SQLite audit store, SIEM export |
-| **Plugin** | TypeScript | Runs inside OpenClaw — intercepts tool calls via `before_tool_call` hook, provides `/scan`, `/block`, `/allow` slash commands |
+| **Plugin** | TypeScript | Runs inside OpenClaw — fetch interceptor routes all LLM traffic through guardrail proxy, intercepts tool calls via `before_tool_call` hook, provides `/scan`, `/block`, `/allow` slash commands |
 
 The **CLI** and **Plugin** communicate with the **Gateway** over a local REST API. The Gateway connects to the OpenClaw Gateway over WebSocket (protocol v3) to subscribe to events and send enforcement commands. A built-in **guardrail proxy** inspects all LLM traffic in real time.
 
@@ -303,13 +303,14 @@ Splunk runtime through this preset, local Splunk usage is subject to the
 Splunk General Terms and the local-mode scope guardrails documented in
 [docs/INSTALL.md](docs/INSTALL.md).
 
-The bundled local runtime starts as a local Splunk Enterprise Trial. After the
-60-day trial period, you can continue using the same local single-instance
-workflow in Splunk Free mode. In Splunk Free mode, alerting is disabled,
-authentication and RBAC are removed, and the local user credentials printed by
-the setup command no longer apply. Existing Splunk license and ingest limits
-still apply in every mode. To keep using full Splunk Enterprise features after
-the trial, apply a valid Splunk Enterprise license. For more details, see
+The bundled local runtime starts directly in Splunk Free mode from day 1. In
+Splunk Free mode, alerting is disabled, authentication and RBAC are removed,
+and the default bundled profile does not require local user credentials.
+When you open Splunk Web in a browser, Splunk can briefly route through its
+account page before it auto-enters the app without asking for credentials.
+Existing Splunk license and ingest limits still apply. To use full Splunk
+Enterprise features later, apply a valid Splunk Enterprise license. For more
+details, see
 [About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
 
 That command also installs the local Splunk app automatically. The app gives
@@ -323,12 +324,14 @@ These values can vary if the preset or config is overridden:
 - index `defenseclaw_local`
 - source `defenseclaw`
 - sourcetype `defenseclaw:json`
+- Splunk starts directly in **Free mode** from day 1
+- Splunk Web does not require local user credentials in the default bundled profile
 
 Recommended local flow:
 
 1. Run `defenseclaw setup splunk --logs --accept-splunk-license --non-interactive`
 2. Start the DefenseClaw sidecar
-3. Open local Splunk with the URL and credentials printed by the setup command
+3. Open local Splunk with the URL printed by the setup command
 4. Validate events in local Splunk
 
 Scope guardrails for this local Splunk preset:
@@ -340,7 +343,7 @@ Events are batched (default 50) and flushed every 5 seconds. Each event includes
 
 ### OTLP Export
 
-The daemon exports logs, spans, and metrics via OTLP HTTP to any compatible collector (Jaeger, Grafana, Datadog, etc.):
+The daemon exports logs, spans, and metrics via OTLP HTTP to any compatible collector (Splunk Observability Cloud, Jaeger, Grafana, etc.):
 
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
@@ -397,6 +400,7 @@ make ts-test        # TypeScript plugin tests
 | [API Reference](docs/API.md) | REST API endpoint documentation |
 | [LLM Guardrail](docs/GUARDRAIL.md) | Guardrail data flow and configuration |
 | [Guardrail Quick Start](docs/GUARDRAIL_QUICKSTART.md) | Set up and test the LLM guardrail |
+| [Upgrading](docs/CLI.md#upgrade) | In-place upgrade with config backup/restore |
 | [OpenTelemetry](docs/OTEL.md) | OTEL signal spec and Splunk mapping |
 | [Config Reference](docs/CONFIG_FILES.md) | Config files and environment variables |
 | [Contributing](docs/CONTRIBUTING.md) | Contribution guidelines |

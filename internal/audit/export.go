@@ -64,7 +64,7 @@ func (s *Store) ExportCSV(path string, limit int) error {
 	}
 
 	w := csv.NewWriter(f)
-	if err := w.Write([]string{"id", "timestamp", "action", "target", "actor", "details", "severity"}); err != nil {
+	if err := w.Write([]string{"id", "timestamp", "action", "target", "actor", "details", "severity", "run_id"}); err != nil {
 		return err
 	}
 	for _, e := range events {
@@ -76,6 +76,7 @@ func (s *Store) ExportCSV(path string, limit int) error {
 			e.Actor,
 			e.Details,
 			e.Severity,
+			e.RunID,
 		}); err != nil {
 			return err
 		}

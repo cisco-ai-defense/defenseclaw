@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type Event struct {
 	Actor     string    `json:"actor"`
 	Details   string    `json:"details"`
 	Severity  string    `json:"severity"`
+	RunID     string    `json:"run_id,omitempty"`
 	TraceID   string    `json:"trace_id,omitempty"`
 }
 
@@ -90,9 +92,14 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
 
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("audit: set WAL mode: %w", err)
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("audit: %s: %w", pragma, err)
+		}
 	}
 
 	return &Store{db: db}, nil
@@ -107,7 +114,8 @@ func (s *Store) Init() error {
 		target TEXT,
 		actor TEXT NOT NULL DEFAULT 'defenseclaw',
 		details TEXT,
-		severity TEXT
+		severity TEXT,
+		run_id TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS scan_results (
@@ -118,7 +126,8 @@ func (s *Store) Init() error {
 		duration_ms INTEGER,
 		finding_count INTEGER,
 		max_severity TEXT,
-		raw_json TEXT
+		raw_json TEXT,
+		run_id TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS findings (
@@ -168,6 +177,9 @@ func (s *Store) Init() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("audit: init schema: %w", err)
 	}
+	if err := s.ensureRunIDColumns(); err != nil {
+		return fmt.Errorf("audit: ensure run_id columns: %w", err)
+	}
 
 	if err := s.migrateOldLists(); err != nil {
 		return fmt.Errorf("audit: migrate old lists: %w", err)
@@ -209,6 +221,72 @@ func (s *Store) migrateOldLists() error {
 	return nil
 }
 
+func (s *Store) ensureRunIDColumns() error {
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)`,
+	}
+	for _, spec := range []struct {
+		table  string
+		column string
+		stmt   string
+	}{
+		{
+			table:  "audit_events",
+			column: "run_id",
+			stmt:   `ALTER TABLE audit_events ADD COLUMN run_id TEXT`,
+		},
+		{
+			table:  "scan_results",
+			column: "run_id",
+			stmt:   `ALTER TABLE scan_results ADD COLUMN run_id TEXT`,
+		},
+	} {
+		exists, err := s.hasColumn(spec.table, spec.column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.Exec(spec.stmt); err != nil {
+			return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+		}
+	}
+	for _, stmt := range indexes {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("create run_id index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("audit: pragma table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultV   sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultV, &primaryKey); err != nil {
+			return false, fmt.Errorf("audit: scan pragma table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // --- Audit Events ---
 
 func (s *Store) LogEvent(e Event) error {
@@ -221,12 +299,15 @@ func (s *Store) LogEvent(e Event) error {
 	if e.Actor == "" {
 		e.Actor = "defenseclaw"
 	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
 
 	ts := e.Timestamp.Format(time.RFC3339Nano)
 	_, err := s.db.Exec(
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity,
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity, nullStr(e.RunID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -235,10 +316,11 @@ func (s *Store) LogEvent(e Event) error {
 }
 
 func (s *Store) InsertScanResult(id, scannerName, target string, ts time.Time, durationMs int64, findingCount int, maxSeverity, rawJSON string) error {
+	runID := currentRunID()
 	_, err := s.db.Exec(
-		`INSERT INTO scan_results (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, scannerName, target, ts, durationMs, findingCount, maxSeverity, rawJSON,
+		`INSERT INTO scan_results (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, scannerName, target, ts, durationMs, findingCount, maxSeverity, rawJSON, nullStr(runID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert scan result: %w", err)
@@ -264,7 +346,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -275,13 +357,14 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity); err != nil {
+		var target, details, severity, runID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
 			return nil, fmt.Errorf("audit: scan row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
+		e.RunID = runID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -555,7 +638,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id
 		 FROM audit_events
 		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
 		   AND action NOT LIKE 'dismiss%'
@@ -569,13 +652,14 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity); err != nil {
+		var target, details, severity, runID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
+		e.RunID = runID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -781,4 +865,8 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+func currentRunID() string {
+	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
 }

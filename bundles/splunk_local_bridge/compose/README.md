@@ -22,6 +22,7 @@ The preferred operational interface is [bin/splunk-claw-bridge](../bin/splunk-cl
 - both profiles mount [splunk/default.yml](../splunk/default.yml) into `/tmp/defaults/default.yml`
 - both profiles mount the public [splunk](../splunk) tree into `/opt/splunk-claw-bridge/splunk`
 - neither profile publishes `8089` on the host
+- the default env contract starts Splunk in Free mode from day 1
 
 ## Important Note
 

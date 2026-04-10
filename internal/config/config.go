@@ -100,6 +100,7 @@ type OTelLogsConfig struct {
 type OTelMetricsConfig struct {
 	Enabled         bool   `mapstructure:"enabled"            yaml:"enabled"`
 	ExportIntervalS int    `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
+	Temporality     string `mapstructure:"temporality"         yaml:"temporality"`
 	Endpoint        string `mapstructure:"endpoint"           yaml:"endpoint"`
 	Protocol        string `mapstructure:"protocol"           yaml:"protocol"`
 	URLPath         string `mapstructure:"url_path"           yaml:"url_path"`
@@ -211,13 +212,13 @@ type ScannersConfig struct {
 }
 
 type OpenShellConfig struct {
-	Binary      string `mapstructure:"binary"        yaml:"binary"`
-	PolicyDir   string `mapstructure:"policy_dir"    yaml:"policy_dir"`
-	Mode        string `mapstructure:"mode"           yaml:"mode,omitempty"`
-	Version     string `mapstructure:"version"        yaml:"version,omitempty"`
-	SandboxHome string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
-	AutoPair    *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
-	HostNetworking *bool `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
+	Binary         string `mapstructure:"binary"        yaml:"binary"`
+	PolicyDir      string `mapstructure:"policy_dir"    yaml:"policy_dir"`
+	Mode           string `mapstructure:"mode"           yaml:"mode,omitempty"`
+	Version        string `mapstructure:"version"        yaml:"version,omitempty"`
+	SandboxHome    string `mapstructure:"sandbox_home"   yaml:"sandbox_home,omitempty"`
+	AutoPair       *bool  `mapstructure:"auto_pair"      yaml:"auto_pair,omitempty"`
+	HostNetworking *bool  `mapstructure:"host_networking" yaml:"host_networking,omitempty"`
 }
 
 const DefaultOpenShellVersion = "0.6.2"
@@ -311,6 +312,7 @@ type GuardrailConfig struct {
 	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
 	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
 	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
+	APIBase       string      `mapstructure:"api_base"        yaml:"api_base"`
 	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`
 }
 
@@ -663,7 +665,7 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
-	viper.SetDefault("guardrail.scanner_mode", "local")
+	viper.SetDefault("guardrail.scanner_mode", "both")
 	viper.SetDefault("guardrail.host", "localhost")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.block_message", "")
@@ -685,10 +687,10 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.api_port", 18970)
 	viper.SetDefault("gateway.watcher.enabled", true)
 	viper.SetDefault("gateway.watcher.skill.enabled", true)
-	viper.SetDefault("gateway.watcher.skill.take_action", false)
+	viper.SetDefault("gateway.watcher.skill.take_action", true)
 	viper.SetDefault("gateway.watcher.skill.dirs", []string{})
 	viper.SetDefault("gateway.watcher.plugin.enabled", true)
-	viper.SetDefault("gateway.watcher.plugin.take_action", false)
+	viper.SetDefault("gateway.watcher.plugin.take_action", true)
 	viper.SetDefault("gateway.watcher.plugin.dirs", []string{})
 
 	viper.SetDefault("otel.enabled", false)
@@ -709,6 +711,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("otel.logs.url_path", "")
 	viper.SetDefault("otel.metrics.enabled", true)
 	viper.SetDefault("otel.metrics.export_interval_s", 60)
+	viper.SetDefault("otel.metrics.temporality", "delta")
 	viper.SetDefault("otel.metrics.endpoint", "")
 	viper.SetDefault("otel.metrics.protocol", "")
 	viper.SetDefault("otel.metrics.url_path", "")
