@@ -148,12 +148,26 @@ func (s *Store) Init() error {
 		updated_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS target_snapshots (
+		id TEXT PRIMARY KEY,
+		target_type TEXT NOT NULL,
+		target_path TEXT NOT NULL,
+		content_hash TEXT NOT NULL,
+		dependency_hashes TEXT,
+		config_hashes TEXT,
+		network_endpoints TEXT,
+		scan_id TEXT,
+		captured_at DATETIME NOT NULL,
+		UNIQUE(target_type, target_path)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
 	CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 	CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 	CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+	CREATE INDEX IF NOT EXISTS idx_snapshots_target ON target_snapshots(target_type, target_path);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -766,6 +780,71 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// GetScanRawJSON returns the raw JSON blob for a scan result by ID.
+func (s *Store) GetScanRawJSON(scanID string) (string, error) {
+	var raw string
+	err := s.db.QueryRow("SELECT raw_json FROM scan_results WHERE id = ?", scanID).Scan(&raw)
+	if err != nil {
+		return "", fmt.Errorf("audit: get scan raw json: %w", err)
+	}
+	return raw, nil
+}
+
+// SnapshotRow represents a stored target snapshot for drift detection.
+type SnapshotRow struct {
+	ID               string    `json:"id"`
+	TargetType       string    `json:"target_type"`
+	TargetPath       string    `json:"target_path"`
+	ContentHash      string    `json:"content_hash"`
+	DependencyHashes string    `json:"dependency_hashes"`
+	ConfigHashes     string    `json:"config_hashes"`
+	NetworkEndpoints string    `json:"network_endpoints"`
+	ScanID           string    `json:"scan_id"`
+	CapturedAt       time.Time `json:"captured_at"`
+}
+
+// SetTargetSnapshot upserts a snapshot baseline for drift comparison.
+func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID string) error {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	_, err := s.db.Exec(
+		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(target_type, target_path) DO UPDATE SET
+		 	content_hash = excluded.content_hash,
+		 	dependency_hashes = excluded.dependency_hashes,
+		 	config_hashes = excluded.config_hashes,
+		 	network_endpoints = excluded.network_endpoints,
+		 	scan_id = excluded.scan_id,
+		 	captured_at = excluded.captured_at`,
+		id, targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, now,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: set target snapshot: %w", err)
+	}
+	return nil
+}
+
+// GetTargetSnapshot loads the stored baseline snapshot for a target.
+func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, error) {
+	row := s.db.QueryRow(
+		`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at
+		 FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
+		targetType, targetPath,
+	)
+	var r SnapshotRow
+	var ts string
+	err := row.Scan(&r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts)
+	if err != nil {
+		return nil, err
+	}
+	r.CapturedAt, _ = time.Parse(time.RFC3339Nano, ts)
+	if r.CapturedAt.IsZero() {
+		r.CapturedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+	}
+	return &r, nil
 }
 
 func (s *Store) Close() error {

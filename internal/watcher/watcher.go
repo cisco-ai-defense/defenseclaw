@@ -158,6 +158,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	_ = w.logger.LogAction("watch-start", "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
+	if w.cfg.Watch.RescanEnabled {
+		go w.rescanLoop(ctx)
+	}
+
 	ticker := time.NewTicker(w.debounce)
 	defer ticker.Stop()
 

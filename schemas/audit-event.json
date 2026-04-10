@@ -6,7 +6,7 @@
   "properties": {
     "id": { "type": "string", "format": "uuid" },
     "timestamp": { "type": "string", "format": "date-time" },
-    "action": { "type": "string", "enum": ["init", "scan", "block", "allow", "quarantine", "restore", "deploy", "stop"] },
+    "action": { "type": "string", "enum": ["init", "scan", "block", "allow", "quarantine", "restore", "deploy", "stop", "drift", "rescan"] },
     "target": { "type": "string" },
     "actor": { "type": "string", "default": "defenseclaw" },
     "details": { "type": "string" },
