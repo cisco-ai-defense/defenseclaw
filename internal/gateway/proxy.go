@@ -769,12 +769,50 @@ func inferProviderFromURL(targetURL string) string {
 	return ""
 }
 
+// resolveConfiguredProvider returns an LLMProvider using the guardrail config's
+// model and API key. This handles the direct-provider case where OpenClaw is
+// configured with "defenseclaw" as a custom provider and sends requests straight
+// to the guardrail proxy without the fetch interceptor setting X-DC-Target-URL.
+func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider {
+	cfgModel := p.cfg.Model
+	if cfgModel == "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] no X-DC-Target-URL and no configured model — cannot route\n")
+		return nil
+	}
+
+	apiKey := ""
+	if req.TargetAPIKey != "" {
+		apiKey = req.TargetAPIKey
+	} else if p.cfg.APIKeyEnv != "" {
+		dotenvPath := filepath.Join(p.dataDir, ".env")
+		apiKey = ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath)
+	}
+
+	if apiKey == "" {
+		fmt.Fprintf(os.Stderr, "[guardrail] no API key available for configured model %q\n", cfgModel)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q\n", cfgModel)
+
+	provider, err := NewProvider(cfgModel, apiKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] failed to create provider for %q: %v\n", cfgModel, err)
+		return nil
+	}
+	return provider
+}
+
 // resolveProviderFromHeaders selects the upstream LLMProvider for the given
 // request. The fetch interceptor sets X-DC-Target-URL on every outbound LLM
 // call; we infer the provider from that URL and use X-AI-Auth as the API key.
+//
+// Fallback: when X-DC-Target-URL is absent (direct-provider mode, where
+// OpenClaw routes to the guardrail proxy as a custom provider endpoint), use
+// the configured guardrail model and API key.
 func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvider {
 	if req.TargetURL == "" {
-		return nil
+		return p.resolveConfiguredProvider(req)
 	}
 
 	prefix := inferProviderFromURL(req.TargetURL)
