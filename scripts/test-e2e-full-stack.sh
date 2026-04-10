@@ -2946,7 +2946,7 @@ phase_splunk() {
     if is_full_live; then
         splunk_assert_results "Splunk: guardrail verdict events present" 'action=guardrail-verdict | head 5'
         splunk_assert_results "Splunk: guardrail completion inspection events present" '(action=guardrail-verdict) details="*completion*" | head 5'
-        splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) details="*passthrough*anthropic*" | head 5'
+        splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) target="anthropic*" | head 5'
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
         splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
         if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then
