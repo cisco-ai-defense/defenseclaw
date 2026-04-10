@@ -365,6 +365,7 @@ type GatewayConfig struct {
 	APIBind         string               `mapstructure:"api_bind"           yaml:"api_bind"`
 	Watcher         GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
 	SandboxHome     string               `mapstructure:"-"                  yaml:"-"`
+	ClawHome        string               `mapstructure:"-"                  yaml:"-"`
 }
 
 // defaultOpenClawGatewayTokenEnv matches gateway.auth.token when copied to ~/.defenseclaw/.env.
@@ -512,6 +513,10 @@ func Load() (*Config, error) {
 	}
 	if cfg.OpenShell.IsStandalone() {
 		cfg.Gateway.SandboxHome = cfg.OpenShell.EffectiveSandboxHome()
+	}
+
+	if home, err := os.UserHomeDir(); err == nil {
+		cfg.Gateway.ClawHome = home
 	}
 
 	warnPlaintextSecrets(&cfg)

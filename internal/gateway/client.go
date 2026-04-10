@@ -527,19 +527,21 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 
 // tryAuthRepair attempts to repair device pairing and refresh the shared
 // gateway token when a connect attempt fails with an auth-related error.
-// No-op when sandbox mode is inactive or the error is not auth-related.
+// Uses SandboxHome in sandbox mode, otherwise falls back to ClawHome
+// (the user's real home directory) so auth repair works everywhere.
 func (c *Client) tryAuthRepair(connectErr error) {
 	if !c.shouldAutoRepair(connectErr) {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — repairing device pairing and token ...\n")
+	home := c.authRepairHome()
+	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — repairing device pairing and token (home=%s) ...\n", home)
 
-	if err := c.device.RepairPairing(c.cfg.SandboxHome); err != nil {
+	if err := c.device.RepairPairing(home); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] repair pairing failed: %v\n", err)
 	}
 
-	if newToken, ok := readOpenClawGatewayToken(c.cfg.SandboxHome); ok && newToken != c.cfg.Token {
+	if newToken, ok := readOpenClawGatewayToken(home); ok && newToken != c.cfg.Token {
 		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
 		c.cfg.Token = newToken
 	}
@@ -547,10 +549,17 @@ func (c *Client) tryAuthRepair(connectErr error) {
 
 // shouldAutoRepair returns true when auth auto-repair should be attempted.
 func (c *Client) shouldAutoRepair(err error) bool {
-	if c.cfg.SandboxHome == "" {
-		return false
+	return c.authRepairHome() != "" && isAuthError(err)
+}
+
+// authRepairHome returns the home directory used for pairing repair.
+// Prefers SandboxHome (standalone sandbox mode), falls back to ClawHome
+// (regular installs).
+func (c *Client) authRepairHome() string {
+	if c.cfg.SandboxHome != "" {
+		return c.cfg.SandboxHome
 	}
-	return isAuthError(err)
+	return c.cfg.ClawHome
 }
 
 // isAuthError returns true if the error message indicates the OpenClaw
