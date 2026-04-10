@@ -14,7 +14,7 @@ DIST_DIR    := dist
 .PHONY: build install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        dist dist-cli dist-gateway dist-plugin dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Aggregate targets
@@ -30,6 +30,9 @@ build: pycli gateway plugin
 	@echo "Run 'make install' to install all components."
 
 install: pycli gateway-install plugin-install
+	@mkdir -p $(INSTALL_DIR)
+	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
+	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
 	@echo ""
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
@@ -40,6 +43,17 @@ install: pycli gateway-install plugin-install
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw init"
 	@echo "  defenseclaw setup guardrail   # configure LLM guardrail"
+	@echo ""
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		echo "Sandbox mode (Linux):"; \
+		echo "  defenseclaw init --sandbox          # create sandbox user + directories"; \
+		echo "  defenseclaw setup sandbox            # configure networking + systemd"; \
+		echo "  scripts/install-openshell-sandbox.sh  # install openshell-sandbox binary"; \
+	else \
+		echo "Sandbox mode (Linux only):"; \
+		echo "  On a Linux host, use 'defenseclaw init --sandbox' to set up"; \
+		echo "  openshell-sandbox standalone mode with network isolation."; \
+	fi
 
 # ---------------------------------------------------------------------------
 # Individual build targets
@@ -51,7 +65,7 @@ dev-install:
 pycli:
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	uv venv $(VENV) --python 3.12
+	uv venv $(VENV) --python 3.12 --clear
 	uv pip install -e . --python $(VENV)/bin/python
 
 dev-pycli: pycli
@@ -80,6 +94,7 @@ start: gateway
 
 plugin:
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
+	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
@@ -178,7 +193,7 @@ go-lint:
 # Distribution targets — build release artifacts into dist/
 # ---------------------------------------------------------------------------
 
-dist: dist-cli dist-gateway dist-plugin dist-checksums
+dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-checksums
 	@echo ""
 	@echo "Release artifacts:"
 	@ls -lh $(DIST_DIR)/
@@ -196,14 +211,22 @@ dist-cli: _bundle-data
 
 _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/rego
+	@mkdir -p cli/defenseclaw/_data/policies/openshell
+	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
+	@mkdir -p cli/defenseclaw/_data/scripts
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
+	cp policies/openshell/*.rego cli/defenseclaw/_data/policies/openshell/
+	cp policies/openshell/*.yaml cli/defenseclaw/_data/policies/openshell/
+	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
+	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
+	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:
 	@mkdir -p $(DIST_DIR)
@@ -227,14 +250,35 @@ dist-plugin: plugin
 		done)
 	@echo "Plugin tarball built"
 
+dist-sandbox:
+	@mkdir -p $(DIST_DIR)/sandbox/policies $(DIST_DIR)/sandbox/scripts
+	cp policies/openshell/*.rego $(DIST_DIR)/sandbox/policies/
+	cp policies/openshell/*.yaml $(DIST_DIR)/sandbox/policies/
+	cp scripts/install-openshell-sandbox.sh $(DIST_DIR)/sandbox/scripts/
+	chmod +x $(DIST_DIR)/sandbox/scripts/install-openshell-sandbox.sh
+	@echo "Sandbox artifacts copied to $(DIST_DIR)/sandbox/"
+
+dist-test:
+	@mkdir -p $(DIST_DIR)/test
+	cp scripts/test-proxy-sandbox.py $(DIST_DIR)/test/
+	cp scripts/test-e2e-tool-block.sh $(DIST_DIR)/test/
+	cp scripts/test-e2e-sandbox-policy-diff.sh $(DIST_DIR)/test/ 2>/dev/null || true
+	cp scripts/test-e2e-cli.py $(DIST_DIR)/test/ 2>/dev/null || true
+	cp scripts/test-e2e-spark.sh $(DIST_DIR)/test/ 2>/dev/null || true
+	cp scripts/test-e2e-mac.sh $(DIST_DIR)/test/ 2>/dev/null || true
+	cp scripts/bundle-sandbox-test.sh $(DIST_DIR)/test/ 2>/dev/null || true
+	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
+	@echo "Test scripts copied to $(DIST_DIR)/test/"
+
 dist-checksums:
 	@test -d $(DIST_DIR) || { echo "Run 'make dist' first"; exit 1; }
-	cd $(DIST_DIR) && shasum -a 256 * > checksums.txt
+	cd $(DIST_DIR) && find . -type f ! -name checksums.txt | sort | xargs shasum -a 256 > checksums.txt
 	@echo "Checksums written to $(DIST_DIR)/checksums.txt"
 
 dist-clean:
 	rm -rf $(DIST_DIR)
 	rm -rf cli/defenseclaw/_data
+	rm -rf sandbox-test-*
 
 clean:
 	rm -f $(GATEWAY) $(BINARY)-linux-* $(BINARY)-darwin-*

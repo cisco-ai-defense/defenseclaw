@@ -38,7 +38,7 @@ set -euo pipefail
 
 GATEWAY="./defenseclaw-gateway"
 DC="defenseclaw"        # Python CLI (must be on PATH after 'make install' or 'make dev-install')
-API_BASE="http://127.0.0.1:18790"
+API_BASE="http://127.0.0.1:18970"
 INSPECT_URL="${API_BASE}/api/v1/inspect/tool"
 SIDECAR_PID=""
 TEST_FILE="/tmp/defenseclaw-e2e-test.txt"

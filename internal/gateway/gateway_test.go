@@ -33,12 +33,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -2215,6 +2217,98 @@ func TestAPIEnforceAllowList(t *testing.T) {
 	}
 }
 
+func TestAPIEnforceAllowSkillReenablesRuntimeDisable(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), client: client, store: store, logger: logger}
+
+	pe := enforce.NewPolicyEngine(store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	body := []byte(`{"target_type":"skill","target_name":"blocked-skill","reason":"reviewed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/enforce/allow", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleEnforceAllow(w, req)
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
+	}
+
+	rpc := drainRPC(t, received)
+	if rpc.Method != "skills.update" {
+		t.Fatalf("Method = %q, want skills.update", rpc.Method)
+	}
+
+	allowed, err := pe.IsAllowed("skill", "blocked-skill")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected allowed after API allow")
+	}
+
+	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil {
+		t.Fatalf("HasAction: %v", err)
+	}
+	if disabled {
+		t.Fatal("runtime disable should be cleared after successful re-enable")
+	}
+}
+
+func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
+	srv := startMockGW(t, func(t *testing.T, conn *websocket.Conn) {
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req RequestFrame
+			json.Unmarshal(raw, &req)
+			resp, _ := json.Marshal(ResponseFrame{
+				Type: "res", ID: req.ID, OK: false,
+				Error: &FrameError{Code: "INTERNAL", Message: "server error"},
+			})
+			conn.WriteMessage(websocket.TextMessage, resp)
+		}
+	})
+	client := connectToMockGW(t, srv)
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), client: client, store: store, logger: logger}
+
+	pe := enforce.NewPolicyEngine(store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	body := []byte(`{"target_type":"skill","target_name":"blocked-skill","reason":"reviewed"}`)
+	req := httptest.NewRequest(http.MethodPost, "/enforce/allow", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleEnforceAllow(w, req)
+	if w.Result().StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusBadGateway)
+	}
+
+	allowed, err := pe.IsAllowed("skill", "blocked-skill")
+	if err != nil {
+		t.Fatalf("IsAllowed: %v", err)
+	}
+	if allowed {
+		t.Fatal("skill should not become allowed when gateway re-enable fails")
+	}
+
+	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil {
+		t.Fatalf("HasAction: %v", err)
+	}
+	if !disabled {
+		t.Fatal("runtime disable should remain when gateway re-enable fails")
+	}
+}
+
 func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
@@ -2853,6 +2947,40 @@ func TestHealthHandlerReturnsJSON(t *testing.T) {
 	}
 }
 
+func TestHealthEndpointNoSecrets(t *testing.T) {
+	health := NewSidecarHealth()
+	// Simulate what a fixed reportSplunkHealth should produce: no raw passwords.
+	health.SetSplunk(StateRunning, "", map[string]interface{}{
+		"hec_endpoint":     "https://splunk.example.com:8088",
+		"index":            "defenseclaw",
+		"web_url":          "http://127.0.0.1:8000",
+		"web_user":         "admin",
+		"web_password_set": true,
+		"username":         "defenseclaw_local_user",
+		"password_set":     true,
+	})
+	api := &APIServer{health: health}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	api.handleHealth(w, req)
+
+	body := w.Body.String()
+
+	// The response must never contain actual password values.
+	for _, forbidden := range []string{`"web_password"`, `"password"`} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("health response contains %s — credentials must not be exposed via /health", forbidden)
+		}
+	}
+	// Confirm the boolean indicators are present instead.
+	for _, expected := range []string{`"web_password_set"`, `"password_set"`} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("health response missing %s — expected boolean indicator", expected)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // baseCommand and truncate tests (router helpers)
 // ---------------------------------------------------------------------------
@@ -3127,21 +3255,32 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 		t.Errorf("latency sum = %f, want 12.5", latHist.DataPoints[0].Sum)
 	}
 
-	tokenMetric := findMetric(rm, "defenseclaw.llm.tokens")
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric == nil {
-		t.Fatal("expected defenseclaw.llm.tokens metric")
+		t.Fatal("expected gen_ai.client.token.usage metric")
 	}
-	tokenSum, ok := tokenMetric.Data.(metricdata.Sum[int64])
+	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
-		t.Fatalf("expected Sum[int64], got %T", tokenMetric.Data)
+		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
 	}
-	promptTok := counterByAttr(tokenSum, "token.type", "prompt")
-	compTok := counterByAttr(tokenSum, "token.type", "completion")
-	if promptTok != 250 {
-		t.Errorf("prompt tokens = %d, want 250", promptTok)
+	var inputSum, outputSum float64
+	for _, dp := range tokenHist.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "gen_ai.token.type" {
+				switch attr.Value.AsString() {
+				case "input":
+					inputSum += dp.Sum
+				case "output":
+					outputSum += dp.Sum
+				}
+			}
+		}
 	}
-	if compTok != 120 {
-		t.Errorf("completion tokens = %d, want 120", compTok)
+	if inputSum != 250 {
+		t.Errorf("input token sum = %v, want 250", inputSum)
+	}
+	if outputSum != 120 {
+		t.Errorf("output token sum = %v, want 120", outputSum)
 	}
 }
 
@@ -3183,16 +3322,16 @@ func TestHandleGuardrailEvent_OTelNoTokensSkipsLLMMetric(t *testing.T) {
 		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
 	}
 
-	tokenMetric := findMetric(rm, "defenseclaw.llm.tokens")
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric != nil {
-		tokenSum, ok := tokenMetric.Data.(metricdata.Sum[int64])
+		tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 		if ok {
-			total := int64(0)
-			for _, dp := range tokenSum.DataPoints {
-				total += dp.Value
+			totalSum := 0.0
+			for _, dp := range tokenHist.DataPoints {
+				totalSum += dp.Sum
 			}
-			if total != 0 {
-				t.Errorf("expected 0 token metrics when tokens_in/out are nil, got %d", total)
+			if totalSum != 0 {
+				t.Errorf("expected 0 token metrics when tokens_in/out are nil, got %v", totalSum)
 			}
 		}
 	}
@@ -4054,4 +4193,194 @@ func TestAPIMuxCSRFIntegration(t *testing.T) {
 			t.Errorf("POST with evil Origin: status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 		}
 	})
+}
+
+func tokenAuthTestServer(t *testing.T, token string) (*APIServer, *bool) {
+	t.Helper()
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Gateway.Token = token
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	called := false
+	return api, &called
+}
+
+func TestTokenAuth_HealthExempt(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET /health without token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("GET /health: next handler was not called")
+	}
+}
+
+func TestTokenAuth_RejectNoToken(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("POST /skill/disable without token: status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestTokenAuth_AcceptBearerToken(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with Bearer token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("POST with Bearer token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_AcceptCustomHeader(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("X-DefenseClaw-Token", "secret-token-123")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with X-DefenseClaw-Token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("POST with X-DefenseClaw-Token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_RejectWrongToken(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("POST with wrong Bearer token: status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestTokenAuth_BearerPrecedence(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	req.Header.Set("X-DefenseClaw-Token", "wrong")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with correct Bearer + wrong custom header: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("Bearer should take precedence over X-DefenseClaw-Token")
+	}
+}
+
+func TestTokenAuth_DisabledWhenEmpty(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("POST with empty token config: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("empty token config: next handler was not called")
+	}
+}
+
+func TestSidecarHealthSetSandbox(t *testing.T) {
+	h := NewSidecarHealth()
+	snap := h.Snapshot()
+	if snap.Sandbox != nil {
+		t.Fatal("NewSidecarHealth: Sandbox should be nil initially")
+	}
+
+	details := map[string]interface{}{"profile": "strict"}
+	h.SetSandbox(StateRunning, "", details)
+	snap = h.Snapshot()
+	if snap.Sandbox == nil {
+		t.Fatal("SetSandbox: Sandbox should not be nil after SetSandbox")
+	}
+	if snap.Sandbox.State != StateRunning {
+		t.Errorf("SetSandbox state = %q, want %q", snap.Sandbox.State, StateRunning)
+	}
+	if snap.Sandbox.LastError != "" {
+		t.Errorf("SetSandbox LastError = %q, want empty", snap.Sandbox.LastError)
+	}
+	if snap.Sandbox.Details["profile"] != "strict" {
+		t.Errorf("SetSandbox details[profile] = %v, want %q", snap.Sandbox.Details["profile"], "strict")
+	}
+}
+
+func TestSidecarHealthSandboxConcurrency(t *testing.T) {
+	h := NewSidecarHealth()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func(n int) {
+			defer wg.Done()
+			h.SetSandbox(StateRunning, "", map[string]interface{}{"iter": n})
+		}(i)
+		go func() {
+			defer wg.Done()
+			snap := h.Snapshot()
+			_ = snap.Sandbox
+		}()
+	}
+	wg.Wait()
+
+	snap := h.Snapshot()
+	if snap.Sandbox == nil {
+		t.Fatal("Sandbox should not be nil after concurrent SetSandbox calls")
+	}
+	if snap.Sandbox.State != StateRunning {
+		t.Errorf("Sandbox state after concurrency = %q, want %q", snap.Sandbox.State, StateRunning)
+	}
 }

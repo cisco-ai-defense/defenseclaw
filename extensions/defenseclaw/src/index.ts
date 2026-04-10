@@ -46,6 +46,7 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
+import { createFetchInterceptor } from "./fetch-interceptor.js";
 
 function formatFindings(findings: Finding[], limit = 15): string[] {
   const lines: string[] = [];
@@ -74,6 +75,18 @@ export default function (api: PluginApi) {
   const SIDECAR_API = sidecarConfig.baseUrl;
   const SIDECAR_TOKEN = sidecarConfig.token;
   const INSPECT_TIMEOUT_MS = 2_000;
+
+  // ─── LLM fetch interceptor ───
+  // Patches globalThis.fetch to redirect all outbound LLM API calls through
+  // the guardrail proxy regardless of which provider/model OpenClaw uses.
+  const interceptor = createFetchInterceptor(sidecarConfig.guardrailPort);
+  api.registerService({
+    id: "llm-interceptor",
+    start: async () => {
+      interceptor.start();
+      return { stop: () => interceptor.stop() };
+    },
+  });
 
   async function inspectTool(
     payload: Record<string, unknown>,

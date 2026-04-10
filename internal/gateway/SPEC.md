@@ -270,6 +270,32 @@ Managed via the Python CLI:
 - `defenseclaw setup guardrail --disable` — reverts `openclaw.json` to the
   original model and sets `guardrail.enabled = false`.
 
+## Security Boundary — Proxy Authentication
+
+The guardrail proxy forwards real LLM provider API keys (received via the
+`X-AI-Auth` header from the fetch interceptor) to upstream providers. Any
+process that can reach the proxy can therefore use those keys.
+
+**Threat model:**
+
+| Layer | Protection |
+|-------|-----------|
+| Network | Proxy binds to `127.0.0.1` only — remote hosts cannot connect |
+| Loopback (token configured) | `OPENCLAW_GATEWAY_TOKEN` is required via `X-DC-Auth` on **all** connections, including loopback. Prevents rogue local processes from relaying through the proxy |
+| Loopback (no token) | Legacy/first-run: loopback trusted unconditionally. A startup warning is logged urging the operator to set `OPENCLAW_GATEWAY_TOKEN` |
+| Non-loopback (sandbox/bridge) | Authentication always required via `X-DC-Auth` or master key |
+
+**Recommendation:** Always set `OPENCLAW_GATEWAY_TOKEN` in
+`~/.defenseclaw/.env` to enforce authentication even on loopback. Without it,
+any local process can use the proxy as an open relay to LLM providers using
+the real API keys.
+
+**Key forwarding flow:**
+1. OpenClaw's fetch interceptor captures outbound LLM requests
+2. The interceptor forwards the original provider API key in the `X-AI-Auth` header
+3. The proxy strips `X-AI-Auth` and sets `Authorization` for the upstream call
+4. The provider key is never stored by the proxy — it is forwarded per-request
+
 ## REST API
 
 The API server binds to `127.0.0.1:{gateway.api_port}` (localhost only).

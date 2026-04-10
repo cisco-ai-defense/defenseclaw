@@ -89,8 +89,8 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │     session.message                  tools.catalog / skills.status    │  │
 │  │                                      sessions.list / subscribe        │  │
 │  │                                                                       │  │
-│  │   LLM traffic routed through guardrail proxy via openclaw.json        │  │
-│  │   provider config (baseUrl → http://localhost:4000)                   │  │
+│  │   LLM traffic routed through guardrail proxy via fetch interceptor    │  │
+│  │   plugin (patches globalThis.fetch — no openclaw.json model changes) │  │
 │  └──────────────────────────┬─────────────────────────────────────────────┘ │
 │                              │                                              │
 │                              ▼                                              │
@@ -168,26 +168,30 @@ and plugins (read/write via gateway REST API).
 | Block/allow lists | CLI | Gateway (admission gate) |
 | Skill inventory (AIBOM) | CLI | Gateway, plugins, TUI |
 
-### 5. LLM Guardrail (Go Proxy)
+### 5. LLM Guardrail (Fetch Interceptor + Go Proxy)
 
-The guardrail intercepts all LLM traffic between OpenClaw and the upstream
-provider. It runs as a Go reverse proxy with built-in inspection.
-The gateway runs the guardrail proxy as part of the sidecar.
+The guardrail intercepts all LLM traffic between OpenClaw and upstream
+providers. A TypeScript fetch interceptor plugin patches `globalThis.fetch`
+inside OpenClaw's Node.js process, routing all outbound LLM calls through
+the Go guardrail reverse proxy regardless of which provider the user selects.
 
 | Responsibility | Detail |
 |----------------|--------|
+| Universal interception | Fetch interceptor covers all 7 providers (Anthropic, OpenAI, Azure, Gemini, OpenRouter, Ollama, Bedrock) |
 | Prompt inspection | Scans every prompt for injection attacks, secrets, PII, data exfiltration patterns before it reaches the LLM |
 | Response inspection | Scans every LLM response for leaked secrets, tool call anomalies |
+| Multi-provider routing | Proxy routes to the correct upstream based on `X-DC-Target-URL` header set by the interceptor |
+| Auth separation | `X-AI-Auth` header carries the real provider key; `Authorization` carries the DefenseClaw gateway key |
 | Observe mode | Logs findings with colored output, never blocks (default, recommended to start) |
 | Action mode | Blocks prompts/responses that match security policies by raising exceptions |
-| Transparent proxy | OpenClaw sees a standard OpenAI-compatible API; no agent code changes required |
+| Transparent proxy | No agent code changes required — the interceptor is invisible to OpenClaw |
 
 **How it connects:**
 
-1. `defenseclaw setup guardrail` configures the model, mode, and port
-2. OpenClaw's `openclaw.json` is patched to route LLM calls through `http://localhost:4000`
-3. The gateway runs the built-in guardrail proxy
-4. The proxy forwards requests to the real LLM provider, running inspection on every call
+1. `defenseclaw setup guardrail` registers the plugin in `openclaw.json`
+2. On OpenClaw start, the fetch interceptor activates and patches `globalThis.fetch`
+3. All outbound LLM calls are routed through `localhost:4000` with auth headers injected
+4. The Go proxy inspects traffic, then forwards to the real upstream provider
 
 See `docs/GUARDRAIL.md` for the full data flow.
 
@@ -223,37 +227,34 @@ See `docs/GUARDRAIL.md` for the full data flow.
 ### LLM Traffic Inspection Flow
 
 ```
-  OpenClaw Agent                Guardrail Proxy             LLM Provider
-       │                     (localhost:4000)              (Anthropic, etc.)
-       │                            │                            │
-       │  1. LLM API request        │                            │
-       │  (OpenAI-compatible)       │                            │
-       ├───────────────────────────►│                            │
-       │                            │                            │
-       │                    2. pre_call guardrail                │
-       │                       scans prompt for:                 │
-       │                       - injection attacks               │
-       │                       - secrets / PII                   │
-       │                       - exfiltration patterns           │
-       │                            │                            │
-       │                      [action mode: block if flagged]    │
-       │                            │                            │
-       │                            │  3. Forward to provider    │
-       │                            ├───────────────────────────►│
-       │                            │                            │
-       │                            │  4. LLM response           │
-       │                            │◄───────────────────────────┤
-       │                            │                            │
-       │                    5. post_call guardrail               │
-       │                       scans response for:               │
-       │                       - leaked secrets                  │
-       │                       - tool call anomalies             │
-       │                            │                            │
-       │                      [action mode: block if flagged]    │
-       │                            │                            │
-       │  6. Response returned      │                            │
-       │◄───────────────────────────┤                            │
-       │                            │                            │
+  OpenClaw Agent       Fetch Interceptor       Guardrail Proxy        LLM Provider
+       │              (in-process plugin)     (localhost:4000)      (any provider)
+       │                      │                      │                    │
+       │  1. fetch(provider)  │                      │                    │
+       ├─────────────────────►│                      │                    │
+       │                      │                      │                    │
+       │               2. Redirect to localhost      │                    │
+       │                  + X-AI-Auth (provider key) │                    │
+       │                  + X-DC-Target-URL           │                    │
+       │                      ├─────────────────────►│                    │
+       │                      │                      │                    │
+       │                      │  3. pre_call scan    │                    │
+       │                      │     (injection,      │                    │
+       │                      │      secrets, PII)   │                    │
+       │                      │                      │                    │
+       │                      │  [action: block]     │                    │
+       │                      │                      │                    │
+       │                      │                      │  4. Forward        │
+       │                      │                      ├───────────────────►│
+       │                      │                      │◄───────────────────┤
+       │                      │                      │                    │
+       │                      │  5. post_call scan   │                    │
+       │                      │     (leaked secrets, │                    │
+       │                      │      tool anomalies) │                    │
+       │                      │                      │                    │
+       │  6. Response         │◄─────────────────────┤                    │
+       │◄─────────────────────┤                      │                    │
+       │                      │                      │                    │
 ```
 
 ### Admission Gate

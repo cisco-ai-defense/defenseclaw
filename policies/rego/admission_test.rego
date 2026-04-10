@@ -99,6 +99,24 @@ test_allowed_no_bypass_falls_through if {
 		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
 		with data.actions as {}
 		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+		with data.severity_ranking as {}
+
+	result.verdict == "allowed"
+}
+
+test_policy_allow_no_bypass_falls_through if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "codeguard",
+		"path": "/tmp/codeguard",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as [{"target_type": "skill", "target_name": "codeguard", "reason": "first-party"}]
 		with data.severity_ranking as {}
 
 	result.verdict == "scan"
@@ -531,8 +549,8 @@ test_production_policy_name_is_default if {
 	data.config.policy_name == "default"
 }
 
-test_production_update_sandbox_policy_enabled if {
-	data.config.update_sandbox_policy == true
+test_production_sandbox_update_policy_disabled_by_default if {
+	data.sandbox.update_policy == false
 }
 
 test_production_max_enforcement_delay_is_two if {
@@ -541,6 +559,134 @@ test_production_max_enforcement_delay_is_two if {
 
 test_production_audit_retention_at_least_90 if {
 	data.audit.retention_days >= 90
+}
+
+test_production_first_party_plugin_allowed if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/home/user/.openclaw/extensions/defenseclaw",
+		"block_list": [],
+		"allow_list": [],
+	}
+
+	result.verdict == "allowed"
+}
+
+test_production_first_party_skill_allowed if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "codeguard",
+		"path": "/home/user/.openclaw/workspace/skills/codeguard",
+		"block_list": [],
+		"allow_list": [],
+	}
+
+	result.verdict == "allowed"
+}
+
+test_first_party_allow_list_bypass_scan if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/defenseclaw",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "MEDIUM", "total_findings": 2, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
+		]
+		with data.actions as {"MEDIUM": {"runtime": "allow", "file": "none", "install": "none"}}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {"MEDIUM": 3}
+
+	result.verdict == "allowed"
+}
+
+test_first_party_block_list_takes_precedence if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/defenseclaw",
+		"block_list": [{"target_type": "plugin", "target_name": "defenseclaw", "reason": "manual block"}],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
+		]
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {}
+
+	result.verdict == "blocked"
+}
+
+test_first_party_bad_provenance_falls_through if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/unrelated/plugin",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party", "source_path_contains": ["defenseclaw", ".defenseclaw"]},
+		]
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {}
+
+	result.verdict == "scan"
+}
+
+test_first_party_temp_dir_does_not_match if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/dclaw-plugin-fetch-abc123/defenseclaw",
+		"block_list": [],
+		"allow_list": [],
+	}
+
+	result.verdict == "scan"
+}
+
+test_first_party_no_constraints_allows if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "defenseclaw",
+		"path": "/tmp/anything",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": true, "scan_on_install": true}
+		with data.first_party_allow_list as [
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
+		]
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {}
+
+	result.verdict == "allowed"
+}
+
+test_production_plugin_medium_warns_not_rejects if {
+	result := admission with input as {
+		"target_type": "plugin",
+		"target_name": "some-plugin",
+		"path": "/tmp/some-plugin",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "MEDIUM", "total_findings": 1, "findings": [
+			{"severity": "MEDIUM", "title": "minor issue", "scanner": "plugin-scanner"},
+		]},
+	}
+
+	result.verdict == "warning"
 }
 
 # --- install_action and file_action output ---
@@ -563,6 +709,24 @@ test_install_action_block_on_critical if {
 	result.file_action == "quarantine"
 }
 
+test_install_block_alone_triggers_reject if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "partial-block-skill",
+		"path": "/tmp/partial",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "HIGH", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"HIGH": {"runtime": "allow", "file": "none", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.severity_ranking as {"HIGH": 4}
+
+	result.verdict == "rejected"
+	result.install_action == "block"
+}
+
 test_install_action_none_on_warning if {
 	result := admission with input as {
 		"target_type": "skill",
@@ -579,6 +743,95 @@ test_install_action_none_on_warning if {
 
 	result.install_action == "none"
 	result.file_action == "none"
+}
+
+test_lowercase_severity_still_rejects if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "lc-skill",
+		"path": "/tmp/lc",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "critical", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"CRITICAL": {"runtime": "block", "file": "quarantine", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.verdict == "rejected"
+	result.runtime_action == "block"
+	result.file_action == "quarantine"
+	result.install_action == "block"
+}
+
+test_mixed_case_severity_still_rejects if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "mc-skill",
+		"path": "/tmp/mc",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "High", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"HIGH": {"runtime": "block", "file": "quarantine", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.verdict == "rejected"
+}
+
+test_high_severity_has_runtime_block if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "risky-skill",
+		"path": "/tmp/risky",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "HIGH", "total_findings": 3, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"HIGH": {"runtime": "block", "file": "quarantine", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.runtime_action == "block"
+}
+
+test_install_only_block_has_runtime_allow if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "install-only-skill",
+		"path": "/tmp/install-only",
+		"block_list": [],
+		"allow_list": [],
+		"scan_result": {"max_severity": "MEDIUM", "total_findings": 1, "findings": []},
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {"MEDIUM": {"runtime": "allow", "file": "none", "install": "block"}}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.runtime_action == "allow"
+	result.install_action == "block"
+	result.verdict == "rejected"
+}
+
+test_no_scan_has_runtime_allow if {
+	result := admission with input as {
+		"target_type": "skill",
+		"target_name": "clean-skill",
+		"path": "/tmp/clean",
+		"block_list": [],
+		"allow_list": [],
+	}
+		with data.config as {"allow_list_bypass_scan": false, "scan_on_install": true}
+		with data.actions as {}
+		with data.scanner_overrides as {}
+		with data.first_party_allow_list as []
+
+	result.runtime_action == "allow"
 }
 
 test_no_scan_result_actions_default_none if {

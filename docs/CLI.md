@@ -103,6 +103,21 @@ Use `<binary> --help` for any command.
 |---------|-------------|
 | `codeguard install-skill` | Install the CodeGuard skill into the OpenClaw workspace |
 
+### upgrade
+
+| Command | Description |
+|---------|-------------|
+| `upgrade` | Upgrade DefenseClaw in-place with config backup and restore |
+
+### sandbox
+
+| Command | Description |
+|---------|-------------|
+| `sandbox init` | Initialize OpenShell sandbox (Linux only) |
+| `sandbox setup` | Configure sandbox networking and policies |
+
+See [SANDBOX.md](SANDBOX.md) for full sandbox setup guide.
+
 ---
 
 ## Go Gateway CLI (`defenseclaw-gateway`)
@@ -135,6 +150,20 @@ The Go binary runs the sidecar daemon and provides additional commands.
 | `policy evaluate-firewall` | Dry-run firewall policy for a given destination |
 | `policy reload` | Tell the running sidecar to hot-reload OPA policies |
 | `policy domains` | List firewall domain allowlist and blocklist |
+
+### sandbox
+
+| Command | Description |
+|---------|-------------|
+| `sandbox start` | Start sandbox and sidecar via systemd |
+| `sandbox stop` | Stop sandbox and sidecar via systemd |
+| `sandbox restart` | Restart sandbox (sidecar reconnects automatically) |
+| `sandbox status` | Show sandbox and sidecar systemd status |
+| `sandbox exec -- <command>` | Run a command as the sandbox user |
+| `sandbox shell` | Open an interactive shell as the sandbox user |
+| `sandbox policy` | Compare active sandbox policy against configured endpoints |
+
+See [SANDBOX.md](SANDBOX.md) for full sandbox architecture, setup, and troubleshooting.
 
 ---
 
@@ -287,6 +316,58 @@ defenseclaw alerts [-n limit]
 ```
 
 Displays recent security alerts. Default limit: 25.
+
+### upgrade
+
+```
+defenseclaw upgrade [flags]
+```
+
+Downloads the gateway binary and Python CLI wheel from a GitHub release,
+runs version-specific migrations, and restarts services. No source checkout
+or build toolchain required — your configuration is preserved.
+
+> **Plugin installs are release-specific.** The OpenClaw plugin is installed
+> by `install.sh` as part of the release that ships it (0.3.0+). `upgrade`
+> does not touch the plugin.
+
+**Upgrade steps:**
+
+1. Create timestamped backup of `~/.defenseclaw/` and `openclaw.json` to `~/.defenseclaw/backups/upgrade-<timestamp>/`
+2. Stop `defenseclaw-gateway`
+3. Download and replace gateway binary from the GitHub release tarball
+4. Download and replace Python CLI from the GitHub release wheel
+5. Run version-specific migrations between the installed and new versions
+6. Start `defenseclaw-gateway` and restart OpenClaw gateway
+
+**Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
+and run automatically even during same-version upgrades. Each migration is
+keyed to the release it ships with. For example, the v0.3.0 migration removes
+legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
+`agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
+by 0.2.0's guardrail setup) while preserving plugin registration.
+
+**Flags:**
+- `--yes`, `-y` — skip confirmation prompts
+- `--version VERSION` — upgrade to a specific release (default: latest)
+
+**Examples:**
+
+```bash
+# Upgrade to the latest release
+defenseclaw upgrade --yes
+
+# Upgrade to a specific release
+defenseclaw upgrade --version 0.3.0 --yes
+```
+
+The equivalent shell script `scripts/upgrade.sh` accepts the same flags:
+
+```bash
+./scripts/upgrade.sh --yes
+./scripts/upgrade.sh --version 0.3.0 --yes
+VERSION=0.3.0 ./scripts/upgrade.sh --yes
+```
 
 ### doctor
 

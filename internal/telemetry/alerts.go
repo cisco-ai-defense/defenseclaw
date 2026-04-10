@@ -33,6 +33,7 @@ const (
 	AlertDataExfiltration = "data-exfiltration"
 	AlertContentViolation  = "content-violation"
 	AlertCodeGuardFinding  = "codeguard-finding"
+	AlertToolCallFlagged   = "tool-call-flagged"
 )
 
 // AlertSource constants for defenseclaw.alert.source.
@@ -42,6 +43,7 @@ const (
 	SourceAIDefense      = "ai-defense"
 	SourceOPAPolicy      = "opa-policy"
 	SourceCodeGuard      = "codeguard"
+	SourceToolInspect    = "tool-inspect"
 )
 
 // EmitRuntimeAlert emits a high-priority OTel LogRecord for a runtime alert.

@@ -10,6 +10,7 @@
     "target": { "type": "string" },
     "actor": { "type": "string", "default": "defenseclaw" },
     "details": { "type": "string" },
-    "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] }
+    "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] },
+    "run_id": { "type": "string" }
   }
 }

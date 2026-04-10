@@ -34,6 +34,8 @@ Instructions are provided for both **NVIDIA DGX Spark** (aarch64/Ubuntu) and **m
 
 On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, block/allow lists, audit logging, and the TUI dashboard. Sandbox enforcement is gracefully skipped.
 
+**For sandbox setup on Linux**, see [SANDBOX.md](SANDBOX.md) for full architecture, configuration, and troubleshooting.
+
 ## Splunk Terms And Scope For The Local Preset
 
 If you enable the bundled local Splunk workflow through `DefenseClaw`, you are
@@ -54,6 +56,14 @@ access, or use the software.
 Scope guardrails for the local Splunk preset:
 
 - use it only for local, single-instance workflows
+- the bundled runtime starts directly in Splunk Free mode from day 1
+- in Splunk Free mode, alerting is disabled
+- in Splunk Free mode, authentication and RBAC are removed, so the
+  default bundled profile does not require local user credentials
+- when you open Splunk Web in a browser, Splunk can briefly route through its
+  account page before it auto-enters the app without asking for credentials
+- to use full Splunk Enterprise features later, apply a valid Splunk
+  Enterprise license
 - assume existing Splunk license limits still apply
 - do not treat it as an endorsed path to multi-instance or long-term
   deployment
@@ -62,6 +72,9 @@ Scope guardrails for the local Splunk preset:
   mode
 - do not assume this local preset proxies or replaces a direct O11y
   integration
+
+For more details on the Free-tier behavior and limits, see
+[About Splunk Free](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free).
 
 ---
 
@@ -479,19 +492,22 @@ defenseclaw setup splunk
 | Flag | Description |
 |------|-------------|
 | `--o11y` | Enable Splunk Observability Cloud (OTLP traces + metrics) |
-| `--logs` | Enable local Splunk Enterprise via Docker (HEC) |
+| `--logs` | Enable local Splunk via Docker (HEC) |
 | `--realm REALM` | Splunk O11y realm |
 | `--access-token TOKEN` | Splunk O11y access token |
 | `--app-name NAME` | Application name for traces |
 | `--disable` | Disable integration(s); combine with `--o11y` / `--logs` to scope |
 | `--non-interactive` | Requires at least `--o11y` or `--logs` |
 
-The `--logs` option requires Docker and sets up a local Splunk
-Enterprise container with the DefenseClaw Splunk bridge
-(`splunk-claw-bridge`).
+The `--logs` option requires Docker and sets up a local Splunk runtime with the
+DefenseClaw Splunk bridge (`splunk-claw-bridge`). That runtime starts directly
+in Splunk Free mode from day 1. In Splunk Free mode, alerting is disabled and
+authentication is not required. To use full Splunk Enterprise features later,
+apply a valid Splunk Enterprise license. For more details, see
+https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/configure-splunk-licenses/about-splunk-free
 
 ```bash
-# Enable Splunk Observability
+# Enable Splunk Observability Cloud
 defenseclaw setup splunk --o11y --realm us1 --access-token $SPLUNK_TOKEN --non-interactive
 
 # Enable local Splunk logs (requires Docker)

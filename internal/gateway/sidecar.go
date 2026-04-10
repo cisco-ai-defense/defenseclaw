@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,11 @@ type Sidecar struct {
 	health *SidecarHealth
 	shell  *sandbox.OpenShell
 	otel   *telemetry.Provider
+	notify *NotificationQueue
+
+	alertCtx    context.Context
+	alertCancel context.CancelFunc
+	alertWg     sync.WaitGroup
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -52,24 +58,38 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 
+	// In standalone sandbox mode the veth link is point-to-point;
+	// TLS is not needed and OpenClaw serves plain WS.
+	if !cfg.Gateway.RequiresTLSWithMode(&cfg.OpenShell) {
+		cfg.Gateway.NoTLS = true
+	}
+
 	client, err := NewClient(&cfg.Gateway)
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: create client: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] device identity loaded (id=%s)\n", client.device.DeviceID)
 
+	notify := NewNotificationQueue()
+
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
+	router.notify = notify
 	client.OnEvent = router.Route
 
+	alertCtx, alertCancel := context.WithCancel(context.Background())
+
 	return &Sidecar{
-		cfg:    cfg,
-		client: client,
-		router: router,
-		store:  store,
-		logger: logger,
-		health: NewSidecarHealth(),
-		shell:  shell,
-		otel:   otel,
+		cfg:         cfg,
+		client:      client,
+		router:      router,
+		store:       store,
+		logger:      logger,
+		health:      NewSidecarHealth(),
+		shell:       shell,
+		otel:        otel,
+		notify:      notify,
+		alertCtx:    alertCtx,
+		alertCancel: alertCancel,
 	}, nil
 }
 
@@ -133,10 +153,16 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// Report Splunk HEC health — not a goroutine, just state
 	s.reportSplunkHealth()
 
+	// Report sandbox health — only present when standalone mode is active
+	s.reportSandboxHealth(ctx)
+
 	// Wait for context cancellation (signal handler in CLI layer)
 	<-ctx.Done()
 	fmt.Fprintf(os.Stderr, "[sidecar] context cancelled, waiting for subsystems to stop ...\n")
 	wg.Wait()
+
+	s.alertCancel()
+	s.alertWg.Wait()
 
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	_ = s.client.Close()
@@ -282,8 +308,8 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	return err
 }
 
-// handleAdmissionResult processes watcher verdicts. For blocked/rejected skills
-// and plugins, it also disables them at the gateway level when take_action is enabled.
+// handleAdmissionResult processes watcher verdicts. It only forwards runtime
+// disable actions to the gateway when the watcher actually requested them.
 func (s *Sidecar) handleAdmissionResult(r watcher.AdmissionResult) {
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher verdict: %s %s — %s (%s)\n",
 		r.Event.Type, r.Event.Name, r.Verdict, r.Reason)
@@ -314,17 +340,108 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	var actions []string
+
+	if r.FileAction == "quarantine" {
+		actions = append(actions, "quarantined")
+	}
+	if r.Verdict == watcher.VerdictBlocked || r.InstallAction == "block" {
+		actions = append(actions, "blocked")
+	}
+
+	if shouldDisableAtGateway(r) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
+				r.Event.Name, err)
+		} else {
+			actions = append(actions, "disabled")
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
+			_ = s.logger.LogAction("sidecar-watcher-disable", r.Event.Name,
+				fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
+		}
+	}
+
+	s.alertWg.Add(1)
+	go func() {
+		defer s.alertWg.Done()
+		s.sendEnforcementAlert("skill", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+	}()
+}
+
+// sendEnforcementAlert sends a security notification to all active sessions
+// via the gateway's sessions.send RPC so each chat learns about the enforcement.
+// Runs in a goroutine to avoid blocking the watcher callback.
+func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string, findings int, actions []string, reason string) {
+	parent := s.alertCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
-	if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
-			r.Event.Name, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
-		_ = s.logger.LogAction("sidecar-watcher-disable", r.Event.Name,
-			fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
+	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, reason)
+	notification := SecurityNotification{
+		SubjectType: subjectType,
+		SkillName:   subjectName,
+		Severity:    severity,
+		Findings:    findings,
+		Actions:     actions,
+		Reason:      reason,
 	}
+	if s.notify != nil {
+		s.notify.Push(notification)
+	}
+
+	sessionKeys := s.activeSessionKeys()
+	if len(sessionKeys) == 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: no active sessions tracked, queued for guardrail injection\n")
+		return
+	}
+
+	if s.client == nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: gateway client unavailable, queued for guardrail injection only\n")
+		return
+	}
+
+	sent := 0
+	for _, key := range sessionKeys {
+		sendCtx, sendCancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := s.client.SessionsSend(sendCtx, key, msg); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: send to session %s failed: %v\n", key, err)
+		} else {
+			sent++
+			fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert sent to session %s\n", key)
+		}
+		sendCancel()
+	}
+
+	if sent == 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: all sessions.send failed, queued for guardrail injection\n")
+	}
+}
+
+// formatEnforcementMessage builds a human-readable security alert for chat.
+func formatEnforcementMessage(subjectType, subjectName, severity string, findings int, actions []string, reason string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[DefenseClaw Security Alert] %s %q was automatically enforced.\n",
+		notificationSubjectLabel(subjectType), subjectName)
+	fmt.Fprintf(&sb, "Severity: %s", severity)
+	if findings > 0 {
+		fmt.Fprintf(&sb, " (%d security finding(s))", findings)
+	}
+	sb.WriteString("\n")
+	if len(actions) > 0 {
+		fmt.Fprintf(&sb, "Actions taken: %s\n", strings.Join(actions, ", "))
+	}
+	if reason != "" {
+		fmt.Fprintf(&sb, "Reason: %s\n", reason)
+	}
+	sb.WriteString("Do not confirm the component was installed or enabled successfully. ")
+	sb.WriteString("Explain that DefenseClaw detected security issues and took protective action.")
+	return sb.String()
 }
 
 func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
@@ -336,17 +453,49 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	var actions []string
 
-	if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable plugin %s failed: %v\n",
-			r.Event.Name, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
-		_ = s.logger.LogAction("sidecar-watcher-disable-plugin", r.Event.Name,
-			fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
+	if r.FileAction == "quarantine" {
+		actions = append(actions, "quarantined")
 	}
+	if r.Verdict == watcher.VerdictBlocked || r.InstallAction == "block" {
+		actions = append(actions, "blocked")
+	}
+
+	if shouldDisableAtGateway(r) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable plugin %s failed: %v\n",
+				r.Event.Name, err)
+		} else {
+			actions = append(actions, "disabled")
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
+			_ = s.logger.LogAction("sidecar-watcher-disable-plugin", r.Event.Name,
+				fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
+		}
+	}
+
+	s.alertWg.Add(1)
+	go func() {
+		defer s.alertWg.Done()
+		s.sendEnforcementAlert("plugin", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+	}()
+}
+
+func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
+	if r.Verdict == watcher.VerdictBlocked {
+		return true
+	}
+	return r.RuntimeAction == "block"
+}
+
+func (s *Sidecar) activeSessionKeys() []string {
+	if s.router == nil {
+		return nil
+	}
+	return s.router.ActiveSessionKeys()
 }
 
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
@@ -360,6 +509,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.store,
 		s.cfg.DataDir,
 		s.cfg.PolicyDir,
+		s.notify,
 	)
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -377,7 +527,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
-	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Gateway.APIPort)
+	bind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		bind = s.cfg.Gateway.APIBind
+	} else if s.cfg.OpenShell.IsStandalone() && s.cfg.Guardrail.Host != "" && s.cfg.Guardrail.Host != "localhost" {
+		bind = s.cfg.Guardrail.Host
+	}
+	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	return api.Run(ctx)
@@ -476,6 +632,63 @@ func (s *Sidecar) reportTelemetryHealth() {
 	s.health.SetTelemetry(StateRunning, "", details)
 }
 
+// reportSandboxHealth sets the sandbox subsystem health when standalone mode is active.
+// It starts a background goroutine that probes the sandbox endpoint and
+// transitions the state to running once reachable, or error on timeout.
+func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
+	if !s.cfg.OpenShell.IsStandalone() {
+		return
+	}
+
+	details := map[string]interface{}{
+		"sandbox_ip":    s.cfg.Gateway.Host,
+		"openclaw_port": s.cfg.Gateway.Port,
+	}
+	s.health.SetSandbox(StateStarting, "", details)
+
+	go s.probeSandbox(ctx, details)
+}
+
+// probeSandbox tries to TCP-dial the sandbox endpoint with back-off.
+// On success it transitions sandbox health to running; on context
+// cancellation or too many failures it transitions to error/stopped.
+func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface{}) {
+	addr := net.JoinHostPort(s.cfg.Gateway.Host, fmt.Sprintf("%d", s.cfg.Gateway.Port))
+	const maxAttempts = 20
+	backoff := 500 * time.Millisecond
+
+	for i := 0; i < maxAttempts; i++ {
+		select {
+		case <-ctx.Done():
+			s.health.SetSandbox(StateStopped, "context cancelled", details)
+			return
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err == nil {
+			conn.Close()
+			fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe succeeded (%s reachable)\n", addr)
+			s.health.SetSandbox(StateRunning, "", details)
+			return
+		}
+
+		fmt.Fprintf(os.Stderr, "[sidecar] sandbox probe attempt %d/%d failed: %v\n", i+1, maxAttempts, err)
+
+		select {
+		case <-ctx.Done():
+			s.health.SetSandbox(StateStopped, "context cancelled", details)
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 5*time.Second {
+			backoff = backoff * 3 / 2
+		}
+	}
+
+	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
+}
+
 // reportSplunkHealth sets the Splunk HEC subsystem health based on config.
 func (s *Sidecar) reportSplunkHealth() {
 	if !s.cfg.Splunk.Enabled {
@@ -492,16 +705,16 @@ func (s *Sidecar) reportSplunkHealth() {
 	if bridgeEnv == nil {
 		bridgeEnv = readDotEnvFile(s.cfg.DataDir)
 	}
-	if url := bridgeEnv["SPLUNK_PASSWORD"]; url != "" {
+	if bridgeEnv["SPLUNK_PASSWORD"] != "" {
 		details["web_url"] = "http://127.0.0.1:8000"
 		details["web_user"] = "admin"
-		details["web_password"] = url
+		details["web_password_set"] = true
 	}
 	if user := bridgeEnv["DEFENSECLAW_LOCAL_USERNAME"]; user != "" {
 		details["username"] = user
 	}
-	if pass := bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"]; pass != "" {
-		details["password"] = pass
+	if bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"] != "" {
+		details["password_set"] = true
 	}
 
 	s.health.SetSplunk(StateRunning, "", details)

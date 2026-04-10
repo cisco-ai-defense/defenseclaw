@@ -95,6 +95,38 @@ class TestMCPAllow(MCPCommandTestBase):
         self.assertIn("Already allowed", result.output)
 
 
+class TestMCPUnblock(MCPCommandTestBase):
+    def test_unblock_clears_blocked(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block("mcp", "http://evil.com", "bad")
+
+        result = self.invoke(["unblock", "http://evil.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("cleared", result.output)
+        self.assertFalse(pe.is_blocked("mcp", "http://evil.com"))
+
+    def test_unblock_no_state(self):
+        result = self.invoke(["unblock", "http://clean.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no enforcement state", result.output)
+
+    def test_unblock_does_not_add_to_allow_list(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block("mcp", "http://evil.com", "bad")
+
+        self.invoke(["unblock", "http://evil.com"])
+        self.assertFalse(pe.is_allowed("mcp", "http://evil.com"))
+
+    def test_unblock_logs_action(self):
+        pe = PolicyEngine(self.app.store)
+        pe.block("mcp", "http://log-me.com", "test")
+
+        self.invoke(["unblock", "http://log-me.com"])
+        events = self.app.store.list_events(10)
+        actions = [e for e in events if e.action == "mcp-unblock"]
+        self.assertEqual(len(actions), 1)
+
+
 class TestMCPScan(MCPCommandTestBase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):

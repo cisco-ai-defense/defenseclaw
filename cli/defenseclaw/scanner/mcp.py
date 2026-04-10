@@ -114,11 +114,14 @@ class MCPScannerWrapper:
         aid = self.cisco_ai_defense
         self._inject_env()
 
+        llm_model = llm.model
+        if llm_model and llm.provider and "/" not in llm_model:
+            llm_model = f"{llm.provider}/{llm_model}"
         sdk_config = MCPConfig(
             api_key=aid.resolved_api_key(),
             endpoint_url=aid.endpoint,
             llm_provider_api_key=llm.resolved_api_key(),
-            llm_model=llm.model,
+            llm_model=llm_model,
             llm_base_url=self._resolve_llm_base_url(),
             llm_timeout=llm.timeout,
             llm_max_retries=llm.max_retries,

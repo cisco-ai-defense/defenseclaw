@@ -377,6 +377,9 @@ install_python_cli() {
     ${pip_cmd} -e ".[tui]"
     
     log_success "Python CLI installed (editable mode)"
+    mkdir -p "${INSTALL_DIR}"
+    ln -sf "${VENV_DIR}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
+    log_success "Linked defenseclaw into ${INSTALL_DIR}"
     
     # Note: cisco-ai-skill-scanner requires additional dependencies.
     # Users can manually install: pip install cisco-ai-skill-scanner

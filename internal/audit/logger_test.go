@@ -16,7 +16,16 @@
 
 package audit
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
 
 func TestInferTargetType(t *testing.T) {
 	tests := []struct {
@@ -29,6 +38,7 @@ func TestInferTargetType(t *testing.T) {
 		{"mcp_scanner", "mcp"},
 		{"codeguard", "code"},
 		{"aibom", "code"},
+		{"aibom-claw", "code"},
 		{"clawshield-vuln", "code"},
 		{"clawshield-secrets", "code"},
 		{"clawshield-pii", "code"},
@@ -92,5 +102,141 @@ func TestContains(t *testing.T) {
 				t.Errorf("contains(%q, %q) = %v, want %v", tt.s, tt.substr, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoggerLogActionIncludesRunID(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "logger-run-id")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	if err := logger.LogAction("skill-block", "test-skill", "reason=test"); err != nil {
+		t.Fatalf("LogAction: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if got := events[0].RunID; got != "logger-run-id" {
+		t.Fatalf("RunID = %q, want %q", got, "logger-run-id")
+	}
+}
+
+func TestLoggerSplunkForwardingIncludesDefaultedFields(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "logger-splunk-run-id")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var payload []byte
+	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		payload = append([]byte(nil), body...)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	logger := NewLogger(store)
+	logger.SetSplunkForwarder(forwarder)
+	if err := logger.LogAction("skill-block", "test-skill", "reason=test"); err != nil {
+		t.Fatalf("LogAction: %v", err)
+	}
+	logger.Close()
+
+	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 forwarded event, got %d", len(lines))
+	}
+
+	var env struct {
+		Event struct {
+			ID     string `json:"id"`
+			Actor  string `json:"actor"`
+			RunID  string `json:"run_id"`
+			Action string `json:"action"`
+			Target string `json:"target"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(lines[0], &env); err != nil {
+		t.Fatalf("Unmarshal forwarded payload: %v", err)
+	}
+
+	if env.Event.ID == "" {
+		t.Fatal("forwarded event id was empty")
+	}
+	if env.Event.Actor != "defenseclaw" {
+		t.Fatalf("forwarded actor = %q, want %q", env.Event.Actor, "defenseclaw")
+	}
+	if env.Event.RunID != "logger-splunk-run-id" {
+		t.Fatalf("forwarded run_id = %q, want %q", env.Event.RunID, "logger-splunk-run-id")
+	}
+	if env.Event.Action != "skill-block" || env.Event.Target != "test-skill" {
+		t.Fatalf("forwarded event mismatch: %+v", env.Event)
+	}
+}
+
+func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var (
+		mu      sync.Mutex
+		payload []byte
+	)
+	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		payload = append([]byte(nil), body...)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	forwarder.cfg.BatchSize = 50
+
+	logger := NewLogger(store)
+	logger.SetSplunkForwarder(forwarder)
+	if err := logger.LogAction("watch-start", "", "dirs=3 debounce=500ms"); err != nil {
+		t.Fatalf("LogAction: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		got := len(bytes.TrimSpace(payload))
+		mu.Unlock()
+		if got > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bytes.TrimSpace(payload)) == 0 {
+		t.Fatal("expected watch-start to flush to Splunk promptly")
 	}
 }

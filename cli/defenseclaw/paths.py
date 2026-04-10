@@ -89,6 +89,36 @@ def bundled_extensions_dir() -> Path:
     )
 
 
+def bundled_openshell_policies_dir() -> Path | None:
+    """OpenShell policy templates (default.rego, default-data.yaml, etc.)."""
+    candidates = [
+        _DATA_DIR / "policies" / "openshell",
+        _REPO_ROOT / "policies" / "openshell",
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def bundled_install_openshell_script() -> Path | None:
+    """Locate install-openshell-sandbox.sh (wheel _data/ or repo scripts/)."""
+    candidates = [
+        _DATA_DIR / "scripts" / "install-openshell-sandbox.sh",
+        _REPO_ROOT / "scripts" / "install-openshell-sandbox.sh",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+def scripts_dir() -> str:
+    """Return the paths to the scripts/ directory in the repository."""
+    candidate = _REPO_ROOT / "scripts"
+    return str(candidate) if candidate.is_dir() else str(_REPO_ROOT)
+
+
 def splunk_bridge_bin(data_dir: str) -> str | None:
     """Locate the splunk-claw-bridge executable.
 

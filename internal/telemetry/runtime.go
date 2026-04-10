@@ -68,7 +68,53 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 	return traceID
 }
 
+// StartAgentSpan starts a new OTel span for an agent invocation session.
+// Follows OTel GenAI semconv: span name = "invoke_agent {agentName}".
+func (p *Provider) StartAgentSpan(
+	ctx context.Context,
+	conversationID, agentName, provider string,
+) (context.Context, trace.Span) {
+	if !p.TracesEnabled() {
+		return ctx, nil
+	}
+
+	spanName := "invoke_agent"
+	if agentName != "" {
+		spanName = fmt.Sprintf("invoke_agent %s", agentName)
+	}
+
+	ctx, span := p.tracer.Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithTimestamp(time.Now()),
+	)
+
+	span.SetAttributes(
+		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.agent.name", agentName),
+		attribute.String("gen_ai.conversation.id", conversationID),
+	)
+	if provider != "" {
+		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
+	}
+
+	return ctx, span
+}
+
+// EndAgentSpan ends an active agent invocation span.
+func (p *Provider) EndAgentSpan(span trace.Span, errMsg string) {
+	if span == nil {
+		return
+	}
+	if errMsg != "" {
+		span.SetStatus(codes.Error, errMsg)
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
 // StartToolSpan starts a new OTel span for a tool_call event.
+// Follows OTel GenAI semconv: span name = "execute_tool {toolName}".
 // Raw args are not exported to avoid leaking tokens, keys, or prompt content.
 // Metrics are always recorded when OTel is enabled, even if traces are off.
 func (p *Provider) StartToolSpan(
@@ -84,13 +130,16 @@ func (p *Provider) StartToolSpan(
 		return ctx, nil
 	}
 
-	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("tool/%s", tool),
+	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("execute_tool %s", tool),
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithTimestamp(time.Now()),
 	)
 
 	span.SetAttributes(
-		attribute.String("defenseclaw.tool.name", tool),
+		attribute.String("gen_ai.operation.name", "execute_tool"),
+		attribute.String("gen_ai.tool.name", tool),
+		attribute.String("gen_ai.tool.type", "function"),
+		// DefenseClaw-specific attributes
 		attribute.String("defenseclaw.tool.status", status),
 		attribute.Int("defenseclaw.tool.args_length", len(args)),
 		attribute.Bool("defenseclaw.tool.dangerous", dangerous),
@@ -194,7 +243,8 @@ func (p *Provider) EndApprovalSpan(span trace.Span, result, reason string, auto,
 	span.End()
 }
 
-// StartLLMSpan starts a new OTel span for an LLM call (future-ready).
+// StartLLMSpan starts a new OTel span for an LLM inference call.
+// Follows OTel GenAI semconv: span name = "chat {model}".
 // Metrics are always recorded when OTel is enabled, even if traces are off.
 func (p *Provider) StartLLMSpan(
 	ctx context.Context,
@@ -202,29 +252,29 @@ func (p *Provider) StartLLMSpan(
 	maxTokens int,
 	temperature float64,
 ) (context.Context, trace.Span) {
-	p.RecordLLMCall(ctx, system, model)
-
 	if !p.TracesEnabled() {
 		return ctx, nil
 	}
 
-	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("llm/%s", model),
+	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("chat %s", model),
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(time.Now()),
 	)
 
 	span.SetAttributes(
+		attribute.String("gen_ai.operation.name", "chat"),
 		attribute.String("gen_ai.system", system),
+		attribute.String("gen_ai.provider.name", provider),
 		attribute.String("gen_ai.request.model", model),
 		attribute.Int("gen_ai.request.max_tokens", maxTokens),
 		attribute.Float64("gen_ai.request.temperature", temperature),
-		attribute.String("defenseclaw.llm.provider", provider),
 	)
 
 	return ctx, span
 }
 
 // EndLLMSpan ends an active LLM call span with response data.
+// Follows OTel GenAI semconv for token attribute names.
 // Metrics are always recorded when OTel is enabled, even if the span is nil
 // (traces disabled).
 func (p *Provider) EndLLMSpan(
@@ -234,13 +284,19 @@ func (p *Provider) EndLLMSpan(
 	finishReasons []string,
 	toolCallCount int,
 	guardrail, guardrailResult string,
-	system string,
+	providerName string,
 	startTime time.Time,
+	agentName string,
 ) {
+	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
+	// to the histogram data points, linking metrics to traces.
 	ctx := context.Background()
-	durationMs := float64(time.Since(startTime).Milliseconds())
-	p.RecordLLMTokens(ctx, system, int64(promptTokens), int64(completionTokens))
-	p.RecordLLMDuration(ctx, system, responseModel, durationMs)
+	if span != nil {
+		ctx = trace.ContextWithSpan(ctx, span)
+	}
+	durationSec := time.Since(startTime).Seconds()
+	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, int64(promptTokens), int64(completionTokens))
+	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, durationSec)
 
 	if span == nil {
 		return
@@ -249,14 +305,68 @@ func (p *Provider) EndLLMSpan(
 	span.SetAttributes(
 		attribute.String("gen_ai.response.model", responseModel),
 		attribute.StringSlice("gen_ai.response.finish_reasons", finishReasons),
-		attribute.Int("gen_ai.usage.prompt_tokens", promptTokens),
-		attribute.Int("gen_ai.usage.completion_tokens", completionTokens),
+		attribute.Int("gen_ai.usage.input_tokens", promptTokens),
+		attribute.Int("gen_ai.usage.output_tokens", completionTokens),
 		attribute.Int("defenseclaw.llm.tool_calls", toolCallCount),
 		attribute.String("defenseclaw.llm.guardrail", guardrail),
 		attribute.String("defenseclaw.llm.guardrail.result", guardrailResult),
 	)
 
 	if guardrailResult == "blocked" {
+		span.SetStatus(codes.Error, "guardrail blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+
+	span.End()
+}
+
+// StartGuardrailSpan starts a new OTel span for a guardrail evaluation.
+// Follows OTel GenAI semconv PR #3233: span name = "apply_guardrail {name} {targetType}".
+func (p *Provider) StartGuardrailSpan(
+	ctx context.Context,
+	name, targetType, model string,
+) (context.Context, trace.Span) {
+	if !p.TracesEnabled() {
+		return ctx, nil
+	}
+
+	spanName := fmt.Sprintf("apply_guardrail %s %s", name, targetType)
+	ctx, span := p.tracer.Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithTimestamp(time.Now()),
+	)
+
+	span.SetAttributes(
+		attribute.String("gen_ai.operation.name", "apply_guardrail"),
+		attribute.String("gen_ai.guardrail.name", name),
+		attribute.String("gen_ai.security.target.type", targetType),
+		attribute.String("gen_ai.request.model", model),
+	)
+
+	return ctx, span
+}
+
+// EndGuardrailSpan ends an active guardrail span with the security decision.
+func (p *Provider) EndGuardrailSpan(
+	span trace.Span,
+	decision, severity, reason string,
+	startTime time.Time,
+) {
+	if span == nil {
+		return
+	}
+
+	span.SetAttributes(
+		attribute.String("gen_ai.security.decision.type", decision),
+		attribute.String("defenseclaw.guardrail.severity", severity),
+	)
+
+	if reason != "" {
+		span.SetAttributes(attribute.String("defenseclaw.guardrail.reason", truncateStr(reason, 256)))
+	}
+
+	if decision == "deny" || decision == "block" {
 		span.SetStatus(codes.Error, "guardrail blocked")
 	} else {
 		span.SetStatus(codes.Ok, "")

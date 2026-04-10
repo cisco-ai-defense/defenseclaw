@@ -174,6 +174,8 @@ def enrich_with_policy(
     inv: dict[str, Any],
     store: Any,
     skill_actions: SkillActionsConfig | None = None,
+    policy_dir: str = "",
+    cfg: Config | None = None,
 ) -> None:
     """Evaluate OPA-style admission gate per item and annotate the inventory.
 
@@ -209,11 +211,20 @@ def enrich_with_policy(
             if not name:
                 continue
 
-            scan_entry = scan_map.get(name)
+            candidates = _inventory_key_candidates(item, target_type, name)
+            scan_entry = _lookup_by_candidates(scan_map, candidates)
+            fallback_actions = _fallback_actions_for(target_type, skill_actions, cfg)
+            action_entry = _lookup_by_candidates(actions_map, candidates)
+            policy_name = _inventory_policy_name(item, target_type, name, action_entry)
+            source_path = _inventory_source_path(
+                item, target_type, candidates, scan_entry, action_entry, cfg,
+            )
             verdict, detail = _admission_verdict(
-                pe, target_type, name,
-                scan_entry, actions_map.get(name),
-                skill_actions,
+                pe, target_type, policy_name,
+                scan_entry, action_entry,
+                fallback_actions,
+                policy_dir=policy_dir,
+                source_path=source_path,
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
@@ -240,6 +251,20 @@ def enrich_with_policy(
 enrich_skills_with_policy = enrich_with_policy
 
 
+def _fallback_actions_for(
+    target_type: str,
+    skill_actions: SkillActionsConfig,
+    cfg: Config | None,
+) -> Any:
+    if target_type == "skill" or cfg is None:
+        return skill_actions
+    if target_type == "plugin":
+        return cfg.plugin_actions
+    if target_type == "mcp":
+        return cfg.mcp_actions
+    return skill_actions
+
+
 def _admission_verdict(
     pe: Any,
     target_type: str,
@@ -247,34 +272,131 @@ def _admission_verdict(
     scan_entry: dict[str, Any] | None,
     action_entry: ActionEntry | None,
     skill_actions: SkillActionsConfig,
+    policy_dir: str = "",
+    source_path: str = "",
 ) -> tuple[str, str]:
-    """Replicate OPA admission.rego logic in Python for offline evaluation."""
-    if pe.is_blocked(target_type, name):
-        reason = action_entry.reason if action_entry else "block list"
-        return "blocked", reason
+    """Replicate admission ordering for offline inventory evaluation."""
+    from defenseclaw.enforce.admission import evaluate_admission
 
-    if pe.is_allowed(target_type, name):
-        reason = action_entry.reason if action_entry else "allow list"
-        return "allowed", reason
-
-    if pe.is_quarantined(target_type, name):
-        reason = action_entry.reason if action_entry else "quarantined"
-        return "rejected", f"quarantined: {reason}"
-
-    if scan_entry is None:
+    decision = evaluate_admission(
+        pe,
+        policy_dir=policy_dir,
+        target_type=target_type,
+        name=name,
+        source_path=source_path,
+        scan_result=scan_entry,
+        action_entry=action_entry,
+        fallback_actions=skill_actions,
+        include_quarantine=True,
+    )
+    if decision.verdict == "scan":
         return "unscanned", "no scan result"
+    if decision.verdict == "blocked" and action_entry is None:
+        return "blocked", "block list"
+    if decision.verdict == "allowed" and action_entry is None and decision.source == "manual-allow":
+        return "allowed", "allow list"
+    return decision.verdict, decision.reason
 
-    if scan_entry["finding_count"] == 0:
-        return "clean", "scan clean"
 
-    sev = scan_entry["max_severity"]
-    n = scan_entry["finding_count"]
-    action = skill_actions.for_severity(sev)
+def _inventory_source_path(
+    item: dict[str, Any],
+    target_type: str,
+    candidates: list[str],
+    scan_entry: dict[str, Any] | None,
+    action_entry: ActionEntry | None,
+    cfg: Config | None,
+) -> str:
+    import os
 
-    if action.install == "block" or action.runtime == "disable":
-        return "rejected", f"{n} findings, max {sev}"
+    if action_entry is not None and action_entry.source_path:
+        return action_entry.source_path
 
-    return "warning", f"{n} findings, max {sev}"
+    for key in ("path", "baseDir", "filePath", "scan_target", "url", "command"):
+        raw = item.get(key)
+        if raw:
+            return str(raw)
+
+    if cfg is None:
+        if scan_entry is not None and scan_entry.get("target"):
+            return str(scan_entry["target"])
+        return ""
+
+    if target_type == "skill":
+        for skill_name in candidates:
+            for skill_dir in cfg.skill_dirs():
+                candidate = os.path.join(skill_dir, skill_name)
+                if os.path.isdir(candidate):
+                    return candidate
+    elif target_type == "plugin":
+        for plugin_name in candidates:
+            for plugin_dir in cfg.plugin_dirs():
+                candidate = os.path.join(plugin_dir, plugin_name)
+                if os.path.isdir(candidate):
+                    return candidate
+
+    if scan_entry is not None and scan_entry.get("target"):
+        return str(scan_entry["target"])
+
+    return ""
+
+
+def _inventory_key_candidates(
+    item: dict[str, Any],
+    target_type: str,
+    name: str,
+) -> list[str]:
+    import os
+
+    candidates: list[str] = []
+
+    def add(raw: Any) -> None:
+        val = str(raw or "").strip()
+        if val and val not in candidates:
+            candidates.append(val)
+
+    add(name)
+    add(os.path.basename(name.rstrip("/")))
+
+    if target_type == "plugin":
+        plugin_name = item.get("name", "")
+        add(plugin_name)
+        add(os.path.basename(str(plugin_name).rstrip("/")))
+    elif target_type == "mcp":
+        add(item.get("url", ""))
+        add(item.get("command", ""))
+
+    return candidates
+
+
+def _inventory_policy_name(
+    item: dict[str, Any],
+    target_type: str,
+    name: str,
+    action_entry: ActionEntry | None,
+) -> str:
+    import os
+
+    if action_entry is not None and action_entry.target_name:
+        return action_entry.target_name
+
+    if target_type == "plugin":
+        plugin_name = str(item.get("name", "")).strip()
+        alias = os.path.basename(plugin_name.rstrip("/"))
+        if alias and (
+            plugin_name.startswith("@")
+            or alias.endswith("-plugin")
+            or alias.endswith("-provider")
+        ):
+            return alias
+
+    return name
+
+
+def _lookup_by_candidates(mapping: dict[str, Any], candidates: list[str]) -> Any | None:
+    for candidate in candidates:
+        if candidate in mapping:
+            return mapping[candidate]
+    return None
 
 
 def _build_actions_map_for_type(store: Any, target_type: str) -> dict[str, ActionEntry]:
@@ -297,12 +419,15 @@ def _build_scan_map_for_type(store: Any, scanner_name: str) -> dict[str, dict[st
     except Exception:
         return scan_map
     for ls in latest:
-        name = os.path.basename(ls["target"])
-        scan_map[name] = {
+        entry = {
             "target": ls["target"],
             "finding_count": ls["finding_count"],
             "max_severity": ls["max_severity"] or "INFO",
         }
+        target = ls["target"]
+        for key in (target, os.path.basename(target)):
+            if key:
+                scan_map[key] = entry
     return scan_map
 
 
@@ -793,8 +918,10 @@ def _run_openclaw(*args: str) -> _CmdResult:
     """
     cmd_str = "openclaw " + " ".join(args) + " --json"
     try:
+        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+        prefix = openclaw_cmd_prefix()
         proc = subprocess.run(
-            ["openclaw", *args, "--json"],
+            [*prefix, openclaw_bin(), *args, "--json"],
             capture_output=True,
             text=True,
             timeout=30,

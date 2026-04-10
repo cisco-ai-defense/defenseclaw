@@ -348,7 +348,6 @@ def show(app: AppContext, name: str) -> None:
     if enforcement:
         click.echo()
         click.echo("Enforcement:")
-        click.echo(f"  update_sandbox_policy:         {enforcement.get('update_sandbox_policy', True)}")
         click.echo(f"  max_enforcement_delay_seconds: {enforcement.get('max_enforcement_delay_seconds', 2)}")
 
     audit_cfg = data.get("audit", {})
@@ -822,7 +821,6 @@ def _default_policy_data() -> dict:
             "allowed_ports": [443, 80],
         },
         "enforcement": {
-            "update_sandbox_policy": True,
             "max_enforcement_delay_seconds": 2,
         },
         "audit": {
@@ -929,8 +927,6 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         opa_data["config"]["scan_on_install"] = admission["scan_on_install"]
 
     enforcement = policy_data.get("enforcement", {})
-    if "update_sandbox_policy" in enforcement:
-        opa_data["config"]["update_sandbox_policy"] = enforcement["update_sandbox_policy"]
     if "max_enforcement_delay_seconds" in enforcement:
         opa_data["config"]["max_enforcement_delay_seconds"] = enforcement["max_enforcement_delay_seconds"]
 
@@ -988,6 +984,26 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         for key in ("default_action", "blocked_destinations", "allowed_domains", "allowed_ports"):
             if key in firewall:
                 opa_data["firewall"][key] = firewall[key]
+
+    # --- first_party_allow_list section ---
+    yaml_fp = policy_data.get("first_party_allow_list", [])
+    if yaml_fp:
+        existing = {
+            (e["target_type"], e["target_name"]): e
+            for e in opa_data.get("first_party_allow_list", [])
+            if "target_type" in e and "target_name" in e
+        }
+        merged = []
+        for entry in yaml_fp:
+            key = (entry.get("target_type", ""), entry.get("target_name", ""))
+            base = existing.get(key, {})
+            base.update(entry)
+            if "source_path_contains" not in base:
+                prev = existing.get(key, {})
+                if "source_path_contains" in prev:
+                    base["source_path_contains"] = prev["source_path_contains"]
+            merged.append(base)
+        opa_data["first_party_allow_list"] = merged
 
     # --- audit section ---
     audit_cfg = policy_data.get("audit", {})
