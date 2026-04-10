@@ -1211,9 +1211,16 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 			wantType:  "*gateway.anthropicProvider",
 		},
 		{
-			name:      "missing_target_url",
+			name:      "missing_target_url_with_config_fallback",
 			targetURL: "",
 			apiKey:    "sk-key",
+			model:     "gpt-4",
+			wantType:  "*gateway.openaiProvider",
+		},
+		{
+			name:      "missing_target_url_no_api_key",
+			targetURL: "",
+			apiKey:    "",
 			model:     "gpt-4",
 			wantNil:   true,
 		},

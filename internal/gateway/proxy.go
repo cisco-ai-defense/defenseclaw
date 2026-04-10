@@ -1221,7 +1221,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var bufferedTCChunks [][]byte // tool-call chunks held until post-stream inspection
 	bufferedTCSize := 0
 	lastScanLen := 0
-	const scanInterval = 500
 	streamFinishReasons := []string{}
 	streamBlocked := false
 	streamCtx, streamCancel := context.WithCancel(r.Context())
