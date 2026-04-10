@@ -1792,13 +1792,19 @@ func scrubURLSecrets(raw string) string {
 	return u.String()
 }
 
-// isKnownProviderDomain returns true when targetURL contains a domain
-// substring that matches an entry in the embedded providers.json list.
-// Used to reject passthrough requests to unknown/internal hosts (SSRF
-// protection).
+// isKnownProviderDomain returns true when the hostname of targetURL
+// contains a domain substring from the embedded providers.json list.
+// Only the parsed hostname is checked — query strings and path
+// components are ignored to prevent bypass via crafted URLs like
+// https://evil.com/?foo=api.openai.com.
 func isKnownProviderDomain(targetURL string) bool {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
 	for _, pd := range providerDomains {
-		if strings.Contains(targetURL, pd.domain) {
+		if strings.Contains(host, pd.domain) {
 			return true
 		}
 	}

@@ -1664,6 +1664,95 @@ func TestHandlePassthrough_ChatCompletionsRedirect(t *testing.T) {
 	}
 }
 
+func TestHandlePassthrough_SSRFRejection(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "test",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+
+	tests := []struct {
+		name      string
+		targetURL string
+		wantCode  int
+	}{
+		{"cloud IMDS", "http://169.254.169.254/latest/meta-data/", http.StatusForbidden},
+		{"localhost", "http://localhost:8080/secret", http.StatusForbidden},
+		{"internal host", "http://10.0.0.1:9200/elasticsearch", http.StatusForbidden},
+		{"query string bypass", "https://evil.com/?foo=api.openai.com", http.StatusForbidden},
+		{"path bypass", "https://evil.com/api.anthropic.com/v1/messages", http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DC-Target-URL", tt.targetURL)
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+
+			proxy.handlePassthrough(rec, req)
+			if rec.Code != tt.wantCode {
+				t.Errorf("expected %d, got %d: %s", tt.wantCode, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestScrubURLSecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"no query", "https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/chat/completions"},
+		{"gemini key", "https://generativelanguage.googleapis.com/models/gemini:generate?key=AIza1234secret", "https://generativelanguage.googleapis.com/models/gemini:generate?key=REDACTED"},
+		{"multiple params", "https://example.com/api?key=secret&alt=sse", "https://example.com/api?alt=sse&key=REDACTED"},
+		{"api-key param", "https://example.com?api-key=secret", "https://example.com?api-key=REDACTED"},
+		{"token param", "https://example.com?token=abc123", "https://example.com?token=REDACTED"},
+		{"no sensitive params", "https://api.openai.com?model=gpt-4", "https://api.openai.com?model=gpt-4"},
+		{"invalid url", "://bad", "://bad"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scrubURLSecrets(tt.url)
+			if got != tt.want {
+				t.Errorf("scrubURLSecrets(%q)\n  got  %q\n  want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsKnownProviderDomain(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"openai", "https://api.openai.com/v1/chat/completions", true},
+		{"anthropic", "https://api.anthropic.com/v1/messages", true},
+		{"gemini", "https://generativelanguage.googleapis.com/v1/models/gemini:generate", true},
+		{"azure", "https://my-resource.openai.azure.com/openai/deployments/gpt4", true},
+		{"bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com/model/invoke", true},
+		{"openrouter", "https://openrouter.ai/api/v1/chat/completions", true},
+		{"cloud IMDS", "http://169.254.169.254/latest/meta-data/", false},
+		{"localhost", "http://localhost:8080/secret", false},
+		{"internal IP", "http://10.0.0.1:9200", false},
+		{"query bypass", "https://evil.com/?foo=api.openai.com", false},
+		{"path bypass", "https://evil.com/api.anthropic.com", false},
+		{"invalid url", "://bad-url", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isKnownProviderDomain(tt.url); got != tt.want {
+				t.Errorf("isKnownProviderDomain(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGuardrailListenAddr(t *testing.T) {
 	tests := []struct {
 		port int
