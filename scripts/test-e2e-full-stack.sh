@@ -2253,6 +2253,15 @@ PY
         skip "upgrade command: backup directory" "no backups found (expected if upgrade was not fully run)"
     fi
 
+    # The upgrade command stops the sidecar as part of its flow. Restart it
+    # so subsequent phases (agent chat, plugin lifecycle) have a running proxy.
+    if ! curl -sf --max-time 3 "$SIDECAR_URL/health" >/dev/null 2>&1; then
+        echo "  Restarting sidecar after upgrade test..."
+        defenseclaw-gateway start 2>/dev/null || true
+        wait_for_url "$SIDECAR_URL/health" 30 3 || true
+        wait_for_sidecar_subsystems_running 30 || true
+    fi
+
     phase_timer_end "Phase 6C"
 }
 
@@ -2272,6 +2281,13 @@ phase_agent_chat() {
         skip "agent chat" "openclaw CLI not found"
         phase_timer_end "Phase 7"
         return
+    fi
+
+    if ! curl -sf --max-time 3 "$SIDECAR_URL/health" >/dev/null 2>&1; then
+        echo "  DefenseClaw sidecar not responding — restarting..."
+        defenseclaw-gateway start 2>/dev/null || true
+        wait_for_url "$SIDECAR_URL/health" 30 3 || true
+        wait_for_sidecar_subsystems_running 30 || true
     fi
 
     if ! curl -sf --max-time 3 "$OPENCLAW_URL" >/dev/null 2>&1; then
