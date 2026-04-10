@@ -320,6 +320,7 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 
 func (c *Client) readLoop() {
 	defer c.signalDisconnect()
+	defer c.drainPending()
 
 	for {
 		_, raw, err := c.conn.ReadMessage()
@@ -437,6 +438,9 @@ func (c *Client) request(ctx context.Context, method string, params interface{})
 
 	select {
 	case resp := <-ch:
+		if resp == nil {
+			return nil, fmt.Errorf("gateway: not connected")
+		}
 		return resp, nil
 	case <-ctx.Done():
 		c.mu.Lock()
@@ -473,6 +477,19 @@ func (c *Client) signalDisconnect() {
 			close(c.disconnCh)
 		}
 	})
+}
+
+// drainPending closes all pending response channels and nils out the
+// connection so that in-flight requests fail fast with a retryable error
+// instead of hanging until context deadline.
+func (c *Client) drainPending() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, ch := range c.pending {
+		close(ch)
+		delete(c.pending, id)
+	}
+	c.conn = nil
 }
 
 // Hello returns the hello-ok payload from the initial handshake.
