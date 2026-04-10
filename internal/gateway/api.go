@@ -21,6 +21,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -334,9 +335,14 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 const gatewayMutationRetryDelay = 2 * time.Second
 const gatewayMutationMaxAttempts = 20
 const pluginGatewayMutationTimeout = 45 * time.Second
+const gatewayMutationPerAttemptTimeout = 10 * time.Second
+
 func isRetryableGatewayMutationError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "gateway: not connected") ||
@@ -344,19 +350,24 @@ func isRetryableGatewayMutationError(err error) bool {
 		strings.Contains(msg, "use of closed network connection") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "connection reset by peer") ||
-		strings.Contains(msg, "connection refused")
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "context deadline exceeded")
 }
 
 func (a *APIServer) retryGatewayMutation(ctx context.Context, fn func(context.Context) error) error {
 	var lastErr error
 	for attempt := 1; attempt <= gatewayMutationMaxAttempts; attempt++ {
-		lastErr = fn(ctx)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, gatewayMutationPerAttemptTimeout)
+		lastErr = fn(attemptCtx)
+		attemptCancel()
 		if lastErr == nil {
 			return nil
 		}
 		if !isRetryableGatewayMutationError(lastErr) || attempt == gatewayMutationMaxAttempts {
 			return lastErr
 		}
+		fmt.Fprintf(os.Stderr, "[api] gateway mutation attempt %d/%d failed: %v (retrying in %s)\n",
+			attempt, gatewayMutationMaxAttempts, lastErr, gatewayMutationRetryDelay)
 
 		select {
 		case <-ctx.Done():
