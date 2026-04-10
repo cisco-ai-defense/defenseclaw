@@ -50,8 +50,10 @@ func patchRawBody(raw json.RawMessage, model string, stream bool) ([]byte, error
 	return json.Marshal(m)
 }
 
+const defaultMaxTokensFallback = 8192
+
 // modelMaxTokens returns the max completion tokens for known models.
-// Returns 0 for unknown models (no capping applied).
+// Returns defaultMaxTokensFallback for unknown models as a safe cap.
 func modelMaxTokens(model string) int {
 	switch {
 	case strings.HasPrefix(model, "gpt-4o-mini"):
@@ -68,8 +70,10 @@ func modelMaxTokens(model string) int {
 		return 100000
 	case strings.HasPrefix(model, "o4-mini"):
 		return 100000
+	case strings.HasPrefix(model, "claude"):
+		return 8192
 	default:
-		return 0
+		return defaultMaxTokensFallback
 	}
 }
 
