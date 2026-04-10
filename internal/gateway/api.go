@@ -278,7 +278,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
@@ -315,7 +315,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
 	defer cancel()
 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {

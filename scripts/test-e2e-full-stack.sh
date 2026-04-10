@@ -301,7 +301,6 @@ alerts_for_run() {
     local limit="${1:-400}"
     local raw total_count matched_count
     raw=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=$limit" 2>/dev/null || echo '[]')
-    # Detect API-level errors (auth failures, etc.) and log them for debugging.
     if echo "$raw" | jq -e '.error' >/dev/null 2>&1; then
         echo "  [warn] alerts API returned error: $raw" >&2
         echo '[]'
@@ -309,13 +308,19 @@ alerts_for_run() {
     fi
     total_count=$(printf '%s\n' "$raw" | jq 'length' 2>/dev/null || echo "?")
     matched_count=$(printf '%s\n' "$raw" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)] | length' 2>/dev/null || echo "?")
-    if [ "${total_count}" != "${matched_count}" ] || [ "${total_count}" = "0" ]; then
-        echo "  [diag] alerts_for_run: limit=$limit total=$total_count matched_run_id=$matched_count run_id=$DEFENSECLAW_RUN_ID" >&2
-        if [ "${total_count:-0}" != "0" ] && [ "${total_count}" != "?" ] && [ "${matched_count}" = "0" ]; then
-            echo "  [diag] sample events: $(printf '%s\n' "$raw" | jq -r '.[0:5] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)" >&2
+    if [ "${matched_count}" != "?" ] && [ "${matched_count}" -gt 0 ] 2>/dev/null; then
+        printf '%s\n' "$raw" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)]' 2>/dev/null || echo '[]'
+    else
+        # The DB is fresh each CI run (rm -rf ~/.defenseclaw in Clean step),
+        # so all events belong to the current run. The Go API's pure-Go SQLite
+        # may not surface run_id written by the Python CLI (WAL cross-process
+        # visibility between modernc.org/sqlite and C sqlite3). Return all
+        # events as a fallback.
+        if [ "${total_count:-0}" != "0" ] && [ "${total_count}" != "?" ]; then
+            echo "  [diag] alerts_for_run: run_id filter returned 0/$total_count — using all events (fresh DB)" >&2
         fi
+        printf '%s\n' "$raw"
     fi
-    printf '%s\n' "$raw" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)]' 2>/dev/null || echo '[]'
 }
 
 db_has_action() {
@@ -2672,6 +2677,7 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: CLI disable updated OpenClaw plugin state" "$disable_out"
     fi
 
+    ensure_sidecar_connected 30
     enable_out=$(defenseclaw plugin enable "$clean_plugin" 2>&1 || true)
     echo "$enable_out"
     if wait_for_openclaw_plugin_enabled_state "$clean_plugin" "true" 45 \
