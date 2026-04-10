@@ -1177,7 +1177,8 @@ def unblock(app: AppContext, name: str) -> None:
         pe.unblock("skill", skill_name)
         pe.clear_quarantine("skill", skill_name)
         click.secho(
-            f"[skill] {skill_name!r} install/file enforcement cleared; runtime disable remains until the gateway is reachable",
+            f"[skill] {skill_name!r} install/file enforcement cleared; "
+            "runtime disable remains until the gateway is reachable",
             fg="yellow",
         )
     if saved_path:

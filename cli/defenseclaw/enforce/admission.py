@@ -62,8 +62,14 @@ def _default_admission_policy() -> AdmissionPolicyData:
             },
         },
         first_party_allow={
-            ("plugin", "defenseclaw"): ("first-party DefenseClaw plugin", [".defenseclaw", "extensions/defenseclaw"]),
-            ("skill", "codeguard"): ("first-party DefenseClaw skill", [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"]),
+            ("plugin", "defenseclaw"): (
+                "first-party DefenseClaw plugin",
+                [".defenseclaw", "extensions/defenseclaw"],
+            ),
+            ("skill", "codeguard"): (
+                "first-party DefenseClaw skill",
+                [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"],
+            ),
         },
     )
 

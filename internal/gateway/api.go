@@ -1763,18 +1763,6 @@ func (a *APIServer) loadPolicyEngine() (*policy.Engine, error) {
 	return policy.New(a.scannerCfg.PolicyDir)
 }
 
-func findPolicyListEntry(entries []policy.ListEntry, targetType, targetName string) (bool, string) {
-	for _, entry := range entries {
-		if entry.TargetType == targetType && entry.TargetName == targetName {
-			if entry.Reason != "" {
-				return true, entry.Reason
-			}
-			return true, fmt.Sprintf("%s %q matched policy list", targetType, targetName)
-		}
-	}
-	return false, ""
-}
-
 // codeScanRequest is the payload for POST /api/v1/scan/code.
 type codeScanRequest struct {
 	Path string `json:"path"`

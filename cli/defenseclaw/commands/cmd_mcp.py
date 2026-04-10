@@ -397,7 +397,7 @@ def unblock(app: AppContext, target: str) -> None:
         fg="green",
     )
     click.echo(
-        f"  The server will go through normal scanning on next check."
+        "  The server will go through normal scanning on next check."
     )
 
     if app.logger:

@@ -590,9 +590,7 @@ func TestPatchRawBodyMaxTokensCapping(t *testing.T) {
 		var m map[string]json.RawMessage
 		json.Unmarshal(patched, &m)
 		var s string
-		if json.Unmarshal(m["max_tokens"], &s) == nil && s == "not-a-number" {
-			// String preserved — this is expected (non-int is not capped)
-		}
+		_ = json.Unmarshal(m["max_tokens"], &s)
 	})
 }
 

@@ -1233,11 +1233,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		// The finish_reason:"tool_calls" chunk carries no delta.ToolCalls
 		// but must stay behind the argument deltas or clients that stop
 		// accumulating on finish_reason will never see the arguments.
-		isToolCallFinish := false
-		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil &&
-			*chunk.Choices[0].FinishReason == "tool_calls" {
-			isToolCallFinish = true
-		}
+		isToolCallFinish := len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil &&
+			*chunk.Choices[0].FinishReason == "tool_calls"
 		if mode == "action" && (hasToolCalls || isToolCallFinish || len(bufferedTCChunks) > 0) {
 			bufferedTCSize += len(data)
 			if bufferedTCSize > maxBufferedTCBytes {
@@ -1362,7 +1359,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			completionTok = int(usage.CompletionTokens)
 		}
 		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
-		llmSpan = nil
 	}
 
 	// Flush buffered tool-call chunks only when inspection passed.
