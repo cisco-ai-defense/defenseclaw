@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/signature.json",
+  "title": "DefenseClaw Signature File",
+  "description": "Schema for .defenseclaw-sig.json — the on-disk cryptographic signature placed alongside a signed skill, MCP server, or plugin directory.",
+  "type": "object",
+  "required": [
+    "version",
+    "algorithm",
+    "publisher",
+    "public_key",
+    "fingerprint",
+    "signed_at",
+    "content_hash",
+    "signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version. Currently always 1."
+    },
+    "algorithm": {
+      "type": "string",
+      "const": "ed25519",
+      "description": "Signature algorithm. Currently only ed25519 is supported."
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable name of the publisher who signed this asset."
+    },
+    "public_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Hex-encoded Ed25519 public key (32 bytes = 64 hex chars)."
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hex digest of the public key, used as a stable identifier for the signing key."
+    },
+    "signed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 / RFC 3339 timestamp of when the signature was created (UTC)."
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hex digest of the canonical manifest (sorted file paths with per-file SHA-256 hashes)."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$",
+      "description": "Hex-encoded Ed25519 signature (64 bytes = 128 hex chars) over the raw content_hash bytes."
+    }
+  }
+}

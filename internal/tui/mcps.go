@@ -26,11 +26,13 @@ import (
 )
 
 type mcpItem struct {
-	URL     string
-	Status  string
-	Actions string
-	Reason  string
-	Time    string
+	URL       string
+	Status    string
+	Verified  bool
+	Publisher string
+	Actions   string
+	Reason    string
+	Time      string
 }
 
 type MCPsPanel struct {
@@ -68,13 +70,18 @@ func (p *MCPsPanel) Refresh() {
 		default:
 			status = "active"
 		}
-		p.items = append(p.items, mcpItem{
+		item := mcpItem{
 			URL:     e.TargetName,
 			Status:  status,
 			Actions: e.Actions.Summary(),
 			Reason:  e.Reason,
 			Time:    e.UpdatedAt.Format("2006-01-02 15:04"),
-		})
+		}
+		if sig, err := p.store.GetSignatureStatus("mcp", e.TargetName); err == nil && sig != nil {
+			item.Verified = sig.Verified
+			item.Publisher = sig.Publisher
+		}
+		p.items = append(p.items, item)
 	}
 
 	if p.cursor >= len(p.items) && len(p.items) > 0 {
@@ -133,7 +140,7 @@ func (p *MCPsPanel) View() string {
 	}
 
 	var b strings.Builder
-	header := fmt.Sprintf("  %-10s %-40s %-20s %-20s %-16s", "STATUS", "URL", "ACTIONS", "REASON", "SINCE")
+	header := fmt.Sprintf("  %-10s %-8s %-36s %-18s %-18s %-16s", "STATUS", "SIGNED", "URL", "ACTIONS", "REASON", "SINCE")
 	b.WriteString(HeaderStyle.Render(header))
 	b.WriteString("\n")
 
@@ -154,20 +161,28 @@ func (p *MCPsPanel) View() string {
 	for i := start; i < end; i++ {
 		item := p.items[i]
 		status := StatusStyle(item.Status).Render(fmt.Sprintf("%-10s", strings.ToUpper(item.Status)))
+		var badge string
+		if item.Verified {
+			badge = StyleVerified.Render("YES")
+			badge = fmt.Sprintf("%-8s", badge)
+		} else {
+			badge = StyleUnverified.Render("-")
+			badge = fmt.Sprintf("  %-6s", badge)
+		}
 		url := item.URL
-		if len(url) > 40 {
-			url = url[:37] + "..."
+		if len(url) > 36 {
+			url = url[:33] + "..."
 		}
 		actions := item.Actions
-		if len(actions) > 20 {
-			actions = actions[:17] + "..."
+		if len(actions) > 18 {
+			actions = actions[:15] + "..."
 		}
 		reason := item.Reason
-		if len(reason) > 20 {
-			reason = reason[:17] + "..."
+		if len(reason) > 18 {
+			reason = reason[:15] + "..."
 		}
 
-		line := fmt.Sprintf("  %s %-40s %-20s %-20s %-16s", status, url, actions, reason, item.Time)
+		line := fmt.Sprintf("  %s %s %-36s %-18s %-18s %-16s", status, badge, url, actions, reason, item.Time)
 
 		if i == p.cursor {
 			line = SelectedStyle.Width(p.width).Render(line)

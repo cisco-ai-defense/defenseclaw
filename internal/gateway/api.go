@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/signing"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -53,10 +54,17 @@ type APIServer struct {
 	scannerCfg *config.Config
 	otel       *telemetry.Provider
 
+	trustStore *signing.TrustStore
+
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
 	// /v1/guardrail/config endpoint while other goroutines read them.
 	cfgMu sync.RWMutex
+}
+
+// SetTrustStore attaches the signing trust store for verify/trust API endpoints.
+func (a *APIServer) SetTrustStore(ts *signing.TrustStore) {
+	a.trustStore = ts
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events
@@ -113,6 +121,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc("/api/v1/verify", a.handleVerify)
+	mux.HandleFunc("/api/v1/trust", a.handleTrust)
+	mux.HandleFunc("/api/v1/signatures", a.handleSignatures)
 
 	handler := a.metricsMiddleware(csrfProtect(mux))
 	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
@@ -692,6 +703,22 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		input.ScanResult = &policy.ScanResultInput{
 			MaxSeverity:   req.Input.ScanResult.MaxSeverity,
 			TotalFindings: req.Input.ScanResult.TotalFindings,
+		}
+	}
+	if req.Input.Path != "" && a.trustStore != nil {
+		vr, verErr := signing.Verify(req.Input.Path, a.trustStore.List())
+		if verErr == nil {
+			input.SigningStatus = &policy.SigningStatusInput{
+				Signed:      vr.Signed,
+				Trusted:     vr.Trusted,
+				Publisher:   vr.Publisher,
+				Fingerprint: vr.Fingerprint,
+			}
+			if a.store != nil && req.Input.TargetName != "" {
+				_ = a.store.SetSignatureStatus(
+					req.Input.TargetType, req.Input.TargetName,
+					vr.Publisher, vr.Fingerprint, vr.Verified, "", vr.Reason)
+			}
 		}
 	}
 
@@ -1761,4 +1788,136 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// --- Signing endpoints ---
+
+type verifyRequest struct {
+	TargetType string `json:"target_type"`
+	TargetName string `json:"target_name"`
+	Path       string `json:"path"`
+}
+
+func (a *APIServer) handleVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var req verifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Path == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+
+	var trusted []signing.Publisher
+	if a.trustStore != nil {
+		trusted = a.trustStore.List()
+	}
+
+	result, err := signing.Verify(req.Path, trusted)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if a.store != nil && req.TargetName != "" {
+		_ = a.store.SetSignatureStatus(
+			req.TargetType, req.TargetName,
+			result.Publisher, result.Fingerprint,
+			result.Verified, "", result.Reason,
+		)
+	}
+
+	if a.logger != nil {
+		_ = a.logger.LogAction("verify", req.TargetName, fmt.Sprintf(
+			"signed=%t trusted=%t publisher=%s", result.Signed, result.Trusted, result.Publisher))
+	}
+
+	a.writeJSON(w, http.StatusOK, result)
+}
+
+type trustAddRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
+func (a *APIServer) handleTrust(w http.ResponseWriter, r *http.Request) {
+	if a.trustStore == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "trust store not configured"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		a.writeJSON(w, http.StatusOK, a.trustStore.List())
+
+	case http.MethodPost:
+		var req trustAddRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		if req.Name == "" || req.PublicKey == "" {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and public_key are required"})
+			return
+		}
+		pub, err := a.trustStore.Add(req.Name, req.PublicKey)
+		if err != nil {
+			a.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := a.trustStore.Save(); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if a.logger != nil {
+			_ = a.logger.LogAction("trust-add", req.Name, fmt.Sprintf("fingerprint=%s", pub.Fingerprint))
+		}
+		a.writeJSON(w, http.StatusCreated, pub)
+
+	case http.MethodDelete:
+		fp := r.URL.Query().Get("fingerprint")
+		if fp == "" {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "fingerprint query param required"})
+			return
+		}
+		if err := a.trustStore.Remove(fp); err != nil {
+			a.writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := a.trustStore.Save(); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if a.logger != nil {
+			_ = a.logger.LogAction("trust-remove", fp, "publisher removed from trust store")
+		}
+		a.writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+
+	default:
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET, POST, or DELETE required"})
+	}
+}
+
+func (a *APIServer) handleSignatures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	if a.store == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "store not available"})
+		return
+	}
+
+	targetType := r.URL.Query().Get("target_type")
+	sigs, err := a.store.ListSignatures(targetType)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, sigs)
 }

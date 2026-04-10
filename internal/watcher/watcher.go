@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/signing"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -91,6 +92,7 @@ type InstallWatcher struct {
 	shell      *sandbox.OpenShell
 	opa        *policy.Engine
 	otel       *telemetry.Provider
+	trustStore *signing.TrustStore
 	debounce   time.Duration
 	onAdmit    OnAdmission
 
@@ -124,6 +126,33 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 // SetOTelProvider attaches the OTel provider for watcher metrics.
 func (w *InstallWatcher) SetOTelProvider(p *telemetry.Provider) {
 	w.otel = p
+}
+
+// SetTrustStore attaches the signing trust store for admission gate verification.
+func (w *InstallWatcher) SetTrustStore(ts *signing.TrustStore) {
+	w.trustStore = ts
+}
+
+// signingStatus runs signature verification on a path and returns a
+// SigningStatusInput suitable for OPA admission input.
+func (w *InstallWatcher) signingStatus(path, targetType, targetName string) *policy.SigningStatusInput {
+	if w.trustStore == nil {
+		return nil
+	}
+	result, err := signing.Verify(path, w.trustStore.List())
+	if err != nil {
+		return nil
+	}
+	if w.store != nil {
+		_ = w.store.SetSignatureStatus(targetType, targetName,
+			result.Publisher, result.Fingerprint, result.Verified, "", result.Reason)
+	}
+	return &policy.SigningStatusInput{
+		Signed:      result.Signed,
+		Trusted:     result.Trusted,
+		Publisher:   result.Publisher,
+		Fingerprint: result.Fingerprint,
+	}
 }
 
 // Run starts watching configured directories. It blocks until ctx is cancelled.
@@ -264,14 +293,17 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 	blockList := w.buildListEntries(pe, "block")
 	allowList := w.buildListEntries(pe, "allow")
 
+	sigStatus := w.signingStatus(evt.Path, targetType, evt.Name)
+
 	// Phase 1: pre-scan OPA evaluation (no scan_result yet).
 	if w.opa != nil {
 		input := policy.AdmissionInput{
-			TargetType: targetType,
-			TargetName: evt.Name,
-			Path:       evt.Path,
-			BlockList:  blockList,
-			AllowList:  allowList,
+			TargetType:    targetType,
+			TargetName:    evt.Name,
+			Path:          evt.Path,
+			BlockList:     blockList,
+			AllowList:     allowList,
+			SigningStatus: sigStatus,
 		}
 		preScanStart := time.Now()
 		out, err := w.opa.Evaluate(ctx, input)
@@ -350,12 +382,13 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) Adm
 			Findings:      toFindingInputs(result.Findings),
 		}
 		input := policy.AdmissionInput{
-			TargetType: targetType,
-			TargetName: evt.Name,
-			Path:       evt.Path,
-			BlockList:  blockList,
-			AllowList:  allowList,
-			ScanResult: scanInput,
+			TargetType:    targetType,
+			TargetName:    evt.Name,
+			Path:          evt.Path,
+			BlockList:     blockList,
+			AllowList:     allowList,
+			ScanResult:    scanInput,
+			SigningStatus: sigStatus,
 		}
 		postScanStart := time.Now()
 		out, evalErr := w.opa.Evaluate(ctx, input)

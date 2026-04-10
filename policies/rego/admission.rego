@@ -48,6 +48,26 @@ reason := sprintf("%s '%s' is on the block list", [input.target_type, input.targ
 	verdict == "blocked"
 }
 
+# --- Signing enforcement (after block list, before allow list) ---
+
+verdict := "rejected" if {
+	not _is_blocked
+	data.signing.mode == "enforce"
+	not _is_signed
+}
+
+reason := "unsigned or untrusted — signing policy is 'enforce'" if {
+	not _is_blocked
+	data.signing.mode == "enforce"
+	not _is_signed
+}
+
+_is_signed if {
+	input.signing_status
+	input.signing_status.signed == true
+	input.signing_status.trusted == true
+}
+
 # --- Allow list (skip scan when configured) ---
 
 verdict := "allowed" if {

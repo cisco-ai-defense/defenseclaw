@@ -175,5 +175,9 @@ func DefaultConfig() *Config {
 		SkillActions:  DefaultSkillActions(),
 		MCPActions:    DefaultMCPActions(),
 		PluginActions: DefaultPluginActions(),
+		Signing: SigningConfig{
+			Mode:     "warn",
+			TrustDir: filepath.Join(dataDir, "trust"),
+		},
 	}
 }

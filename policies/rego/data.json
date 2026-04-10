@@ -65,6 +65,10 @@
     "LOW": 2,
     "INFO": 1
   },
+  "signing": {
+    "mode": "warn",
+    "require_trusted_publisher": true
+  },
   "audit": {
     "retention_days": 90,
     "log_all_actions": true,

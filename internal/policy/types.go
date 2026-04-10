@@ -18,12 +18,21 @@ package policy
 
 // AdmissionInput is the structured input passed to the OPA admission policy.
 type AdmissionInput struct {
-	TargetType string           `json:"target_type"`
-	TargetName string           `json:"target_name"`
-	Path       string           `json:"path"`
-	BlockList  []ListEntry      `json:"block_list"`
-	AllowList  []ListEntry      `json:"allow_list"`
-	ScanResult *ScanResultInput `json:"scan_result,omitempty"`
+	TargetType    string              `json:"target_type"`
+	TargetName    string              `json:"target_name"`
+	Path          string              `json:"path"`
+	BlockList     []ListEntry         `json:"block_list"`
+	AllowList     []ListEntry         `json:"allow_list"`
+	ScanResult    *ScanResultInput    `json:"scan_result,omitempty"`
+	SigningStatus *SigningStatusInput  `json:"signing_status,omitempty"`
+}
+
+// SigningStatusInput conveys the signature verification result to OPA.
+type SigningStatusInput struct {
+	Signed      bool   `json:"signed"`
+	Trusted     bool   `json:"trusted"`
+	Publisher   string `json:"publisher,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // ListEntry represents one entry in the block or allow list.

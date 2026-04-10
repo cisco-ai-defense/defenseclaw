@@ -79,13 +79,16 @@ class ScanResult:
         return len(self.findings) == 0
 
     def to_json(self) -> str:
-        return json.dumps({
-            "scanner": self.scanner,
-            "target": self.target,
-            "timestamp": self.timestamp.isoformat(),
-            "findings": [f.to_dict() for f in self.findings],
-            "duration_ms": int(self.duration.total_seconds() * 1000),
-        }, indent=2)
+        return json.dumps(
+            {
+                "scanner": self.scanner,
+                "target": self.target,
+                "timestamp": self.timestamp.isoformat(),
+                "findings": [f.to_dict() for f in self.findings],
+                "duration_ms": int(self.duration.total_seconds() * 1000),
+            },
+            indent=2,
+        )
 
 
 def compare_severity(a: str, b: str) -> int:
@@ -93,6 +96,7 @@ def compare_severity(a: str, b: str) -> int:
 
 
 # --- Audit / enforcement models ---
+
 
 @dataclass
 class ActionState:
@@ -167,3 +171,16 @@ class Counts:
     allowed_mcps: int = 0
     alerts: int = 0
     total_scans: int = 0
+
+
+@dataclass
+class SignatureEntry:
+    id: str
+    target_type: str
+    target_name: str
+    publisher: str = ""
+    fingerprint: str = ""
+    verified: bool = False
+    verified_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    content_hash: str = ""
+    reason: str = ""

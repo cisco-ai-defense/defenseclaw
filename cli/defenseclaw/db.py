@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from defenseclaw.models import ActionEntry, ActionState, Counts, Event
+from defenseclaw.models import ActionEntry, ActionState, Counts, Event, SignatureEntry
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -84,6 +84,21 @@ CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+
+CREATE TABLE IF NOT EXISTS signatures (
+    id TEXT PRIMARY KEY,
+    target_type TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    publisher TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 0,
+    verified_at DATETIME,
+    content_hash TEXT,
+    reason TEXT,
+    UNIQUE(target_type, target_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signatures_target ON signatures(target_type, target_name);
 """
 
 _VALID_FIELDS: dict[str, set[str]] = {
@@ -117,13 +132,9 @@ class Store:
     # -- Old list migration (matches Go migrateOldLists) --
 
     def _migrate_old_lists(self) -> None:
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'")
         block_exists = cur.fetchone()[0] > 0
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'")
         allow_exists = cur.fetchone()[0] > 0
 
         if not block_exists and not allow_exists:
@@ -149,10 +160,7 @@ class Store:
 
     def _ensure_run_id_columns(self) -> None:
         for table in ("audit_events", "scan_results"):
-            columns = {
-                row[1]
-                for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
-            }
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
             if "run_id" in columns:
                 continue
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
@@ -174,9 +182,16 @@ class Store:
         self.db.execute(
             """INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event.id, event.timestamp.isoformat(), event.action,
-             event.target or None, event.actor, event.details or None,
-             event.severity or None, event.run_id or None),
+            (
+                event.id,
+                event.timestamp.isoformat(),
+                event.action,
+                event.target or None,
+                event.actor,
+                event.details or None,
+                event.severity or None,
+                event.run_id or None,
+            ),
         )
         self.db.commit()
 
@@ -202,31 +217,52 @@ class Store:
     # -- Scan results --
 
     def insert_scan_result(
-        self, scan_id: str, scanner: str, target: str,
-        ts: datetime, duration_ms: int, finding_count: int,
-        max_severity: str, raw_json: str,
+        self,
+        scan_id: str,
+        scanner: str,
+        target: str,
+        ts: datetime,
+        duration_ms: int,
+        finding_count: int,
+        max_severity: str,
+        raw_json: str,
     ) -> None:
         run_id = _current_run_id()
         self.db.execute(
             """INSERT INTO scan_results
                (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (scan_id, scanner, target, ts.isoformat(), duration_ms,
-             finding_count, max_severity, raw_json, run_id or None),
+            (
+                scan_id,
+                scanner,
+                target,
+                ts.isoformat(),
+                duration_ms,
+                finding_count,
+                max_severity,
+                raw_json,
+                run_id or None,
+            ),
         )
         self.db.commit()
 
     def insert_finding(
-        self, finding_id: str, scan_id: str, severity: str,
-        title: str, description: str, location: str,
-        remediation: str, scanner: str, tags: str,
+        self,
+        finding_id: str,
+        scan_id: str,
+        severity: str,
+        title: str,
+        description: str,
+        location: str,
+        remediation: str,
+        scanner: str,
+        tags: str,
     ) -> None:
         self.db.execute(
             """INSERT INTO findings
                (id, scan_id, severity, title, description, location, remediation, scanner, tags)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (finding_id, scan_id, severity, title, description,
-             location, remediation, scanner, tags),
+            (finding_id, scan_id, severity, title, description, location, remediation, scanner, tags),
         )
         self.db.commit()
 
@@ -253,18 +289,22 @@ class Store:
         )
         results: list[dict[str, Any]] = []
         for row in cur.fetchall():
-            results.append({
-                "id": row[0],
-                "target": row[1],
-                "timestamp": _parse_ts(row[2]),
-                "finding_count": row[3] or 0,
-                "max_severity": row[4] or "INFO",
-                "raw_json": row[5] or "",
-            })
+            results.append(
+                {
+                    "id": row[0],
+                    "target": row[1],
+                    "timestamp": _parse_ts(row[2]),
+                    "finding_count": row[3] or 0,
+                    "max_severity": row[4] or "INFO",
+                    "raw_json": row[5] or "",
+                }
+            )
         return results
 
     def get_severity_counts_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> dict[str, int]:
         """Return {severity: count} from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -282,7 +322,9 @@ class Store:
         return {row[0]: row[1] for row in cur.fetchall()}
 
     def get_findings_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> list[dict[str, Any]]:
         """Return findings from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -299,16 +341,17 @@ class Store:
                    WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END""",
             (target, scanner),
         )
-        return [
-            {"severity": r[0], "title": r[1], "location": r[2] or ""}
-            for r in cur.fetchall()
-        ]
+        return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
 
     # -- Actions --
 
     def set_action(
-        self, target_type: str, target_name: str,
-        source_path: str, state: ActionState, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        source_path: str,
+        state: ActionState,
+        reason: str,
     ) -> None:
         actions_json = json.dumps(state.to_dict())
         aid = str(uuid.uuid4())
@@ -321,14 +364,17 @@ class Store:
                  reason = excluded.reason,
                  updated_at = excluded.updated_at,
                  source_path = COALESCE(excluded.source_path, source_path)""",
-            (aid, target_type, target_name, source_path or None,
-             actions_json, reason, now),
+            (aid, target_type, target_name, source_path or None, actions_json, reason, now),
         )
         self.db.commit()
 
     def set_action_field(
-        self, target_type: str, target_name: str,
-        field: str, value: str, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
+        reason: str,
     ) -> None:
         _validate(field, value)
         aid = str(uuid.uuid4())
@@ -408,7 +454,10 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_by_action_and_type(
-        self, field: str, value: str, target_type: str,
+        self,
+        field: str,
+        value: str,
+        target_type: str,
     ) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
@@ -445,9 +494,7 @@ class Store:
             allowed_skills=_count(q_skill + "'allow'"),
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=_count(
-                "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
-            ),
+            alerts=_count("SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
         )
 
@@ -464,6 +511,72 @@ class Store:
             details=row[5] or "",
             severity=row[6] or "",
             run_id=row[7] or "",
+        )
+
+    # --- Signature status ---
+
+    def set_signature_status(
+        self,
+        target_type: str,
+        target_name: str,
+        publisher: str,
+        fingerprint: str,
+        verified: bool,
+        content_hash: str,
+        reason: str,
+    ) -> None:
+        sid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        cols = "id, target_type, target_name, publisher, fingerprint, verified, verified_at, content_hash, reason"
+        self.db.execute(
+            f"""INSERT INTO signatures ({cols})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(target_type, target_name) DO UPDATE SET
+                publisher = excluded.publisher,
+                fingerprint = excluded.fingerprint,
+                verified = excluded.verified,
+                verified_at = excluded.verified_at,
+                content_hash = excluded.content_hash,
+                reason = excluded.reason""",
+            (sid, target_type, target_name, publisher, fingerprint, int(verified), now, content_hash, reason),
+        )
+        self.db.commit()
+
+    _SIG_COLS = "id, target_type, target_name, publisher, fingerprint, verified, verified_at, content_hash, reason"
+
+    def get_signature_status(self, target_type: str, target_name: str) -> SignatureEntry | None:
+        row = self.db.execute(
+            f"SELECT {self._SIG_COLS} FROM signatures WHERE target_type = ? AND target_name = ?",
+            (target_type, target_name),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_signature(row)
+
+    def list_signatures(self, target_type: str = "") -> list[SignatureEntry]:
+        if target_type:
+            rows = self.db.execute(
+                f"SELECT {self._SIG_COLS} FROM signatures WHERE target_type = ? ORDER BY verified_at DESC",
+                (target_type,),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                f"SELECT {self._SIG_COLS} FROM signatures ORDER BY verified_at DESC",
+            ).fetchall()
+        return [self._row_to_signature(r) for r in rows]
+
+    @staticmethod
+    def _row_to_signature(row: tuple[Any, ...]) -> SignatureEntry:
+        return SignatureEntry(
+            id=row[0],
+            target_type=row[1],
+            target_name=row[2],
+            publisher=row[3] or "",
+            fingerprint=row[4] or "",
+            verified=bool(row[5]),
+            verified_at=_parse_ts(row[6]),
+            content_hash=row[7] or "",
+            reason=row[8] or "",
         )
 
     @staticmethod

@@ -37,6 +37,7 @@ from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_sandbox import sandbox
 from defenseclaw.commands.cmd_setup import setup
+from defenseclaw.commands.cmd_sign import sign, trust
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
@@ -118,6 +119,8 @@ cli.add_command(alerts)
 cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(doctor)
+cli.add_command(sign)
+cli.add_command(trust)
 cli.add_command(sandbox)
 
 

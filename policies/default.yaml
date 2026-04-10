@@ -101,6 +101,9 @@ firewall:
 enforcement:
   max_enforcement_delay_seconds: 2
 
+signing:
+  mode: warn
+
 audit:
   log_all_actions: true
   log_scan_results: true

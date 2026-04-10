@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
+	"github.com/defenseclaw/defenseclaw/internal/signing"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -276,6 +277,11 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	if s.otel != nil {
 		w.SetOTelProvider(s.otel)
 	}
+	if s.cfg.Signing.TrustDir != "" {
+		ts := signing.NewTrustStore(s.cfg.Signing.TrustDir)
+		_ = ts.Load()
+		w.SetTrustStore(ts)
+	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
 		len(skillDirs), len(pluginDirs), wcfg.Skill.TakeAction, wcfg.Plugin.TakeAction)
@@ -396,6 +402,13 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
+
+	if s.cfg.Signing.TrustDir != "" {
+		ts := signing.NewTrustStore(s.cfg.Signing.TrustDir)
+		_ = ts.Load()
+		api.SetTrustStore(ts)
+	}
+
 	return api.Run(ctx)
 }
 

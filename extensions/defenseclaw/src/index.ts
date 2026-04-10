@@ -177,6 +177,71 @@ export default function (api: PluginApi) {
     },
   });
 
+  // ─── Slash command: /verify ───
+
+  api.registerCommand({
+    name: "verify",
+    description: "Verify the cryptographic signature of a skill, MCP, or plugin directory",
+    args: [
+      { name: "path", description: "Path to skill/MCP/plugin directory", required: true },
+      { name: "type", description: "Target type: skill (default), mcp, plugin", required: false },
+    ],
+    handler: async ({ args }) => {
+      const targetPath = args.path as string | undefined;
+      if (!targetPath) {
+        return { text: "Usage: /verify <path> [skill|mcp|plugin]" };
+      }
+      const targetType = (args.type ?? "skill") as string;
+      const targetName = targetPath.split("/").pop() ?? targetPath;
+
+      try {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "X-DefenseClaw-Client": "openclaw-plugin",
+        };
+        if (SIDECAR_TOKEN) {
+          headers["Authorization"] = `Bearer ${SIDECAR_TOKEN}`;
+        }
+        const res = await fetch(`${SIDECAR_API}/api/v1/verify`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            target_type: targetType,
+            target_name: targetName,
+            path: targetPath,
+          }),
+        });
+        const result = (await res.json()) as {
+          verified: boolean;
+          signed: boolean;
+          trusted: boolean;
+          publisher?: string;
+          fingerprint?: string;
+          reason: string;
+        };
+
+        const badge = result.verified
+          ? "VERIFIED"
+          : result.signed
+            ? "SIGNED (not trusted)"
+            : "UNSIGNED";
+
+        const lines = [
+          `**DefenseClaw Signature Verification: ${targetPath}**\n`,
+          `Status: **${badge}**`,
+          `Publisher: ${result.publisher ?? "—"}`,
+          `Fingerprint: \`${result.fingerprint ?? "—"}\``,
+          `Reason: ${result.reason}`,
+        ];
+        return { text: lines.join("\n") };
+      } catch (err) {
+        return {
+          text: `Verification failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
   // ─── Slash command: /block ───
 
   api.registerCommand({

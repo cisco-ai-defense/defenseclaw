@@ -60,6 +60,7 @@ type Config struct {
 	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	Signing        SigningConfig        `mapstructure:"signing"          yaml:"signing"`
 }
 
 type OTelConfig struct {
@@ -114,6 +115,12 @@ type OTelBatchConfig struct {
 
 type OTelResourceConfig struct {
 	Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
+}
+
+// SigningConfig controls cryptographic skill/MCP/plugin signing verification.
+type SigningConfig struct {
+	Mode     string `mapstructure:"mode"      yaml:"mode"`      // "enforce", "warn", "off"
+	TrustDir string `mapstructure:"trust_dir" yaml:"trust_dir"` // default ~/.defenseclaw/trust
 }
 
 type FirewallConfig struct {

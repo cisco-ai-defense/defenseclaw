@@ -36,6 +36,10 @@ var (
 	StyleAllowed = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	StyleUnknown = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
+	// Signature verification
+	StyleVerified   = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	StyleUnverified = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
 	// List
 	SelectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 	NormalStyle   = lipgloss.NewStyle()

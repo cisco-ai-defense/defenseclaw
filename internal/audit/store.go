@@ -154,6 +154,21 @@ func (s *Store) Init() error {
 	CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 	CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+
+	CREATE TABLE IF NOT EXISTS signatures (
+		id TEXT PRIMARY KEY,
+		target_type TEXT NOT NULL,
+		target_name TEXT NOT NULL,
+		publisher TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		verified INTEGER NOT NULL DEFAULT 0,
+		verified_at DATETIME,
+		content_hash TEXT,
+		reason TEXT,
+		UNIQUE(target_type, target_name)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_signatures_target ON signatures(target_type, target_name);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -764,6 +779,144 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 		r.MaxSeverity = maxSev.String
 		r.RawJSON = rawJSON.String
 		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// --- Signature status ---
+
+type SignatureEntry struct {
+	ID          string    `json:"id"`
+	TargetType  string    `json:"target_type"`
+	TargetName  string    `json:"target_name"`
+	Publisher   string    `json:"publisher"`
+	Fingerprint string    `json:"fingerprint"`
+	Verified    bool      `json:"verified"`
+	VerifiedAt  time.Time `json:"verified_at"`
+	ContentHash string    `json:"content_hash"`
+	Reason      string    `json:"reason"`
+}
+
+func (s *Store) SetSignatureStatus(targetType, targetName, publisher, fingerprint string, verified bool, contentHash, reason string) error {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	v := 0
+	if verified {
+		v = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO signatures (id, target_type, target_name, publisher, fingerprint, verified, verified_at, content_hash, reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(target_type, target_name) DO UPDATE SET
+			publisher = excluded.publisher,
+			fingerprint = excluded.fingerprint,
+			verified = excluded.verified,
+			verified_at = excluded.verified_at,
+			content_hash = excluded.content_hash,
+			reason = excluded.reason`,
+		id, targetType, targetName, publisher, fingerprint, v, now, contentHash, reason,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: set signature status: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetSignatureStatus(targetType, targetName string) (*SignatureEntry, error) {
+	row := s.db.QueryRow(`
+		SELECT id, target_type, target_name, publisher, fingerprint, verified, verified_at, content_hash, reason
+		FROM signatures WHERE target_type = ? AND target_name = ?`,
+		targetType, targetName,
+	)
+
+	var e SignatureEntry
+	var v int
+	var verAt sql.NullString
+	var cHash, reason sql.NullString
+	err := row.Scan(&e.ID, &e.TargetType, &e.TargetName, &e.Publisher, &e.Fingerprint, &v, &verAt, &cHash, &reason)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("audit: get signature status: %w", err)
+	}
+	e.Verified = v != 0
+	if verAt.Valid {
+		e.VerifiedAt, _ = time.Parse(time.RFC3339Nano, verAt.String)
+	}
+	e.ContentHash = cHash.String
+	e.Reason = reason.String
+	return &e, nil
+}
+
+func (s *Store) ListVerified(targetType string) ([]SignatureEntry, error) {
+	query := `SELECT id, target_type, target_name, publisher, fingerprint, verified, verified_at, content_hash, reason
+		FROM signatures WHERE verified = 1`
+	args := []any{}
+	if targetType != "" {
+		query += ` AND target_type = ?`
+		args = append(args, targetType)
+	}
+	query += ` ORDER BY verified_at DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list verified: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SignatureEntry
+	for rows.Next() {
+		var e SignatureEntry
+		var v int
+		var verAt sql.NullString
+		var cHash, reason sql.NullString
+		if err := rows.Scan(&e.ID, &e.TargetType, &e.TargetName, &e.Publisher, &e.Fingerprint, &v, &verAt, &cHash, &reason); err != nil {
+			return nil, fmt.Errorf("audit: scan signature row: %w", err)
+		}
+		e.Verified = v != 0
+		if verAt.Valid {
+			e.VerifiedAt, _ = time.Parse(time.RFC3339Nano, verAt.String)
+		}
+		e.ContentHash = cHash.String
+		e.Reason = reason.String
+		results = append(results, e)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) ListSignatures(targetType string) ([]SignatureEntry, error) {
+	query := `SELECT id, target_type, target_name, publisher, fingerprint, verified, verified_at, content_hash, reason
+		FROM signatures`
+	args := []any{}
+	if targetType != "" {
+		query += ` WHERE target_type = ?`
+		args = append(args, targetType)
+	}
+	query += ` ORDER BY verified_at DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list signatures: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SignatureEntry
+	for rows.Next() {
+		var e SignatureEntry
+		var v int
+		var verAt sql.NullString
+		var cHash, reason sql.NullString
+		if err := rows.Scan(&e.ID, &e.TargetType, &e.TargetName, &e.Publisher, &e.Fingerprint, &v, &verAt, &cHash, &reason); err != nil {
+			return nil, fmt.Errorf("audit: scan signature row: %w", err)
+		}
+		e.Verified = v != 0
+		if verAt.Valid {
+			e.VerifiedAt, _ = time.Parse(time.RFC3339Nano, verAt.String)
+		}
+		e.ContentHash = cHash.String
+		e.Reason = reason.String
+		results = append(results, e)
 	}
 	return results, rows.Err()
 }
