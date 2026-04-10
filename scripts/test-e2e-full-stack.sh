@@ -2324,9 +2324,10 @@ PY
     sleep 3
 
     echo "  Restarting sidecar after upgrade test..."
-    defenseclaw-gateway stop 2>/dev/null || true
+    defenseclaw-gateway stop || true
     sleep 1
-    defenseclaw-gateway start 2>/dev/null || true
+    echo "  [diag] Shell DEFENSECLAW_RUN_ID=$DEFENSECLAW_RUN_ID before start"
+    defenseclaw-gateway start || true
     wait_for_url "$SIDECAR_URL/health" 30 3 || true
     wait_for_sidecar_subsystems_running 60 || true
 

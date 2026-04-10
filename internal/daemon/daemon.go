@@ -159,8 +159,14 @@ func (d *Daemon) Start(args []string) (int, error) {
 		return 0, fmt.Errorf("daemon: open /dev/null: %w", err)
 	}
 
+	env := append(os.Environ(), EnvDaemon+"=1")
+	runID := os.Getenv("DEFENSECLAW_RUN_ID")
+	diagMsg := fmt.Sprintf("[daemon] spawning child (DEFENSECLAW_RUN_ID=%s env_count=%d)\n", runID, len(env))
+	fmt.Fprint(os.Stderr, diagMsg)
+	fmt.Fprint(logWriter, diagMsg)
+
 	cmd := exec.Command(executable, args...)
-	cmd.Env = append(os.Environ(), EnvDaemon+"=1")
+	cmd.Env = env
 	cmd.Stdin = devNull
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
