@@ -333,7 +333,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 }
 
 const gatewayMutationRetryDelay = 2 * time.Second
-const gatewayMutationMaxAttempts = 20
+const gatewayMutationMaxAttempts = 45
 const pluginGatewayMutationTimeout = 90 * time.Second
 const gatewayMutationPerAttemptTimeout = 10 * time.Second
 
