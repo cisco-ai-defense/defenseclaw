@@ -961,11 +961,26 @@ dump_artifacts() {
     defenseclaw-gateway status 2>/dev/null || echo "  (not running)"
     echo "--- gateway.log (last 60 lines) ---"
     tail -60 ~/.defenseclaw/gateway.log 2>/dev/null || echo "  (not found)"
-    echo "--- SQLite direct event count ---"
-    sqlite3 ~/.defenseclaw/audit.db "SELECT COUNT(*) AS total FROM audit_events;" 2>/dev/null || echo "  (sqlite3 unavailable)"
-    sqlite3 ~/.defenseclaw/audit.db "SELECT COUNT(*) AS with_run_id FROM audit_events WHERE run_id = '$DEFENSECLAW_RUN_ID';" 2>/dev/null || echo "  (sqlite3 unavailable)"
-    sqlite3 ~/.defenseclaw/audit.db "SELECT action, COUNT(*) AS cnt FROM audit_events WHERE run_id = '$DEFENSECLAW_RUN_ID' GROUP BY action ORDER BY cnt DESC LIMIT 20;" 2>/dev/null || echo "  (sqlite3 unavailable)"
-    sqlite3 ~/.defenseclaw/audit.db "SELECT DISTINCT run_id FROM audit_events LIMIT 10;" 2>/dev/null || echo "  (sqlite3 unavailable)"
+    echo "--- SQLite direct event count (via Python) ---"
+    python3 -c "
+import sqlite3, os
+db = os.path.expanduser('~/.defenseclaw/audit.db')
+if not os.path.isfile(db):
+    print('  audit.db not found')
+    raise SystemExit(0)
+conn = sqlite3.connect(db)
+total = conn.execute('SELECT COUNT(*) FROM audit_events').fetchone()[0]
+with_rid = conn.execute('SELECT COUNT(*) FROM audit_events WHERE run_id IS NOT NULL AND run_id != \"\"').fetchone()[0]
+rid_match = conn.execute('SELECT COUNT(*) FROM audit_events WHERE run_id = ?', (os.environ.get('DEFENSECLAW_RUN_ID',''),)).fetchone()[0]
+print(f'  total={total} with_run_id={with_rid} matching_current_run={rid_match}')
+print('  distinct run_ids:')
+for (rid,) in conn.execute('SELECT DISTINCT run_id FROM audit_events LIMIT 10').fetchall():
+    print(f'    {rid!r}')
+print('  latest 10 events:')
+for action, rid in conn.execute('SELECT action, run_id FROM audit_events ORDER BY timestamp DESC LIMIT 10').fetchall():
+    print(f'    {action} run_id={rid!r}')
+conn.close()
+" 2>&1 || echo "  (python query failed)"
     echo "--- alerts for current run (raw API) ---"
     local raw_alerts_count
     raw_alerts_count=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=2000" 2>/dev/null | jq 'length' 2>/dev/null || echo "API unreachable")
@@ -2315,6 +2330,19 @@ PY
     wait_for_url "$SIDECAR_URL/health" 30 3 || true
     wait_for_sidecar_subsystems_running 60 || true
 
+    # Checkpoint: verify events are still visible after sidecar restart
+    local post6c_events post6c_total post6c_matched post6c_with_rid post6c_without_rid
+    post6c_events=$(curl_with_gateway_headers GET "$SIDECAR_URL/alerts?limit=2000" 2>/dev/null || echo '[]')
+    post6c_total=$(printf '%s\n' "$post6c_events" | jq 'length' 2>/dev/null || echo "0")
+    post6c_matched=$(printf '%s\n' "$post6c_events" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)] | length' 2>/dev/null || echo "0")
+    post6c_with_rid=$(printf '%s\n' "$post6c_events" | jq '[.[] | select(.run_id != null and .run_id != "")] | length' 2>/dev/null || echo "0")
+    post6c_without_rid=$(printf '%s\n' "$post6c_events" | jq '[.[] | select(.run_id == null or .run_id == "")] | length' 2>/dev/null || echo "0")
+    echo "  [diag] Post-6C events: total=$post6c_total matched=$post6c_matched with_run_id=$post6c_with_rid without_run_id=$post6c_without_rid"
+    if [ "${post6c_total:-0}" != "0" ]; then
+        echo "  [diag] Post-6C first 5: $(printf '%s\n' "$post6c_events" | jq -r '.[0:5] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)"
+        echo "  [diag] Post-6C last 5: $(printf '%s\n' "$post6c_events" | jq -r '.[-5:] | .[] | "\(.action) run_id=\(.run_id // "NULL")"' 2>/dev/null)"
+    fi
+
     phase_timer_end "Phase 6C"
 }
 
@@ -2584,6 +2612,21 @@ phase_plugin_lifecycle() {
     else
         fail "plugin lifecycle: clean plugin visible in plugin list" "plugin list entry missing for $clean_plugin"
     fi
+
+    # Targeted run_id diagnostic: query SQLite directly via Python
+    echo "  [diag] run_id in SQLite after plugin-install:"
+    python3 -c "
+import sqlite3, os
+db = os.path.expanduser('~/.defenseclaw/audit.db')
+conn = sqlite3.connect(db)
+rows = conn.execute('SELECT action, run_id FROM audit_events ORDER BY timestamp DESC LIMIT 10').fetchall()
+for action, rid in rows:
+    print(f'    {action} run_id={rid!r}')
+total = conn.execute('SELECT COUNT(*) FROM audit_events').fetchone()[0]
+with_rid = conn.execute('SELECT COUNT(*) FROM audit_events WHERE run_id IS NOT NULL AND run_id != \"\"').fetchone()[0]
+print(f'    totals: all={total} with_run_id={with_rid} without_run_id={total-with_rid}')
+conn.close()
+" 2>&1 || echo "    (python query failed)"
 
     scan_out=$(defenseclaw plugin scan "$malicious_source" --json 2>&1 || true)
     echo "$scan_out"
