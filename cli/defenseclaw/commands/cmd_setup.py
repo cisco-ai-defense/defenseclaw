@@ -45,7 +45,8 @@ def setup() -> None:
 @click.option("--use-trigger", is_flag=True, default=None, help="Enable trigger analyzer")
 @click.option("--use-virustotal", is_flag=True, default=None, help="Enable VirusTotal scanner")
 @click.option("--use-aidefense", is_flag=True, default=None, help="Enable AI Defense analyzer")
-@click.option("--llm-provider", default=None, help="LLM provider (anthropic or openai)")
+@click.option("--llm-provider", default=None, type=click.Choice(["anthropic", "openai"]),
+              help="LLM provider (anthropic or openai)")
 @click.option("--llm-model", default=None, help="LLM model name")
 @click.option("--llm-consensus-runs", type=int, default=None, help="LLM consensus runs (0=disabled)")
 @click.option("--policy", default=None, help="Scan policy preset (strict, balanced, permissive)")
@@ -179,10 +180,11 @@ def _configure_inspect_llm(llm, data_dir: str) -> None:
 
     The API key is stored in ~/.defenseclaw/.env, not in config.yaml.
     """
-    from defenseclaw.guardrail import detect_api_key_env
+    from defenseclaw.guardrail import KNOWN_PROVIDERS, detect_api_key_env
     llm.provider = click.prompt(
-        "  LLM provider (anthropic/openai)",
-        default=llm.provider or "anthropic",
+        "  LLM provider",
+        type=click.Choice(KNOWN_PROVIDERS),
+        default=llm.provider if llm.provider in KNOWN_PROVIDERS else "anthropic",
     )
     llm.model = click.prompt("  LLM model name", default=llm.model or "", show_default=False)
     env_name = detect_api_key_env(f"{llm.provider}/{llm.model}")
@@ -312,7 +314,8 @@ def _print_summary(sc, llm, aid) -> None:
 
 @setup.command("mcp-scanner")
 @click.option("--analyzers", default=None, help="Comma-separated analyzer list (yara,api,llm,behavioral,readiness)")
-@click.option("--llm-provider", default=None, help="LLM provider (anthropic or openai)")
+@click.option("--llm-provider", default=None, type=click.Choice(["anthropic", "openai"]),
+              help="LLM provider (anthropic or openai)")
 @click.option("--llm-model", default=None, help="LLM model for semantic analysis")
 @click.option("--scan-prompts", is_flag=True, default=None, help="Scan MCP prompts")
 @click.option("--scan-resources", is_flag=True, default=None, help="Scan MCP resources")
@@ -667,7 +670,10 @@ def setup_guardrail(
     gc = app.cfg.guardrail
 
     if disable:
-        _disable_guardrail(app, gc, restart=restart)
+        # Always restart on disable — leaving the proxy running defeats the
+        # purpose of disabling. The fetch interceptor also needs OpenClaw
+        # to restart (which happens automatically when openclaw.json changes).
+        _disable_guardrail(app, gc, restart=True)
         return
 
     aid = app.cfg.cisco_ai_defense
@@ -710,6 +716,8 @@ def setup_guardrail(
         ("guardrail.model_name", gc.model_name),
         ("guardrail.api_key_env", gc.api_key_env),
     ]
+    if gc.api_base:
+        rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     if gc.block_message:
         truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
         rows.append(("guardrail.block_message", truncated))
@@ -783,20 +791,7 @@ def execute_guardrail_setup(
             click.echo("    Expected location: ~/.openclaw/openclaw.json")
             return False, warnings
 
-    if not gc.model or not gc.model_name:
-        click.echo("  ✗ Model or model_name is empty — cannot configure guardrail.")
-        click.echo("    Run interactively (without --non-interactive) to set the model.")
-        return False, warnings
-
-    if "/" not in gc.model:
-        click.echo(f"  ⚠ Model '{gc.model}' has no provider prefix (e.g. anthropic/{gc.model}).")
-        click.echo("    The proxy will attempt to infer the provider from the model name,")
-        click.echo("    but this may route to the wrong API. Run interactively to set it explicitly.")
-        warnings.append(
-            f"Model '{gc.model}' has no provider prefix — provider will be inferred at runtime. "
-            "Run 'defenseclaw setup guardrail' interactively to fix."
-        )
-
+    # No model validation — the fetch interceptor scans all models automatically.
     click.echo()
 
     click.echo("  ✓ Guardrail proxy is built into the Go binary (no Python deps)")
@@ -868,31 +863,21 @@ def execute_guardrail_setup(
     if gc.original_model:
         click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
 
-    # --- Step 4: Write .env file for API keys ---
-    if gc.api_key_env:
-        env_val = os.environ.get(gc.api_key_env, "")
+    # --- Step 4: Auto-detect Azure endpoints and write to .env ---
+    # No provider API keys needed — the fetch interceptor reads them from
+    # OpenClaw's auth-profiles.json at runtime. Azure endpoints are the
+    # exception: they're customer-specific URLs we detect from openclaw.json
+    # and write to .env so the proxy knows where to forward Azure requests.
+    from defenseclaw.guardrail import detect_azure_endpoints
+    azure_endpoints = detect_azure_endpoints(app.cfg.claw.config_file)
+    if azure_endpoints:
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
         existing_dotenv = _load_dotenv(dotenv_path)
-
-        if not env_val and gc.api_key_env not in existing_dotenv:
-            click.echo()
-            click.echo(f"  ⚠ {gc.api_key_env} is not set in your current environment")
-            env_val = click.prompt(
-                f"  Enter the value for {gc.api_key_env}",
-                hide_input=True,
-                default="",
-            )
-            if not env_val:
-                click.echo("    Skipped — the guardrail proxy will fail without this key.")
-                click.echo(f"    You can set it later in {dotenv_path}")
-                warnings.append(f"{gc.api_key_env} not set — sidecar will fail to start")
-
-        if env_val:
-            existing_dotenv[gc.api_key_env] = env_val
-
-        if existing_dotenv:
-            _write_dotenv(dotenv_path, existing_dotenv)
-            click.echo(f"  ✓ API keys written to {dotenv_path} (mode 0600)")
+        # Write the first Azure endpoint as AZURE_OPENAI_ENDPOINT
+        first_name, first_url = next(iter(azure_endpoints.items()))
+        existing_dotenv["AZURE_OPENAI_ENDPOINT"] = first_url
+        _write_dotenv(dotenv_path, existing_dotenv)
+        click.echo(f"  ✓ Azure endpoint saved: {first_url[:60]}...")
 
     # --- Step 5: Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
@@ -912,13 +897,6 @@ def execute_guardrail_setup(
 
 
 def _interactive_guardrail_setup(app: AppContext, gc) -> None:
-    from defenseclaw.guardrail import (
-        KNOWN_PROVIDERS,
-        detect_api_key_env,
-        detect_current_model,
-        guess_provider,
-        model_to_proxy_name,
-    )
 
     click.echo()
     click.echo("  LLM Guardrail Configuration")
@@ -991,84 +969,11 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
     gc.port = click.prompt("  Guardrail proxy port", default=gc.port or 4000, type=int)
 
-    # Detect current model
-    current_model, current_provider = detect_current_model(app.cfg.claw.config_file)
-    click.echo()
-
-    # If model has no provider/ prefix, ask the user to confirm the provider.
-    if current_model and not current_provider and "/" not in current_model:
-        guessed = guess_provider(current_model)
-        click.echo(f"  Current OpenClaw model: {current_model}")
-        click.echo(f"  No provider prefix detected (e.g. anthropic/{current_model}).")
-        provider_choices = click.Choice(KNOWN_PROVIDERS)
-        chosen = click.prompt(
-            "  Which provider hosts this model?",
-            type=provider_choices,
-            default=guessed if guessed else None,
-        )
-        current_model = f"{chosen}/{current_model}"
-        current_provider = chosen
-        click.echo(f"  Using: {current_model}")
-        click.echo()
-
-    routed_prefixes = ("defenseclaw/",)
-    is_already_routed = current_model and any(current_model.startswith(p) for p in routed_prefixes)
-
-    if current_model and not is_already_routed:
-        click.echo(f"  Current OpenClaw model: {current_model}")
-        if click.confirm("  Route this model through the guardrail?", default=True):
-            gc.model = current_model
-            gc.model_name = model_to_proxy_name(current_model)
-            gc.original_model = current_model
-        else:
-            gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-            gc.model_name = model_to_proxy_name(gc.model)
-    elif is_already_routed:
-        click.echo(f"  Already routed through guardrail: {current_model}")
-        if gc.model:
-            click.echo(f"  Upstream model: {gc.model}")
-        else:
-            click.echo("  Upstream model not configured — need to set it.")
-            gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-            gc.model_name = model_to_proxy_name(gc.model)
-        if not gc.original_model or any(gc.original_model.startswith(p) for p in routed_prefixes):
-            gc.original_model = gc.model
-    else:
-        gc.model = click.prompt("  Upstream model (e.g. anthropic/claude-sonnet-4-20250514)")
-        gc.model_name = model_to_proxy_name(gc.model)
-
-    if not gc.model_name:
-        gc.model_name = model_to_proxy_name(gc.model)
-
-    if not gc.model or not gc.model_name:
-        click.echo("  Error: model and model_name must not be empty.")
-        gc.enabled = False
-        return
-
-    # API key env var
-    if not gc.api_key_env or _looks_like_secret(gc.api_key_env):
-        gc.api_key_env = detect_api_key_env(gc.model)
-
-    env_val = os.environ.get(gc.api_key_env, "")
-    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
-    existing_dotenv = _load_dotenv(dotenv_path)
-    dotenv_val = existing_dotenv.get(gc.api_key_env, "")
-    click.echo()
-    if env_val:
-        click.echo(f"  API key env var: {gc.api_key_env} ({_mask(env_val)})")
-        if not click.confirm("  Use this env var?", default=True):
-            gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
-    elif dotenv_val:
-        click.echo(f"  API key: {gc.api_key_env} ({_mask(dotenv_val)}) — from {dotenv_path}")
-        if not click.confirm("  Use this key?", default=True):
-            gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
-    else:
-        click.echo(f"  API key env var: {gc.api_key_env} (not set in environment or .env)")
-        click.echo("  The key will be saved to ~/.defenseclaw/.env during setup.")
-        gc.api_key_env = _prompt_env_var_name(gc.api_key_env)
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
+    from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
+
     standalone = app.cfg.openshell.is_standalone()
 
     click.echo()
@@ -1079,27 +984,12 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         click.echo("  ⚠ Sandbox mode: skipping OpenClaw config restore and plugin removal")
         click.echo("    Run 'defenseclaw sandbox setup' to remove the guardrail plugin from the sandbox")
     else:
-        from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
-
-        # Restore OpenClaw config (model + remove defenseclaw provider + plugins.allow)
-        if gc.original_model:
-            if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
-                click.echo(f"  ✓ OpenClaw model restored to: {gc.original_model}")
-            else:
-                click.echo(f"  ✗ Could not restore OpenClaw config: {app.cfg.claw.config_file}")
-                click.echo("    The file may be missing or contain invalid JSON.")
-                warnings.append(
-                    f"Manually edit {app.cfg.claw.config_file}: "
-                    f"set agents.defaults.model.primary to \"{gc.original_model}\" "
-                    "and remove the \"defenseclaw\" provider from models.providers"
-                )
+        # Remove defenseclaw plugin entries from openclaw.json
+        if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
+            click.echo(f"  ✓ OpenClaw plugin removed from: {app.cfg.claw.config_file}")
         else:
-            click.echo("  ⚠ No original model on record — cannot revert LLM routing")
-            click.echo("    The model in openclaw.json may still point to defenseclaw/...")
-            warnings.append(
-                f"Check {app.cfg.claw.config_file} and set agents.defaults.model.primary "
-                "to your desired model (e.g. anthropic/claude-sonnet-4-20250514)"
-            )
+            click.echo(f"  ✗ Could not update OpenClaw config: {app.cfg.claw.config_file}")
+            warnings.append(f"Manually remove defenseclaw from plugins.allow in {app.cfg.claw.config_file}")
 
         # Uninstall OpenClaw plugin
         openclaw_home = app.cfg.claw.home_dir
@@ -1136,13 +1026,23 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         for w in warnings:
             click.echo(f"  ⚠ {w}")
 
-    if restart:
-        click.echo()
-        _restart_services(app.cfg.data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
-    else:
-        click.echo()
-        click.echo("  Restart the defenseclaw sidecar for changes to take effect:")
-        click.echo("    defenseclaw-gateway restart")
+    # Restart OpenClaw so it reloads without the plugin — this stops the
+    # fetch interceptor immediately. Plugin was already uninstalled above.
+    click.echo()
+    click.echo("  Restarting OpenClaw gateway to unload the plugin...")
+    try:
+        result = subprocess.run(
+            ["openclaw", "gateway", "restart"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            click.echo("  ✓ OpenClaw gateway restarted — traffic flows directly to providers")
+        else:
+            click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
+            click.echo("    Run manually: openclaw gateway restart")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
+        click.echo("    Run manually: openclaw gateway restart")
         click.echo("    (openclaw gateway auto-reloads — no restart needed)")
         click.echo()
         click.echo("  Or re-run with --restart:")

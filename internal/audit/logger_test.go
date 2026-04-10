@@ -22,7 +22,9 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestInferTargetType(t *testing.T) {
@@ -201,11 +203,16 @@ func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	var payload []byte
+	var (
+		mu      sync.Mutex
+		payload []byte
+	)
 	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		payload = append([]byte(nil), body...)
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
 	forwarder.cfg.BatchSize = 50
@@ -216,7 +223,20 @@ func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
 		t.Fatalf("LogAction: %v", err)
 	}
 
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		got := len(bytes.TrimSpace(payload))
+		mu.Unlock()
+		if got > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
 	if len(bytes.TrimSpace(payload)) == 0 {
-		t.Fatal("expected watch-start to flush to Splunk immediately")
+		t.Fatal("expected watch-start to flush to Splunk promptly")
 	}
 }

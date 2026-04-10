@@ -445,7 +445,8 @@ class TestPatchOpenclawConfig(unittest.TestCase):
             json.dump(oc, f)
         return path
 
-    def test_patches_provider_and_model(self):
+    def test_registers_plugin_only(self):
+        """patch_openclaw_config only registers the plugin — no provider, no model change."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
@@ -458,14 +459,12 @@ class TestPatchOpenclawConfig(unittest.TestCase):
             with open(path) as f:
                 cfg = json.load(f)
 
-            self.assertIn("defenseclaw", cfg["models"]["providers"])
-            provider = cfg["models"]["providers"]["defenseclaw"]
-            self.assertEqual(provider["baseUrl"], "http://localhost:4000")
-            self.assertEqual(provider["apiKey"], "sk-dc-test")
-            self.assertEqual(provider["models"][0]["id"], "claude-opus")
+            # No defenseclaw provider added
+            self.assertNotIn("defenseclaw", cfg["models"]["providers"])
 
+            # Primary model unchanged — fetch interceptor handles routing
             primary = cfg["agents"]["defaults"]["model"]["primary"]
-            self.assertEqual(primary, "defenseclaw/claude-opus")
+            self.assertEqual(primary, "anthropic/claude-opus-4-5")
 
     def test_creates_backup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -501,28 +500,30 @@ class TestPatchOpenclawConfig(unittest.TestCase):
 
             self.assertEqual(cfg["plugins"]["allow"].count("defenseclaw"), 1)
 
-    def test_model_name_must_not_be_empty(self):
+    def test_model_name_unused(self):
+        """model_name parameter is accepted but no longer used."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
-            patch_openclaw_config(path, "", 4000, "sk-dc-test", "")
-
-            with open(path) as f:
-                cfg = json.load(f)
-
-            model_id = cfg["models"]["providers"]["defenseclaw"]["models"][0]["id"]
-            self.assertEqual(model_id, "")
+            result = patch_openclaw_config(path, "", 4000, "sk-dc-test", "")
+            # Should succeed without error regardless of empty model_name
+            self.assertIsNotNone(result)
 
 
 class TestRestoreOpenclawConfig(unittest.TestCase):
-    def test_restores_model_and_removes_provider(self):
+    def test_removes_plugin_and_legacy_providers(self):
+        """restore_openclaw_config removes plugin entries and any legacy provider entries."""
         with tempfile.TemporaryDirectory() as tmpdir:
             oc = {
-                "agents": {"defaults": {"model": {"primary": "defenseclaw/claude-opus"}}},
+                "agents": {"defaults": {"model": {"primary": "anthropic/claude-opus"}}},
                 "models": {"providers": {
                     "litellm": {"baseUrl": "http://localhost:4000"},
+                    "defenseclaw": {"baseUrl": "http://localhost:4000"},
                     "anthropic": {"apiKey": "..."},
                 }},
-                "plugins": {"allow": ["defenseclaw"]},
+                "plugins": {
+                    "allow": ["defenseclaw"],
+                    "entries": {"defenseclaw": {"enabled": True}},
+                },
             }
             path = os.path.join(tmpdir, "openclaw.json")
             with open(path, "w") as f:
@@ -534,10 +535,16 @@ class TestRestoreOpenclawConfig(unittest.TestCase):
             with open(path) as f:
                 cfg = json.load(f)
 
-            self.assertEqual(cfg["agents"]["defaults"]["model"]["primary"], "anthropic/claude-opus-4-5")
-            self.assertNotIn("litellm", cfg["models"]["providers"])
-            self.assertIn("anthropic", cfg["models"]["providers"])
+            # Plugin removed from all plugin sections
             self.assertNotIn("defenseclaw", cfg["plugins"]["allow"])
+            self.assertFalse(cfg["plugins"]["entries"]["defenseclaw"]["enabled"])
+            # Legacy provider entries removed
+            self.assertNotIn("litellm", cfg["models"]["providers"])
+            self.assertNotIn("defenseclaw", cfg["models"]["providers"])
+            # Real providers untouched
+            self.assertIn("anthropic", cfg["models"]["providers"])
+            # Primary model unchanged (was never touched by setup)
+            self.assertEqual(cfg["agents"]["defaults"]["model"]["primary"], "anthropic/claude-opus")
 
 
 # ---------------------------------------------------------------------------
@@ -939,7 +946,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(setup, ["guardrail", "--disable"], obj=self.app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Disabling", result.output)
-        self.assertIn("No original model on record", result.output)
+        self.assertIn("OpenClaw plugin removed", result.output)
 
     def test_non_interactive_with_model(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -979,11 +986,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Make sure OpenClaw is installed", result.output)
         self.assertNotIn("Guardrail proxy is built into the Go binary", result.output)
 
-    def test_preflight_aborts_when_model_empty(self):
+    def test_preflight_succeeds_with_empty_model(self):
+        """Model is no longer required — fetch interceptor scans all models."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = ""
         self.app.cfg.guardrail.model_name = ""
-        self.app.cfg.guardrail.api_key_env = "ANTHROPIC_API_KEY"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
@@ -991,8 +998,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Model or model_name is empty", result.output)
-        self.assertNotIn("Guardrail proxy is built into the Go binary", result.output)
+        # Setup proceeds without model — all models scanned automatically
+        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
 
     def test_api_key_env_warning_when_not_set(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1274,8 +1281,8 @@ class TestSetupGuardrailRestart(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
+        # Setup shows restart instructions when --restart not passed
         self.assertIn("defenseclaw-gateway restart", result.output)
-        self.assertIn("openclaw gateway auto-reloads", result.output)
         self.assertIn("--restart", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._restart_services")
@@ -1290,31 +1297,41 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         mock_restart.assert_called_once()
         self.assertNotIn("Restart services for changes to take effect", result.output)
 
-    @patch("defenseclaw.commands.cmd_setup._restart_services")
-    def test_disable_with_restart(self, mock_restart):
+    def test_disable_restarts_openclaw(self):
+        """Disabling always restarts OpenClaw gateway to unload the plugin."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
         self.app.cfg.guardrail.original_model = "anthropic/claude-opus-4-5"
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--disable", "--restart"],
-            obj=self.app,
-        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--disable"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_restart.assert_called_once()
+        # Verify openclaw gateway restart was attempted
+        calls = [str(c) for c in mock_run.call_args_list]
+        self.assertTrue(
+            any("openclaw" in c and "gateway" in c and "restart" in c for c in calls),
+            f"Expected openclaw gateway restart call. Got: {calls}"
+        )
+        self.assertIn("OpenClaw gateway restarted", result.output)
 
     def test_disable_without_restart_shows_instructions(self):
+        """--disable always restarts OpenClaw; no separate --restart flag needed."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--disable"],
-            obj=self.app,
-        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--disable"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("defenseclaw-gateway restart", result.output)
-        self.assertIn("openclaw gateway auto-reloads", result.output)
-        self.assertIn("No original model on record", result.output)
+        self.assertIn("OpenClaw plugin removed", result.output)
+        self.assertIn("Restarting OpenClaw gateway", result.output)
 
     def test_help_shows_restart_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1352,18 +1369,21 @@ class TestDisableGuardrailFlow(unittest.TestCase):
 
     def test_successful_restore_with_original_model(self):
         from defenseclaw.commands.cmd_setup import setup
-        result = self.runner.invoke(
-            setup, ["guardrail", "--disable"], obj=self.app,
-        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = self.runner.invoke(
+                setup, ["guardrail", "--disable"], obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw model restored to: anthropic/claude-opus-4-5", result.output)
         self.assertIn("Config saved", result.output)
         self.assertNotIn("Manual steps required", result.output)
 
         with open(self.oc_path) as f:
             cfg = json.load(f)
-        self.assertEqual(cfg["agents"]["defaults"]["model"]["primary"], "anthropic/claude-opus-4-5")
+        # Primary model untouched — setup no longer changes it
         self.assertNotIn("litellm", cfg["models"]["providers"])
+        # Plugin removed
+        self.assertNotIn("defenseclaw", cfg.get("plugins", {}).get("allow", []))
 
     def test_restore_failure_shows_manual_steps(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1372,9 +1392,9 @@ class TestDisableGuardrailFlow(unittest.TestCase):
             setup, ["guardrail", "--disable"], obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Could not restore OpenClaw config", result.output)
+        self.assertIn("Could not update OpenClaw config", result.output)
         self.assertIn("Manual steps required", result.output)
-        self.assertIn("Manually edit", result.output)
+        self.assertIn("Manually remove defenseclaw", result.output)
 
     def test_uninstalls_plugin_during_disable(self):
         from unittest.mock import patch
@@ -1392,16 +1412,18 @@ class TestDisableGuardrailFlow(unittest.TestCase):
         self.assertIn("plugin removed from extensions", result.output)
         self.assertFalse(os.path.exists(ext))
 
-    def test_no_original_model_warns_about_manual_steps(self):
+    def test_no_original_model_still_disables(self):
+        """Disable works without original_model since we no longer change the model."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.original_model = ""
-        result = self.runner.invoke(
-            setup, ["guardrail", "--disable"], obj=self.app,
-        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = self.runner.invoke(
+                setup, ["guardrail", "--disable"], obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No original model on record", result.output)
-        self.assertIn("Manual steps required", result.output)
-        self.assertIn("agents.defaults.model.primary", result.output)
+        self.assertIn("OpenClaw plugin removed", result.output)
+        self.assertIn("Restarting OpenClaw gateway", result.output)
 
     def test_disable_sets_enabled_false(self):
         from defenseclaw.commands.cmd_setup import setup

@@ -128,7 +128,7 @@ func DefaultConfig() *Config {
 		},
 		Guardrail: GuardrailConfig{
 			Mode:        "observe",
-			ScannerMode: "local",
+			ScannerMode: "both",
 			Host:        "localhost",
 			Port:        4000,
 			Judge: JudgeConfig{
@@ -162,12 +162,12 @@ func DefaultConfig() *Config {
 				Enabled: true,
 				Skill: GatewayWatcherSkillConfig{
 					Enabled:    true,
-					TakeAction: false,
+					TakeAction: true,
 					Dirs:       []string{},
 				},
 				Plugin: GatewayWatcherPluginConfig{
 					Enabled:    true,
-					TakeAction: false,
+					TakeAction: true,
 					Dirs:       []string{},
 				},
 			},

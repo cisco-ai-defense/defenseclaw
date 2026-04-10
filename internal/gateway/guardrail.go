@@ -75,6 +75,9 @@ func (g *GuardrailInspector) SetScannerMode(mode string) {
 }
 
 // Inspect runs scanners according to scanner_mode and returns a merged verdict.
+// Local pattern scanning always runs as a baseline, regardless of scanner_mode,
+// to ensure prompt injection and PII patterns are caught even when the remote
+// scanner returns safe or is unreachable.
 func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	var localResult *ScanVerdict
 	var ciscoResult *ScanVerdict
@@ -82,13 +85,13 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	sm := g.scannerMode
 
-	if sm == "local" || sm == "both" {
-		localResult = scanLocalPatterns(direction, content)
-	}
+	localResult = scanLocalPatterns(direction, content)
 
-	// In "both" mode, skip remote if local already flags something.
-	if sm == "both" && localResult != nil && localResult.Severity != "NONE" {
-		localResult.ScannerSources = []string{"local-pattern"}
+	// In local-only mode or if local already flagged HIGH+, skip the remote call.
+	if sm == "local" || (localResult != nil && localResult.Severity == "HIGH") {
+		if localResult != nil {
+			localResult.ScannerSources = []string{"local-pattern"}
+		}
 		return g.finalize(ctx, direction, model, mode, content, localResult, nil)
 	}
 
@@ -101,7 +104,6 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	merged := mergeVerdicts(localResult, ciscoResult)
 	merged.CiscoElapsedMs = ciscoElapsedMs
 
-	// Run LLM judge if configured.
 	if g.judge != nil {
 		judgeVerdict := g.judge.RunJudges(ctx, direction, content)
 		if judgeVerdict != nil && judgeVerdict.Severity != "NONE" {
@@ -169,9 +171,40 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 
 var injectionPatterns = []string{
 	"ignore previous", "ignore all instructions", "ignore above",
-	"disregard previous", "disregard all", "you are now",
-	"act as", "pretend you are", "bypass", "jailbreak",
-	"do anything now", "dan mode",
+	"ignore all previous", "ignore your instructions", "ignore prior",
+	"disregard previous", "disregard all", "disregard your",
+	"forget your instructions", "forget all previous",
+	"override your instructions", "override all instructions",
+	"you are now", "pretend you are",
+	"jailbreak", "do anything now", "dan mode",
+	"developer mode enabled",
+}
+
+var injectionRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
+	regexp.MustCompile(`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
+	regexp.MustCompile(`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`),
+	regexp.MustCompile(`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`),
+	regexp.MustCompile(`act\s+as\b`),
+	regexp.MustCompile(`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`),
+}
+
+var piiRequestPatterns = []string{
+	"find their ssn", "find my ssn", "look up their ssn",
+	"retrieve their ssn", "get their ssn", "get my ssn",
+	"social security number", "mother's maiden name",
+	"mothers maiden name", "credit card number",
+	"find their password", "look up their password",
+	"find their email", "look up their email",
+	"date of birth", "bank account number",
+	"passport number", "driver's license",
+	"drivers license",
+}
+
+var piiDataRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
+	regexp.MustCompile(`\b\d{9}\b`),
+	regexp.MustCompile(`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`),
 }
 
 var secretPatterns = []string{
@@ -189,19 +222,43 @@ var exfilPatterns = []string{
 func scanLocalPatterns(direction, content string) *ScanVerdict {
 	lower := strings.ToLower(content)
 	var flags []string
+	isHigh := false
 
 	if direction == "prompt" {
 		for _, p := range injectionPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, p)
+				isHigh = true
+			}
+		}
+		for _, re := range injectionRegexes {
+			if re.MatchString(lower) {
+				match := re.FindString(lower)
+				flags = append(flags, match)
+				isHigh = true
+			}
+		}
+		for _, p := range piiRequestPatterns {
+			if strings.Contains(lower, p) {
+				flags = append(flags, "pii-request:"+p)
+				isHigh = true
 			}
 		}
 		for _, p := range exfilPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, p)
+				isHigh = true
 			}
 		}
 	}
+
+	for _, re := range piiDataRegexes {
+		if re.MatchString(content) {
+			flags = append(flags, "pii-data:"+re.FindString(content))
+			isHigh = true
+		}
+	}
+
 	for _, p := range secretPatterns {
 		if strings.Contains(lower, p) {
 			flags = append(flags, p)
@@ -213,29 +270,8 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	}
 
 	severity := "MEDIUM"
-	for _, p := range injectionPatterns {
-		for _, f := range flags {
-			if f == p {
-				severity = "HIGH"
-				break
-			}
-		}
-		if severity == "HIGH" {
-			break
-		}
-	}
-	if severity == "MEDIUM" {
-		for _, p := range exfilPatterns {
-			for _, f := range flags {
-				if f == p {
-					severity = "HIGH"
-					break
-				}
-			}
-			if severity == "HIGH" {
-				break
-			}
-		}
+	if isHigh {
+		severity = "HIGH"
 	}
 
 	action := "alert"

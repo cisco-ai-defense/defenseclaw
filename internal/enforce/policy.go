@@ -17,6 +17,8 @@
 package enforce
 
 import (
+	"fmt"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
@@ -60,7 +62,22 @@ func (e *PolicyEngine) Allow(targetType, name, reason string) error {
 	if e.store == nil {
 		return nil
 	}
-	return e.store.SetActionField(targetType, name, "install", "allow", reason)
+	if err := e.store.SetActionField(targetType, name, "install", "allow", reason); err != nil {
+		return err
+	}
+	// Clear residual auto-enforcement state (quarantine / disable) so the
+	// allow actually takes full effect.  Only a manual Block can override.
+	var errs []error
+	if err := e.store.ClearActionField(targetType, name, "file"); err != nil {
+		errs = append(errs, fmt.Errorf("clear file action: %w", err))
+	}
+	if err := e.store.ClearActionField(targetType, name, "runtime"); err != nil {
+		errs = append(errs, fmt.Errorf("clear runtime action: %w", err))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("enforce: allow %s %q: partial cleanup: %v", targetType, name, errs)
+	}
+	return nil
 }
 
 func (e *PolicyEngine) Unblock(targetType, name string) error {

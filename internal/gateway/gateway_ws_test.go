@@ -1111,6 +1111,8 @@ func TestHandleAdmissionResultBlocked(t *testing.T) {
 		},
 		client: client,
 		logger: logger,
+		notify: NewNotificationQueue(),
+		router: NewEventRouter(client, nil, logger, false, nil),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1153,6 +1155,8 @@ func TestHandleAdmissionResultRejected(t *testing.T) {
 		},
 		client: client,
 		logger: logger,
+		notify: NewNotificationQueue(),
+		router: NewEventRouter(client, nil, logger, false, nil),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1160,8 +1164,9 @@ func TestHandleAdmissionResultRejected(t *testing.T) {
 			Type: watcher.InstallSkill,
 			Name: "rejected-skill",
 		},
-		Verdict: watcher.VerdictRejected,
-		Reason:  "scan found critical findings",
+		Verdict:       watcher.VerdictRejected,
+		Reason:        "scan found critical findings",
+		RuntimeAction: "block",
 	})
 
 	rpc := drainRPC(t, received)
@@ -1169,6 +1174,73 @@ func TestHandleAdmissionResultRejected(t *testing.T) {
 	json.Unmarshal(rpc.Params, &params)
 	if params.SkillKey != "rejected-skill" {
 		t.Errorf("SkillKey = %q, want rejected-skill", params.SkillKey)
+	}
+}
+
+func TestHandleAdmissionResultRejectedInstallOnlyDoesNotDisableSkill(t *testing.T) {
+	_, logger := testStoreAndLogger(t)
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				Watcher: config.GatewayWatcherConfig{
+					Skill: config.GatewayWatcherSkillConfig{TakeAction: true},
+				},
+			},
+		},
+		logger:   logger,
+		notify:   NewNotificationQueue(),
+		router:   &EventRouter{},
+		alertCtx: context.Background(),
+	}
+
+	s.handleAdmissionResult(watcher.AdmissionResult{
+		Event: watcher.InstallEvent{
+			Type: watcher.InstallSkill,
+			Name: "install-only-skill",
+		},
+		Verdict:       watcher.VerdictRejected,
+		Reason:        "install blocked by policy",
+		InstallAction: "block",
+		RuntimeAction: "allow",
+	})
+
+	s.alertWg.Wait()
+	notes := s.notify.ActiveNotifications()
+	if len(notes) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(notes))
+	}
+	if got := strings.Join(notes[0].Actions, ","); strings.Contains(got, "disabled") {
+		t.Fatalf("actions = %q, should not include disabled", got)
+	}
+}
+
+func TestSendEnforcementAlertQueuesAfterLiveSend(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+
+	router := &EventRouter{activeSessions: map[string]time.Time{"session-1": time.Now()}}
+	s := &Sidecar{
+		client:   client,
+		notify:   NewNotificationQueue(),
+		router:   router,
+		alertCtx: context.Background(),
+	}
+
+	s.sendEnforcementAlert("skill", "malicious-skill", "HIGH", 2, []string{"blocked"}, "policy reject")
+
+	rpc := drainRPC(t, received)
+	if rpc.Method != "sessions.send" {
+		t.Fatalf("Method = %q, want sessions.send", rpc.Method)
+	}
+
+	notes := s.notify.ActiveNotifications()
+	if len(notes) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(notes))
+	}
+	if notes[0].SkillName != "malicious-skill" {
+		t.Fatalf("notification skill = %q, want malicious-skill", notes[0].SkillName)
 	}
 }
 
@@ -1237,8 +1309,11 @@ func TestHandlePluginAdmissionBlocked(t *testing.T) {
 				},
 			},
 		},
-		client: client,
-		logger: logger,
+		client:   client,
+		logger:   logger,
+		notify:   NewNotificationQueue(),
+		router:   &EventRouter{},
+		alertCtx: context.Background(),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1260,6 +1335,15 @@ func TestHandlePluginAdmissionBlocked(t *testing.T) {
 		t.Errorf("second RPC Method = %q, want config.patch", configPatch.Method)
 	}
 	assertPluginConfigPatch(t, configPatch.Params, "malicious-plugin", false)
+
+	s.alertWg.Wait()
+	notes := s.notify.ActiveNotifications()
+	if len(notes) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(notes))
+	}
+	if notes[0].SubjectType != "plugin" {
+		t.Fatalf("notification subject type = %q, want plugin", notes[0].SubjectType)
+	}
 }
 
 func TestHandlePluginAdmissionNoTakeAction(t *testing.T) {
@@ -1422,8 +1506,11 @@ func TestHandlePluginAdmissionRejected(t *testing.T) {
 				},
 			},
 		},
-		client: client,
-		logger: logger,
+		client:   client,
+		logger:   logger,
+		notify:   NewNotificationQueue(),
+		router:   &EventRouter{},
+		alertCtx: context.Background(),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1432,8 +1519,9 @@ func TestHandlePluginAdmissionRejected(t *testing.T) {
 			Name: "rejected-plugin",
 			Path: "/path/to/plugin",
 		},
-		Verdict: watcher.VerdictRejected,
-		Reason:  "scan found CRITICAL findings",
+		Verdict:       watcher.VerdictRejected,
+		Reason:        "scan found CRITICAL findings",
+		RuntimeAction: "block",
 	})
 
 	configGet := drainRPC(t, received)
@@ -1445,4 +1533,52 @@ func TestHandlePluginAdmissionRejected(t *testing.T) {
 		t.Errorf("second RPC Method = %q, want config.patch", configPatch.Method)
 	}
 	assertPluginConfigPatch(t, configPatch.Params, "rejected-plugin", false)
+
+	s.alertWg.Wait()
+	notes := s.notify.ActiveNotifications()
+	if len(notes) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(notes))
+	}
+	if notes[0].SubjectType != "plugin" {
+		t.Fatalf("notification subject type = %q, want plugin", notes[0].SubjectType)
+	}
+}
+
+func TestHandlePluginAdmissionRejectedInstallOnlyDoesNotDisable(t *testing.T) {
+	_, logger := testStoreAndLogger(t)
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				Watcher: config.GatewayWatcherConfig{
+					Plugin: config.GatewayWatcherPluginConfig{TakeAction: true},
+				},
+			},
+		},
+		logger:   logger,
+		notify:   NewNotificationQueue(),
+		router:   &EventRouter{},
+		alertCtx: context.Background(),
+	}
+
+	s.handleAdmissionResult(watcher.AdmissionResult{
+		Event: watcher.InstallEvent{
+			Type: watcher.InstallPlugin,
+			Name: "install-only-plugin",
+			Path: "/path/to/plugin",
+		},
+		Verdict:       watcher.VerdictRejected,
+		Reason:        "install blocked by policy",
+		InstallAction: "block",
+		RuntimeAction: "allow",
+	})
+
+	s.alertWg.Wait()
+	notes := s.notify.ActiveNotifications()
+	if len(notes) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(notes))
+	}
+	if got := strings.Join(notes[0].Actions, ","); strings.Contains(got, "disabled") {
+		t.Fatalf("actions = %q, should not include disabled", got)
+	}
 }

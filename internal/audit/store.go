@@ -92,9 +92,14 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
 
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("audit: set WAL mode: %w", err)
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("audit: %s: %w", pragma, err)
+		}
 	}
 
 	return &Store{db: db}, nil

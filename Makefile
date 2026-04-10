@@ -30,6 +30,9 @@ build: pycli gateway plugin
 	@echo "Run 'make install' to install all components."
 
 install: pycli gateway-install plugin-install
+	@mkdir -p $(INSTALL_DIR)
+	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
+	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
 	@echo ""
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
@@ -64,9 +67,6 @@ pycli:
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv venv $(VENV) --python 3.12 --clear
 	uv pip install -e . --python $(VENV)/bin/python
-	@mkdir -p $(INSTALL_DIR)
-	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
-	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
 
 dev-pycli: pycli
 	uv pip install --group dev --python $(VENV)/bin/python
@@ -94,6 +94,7 @@ start: gateway
 
 plugin:
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
+	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"

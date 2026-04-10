@@ -156,9 +156,9 @@ func TestPolicyScan_Strict_MediumPlugin_Rejected(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// Test: Strict policy → allow-listed plugin still scanned (no bypass)
+// Test: Strict policy → explicit allow still overrides scan bypass config
 // --------------------------------------------------------------------------
-func TestPolicyScan_Strict_AllowListedStillScanned(t *testing.T) {
+func TestPolicyScan_Strict_ExplicitAllowStillAllowed(t *testing.T) {
 	dir := setupPolicyDir(t, map[string]map[string]string{
 		"CRITICAL": {"runtime": "block", "file": "quarantine"},
 		"HIGH":     {"runtime": "block", "file": "quarantine"},
@@ -172,7 +172,7 @@ func TestPolicyScan_Strict_AllowListedStillScanned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Plugin is allow-listed but strict policy says no bypass
+	// Explicit allow entries override policy bypass settings.
 	out, err := eng.Evaluate(context.Background(), AdmissionInput{
 		TargetType: "plugin",
 		TargetName: "trusted-plugin",
@@ -185,9 +185,8 @@ func TestPolicyScan_Strict_AllowListedStillScanned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Without bypass, allow-listed plugin should fall through to "scan"
-	if out.Verdict != "scan" {
-		t.Errorf("strict policy: allow-listed plugin without bypass should be 'scan', got %q", out.Verdict)
+	if out.Verdict != "allowed" {
+		t.Errorf("strict policy: explicit allow should still be 'allowed', got %q", out.Verdict)
 	}
 }
 

@@ -57,12 +57,16 @@ type EventRouter struct {
 	logger *audit.Logger
 	policy *enforce.PolicyEngine
 	otel   *telemetry.Provider
+	notify *NotificationQueue
 
 	autoApprove      bool
 	activeToolSpans  map[string][]*activeSpan
 	activeAgentSpans map[string]*activeAgent // keyed by runId
 	activeLLMCtx     context.Context         // context of most recent LLM span, for tool→LLM hierarchy
 	spanMu           sync.Mutex
+
+	activeSessionsMu sync.RWMutex
+	activeSessions   map[string]time.Time // sessionKey → last seen
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
@@ -76,6 +80,7 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		autoApprove:      autoApprove,
 		activeToolSpans:  make(map[string][]*activeSpan),
 		activeAgentSpans: make(map[string]*activeAgent),
+		activeSessions:   make(map[string]time.Time),
 	}
 }
 
@@ -104,6 +109,44 @@ func (r *EventRouter) getToolParentCtx() context.Context {
 		return aa.ctx
 	}
 	return context.Background()
+}
+
+// ActiveSessionKeys returns session keys seen in the last hour.
+func (r *EventRouter) ActiveSessionKeys() []string {
+	r.activeSessionsMu.RLock()
+	defer r.activeSessionsMu.RUnlock()
+	cutoff := time.Now().Add(-1 * time.Hour)
+	var keys []string
+	for k, t := range r.activeSessions {
+		if t.After(cutoff) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+const maxActiveSessions = 500
+
+func (r *EventRouter) trackSession(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	r.activeSessionsMu.Lock()
+	r.activeSessions[sessionKey] = time.Now()
+	if len(r.activeSessions) > maxActiveSessions {
+		r.pruneSessionsLocked()
+	}
+	r.activeSessionsMu.Unlock()
+}
+
+// pruneSessionsLocked removes stale entries. Caller must hold activeSessionsMu.
+func (r *EventRouter) pruneSessionsLocked() {
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for k, t := range r.activeSessions {
+		if t.Before(cutoff) {
+			delete(r.activeSessions, k)
+		}
+	}
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -409,6 +452,8 @@ func (r *EventRouter) handleSessionsChanged(evt EventFrame, seqStr string) {
 	readLoopLogf("[bifrost] sessions.changed: phase=%s session=%s status=%s model=%s runId=%s msgId=%s",
 		sc.Phase, sc.SessionKey, sc.Session.Status, sc.Session.Model, sc.RunID, sc.MessageID)
 
+	r.trackSession(sc.SessionKey)
+
 	if sc.Session.Status == "failed" || sc.Phase == "error" {
 		readLoopLogf("[bifrost] sessions.changed ERROR: session %s status=failed phase=%s", sc.SessionKey, sc.Phase)
 		_ = r.logger.LogAction("gateway-session-error", sc.SessionKey,
@@ -695,7 +740,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	// Use the shared rule engine — no tool-name gating.
 	findings := ScanAllRules(string(payload.Args), payload.Tool)
-	dangerous := len(findings) > 0 && severityRank[HighestSeverity(findings)] >= severityRank["HIGH"]
+	severity := HighestSeverity(findings)
+	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
 	flaggedPattern := ""
 	if dangerous {
 		flaggedPattern = findings[0].RuleID
@@ -703,6 +749,18 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			fmt.Sprintf("reason=%s severity=%s confidence=%.2f",
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
+
+		if r.otel != nil {
+			r.otel.EmitRuntimeAlert(
+				telemetry.AlertToolCallFlagged,
+				severity,
+				telemetry.SourceToolInspect,
+				fmt.Sprintf("Dangerous tool call: %s — %s", payload.Tool, findings[0].Title),
+				map[string]string{"tool": payload.Tool},
+				map[string]string{"rule_id": flaggedPattern, "action": "flagged"},
+				"", "",
+			)
+		}
 	}
 
 	if r.otel != nil {

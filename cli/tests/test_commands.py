@@ -135,7 +135,7 @@ class TestPluginCommands(unittest.TestCase):
             os.makedirs(os.path.join(tmpdir, "my-plugin"))
             app = _make_app()
             app.cfg.plugin_dir = tmpdir
-            result = _invoke(list_plugins, app=app)
+            result = _invoke(list_plugins, args=["--json"], app=app)
             self.assertEqual(result.exit_code, 0)
             self.assertIn("my-plugin", result.output)
 

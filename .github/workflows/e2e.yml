@@ -120,9 +120,37 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
-            docker compose -f docker-compose.ci.yml up -d
+          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
+
+          # Lower minFreeSpace for CI runners with limited disk.
+          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503.
+          echo "Disk free: $(df -h / | tail -1)"
+          docker compose -f docker-compose.ci.yml exec -T -u splunk splunk bash -c '
+            for d in /opt/splunk/etc/system/local /opt/splunk/etc/apps/search/local; do
+              echo "Checking $d/server.conf ..."
+              if [ -d "$d" ]; then
+                mkdir -p "$d"
+                SCONF="$d/server.conf"
+                if ! grep -q "minFreeSpace" "$SCONF" 2>/dev/null; then
+                  printf "\n[diskUsage]\nminFreeSpace = 500\n" >> "$SCONF"
+                  echo "  -> patched $SCONF"
+                else
+                  echo "  -> already has minFreeSpace"
+                fi
+                cat "$SCONF"
+                break
+              fi
+            done
+          '
+          echo "Restarting Splunk to apply minFreeSpace..."
+          docker compose -f docker-compose.ci.yml restart splunk
+          echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
             sleep 5
@@ -254,6 +282,8 @@ jobs:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
       E2E_PROFILE: full-live
@@ -373,9 +403,37 @@ jobs:
           cd bundles/splunk_local_bridge
           bash splunk/package_local_mode_app.sh
           cd compose
-          SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0 \
-            docker compose -f docker-compose.ci.yml up -d
+          export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+          docker compose -f docker-compose.ci.yml up -d
           echo "Waiting for Splunk HEC..."
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8088/services/collector/health && break
+            sleep 5
+          done
+
+          # Lower minFreeSpace for CI runners with limited disk.
+          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503.
+          echo "Disk free: $(df -h / | tail -1)"
+          docker compose -f docker-compose.ci.yml exec -T -u splunk splunk bash -c '
+            for d in /opt/splunk/etc/system/local /opt/splunk/etc/apps/search/local; do
+              echo "Checking $d/server.conf ..."
+              if [ -d "$d" ]; then
+                mkdir -p "$d"
+                SCONF="$d/server.conf"
+                if ! grep -q "minFreeSpace" "$SCONF" 2>/dev/null; then
+                  printf "\n[diskUsage]\nminFreeSpace = 500\n" >> "$SCONF"
+                  echo "  -> patched $SCONF"
+                else
+                  echo "  -> already has minFreeSpace"
+                fi
+                cat "$SCONF"
+                break
+              fi
+            done
+          '
+          echo "Restarting Splunk to apply minFreeSpace..."
+          docker compose -f docker-compose.ci.yml restart splunk
+          echo "Waiting for Splunk HEC after restart..."
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8088/services/collector/health && break
             sleep 5
@@ -537,6 +595,12 @@ jobs:
           if [ -n "${OPENAI_API_KEY:-}" ]; then
             echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
           fi
+          if [ -n "${GOOGLE_API_KEY:-}" ]; then
+            echo "GOOGLE_API_KEY=${GOOGLE_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
+            echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
           if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
             echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
@@ -574,6 +638,8 @@ jobs:
               API_KEY_ENV="ANTHROPIC_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
               API_KEY_ENV="OPENAI_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "gemini\|google"; then
+              API_KEY_ENV="GOOGLE_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
               GUARDRAIL_REASON="Bedrock model detected — live guardrail proxy does not yet support SigV4 auth"
             else
@@ -675,7 +741,7 @@ jobs:
 
   e2e-required:
     name: E2E Required
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ always() && github.event_name != 'schedule' }}
     needs: [core, full-live]
     runs-on: ubuntu-latest
     steps:

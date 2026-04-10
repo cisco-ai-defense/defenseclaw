@@ -7,7 +7,7 @@ Set up the LLM guardrail and verify it works end-to-end.
 - DefenseClaw CLI installed (`defenseclaw --help` works)
 - DefenseClaw Gateway built (`make gateway` produces `defenseclaw-gateway`)
 - OpenClaw running (`openclaw gateway status` shows healthy)
-- An LLM API key set in your environment (e.g. `export ANTHROPIC_API_KEY=...`)
+- At least one LLM provider configured in OpenClaw (any provider works — the fetch interceptor covers all of them)
 
 ## 1. Install Dependencies
 
@@ -30,8 +30,12 @@ defenseclaw setup guardrail
 The wizard walks through:
 - **Mode**: `observe` (log only) or `action` (block threats) — start with `observe`
 - **Port**: guardrail proxy port (default `4000`)
-- **Model**: auto-detected from `openclaw.json`, e.g. `anthropic/claude-opus-4-5`
-- **API key env var**: e.g. `ANTHROPIC_API_KEY` — must be set before starting
+
+No model or API key prompts — the fetch interceptor captures provider
+auth headers set by OpenClaw's provider SDKs (`Authorization`,
+`x-api-key`, `api-key`) and forwards them to the proxy as `X-AI-Auth`.
+All supported providers (Anthropic, OpenAI, Azure, Gemini, OpenRouter,
+Ollama, Bedrock) are covered transparently.
 
 ### Non-interactive
 
@@ -41,9 +45,6 @@ defenseclaw setup guardrail \
   --mode observe \
   --port 4000
 ```
-
-Requires `guardrail.model` and `guardrail.api_key_env` already set in
-`~/.defenseclaw/config.yaml` (or from a previous interactive run).
 
 ## 3. Start Services
 
@@ -273,10 +274,10 @@ defenseclaw setup guardrail --disable --restart
 ```
 
 This restores direct LLM access:
-- `openclaw.json` primary model is reverted to the original
-- defenseclaw provider is removed from `openclaw.json`
+- DefenseClaw plugin entries removed from `openclaw.json`
+- Plugin uninstalled from `~/.openclaw/extensions/defenseclaw/`
 - Guardrail is disabled in `config.yaml`
-- Both services are restarted
+- OpenClaw gateway restarted (fetch interceptor unloads)
 
 ## Detection Patterns Reference
 
@@ -295,21 +296,38 @@ This restores direct LLM access:
 2. Check the guardrail proxy is configured in `~/.defenseclaw/config.yaml` (`guardrail.enabled`, port, model)
 3. If misconfigured, regenerate: `defenseclaw setup guardrail --restart`
 
-### OpenClaw "Invalid config" after setup
+### Fetch interceptor not routing traffic
 
-The `models.providers.defenseclaw.models.0.id` must not be empty. Re-run the
-setup wizard and ensure you specify the upstream model:
+1. Verify the plugin is installed: `ls ~/.openclaw/extensions/defenseclaw/`
+2. Check that `defenseclaw` is in `plugins.allow` in `openclaw.json`
+3. Restart OpenClaw: `openclaw gateway restart`
+4. Check the sidecar logs for `fetch-interceptor: active` on startup
+
+### Provider key not forwarded
+
+The fetch interceptor captures the auth header that OpenClaw's provider
+SDK sets on each request (`Authorization: Bearer`, `x-api-key`, or
+`api-key`). If the proxy receives no `X-AI-Auth`, verify the provider
+is configured in OpenClaw with a valid API key.
+
+### Upgrading DefenseClaw
+
+Use the built-in upgrade command to update without losing configuration:
 
 ```bash
-defenseclaw setup guardrail
+# Upgrade to the latest release
+defenseclaw upgrade --yes
+
+# Upgrade to a specific release
+defenseclaw upgrade --version 0.3.0 --yes
 ```
 
-### API key not found
+This backs up config files, downloads and replaces the gateway binary and
+Python CLI wheel from the GitHub release, runs version-specific migrations
+(e.g. the v0.3.0 migration cleans up legacy `openclaw.json` provider entries),
+and restarts both the defenseclaw-gateway and the OpenClaw gateway.
 
-The guardrail proxy reads the API key from the environment variable specified in
-`guardrail.api_key_env`. Make sure it's exported before starting the sidecar:
+> **Note:** The OpenClaw plugin is installed by `install.sh` as part of
+> the release that ships it (0.3.0+) and is not replaced during upgrade.
 
-```bash
-export ANTHROPIC_API_KEY=your-key-here
-defenseclaw-gateway restart
-```
+See [CLI Reference — upgrade](CLI.md#upgrade) for full details.

@@ -48,17 +48,31 @@ reason := sprintf("%s '%s' is on the block list", [input.target_type, input.targ
 	verdict == "blocked"
 }
 
-# --- Allow list (skip scan when configured) ---
+# --- Explicit allow list (manual override; always skip scan) ---
 
 verdict := "allowed" if {
 	not _is_blocked
-	_is_allow_listed
+	_is_explicit_allow_listed
+}
+
+reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
+	not _is_blocked
+	_is_explicit_allow_listed
+}
+
+# --- Policy-managed allow list (skip scan when configured) ---
+
+verdict := "allowed" if {
+	not _is_blocked
+	not _is_explicit_allow_listed
+	_is_policy_allow_listed
 	data.config.allow_list_bypass_scan == true
 }
 
 reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
 	not _is_blocked
-	_is_allow_listed
+	not _is_explicit_allow_listed
+	_is_policy_allow_listed
 	data.config.allow_list_bypass_scan == true
 }
 
@@ -138,14 +152,38 @@ _is_blocked if {
 	entry.target_type == input.target_type
 }
 
-_is_allow_listed if {
+_is_explicit_allow_listed if {
 	some entry in input.allow_list
 	entry.target_name == input.target_name
 	entry.target_type == input.target_type
 }
 
+_is_policy_allow_listed if {
+	some entry in data.first_party_allow_list
+	entry.target_name == input.target_name
+	entry.target_type == input.target_type
+	_path_matches_provenance(entry)
+}
+
+_path_matches_provenance(entry) if {
+	not entry.source_path_contains
+}
+
+_path_matches_provenance(entry) if {
+	count(entry.source_path_contains) == 0
+}
+
+_path_matches_provenance(entry) if {
+	some prefix in entry.source_path_contains
+	contains(lower(input.path), lower(prefix))
+}
+
 _is_allow_bypassed if {
-	_is_allow_listed
+	_is_explicit_allow_listed
+}
+
+_is_allow_bypassed if {
+	_is_policy_allow_listed
 	data.config.allow_list_bypass_scan == true
 }
 
@@ -155,13 +193,17 @@ _has_scan if input.scan_result
 # Check scanner_overrides[target_type][severity] first, fall back to global actions.
 
 _effective_action := action if {
-	action := data.scanner_overrides[input.target_type][input.scan_result.max_severity]
+	action := data.scanner_overrides[input.target_type][upper(input.scan_result.max_severity)]
 } else := action if {
-	action := data.actions[input.scan_result.max_severity]
+	action := data.actions[upper(input.scan_result.max_severity)]
 }
 
 _should_reject if {
 	_effective_action.runtime == "block"
+}
+
+_should_reject if {
+	_effective_action.install == "block"
 }
 
 # --- Structured output: file_action ---
@@ -183,5 +225,16 @@ install_action := action if {
 }
 
 install_action := "none" if {
+	not _has_scan
+}
+
+# --- Structured output: runtime_action ---
+
+runtime_action := action if {
+	_has_scan
+	action := _effective_action.runtime
+}
+
+runtime_action := "allow" if {
 	not _has_scan
 }

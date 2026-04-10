@@ -15,6 +15,7 @@ resolution-markers = [
 [manifest]
 overrides = [
     { name = "cryptography", specifier = ">=46.0.7" },
+    { name = "litellm", specifier = ">=1.83.0" },
     { name = "rich", specifier = ">=13.7.1,<14.0.0" },
 ]
 
