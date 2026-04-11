@@ -108,6 +108,10 @@ firewall:
     - 443
     - 80
 
+watch:
+  rescan_enabled: true
+  rescan_interval_min: 60
+
 enforcement:
   max_enforcement_delay_seconds: 2
 

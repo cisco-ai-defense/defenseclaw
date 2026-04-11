@@ -71,6 +71,10 @@ firewall:
   allowed_domains: []
   allowed_ports: []
 
+watch:
+  rescan_enabled: true
+  rescan_interval_min: 120
+
 enforcement:
   max_enforcement_delay_seconds: 5
 

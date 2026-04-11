@@ -160,6 +160,19 @@ class Event:
 
 
 @dataclass
+class TargetSnapshot:
+    id: str = ""
+    target_type: str = ""
+    target_path: str = ""
+    content_hash: str = ""
+    dependency_hashes: dict[str, str] = field(default_factory=dict)
+    config_hashes: dict[str, str] = field(default_factory=dict)
+    network_endpoints: list[str] = field(default_factory=list)
+    scan_id: str = ""
+    captured_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
 class Counts:
     blocked_skills: int = 0
     allowed_skills: int = 0

@@ -146,9 +146,11 @@ func (c *SplunkConfig) ResolvedHECToken() string {
 }
 
 type WatchConfig struct {
-	DebounceMs          int  `mapstructure:"debounce_ms"          yaml:"debounce_ms"`
-	AutoBlock           bool `mapstructure:"auto_block"           yaml:"auto_block"`
+	DebounceMs          int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
+	AutoBlock           bool `mapstructure:"auto_block"             yaml:"auto_block"`
 	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
+	RescanEnabled       bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
+	RescanIntervalMin   int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
 }
 
 type InspectLLMConfig struct {
@@ -608,6 +610,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)
 	viper.SetDefault("watch.allow_list_bypass_scan", true)
+	viper.SetDefault("watch.rescan_enabled", true)
+	viper.SetDefault("watch.rescan_interval_min", 60)
 
 	viper.SetDefault("splunk.hec_endpoint", "https://localhost:8088/services/collector/event")
 	viper.SetDefault("splunk.hec_token", "")
