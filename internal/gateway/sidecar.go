@@ -102,6 +102,11 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
+	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" {
+		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — guardrail proxy will fail.\n")
+		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml (e.g. anthropic/claude-sonnet-4-20250514)\n")
+	}
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)
 
