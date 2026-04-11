@@ -9,7 +9,7 @@ dependencies = [
     "click==8.3.1",
     "pyyaml==6.0.3",
     "requests==2.33.0",
-    "rich>=13.0",
+    "rich>=14.3.4",
     "cisco-ai-skill-scanner==2.0.8",
     "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
 ]
