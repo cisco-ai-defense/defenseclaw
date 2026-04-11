@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from click.testing import CliRunner
 
-from defenseclaw.commands.cmd_skill import skill, _skill_status_display, _build_scan_map
+from defenseclaw.commands.cmd_skill import skill, _skill_display_name, _skill_status_display, _build_scan_map
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import ActionEntry, ActionState, Finding, ScanResult
 from tests.helpers import make_app_context, cleanup_app
@@ -378,6 +378,16 @@ class TestSkillList(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("apple", result.output)
         self.assertNotIn("\n│           │", result.output)
+
+    def test_skill_display_name_puts_emoji_after_name(self):
+        self.assertEqual(
+            _skill_display_name({"name": "apple-notes", "emoji": "📝"}),
+            "apple-notes 📝",
+        )
+        self.assertEqual(
+            _skill_display_name({"name": "healthcheck", "emoji": ""}),
+            "healthcheck",
+        )
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_json(self, mock_list):
