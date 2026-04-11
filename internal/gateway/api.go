@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1466,16 +1467,12 @@ func csrfProtect(next http.Handler) http.Handler {
 }
 
 func isLocalhostOrigin(origin string) bool {
-	for _, prefix := range []string{
-		"http://127.0.0.1", "http://localhost",
-		"http://[::1]", "https://127.0.0.1",
-		"https://localhost", "https://[::1]",
-	} {
-		if strings.HasPrefix(origin, prefix) {
-			return true
-		}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
 	}
-	return false
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 func (a *APIServer) writeJSON(w http.ResponseWriter, status int, v interface{}) {
