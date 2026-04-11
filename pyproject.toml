@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tui = ["textual>=0.50"]
+tui = ["textual>=8.2.3"]
 
 [dependency-groups]
 dev = [
