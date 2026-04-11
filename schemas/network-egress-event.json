@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/cisco-ai-defense/defenseclaw/schemas/network-egress-event.json",
+  "title": "NetworkEgressEvent",
+  "description": "A single outbound network call observed by the agent runtime, with policy decision fields stored as first-class structured data.",
+  "type": "object",
+  "required": ["hostname", "policy_outcome"],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the call was observed (RFC3339). Defaults to the ingestion time when omitted."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "Agent session identifier. Correlates this event with tool_call/tool_result rows for the same session."
+    },
+    "hostname": {
+      "type": "string",
+      "description": "Destination hostname without port (e.g. 'api.example.com').",
+      "minLength": 1
+    },
+    "url": {
+      "type": "string",
+      "description": "Full destination URL. Stored at most 512 characters.",
+      "maxLength": 512
+    },
+    "http_method": {
+      "type": "string",
+      "description": "HTTP verb (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS).",
+      "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+    },
+    "protocol": {
+      "type": "string",
+      "description": "Transport protocol.",
+      "enum": ["http", "https"]
+    },
+    "policy_outcome": {
+      "type": "string",
+      "description": "Human-readable summary of the policy decision.",
+      "minLength": 1
+    },
+    "decision_code": {
+      "type": "string",
+      "description": "Machine-readable outcome token for programmatic filtering.",
+      "examples": [
+        "NETWORK_ALLOW_PATTERN",
+        "NETWORK_DENY_PATTERN",
+        "NETWORK_DEFAULT_ALLOW",
+        "NETWORK_DENY_DEFAULT"
+      ]
+    },
+    "blocked": {
+      "type": "boolean",
+      "description": "true when the call was actively prevented by policy."
+    },
+    "severity": {
+      "type": "string",
+      "description": "Event severity. Defaults to HIGH for blocked calls and INFO for allowed calls.",
+      "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    },
+    "details": {
+      "type": "string",
+      "description": "Additional context such as the matched policy pattern."
+    }
+  },
+  "additionalProperties": false
+}

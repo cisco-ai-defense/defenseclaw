@@ -115,6 +115,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 
 	handler := a.metricsMiddleware(csrfProtect(mux))
 	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
@@ -1814,4 +1815,106 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// handleNetworkEgress serves GET /api/v1/network-egress and
+// POST /api/v1/network-egress.
+//
+// GET  — list structured outbound network call records from the audit DB.
+//
+//	Query params:
+//	  limit=N    (default 50, max 500)
+//	  hostname=H (filter to exact hostname)
+//
+// POST — ingest a single egress event from an external observer (e.g. a
+//
+//	runtime hook running inside the agent process) so that it is
+//	persisted alongside tool-lifecycle events.
+func (a *APIServer) handleNetworkEgress(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		a.handleNetworkEgressList(w, r)
+	case http.MethodPost:
+		a.handleNetworkEgressIngest(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *APIServer) handleNetworkEgressList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	limit := 50
+	if raw := q.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 500 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be 1–500"})
+			return
+		}
+		limit = parsed
+	}
+
+	f := audit.NetworkEgressFilter{
+		Hostname:  q.Get("hostname"),
+		SessionID: q.Get("session_id"),
+		Limit:     limit,
+	}
+
+	// ?blocked=true|false — optional boolean filter
+	if raw := q.Get("blocked"); raw != "" {
+		b := raw == "true" || raw == "1"
+		f.Blocked = &b
+	}
+
+	// ?since=<RFC3339> — optional time lower-bound filter
+	if raw := q.Get("since"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "since must be RFC3339 (e.g. 2026-01-02T15:04:05Z)"})
+			return
+		}
+		f.Since = t
+	}
+
+	events, err := a.store.QueryNetworkEgressEvents(f)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	type response struct {
+		Events []audit.NetworkEgressRow `json:"events"`
+		Count  int                      `json:"count"`
+	}
+	if events == nil {
+		events = []audit.NetworkEgressRow{}
+	}
+	a.writeJSON(w, http.StatusOK, response{Events: events, Count: len(events)})
+}
+
+func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Request) {
+	var evt audit.NetworkEgressEvent
+	if err := json.NewDecoder(r.Body).Decode(&evt); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if err := evt.Validate(); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if a.logger == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit logger not configured"})
+		return
+	}
+	if err := a.logger.LogNetworkEgress(r.Context(), evt); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
