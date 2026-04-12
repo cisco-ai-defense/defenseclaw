@@ -129,6 +129,18 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Watch.DebounceMs != 500 {
 		t.Errorf("expected debounce 500ms, got %d", cfg.Watch.DebounceMs)
 	}
+	if !cfg.Watch.AllowListBypassScan {
+		t.Error("expected allow-list bypass scan enabled by default")
+	}
+	if !cfg.Watch.RescanEnabled {
+		t.Error("expected rescan enabled by default")
+	}
+	if cfg.Watch.RescanIntervalMin != 60 {
+		t.Errorf("expected rescan interval 60 min, got %d", cfg.Watch.RescanIntervalMin)
+	}
+	if cfg.Scanners.PluginScanner != "defenseclaw" {
+		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
+	}
 }
 
 func TestDefaultGatewayWatcherPluginConfig(t *testing.T) {

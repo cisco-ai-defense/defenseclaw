@@ -57,7 +57,7 @@ def make_temp_config(tmp_dir: str | None = None) -> Config:
             skill_scanner=SkillScannerConfig(binary="skill-scanner"),
             mcp_scanner=MCPScannerConfig(binary="mcp-scanner"),
         ),
-        openshell=OpenShellConfig(binary="openshell-sandbox"),
+        openshell=OpenShellConfig(binary="openshell"),
         gateway=GatewayConfig(host="127.0.0.1", api_port=18970),
         skill_actions=SkillActionsConfig(),
     )

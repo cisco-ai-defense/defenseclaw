@@ -153,10 +153,10 @@ make plugin
 Install individual components without rebuilding everything:
 
 ```bash
-# Gateway → ~/.local/bin/defenseclaw-gateway
+# Gateway → ~/.local/bin/defenseclaw-gateway (+ defenseclaw CLI)
 make gateway-install
 
-# Plugin → ~/.defenseclaw/extensions/defenseclaw/
+# Plugin → ~/.defenseclaw/extensions/defenseclaw/ (+ defenseclaw CLI)
 make plugin-install
 ```
 

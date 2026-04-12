@@ -174,6 +174,16 @@ def create(
     policies_dir = _ensure_policies_dir(app)
     dest = os.path.join(policies_dir, f"{name}.yaml")
 
+    if os.path.islink(dest):
+        click.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
+        raise SystemExit(1)
+
+    real_dest = os.path.realpath(dest)
+    real_dir = os.path.realpath(policies_dir)
+    if not real_dest.startswith(real_dir + os.sep):
+        click.echo("error: resolved path escapes policy directory", err=True)
+        raise SystemExit(1)
+
     if os.path.exists(dest):
         click.echo(f"error: policy '{name}' already exists at {dest}", err=True)
         click.echo("  Delete it first or choose a different name.", err=True)
@@ -428,17 +438,30 @@ def activate(app: AppContext, name: str) -> None:
 @pass_ctx
 def delete(app: AppContext, name: str) -> None:
     """Delete a custom policy."""
+    name = _sanitize_policy_name(name)
+
     if name in BUILTIN_POLICIES:
         click.echo(f"error: cannot delete built-in policy '{name}'", err=True)
         raise SystemExit(1)
 
     user_dir = _policies_dir(app)
     path = os.path.join(user_dir, f"{name}.yaml")
-    if not os.path.isfile(path):
+
+    if os.path.islink(path):
+        click.echo(f"error: policy '{name}' is a symbolic link — refusing to delete", err=True)
+        raise SystemExit(1)
+
+    real_path = os.path.realpath(path)
+    real_dir = os.path.realpath(user_dir)
+    if not real_path.startswith(real_dir + os.sep):
+        click.echo("error: resolved path escapes policy directory", err=True)
+        raise SystemExit(1)
+
+    if not os.path.isfile(real_path):
         click.echo(f"error: policy '{name}' not found in {user_dir}", err=True)
         raise SystemExit(1)
 
-    os.remove(path)
+    os.remove(real_path)
     click.echo(f"Policy '{name}' deleted.")
     if app.logger:
         app.logger.log_action("policy-delete", name, "")

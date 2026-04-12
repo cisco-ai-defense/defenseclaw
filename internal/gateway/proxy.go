@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -274,8 +275,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// SSRF protection: only forward to domains listed in providers.json.
-	// Reject requests targeting internal hosts (e.g. cloud IMDS, localhost).
+	// SSRF protection: only forward to domains listed in providers.json
+	// or Ollama loopback.  Reject other internal hosts (e.g. cloud IMDS).
 	if !isKnownProviderDomain(targetOrigin) {
 		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s\n", targetOrigin)
 		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
@@ -741,6 +742,11 @@ var providerDomains []struct {
 	name   string
 }
 
+// ollamaPorts lists the TCP ports that Ollama binds to (from providers.json).
+// Requests to localhost/127.0.0.1/::1 on these ports are treated as known
+// provider traffic so the SSRF allowlist does not reject them.
+var ollamaPorts []int
+
 func init() {
 	cfg, err := configs.LoadProviders()
 	if err != nil {
@@ -754,6 +760,7 @@ func init() {
 			}{d, p.Name})
 		}
 	}
+	ollamaPorts = cfg.OllamaPorts
 }
 
 // inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
@@ -761,10 +768,18 @@ func init() {
 // is loaded from internal/configs/providers.json — the single source of truth
 // shared with the TypeScript fetch interceptor.
 func inferProviderFromURL(targetURL string) string {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
 	for _, pd := range providerDomains {
-		if strings.Contains(targetURL, pd.domain) {
+		if matchProviderDomain(host, u.Path, pd.domain) {
 			return pd.name
 		}
+	}
+	if isOllamaLoopback(targetURL, 0) {
+		return "ollama"
 	}
 	return ""
 }
@@ -1966,23 +1981,75 @@ func scrubURLSecrets(raw string) string {
 	return u.String()
 }
 
+// isOllamaLoopback returns true when targetURL points at a loopback
+// address (localhost, 127.0.0.1, ::1) on one of the Ollama ports
+// listed in providers.json.  The guardrailPort is excluded so the
+// proxy never forwards to itself.
+func isOllamaLoopback(targetURL string, guardrailPort int) bool {
+	u, err := url.Parse(targetURL)
+	if err != nil || len(ollamaPorts) == 0 {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return false
+	}
+	portStr := u.Port()
+	if portStr == "" {
+		return false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return false
+	}
+	if port == guardrailPort {
+		return false
+	}
+	for _, op := range ollamaPorts {
+		if port == op {
+			return true
+		}
+	}
+	return false
+}
+
 // isKnownProviderDomain returns true when the hostname of targetURL
-// contains a domain substring from the embedded providers.json list.
-// Only the parsed hostname is checked — query strings and path
-// components are ignored to prevent bypass via crafted URLs like
-// https://evil.com/?foo=api.openai.com.
+// matches a domain from the embedded providers.json list or is an
+// Ollama loopback address.  Only the parsed hostname is checked —
+// query strings and path components are ignored to prevent bypass via
+// crafted URLs like https://evil.com/?foo=api.openai.com.
 func isKnownProviderDomain(targetURL string) bool {
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return false
 	}
-	host := u.Hostname()
+	host := strings.ToLower(u.Hostname())
 	for _, pd := range providerDomains {
-		if strings.Contains(host, pd.domain) {
+		if matchProviderDomain(host, u.Path, pd.domain) {
 			return true
 		}
 	}
-	return false
+	return isOllamaLoopback(targetURL, 0)
+}
+
+// matchProviderDomain performs safe domain matching:
+//   - Domains ending in "." are hostname prefixes (e.g. "bedrock-runtime.")
+//   - Domains containing "/" match hostname+path prefix
+//   - All others require exact hostname or subdomain match
+func matchProviderDomain(host, urlPath, domain string) bool {
+	d := strings.ToLower(domain)
+	if strings.HasSuffix(d, ".") {
+		return strings.HasPrefix(host, d)
+	}
+	if strings.Contains(d, "/") {
+		parts := strings.SplitN(d, "/", 2)
+		domainPart, pathPart := parts[0], "/"+parts[1]
+		if !(host == domainPart || strings.HasSuffix(host, "."+domainPart)) {
+			return false
+		}
+		return strings.HasPrefix(urlPath, pathPart)
+	}
+	return host == d || strings.HasSuffix(host, "."+d)
 }
 
 // patchRawResponseModel overwrites only the "model" field in raw JSON bytes,

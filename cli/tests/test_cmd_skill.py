@@ -314,6 +314,17 @@ class TestSkillQuarantine(SkillCommandTestBase):
         result = self.invoke(["quarantine", "/nonexistent/path/ghost-skill"])
         self.assertNotEqual(result.exit_code, 0)
 
+    def test_quarantine_rejects_skill_root_path(self):
+        skill_root = os.path.join(self.tmp_dir, "skills")
+        os.makedirs(os.path.join(skill_root, "child-skill"), exist_ok=True)
+
+        self.app.cfg.quarantine_dir = os.path.join(self.tmp_dir, "quarantine")
+
+        result = self.invoke(["quarantine", skill_root])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("specific skill directory", result.output)
+        self.assertTrue(os.path.isdir(skill_root))
+
     def test_restore_non_quarantined_errors(self):
         self.app.cfg.quarantine_dir = os.path.join(self.tmp_dir, "quarantine")
         result = self.invoke(["restore", "not-quarantined"])

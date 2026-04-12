@@ -11,7 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
 
-.PHONY: build install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
+.PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
@@ -29,10 +29,7 @@ build: pycli gateway plugin
 	@echo ""
 	@echo "Run 'make install' to install all components."
 
-install: pycli gateway-install plugin-install
-	@mkdir -p $(INSTALL_DIR)
-	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
-	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
+install: cli-install gateway-install plugin-install
 	@echo ""
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
@@ -104,7 +101,18 @@ plugin:
 # Individual install targets
 # ---------------------------------------------------------------------------
 
-gateway-install: gateway
+cli-install: pycli
+	@mkdir -p $(INSTALL_DIR)
+	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
+	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
+	@echo "Installed defenseclaw CLI to $(INSTALL_DIR)"
+	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
+		echo ""; \
+		echo "Add $(INSTALL_DIR) to your PATH:"; \
+		echo "  export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
+	fi
+
+gateway-install: cli-install gateway
 	@mkdir -p $(INSTALL_DIR)
 	@cp $(GATEWAY) $(INSTALL_DIR)/$(GATEWAY)
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
@@ -117,7 +125,7 @@ gateway-install: gateway
 		echo "  export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
 	fi
 
-plugin-install: plugin
+plugin-install: cli-install plugin
 	@if [ ! -f $(PLUGIN_DIR)/dist/index.js ]; then \
 		echo "Plugin not built — run 'make plugin' first"; \
 		exit 1; \

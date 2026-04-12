@@ -368,8 +368,8 @@ make gateway     # Go gateway → ./defenseclaw-gateway
 make plugin      # TS plugin  → extensions/defenseclaw/dist/
 
 # Individual installs
-make gateway-install   # → ~/.local/bin/defenseclaw-gateway
-make plugin-install    # → ~/.openclaw/extensions/defenseclaw/
+make gateway-install   # → ~/.local/bin/defenseclaw-gateway (+ defenseclaw CLI)
+make plugin-install    # → ~/.openclaw/extensions/defenseclaw/ (+ defenseclaw CLI)
 
 # Cross-compile for DGX Spark
 make gateway-cross GOOS=linux GOARCH=arm64

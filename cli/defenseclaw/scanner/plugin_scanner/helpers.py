@@ -130,7 +130,7 @@ def downgrade(severity: str) -> str:
 # Directories that are always safe to skip (build artifacts, VCS, IDE config,
 # and Python virtual environments).
 _SKIP_DIRS: frozenset[str] = frozenset({
-    "node_modules", "dist", "build", "coverage",
+    "node_modules", "dist", "coverage",
     ".git", ".svn", ".hg",
     ".vscode", ".idea",
     ".tox", "__pycache__", ".mypy_cache",
@@ -149,7 +149,7 @@ def collect_files(
     _depth: int = 0,
     *,
     _scan_root: str | None = None,
-    _seen_inodes: set[int] | None = None,
+    _seen_inodes: set[tuple[int, int]] | None = None,
     _symlink_escapes: list[str] | None = None,
     _depth_truncations: list[str] | None = None,
     _oversized_files: list[str] | None = None,
@@ -167,6 +167,11 @@ def collect_files(
         _scan_root = os.path.realpath(directory)
     if _seen_inodes is None:
         _seen_inodes = set()
+        try:
+            st_root = os.stat(_scan_root)
+            _seen_inodes.add((st_root.st_dev, st_root.st_ino))
+        except OSError:
+            pass
     if _symlink_escapes is None:
         _symlink_escapes = []
     if _depth_truncations is None:
@@ -200,16 +205,16 @@ def collect_files(
                 if not real.startswith(_scan_root + os.sep) and real != _scan_root:
                     _symlink_escapes.append(full_path)
                     continue
-                # Cycle detection via inode
-                try:
-                    ino = os.stat(real).st_ino
-                except OSError:
-                    continue
-                if ino in _seen_inodes:
-                    continue
-                _seen_inodes.add(ino)
 
             if os.path.isdir(full_path):
+                try:
+                    st_dir = os.stat(full_path)
+                    dir_key = (st_dir.st_dev, st_dir.st_ino)
+                except OSError:
+                    continue
+                if dir_key in _seen_inodes:
+                    continue
+                _seen_inodes.add(dir_key)
                 nested = collect_files(
                     full_path,
                     extensions,
@@ -224,6 +229,14 @@ def collect_files(
                 )
                 files.extend(nested)
             elif any(entry.endswith(ext) for ext in extensions):
+                try:
+                    st_file = os.stat(full_path)
+                    file_key = (st_file.st_dev, st_file.st_ino)
+                except OSError:
+                    continue
+                if file_key in _seen_inodes:
+                    continue
+                _seen_inodes.add(file_key)
                 if max_file_bytes > 0:
                     try:
                         if os.path.getsize(full_path) > max_file_bytes:
@@ -306,7 +319,7 @@ def deduplicate_findings(findings: list[Finding]) -> list[Finding]:
     out: list[Finding] = []
 
     for f in findings:
-        key = f"{f.rule_id or ''}::{f.title}"
+        key = f"{f.rule_id or ''}::{f.title}::{f.location or ''}"
         existing = seen.get(key)
         if existing is not None:
             existing.occurrence_count = (existing.occurrence_count or 1) + 1

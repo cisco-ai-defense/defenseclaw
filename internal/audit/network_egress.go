@@ -22,7 +22,22 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+// truncateUTF8 truncates s to at most maxBytes without splitting a UTF-8 code point.
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
 
 // NetworkEgressEvent describes a single outbound network call observed by the
 // agent runtime. It captures the destination, request shape, and policy
@@ -101,7 +116,7 @@ func (e *NetworkEgressEvent) effectiveSeverity() string {
 func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
 	url := e.URL
 	if len(url) > 512 {
-		url = url[:512]
+		url = truncateUTF8(url, 512)
 	}
 	return NetworkEgressRow{
 		Timestamp:     e.Timestamp,
@@ -181,5 +196,5 @@ func truncateStr(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max]
+	return truncateUTF8(s, max)
 }

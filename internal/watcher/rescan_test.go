@@ -87,6 +87,32 @@ func TestCompareSnapshots_NewDependency(t *testing.T) {
 	}
 }
 
+func TestCompareSnapshots_RemovedDependency(t *testing.T) {
+	baseline := &audit.SnapshotRow{
+		DependencyHashes: `{"package.json":"old-hash"}`,
+		ConfigHashes:     `{}`,
+		NetworkEndpoints: `[]`,
+		ContentHash:      "baseline-hash",
+	}
+	current := &TargetSnapshot{
+		DependencyHashes: map[string]string{},
+		ConfigHashes:     map[string]string{},
+		NetworkEndpoints: []string{},
+		ContentHash:      "current-hash",
+	}
+
+	deltas := compareSnapshots(baseline, current)
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 delta, got %d", len(deltas))
+	}
+	if deltas[0].Type != DriftDependencyChange {
+		t.Errorf("expected dependency_change, got %s", deltas[0].Type)
+	}
+	if deltas[0].Description != "dependency manifest removed: package.json" {
+		t.Errorf("unexpected description: %q", deltas[0].Description)
+	}
+}
+
 func TestCompareSnapshots_ConfigMutated(t *testing.T) {
 	baseline := &audit.SnapshotRow{
 		DependencyHashes: `{}`,
@@ -105,6 +131,35 @@ func TestCompareSnapshots_ConfigMutated(t *testing.T) {
 	}
 	if deltas[0].Type != DriftConfigMutation {
 		t.Errorf("expected config_mutation, got %s", deltas[0].Type)
+	}
+	if deltas[0].Severity != "HIGH" {
+		t.Errorf("expected HIGH severity, got %s", deltas[0].Severity)
+	}
+}
+
+func TestCompareSnapshots_RemovedConfig(t *testing.T) {
+	baseline := &audit.SnapshotRow{
+		DependencyHashes: `{}`,
+		ConfigHashes:     `{"skill.yaml":"old-hash"}`,
+		NetworkEndpoints: `[]`,
+		ContentHash:      "baseline-hash",
+	}
+	current := &TargetSnapshot{
+		DependencyHashes: map[string]string{},
+		ConfigHashes:     map[string]string{},
+		NetworkEndpoints: []string{},
+		ContentHash:      "current-hash",
+	}
+
+	deltas := compareSnapshots(baseline, current)
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 delta, got %d", len(deltas))
+	}
+	if deltas[0].Type != DriftConfigMutation {
+		t.Errorf("expected config_mutation, got %s", deltas[0].Type)
+	}
+	if deltas[0].Description != "config file removed: skill.yaml" {
+		t.Errorf("unexpected description: %q", deltas[0].Description)
 	}
 	if deltas[0].Severity != "HIGH" {
 		t.Errorf("expected HIGH severity, got %s", deltas[0].Severity)
@@ -159,16 +214,44 @@ func TestCompareSnapshots_RemovedEndpoint(t *testing.T) {
 	}
 }
 
+func TestCompareSnapshots_ContentHashFallback(t *testing.T) {
+	baseline := &audit.SnapshotRow{
+		DependencyHashes: `{}`,
+		ConfigHashes:     `{}`,
+		NetworkEndpoints: `[]`,
+		ContentHash:      "baseline-hash",
+	}
+	current := &TargetSnapshot{
+		DependencyHashes: map[string]string{},
+		ConfigHashes:     map[string]string{},
+		NetworkEndpoints: []string{},
+		ContentHash:      "current-hash",
+	}
+
+	deltas := compareSnapshots(baseline, current)
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 delta, got %d", len(deltas))
+	}
+	if deltas[0].Type != DriftContentChange {
+		t.Errorf("expected content_change, got %s", deltas[0].Type)
+	}
+	if deltas[0].Severity != "MEDIUM" {
+		t.Errorf("expected MEDIUM severity, got %s", deltas[0].Severity)
+	}
+}
+
 func TestCompareSnapshots_MultipleDrifts(t *testing.T) {
 	baseline := &audit.SnapshotRow{
 		DependencyHashes: `{"requirements.txt":"old"}`,
 		ConfigHashes:     `{"config.yaml":"old"}`,
 		NetworkEndpoints: `[]`,
+		ContentHash:      "baseline-hash",
 	}
 	current := &TargetSnapshot{
 		DependencyHashes: map[string]string{"requirements.txt": "new"},
 		ConfigHashes:     map[string]string{"config.yaml": "new"},
 		NetworkEndpoints: []string{"https://new-endpoint.com"},
+		ContentHash:      "current-hash",
 	}
 
 	deltas := compareSnapshots(baseline, current)
@@ -195,6 +278,50 @@ func TestDiffFindings_NewFinding(t *testing.T) {
 	}
 }
 
+func TestDiffFindings_SameTitleDifferentLocations(t *testing.T) {
+	prev := []scanner.Finding{
+		{Scanner: "skill-scanner", Title: "Hardcoded secret", Location: "a.py:1", Severity: "HIGH"},
+	}
+	curr := []scanner.Finding{
+		{Scanner: "skill-scanner", Title: "Hardcoded secret", Location: "a.py:1", Severity: "HIGH"},
+		{Scanner: "skill-scanner", Title: "Hardcoded secret", Location: "b.py:5", Severity: "HIGH"},
+	}
+
+	deltas := diffFindings(prev, curr)
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 delta, got %d", len(deltas))
+	}
+	if deltas[0].Type != DriftNewFinding {
+		t.Errorf("expected new_finding, got %s", deltas[0].Type)
+	}
+	if deltas[0].Current != "Hardcoded secret (b.py:5)" {
+		t.Errorf("unexpected current label: %q", deltas[0].Current)
+	}
+}
+
+func TestDiffFindings_SeverityChange(t *testing.T) {
+	prev := []scanner.Finding{
+		{Scanner: "skill-scanner", Title: "Hardcoded secret", Location: "main.py:7", Severity: "MEDIUM"},
+	}
+	curr := []scanner.Finding{
+		{Scanner: "skill-scanner", Title: "Hardcoded secret", Location: "main.py:7", Severity: "CRITICAL"},
+	}
+
+	deltas := diffFindings(prev, curr)
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 delta, got %d", len(deltas))
+	}
+	if deltas[0].Type != DriftSeverityChange {
+		t.Errorf("expected severity_escalation, got %s", deltas[0].Type)
+	}
+	if deltas[0].Severity != "CRITICAL" {
+		t.Errorf("expected CRITICAL, got %s", deltas[0].Severity)
+	}
+	if deltas[0].Previous != "MEDIUM" || deltas[0].Current != "CRITICAL" {
+		t.Errorf("unexpected severity transition: %q -> %q", deltas[0].Previous, deltas[0].Current)
+	}
+}
+
 func TestDiffFindings_ResolvedFinding(t *testing.T) {
 	prev := []scanner.Finding{
 		{Title: "Hardcoded secret", Severity: "HIGH"},
@@ -215,8 +342,8 @@ func TestDiffFindings_ResolvedFinding(t *testing.T) {
 
 func TestDiffFindings_NoChange(t *testing.T) {
 	findings := []scanner.Finding{
-		{Title: "Secret A", Severity: "MEDIUM"},
-		{Title: "Secret B", Severity: "LOW"},
+		{Scanner: "skill-scanner", Title: "Secret A", Location: "a.py:1", Severity: "MEDIUM"},
+		{Scanner: "skill-scanner", Title: "Secret B", Location: "b.py:2", Severity: "LOW"},
 	}
 
 	deltas := diffFindings(findings, findings)

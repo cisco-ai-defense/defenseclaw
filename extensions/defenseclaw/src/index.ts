@@ -106,6 +106,9 @@ export default function (api: PluginApi) {
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
+      if (!res.ok) {
+        return { action: "allow", severity: "NONE", reason: `sidecar returned ${res.status}`, mode: "observe" };
+      }
       return (await res.json()) as {
         action: string;
         severity: string;
@@ -182,7 +185,7 @@ export default function (api: PluginApi) {
       }
 
       if (scanType === "code") {
-        return handleCodeScan(target, SIDECAR_API);
+        return handleCodeScan(target, SIDECAR_API, SIDECAR_TOKEN);
       }
 
       return handleSkillScan(target);
@@ -244,7 +247,9 @@ export default function (api: PluginApi) {
 
 // ─── Scan handlers ───
 
-async function handlePluginScan(target: string): Promise<{ text: string }> {
+async function handlePluginScan(
+  target: string,
+): Promise<{ text: string }> {
   try {
     const result = await runPluginScan(target);
     return { text: formatScanOutput("Plugin", target, result) };
@@ -266,9 +271,9 @@ async function handleMCPScan(target: string): Promise<{ text: string }> {
   }
 }
 
-async function handleCodeScan(target: string, sidecarApi: string): Promise<{ text: string }> {
+async function handleCodeScan(target: string, sidecarApi: string, sidecarToken: string): Promise<{ text: string }> {
   try {
-    const result = await runCodeScan(target, sidecarApi);
+    const result = await runCodeScan(target, sidecarApi, sidecarToken);
     return { text: formatScanOutput("Code", target, result) };
   } catch (err) {
     return {

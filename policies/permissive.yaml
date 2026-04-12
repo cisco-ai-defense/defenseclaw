@@ -71,6 +71,7 @@ firewall:
   allowed_domains: []
   allowed_ports: []
 
+# Periodic rescan / drift detection settings (not policy file watching).
 watch:
   rescan_enabled: true
   rescan_interval_min: 120

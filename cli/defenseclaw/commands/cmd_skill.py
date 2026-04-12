@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from typing import Any
 
@@ -911,38 +912,17 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
         skill_dir = os.path.join(tmpdir, "skill")
         os.makedirs(skill_dir, exist_ok=True)
 
-        # Use a single tar command to extract only the skill subdirectory.
-        # Avoids iterating all ~5000 members in Python which causes resource
-        # exhaustion on macOS (fork bomb via VSCode shell integration hooks).
-        import subprocess
-
         if not as_json:
             click.echo(
-                f"[scan] tar: archive={archive_path!s} prefix={skill_prefix!r} "
-                f"strip=3 dest={skill_dir!s}"
+                f"[scan] extracting prefix={skill_prefix!r} → {skill_dir!s}"
             )
-        tar_result = subprocess.run(
-            [
-                "tar", "xzf", archive_path,
-                "-C", skill_dir,
-                "--strip-components=3",
-                skill_prefix,
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-
-        if not as_json:
-            click.echo(f"[scan] tar: exit={tar_result.returncode}")
-            if tar_result.stdout:
-                click.echo(f"[scan] tar stdout: {tar_result.stdout!r}")
-            if tar_result.stderr:
-                click.echo(f"[scan] tar stderr: {tar_result.stderr!r}", err=True)
+        _safe_tar_extract(archive_path, skill_dir, skill_prefix, strip=3)
 
         os.unlink(archive_path)  # free disk immediately
 
-        found = tar_result.returncode == 0 and os.listdir(skill_dir)
+        found = bool(os.listdir(skill_dir))
         if not as_json and found:
-            click.echo(f"[scan] tar: extracted entries in skill_dir: {os.listdir(skill_dir)!r}")
+            click.echo(f"[scan] extracted entries in skill_dir: {os.listdir(skill_dir)!r}")
 
         if not found:
             click.echo(f"error: skill {name!r} not found in openclaw package", err=True)
@@ -1055,16 +1035,76 @@ def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+_CLAWHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+
+
 def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
-    """Parse clawhub://name[@version] → (name, version or None)."""
+    """Parse clawhub://name[@version] → (name, version or None).
+
+    Names are restricted to alphanumeric, dots, hyphens, and underscores
+    to prevent path traversal when used in tar extraction prefixes.
+    """
     path = uri.removeprefix("clawhub://")
     if not path:
         return ("", None)
 
+    version: str | None = None
     if "@" in path:
         name, version = path.split("@", 1)
-        return (name, version)
-    return (path, None)
+    else:
+        name = path
+
+    if not _CLAWHUB_NAME_RE.match(name):
+        return ("", None)
+    return (name, version)
+
+
+def _safe_tar_extract(
+    archive_path: str, dest_dir: str, prefix: str, *, strip: int = 0
+) -> None:
+    """Extract members under *prefix* from a tar archive into *dest_dir*.
+
+    Each member name is validated after stripping *strip* leading path
+    components to prevent path traversal (``..`` segments, absolute paths,
+    or symlinks escaping *dest_dir*).
+    """
+    import tarfile
+
+    real_dest = os.path.realpath(dest_dir)
+    with tarfile.open(archive_path, "r:gz") as tf:
+        for member in tf.getmembers():
+            if not member.name.startswith(prefix):
+                continue
+            if member.issym() or member.islnk():
+                continue
+
+            parts = member.name.split("/")
+            if len(parts) <= strip:
+                continue
+            stripped = os.path.join(*parts[strip:])
+            target = os.path.realpath(os.path.join(dest_dir, stripped))
+            if not (target == real_dest or target.startswith(real_dest + os.sep)):
+                continue
+            if ".." in stripped.split(os.sep):
+                continue
+
+            member_copy = tarfile.TarInfo(name=stripped)
+            member_copy.size = member.size
+            member_copy.mode = 0o644 if not member.isdir() else 0o755
+
+            if member.isdir():
+                os.makedirs(target, exist_ok=True)
+            elif member.isfile():
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with tf.extractfile(member) as src:
+                    if src is None:
+                        continue
+                    with open(target, "wb") as dst:
+                        while True:
+                            chunk = src.read(65536)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
 
 
 def _print_result(name: str, result) -> None:
@@ -1339,7 +1379,13 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
         # Validate absolute paths resolve inside a configured skill directory
         real = os.path.realpath(name)
         allowed_roots = [os.path.realpath(c) for c in app.cfg.skill_dirs()]
-        if not any(real.startswith(root + os.sep) or real == root for root in allowed_roots):
+        if any(real == root for root in allowed_roots):
+            click.echo(
+                f"error: path {name!r} must point to a specific skill directory, not the skill root",
+                err=True,
+            )
+            raise SystemExit(1)
+        if not any(real.startswith(root + os.sep) for root in allowed_roots):
             click.echo(
                 f"error: path {name!r} is not inside a configured skill directory\n"
                 f"  Allowed roots: {', '.join(allowed_roots)}",
@@ -1409,7 +1455,20 @@ def restore(app: AppContext, name: str, restore_path: str) -> None:
             raise SystemExit(1)
         restore_path = entry.source_path
 
-    if not se.restore(skill_name, restore_path):
+    allowed_roots = app.cfg.skill_dirs() if hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs) else None
+    real_restore = os.path.realpath(restore_path)
+    if allowed_roots:
+        if not any(
+            real_restore.startswith(os.path.realpath(r) + os.sep) or real_restore == os.path.realpath(r)
+            for r in allowed_roots
+        ):
+            click.echo(
+                "error: restore path must be within configured skill directories",
+                err=True,
+            )
+            raise SystemExit(1)
+
+    if not se.restore(skill_name, restore_path, allowed_roots=allowed_roots):
         click.echo(f"error: restore failed for {skill_name!r}", err=True)
         raise SystemExit(1)
 
@@ -1655,7 +1714,10 @@ def _run_clawhub_install(skill_name: str, force: bool) -> None:
     if force:
         args.append("--force")
     try:
-        subprocess.run(args, check=True)
+        subprocess.run(args, check=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        click.echo("error: clawhub install timed out after 300s", err=True)
+        raise SystemExit(1)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         click.echo(f"error: clawhub install failed: {exc}", err=True)
         raise SystemExit(1)

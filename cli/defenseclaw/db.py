@@ -78,6 +78,21 @@ CREATE TABLE IF NOT EXISTS actions (
     updated_at DATETIME NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS network_egress_events (
+    id TEXT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    session_id TEXT,
+    hostname TEXT NOT NULL,
+    url TEXT,
+    http_method TEXT,
+    protocol TEXT,
+    policy_outcome TEXT NOT NULL,
+    decision_code TEXT,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT 'INFO',
+    details TEXT
+);
+
 CREATE TABLE IF NOT EXISTS target_snapshots (
     id TEXT PRIMARY KEY,
     target_type TEXT NOT NULL,
@@ -97,6 +112,10 @@ CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
 CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
+CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
+CREATE INDEX IF NOT EXISTS idx_egress_session ON network_egress_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_target ON target_snapshots(target_type, target_path);
 """
 
@@ -466,6 +485,9 @@ class Store:
                 "SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')"
             ),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+            blocked_egress_calls=_count(
+                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
+            ),
         )
 
     # -- Row converters --

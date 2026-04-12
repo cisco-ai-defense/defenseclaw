@@ -19,6 +19,7 @@ package watcher
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -107,14 +108,33 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 	endpointSet := make(map[string]bool)
 	var allHashes []string
 
+	realRoot, _ := filepath.EvalSymlinks(root)
+	if realRoot == "" {
+		realRoot = root
+	}
+
+	var walkErrors int
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			walkErrors++
+			if walkErrors <= 5 {
+				fmt.Fprintf(os.Stderr, "[snapshot] walk error %s: %v\n", path, err)
+			}
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if info.IsDir() {
 			base := info.Name()
 			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".venv" || base == "venv" {
 				return filepath.SkipDir
+			}
+			if path != root {
+				realDir, linkErr := filepath.EvalSymlinks(path)
+				if linkErr == nil && !strings.HasPrefix(realDir, realRoot+string(filepath.Separator)) && realDir != realRoot {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -125,6 +145,10 @@ func SnapshotTarget(root string) (*TargetSnapshot, error) {
 
 		h, hashErr := hashFile(path)
 		if hashErr != nil {
+			walkErrors++
+			if walkErrors <= 5 {
+				fmt.Fprintf(os.Stderr, "[snapshot] hash error %s: %v\n", path, hashErr)
+			}
 			return nil
 		}
 		allHashes = append(allHashes, rel+":"+h)

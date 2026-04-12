@@ -281,7 +281,19 @@ func (s *Store) ensureRunIDColumns() error {
 	return nil
 }
 
+// knownTables is the set of tables hasColumn is allowed to inspect.
+var knownTables = map[string]bool{
+	"audit_events":          true,
+	"scan_results":          true,
+	"actions":               true,
+	"target_snapshots":      true,
+	"network_egress_events": true,
+}
+
 func (s *Store) hasColumn(table, column string) (bool, error) {
+	if !knownTables[table] {
+		return false, fmt.Errorf("audit: hasColumn called with unknown table %q", table)
+	}
 	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false, fmt.Errorf("audit: pragma table_info(%s): %w", table, err)
@@ -799,7 +811,7 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		args = append(args, f.SessionID)
 	}
 	if !f.Since.IsZero() {
-		query += " AND timestamp >= ?"
+		query += " AND julianday(timestamp) >= julianday(?)"
 		args = append(args, f.Since.UTC().Format(time.RFC3339Nano))
 	}
 	if f.Blocked != nil {
@@ -810,7 +822,7 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		query += " AND blocked = ?"
 		args = append(args, blocked)
 	}
-	query += " ORDER BY timestamp DESC LIMIT ?"
+	query += " ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.Query(query, args...)
@@ -886,18 +898,18 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 
 // NetworkEgressRow is the persisted shape of a network_egress_events row.
 type NetworkEgressRow struct {
-	ID           string    `json:"id"`
-	Timestamp    time.Time `json:"timestamp"`
-	SessionID    string    `json:"session_id,omitempty"`
-	Hostname     string    `json:"hostname"`
-	URL          string    `json:"url,omitempty"`
-	HTTPMethod   string    `json:"http_method,omitempty"`
-	Protocol     string    `json:"protocol,omitempty"`
-	PolicyOutcome string   `json:"policy_outcome"`
-	DecisionCode string    `json:"decision_code,omitempty"`
-	Blocked      bool      `json:"blocked"`
-	Severity     string    `json:"severity"`
-	Details      string    `json:"details,omitempty"`
+	ID            string    `json:"id"`
+	Timestamp     time.Time `json:"timestamp"`
+	SessionID     string    `json:"session_id,omitempty"`
+	Hostname      string    `json:"hostname"`
+	URL           string    `json:"url,omitempty"`
+	HTTPMethod    string    `json:"http_method,omitempty"`
+	Protocol      string    `json:"protocol,omitempty"`
+	PolicyOutcome string    `json:"policy_outcome"`
+	DecisionCode  string    `json:"decision_code,omitempty"`
+	Blocked       bool      `json:"blocked"`
+	Severity      string    `json:"severity"`
+	Details       string    `json:"details,omitempty"`
 }
 
 // InsertNetworkEgressEvent persists one outbound network call as a structured row.
@@ -990,14 +1002,15 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 		rows, err = s.db.Query(
 			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
-			 FROM network_egress_events ORDER BY timestamp DESC LIMIT ?`, limit,
+			 FROM network_egress_events
+			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
 		)
 	} else {
 		rows, err = s.db.Query(
 			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
-			 ORDER BY timestamp DESC LIMIT ?`, hostname, limit,
+			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, hostname, limit,
 		)
 	}
 	if err != nil {
@@ -1049,7 +1062,7 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 	var ts string
 	err := row.Scan(&r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("audit: get target snapshot: %w", err)
 	}
 	r.CapturedAt, _ = time.Parse(time.RFC3339Nano, ts)
 	if r.CapturedAt.IsZero() {

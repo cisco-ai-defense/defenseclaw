@@ -48,7 +48,9 @@ class PluginEnforcer:
         shutil.move(real_path, dest)
         return dest
 
-    def restore(self, plugin_name: str, restore_path: str) -> bool:
+    def restore(
+        self, plugin_name: str, restore_path: str, allowed_roots: list[str] | None = None
+    ) -> bool:
         """Restore a quarantined plugin to its original location."""
         safe_name = os.path.basename(plugin_name)
         if not safe_name or safe_name != plugin_name:
@@ -58,6 +60,13 @@ class PluginEnforcer:
             return False
         if not os.path.exists(src):
             return False
+        real_dest = os.path.realpath(restore_path)
+        if allowed_roots:
+            if not any(
+                real_dest == os.path.realpath(r) or real_dest.startswith(os.path.realpath(r) + os.sep)
+                for r in allowed_roots
+            ):
+                return False
         os.makedirs(os.path.dirname(restore_path), exist_ok=True)
         shutil.move(src, restore_path)
         return True

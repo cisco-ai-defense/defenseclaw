@@ -119,6 +119,33 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0].severity, "HIGH")
 
+    def test_store_init_creates_network_egress_schema_and_counts(self):
+        tables = {
+            row[0]
+            for row in self.store.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        self.assertIn("network_egress_events", tables)
+
+        self.store.db.execute(
+            """INSERT INTO network_egress_events
+               (id, timestamp, hostname, policy_outcome, blocked, severity)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "egress-1",
+                datetime.now(timezone.utc).isoformat(),
+                "evil.example",
+                "Denied by policy",
+                1,
+                "HIGH",
+            ),
+        )
+        self.store.db.commit()
+
+        counts = self.store.get_counts()
+        self.assertEqual(counts.blocked_egress_calls, 1)
+
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()
         os.unlink(self.tmp.name)
