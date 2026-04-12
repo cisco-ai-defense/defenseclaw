@@ -79,24 +79,25 @@ def scan_plugin(
 
     # --- Load manifest ---
     manifest = _load_manifest(target)
+    manifest_missing_finding: Finding | None = None
     if manifest is None:
-        findings = [
-            make_finding(
-                1,
-                rule_id="MANIFEST-MISSING",
-                severity="MEDIUM",
-                confidence=1.0,
-                title="No plugin manifest found",
-                description=(
-                    "Plugin directory lacks a package.json, manifest.json, or plugin.json. "
-                    "Cannot verify plugin identity, version, or declared permissions."
-                ),
-                location=target,
-                remediation="Add a package.json with name, version, and permissions fields.",
-                tags=["supply-chain"],
-            )
-        ]
-        return build_result(target, findings, start_ms)
+        manifest_missing_finding = make_finding(
+            1,
+            rule_id="MANIFEST-MISSING",
+            severity="HIGH",
+            confidence=1.0,
+            title="No plugin manifest found",
+            description=(
+                "Plugin directory lacks a package.json, manifest.json, plugin.json, "
+                "or openclaw.plugin.json. Cannot verify plugin identity, version, "
+                "or declared permissions. Source scanning will still run."
+            ),
+            location=target,
+            remediation="Add a package.json with name, version, and permissions fields.",
+            tags=["supply-chain"],
+        )
+        # Synthetic manifest so the analyzer pipeline still runs
+        manifest = PluginManifest(name="unknown", source="none")
 
     # --- Build analyzer pipeline (respecting policy toggles + LLM config) ---
     analyzers = build_analyzers(
@@ -119,6 +120,8 @@ def scan_plugin(
 
     # --- Run analyzers sequentially ---
     all_findings: list[Finding] = []
+    if manifest_missing_finding is not None:
+        all_findings.append(manifest_missing_finding)
 
     for analyzer in analyzers:
         # Feed accumulated findings to meta analyzer
@@ -161,7 +164,8 @@ def scan_plugin(
 
 
 def _load_manifest(directory: str) -> PluginManifest | None:
-    for name in ("package.json", "manifest.json", "plugin.json"):
+    # Include openclaw.plugin.json so OpenClaw-only plugins get a full scan
+    for name in ("package.json", "manifest.json", "plugin.json", "openclaw.plugin.json"):
         try:
             with open(os.path.join(directory, name), encoding="utf-8") as fh:
                 raw = json.loads(fh.read())
@@ -175,8 +179,10 @@ def _normalize_manifest(
     raw: dict,
     filename: str,
 ) -> PluginManifest:
+    # openclaw.plugin.json uses "id" instead of "name"
+    name = raw.get("name") or raw.get("id") or os.path.basename(filename)
     manifest = PluginManifest(
-        name=str(raw.get("name", os.path.basename(filename))),
+        name=str(name),
         version=raw.get("version") if isinstance(raw.get("version"), str) else None,
         description=raw.get("description") if isinstance(raw.get("description"), str) else None,
         source=filename,

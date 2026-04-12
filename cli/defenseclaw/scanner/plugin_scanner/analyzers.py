@@ -337,6 +337,74 @@ def check_tool(
 # ---------------------------------------------------------------------------
 
 
+def _emit_collection_findings(
+    findings: list[Finding],
+    symlink_escapes: list[str],
+    depth_truncations: list[str],
+    directory: str,
+    scan_label: str,
+    oversized_files: list[str] | None = None,
+) -> None:
+    """Emit findings for anomalies detected during file collection.
+
+    Centralises the symlink-escape, depth-truncation, and oversized-file
+    finding blocks that would otherwise be duplicated in every scan function
+    that calls collect_files.
+    """
+    label_suffix = f" ({scan_label})" if scan_label else ""
+
+    for esc in symlink_escapes:
+        rel = esc.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="STRUCT-SYMLINK-ESCAPE",
+            severity="HIGH",
+            confidence=0.95,
+            title=f"Symlink escapes plugin directory{label_suffix}",
+            description=(
+                f"Symlink at '{rel}' points outside the plugin root. "
+                "This could allow the plugin to read host files."
+            ),
+            location=rel,
+            remediation="Remove symlinks that reference paths outside the plugin directory.",
+            tags=["supply-chain"],
+        ))
+
+    for trunc in depth_truncations:
+        rel = trunc.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="SCAN-DEPTH-LIMIT",
+            severity="MEDIUM",
+            confidence=0.9,
+            title=f"Directory depth limit reached{label_suffix}",
+            description=(
+                f"Directory '{rel}' was not scanned because it exceeds the depth limit. "
+                "A plugin may hide malicious code in deeply nested directories."
+            ),
+            location=rel,
+            remediation="Inspect deeply nested directories manually.",
+            tags=["supply-chain"],
+        ))
+
+    for path in (oversized_files or []):
+        rel = path.replace(directory + os.sep, "")
+        findings.append(make_finding(
+            0,
+            rule_id="SCAN-OVERSIZED-FILE",
+            severity="LOW",
+            confidence=0.9,
+            title=f"File skipped: exceeds size limit{label_suffix}",
+            description=(
+                f"File '{rel}' exceeds the per-file size limit and was not scanned. "
+                "Oversized files may be used to evade static analysis."
+            ),
+            location=rel,
+            remediation="Investigate oversized files and remove them if unnecessary.",
+            tags=["supply-chain"],
+        ))
+
+
 def scan_source_files(
     directory: str,
     findings: list[Finding],
@@ -344,7 +412,19 @@ def scan_source_files(
     profile: str,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes)."""
-    ts_files = collect_files(directory, [".ts", ".js", ".mjs"])
+    symlink_escapes: list[str] = []
+    depth_truncations: list[str] = []
+    oversized_files: list[str] = []
+    ts_files = collect_files(
+        directory,
+        [".ts", ".js", ".mjs"],
+        max_file_bytes=2 * 1024 * 1024,
+        _symlink_escapes=symlink_escapes,
+        _depth_truncations=depth_truncations,
+        _oversized_files=oversized_files,
+    )
+    _emit_collection_findings(findings, symlink_escapes, depth_truncations, directory, "source", oversized_files)
+
     total_bytes = 0
 
     for file_path in ts_files:
@@ -355,8 +435,6 @@ def scan_source_files(
             continue
 
         total_bytes += len(content)
-        if len(content) > 512 * 1024:
-            continue
 
         # Normalise path separators for consistent matching
         rel_path = file_path.replace(directory + os.sep, "").replace(os.sep, "/")
@@ -1171,7 +1249,18 @@ def scan_json_configs(
     directory: str,
     findings: list[Finding],
 ) -> None:
-    json_files = collect_files(directory, [".json"], 3)
+    symlink_escapes: list[str] = []
+    depth_truncations: list[str] = []
+    oversized_files: list[str] = []
+    json_files = collect_files(
+        directory,
+        [".json"],
+        max_file_bytes=256 * 1024,
+        _symlink_escapes=symlink_escapes,
+        _depth_truncations=depth_truncations,
+        _oversized_files=oversized_files,
+    )
+    _emit_collection_findings(findings, symlink_escapes, depth_truncations, directory, "JSON", oversized_files)
 
     for file_path in json_files:
         basename = os.path.basename(file_path)
@@ -1184,9 +1273,6 @@ def scan_json_configs(
                 content = fh.read()
         except OSError:
             continue
-
-        if len(content) > 256 * 1024:
-            continue  # skip very large JSON
 
         rel_path = file_path.replace(directory + os.sep, "").replace(os.sep, "/")
         if not rel_path.startswith("/"):
