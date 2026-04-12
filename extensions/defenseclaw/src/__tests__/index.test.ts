@@ -21,7 +21,7 @@ import type { ScanResult } from "../types.js";
 
 // --- Hoisted mocks (available before module-level vi.mock factories) ---
 
-const { mockEnforcer, mockRunSkillScan, mockScanPlugin, mockScanMCPServer } =
+const { mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockScanMCPServer } =
   vi.hoisted(() => ({
     mockEnforcer: {
       syncFromDaemon: vi.fn(),
@@ -31,7 +31,7 @@ const { mockEnforcer, mockRunSkillScan, mockScanPlugin, mockScanMCPServer } =
       allow: vi.fn(),
     },
     mockRunSkillScan: vi.fn(),
-    mockScanPlugin: vi.fn(),
+    mockRunPluginScan: vi.fn(),
     mockScanMCPServer: vi.fn(),
   }));
 
@@ -46,10 +46,7 @@ vi.mock("../client.js", () => ({
 vi.mock("../policy/enforcer.js", () => ({
   PolicyEnforcer: vi.fn(() => mockEnforcer),
   runSkillScan: mockRunSkillScan,
-}));
-
-vi.mock("../scanners/plugin_scanner/index.js", () => ({
-  scanPlugin: mockScanPlugin,
+  runPluginScan: mockRunPluginScan,
 }));
 
 vi.mock("../scanners/mcp-scanner.js", () => ({
@@ -141,12 +138,12 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
 
     it("runs plugin scan when type=plugin", async () => {
-      mockScanPlugin.mockResolvedValue(makeScanResult());
+      mockRunPluginScan.mockResolvedValue(makeScanResult());
 
       const result = await commands["scan"].handler({ args: { target: "/plugins/test", type: "plugin" } });
 
       expect(result.text).toContain("Plugin Scan");
-      expect(mockScanPlugin).toHaveBeenCalledWith("/plugins/test");
+      expect(mockRunPluginScan).toHaveBeenCalledWith("/plugins/test");
     });
 
     it("runs mcp scan when type=mcp", async () => {
