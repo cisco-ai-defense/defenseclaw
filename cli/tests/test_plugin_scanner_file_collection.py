@@ -18,6 +18,7 @@
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -29,10 +30,11 @@ from defenseclaw.scanner.plugin_scanner.scanner import _load_manifest, scan_plug
 
 
 class TestCollectFilesSymlinks(unittest.TestCase):
-    """F-0361: symlinks that escape the scan root must be skipped."""
+    """Symlinks that escape the scan root must be skipped."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         # Plugin root
         self.plugin_dir = os.path.join(self.tmp, "plugin")
         os.makedirs(os.path.join(self.plugin_dir, "src"))
@@ -88,10 +90,11 @@ class TestCollectFilesSymlinks(unittest.TestCase):
 
 
 class TestCollectFilesDotDirs(unittest.TestCase):
-    """F-0342: dot-prefixed dirs should be scanned unless they're known-benign."""
+    """Dot-prefixed dirs should be scanned unless they're known-benign."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.plugin_dir = os.path.join(self.tmp, "plugin")
         os.makedirs(self.plugin_dir)
 
@@ -129,10 +132,11 @@ class TestCollectFilesDotDirs(unittest.TestCase):
 
 
 class TestCollectFilesDepthLimit(unittest.TestCase):
-    """F-0341: depth limit should be high enough for real plugins, and truncation should be reported."""
+    """Depth limit should be high enough for real plugins, and truncation should be reported."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
         self.plugin_dir = os.path.join(self.tmp, "plugin")
         # Create a deeply nested directory (depth 6)
         deep = self.plugin_dir
@@ -171,10 +175,11 @@ class TestCollectFilesDepthLimit(unittest.TestCase):
 
 
 class TestLoadManifestOpenClaw(unittest.TestCase):
-    """F-0343: _load_manifest should recognize openclaw.plugin.json."""
+    """_load_manifest should recognize openclaw.plugin.json."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
 
     def test_openclaw_plugin_json_is_loaded(self):
         """A plugin with only openclaw.plugin.json should get a manifest."""
@@ -223,10 +228,13 @@ class TestLoadManifestOpenClaw(unittest.TestCase):
 class TestNoManifestStillScans(unittest.TestCase):
     """A plugin with no manifest at all should still get source-scanned."""
 
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
     def test_no_manifest_still_finds_eval(self):
         """Even without any manifest, source scanning should catch eval()."""
-        tmp = tempfile.mkdtemp()
-        plugin_dir = os.path.join(tmp, "no_manifest_plugin")
+        plugin_dir = os.path.join(self.tmp, "no_manifest_plugin")
         os.makedirs(os.path.join(plugin_dir, "src"))
         with open(os.path.join(plugin_dir, "src", "bad.js"), "w") as f:
             f.write("eval('malicious code')")
@@ -243,14 +251,61 @@ class TestNoManifestStillScans(unittest.TestCase):
 
     def test_no_manifest_finding_is_high_severity(self):
         """MANIFEST-MISSING should be HIGH, not MEDIUM."""
-        tmp = tempfile.mkdtemp()
-        plugin_dir = os.path.join(tmp, "empty_plugin")
+        plugin_dir = os.path.join(self.tmp, "empty_plugin")
         os.makedirs(plugin_dir)
 
         result = scan_plugin(plugin_dir)
         manifest_findings = [f for f in result.findings if f.rule_id == "MANIFEST-MISSING"]
         self.assertEqual(len(manifest_findings), 1)
         self.assertEqual(manifest_findings[0].severity, "HIGH")
+
+
+class TestCollectFilesSymlinkedFiles(unittest.TestCase):
+    """A symlinked file pointing outside the scan root must also be caught."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.plugin_dir = os.path.join(self.tmp, "plugin")
+        os.makedirs(os.path.join(self.plugin_dir, "src"))
+        # Legitimate file inside the plugin
+        with open(os.path.join(self.plugin_dir, "src", "index.js"), "w") as f:
+            f.write("console.log('legit');")
+        # External file outside the plugin root
+        self.external_dir = os.path.join(self.tmp, "external")
+        os.makedirs(self.external_dir)
+        self.external_file = os.path.join(self.external_dir, "secret.js")
+        with open(self.external_file, "w") as f:
+            f.write("// host secret")
+
+    def test_file_symlink_escaping_root_is_skipped(self):
+        """A .js file symlink pointing outside the plugin root should be blocked and recorded."""
+        link_path = os.path.join(self.plugin_dir, "src", "escape.js")
+        os.symlink(self.external_file, link_path)
+
+        escapes: list[str] = []
+        files = collect_files(self.plugin_dir, [".js"], _symlink_escapes=escapes)
+
+        basenames = [os.path.basename(f) for f in files]
+        self.assertNotIn("escape.js", basenames, "Symlinked file outside root must not be collected")
+        self.assertIn("index.js", basenames, "Legitimate file must still be collected")
+        self.assertEqual(len(escapes), 1)
+        self.assertIn("escape.js", escapes[0])
+
+    def test_file_symlink_within_root_is_collected(self):
+        """A .js file symlink that stays inside the plugin root should be included normally."""
+        internal_file = os.path.join(self.plugin_dir, "src", "util.js")
+        with open(internal_file, "w") as f:
+            f.write("// util")
+        link_path = os.path.join(self.plugin_dir, "src", "util_link.js")
+        os.symlink(internal_file, link_path)
+
+        escapes: list[str] = []
+        files = collect_files(self.plugin_dir, [".js"], _symlink_escapes=escapes)
+
+        basenames = [os.path.basename(f) for f in files]
+        self.assertIn("util.js", basenames)
+        self.assertEqual(len(escapes), 0, "Internal file symlink should not be flagged as escape")
 
 
 if __name__ == "__main__":

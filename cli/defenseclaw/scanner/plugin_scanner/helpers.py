@@ -127,12 +127,14 @@ def downgrade(severity: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Directories that are always safe to skip (build artifacts, VCS, IDE config).
+# Directories that are always safe to skip (build artifacts, VCS, IDE config,
+# and Python virtual environments).
 _SKIP_DIRS: frozenset[str] = frozenset({
     "node_modules", "dist", "build", "coverage",
     ".git", ".svn", ".hg",
     ".vscode", ".idea",
     ".tox", "__pycache__", ".mypy_cache",
+    "venv", ".venv", "env",
 })
 
 # Safety cap — high enough for any real plugin tree, low enough to bound cost.
@@ -143,12 +145,14 @@ def collect_files(
     directory: str,
     extensions: list[str],
     max_depth: int = _MAX_DEPTH,
+    max_file_bytes: int = 2 * 1024 * 1024,
     _depth: int = 0,
     *,
     _scan_root: str | None = None,
     _seen_inodes: set[int] | None = None,
     _symlink_escapes: list[str] | None = None,
     _depth_truncations: list[str] | None = None,
+    _oversized_files: list[str] | None = None,
 ) -> list[str]:
     """Recursively collect files with given extensions.
 
@@ -156,6 +160,8 @@ def collect_files(
     - Inode tracking prevents symlink cycles.
     - Only known-benign directories are skipped; other dot-prefixed dirs are scanned.
     - Depth limit raised to 20; truncated directories are recorded.
+    - Files exceeding *max_file_bytes* are skipped and recorded in *_oversized_files*
+      without being read, preventing memory exhaustion from crafted large files.
     """
     if _scan_root is None:
         _scan_root = os.path.realpath(directory)
@@ -184,6 +190,10 @@ def collect_files(
         full_path = os.path.join(directory, entry)
         try:
             # --- Symlink containment ---
+            # NOTE: There is a theoretical TOCTOU race between os.path.islink()
+            # and os.path.realpath(): the symlink target could change between
+            # the two calls. Acceptable for static plugin scanning where the
+            # directory is not modified concurrently.
             if os.path.islink(full_path):
                 real = os.path.realpath(full_path)
                 # Block symlinks that escape the scan root
@@ -204,14 +214,24 @@ def collect_files(
                     full_path,
                     extensions,
                     max_depth,
+                    max_file_bytes,
                     _depth + 1,
                     _scan_root=_scan_root,
                     _seen_inodes=_seen_inodes,
                     _symlink_escapes=_symlink_escapes,
                     _depth_truncations=_depth_truncations,
+                    _oversized_files=_oversized_files,
                 )
                 files.extend(nested)
             elif any(entry.endswith(ext) for ext in extensions):
+                if max_file_bytes > 0:
+                    try:
+                        if os.path.getsize(full_path) > max_file_bytes:
+                            if _oversized_files is not None:
+                                _oversized_files.append(full_path)
+                            continue
+                    except OSError:
+                        pass
                 files.append(full_path)
         except OSError:
             continue
