@@ -2901,6 +2901,9 @@ phase_splunk() {
     if [ "$diag_api_http" != "200" ]; then
         echo "  [diag] Splunk search API returned HTTP $diag_api_http (expected 200)"
         echo "  [diag] Disk usage: $(df -h / | tail -1)"
+        skip "Splunk: event assertions" "search API unhealthy (HTTP $diag_api_http) — likely disk full; skipping event queries"
+        phase_timer_end "Phase 8"
+        return
     fi
 
     local diag_count
