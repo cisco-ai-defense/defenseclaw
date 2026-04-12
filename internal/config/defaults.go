@@ -136,6 +136,7 @@ func DefaultConfig() *Config {
 				PII:           true,
 				PIIPrompt:     true,
 				PIICompletion: true,
+				ToolInjection: true,
 				Timeout:       30.0,
 			},
 		},

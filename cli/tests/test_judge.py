@@ -85,6 +85,31 @@ class TestCLIFlagParsing(unittest.TestCase):
         self.assertFalse(gc.judge.pii_prompt)
         self.assertTrue(gc.judge.pii_completion)
 
+    def test_judge_tool_injection_default(self):
+        from defenseclaw.config import JudgeConfig
+
+        cfg = JudgeConfig()
+        self.assertTrue(cfg.tool_injection)
+
+    def test_judge_tool_injection_from_dict(self):
+        from defenseclaw.config import _merge_guardrail
+
+        raw = {
+            "enabled": True,
+            "judge": {
+                "enabled": True,
+                "tool_injection": False,
+            },
+        }
+        gc = _merge_guardrail(raw, "/tmp/test")
+        self.assertFalse(gc.judge.tool_injection)
+
+    def test_judge_tool_injection_absent_defaults_true(self):
+        from defenseclaw.config import _merge_guardrail
+
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
+        self.assertTrue(gc.judge.tool_injection)
+
 
 if __name__ == "__main__":
     unittest.main()

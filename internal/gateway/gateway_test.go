@@ -4384,3 +4384,91 @@ func TestSidecarHealthSandboxConcurrency(t *testing.T) {
 		t.Errorf("Sandbox state after concurrency = %q, want %q", snap.Sandbox.State, StateRunning)
 	}
 }
+
+func TestToolInjectionToVerdict(t *testing.T) {
+	clean := func(cats ...string) map[string]interface{} {
+		all := []string{"Instruction Manipulation", "Context Manipulation", "Obfuscation", "Data Exfiltration", "Destructive Commands"}
+		d := map[string]interface{}{}
+		flagged := map[string]bool{}
+		for _, c := range cats {
+			flagged[c] = true
+		}
+		for _, c := range all {
+			d[c] = map[string]interface{}{"reasoning": "test", "label": flagged[c]}
+		}
+		return d
+	}
+
+	t.Run("clean", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean())
+		if v.Action != "allow" {
+			t.Errorf("action = %q, want allow", v.Action)
+		}
+	})
+
+	// Single soft flag (Obfuscation alone) → MEDIUM/alert, not block.
+	t.Run("obfuscation alone is medium alert", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean("Obfuscation"))
+		if v.Action != "alert" {
+			t.Errorf("action = %q, want alert", v.Action)
+		}
+		if v.Severity != "MEDIUM" {
+			t.Errorf("severity = %q, want MEDIUM", v.Severity)
+		}
+	})
+
+	// Single soft flag (Instruction Manipulation alone) → MEDIUM/alert.
+	t.Run("instruction manipulation alone is medium alert", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean("Instruction Manipulation"))
+		if v.Action != "alert" {
+			t.Errorf("action = %q, want alert", v.Action)
+		}
+		if v.Severity != "MEDIUM" {
+			t.Errorf("severity = %q, want MEDIUM", v.Severity)
+		}
+	})
+
+	// Data Exfiltration alone → HIGH/block (structural signal, no benign interpretation).
+	t.Run("data exfiltration alone is high block", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean("Data Exfiltration"))
+		if v.Action != "block" {
+			t.Errorf("action = %q, want block", v.Action)
+		}
+		if v.Severity != "HIGH" {
+			t.Errorf("severity = %q, want HIGH", v.Severity)
+		}
+	})
+
+	// Destructive Commands alone → HIGH/block (structural signal).
+	t.Run("destructive commands alone is high block", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean("Destructive Commands"))
+		if v.Action != "block" {
+			t.Errorf("action = %q, want block", v.Action)
+		}
+		if v.Severity != "HIGH" {
+			t.Errorf("severity = %q, want HIGH", v.Severity)
+		}
+	})
+
+	// Two soft flags → HIGH/block (corroboration reached).
+	t.Run("two soft flags escalate to high block", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean("Obfuscation", "Instruction Manipulation"))
+		if v.Action != "block" {
+			t.Errorf("action = %q, want block", v.Action)
+		}
+		if v.Severity != "HIGH" {
+			t.Errorf("severity = %q, want HIGH", v.Severity)
+		}
+	})
+
+	// Three or more flags → CRITICAL/block.
+	t.Run("three flags escalate to critical", func(t *testing.T) {
+		v := toolInjectionToVerdict(clean("Obfuscation", "Instruction Manipulation", "Data Exfiltration"))
+		if v.Action != "block" {
+			t.Errorf("action = %q, want block", v.Action)
+		}
+		if v.Severity != "CRITICAL" {
+			t.Errorf("severity = %q, want CRITICAL", v.Severity)
+		}
+	})
+}
