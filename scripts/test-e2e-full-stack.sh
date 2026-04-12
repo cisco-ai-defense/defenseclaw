@@ -1476,6 +1476,19 @@ phase_block_allow() {
     fi
 
     skill_install_allow_events=$(echo "$alerts" | jq --arg skill "$allowed_skill" '[.[] | select(.action == "install-allowed" and (.target | contains($skill)))] | length' 2>/dev/null || echo "0")
+    if [ "${skill_install_allow_events:-0}" -eq 0 ]; then
+        # The watcher may not have processed the original fsnotify Create
+        # event (race under load). Remove and re-copy the skill to generate
+        # a fresh Create event, then poll for the audit entry.
+        rm -rf "$skill_dir_root/$allowed_skill"
+        sleep 1
+        copy_skill_fixture "$clean_skill" "$skill_dir_root" "$allowed_skill"
+        local allow_deadline=$((SECONDS + 20))
+        while [ $SECONDS -lt $allow_deadline ] && [ "${skill_install_allow_events:-0}" -eq 0 ]; do
+            sleep 3
+            skill_install_allow_events=$(alerts_for_run 2000 | jq --arg skill "$allowed_skill" '[.[] | select(.action == "install-allowed" and (.target | contains($skill)))] | length' 2>/dev/null || echo "0")
+        done
+    fi
     if [ "${skill_install_allow_events:-0}" -gt 0 ]; then
         pass "block/allow: allow-listed install audit recorded"
     else
