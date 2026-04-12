@@ -78,8 +78,8 @@
       "HIGH": 3,
       "CRITICAL": 4
     },
-    "block_threshold": 2,
-    "alert_threshold": 1,
+    "block_threshold": 3,
+    "alert_threshold": 2,
     "cisco_trust_level": "full",
     "patterns": {
       "injection": [

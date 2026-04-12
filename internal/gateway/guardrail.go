@@ -167,18 +167,59 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 // Local pattern scanning
 // ---------------------------------------------------------------------------
 
-var injectionPatterns = []string{
-	"ignore previous", "ignore all instructions", "ignore above",
-	"disregard previous", "disregard all", "you are now",
-	"act as", "pretend you are", "bypass", "jailbreak",
-	"do anything now", "dan mode",
+// injectionRule pairs a compiled regexp with a short finding name.
+// All rules fire only on direction=="prompt".
+type injectionRule struct {
+	re   *regexp.Regexp
+	name string
 }
 
+// injectionRules uses context-aware regexps rather than bare substrings.
+// A pattern must match both the injection verb AND its malicious target or
+// explicit restriction-removal qualifier before firing. This eliminates
+// false positives on normal operational phrasing ("act as a helpful
+// assistant", "you are now connected", "bypass this error").
+var injectionRules = []injectionRule{
+	// Explicit instruction override — clearest injection signal.
+	// Matches "ignore all instructions" (bare) and "ignore all previous instructions" (qualified).
+	{
+		regexp.MustCompile(`(?i)(?:ignore|disregard|forget|override)\s+(?:all\s+(?:previous\s+|prior\s+|above\s+|your\s+)?|(?:previous|prior|above|your)\s+)(?:instructions?|rules?|guidelines?|directives?|constraints?)`),
+		"instruction-override",
+	},
+	// Role-play as a malicious entity (named role).
+	{
+		regexp.MustCompile(`(?i)(?:act\s+as|pretend\s+(?:you\s+are|to\s+be)|simulate|roleplay\s+as)\s+(?:a\s+|an\s+)?(?:hacker|attacker|malicious|uncensored|unfiltered|unrestricted|jailbroken|evil|dangerous)`),
+		"malicious-role",
+	},
+	// Role-play combined with explicit restriction removal ("a system with no rules").
+	{
+		regexp.MustCompile(`(?i)(?:act\s+as|pretend\s+(?:you\s+are|to\s+be)|you\s+are(?:\s+now)?|roleplay).{0,50}?(?:no|without)\s+(?:any\s+)?(?:rules|restrictions|constraints|limits|guidelines|filters)`),
+		"no-restrictions-roleplay",
+	},
+	// "You are now" + explicit restriction-removal qualifier.
+	{
+		regexp.MustCompile(`(?i)you\s+are\s+now\s+(?:a\s+|an\s+)?(?:jailbroken|unrestricted|uncensored|unfiltered|dangerous|malicious|evil|hacked|different\s+ai|new\s+ai)`),
+		"you-are-now-unrestricted",
+	},
+	// Jailbreak vocabulary.
+	{regexp.MustCompile(`(?i)\bjailbreak\b`), "jailbreak"},
+	{regexp.MustCompile(`(?i)\bdan\s+mode\b`), "dan-mode"},
+	{regexp.MustCompile(`(?i)\bdo\s+anything\s+now\b`), "do-anything-now"},
+	// Prompt injection meta-vocabulary.
+	{regexp.MustCompile(`(?i)prompt\s+(?:injection|hacking|hijack)`), "prompt-injection-meta"},
+	{regexp.MustCompile(`(?i)hidden\s+instruction`), "hidden-instruction"},
+	{regexp.MustCompile(`(?i)system\s+prompt\s+(?:override|bypass|leak|extract)`), "system-prompt-attack"},
+}
+
+// secretPatterns matches credentials that are structurally identifiable —
+// patterns that require a specific prefix or key material format.
+// "token:" and "bearer " are omitted: without an accompanying value they
+// match routine CLI metadata and auth discussion, causing false positives.
 var secretPatterns = []string{
-	"sk-", "sk-ant-", "sk-proj-", "api_key=", "apikey=",
+	"sk-ant-", "sk-proj-", "sk-live_", "api_key=", "apikey=",
 	"-----begin rsa", "-----begin private", "-----begin openssh",
 	"aws_access_key", "aws_secret_access", "password=",
-	"token:", "bearer ", "ghp_", "gho_", "github_pat_",
+	"ghp_", "gho_", "github_pat_",
 }
 
 var exfilPatterns = []string{
@@ -189,16 +230,19 @@ var exfilPatterns = []string{
 func scanLocalPatterns(direction, content string) *ScanVerdict {
 	lower := strings.ToLower(content)
 	var flags []string
+	severity := "MEDIUM" // secrets default; injection/exfil upgrade to HIGH
 
 	if direction == "prompt" {
-		for _, p := range injectionPatterns {
-			if strings.Contains(lower, p) {
-				flags = append(flags, p)
+		for _, rule := range injectionRules {
+			if rule.re.MatchString(lower) {
+				flags = append(flags, rule.name)
+				severity = "HIGH"
 			}
 		}
 		for _, p := range exfilPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, p)
+				severity = "HIGH"
 			}
 		}
 	}
@@ -210,32 +254,6 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 
 	if len(flags) == 0 {
 		return allowVerdict("local-pattern")
-	}
-
-	severity := "MEDIUM"
-	for _, p := range injectionPatterns {
-		for _, f := range flags {
-			if f == p {
-				severity = "HIGH"
-				break
-			}
-		}
-		if severity == "HIGH" {
-			break
-		}
-	}
-	if severity == "MEDIUM" {
-		for _, p := range exfilPatterns {
-			for _, f := range flags {
-				if f == p {
-					severity = "HIGH"
-					break
-				}
-			}
-			if severity == "HIGH" {
-				break
-			}
-		}
 	}
 
 	action := "alert"
