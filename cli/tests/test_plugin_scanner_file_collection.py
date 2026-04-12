@@ -359,7 +359,12 @@ class TestCollectFilesSymlinkedFiles(unittest.TestCase):
         files = collect_files(self.plugin_dir, [".js"], _symlink_escapes=escapes)
 
         basenames = [os.path.basename(f) for f in files]
-        self.assertIn("util.js", basenames)
+        util_variants = {"util.js", "util_link.js"}
+        collected = util_variants & set(basenames)
+        self.assertTrue(
+            len(collected) == 1,
+            f"Inode dedup should collect exactly one of util.js / util_link.js, got {collected}",
+        )
         self.assertEqual(len(escapes), 0, "Internal file symlink should not be flagged as escape")
 
 

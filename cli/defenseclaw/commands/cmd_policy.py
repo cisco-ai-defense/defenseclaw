@@ -418,7 +418,12 @@ def activate(app: AppContext, name: str) -> None:
         info=_parse_action(actions_raw.get("info", {})),
     )
 
+    watch_raw = data.get("watch", {})
     app.cfg.skill_actions = new_actions
+    if "rescan_enabled" in watch_raw:
+        app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
+    if "rescan_interval_min" in watch_raw:
+        app.cfg.watch.rescan_interval_min = int(watch_raw["rescan_interval_min"])
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
 

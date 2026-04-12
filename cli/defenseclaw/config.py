@@ -295,6 +295,9 @@ class OpenShellConfig:
 class WatchConfig:
     debounce_ms: int = 500
     auto_block: bool = True
+    allow_list_bypass_scan: bool = True
+    rescan_enabled: bool = True
+    rescan_interval_min: int = 60
 
 
 @dataclass
@@ -1051,6 +1054,9 @@ def load() -> Config:
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),
+            allow_list_bypass_scan=raw.get("watch", {}).get("allow_list_bypass_scan", True),
+            rescan_enabled=raw.get("watch", {}).get("rescan_enabled", True),
+            rescan_interval_min=raw.get("watch", {}).get("rescan_interval_min", 60),
         ),
         firewall=FirewallConfig(
             config_file=raw.get("firewall", {}).get("config_file", os.path.join(data_dir, "firewall.yaml")),

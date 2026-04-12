@@ -52,14 +52,14 @@ type activeAgent struct {
 // EventRouter dispatches gateway events to the appropriate handlers and logs
 // everything to the audit store.
 type EventRouter struct {
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
-	policy *enforce.PolicyEngine
-	otel   *telemetry.Provider
-	notify *NotificationQueue
+	client   *Client
+	store    *audit.Store
+	logger   *audit.Logger
+	policy   *enforce.PolicyEngine
+	otel     *telemetry.Provider
+	notify   *NotificationQueue
 	judge    *LLMJudge
-	judgeSem chan struct{} // bounds concurrent tool-judge goroutines
+	judgeSem chan struct{} // bounds concurrent active tool-judge executions
 
 	autoApprove      bool
 	activeToolSpans  map[string][]*activeSpan
@@ -771,32 +771,27 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		}
 	}
 
-	// LLM judge — runs tool injection detection on arguments (async, bounded).
-	// The semaphore caps concurrent judge goroutines; excess calls are dropped
-	// with a warning to prevent unbounded goroutine accumulation.
+	// LLM judge — runs tool injection detection on arguments asynchronously.
+	// The semaphore bounds concurrent judge executions while queued goroutines
+	// wait for a slot instead of dropping inspection entirely.
 	if r.judge != nil && len(payload.Args) > 0 {
-		select {
-		case r.judgeSem <- struct{}{}:
-			go func(tool string, args json.RawMessage) {
-				defer func() { <-r.judgeSem }()
-				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer cancel()
-				verdict := r.judge.RunToolJudge(ctx, tool, string(args))
-				if verdict.Severity != "NONE" {
-					fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
-						tool, verdict.Severity, verdict.Reason)
-					_ = r.logger.LogAction("gateway-tool-call-judge-flagged", tool,
-						fmt.Sprintf("severity=%s findings=%d reason=%s",
-							verdict.Severity, len(verdict.Findings), verdict.Reason))
-					if r.otel != nil {
-						r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
-					}
+		go func(tool string, args json.RawMessage) {
+			r.judgeSem <- struct{}{}
+			defer func() { <-r.judgeSem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
+			if verdict.Severity != "NONE" {
+				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
+					tool, verdict.Severity, verdict.Reason)
+				_ = r.logger.LogAction("gateway-tool-call-judge-flagged", tool,
+					fmt.Sprintf("severity=%s findings=%d reason=%s",
+						verdict.Severity, len(verdict.Findings), verdict.Reason))
+				if r.otel != nil {
+					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
 				}
-			}(payload.Tool, payload.Args)
-		default:
-			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge backlog full, dropping tool call: %s\n", payload.Tool)
-			_ = r.logger.LogAction("gateway-tool-call-judge-dropped", payload.Tool, "reason=backlog-full")
-		}
+			}
+		}(payload.Tool, payload.Args)
 	}
 
 	if r.otel != nil {

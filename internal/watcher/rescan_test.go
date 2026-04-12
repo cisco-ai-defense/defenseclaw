@@ -18,6 +18,8 @@ package watcher
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -410,5 +412,95 @@ func TestDriftDelta_JSONRoundtrip(t *testing.T) {
 	}
 	if decoded.Severity != delta.Severity {
 		t.Errorf("severity mismatch: %s != %s", decoded.Severity, delta.Severity)
+	}
+}
+
+func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("PATH", "")
+
+	pluginDir := filepath.Join(cfg.DataDir, "plugins")
+	if err := os.MkdirAll(filepath.Join(skillDir, "watched-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(pluginDir, "watched-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
+	ocData := `{
+		"mcp": {
+			"servers": {
+				"remote-mcp": {"url": "https://example.com/mcp"},
+				"stdio-mcp": {"command": "npx", "args": ["-y", "mcp-server"]}
+			}
+		}
+	}`
+	if err := os.WriteFile(ocPath, []byte(ocData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = ocPath
+
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil, nil, nil)
+	targets := w.enumerateTargets()
+
+	seen := make(map[InstallType]map[string]InstallEvent)
+	for _, target := range targets {
+		if seen[target.Type] == nil {
+			seen[target.Type] = make(map[string]InstallEvent)
+		}
+		seen[target.Type][target.Name] = target
+	}
+
+	if _, ok := seen[InstallSkill]["watched-skill"]; !ok {
+		t.Fatalf("expected watched skill in targets, got %+v", targets)
+	}
+	if _, ok := seen[InstallPlugin]["watched-plugin"]; !ok {
+		t.Fatalf("expected watched plugin in targets, got %+v", targets)
+	}
+	if evt, ok := seen[InstallMCP]["remote-mcp"]; !ok {
+		t.Fatalf("expected remote MCP in targets, got %+v", targets)
+	} else if evt.Path != "remote-mcp" {
+		t.Fatalf("remote MCP path = %q, want server name", evt.Path)
+	}
+	if evt, ok := seen[InstallMCP]["stdio-mcp"]; !ok {
+		t.Fatalf("expected stdio MCP in targets, got %+v", targets)
+	} else if evt.Path != "stdio-mcp" {
+		t.Fatalf("stdio MCP path = %q, want server name", evt.Path)
+	}
+}
+
+func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("PATH", "")
+
+	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
+	ocData := `{
+		"mcp": {
+			"servers": {
+				"remote-mcp": {"url": "https://example.com/mcp", "transport": "http"}
+			}
+		}
+	}`
+	if err := os.WriteFile(ocPath, []byte(ocData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = ocPath
+
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	snap, err := w.snapshotMCPServer("remote-mcp")
+	if err != nil {
+		t.Fatalf("snapshotMCPServer: %v", err)
+	}
+
+	key := "mcp.servers.remote-mcp"
+	if snap.ConfigHashes[key] == "" {
+		t.Fatalf("expected config hash for %q, got %+v", key, snap.ConfigHashes)
+	}
+	if len(snap.NetworkEndpoints) != 1 || snap.NetworkEndpoints[0] != "https://example.com/mcp" {
+		t.Fatalf("unexpected endpoints: %+v", snap.NetworkEndpoints)
+	}
+	if snap.ContentHash == "" {
+		t.Fatal("expected non-empty content hash")
 	}
 }

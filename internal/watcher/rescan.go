@@ -18,7 +18,9 @@ package watcher
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -57,7 +60,7 @@ type DriftDelta struct {
 	Current     string    `json:"current,omitempty"`
 }
 
-// rescanLoop runs periodic re-scans of all installed skills and MCPs,
+// rescanLoop runs periodic re-scans of all installed skills, plugins, and MCPs,
 // compares against baseline snapshots, and emits drift alerts.
 func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	interval := time.Duration(w.cfg.Watch.RescanIntervalMin) * time.Minute
@@ -112,7 +115,8 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 }
 
-// enumerateTargets lists all direct child directories under watched roots.
+// enumerateTargets lists all direct child directories under watched roots plus
+// configured MCP servers from openclaw.json.
 func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	var targets []InstallEvent
 
@@ -154,16 +158,32 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 	}
 
+	servers, err := w.cfg.ReadMCPServers()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] enumerate mcp servers: %v\n", err)
+		return targets
+	}
+	for _, server := range servers {
+		if strings.TrimSpace(server.Name) == "" {
+			continue
+		}
+		targets = append(targets, InstallEvent{
+			Type:      InstallMCP,
+			Name:      server.Name,
+			Path:      server.Name,
+			Timestamp: time.Now().UTC(),
+		})
+	}
+
 	return targets
 }
 
 // rescanTarget scans a single target, compares with baseline, and emits drift alerts.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
-	if _, err := os.Stat(evt.Path); os.IsNotExist(err) {
+	currentSnap, err := w.snapshotForEvent(evt)
+	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
-
-	currentSnap, err := SnapshotTarget(evt.Path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] snapshot %s: %v\n", evt.Path, err)
 		return
@@ -211,7 +231,7 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 
-		result, err := s.Scan(scanCtx, evt.Path)
+		result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 		if err == nil && result != nil {
 			scanID = w.persistScanResult(result)
 		}
@@ -257,7 +277,7 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	current, err := s.Scan(scanCtx, evt.Path)
+	current, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: scan %s: %v\n", evt.Path, err)
 		return nil
@@ -554,6 +574,73 @@ func severityRank(s string) int {
 	default:
 		return 0
 	}
+}
+
+func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, error) {
+	switch evt.Type {
+	case InstallMCP:
+		return w.snapshotMCPServer(evt.Name)
+	default:
+		if _, err := os.Stat(evt.Path); err != nil {
+			return nil, err
+		}
+		return SnapshotTarget(evt.Path)
+	}
+}
+
+func (w *InstallWatcher) snapshotMCPServer(name string) (*TargetSnapshot, error) {
+	entry, err := w.lookupMCPServer(name)
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
+	}
+	sum := sha256.Sum256(raw)
+	hash := hex.EncodeToString(sum[:])
+
+	snap := &TargetSnapshot{
+		ContentHash:      hash,
+		DependencyHashes: map[string]string{},
+		ConfigHashes: map[string]string{
+			fmt.Sprintf("mcp.servers.%s", name): hash,
+		},
+		Timestamp: time.Now().UTC(),
+	}
+	if entry.URL != "" {
+		snap.NetworkEndpoints = []string{entry.URL}
+	}
+	return snap, nil
+}
+
+func (w *InstallWatcher) lookupMCPServer(name string) (*config.MCPServerEntry, error) {
+	servers, err := w.cfg.ReadMCPServers()
+	if err != nil {
+		return nil, err
+	}
+	for _, server := range servers {
+		if server.Name == name {
+			serverCopy := server
+			return &serverCopy, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
+func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
+	if evt.Type != InstallMCP {
+		return evt.Path
+	}
+	entry, err := w.lookupMCPServer(evt.Name)
+	if err != nil {
+		return evt.Name
+	}
+	if entry.URL != "" {
+		return entry.URL
+	}
+	return entry.Name
 }
 
 // persistScanResult stores a scan result in the audit DB and returns the generated scan ID.
