@@ -2044,7 +2044,7 @@ func matchProviderDomain(host, urlPath, domain string) bool {
 	if strings.Contains(d, "/") {
 		parts := strings.SplitN(d, "/", 2)
 		domainPart, pathPart := parts[0], "/"+parts[1]
-		if !(host == domainPart || strings.HasSuffix(host, "."+domainPart)) {
+		if host != domainPart && !strings.HasSuffix(host, "."+domainPart) {
 			return false
 		}
 		return strings.HasPrefix(urlPath, pathPart)

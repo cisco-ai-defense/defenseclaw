@@ -78,20 +78,12 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
-	running := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if running {
-				fmt.Fprintf(os.Stderr, "[rescan] previous cycle still running, skipping\n")
-				timer.Reset(interval)
-				continue
-			}
-			running = true
 			w.runRescanCycle(ctx)
-			running = false
 			timer.Reset(interval)
 		}
 	}
