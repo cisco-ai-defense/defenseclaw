@@ -209,10 +209,10 @@ webhooks:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `url` | string | `""` | Webhook endpoint URL. Required. For Webex, use `https://webexapis.com/v1/messages`. |
-| `type` | string | `"generic"` | Channel type: `slack` (Block Kit), `pagerduty` (Events API v2), `webex` (Webex Messages API), or `generic` (flat JSON). |
-| `secret_env` | string | `""` | Name of an environment variable holding the secret. For `pagerduty`, this is the routing key. For `webex`, this is the bot access token (sent as `Authorization: Bearer`). For `generic`, the value is sent as `X-Webhook-Secret` header. Not used for `slack`. |
-| `room_id` | string | `""` | Webex room ID to post messages to. Required when `type` is `webex`. |
+| `url` | string | `""` | Webhook endpoint URL. Required. For Webex bot, use `https://webexapis.com/v1/messages`. For Webex Incoming Webhooks, use the full incoming webhook URL. |
+| `type` | string | `"generic"` | Channel type: `slack` (Block Kit), `pagerduty` (Events API v2), `webex` (Webex Messages API or Incoming Webhook), or `generic` (flat JSON). |
+| `secret_env` | string | `""` | Name of an environment variable holding the secret. For `pagerduty`, this is the routing key. For `webex` with the Messages API, this is the bot access token (sent as `Authorization: Bearer`). Not needed for Webex Incoming Webhooks. For `generic`, the value is used for HMAC-SHA256 signing (`X-Hub-Signature-256`). Not used for `slack`. |
+| `room_id` | string | `""` | Webex room ID to post messages to. Required when `type` is `webex` with the Messages API. Omit for Webex Incoming Webhooks (room is embedded in the URL). |
 | `min_severity` | string | `"HIGH"` | Minimum event severity to dispatch. Events below this threshold are silently dropped. |
 | `events` | list | `[]` | Event categories to include. Empty means all categories. Valid values: `block`, `drift`, `guardrail`, `scan`. |
 | `timeout_seconds` | int | `10` | HTTP timeout per webhook request. |

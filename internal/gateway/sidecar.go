@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
+	"github.com/google/uuid"
 )
 
 // Sidecar is the long-running process that connects to the OpenClaw gateway,
@@ -432,6 +433,19 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 		s.notify.Push(notification)
 	}
 
+	if s.webhooks != nil {
+		event := audit.Event{
+			ID:        uuid.New().String(),
+			Timestamp: time.Now().UTC(),
+			Action:    "block",
+			Target:    subjectName,
+			Actor:     "defenseclaw-watcher",
+			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), reason),
+			Severity:  severity,
+		}
+		s.webhooks.Dispatch(event)
+	}
+
 	sessionKeys := s.activeSessionKeys()
 	if len(sessionKeys) == 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: no active sessions tracked, queued for guardrail injection\n")
@@ -457,18 +471,6 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 
 	if sent == 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: all sessions.send failed, queued for guardrail injection\n")
-	}
-
-	if s.webhooks != nil {
-		event := audit.Event{
-			Timestamp: time.Now().UTC(),
-			Action:    "block",
-			Target:    subjectName,
-			Actor:     "defenseclaw-watcher",
-			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), reason),
-			Severity:  severity,
-		}
-		s.webhooks.Dispatch(event)
 	}
 }
 

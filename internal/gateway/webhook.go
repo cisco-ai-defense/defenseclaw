@@ -19,17 +19,25 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/google/uuid"
 )
 
 // WebhookDispatcher sends structured JSON payloads to configured webhook
@@ -38,6 +46,9 @@ type WebhookDispatcher struct {
 	endpoints    []webhookEndpoint
 	client       *http.Client
 	retryBackoff time.Duration
+	sem          chan struct{} // bounded concurrency
+	logger       *log.Logger
+	debug        bool
 	wg           sync.WaitGroup
 	done         chan struct{}
 }
@@ -47,21 +58,29 @@ type webhookEndpoint struct {
 	channelType string // slack, pagerduty, webex, generic
 	secret      string
 	roomID      string
+	timeout     time.Duration
 	minSeverity int
 	events      map[string]bool
 }
 
 const (
-	webhookMaxRetries   = 3
-	webhookRetryBackoff = 2 * time.Second
+	webhookMaxRetries      = 3
+	webhookRetryBackoff    = 2 * time.Second
+	webhookMaxConcurrency  = 20
+	webhookDefaultTimeout  = 10 * time.Second
 )
 
 // NewWebhookDispatcher creates a dispatcher from the config slice.
-// Endpoints with enabled=false or empty URL are skipped.
+// Endpoints with enabled=false, empty URL, or unsafe URLs are skipped.
 func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
+	logger := log.New(os.Stderr, "[webhook] ", 0)
 	var endpoints []webhookEndpoint
 	for _, c := range cfgs {
 		if !c.Enabled || c.URL == "" {
+			continue
+		}
+		if err := validateWebhookURL(c.URL); err != nil {
+			logger.Printf("rejected endpoint %s: %v", c.URL, err)
 			continue
 		}
 		evts := make(map[string]bool)
@@ -70,17 +89,17 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 		}
 		timeout := time.Duration(c.TimeoutSeconds) * time.Second
 		if timeout <= 0 {
-			timeout = 10 * time.Second
+			timeout = webhookDefaultTimeout
 		}
 		endpoints = append(endpoints, webhookEndpoint{
 			url:         c.URL,
 			channelType: strings.ToLower(c.Type),
 			secret:      c.ResolvedSecret(),
 			roomID:      c.RoomID,
-			minSeverity: severityToRank(c.MinSeverity),
+			minSeverity: audit.SeverityRank(c.MinSeverity),
 			events:      evts,
+			timeout:     timeout,
 		})
-		_ = timeout // per-endpoint timeout not used for shared client
 	}
 	if len(endpoints) == 0 {
 		return nil
@@ -88,9 +107,12 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 	return &WebhookDispatcher{
 		endpoints: endpoints,
 		client: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: 30 * time.Second,
 		},
 		retryBackoff: webhookRetryBackoff,
+		sem:          make(chan struct{}, webhookMaxConcurrency),
+		logger:       logger,
+		debug:        os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:         make(chan struct{}),
 	}
 }
@@ -101,7 +123,10 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	if d == nil || d.closing() {
 		return
 	}
-	rank := severityToRank(event.Severity)
+	if event.ID == "" {
+		event.ID = uuid.New().String()
+	}
+	rank := audit.SeverityRank(event.Severity)
 	action := strings.ToLower(event.Action)
 	eventCategory := categorizeAction(action)
 
@@ -116,6 +141,8 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		d.wg.Add(1)
 		go func(ep *webhookEndpoint) {
 			defer d.wg.Done()
+			d.sem <- struct{}{}
+			defer func() { <-d.sem }()
 			d.send(ep, event)
 		}(ep)
 	}
@@ -160,7 +187,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 		payload, err = formatGenericPayload(event)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[webhook] format error for %s: %v\n", ep.url, err)
+		d.logger.Printf("format error for %s: %v", ep.url, err)
 		return
 	}
 
@@ -170,25 +197,20 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 			time.Sleep(backoff)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), ep.timeout)
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, ep.url, bytes.NewReader(payload))
 		if reqErr != nil {
 			cancel()
-			fmt.Fprintf(os.Stderr, "[webhook] request error for %s: %v\n", ep.url, reqErr)
+			d.logger.Printf("request error for %s: %v", ep.url, reqErr)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		switch {
-		case ep.channelType == "webex" && ep.secret != "":
-			req.Header.Set("Authorization", "Bearer "+ep.secret)
-		case ep.channelType == "generic" && ep.secret != "":
-			req.Header.Set("X-Webhook-Secret", ep.secret)
-		}
+		d.setAuthHeaders(req, ep, payload)
 
 		resp, doErr := d.client.Do(req)
 		cancel()
 		if doErr != nil {
-			fmt.Fprintf(os.Stderr, "[webhook] send to %s attempt %d/%d failed: %v\n",
+			d.logger.Printf("send to %s attempt %d/%d failed: %v",
 				ep.url, attempt+1, webhookMaxRetries+1, doErr)
 			continue
 		}
@@ -196,14 +218,137 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 		resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			fmt.Fprintf(os.Stderr, "[webhook] sent to %s (status=%d action=%s severity=%s)\n",
-				ep.url, resp.StatusCode, event.Action, event.Severity)
+			if d.debug {
+				d.logger.Printf("sent to %s (status=%d action=%s severity=%s)",
+					ep.url, resp.StatusCode, event.Action, event.Severity)
+			}
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[webhook] %s returned %d, attempt %d/%d\n",
+
+		if !isRetryable(resp.StatusCode) {
+			d.logger.Printf("%s returned %d (permanent failure), not retrying",
+				ep.url, resp.StatusCode)
+			return
+		}
+
+		if resp.StatusCode == 429 {
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if secs, parseErr := strconv.Atoi(ra); parseErr == nil && secs > 0 && secs <= 120 {
+					time.Sleep(time.Duration(secs) * time.Second)
+					continue
+				}
+			}
+		}
+
+		d.logger.Printf("%s returned %d, attempt %d/%d",
 			ep.url, resp.StatusCode, attempt+1, webhookMaxRetries+1)
 	}
-	fmt.Fprintf(os.Stderr, "[webhook] exhausted retries for %s\n", ep.url)
+	d.logger.Printf("exhausted retries for %s", ep.url)
+}
+
+// setAuthHeaders applies authentication and payload signing per channel type.
+func (d *WebhookDispatcher) setAuthHeaders(req *http.Request, ep *webhookEndpoint, payload []byte) {
+	if ep.secret == "" {
+		return
+	}
+	switch ep.channelType {
+	case "webex":
+		req.Header.Set("Authorization", "Bearer "+ep.secret)
+	case "generic":
+		sig := computeHMAC(payload, ep.secret)
+		req.Header.Set("X-Hub-Signature-256", "sha256="+sig)
+	case "pagerduty":
+		// routing_key is in the payload body, no header needed
+	}
+}
+
+// computeHMAC returns the hex-encoded HMAC-SHA256 of data using the given key.
+func computeHMAC(data []byte, key string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write(data)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// isRetryable returns true for status codes that may succeed on retry.
+func isRetryable(status int) bool {
+	return status == 429 || (status >= 500 && status < 600)
+}
+
+// ---------------------------------------------------------------------------
+// URL validation (SSRF prevention)
+// ---------------------------------------------------------------------------
+
+// validateWebhookURL ensures the URL is safe for outbound webhook delivery.
+// Blocks non-HTTP schemes, localhost, private/link-local IP ranges, and
+// cloud metadata endpoints.
+func validateWebhookURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return fmt.Errorf("scheme %q not allowed (must be http or https)", scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("empty hostname")
+	}
+	allowLocal := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+
+	hostLower := strings.ToLower(host)
+	if hostLower == "localhost" {
+		if !allowLocal {
+			return fmt.Errorf("localhost not allowed (set DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 for local dev)")
+		}
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ips, resolveErr := net.LookupIP(host)
+		if resolveErr != nil {
+			return nil // allow DNS names that can't be resolved at config time
+		}
+		for _, resolved := range ips {
+			if isPrivateIP(resolved) {
+				if allowLocal && resolved.IsLoopback() {
+					continue
+				}
+				return fmt.Errorf("hostname %q resolves to private IP %s", host, resolved)
+			}
+		}
+		return nil
+	}
+	if isPrivateIP(ip) {
+		if allowLocal && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("IP %s is private/reserved", ip)
+	}
+	return nil
+}
+
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16", // link-local / cloud metadata
+		"::1/128",
+		"fc00::/7",
+		"fe80::/10",
+	}
+	for _, cidr := range privateRanges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -305,8 +450,10 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 	markdown += fmt.Sprintf("\n_Event ID: %s | %s_", event.ID, event.Timestamp.Format(time.RFC3339))
 
 	payload := map[string]interface{}{
-		"roomId":   roomID,
 		"markdown": markdown,
+	}
+	if roomID != "" {
+		payload["roomId"] = roomID
 	}
 	return json.Marshal(payload)
 }
@@ -361,23 +508,6 @@ func webexSeverityIcon(severity string) string {
 		return "🟢"
 	default:
 		return "🔵"
-	}
-}
-
-func severityToRank(s string) int {
-	switch strings.ToUpper(s) {
-	case "CRITICAL":
-		return 5
-	case "HIGH":
-		return 4
-	case "MEDIUM":
-		return 3
-	case "LOW":
-		return 2
-	case "INFO":
-		return 1
-	default:
-		return 0
 	}
 }
 

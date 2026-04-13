@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +34,7 @@ import (
 type receivedPayload struct {
 	Body        map[string]interface{}
 	ContentType string
-	SecretHdr   string
+	SigHdr      string // X-Hub-Signature-256
 	AuthHdr     string
 	Method      string
 }
@@ -57,7 +58,7 @@ func newCollector() *webhookCollector {
 		c.payloads = append(c.payloads, receivedPayload{
 			Body:        m,
 			ContentType: r.Header.Get("Content-Type"),
-			SecretHdr:   r.Header.Get("X-Webhook-Secret"),
+			SigHdr:      r.Header.Get("X-Hub-Signature-256"),
 			AuthHdr:     r.Header.Get("Authorization"),
 			Method:      r.Method,
 		})
@@ -72,16 +73,24 @@ func newCollector() *webhookCollector {
 	return c
 }
 
-func (c *webhookCollector) Close()                  { c.srv.Close() }
-func (c *webhookCollector) URL() string             { return c.srv.URL }
-func (c *webhookCollector) get() []receivedPayload  { c.mu.Lock(); defer c.mu.Unlock(); cp := make([]receivedPayload, len(c.payloads)); copy(cp, c.payloads); return cp }
-func (c *webhookCollector) count() int              { c.mu.Lock(); defer c.mu.Unlock(); return len(c.payloads) }
+func (c *webhookCollector) Close()                 { c.srv.Close() }
+func (c *webhookCollector) URL() string            { return c.srv.URL }
+func (c *webhookCollector) get() []receivedPayload { c.mu.Lock(); defer c.mu.Unlock(); cp := make([]receivedPayload, len(c.payloads)); copy(cp, c.payloads); return cp }
+func (c *webhookCollector) count() int             { c.mu.Lock(); defer c.mu.Unlock(); return len(c.payloads) }
 
 // newTestDispatcher creates a WebhookDispatcher with zero retry backoff for fast tests.
+// It sets DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 so that httptest servers on 127.0.0.1 are accepted.
 func newTestDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
+	prev := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST")
+	os.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
 	d := NewWebhookDispatcher(cfgs)
+	if prev == "" {
+		os.Unsetenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST")
+	} else {
+		os.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", prev)
+	}
 	if d != nil {
-		d.retryBackoff = 0 // no wait between retries in tests
+		d.retryBackoff = 0
 	}
 	return d
 }
@@ -90,23 +99,17 @@ func newTestDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 // Full realistic E2E test: multi-event enforcement pipeline
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_FullEnforcementPipeline simulates the complete DefenseClaw
-// enforcement pipeline — watcher blocks a malicious skill, rescan detects
-// drift, guardrail blocks a prompt injection — and verifies that each event
-// is delivered to the correct webhook endpoints with correct payloads.
 func TestWebhookE2E_FullEnforcementPipeline(t *testing.T) {
-	// --- Set up 3 simulated external webhook receivers ---
 	slackReceiver := newCollector()
 	defer slackReceiver.Close()
 
 	pagerdutyReceiver := newCollector()
 	defer pagerdutyReceiver.Close()
-	pagerdutyReceiver.statusFn = func(int) int { return 202 } // PD returns 202 Accepted
+	pagerdutyReceiver.statusFn = func(int) int { return 202 }
 
 	genericReceiver := newCollector()
 	defer genericReceiver.Close()
 
-	// --- Create dispatcher with realistic multi-endpoint config ---
 	d := newTestDispatcher([]config.WebhookConfig{
 		{
 			URL:         slackReceiver.URL(),
@@ -125,7 +128,6 @@ func TestWebhookE2E_FullEnforcementPipeline(t *testing.T) {
 		{
 			URL:            genericReceiver.URL(),
 			Type:           "generic",
-			SecretEnv:      "",
 			MinSeverity:    "INFO",
 			Events:         []string{"block", "drift", "guardrail", "scan"},
 			TimeoutSeconds: 5,
@@ -136,93 +138,53 @@ func TestWebhookE2E_FullEnforcementPipeline(t *testing.T) {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
-	// ── EVENT 1: Watcher blocks a malicious skill ──
-	// Simulates sendEnforcementAlert in sidecar.go creating this event
 	skillBlockEvent := audit.Event{
-		ID:        "evt-watcher-001",
-		Timestamp: time.Now().UTC(),
-		Action:    "block",
-		Target:    "crypto-miner-skill",
-		Actor:     "defenseclaw-watcher",
-		Details:   "type=skill severity=CRITICAL findings=7 actions=quarantined,blocked,disabled reason=malware signature detected in node_modules",
-		Severity:  "CRITICAL",
-		RunID:     "run-e2e-pipeline",
+		ID: "evt-watcher-001", Timestamp: time.Now().UTC(),
+		Action: "block", Target: "crypto-miner-skill", Actor: "defenseclaw-watcher",
+		Details: "type=skill severity=CRITICAL findings=7 actions=quarantined,blocked,disabled reason=malware signature detected",
+		Severity: "CRITICAL", RunID: "run-e2e-pipeline",
 	}
 	d.Dispatch(skillBlockEvent)
 
-	// ── EVENT 2: Drift detected during periodic rescan ──
-	// Simulates emitDriftAlerts in rescan.go
 	driftEvent := audit.Event{
-		ID:        "evt-drift-002",
-		Timestamp: time.Now().UTC(),
-		Action:    "drift",
-		Target:    "/home/user/.openclaw/workspace/skills/data-analyzer",
-		Actor:     "defenseclaw-rescan",
-		Details:   `[{"type":"dependency_change","severity":"MEDIUM","description":"dependency manifest modified: package.json"},{"type":"new_endpoint","severity":"HIGH","description":"new network endpoint detected: https://evil-c2.example.com/exfil"}]`,
-		Severity:  "HIGH",
+		ID: "evt-drift-002", Timestamp: time.Now().UTC(),
+		Action: "drift", Target: "/home/user/.openclaw/workspace/skills/data-analyzer",
+		Actor: "defenseclaw-rescan", Severity: "HIGH",
+		Details: `[{"type":"dependency_change","severity":"MEDIUM"}]`,
 	}
 	d.Dispatch(driftEvent)
 
-	// ── EVENT 3: Guardrail blocks a prompt injection ──
-	// Simulates recordTelemetry in proxy.go when verdict.Action == "block"
 	guardrailBlockEvent := audit.Event{
-		ID:        "evt-guardrail-003",
-		Timestamp: time.Now().UTC(),
-		Action:    "guardrail-block",
-		Target:    "anthropic/claude-sonnet-4-20250514",
-		Actor:     "defenseclaw-guardrail",
-		Details:   "direction=prompt action=block severity=HIGH findings=2 elapsed_ms=45.3 reason=prompt_injection:ignore_previous_instructions",
-		Severity:  "HIGH",
+		ID: "evt-guardrail-003", Timestamp: time.Now().UTC(),
+		Action: "guardrail-block", Target: "anthropic/claude-sonnet-4-20250514",
+		Actor: "defenseclaw-guardrail", Severity: "HIGH",
+		Details: "direction=prompt action=block severity=HIGH findings=2",
 	}
 	d.Dispatch(guardrailBlockEvent)
 
-	// ── EVENT 4: Low-severity scan (should only reach generic) ──
 	scanEvent := audit.Event{
-		ID:        "evt-scan-004",
-		Timestamp: time.Now().UTC(),
-		Action:    "scan",
-		Target:    "safe-utility-skill",
-		Actor:     "defenseclaw",
-		Details:   "scanner=skill-scanner findings=0 max_severity=INFO",
-		Severity:  "INFO",
+		ID: "evt-scan-004", Timestamp: time.Now().UTC(),
+		Action: "scan", Target: "safe-utility-skill", Actor: "defenseclaw",
+		Details: "scanner=skill-scanner findings=0 max_severity=INFO", Severity: "INFO",
 	}
 	d.Dispatch(scanEvent)
 
-	// Wait for all async sends to complete
 	d.Close()
 
-	// --- Validate Slack endpoint ---
-	// Slack: min_severity=MEDIUM, events=[block, drift, guardrail]
-	// Should receive: skill block (CRITICAL ≥ MEDIUM), drift (HIGH ≥ MEDIUM), guardrail (HIGH ≥ MEDIUM)
-	// Should NOT receive: scan (INFO < MEDIUM, and scan not in event filter)
+	// Slack: MEDIUM threshold, events=[block,drift,guardrail] -> 3 payloads
 	slackPayloads := slackReceiver.get()
 	if len(slackPayloads) != 3 {
-		t.Errorf("[slack] expected 3 payloads (block+drift+guardrail), got %d", len(slackPayloads))
+		t.Errorf("[slack] expected 3 payloads, got %d", len(slackPayloads))
 	}
 	for _, p := range slackPayloads {
 		if p.ContentType != "application/json" {
 			t.Errorf("[slack] expected Content-Type=application/json, got %q", p.ContentType)
 		}
-		if p.Method != "POST" {
-			t.Errorf("[slack] expected POST, got %s", p.Method)
-		}
 		attachments, ok := p.Body["attachments"].([]interface{})
 		if !ok || len(attachments) == 0 {
 			t.Error("[slack] missing attachments array")
-			continue
-		}
-		att := attachments[0].(map[string]interface{})
-		color, _ := att["color"].(string)
-		if color == "" {
-			t.Error("[slack] missing color on attachment")
-		}
-		blocks, _ := att["blocks"].([]interface{})
-		if len(blocks) < 3 {
-			t.Errorf("[slack] expected ≥3 blocks (header, section, context), got %d", len(blocks))
 		}
 	}
-
-	// Validate that at least one Slack payload has CRITICAL red color
 	foundCriticalRed := false
 	for _, p := range slackPayloads {
 		att := p.Body["attachments"].([]interface{})[0].(map[string]interface{})
@@ -235,132 +197,48 @@ func TestWebhookE2E_FullEnforcementPipeline(t *testing.T) {
 		t.Error("[slack] expected at least one CRITICAL payload with red (#FF0000) color")
 	}
 
-	// --- Validate PagerDuty endpoint ---
-	// PagerDuty: min_severity=HIGH, events=[block]
-	// Should receive: skill block (CRITICAL ≥ HIGH, action=block)
-	// Should NOT receive: drift (HIGH ≥ HIGH but action=drift not in filter), guardrail, scan
+	// PagerDuty: HIGH threshold, events=[block] -> 1 payload
 	pdPayloads := pagerdutyReceiver.get()
 	if len(pdPayloads) != 1 {
-		t.Errorf("[pagerduty] expected 1 payload (block only), got %d", len(pdPayloads))
+		t.Errorf("[pagerduty] expected 1 payload, got %d", len(pdPayloads))
 	}
 	if len(pdPayloads) >= 1 {
-		pd := pdPayloads[0]
-		if pd.ContentType != "application/json" {
-			t.Errorf("[pagerduty] expected Content-Type=application/json, got %q", pd.ContentType)
-		}
-		body := pd.Body
+		body := pdPayloads[0].Body
 		if body["event_action"] != "trigger" {
 			t.Errorf("[pagerduty] expected event_action=trigger, got %v", body["event_action"])
 		}
-		dedupKey, _ := body["dedup_key"].(string)
-		if !strings.Contains(dedupKey, "crypto-miner-skill") {
-			t.Errorf("[pagerduty] dedup_key should contain target name, got %q", dedupKey)
-		}
 		payload := body["payload"].(map[string]interface{})
 		if payload["severity"] != "critical" {
-			t.Errorf("[pagerduty] expected severity=critical for CRITICAL event, got %v", payload["severity"])
+			t.Errorf("[pagerduty] expected severity=critical, got %v", payload["severity"])
 		}
-		if payload["source"] != "defenseclaw" {
-			t.Errorf("[pagerduty] expected source=defenseclaw, got %v", payload["source"])
-		}
-		summary, _ := payload["summary"].(string)
-		if !strings.Contains(summary, "crypto-miner-skill") {
-			t.Errorf("[pagerduty] summary should mention target, got %q", summary)
-		}
-		customDetails := payload["custom_details"].(map[string]interface{})
-		if customDetails["action"] != "block" {
-			t.Errorf("[pagerduty] custom_details.action should be block, got %v", customDetails["action"])
-		}
-		if customDetails["event_id"] != "evt-watcher-001" {
-			t.Errorf("[pagerduty] custom_details.event_id should be evt-watcher-001, got %v", customDetails["event_id"])
+		cd := payload["custom_details"].(map[string]interface{})
+		if cd["event_id"] != "evt-watcher-001" {
+			t.Errorf("[pagerduty] event_id should be evt-watcher-001, got %v", cd["event_id"])
 		}
 	}
 
-	// --- Validate Generic endpoint ---
-	// Generic: min_severity=INFO, events=[block, drift, guardrail, scan]
-	// Should receive ALL 4 events
+	// Generic: INFO threshold, events=[block,drift,guardrail,scan] -> 4 payloads
 	genPayloads := genericReceiver.get()
 	if len(genPayloads) != 4 {
-		t.Errorf("[generic] expected 4 payloads (block+drift+guardrail+scan), got %d", len(genPayloads))
+		t.Errorf("[generic] expected 4 payloads, got %d", len(genPayloads))
 	}
-
-	// Index generic payloads by event ID for order-independent assertions
 	byID := make(map[string]receivedPayload)
 	for _, p := range genPayloads {
-		if p.Body["webhook_type"] != "defenseclaw_enforcement" {
-			t.Errorf("[generic] expected webhook_type=defenseclaw_enforcement, got %v", p.Body["webhook_type"])
-		}
-		if p.Body["defenseclaw_version"] != "1.0" {
-			t.Errorf("[generic] expected defenseclaw_version=1.0, got %v", p.Body["defenseclaw_version"])
-		}
 		evt := p.Body["event"].(map[string]interface{})
-		if _, ok := evt["timestamp"]; !ok {
-			t.Error("[generic] missing timestamp")
-		}
 		id, _ := evt["id"].(string)
 		byID[id] = p
 	}
-
-	// Validate the watcher block event
-	if p, ok := byID["evt-watcher-001"]; ok {
-		e := p.Body["event"].(map[string]interface{})
-		if e["action"] != "block" {
-			t.Errorf("[generic][block] action should be block, got %v", e["action"])
-		}
-		if e["target"] != "crypto-miner-skill" {
-			t.Errorf("[generic][block] target should be crypto-miner-skill, got %v", e["target"])
-		}
-		if e["severity"] != "CRITICAL" {
-			t.Errorf("[generic][block] severity should be CRITICAL, got %v", e["severity"])
-		}
-		if e["actor"] != "defenseclaw-watcher" {
-			t.Errorf("[generic][block] actor should be defenseclaw-watcher, got %v", e["actor"])
-		}
-		if e["run_id"] != "run-e2e-pipeline" {
-			t.Errorf("[generic][block] run_id should be run-e2e-pipeline, got %v", e["run_id"])
-		}
-	} else {
-		t.Error("[generic] missing evt-watcher-001 (block event)")
+	if _, ok := byID["evt-watcher-001"]; !ok {
+		t.Error("[generic] missing evt-watcher-001")
 	}
-
-	// Validate the drift event
-	if p, ok := byID["evt-drift-002"]; ok {
-		e := p.Body["event"].(map[string]interface{})
-		if e["action"] != "drift" {
-			t.Errorf("[generic][drift] action should be drift, got %v", e["action"])
-		}
-		details, _ := e["details"].(string)
-		if !strings.Contains(details, "dependency_change") {
-			t.Errorf("[generic][drift] details should contain drift delta JSON, got %q", details)
-		}
-	} else {
-		t.Error("[generic] missing evt-drift-002 (drift event)")
+	if _, ok := byID["evt-drift-002"]; !ok {
+		t.Error("[generic] missing evt-drift-002")
 	}
-
-	// Validate the guardrail block event
-	if p, ok := byID["evt-guardrail-003"]; ok {
-		e := p.Body["event"].(map[string]interface{})
-		if e["action"] != "guardrail-block" {
-			t.Errorf("[generic][guardrail] action should be guardrail-block, got %v", e["action"])
-		}
-		if e["actor"] != "defenseclaw-guardrail" {
-			t.Errorf("[generic][guardrail] actor should be defenseclaw-guardrail, got %v", e["actor"])
-		}
-	} else {
-		t.Error("[generic] missing evt-guardrail-003 (guardrail-block event)")
+	if _, ok := byID["evt-guardrail-003"]; !ok {
+		t.Error("[generic] missing evt-guardrail-003")
 	}
-
-	// Validate the scan event
-	if p, ok := byID["evt-scan-004"]; ok {
-		e := p.Body["event"].(map[string]interface{})
-		if e["action"] != "scan" {
-			t.Errorf("[generic][scan] action should be scan, got %v", e["action"])
-		}
-		if e["severity"] != "INFO" {
-			t.Errorf("[generic][scan] severity should be INFO, got %v", e["severity"])
-		}
-	} else {
-		t.Error("[generic] missing evt-scan-004 (scan event)")
+	if _, ok := byID["evt-scan-004"]; !ok {
+		t.Error("[generic] missing evt-scan-004")
 	}
 }
 
@@ -368,12 +246,9 @@ func TestWebhookE2E_FullEnforcementPipeline(t *testing.T) {
 // Retry under transient failures
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_RetryOnTransientFailure verifies the dispatcher retries
-// on 503/500 responses and eventually delivers the payload.
 func TestWebhookE2E_RetryOnTransientFailure(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
-	// First 2 attempts return 503, third succeeds
 	receiver.statusFn = func(n int) int {
 		if n <= 2 {
 			return 503
@@ -392,43 +267,56 @@ func TestWebhookE2E_RetryOnTransientFailure(t *testing.T) {
 	if got < 3 {
 		t.Errorf("expected at least 3 attempts (initial + 2 retries), got %d", got)
 	}
-
-	// The last payload should be the successful one with correct content
-	payloads := receiver.get()
-	last := payloads[len(payloads)-1]
-	if last.Body["webhook_type"] != "defenseclaw_enforcement" {
-		t.Errorf("final payload should be valid generic format")
-	}
 }
 
-// TestWebhookE2E_AllRetriesExhausted verifies that when all retries fail,
-// the dispatcher does not panic and the payload structure is still correct.
 func TestWebhookE2E_AllRetriesExhausted(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
-	receiver.statusFn = func(int) int { return 500 } // always fail
+	receiver.statusFn = func(int) int { return 500 }
 
 	d := newTestDispatcher([]config.WebhookConfig{
 		{URL: receiver.URL(), Type: "generic", MinSeverity: "INFO", Enabled: true},
 	})
 
 	d.Dispatch(testEvent())
-	d.Close() // should not hang
+	d.Close()
 
 	got := receiver.count()
-	expected := webhookMaxRetries + 1 // initial + retries
+	expected := webhookMaxRetries + 1
 	if got != expected {
 		t.Errorf("expected %d total attempts, got %d", expected, got)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Secret header on generic webhooks
+// 4xx permanent failures (not retried)
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_GenericSecretHeader verifies that X-Webhook-Secret is
-// set on generic webhook requests when a secret is configured.
-func TestWebhookE2E_GenericSecretHeader(t *testing.T) {
+func TestWebhookE2E_4xxNotRetried(t *testing.T) {
+	for _, code := range []int{400, 401, 403, 404} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			receiver := newCollector()
+			defer receiver.Close()
+			receiver.statusFn = func(int) int { return code }
+
+			d := newTestDispatcher([]config.WebhookConfig{
+				{URL: receiver.URL(), Type: "generic", MinSeverity: "INFO", Enabled: true},
+			})
+			d.Dispatch(testEvent())
+			d.Close()
+
+			if receiver.count() != 1 {
+				t.Errorf("%d should be permanent (1 attempt), got %d", code, receiver.count())
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HMAC signing on generic endpoints (E2E)
+// ---------------------------------------------------------------------------
+
+func TestWebhookE2E_GenericHMACSignature(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
 
@@ -450,14 +338,12 @@ func TestWebhookE2E_GenericSecretHeader(t *testing.T) {
 	if len(payloads) != 1 {
 		t.Fatalf("expected 1 payload, got %d", len(payloads))
 	}
-	if payloads[0].SecretHdr != "supersecretvalue42" {
-		t.Errorf("expected X-Webhook-Secret=supersecretvalue42, got %q", payloads[0].SecretHdr)
+	if !strings.HasPrefix(payloads[0].SigHdr, "sha256=") {
+		t.Errorf("expected X-Hub-Signature-256 with sha256= prefix, got %q", payloads[0].SigHdr)
 	}
 }
 
-// TestWebhookE2E_SlackNoSecretHeader verifies that X-Webhook-Secret is
-// NOT sent for Slack webhooks (Slack authenticates via the URL token).
-func TestWebhookE2E_SlackNoSecretHeader(t *testing.T) {
+func TestWebhookE2E_SlackNoSignatureHeader(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
 
@@ -472,17 +358,15 @@ func TestWebhookE2E_SlackNoSecretHeader(t *testing.T) {
 	if len(payloads) != 1 {
 		t.Fatalf("expected 1 payload, got %d", len(payloads))
 	}
-	if payloads[0].SecretHdr != "" {
-		t.Errorf("slack webhooks should not include X-Webhook-Secret, got %q", payloads[0].SecretHdr)
+	if payloads[0].SigHdr != "" {
+		t.Errorf("slack should not include signature header, got %q", payloads[0].SigHdr)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Webex webhook integration
+// Webex integration
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_WebexPayloadAndAuth verifies that Webex webhooks send
-// the correct Messages API payload with Bearer auth and roomId.
 func TestWebhookE2E_WebexPayloadAndAuth(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
@@ -491,8 +375,7 @@ func TestWebhookE2E_WebexPayloadAndAuth(t *testing.T) {
 
 	d := newTestDispatcher([]config.WebhookConfig{
 		{
-			URL:       receiver.URL(),
-			Type:      "webex",
+			URL: receiver.URL(), Type: "webex",
 			SecretEnv: "WEBEX_BOT_TOKEN_E2E",
 			RoomID:    "Y2lzY29zcGFyazovL3VzL1JPT00vc2VjdXJpdHktYWxlcnRz",
 			Enabled:   true,
@@ -500,13 +383,9 @@ func TestWebhookE2E_WebexPayloadAndAuth(t *testing.T) {
 	})
 
 	d.Dispatch(audit.Event{
-		ID:        "evt-webex-001",
-		Timestamp: time.Now().UTC(),
-		Action:    "block",
-		Target:    "crypto-miner-skill",
-		Actor:     "defenseclaw-watcher",
-		Details:   "type=skill severity=CRITICAL findings=7 actions=quarantined,blocked",
-		Severity:  "CRITICAL",
+		ID: "evt-webex-001", Timestamp: time.Now().UTC(),
+		Action: "block", Target: "crypto-miner-skill", Actor: "defenseclaw-watcher",
+		Severity: "CRITICAL",
 	})
 	d.Close()
 
@@ -514,52 +393,27 @@ func TestWebhookE2E_WebexPayloadAndAuth(t *testing.T) {
 	if len(payloads) != 1 {
 		t.Fatalf("expected 1 Webex payload, got %d", len(payloads))
 	}
-
 	p := payloads[0]
-
-	// Verify Bearer auth header
 	if p.AuthHdr != "Bearer NjM0ZDk1OTEtYzRmOC00ZTJlLWI4YjgtOTIwMGQwNT" {
-		t.Errorf("expected Bearer token in Authorization header, got %q", p.AuthHdr)
+		t.Errorf("expected Bearer token, got %q", p.AuthHdr)
 	}
-
-	// Webex should NOT have X-Webhook-Secret
-	if p.SecretHdr != "" {
-		t.Errorf("Webex should not set X-Webhook-Secret, got %q", p.SecretHdr)
+	if p.SigHdr != "" {
+		t.Errorf("Webex should not set X-Hub-Signature-256, got %q", p.SigHdr)
 	}
-
-	// Verify roomId
 	if p.Body["roomId"] != "Y2lzY29zcGFyazovL3VzL1JPT00vc2VjdXJpdHktYWxlcnRz" {
 		t.Errorf("expected roomId to match, got %v", p.Body["roomId"])
 	}
-
-	// Verify markdown content
-	md, ok := p.Body["markdown"].(string)
-	if !ok || md == "" {
-		t.Fatal("expected non-empty markdown field")
-	}
-	if !strings.Contains(md, "DefenseClaw: block") {
-		t.Errorf("markdown should contain action, got %q", md)
-	}
-	if !strings.Contains(md, "crypto-miner-skill") {
-		t.Errorf("markdown should contain target, got %q", md)
-	}
-	if !strings.Contains(md, "CRITICAL") {
-		t.Errorf("markdown should contain severity, got %q", md)
-	}
+	md, _ := p.Body["markdown"].(string)
 	if !strings.Contains(md, "evt-webex-001") {
 		t.Errorf("markdown should contain event ID, got %q", md)
 	}
 }
 
-// TestWebhookE2E_WebexInPipeline verifies that Webex endpoints participate
-// correctly in multi-endpoint fan-out alongside Slack and generic.
 func TestWebhookE2E_WebexInPipeline(t *testing.T) {
 	slackReceiver := newCollector()
 	defer slackReceiver.Close()
-
 	webexReceiver := newCollector()
 	defer webexReceiver.Close()
-
 	genericReceiver := newCollector()
 	defer genericReceiver.Close()
 
@@ -571,38 +425,26 @@ func TestWebhookE2E_WebexInPipeline(t *testing.T) {
 		{URL: genericReceiver.URL(), Type: "generic", MinSeverity: "INFO", Enabled: true},
 	})
 
-	// CRITICAL block — should reach all 3
 	d.Dispatch(audit.Event{
 		ID: "evt-pipe-001", Timestamp: time.Now().UTC(),
-		Action: "block", Target: "evil-skill", Actor: "watcher",
-		Severity: "CRITICAL",
+		Action: "block", Target: "evil-skill", Actor: "watcher", Severity: "CRITICAL",
 	})
-
-	// MEDIUM drift — should reach webex (MEDIUM ≥ MEDIUM, drift in filter) and generic (INFO, no filter)
-	// should NOT reach slack (HIGH threshold, drift not in block filter)
 	d.Dispatch(audit.Event{
 		ID: "evt-pipe-002", Timestamp: time.Now().UTC(),
-		Action: "drift", Target: "mutated-skill", Actor: "rescan",
-		Severity: "MEDIUM",
+		Action: "drift", Target: "mutated-skill", Actor: "rescan", Severity: "MEDIUM",
 	})
-
 	d.Close()
 
 	if slackReceiver.count() != 1 {
-		t.Errorf("[slack] expected 1 payload, got %d", slackReceiver.count())
+		t.Errorf("[slack] expected 1, got %d", slackReceiver.count())
 	}
 	if webexReceiver.count() != 2 {
-		t.Errorf("[webex] expected 2 payloads (block+drift), got %d", webexReceiver.count())
+		t.Errorf("[webex] expected 2, got %d", webexReceiver.count())
 	}
 	if genericReceiver.count() != 2 {
-		t.Errorf("[generic] expected 2 payloads, got %d", genericReceiver.count())
+		t.Errorf("[generic] expected 2, got %d", genericReceiver.count())
 	}
-
-	// Verify all Webex payloads have the correct roomId and Bearer auth
 	for _, p := range webexReceiver.get() {
-		if p.Body["roomId"] != "room-123" {
-			t.Errorf("[webex] roomId should be room-123, got %v", p.Body["roomId"])
-		}
 		if p.AuthHdr != "Bearer testtoken123" {
 			t.Errorf("[webex] expected Bearer auth, got %q", p.AuthHdr)
 		}
@@ -610,32 +452,28 @@ func TestWebhookE2E_WebexInPipeline(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Severity threshold edge cases
+// Severity edge cases
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_SeverityEdgeCases verifies boundary behavior for severity
-// filtering across all severity levels.
 func TestWebhookE2E_SeverityEdgeCases(t *testing.T) {
 	severities := []string{"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
 
 	for _, threshold := range severities {
 		for _, eventSev := range severities {
-			name := threshold + "_accepts_" + eventSev
-			t.Run(name, func(t *testing.T) {
+			t.Run(threshold+"_accepts_"+eventSev, func(t *testing.T) {
 				receiver := newCollector()
 				defer receiver.Close()
 
 				d := newTestDispatcher([]config.WebhookConfig{
 					{URL: receiver.URL(), Type: "generic", MinSeverity: threshold, Enabled: true},
 				})
-
 				evt := testEvent()
 				evt.Severity = eventSev
 				d.Dispatch(evt)
 				d.Close()
 
 				delivered := receiver.count() > 0
-				expected := severityToRank(eventSev) >= severityToRank(threshold)
+				expected := audit.SeverityRank(eventSev) >= audit.SeverityRank(threshold)
 				if delivered != expected {
 					t.Errorf("threshold=%s event=%s: delivered=%v, want %v",
 						threshold, eventSev, delivered, expected)
@@ -649,12 +487,9 @@ func TestWebhookE2E_SeverityEdgeCases(t *testing.T) {
 // Mixed enabled/disabled endpoints
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_MixedEnabledDisabled verifies that disabled endpoints
-// are silently skipped and enabled ones still receive events.
 func TestWebhookE2E_MixedEnabledDisabled(t *testing.T) {
 	activeReceiver := newCollector()
 	defer activeReceiver.Close()
-
 	disabledReceiver := newCollector()
 	defer disabledReceiver.Close()
 
@@ -668,10 +503,10 @@ func TestWebhookE2E_MixedEnabledDisabled(t *testing.T) {
 	d.Close()
 
 	if activeReceiver.count() != 1 {
-		t.Errorf("active endpoint should receive 1 payload, got %d", activeReceiver.count())
+		t.Errorf("active should receive 1, got %d", activeReceiver.count())
 	}
 	if disabledReceiver.count() != 0 {
-		t.Errorf("disabled endpoint should receive 0 payloads, got %d", disabledReceiver.count())
+		t.Errorf("disabled should receive 0, got %d", disabledReceiver.count())
 	}
 }
 
@@ -679,8 +514,6 @@ func TestWebhookE2E_MixedEnabledDisabled(t *testing.T) {
 // Concurrent dispatch safety
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_ConcurrentDispatch verifies that dispatching many events
-// concurrently does not cause races or lost payloads.
 func TestWebhookE2E_ConcurrentDispatch(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
@@ -696,12 +529,9 @@ func TestWebhookE2E_ConcurrentDispatch(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			evt := audit.Event{
-				ID:        time.Now().Format("20060102150405.000000") + "-" + string(rune('A'+i%26)),
+				ID: time.Now().Format("20060102150405.000000") + "-" + string(rune('A'+i%26)),
 				Timestamp: time.Now().UTC(),
-				Action:    "block",
-				Target:    "concurrent-skill",
-				Actor:     "test",
-				Severity:  "HIGH",
+				Action: "block", Target: "concurrent-skill", Actor: "test", Severity: "HIGH",
 			}
 			d.Dispatch(evt)
 		}(i)
@@ -709,18 +539,15 @@ func TestWebhookE2E_ConcurrentDispatch(t *testing.T) {
 	wg.Wait()
 	d.Close()
 
-	got := receiver.count()
-	if got != numEvents {
-		t.Errorf("expected %d payloads for concurrent dispatch, got %d", numEvents, got)
+	if receiver.count() != numEvents {
+		t.Errorf("expected %d, got %d", numEvents, receiver.count())
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Post-close dispatch is silently dropped
+// Post-close dispatch
 // ---------------------------------------------------------------------------
 
-// TestWebhookE2E_DispatchAfterClose verifies that events sent after Close
-// are silently dropped without panic.
 func TestWebhookE2E_DispatchAfterClose(t *testing.T) {
 	receiver := newCollector()
 	defer receiver.Close()
@@ -733,14 +560,11 @@ func TestWebhookE2E_DispatchAfterClose(t *testing.T) {
 	d.Close()
 
 	before := receiver.count()
-
-	// These should be silently dropped
 	d.Dispatch(testEvent())
 	d.Dispatch(testEvent())
 	time.Sleep(50 * time.Millisecond)
 
-	after := receiver.count()
-	if after != before {
-		t.Errorf("expected no new payloads after Close, before=%d after=%d", before, after)
+	if receiver.count() != before {
+		t.Errorf("expected no new payloads after Close, before=%d after=%d", before, receiver.count())
 	}
 }

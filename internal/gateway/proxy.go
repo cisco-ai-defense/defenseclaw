@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/google/uuid"
 )
 
 // guardrailListenAddr returns the TCP listen address for the guardrail HTTP server.
@@ -2116,6 +2117,7 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 
 	if p.webhooks != nil && verdict.Action == "block" {
 		event := audit.Event{
+			ID:        uuid.New().String(),
 			Timestamp: time.Now().UTC(),
 			Action:    "guardrail-block",
 			Target:    model,

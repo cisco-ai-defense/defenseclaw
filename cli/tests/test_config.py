@@ -44,6 +44,7 @@ from defenseclaw.config import (
     SeverityAction,
     SkillActionsConfig,
     SkillScannerConfig,
+    WebhookConfig,
     WatchConfig,
     _dedup,
     _expand,
@@ -56,6 +57,7 @@ from defenseclaw.config import (
     _merge_guardrail,
     _merge_severity_action,
     _merge_skill_actions,
+    _merge_webhooks,
     default_config,
     default_data_path,
     config_path,
@@ -858,6 +860,97 @@ class TestOpenShellSandboxFields(unittest.TestCase):
                 self.assertEqual(cfg.openshell.version, "0.7.0")
                 self.assertEqual(cfg.openshell.sandbox_home, "/opt/sandbox")
                 self.assertFalse(cfg.openshell.auto_pair)
+
+
+class TestWebhookConfig(unittest.TestCase):
+    """Tests for WebhookConfig, _merge_webhooks, and resolved_secret."""
+
+    def test_merge_valid_yaml(self):
+        raw = [
+            {
+                "url": "https://hooks.slack.com/services/T/B/xxx",
+                "type": "slack",
+                "secret_env": "SLACK_TOKEN",
+                "min_severity": "MEDIUM",
+                "events": ["block", "drift"],
+                "timeout_seconds": 15,
+                "enabled": True,
+            },
+            {
+                "url": "https://pd.example.com",
+                "type": "pagerduty",
+                "enabled": False,
+            },
+        ]
+        result = _merge_webhooks(raw)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].url, "https://hooks.slack.com/services/T/B/xxx")
+        self.assertEqual(result[0].type, "slack")
+        self.assertEqual(result[0].min_severity, "MEDIUM")
+        self.assertEqual(result[0].events, ["block", "drift"])
+        self.assertEqual(result[0].timeout_seconds, 15)
+        self.assertTrue(result[0].enabled)
+        self.assertFalse(result[1].enabled)
+
+    def test_merge_empty_and_none(self):
+        self.assertEqual(_merge_webhooks(None), [])
+        self.assertEqual(_merge_webhooks([]), [])
+
+    def test_merge_skips_non_dict(self):
+        result = _merge_webhooks(["not-a-dict", 42, None])
+        self.assertEqual(result, [])
+
+    def test_merge_defaults(self):
+        result = _merge_webhooks([{}])
+        self.assertEqual(len(result), 1)
+        wh = result[0]
+        self.assertEqual(wh.url, "")
+        self.assertEqual(wh.type, "generic")
+        self.assertEqual(wh.min_severity, "HIGH")
+        self.assertEqual(wh.timeout_seconds, 10)
+        self.assertFalse(wh.enabled)
+
+    def test_resolved_secret_from_env(self):
+        wh = WebhookConfig(secret_env="TEST_WH_SECRET_42")
+        with patch.dict(os.environ, {"TEST_WH_SECRET_42": "s3cret"}):
+            self.assertEqual(wh.resolved_secret(), "s3cret")
+
+    def test_resolved_secret_missing_env(self):
+        wh = WebhookConfig(secret_env="NONEXISTENT_VAR_99")
+        env = os.environ.copy()
+        env.pop("NONEXISTENT_VAR_99", None)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(wh.resolved_secret(), "")
+
+    def test_resolved_secret_no_env_configured(self):
+        wh = WebhookConfig()
+        self.assertEqual(wh.resolved_secret(), "")
+
+    def test_roundtrip_preservation(self):
+        """Ensure load() preserves webhooks from YAML so init doesn't drop them."""
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_data = {
+                "webhooks": [
+                    {
+                        "url": "https://hooks.example.com/abc",
+                        "type": "generic",
+                        "enabled": True,
+                        "min_severity": "LOW",
+                    }
+                ],
+            }
+            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+                yaml.dump(cfg_data, f)
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                cfg = load()
+                self.assertEqual(len(cfg.webhooks), 1)
+                self.assertEqual(cfg.webhooks[0].url, "https://hooks.example.com/abc")
+                self.assertTrue(cfg.webhooks[0].enabled)
+                self.assertEqual(cfg.webhooks[0].min_severity, "LOW")
 
 
 if __name__ == "__main__":
