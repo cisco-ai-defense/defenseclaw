@@ -19,7 +19,7 @@ tui = ["textual>=0.50"]
 
 [dependency-groups]
 dev = [
-    "pytest==9.0.3",
+    "pytest>=9.0.3",
     "pytest-cov==7.1.0",
     "ruff==0.15.7",
 ]

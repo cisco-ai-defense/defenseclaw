@@ -159,31 +159,31 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 		case <-ticker.C:
 			probed := probeHealth(client, healthURL)
 
-			switch {
-			case probed == stateHealthy:
-				failCount = 0
-				if current != stateHealthy {
-					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
-					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
-				}
-				current = stateHealthy
-
-			case probed == stateDegraded:
-				failCount++
-				if failCount >= debounce && current == stateHealthy {
-					fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
-					_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
-					current = stateDegraded
-				}
-
-			default: // stateDown
-				failCount++
-				if failCount >= debounce && current != stateDown {
-					fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
-					_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
-					current = stateDown
-				}
+		switch probed {
+		case stateHealthy:
+			failCount = 0
+			if current != stateHealthy {
+				fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
+				_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
 			}
+			current = stateHealthy
+
+		case stateDegraded:
+			failCount++
+			if failCount >= debounce && current == stateHealthy {
+				fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
+				_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
+				current = stateDegraded
+			}
+
+		default: // stateDown
+			failCount++
+			if failCount >= debounce && current != stateDown {
+				fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
+				_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
+				current = stateDown
+			}
+		}
 		}
 	}
 }
