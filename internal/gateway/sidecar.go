@@ -38,16 +38,17 @@ import (
 // Sidecar is the long-running process that connects to the OpenClaw gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
-	cfg    *config.Config
-	client *Client
-	router *EventRouter
-	store  *audit.Store
-	logger *audit.Logger
-	health *SidecarHealth
-	shell  *sandbox.OpenShell
-	otel   *telemetry.Provider
-	notify *NotificationQueue
-	opa    *policy.Engine
+	cfg      *config.Config
+	client   *Client
+	router   *EventRouter
+	store    *audit.Store
+	logger   *audit.Logger
+	health   *SidecarHealth
+	shell    *sandbox.OpenShell
+	otel     *telemetry.Provider
+	notify   *NotificationQueue
+	opa      *policy.Engine
+	webhooks *WebhookDispatcher
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -92,6 +93,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	alertCtx, alertCancel := context.WithCancel(context.Background())
 
+	var webhooks *WebhookDispatcher
+	if len(cfg.Webhooks) > 0 {
+		webhooks = NewWebhookDispatcher(cfg.Webhooks)
+		if webhooks != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d endpoints)\n", len(webhooks.endpoints))
+		}
+	}
+
 	return &Sidecar{
 		cfg:         cfg,
 		client:      client,
@@ -102,6 +111,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		shell:       shell,
 		otel:        otel,
 		notify:      notify,
+		webhooks:    webhooks,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 	}, nil
@@ -200,6 +210,9 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertWg.Wait()
 
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
+	if s.webhooks != nil {
+		s.webhooks.Close()
+	}
 	s.logger.Close()
 	_ = s.client.Close()
 
@@ -312,6 +325,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	})
 	if s.otel != nil {
 		w.SetOTelProvider(s.otel)
+	}
+	if s.webhooks != nil {
+		w.SetWebhookDispatcher(s.webhooks)
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
@@ -442,6 +458,18 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 	if sent == 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] enforcement alert: all sessions.send failed, queued for guardrail injection\n")
 	}
+
+	if s.webhooks != nil {
+		event := audit.Event{
+			Timestamp: time.Now().UTC(),
+			Action:    "block",
+			Target:    subjectName,
+			Actor:     "defenseclaw-watcher",
+			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), reason),
+			Severity:  severity,
+		}
+		s.webhooks.Dispatch(event)
+	}
 }
 
 // formatEnforcementMessage builds a human-readable security alert for chat.
@@ -532,6 +560,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.cfg.PolicyDir,
 		s.notify,
 	)
+	if err == nil && s.webhooks != nil {
+		proxy.SetWebhookDispatcher(s.webhooks)
+	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] init error: %v\n", err)

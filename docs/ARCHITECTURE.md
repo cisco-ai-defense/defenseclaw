@@ -155,6 +155,7 @@ only component with direct access to all subsystems.
 | Policy engine | Runs admission gate: block list → allow list → scan → verdict |
 | LLM guardrail management | Runs guardrail proxy; restarts on crash |
 | Audit / SIEM | Logs all events to SQLite, forwards to Splunk HEC (batch or real-time) |
+| Webhook dispatch | Pushes enforcement events (block, drift, guardrail-block) to configured webhook endpoints (Slack, PagerDuty, generic HTTP) with severity filtering, event-type filtering, and retry |
 | DB access | Full read/write to SQLite — scan results, block/allow lists, inventory |
 
 ### 4. SQLite Database
@@ -211,8 +212,9 @@ See `docs/GUARDRAIL.md` for the full data flow.
               │                                      │
               │  3. Log audit event                  │
               │  4. Forward to SIEM (if configured)  │
-              │  5. Evaluate policy (if action req)  │
-              │  6. Send command to OpenClaw via WS   │
+              │  5. Dispatch to webhooks (if config) │
+              │  6. Evaluate policy (if action req)  │
+              │  7. Send command to OpenClaw via WS   │
               └──────────────────────────────────────┘
                               │
                               ▼

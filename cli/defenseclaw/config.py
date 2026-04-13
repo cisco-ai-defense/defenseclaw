@@ -535,6 +535,23 @@ class JudgeConfig:
 
 
 @dataclass
+class WebhookConfig:
+    url: str = ""
+    type: str = "generic"
+    secret_env: str = ""
+    min_severity: str = "HIGH"
+    events: list[str] = field(default_factory=list)
+    timeout_seconds: int = 10
+    enabled: bool = False
+
+    def resolved_secret(self) -> str:
+        """Return the webhook secret/token from the env var."""
+        if self.secret_env:
+            return os.environ.get(self.secret_env, "")
+        return ""
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
@@ -572,6 +589,7 @@ class Config:
     skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
+    webhooks: list[WebhookConfig] = field(default_factory=list)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -915,6 +933,25 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
     )
 
 
+def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
+    if not raw:
+        return []
+    webhooks: list[WebhookConfig] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        webhooks.append(WebhookConfig(
+            url=entry.get("url", ""),
+            type=entry.get("type", "generic"),
+            secret_env=entry.get("secret_env", ""),
+            min_severity=entry.get("min_severity", "HIGH"),
+            events=entry.get("events", []),
+            timeout_seconds=entry.get("timeout_seconds", 10),
+            enabled=entry.get("enabled", False),
+        ))
+    return webhooks
+
+
 def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     if not raw:
         return OpenShellConfig()
@@ -1093,6 +1130,7 @@ def load() -> Config:
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
+        webhooks=_merge_webhooks(raw.get("webhooks")),
     )
     _warn_plaintext_secrets(cfg)
     return cfg

@@ -128,6 +128,20 @@ watch:
   rescan_enabled: true
   rescan_interval_min: 30
 
+# webhooks:
+#   - url: "https://hooks.slack.com/services/T00/B00/xxx"
+#     type: slack
+#     min_severity: HIGH
+#     events: [block, drift, guardrail]
+#     enabled: true
+#   - url: "https://events.pagerduty.com/v2/enqueue"
+#     type: pagerduty
+#     secret_env: PAGERDUTY_ROUTING_KEY
+#     min_severity: CRITICAL
+#     events: [block]
+#     enabled: true
+webhooks: []
+
 enforcement:
   max_enforcement_delay_seconds: 1
 

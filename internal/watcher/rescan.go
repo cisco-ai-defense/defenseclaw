@@ -530,6 +530,10 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 	if w.otel != nil {
 		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type))
 	}
+
+	if w.webhooks != nil {
+		w.webhooks.Dispatch(event)
+	}
 }
 
 func summarizeDrift(deltas []DriftDelta) string {

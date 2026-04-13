@@ -87,6 +87,12 @@ type OnAdmission func(AdmissionResult)
 // and runs the admission gate (block → allow → scan) on each detection.
 // MCP servers are managed via “defenseclaw mcp set/unset“ rather than
 // filesystem watching.
+// WebhookDispatcher is implemented by gateway.WebhookDispatcher. Declared as
+// an interface here to avoid an import cycle (watcher → gateway).
+type WebhookDispatcher interface {
+	Dispatch(event audit.Event)
+}
+
 type InstallWatcher struct {
 	cfg        *config.Config
 	skillDirs  []string
@@ -96,6 +102,7 @@ type InstallWatcher struct {
 	shell      *sandbox.OpenShell
 	opa        *policy.Engine
 	otel       *telemetry.Provider
+	webhooks   WebhookDispatcher
 	debounce   time.Duration
 	onAdmit    OnAdmission
 
@@ -129,6 +136,11 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 // SetOTelProvider attaches the OTel provider for watcher metrics.
 func (w *InstallWatcher) SetOTelProvider(p *telemetry.Provider) {
 	w.otel = p
+}
+
+// SetWebhookDispatcher attaches a webhook dispatcher for outbound notifications.
+func (w *InstallWatcher) SetWebhookDispatcher(d WebhookDispatcher) {
+	w.webhooks = d
 }
 
 // Run starts watching configured directories. It blocks until ctx is cancelled.

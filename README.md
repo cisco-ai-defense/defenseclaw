@@ -282,6 +282,41 @@ For full setup, architecture, monitoring, and debugging details, see [docs/SANDB
 
 ---
 
+## Notifications
+
+### Webhook Notifications
+
+DefenseClaw can push enforcement events to external systems in real time. When a skill is blocked, drift is detected, or a guardrail fires, the webhook dispatcher sends structured payloads to configured endpoints.
+
+Supported channel types:
+
+| Type | Payload format | Authentication |
+|------|---------------|----------------|
+| **Slack** | Block Kit attachments with color-coded severity | URL token (Slack incoming webhook URL) |
+| **PagerDuty** | Events API v2 trigger with dedup key | `routing_key` via `secret_env` |
+| **Generic** | Flat JSON with full event metadata | `X-Webhook-Secret` header via `secret_env` |
+
+Configure in `~/.defenseclaw/config.yaml`:
+
+```yaml
+webhooks:
+  - url: "https://hooks.slack.com/services/T00/B00/xxx"
+    type: slack
+    min_severity: HIGH
+    events: [block, drift, guardrail]
+    enabled: true
+  - url: "https://events.pagerduty.com/v2/enqueue"
+    type: pagerduty
+    secret_env: PAGERDUTY_ROUTING_KEY
+    min_severity: CRITICAL
+    events: [block]
+    enabled: true
+```
+
+Events are dispatched asynchronously with automatic retry (up to 3 retries with exponential backoff). Each endpoint can filter by minimum severity and event category (`block`, `drift`, `guardrail`, `scan`).
+
+---
+
 ## SIEM Integration
 
 ### Splunk HEC

@@ -60,6 +60,7 @@ type Config struct {
 	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
 }
 
 type OTelConfig struct {
@@ -143,6 +144,24 @@ func (c *SplunkConfig) ResolvedHECToken() string {
 		}
 	}
 	return c.HECToken
+}
+
+type WebhookConfig struct {
+	URL            string   `mapstructure:"url"             yaml:"url"`
+	Type           string   `mapstructure:"type"            yaml:"type"`
+	SecretEnv      string   `mapstructure:"secret_env"      yaml:"secret_env"`
+	MinSeverity    string   `mapstructure:"min_severity"    yaml:"min_severity"`
+	Events         []string `mapstructure:"events"          yaml:"events"`
+	TimeoutSeconds int      `mapstructure:"timeout_seconds" yaml:"timeout_seconds"`
+	Enabled        bool     `mapstructure:"enabled"         yaml:"enabled"`
+}
+
+// ResolvedSecret returns the webhook secret/token from the env var.
+func (c *WebhookConfig) ResolvedSecret() string {
+	if c.SecretEnv != "" {
+		return os.Getenv(c.SecretEnv)
+	}
+	return ""
 }
 
 type WatchConfig struct {

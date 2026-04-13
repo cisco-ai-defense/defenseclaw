@@ -46,10 +46,10 @@ GUARDRAIL PROXY:
 ### `~/.defenseclaw/config.yaml`
 
 Central config file shared by the Go sidecar and the Python CLI. Stores
-scanner settings, gateway connection, watcher config, guardrail settings
-(including model routing and `guardrail.port` for the built-in proxy — no
-separate proxy YAML file), top-level `cisco_ai_defense` settings, skill actions,
-and everything else.
+scanner settings, gateway connection, watcher config, webhook notifications,
+guardrail settings (including model routing and `guardrail.port` for the
+built-in proxy — no separate proxy YAML file), top-level `cisco_ai_defense`
+settings, skill actions, and everything else.
 
 | | |
 |---|---|
@@ -184,3 +184,41 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 | **Set by** | `defenseclaw setup sandbox --host-ip <ip>` |
 | **Read by** | **Python CLI** `patch_openclaw_config()` — sets the `defenseclaw` provider `baseUrl` in `openclaw.json` to `http://{host}:{guardrail.port}`. **Go sidecar** `runAPI()` — in standalone mode, when `api_bind` is unset and host is not `localhost`, uses `guardrail.host` as the REST API bind address. |
 | **Effect** | Lets OpenClaw inside the sandbox point at the guardrail proxy and sidecar API on the host veth IP. |
+
+---
+
+## Webhook Notification Config
+
+The `webhooks` section in `config.yaml` configures outbound HTTP notifications
+for enforcement events. Each entry defines a webhook endpoint. Disabled by
+default in all policy presets.
+
+```yaml
+webhooks:
+  - url: "https://hooks.slack.com/services/T00/B00/xxx"
+    type: slack              # slack | pagerduty | generic
+    secret_env: ""           # env var name holding the auth secret/token
+    min_severity: HIGH       # minimum severity to dispatch (CRITICAL, HIGH, MEDIUM, LOW, INFO)
+    events:                  # event categories to dispatch (empty = all)
+      - block
+      - drift
+      - guardrail
+    timeout_seconds: 10      # per-request HTTP timeout
+    enabled: true            # set false to disable without removing the entry
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | `""` | Webhook endpoint URL. Required. |
+| `type` | string | `"generic"` | Channel type: `slack` (Block Kit), `pagerduty` (Events API v2), or `generic` (flat JSON). |
+| `secret_env` | string | `""` | Name of an environment variable holding the secret. For `pagerduty`, this is the routing key. For `generic`, the value is sent as `X-Webhook-Secret` header. Not used for `slack`. |
+| `min_severity` | string | `"HIGH"` | Minimum event severity to dispatch. Events below this threshold are silently dropped. |
+| `events` | list | `[]` | Event categories to include. Empty means all categories. Valid values: `block`, `drift`, `guardrail`, `scan`. |
+| `timeout_seconds` | int | `10` | HTTP timeout per webhook request. |
+| `enabled` | bool | `false` | Whether this endpoint is active. |
+
+| | |
+|---|---|
+| **Set by** | Operator, manually in `config.yaml`. |
+| **Read by** | **Go sidecar** at startup via `config.Load()`. **Python CLI** via `config.load()` (read-only, for display). |
+| **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors). |

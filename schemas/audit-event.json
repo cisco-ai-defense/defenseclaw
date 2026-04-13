@@ -6,7 +6,7 @@
   "properties": {
     "id": { "type": "string", "format": "uuid" },
     "timestamp": { "type": "string", "format": "date-time" },
-    "action": { "type": "string", "enum": ["init", "scan", "block", "allow", "quarantine", "restore", "deploy", "stop", "drift", "rescan", "rescan-start", "network-egress-blocked"] },
+    "action": { "type": "string", "enum": ["init", "scan", "block", "allow", "quarantine", "restore", "deploy", "stop", "drift", "rescan", "rescan-start", "network-egress-blocked", "guardrail-block"] },
     "target": { "type": "string" },
     "actor": { "type": "string", "default": "defenseclaw" },
     "details": { "type": "string" },
