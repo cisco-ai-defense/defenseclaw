@@ -134,6 +134,13 @@ watch:
 #     min_severity: HIGH
 #     events: [block, drift, guardrail]
 #     enabled: true
+#   - url: "https://webexapis.com/v1/messages"
+#     type: webex
+#     secret_env: WEBEX_BOT_TOKEN
+#     room_id: "Y2lzY29zcGFyazovL3VzL1JPT00v..."
+#     min_severity: HIGH
+#     events: [block, drift, guardrail]
+#     enabled: true
 #   - url: "https://events.pagerduty.com/v2/enqueue"
 #     type: pagerduty
 #     secret_env: PAGERDUTY_ROUTING_KEY

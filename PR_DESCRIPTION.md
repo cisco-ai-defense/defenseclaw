@@ -2,11 +2,11 @@
 
 ### Summary
 
-Adds an outbound webhook notification system that pushes enforcement events (skill/plugin blocks, drift alerts, guardrail blocks) to external systems in real time. Supports Slack, PagerDuty, and generic HTTP endpoints with per-endpoint severity filtering, event-type filtering, and automatic retry with exponential backoff.
+Adds an outbound webhook notification system that pushes enforcement events (skill/plugin blocks, drift alerts, guardrail blocks) to external systems in real time. Supports Slack, PagerDuty, Webex, and generic HTTP endpoints with per-endpoint severity filtering, event-type filtering, and automatic retry with exponential backoff.
 
 ### Motivation
 
-Before this PR, DefenseClaw enforcement events were only visible through the SQLite audit DB, the TUI dashboard, and Splunk HEC forwarding. There was no way to push real-time alerts to team collaboration tools (Slack) or incident management platforms (PagerDuty) without building custom integrations on top of the SIEM pipeline. This created a gap in operational workflows — security teams couldn't receive immediate, actionable notifications when a malicious skill was blocked or drift was detected.
+Before this PR, DefenseClaw enforcement events were only visible through the SQLite audit DB, the TUI dashboard, and Splunk HEC forwarding. There was no way to push real-time alerts to team collaboration tools (Slack, Webex) or incident management platforms (PagerDuty) without building custom integrations on top of the SIEM pipeline. This created a gap in operational workflows — security teams couldn't receive immediate, actionable notifications when a malicious skill was blocked or drift was detected.
 
 This PR closes that gap by adding a lightweight, configurable webhook dispatcher that runs alongside the existing audit pipeline.
 
@@ -16,22 +16,22 @@ This PR closes that gap by adding a lightweight, configurable webhook dispatcher
 
 | File | Purpose |
 |------|---------|
-| `internal/gateway/webhook.go` | `WebhookDispatcher` — async dispatch engine with retry, severity/event filtering, and payload formatters for Slack (Block Kit), PagerDuty (Events API v2), and generic JSON |
-| `internal/gateway/webhook_test.go` | 8 unit tests — payload formatting (Slack, PagerDuty, generic), severity filtering matrix, event-type filtering, action categorization, nil dispatcher safety, disabled endpoint handling |
-| `internal/gateway/webhook_e2e_test.go` | 9 E2E tests — full enforcement pipeline simulation, retry on transient failure, retry exhaustion, secret header validation, severity edge cases (25-combination matrix), enabled/disabled mixing, concurrent dispatch (50 goroutines), post-close safety |
+| `internal/gateway/webhook.go` | `WebhookDispatcher` — async dispatch engine with retry, severity/event filtering, and payload formatters for Slack (Block Kit), PagerDuty (Events API v2), Webex (Messages API with markdown), and generic JSON |
+| `internal/gateway/webhook_test.go` | 9 unit tests — payload formatting (Slack, PagerDuty, Webex, generic), severity filtering matrix, event-type filtering, action categorization, nil dispatcher safety, disabled endpoint handling |
+| `internal/gateway/webhook_e2e_test.go` | 11 E2E tests — full enforcement pipeline simulation, retry on transient failure, retry exhaustion, secret/auth header validation (generic, Slack, Webex Bearer), severity edge cases (25-combination matrix), Webex payload + multi-endpoint fan-out, enabled/disabled mixing, concurrent dispatch (50 goroutines), post-close safety |
 
 #### Modified Files
 
 | File | Change |
 |------|--------|
-| `internal/config/config.go` | Added `WebhookConfig` struct and `Webhooks []WebhookConfig` field to top-level `Config`; `ResolvedSecret()` helper reads secret from env var |
+| `internal/config/config.go` | Added `WebhookConfig` struct (with `RoomID` for Webex) and `Webhooks []WebhookConfig` field to top-level `Config`; `ResolvedSecret()` helper reads secret from env var |
 | `internal/gateway/sidecar.go` | Initializes `WebhookDispatcher` on startup; passes it to watcher and guardrail proxy; dispatches `block` events from `sendEnforcementAlert`; drains dispatcher on shutdown |
 | `internal/gateway/proxy.go` | Added `webhooks *WebhookDispatcher` field and `SetWebhookDispatcher` method; dispatches `guardrail-block` events from `recordTelemetry` when verdict is block |
 | `internal/watcher/watcher.go` | Added `WebhookDispatcher` interface and `SetWebhookDispatcher` method to break import cycle between `gateway` and `watcher` packages |
 | `internal/watcher/rescan.go` | Dispatches drift audit events to webhook dispatcher (if configured) after logging to audit store |
 | `cli/defenseclaw/config.py` | Mirrored `WebhookConfig` dataclass in Python CLI; added `_merge_webhooks()` parser; wired into `Config.webhooks` field |
 | `policies/default.yaml` | Added `webhooks: []` (disabled by default) |
-| `policies/strict.yaml` | Added `webhooks: []` with commented-out Slack/PagerDuty examples |
+| `policies/strict.yaml` | Added `webhooks: []` with commented-out Slack/Webex/PagerDuty examples |
 | `policies/permissive.yaml` | Added `webhooks: []` |
 | `schemas/audit-event.json` | Extended `action` enum with `"guardrail-block"` |
 | `README.md` | Added Notifications section with webhook config example and channel type table |
@@ -53,12 +53,13 @@ Enforcement Event Sources                  WebhookDispatcher
 │ Guardrail Proxy     │── guardrail ──────▶│  Payload formatters:         │
 │ (proxy.go)          │   block            │    ├─ Slack (Block Kit)      │
 └─────────────────────┘                    │    ├─ PagerDuty (Events v2)  │
+                                           │    ├─ Webex (Messages API)   │
                                            │    └─ Generic (flat JSON)    │
-                                           └──────┬───────┬───────┬──────┘
-                                                  │       │       │
-                                                  ▼       ▼       ▼
-                                              Slack   PagerDuty  HTTP
-                                             webhook   Events   endpoint
+                                           └──┬──────┬──────┬───────┬────┘
+                                              │      │      │       │
+                                              ▼      ▼      ▼       ▼
+                                           Slack  PagerDuty Webex  HTTP
+                                           webhook Events   Room  endpoint
 ```
 
 ### Webhook Channel Types
@@ -67,6 +68,7 @@ Enforcement Event Sources                  WebhookDispatcher
 |------|---------------|----------------|-------------|
 | `slack` | Block Kit attachments with severity-color-coded sidebar, header, section fields, context with event ID/timestamp | URL token embedded in Slack incoming webhook URL | 200 |
 | `pagerduty` | Events API v2 `trigger` with `dedup_key` (target+action), severity mapping (CRITICAL→critical, HIGH→error, MEDIUM→warning), `custom_details` | `routing_key` from `secret_env` | 202 |
+| `webex` | Markdown message via Webex Messages API (`POST /v1/messages`) with severity icon, structured fields, and `roomId` | Bot access token as `Authorization: Bearer` from `secret_env` | 200 |
 | `generic` | Flat JSON envelope (`webhook_type`, `defenseclaw_version`, nested `event` object with all audit fields) | `X-Webhook-Secret` header from `secret_env` | 200 |
 
 ### Severity and Event Filtering
@@ -101,6 +103,14 @@ webhooks:
     events: [block, drift, guardrail]
     enabled: true
 
+  - url: "https://webexapis.com/v1/messages"
+    type: webex
+    secret_env: WEBEX_BOT_TOKEN
+    room_id: "Y2lzY29zcGFyazovL3VzL1JPT00v..."
+    min_severity: HIGH
+    events: [block, drift, guardrail]
+    enabled: true
+
   - url: "https://events.pagerduty.com/v2/enqueue"
     type: pagerduty
     secret_env: PAGERDUTY_ROUTING_KEY
@@ -131,12 +141,14 @@ webhooks:
 
 ### Test Plan
 
-- [x] 8 unit tests pass (payload formatting, severity filtering, event-type filtering, action categorization, nil safety, disabled endpoints)
-- [x] 9 E2E tests pass:
+- [x] 9 unit tests pass (payload formatting for Slack, PagerDuty, Webex, generic; severity filtering, event-type filtering, action categorization, nil safety, disabled endpoints)
+- [x] 11 E2E tests pass:
   - [x] Full enforcement pipeline: 4 events (block, drift, guardrail-block, scan) → 3 endpoints (Slack, PagerDuty, generic) with correct routing, payload structure, and deep field validation
   - [x] Retry on transient failure: server returns 503 twice, then 200 — verifies 3 attempts
   - [x] Retry exhaustion: server always returns 500 — verifies exactly `maxRetries+1` attempts without hang
   - [x] Secret header: generic webhook receives `X-Webhook-Secret`, Slack does not
+  - [x] Webex payload + auth: verifies `Authorization: Bearer`, `roomId`, markdown content, no `X-Webhook-Secret`
+  - [x] Webex in multi-endpoint pipeline: Webex participates correctly alongside Slack and generic in fan-out with proper filtering
   - [x] Severity edge cases: 25-combination matrix (5 thresholds x 5 event severities)
   - [x] Mixed enabled/disabled: disabled and empty-URL endpoints skipped
   - [x] Concurrent dispatch: 50 goroutines dispatch simultaneously — no races, no lost payloads

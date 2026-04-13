@@ -294,6 +294,7 @@ Supported channel types:
 |------|---------------|----------------|
 | **Slack** | Block Kit attachments with color-coded severity | URL token (Slack incoming webhook URL) |
 | **PagerDuty** | Events API v2 trigger with dedup key | `routing_key` via `secret_env` |
+| **Webex** | Markdown message via Webex Messages API | Bot Bearer token via `secret_env` |
 | **Generic** | Flat JSON with full event metadata | `X-Webhook-Secret` header via `secret_env` |
 
 Configure in `~/.defenseclaw/config.yaml`:
@@ -302,6 +303,13 @@ Configure in `~/.defenseclaw/config.yaml`:
 webhooks:
   - url: "https://hooks.slack.com/services/T00/B00/xxx"
     type: slack
+    min_severity: HIGH
+    events: [block, drift, guardrail]
+    enabled: true
+  - url: "https://webexapis.com/v1/messages"
+    type: webex
+    secret_env: WEBEX_BOT_TOKEN
+    room_id: "Y2lzY29zcGFyazovL3VzL1JPT00v..."
     min_severity: HIGH
     events: [block, drift, guardrail]
     enabled: true

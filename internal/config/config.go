@@ -150,6 +150,7 @@ type WebhookConfig struct {
 	URL            string   `mapstructure:"url"             yaml:"url"`
 	Type           string   `mapstructure:"type"            yaml:"type"`
 	SecretEnv      string   `mapstructure:"secret_env"      yaml:"secret_env"`
+	RoomID         string   `mapstructure:"room_id"         yaml:"room_id"`
 	MinSeverity    string   `mapstructure:"min_severity"    yaml:"min_severity"`
 	Events         []string `mapstructure:"events"          yaml:"events"`
 	TimeoutSeconds int      `mapstructure:"timeout_seconds" yaml:"timeout_seconds"`

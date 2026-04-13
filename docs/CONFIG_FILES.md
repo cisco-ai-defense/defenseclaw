@@ -209,9 +209,10 @@ webhooks:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `url` | string | `""` | Webhook endpoint URL. Required. |
-| `type` | string | `"generic"` | Channel type: `slack` (Block Kit), `pagerduty` (Events API v2), or `generic` (flat JSON). |
-| `secret_env` | string | `""` | Name of an environment variable holding the secret. For `pagerduty`, this is the routing key. For `generic`, the value is sent as `X-Webhook-Secret` header. Not used for `slack`. |
+| `url` | string | `""` | Webhook endpoint URL. Required. For Webex, use `https://webexapis.com/v1/messages`. |
+| `type` | string | `"generic"` | Channel type: `slack` (Block Kit), `pagerduty` (Events API v2), `webex` (Webex Messages API), or `generic` (flat JSON). |
+| `secret_env` | string | `""` | Name of an environment variable holding the secret. For `pagerduty`, this is the routing key. For `webex`, this is the bot access token (sent as `Authorization: Bearer`). For `generic`, the value is sent as `X-Webhook-Secret` header. Not used for `slack`. |
+| `room_id` | string | `""` | Webex room ID to post messages to. Required when `type` is `webex`. |
 | `min_severity` | string | `"HIGH"` | Minimum event severity to dispatch. Events below this threshold are silently dropped. |
 | `events` | list | `[]` | Event categories to include. Empty means all categories. Valid values: `block`, `drift`, `guardrail`, `scan`. |
 | `timeout_seconds` | int | `10` | HTTP timeout per webhook request. |

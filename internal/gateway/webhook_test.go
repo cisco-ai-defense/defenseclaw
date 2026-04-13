@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,6 +79,33 @@ func TestFormatPagerDutyPayload(t *testing.T) {
 	p := m["payload"].(map[string]interface{})
 	if p["severity"] != "error" {
 		t.Errorf("expected PD severity=error for HIGH, got %v", p["severity"])
+	}
+}
+
+func TestFormatWebexPayload(t *testing.T) {
+	payload, err := formatWebexPayload(testEvent(), "Y2lzY29zcGFyazovL3VzL1JPT00vdGVzdC1yb29t")
+	if err != nil {
+		t.Fatalf("formatWebexPayload error: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["roomId"] != "Y2lzY29zcGFyazovL3VzL1JPT00vdGVzdC1yb29t" {
+		t.Errorf("expected roomId to match, got %v", m["roomId"])
+	}
+	md, ok := m["markdown"].(string)
+	if !ok || md == "" {
+		t.Fatal("expected non-empty markdown field")
+	}
+	if !strings.Contains(md, "DefenseClaw: block") {
+		t.Errorf("markdown should contain action, got %q", md)
+	}
+	if !strings.Contains(md, "malicious-skill") {
+		t.Errorf("markdown should contain target, got %q", md)
+	}
+	if !strings.Contains(md, "HIGH") {
+		t.Errorf("markdown should contain severity, got %q", md)
 	}
 }
 

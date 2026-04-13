@@ -539,6 +539,7 @@ class WebhookConfig:
     url: str = ""
     type: str = "generic"
     secret_env: str = ""
+    room_id: str = ""
     min_severity: str = "HIGH"
     events: list[str] = field(default_factory=list)
     timeout_seconds: int = 10
@@ -944,6 +945,7 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
             url=entry.get("url", ""),
             type=entry.get("type", "generic"),
             secret_env=entry.get("secret_env", ""),
+            room_id=entry.get("room_id", ""),
             min_severity=entry.get("min_severity", "HIGH"),
             events=entry.get("events", []),
             timeout_seconds=entry.get("timeout_seconds", 10),

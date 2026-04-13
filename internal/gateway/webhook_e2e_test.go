@@ -34,6 +34,7 @@ type receivedPayload struct {
 	Body        map[string]interface{}
 	ContentType string
 	SecretHdr   string
+	AuthHdr     string
 	Method      string
 }
 
@@ -57,6 +58,7 @@ func newCollector() *webhookCollector {
 			Body:        m,
 			ContentType: r.Header.Get("Content-Type"),
 			SecretHdr:   r.Header.Get("X-Webhook-Secret"),
+			AuthHdr:     r.Header.Get("Authorization"),
 			Method:      r.Method,
 		})
 		statusFn := c.statusFn
@@ -472,6 +474,138 @@ func TestWebhookE2E_SlackNoSecretHeader(t *testing.T) {
 	}
 	if payloads[0].SecretHdr != "" {
 		t.Errorf("slack webhooks should not include X-Webhook-Secret, got %q", payloads[0].SecretHdr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Webex webhook integration
+// ---------------------------------------------------------------------------
+
+// TestWebhookE2E_WebexPayloadAndAuth verifies that Webex webhooks send
+// the correct Messages API payload with Bearer auth and roomId.
+func TestWebhookE2E_WebexPayloadAndAuth(t *testing.T) {
+	receiver := newCollector()
+	defer receiver.Close()
+
+	t.Setenv("WEBEX_BOT_TOKEN_E2E", "NjM0ZDk1OTEtYzRmOC00ZTJlLWI4YjgtOTIwMGQwNT")
+
+	d := newTestDispatcher([]config.WebhookConfig{
+		{
+			URL:       receiver.URL(),
+			Type:      "webex",
+			SecretEnv: "WEBEX_BOT_TOKEN_E2E",
+			RoomID:    "Y2lzY29zcGFyazovL3VzL1JPT00vc2VjdXJpdHktYWxlcnRz",
+			Enabled:   true,
+		},
+	})
+
+	d.Dispatch(audit.Event{
+		ID:        "evt-webex-001",
+		Timestamp: time.Now().UTC(),
+		Action:    "block",
+		Target:    "crypto-miner-skill",
+		Actor:     "defenseclaw-watcher",
+		Details:   "type=skill severity=CRITICAL findings=7 actions=quarantined,blocked",
+		Severity:  "CRITICAL",
+	})
+	d.Close()
+
+	payloads := receiver.get()
+	if len(payloads) != 1 {
+		t.Fatalf("expected 1 Webex payload, got %d", len(payloads))
+	}
+
+	p := payloads[0]
+
+	// Verify Bearer auth header
+	if p.AuthHdr != "Bearer NjM0ZDk1OTEtYzRmOC00ZTJlLWI4YjgtOTIwMGQwNT" {
+		t.Errorf("expected Bearer token in Authorization header, got %q", p.AuthHdr)
+	}
+
+	// Webex should NOT have X-Webhook-Secret
+	if p.SecretHdr != "" {
+		t.Errorf("Webex should not set X-Webhook-Secret, got %q", p.SecretHdr)
+	}
+
+	// Verify roomId
+	if p.Body["roomId"] != "Y2lzY29zcGFyazovL3VzL1JPT00vc2VjdXJpdHktYWxlcnRz" {
+		t.Errorf("expected roomId to match, got %v", p.Body["roomId"])
+	}
+
+	// Verify markdown content
+	md, ok := p.Body["markdown"].(string)
+	if !ok || md == "" {
+		t.Fatal("expected non-empty markdown field")
+	}
+	if !strings.Contains(md, "DefenseClaw: block") {
+		t.Errorf("markdown should contain action, got %q", md)
+	}
+	if !strings.Contains(md, "crypto-miner-skill") {
+		t.Errorf("markdown should contain target, got %q", md)
+	}
+	if !strings.Contains(md, "CRITICAL") {
+		t.Errorf("markdown should contain severity, got %q", md)
+	}
+	if !strings.Contains(md, "evt-webex-001") {
+		t.Errorf("markdown should contain event ID, got %q", md)
+	}
+}
+
+// TestWebhookE2E_WebexInPipeline verifies that Webex endpoints participate
+// correctly in multi-endpoint fan-out alongside Slack and generic.
+func TestWebhookE2E_WebexInPipeline(t *testing.T) {
+	slackReceiver := newCollector()
+	defer slackReceiver.Close()
+
+	webexReceiver := newCollector()
+	defer webexReceiver.Close()
+
+	genericReceiver := newCollector()
+	defer genericReceiver.Close()
+
+	t.Setenv("WEBEX_BOT_TOKEN_PIPE", "testtoken123")
+
+	d := newTestDispatcher([]config.WebhookConfig{
+		{URL: slackReceiver.URL(), Type: "slack", MinSeverity: "HIGH", Events: []string{"block"}, Enabled: true},
+		{URL: webexReceiver.URL(), Type: "webex", SecretEnv: "WEBEX_BOT_TOKEN_PIPE", RoomID: "room-123", MinSeverity: "MEDIUM", Events: []string{"block", "drift"}, Enabled: true},
+		{URL: genericReceiver.URL(), Type: "generic", MinSeverity: "INFO", Enabled: true},
+	})
+
+	// CRITICAL block — should reach all 3
+	d.Dispatch(audit.Event{
+		ID: "evt-pipe-001", Timestamp: time.Now().UTC(),
+		Action: "block", Target: "evil-skill", Actor: "watcher",
+		Severity: "CRITICAL",
+	})
+
+	// MEDIUM drift — should reach webex (MEDIUM ≥ MEDIUM, drift in filter) and generic (INFO, no filter)
+	// should NOT reach slack (HIGH threshold, drift not in block filter)
+	d.Dispatch(audit.Event{
+		ID: "evt-pipe-002", Timestamp: time.Now().UTC(),
+		Action: "drift", Target: "mutated-skill", Actor: "rescan",
+		Severity: "MEDIUM",
+	})
+
+	d.Close()
+
+	if slackReceiver.count() != 1 {
+		t.Errorf("[slack] expected 1 payload, got %d", slackReceiver.count())
+	}
+	if webexReceiver.count() != 2 {
+		t.Errorf("[webex] expected 2 payloads (block+drift), got %d", webexReceiver.count())
+	}
+	if genericReceiver.count() != 2 {
+		t.Errorf("[generic] expected 2 payloads, got %d", genericReceiver.count())
+	}
+
+	// Verify all Webex payloads have the correct roomId and Bearer auth
+	for _, p := range webexReceiver.get() {
+		if p.Body["roomId"] != "room-123" {
+			t.Errorf("[webex] roomId should be room-123, got %v", p.Body["roomId"])
+		}
+		if p.AuthHdr != "Bearer testtoken123" {
+			t.Errorf("[webex] expected Bearer auth, got %q", p.AuthHdr)
+		}
 	}
 }
 

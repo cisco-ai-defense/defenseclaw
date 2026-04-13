@@ -44,8 +44,9 @@ type WebhookDispatcher struct {
 
 type webhookEndpoint struct {
 	url         string
-	channelType string // slack, pagerduty, generic
+	channelType string // slack, pagerduty, webex, generic
 	secret      string
+	roomID      string
 	minSeverity int
 	events      map[string]bool
 }
@@ -75,6 +76,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			url:         c.URL,
 			channelType: strings.ToLower(c.Type),
 			secret:      c.ResolvedSecret(),
+			roomID:      c.RoomID,
 			minSeverity: severityToRank(c.MinSeverity),
 			events:      evts,
 		})
@@ -152,6 +154,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 		payload, err = formatSlackPayload(event)
 	case "pagerduty":
 		payload, err = formatPagerDutyPayload(event, ep.secret)
+	case "webex":
+		payload, err = formatWebexPayload(event, ep.roomID)
 	default:
 		payload, err = formatGenericPayload(event)
 	}
@@ -174,7 +178,10 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if ep.secret != "" && ep.channelType == "generic" {
+		switch {
+		case ep.channelType == "webex" && ep.secret != "":
+			req.Header.Set("Authorization", "Bearer "+ep.secret)
+		case ep.channelType == "generic" && ep.secret != "":
 			req.Header.Set("X-Webhook-Secret", ep.secret)
 		}
 
@@ -278,6 +285,32 @@ func formatPagerDutyPayload(event audit.Event, routingKey string) ([]byte, error
 	return json.Marshal(payload)
 }
 
+func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
+	severity := strings.ToUpper(event.Severity)
+	icon := webexSeverityIcon(severity)
+	markdown := fmt.Sprintf(
+		"%s **DefenseClaw: %s**\n\n"+
+			"- **Severity:** %s\n"+
+			"- **Target:** `%s`\n"+
+			"- **Actor:** %s\n",
+		icon, event.Action, severity, event.Target, event.Actor,
+	)
+	if event.Details != "" {
+		details := event.Details
+		if len(details) > 500 {
+			details = details[:500] + "..."
+		}
+		markdown += fmt.Sprintf("- **Details:** %s\n", details)
+	}
+	markdown += fmt.Sprintf("\n_Event ID: %s | %s_", event.ID, event.Timestamp.Format(time.RFC3339))
+
+	payload := map[string]interface{}{
+		"roomId":   roomID,
+		"markdown": markdown,
+	}
+	return json.Marshal(payload)
+}
+
 func formatGenericPayload(event audit.Event) ([]byte, error) {
 	payload := map[string]interface{}{
 		"webhook_type":        "defenseclaw_enforcement",
@@ -313,6 +346,21 @@ func slackColor(severity string) string {
 		return "#36A64F"
 	default:
 		return "#439FE0"
+	}
+}
+
+func webexSeverityIcon(severity string) string {
+	switch severity {
+	case "CRITICAL":
+		return "🔴"
+	case "HIGH":
+		return "🟠"
+	case "MEDIUM":
+		return "🟡"
+	case "LOW":
+		return "🟢"
+	default:
+		return "🔵"
 	}
 }
 
