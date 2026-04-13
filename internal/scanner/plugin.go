@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -37,14 +38,27 @@ func NewPluginScanner(binaryPath string) *PluginScanner {
 	return &PluginScanner{BinaryPath: binaryPath}
 }
 
-func (s *PluginScanner) Name() string              { return "plugin-scanner" }
+func (s *PluginScanner) Name() string               { return "plugin-scanner" }
 func (s *PluginScanner) Version() string            { return "1.0.0" }
 func (s *PluginScanner) SupportedTargets() []string { return []string{"plugin"} }
+
+func pluginScanCommand(binaryPath, target string) (string, []string) {
+	if binaryPath == "" {
+		binaryPath = "defenseclaw"
+	}
+	switch filepath.Base(binaryPath) {
+	case "defenseclaw-plugin-scanner", "defenseclaw-plugin-scanner.exe":
+		return binaryPath, []string{target}
+	default:
+		return binaryPath, []string{"plugin", "scan", "--json", target}
+	}
+}
 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
 
-	cmd := exec.CommandContext(ctx, s.BinaryPath, "plugin", "scan", "--json", target)
+	binaryPath, args := pluginScanCommand(s.BinaryPath, target)
+	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

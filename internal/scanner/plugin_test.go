@@ -245,3 +245,31 @@ func TestParsePluginOutput_AllSuppressed(t *testing.T) {
 		t.Fatalf("expected 0 findings (all suppressed), got %d", len(findings))
 	}
 }
+
+func TestPluginScanCommand(t *testing.T) {
+	t.Run("default cli path uses plugin subcommand", func(t *testing.T) {
+		binary, args := pluginScanCommand("", "/tmp/plugin")
+		if binary != "defenseclaw" {
+			t.Fatalf("binary = %q, want defenseclaw", binary)
+		}
+		want := []string{"plugin", "scan", "--json", "/tmp/plugin"}
+		if len(args) != len(want) {
+			t.Fatalf("len(args) = %d, want %d (%v)", len(args), len(want), args)
+		}
+		for i := range want {
+			if args[i] != want[i] {
+				t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
+			}
+		}
+	})
+
+	t.Run("legacy standalone scanner remains supported", func(t *testing.T) {
+		binary, args := pluginScanCommand("/usr/local/bin/defenseclaw-plugin-scanner", "/tmp/plugin")
+		if binary != "/usr/local/bin/defenseclaw-plugin-scanner" {
+			t.Fatalf("binary = %q", binary)
+		}
+		if len(args) != 1 || args[0] != "/tmp/plugin" {
+			t.Fatalf("args = %v, want [/tmp/plugin]", args)
+		}
+	})
+}

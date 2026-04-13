@@ -268,7 +268,7 @@ DEFAULT_SANDBOX_HOME = "/home/sandbox"
 
 @dataclass
 class OpenShellConfig:
-    binary: str = "openshell-sandbox"
+    binary: str = "openshell"
     policy_dir: str = "/etc/openshell/policies"
     mode: str = ""
     version: str = DEFAULT_OPENSHELL_VERSION
@@ -295,6 +295,9 @@ class OpenShellConfig:
 class WatchConfig:
     debounce_ms: int = 500
     auto_block: bool = True
+    allow_list_bypass_scan: bool = True
+    rescan_enabled: bool = True
+    rescan_interval_min: int = 60
 
 
 @dataclass
@@ -535,7 +538,7 @@ class JudgeConfig:
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
-    scanner_mode: str = "local"     # local | remote | both
+    scanner_mode: str = "both"      # local | remote | both
     host: str = "localhost"         # host where guardrail proxy is reachable (bridge IP in sandbox mode)
     port: int = 4000
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
@@ -831,7 +834,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     return GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
-        scanner_mode=raw.get("scanner_mode", "local"),
+        scanner_mode=raw.get("scanner_mode", "both"),
         host=raw.get("host", "localhost"),
         port=raw.get("port", 4000),
         model=raw.get("model", ""),
@@ -924,7 +927,7 @@ def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     else:
         host_networking = True
     return OpenShellConfig(
-        binary=raw.get("binary", "openshell-sandbox"),
+        binary=raw.get("binary", "openshell"),
         policy_dir=raw.get("policy_dir", "/etc/openshell/policies"),
         mode=raw.get("mode", ""),
         version=raw.get("version", DEFAULT_OPENSHELL_VERSION),
@@ -1051,6 +1054,9 @@ def load() -> Config:
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),
+            allow_list_bypass_scan=raw.get("watch", {}).get("allow_list_bypass_scan", True),
+            rescan_enabled=raw.get("watch", {}).get("rescan_enabled", True),
+            rescan_interval_min=raw.get("watch", {}).get("rescan_interval_min", 60),
         ),
         firewall=FirewallConfig(
             config_file=raw.get("firewall", {}).get("config_file", os.path.join(data_dir, "firewall.yaml")),

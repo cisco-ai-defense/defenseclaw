@@ -108,6 +108,9 @@ firewall:
     - 443
     - 80
 
+# Periodic rescan / drift detection settings.  This does NOT enable
+# filesystem watching of policy files — use `POST /policy/reload` or
+# `defenseclaw policy reload` to pick up Rego policy changes.
 watch:
   rescan_enabled: true
   rescan_interval_min: 60

@@ -89,9 +89,9 @@ func TestNetworkEgressEvent_Validate(t *testing.T) {
 
 func TestNetworkEgressEvent_effectiveSeverity(t *testing.T) {
 	tests := []struct {
-		name     string
-		evt      NetworkEgressEvent
-		wantSev  string
+		name    string
+		evt     NetworkEgressEvent
+		wantSev string
 	}{
 		{"explicit severity wins", NetworkEgressEvent{Severity: "CRITICAL"}, "CRITICAL"},
 		{"blocked defaults HIGH", NetworkEgressEvent{Blocked: true}, "HIGH"},
@@ -262,6 +262,44 @@ func TestStore_QueryNetworkEgressEvents(t *testing.T) {
 	}
 }
 
+func TestStore_QueryNetworkEgressEvents_OrdersFractionalTimestampsChronologically(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	rawRows := []struct {
+		id        string
+		timestamp string
+		hostname  string
+	}{
+		{id: "whole-second", timestamp: "2026-03-24T12:00:00Z", hostname: "whole.example"},
+		{id: "fractional", timestamp: "2026-03-24T12:00:00.1Z", hostname: "fractional.example"},
+	}
+
+	for _, row := range rawRows {
+		if _, err := store.db.Exec(
+			`INSERT INTO network_egress_events
+			 (id, timestamp, hostname, policy_outcome, blocked, severity)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			row.id, row.timestamp, row.hostname, "ok", 0, "INFO",
+		); err != nil {
+			t.Fatalf("insert raw row %s: %v", row.id, err)
+		}
+	}
+
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{
+		Since: time.Date(2026, 3, 24, 12, 0, 0, 50_000_000, time.UTC),
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryNetworkEgressEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row after since-filter, got %d", len(rows))
+	}
+	if rows[0].Hostname != "fractional.example" {
+		t.Errorf("expected fractional row first, got %q", rows[0].Hostname)
+	}
+}
 func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()

@@ -77,6 +77,20 @@ class TestCollectFilesSymlinks(unittest.TestCase):
         basenames = [os.path.basename(f) for f in files]
         self.assertIn("util.js", basenames)
 
+    def test_symlink_alias_inside_root_is_not_double_counted(self):
+        """A symlink alias to an in-root directory should not duplicate findings."""
+        subdir = os.path.join(self.plugin_dir, "src", "nested")
+        os.makedirs(subdir)
+        with open(os.path.join(subdir, "alias.js"), "w") as f:
+            f.write("console.log('once');")
+        os.symlink(subdir, os.path.join(self.plugin_dir, "alias"))
+
+        files = collect_files(self.plugin_dir, [".js"])
+        self.assertEqual(
+            sorted(os.path.basename(f) for f in files),
+            ["alias.js", "index.js"],
+        )
+
     def test_symlink_cycle_does_not_loop(self):
         """Symlink cycle should be detected via inode tracking."""
         subdir = os.path.join(self.plugin_dir, "src")
@@ -84,9 +98,15 @@ class TestCollectFilesSymlinks(unittest.TestCase):
         link_path = os.path.join(subdir, "cycle")
         os.symlink(self.plugin_dir, link_path)
 
-        # Should complete without hanging
+        # Should complete without hanging and return a bounded file set
         files = collect_files(self.plugin_dir, [".js"])
         self.assertIsInstance(files, list)
+        self.assertGreater(len(files), 0, "cycle detection must still return files")
+        # Cycle detection prevents unbounded growth — file count must be
+        # finite and small (no more than a handful of the fixture files,
+        # even if some are seen via the symlink before the cycle is caught).
+        self.assertLess(len(files), 20,
+                        "symlink cycle produced too many files — cycle detection may be broken")
 
 
 class TestCollectFilesDotDirs(unittest.TestCase):
@@ -259,6 +279,41 @@ class TestNoManifestStillScans(unittest.TestCase):
         self.assertEqual(len(manifest_findings), 1)
         self.assertEqual(manifest_findings[0].severity, "HIGH")
 
+    def test_build_directory_is_scanned(self):
+        """Runtime code under build/ should still be inspected."""
+        plugin_dir = os.path.join(self.tmp, "build_plugin")
+        os.makedirs(os.path.join(plugin_dir, "build"))
+        with open(os.path.join(plugin_dir, "package.json"), "w") as f:
+            json.dump({"name": "build-plugin", "version": "1.0.0"}, f)
+        with open(os.path.join(plugin_dir, "build", "index.js"), "w") as f:
+            f.write("eval('malicious payload')")
+
+        result = scan_plugin(plugin_dir)
+        rule_ids = [f.rule_id for f in result.findings]
+        self.assertTrue(
+            any("EVAL" in rid for rid in rule_ids if rid),
+            f"Expected eval finding from build/ output, got: {rule_ids}",
+        )
+
+    def test_openclaw_manifest_still_gets_generic_json_checks(self):
+        """openclaw.plugin.json should still trigger JSON secret/URL rules."""
+        plugin_dir = os.path.join(self.tmp, "oc_json")
+        os.makedirs(plugin_dir)
+        with open(os.path.join(plugin_dir, "openclaw.plugin.json"), "w") as f:
+            json.dump(
+                {
+                    "id": "oc-json-plugin",
+                    "config": {
+                        "metadata_url": "http://169.254.169.254/latest/meta-data"
+                    },
+                },
+                f,
+            )
+
+        result = scan_plugin(plugin_dir)
+        rule_ids = [f.rule_id for f in result.findings]
+        self.assertIn("JSON-URL-HTTP", rule_ids)
+
 
 class TestCollectFilesSymlinkedFiles(unittest.TestCase):
     """A symlinked file pointing outside the scan root must also be caught."""
@@ -304,7 +359,12 @@ class TestCollectFilesSymlinkedFiles(unittest.TestCase):
         files = collect_files(self.plugin_dir, [".js"], _symlink_escapes=escapes)
 
         basenames = [os.path.basename(f) for f in files]
-        self.assertIn("util.js", basenames)
+        util_variants = {"util.js", "util_link.js"}
+        collected = util_variants & set(basenames)
+        self.assertTrue(
+            len(collected) == 1,
+            f"Inode dedup should collect exactly one of util.js / util_link.js, got {collected}",
+        )
         self.assertEqual(len(escapes), 0, "Internal file symlink should not be flagged as escape")
 
 

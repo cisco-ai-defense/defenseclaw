@@ -110,7 +110,8 @@ func DefaultConfig() *Config {
 				Binary:    "mcp-scanner",
 				Analyzers: "yara",
 			},
-			CodeGuard: filepath.Join(dataDir, "codeguard-rules"),
+			PluginScanner: "defenseclaw",
+			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),
 		},
 		OpenShell: OpenShellConfig{
 			Binary:    "openshell",
@@ -118,8 +119,11 @@ func DefaultConfig() *Config {
 			Version:   DefaultOpenShellVersion,
 		},
 		Watch: WatchConfig{
-			DebounceMs: 500,
-			AutoBlock:  true,
+			DebounceMs:          500,
+			AutoBlock:           true,
+			AllowListBypassScan: true,
+			RescanEnabled:       true,
+			RescanIntervalMin:   60,
 		},
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),

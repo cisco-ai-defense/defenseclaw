@@ -18,7 +18,11 @@ package watcher
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +33,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -36,13 +41,14 @@ import (
 type DriftType string
 
 const (
-	DriftNewFinding      DriftType = "new_finding"
-	DriftRemovedFinding  DriftType = "resolved_finding"
-	DriftSeverityChange  DriftType = "severity_escalation"
+	DriftNewFinding       DriftType = "new_finding"
+	DriftRemovedFinding   DriftType = "resolved_finding"
+	DriftSeverityChange   DriftType = "severity_escalation"
+	DriftContentChange    DriftType = "content_change"
 	DriftDependencyChange DriftType = "dependency_change"
-	DriftConfigMutation  DriftType = "config_mutation"
-	DriftNewEndpoint     DriftType = "new_endpoint"
-	DriftRemovedEndpoint DriftType = "removed_endpoint"
+	DriftConfigMutation   DriftType = "config_mutation"
+	DriftNewEndpoint      DriftType = "new_endpoint"
+	DriftRemovedEndpoint  DriftType = "removed_endpoint"
 )
 
 // DriftDelta represents a single detected change between baseline and current state.
@@ -54,7 +60,7 @@ type DriftDelta struct {
 	Current     string    `json:"current,omitempty"`
 }
 
-// rescanLoop runs periodic re-scans of all installed skills and MCPs,
+// rescanLoop runs periodic re-scans of all installed skills, plugins, and MCPs,
 // compares against baseline snapshots, and emits drift alerts.
 func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	interval := time.Duration(w.cfg.Watch.RescanIntervalMin) * time.Minute
@@ -65,18 +71,27 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	fmt.Fprintf(os.Stderr, "[rescan] periodic re-scan enabled (interval=%s)\n", interval)
 	_ = w.logger.LogAction("rescan-start", "", fmt.Sprintf("interval=%s", interval))
 
-	// Initial delay: wait one interval before the first re-scan to avoid
-	// scanning immediately on startup when the event-driven watcher is
-	// already handling fresh installs.
+	// Bootstrap a baseline immediately so already-installed targets are not
+	// blind for the first full interval after startup.
+	w.runRescanCycle(ctx)
+
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 
+	running := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			if running {
+				fmt.Fprintf(os.Stderr, "[rescan] previous cycle still running, skipping\n")
+				timer.Reset(interval)
+				continue
+			}
+			running = true
 			w.runRescanCycle(ctx)
+			running = false
 			timer.Reset(interval)
 		}
 	}
@@ -100,13 +115,15 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 }
 
-// enumerateTargets lists all direct child directories under watched roots.
+// enumerateTargets lists all direct child directories under watched roots plus
+// configured MCP servers from openclaw.json.
 func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	var targets []InstallEvent
 
 	for _, dir := range w.skillDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate skills dir %s: %v\n", dir, err)
 			continue
 		}
 		for _, e := range entries {
@@ -125,6 +142,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	for _, dir := range w.pluginDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
 			continue
 		}
 		for _, e := range entries {
@@ -140,16 +158,32 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 	}
 
+	servers, err := w.cfg.ReadMCPServers()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] enumerate mcp servers: %v\n", err)
+		return targets
+	}
+	for _, server := range servers {
+		if strings.TrimSpace(server.Name) == "" {
+			continue
+		}
+		targets = append(targets, InstallEvent{
+			Type:      InstallMCP,
+			Name:      server.Name,
+			Path:      server.Name,
+			Timestamp: time.Now().UTC(),
+		})
+	}
+
 	return targets
 }
 
 // rescanTarget scans a single target, compares with baseline, and emits drift alerts.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
-	if _, err := os.Stat(evt.Path); os.IsNotExist(err) {
+	currentSnap, err := w.snapshotForEvent(evt)
+	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
-
-	currentSnap, err := SnapshotTarget(evt.Path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] snapshot %s: %v\n", evt.Path, err)
 		return
@@ -158,12 +192,21 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 
 	if err != nil {
-		// No baseline: this is the first scan. Take snapshot, run scan, store baseline.
-		w.storeBaseline(ctx, evt, currentSnap)
+		if errors.Is(err, sql.ErrNoRows) {
+			w.storeBaseline(ctx, evt, currentSnap)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
 		return
 	}
 
 	var deltas []DriftDelta
+
+	// If a previous baseline exists but never recorded a scan result, keep
+	// retrying scan persistence so finding-based drift detection can recover.
+	if baseline.ScanID == "" {
+		w.storeBaseline(ctx, evt, currentSnap)
+	}
 
 	// Compare content-level drift (deps, config, endpoints).
 	deltas = append(deltas, compareSnapshots(baseline, currentSnap)...)
@@ -188,7 +231,7 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 
-		result, err := s.Scan(scanCtx, evt.Path)
+		result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 		if err == nil && result != nil {
 			scanID = w.persistScanResult(result)
 		}
@@ -212,20 +255,34 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 	}
 
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
-	if err != nil || baseline.ScanID == "" {
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: get baseline %s: %v\n", evt.Path, err)
+		}
+		return nil
+	}
+	if baseline.ScanID == "" {
 		return nil
 	}
 
 	prevScan, err := w.loadScanResult(baseline.ScanID)
-	if err != nil || prevScan == nil {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: load baseline scan %s: %v\n", baseline.ScanID, err)
+		return nil
+	}
+	if prevScan == nil {
 		return nil
 	}
 
 	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	current, err := s.Scan(scanCtx, evt.Path)
-	if err != nil || current == nil {
+	current, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: scan %s: %v\n", evt.Path, err)
+		return nil
+	}
+	if current == nil {
 		return nil
 	}
 
@@ -262,9 +319,14 @@ func (w *InstallWatcher) loadScanResult(scanID string) (*scanner.ScanResult, err
 // compareSnapshots diffs dependency hashes, config hashes, and network endpoints.
 func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []DriftDelta {
 	var deltas []DriftDelta
+	if baseline == nil || current == nil {
+		return deltas
+	}
 
 	var prevDeps map[string]string
-	_ = json.Unmarshal([]byte(baseline.DependencyHashes), &prevDeps)
+	if err := json.Unmarshal([]byte(baseline.DependencyHashes), &prevDeps); err != nil && baseline.DependencyHashes != "" {
+		fmt.Fprintf(os.Stderr, "[rescan] corrupt baseline dependency_hashes for %s: %v\n", baseline.TargetPath, err)
+	}
 	for file, hash := range current.DependencyHashes {
 		prev, exists := prevDeps[file]
 		if !exists {
@@ -284,9 +346,21 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 			})
 		}
 	}
+	for file, hash := range prevDeps {
+		if _, exists := current.DependencyHashes[file]; !exists {
+			deltas = append(deltas, DriftDelta{
+				Type:        DriftDependencyChange,
+				Severity:    "MEDIUM",
+				Description: fmt.Sprintf("dependency manifest removed: %s", file),
+				Previous:    hash,
+			})
+		}
+	}
 
 	var prevCfg map[string]string
-	_ = json.Unmarshal([]byte(baseline.ConfigHashes), &prevCfg)
+	if err := json.Unmarshal([]byte(baseline.ConfigHashes), &prevCfg); err != nil && baseline.ConfigHashes != "" {
+		fmt.Fprintf(os.Stderr, "[rescan] corrupt baseline config_hashes for %s: %v\n", baseline.TargetPath, err)
+	}
 	for file, hash := range current.ConfigHashes {
 		prev, exists := prevCfg[file]
 		if !exists {
@@ -306,9 +380,21 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 			})
 		}
 	}
+	for file, hash := range prevCfg {
+		if _, exists := current.ConfigHashes[file]; !exists {
+			deltas = append(deltas, DriftDelta{
+				Type:        DriftConfigMutation,
+				Severity:    "HIGH",
+				Description: fmt.Sprintf("config file removed: %s", file),
+				Previous:    hash,
+			})
+		}
+	}
 
 	var prevEndpoints []string
-	_ = json.Unmarshal([]byte(baseline.NetworkEndpoints), &prevEndpoints)
+	if err := json.Unmarshal([]byte(baseline.NetworkEndpoints), &prevEndpoints); err != nil && baseline.NetworkEndpoints != "" {
+		fmt.Fprintf(os.Stderr, "[rescan] corrupt baseline network_endpoints for %s: %v\n", baseline.TargetPath, err)
+	}
 	prevSet := make(map[string]bool, len(prevEndpoints))
 	for _, ep := range prevEndpoints {
 		prevSet[ep] = true
@@ -339,40 +425,83 @@ func compareSnapshots(baseline *audit.SnapshotRow, current *TargetSnapshot) []Dr
 		}
 	}
 
+	// Fall back to the whole-tree content hash so code-only mutations that do
+	// not alter dependencies, config files, or endpoints still surface as drift.
+	if baseline.ContentHash != "" && current.ContentHash != "" &&
+		baseline.ContentHash != current.ContentHash && len(deltas) == 0 {
+		deltas = append(deltas, DriftDelta{
+			Type:        DriftContentChange,
+			Severity:    "MEDIUM",
+			Description: "directory contents changed outside tracked dependency/config/endpoint surfaces",
+			Previous:    baseline.ContentHash,
+			Current:     current.ContentHash,
+		})
+	}
+
 	return deltas
 }
 
-// diffFindings compares two sets of findings by title and returns drift deltas.
-func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
-	prevByTitle := make(map[string]scanner.Finding, len(prev))
-	for _, f := range prev {
-		prevByTitle[f.Title] = f
+func findingDriftKey(f scanner.Finding) string {
+	return strings.Join([]string{
+		f.Scanner,
+		f.Title,
+		f.Location,
+	}, "\x00")
+}
+
+func findingLabel(f scanner.Finding) string {
+	if f.Location == "" {
+		return f.Title
 	}
-	currByTitle := make(map[string]scanner.Finding, len(curr))
+	return fmt.Sprintf("%s (%s)", f.Title, f.Location)
+}
+
+// diffFindings compares two sets of findings and returns drift deltas.
+func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
+	prevByKey := make(map[string]scanner.Finding, len(prev))
+	for _, f := range prev {
+		prevByKey[findingDriftKey(f)] = f
+	}
+	currByKey := make(map[string]scanner.Finding, len(curr))
 	for _, f := range curr {
-		currByTitle[f.Title] = f
+		currByKey[findingDriftKey(f)] = f
 	}
 
 	var deltas []DriftDelta
 
-	for title, f := range currByTitle {
-		if _, exists := prevByTitle[title]; !exists {
+	for key, f := range currByKey {
+		prevFinding, exists := prevByKey[key]
+		if !exists {
 			deltas = append(deltas, DriftDelta{
 				Type:        DriftNewFinding,
 				Severity:    string(f.Severity),
-				Description: fmt.Sprintf("new finding: %s (%s)", f.Title, f.Severity),
-				Current:     f.Title,
+				Description: fmt.Sprintf("new finding: %s (%s)", findingLabel(f), f.Severity),
+				Current:     findingLabel(f),
+			})
+			continue
+		}
+		if prevFinding.Severity != f.Severity {
+			sev := prevFinding.Severity
+			if severityRank(string(f.Severity)) > severityRank(string(prevFinding.Severity)) {
+				sev = f.Severity
+			}
+			deltas = append(deltas, DriftDelta{
+				Type:        DriftSeverityChange,
+				Severity:    string(sev),
+				Description: fmt.Sprintf("finding severity changed: %s (%s -> %s)", findingLabel(f), prevFinding.Severity, f.Severity),
+				Previous:    string(prevFinding.Severity),
+				Current:     string(f.Severity),
 			})
 		}
 	}
 
-	for title, f := range prevByTitle {
-		if _, exists := currByTitle[title]; !exists {
+	for key, f := range prevByKey {
+		if _, exists := currByKey[key]; !exists {
 			deltas = append(deltas, DriftDelta{
 				Type:        DriftRemovedFinding,
 				Severity:    "INFO",
-				Description: fmt.Sprintf("finding resolved: %s (was %s)", f.Title, f.Severity),
-				Previous:    f.Title,
+				Description: fmt.Sprintf("finding resolved: %s (was %s)", findingLabel(f), f.Severity),
+				Previous:    findingLabel(f),
 			})
 		}
 	}
@@ -402,7 +531,9 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 		Details:   string(detailsJSON),
 		Severity:  maxSev,
 	}
-	_ = w.store.LogEvent(event)
+	if err := w.store.LogEvent(event); err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] drift alert LogEvent failed for %s: %v\n", evt.Path, err)
+	}
 
 	if w.otel != nil {
 		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type))
@@ -443,6 +574,73 @@ func severityRank(s string) int {
 	default:
 		return 0
 	}
+}
+
+func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, error) {
+	switch evt.Type {
+	case InstallMCP:
+		return w.snapshotMCPServer(evt.Name)
+	default:
+		if _, err := os.Stat(evt.Path); err != nil {
+			return nil, err
+		}
+		return SnapshotTarget(evt.Path)
+	}
+}
+
+func (w *InstallWatcher) snapshotMCPServer(name string) (*TargetSnapshot, error) {
+	entry, err := w.lookupMCPServer(name)
+	if err != nil {
+		return nil, err
+	}
+
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
+	}
+	sum := sha256.Sum256(raw)
+	hash := hex.EncodeToString(sum[:])
+
+	snap := &TargetSnapshot{
+		ContentHash:      hash,
+		DependencyHashes: map[string]string{},
+		ConfigHashes: map[string]string{
+			fmt.Sprintf("mcp.servers.%s", name): hash,
+		},
+		Timestamp: time.Now().UTC(),
+	}
+	if entry.URL != "" {
+		snap.NetworkEndpoints = []string{entry.URL}
+	}
+	return snap, nil
+}
+
+func (w *InstallWatcher) lookupMCPServer(name string) (*config.MCPServerEntry, error) {
+	servers, err := w.cfg.ReadMCPServers()
+	if err != nil {
+		return nil, err
+	}
+	for _, server := range servers {
+		if server.Name == name {
+			serverCopy := server
+			return &serverCopy, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
+func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
+	if evt.Type != InstallMCP {
+		return evt.Path
+	}
+	entry, err := w.lookupMCPServer(evt.Name)
+	if err != nil {
+		return evt.Name
+	}
+	if entry.URL != "" {
+		return entry.URL
+	}
+	return entry.Name
 }
 
 // persistScanResult stores a scan result in the audit DB and returns the generated scan ID.

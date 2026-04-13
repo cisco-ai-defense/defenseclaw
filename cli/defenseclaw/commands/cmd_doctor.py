@@ -197,11 +197,10 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 
     if not cfg.guardrail.model:
         _emit(
-            "fail", "Guardrail proxy",
-            "guardrail.model is empty — set it in ~/.defenseclaw/config.yaml",
+            "warn", "Guardrail proxy",
+            "guardrail.model is empty — relying on fetch-interceptor routing",
         )
-        r.record("fail")
-        return
+        r.record("warn")
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
     url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"

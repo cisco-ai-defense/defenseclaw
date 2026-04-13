@@ -1189,6 +1189,8 @@ def scan_bundle_size(
 
         bundle_path = os.path.join(directory, entry)
         try:
+            if os.path.islink(bundle_path):
+                continue
             if not os.path.isdir(bundle_path):
                 continue
         except OSError:
@@ -1220,9 +1222,16 @@ def scan_bundle_size(
             )
 
 
-def _measure_dir_size(directory: str, max_depth: int = 3, depth: int = 0) -> int:
+def _measure_dir_size(
+    directory: str,
+    max_depth: int = 3,
+    depth: int = 0,
+    _root: str | None = None,
+) -> int:
     if depth >= max_depth:
         return 0
+    if _root is None:
+        _root = os.path.realpath(directory)
     total = 0
     try:
         entries = os.listdir(directory)
@@ -1231,8 +1240,13 @@ def _measure_dir_size(directory: str, max_depth: int = 3, depth: int = 0) -> int
     for entry in entries:
         full_path = os.path.join(directory, entry)
         try:
+            if os.path.islink(full_path):
+                continue
+            real = os.path.realpath(full_path)
+            if not real.startswith(_root + os.sep) and real != _root:
+                continue
             if os.path.isdir(full_path):
-                total += _measure_dir_size(full_path, max_depth, depth + 1)
+                total += _measure_dir_size(full_path, max_depth, depth + 1, _root)
             else:
                 total += os.path.getsize(full_path)
         except OSError:
@@ -1265,7 +1279,7 @@ def scan_json_configs(
     for file_path in json_files:
         basename = os.path.basename(file_path)
         # Skip package.json (already handled), lockfiles, and tsconfig
-        if basename in ("package.json", "package-lock.json", "tsconfig.json", "openclaw.plugin.json"):
+        if basename in ("package.json", "package-lock.json", "tsconfig.json"):
             continue
 
         try:

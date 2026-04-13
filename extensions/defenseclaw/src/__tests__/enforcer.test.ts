@@ -296,6 +296,58 @@ describe("PolicyEnforcer", () => {
       expect(enforcer.isBlockedLocally("skill", "blocked-skill")).toBe(true);
       expect(enforcer.isAllowedLocally("mcp", "allowed-mcp")).toBe(true);
     });
+
+    it("removes stale entries on subsequent sync", async () => {
+      blockedList = [
+        {
+          id: "1",
+          target_type: "skill",
+          target_name: "skill-a",
+          reason: "blocked",
+          updated_at: new Date().toISOString(),
+        },
+        {
+          id: "2",
+          target_type: "skill",
+          target_name: "skill-b",
+          reason: "blocked",
+          updated_at: new Date().toISOString(),
+        },
+      ];
+      allowedList = [
+        {
+          id: "3",
+          target_type: "mcp",
+          target_name: "mcp-a",
+          reason: "allowed",
+          updated_at: new Date().toISOString(),
+        },
+      ];
+
+      const enforcer = makeEnforcer();
+      await enforcer.syncFromDaemon();
+
+      expect(enforcer.isBlockedLocally("skill", "skill-a")).toBe(true);
+      expect(enforcer.isBlockedLocally("skill", "skill-b")).toBe(true);
+      expect(enforcer.isAllowedLocally("mcp", "mcp-a")).toBe(true);
+
+      blockedList = [
+        {
+          id: "2",
+          target_type: "skill",
+          target_name: "skill-b",
+          reason: "blocked",
+          updated_at: new Date().toISOString(),
+        },
+      ];
+      allowedList = [];
+
+      await enforcer.syncFromDaemon();
+
+      expect(enforcer.isBlockedLocally("skill", "skill-a")).toBe(false);
+      expect(enforcer.isBlockedLocally("skill", "skill-b")).toBe(true);
+      expect(enforcer.isAllowedLocally("mcp", "mcp-a")).toBe(false);
+    });
   });
 
   describe("evaluatePlugin - admission gate", () => {
@@ -422,9 +474,7 @@ describe("PolicyEnforcer", () => {
         "broken",
       );
 
-      expect(["clean", "scan-error", "warning", "rejected"]).toContain(
-        result.verdict,
-      );
+      expect(result.verdict).toBe("scan-error");
     });
 
     it("submits scan results to daemon", async () => {

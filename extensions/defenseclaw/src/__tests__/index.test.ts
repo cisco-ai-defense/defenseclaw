@@ -21,7 +21,7 @@ import type { ScanResult } from "../types.js";
 
 // --- Hoisted mocks (available before module-level vi.mock factories) ---
 
-const { mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockScanMCPServer } =
+const { mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockRunCodeScan, mockScanMCPServer } =
   vi.hoisted(() => ({
     mockEnforcer: {
       syncFromDaemon: vi.fn(),
@@ -32,6 +32,7 @@ const { mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockScanMCPServer } =
     },
     mockRunSkillScan: vi.fn(),
     mockRunPluginScan: vi.fn(),
+    mockRunCodeScan: vi.fn(),
     mockScanMCPServer: vi.fn(),
   }));
 
@@ -47,6 +48,7 @@ vi.mock("../policy/enforcer.js", () => ({
   PolicyEnforcer: vi.fn(() => mockEnforcer),
   runSkillScan: mockRunSkillScan,
   runPluginScan: mockRunPluginScan,
+  runCodeScan: mockRunCodeScan,
 }));
 
 vi.mock("../scanners/mcp-scanner.js", () => ({

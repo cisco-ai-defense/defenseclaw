@@ -1806,7 +1806,12 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"internal IP", "http://10.0.0.1:9200", false},
 		{"query bypass", "https://evil.com/?foo=api.openai.com", false},
 		{"path bypass", "https://evil.com/api.anthropic.com", false},
+		{"hostname embed", "https://notopenrouter.ai/v1/chat", false},
+		{"hostname suffix spoof", "https://api.openai.com.attacker.example/v1/chat", false},
+		{"subdomain embed", "https://evil-api.anthropic.com.evil.com/messages", false},
 		{"invalid url", "://bad-url", false},
+		{"ollama loopback", "http://localhost:11434/api/chat", true},
+		{"ollama 127.0.0.1", "http://127.0.0.1:11434/v1/chat/completions", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1814,6 +1819,47 @@ func TestIsKnownProviderDomain(t *testing.T) {
 				t.Errorf("isKnownProviderDomain(%q) = %v, want %v", tt.url, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsOllamaLoopback(t *testing.T) {
+	tests := []struct {
+		name          string
+		url           string
+		guardrailPort int
+		want          bool
+	}{
+		{"ollama default port", "http://localhost:11434/api/chat", 4000, true},
+		{"ollama 127.0.0.1", "http://127.0.0.1:11434/api/chat", 4000, true},
+		{"ollama ipv6 loopback", "http://[::1]:11434/api/chat", 4000, true},
+		{"non-ollama localhost port", "http://localhost:8080/secret", 4000, false},
+		{"guardrail port excluded", "http://localhost:11434/api/chat", 11434, false},
+		{"external host on ollama port", "http://evil.com:11434/api/chat", 4000, false},
+		{"no port", "http://localhost/api/chat", 4000, false},
+		{"invalid url", "://bad", 4000, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isOllamaLoopback(tt.url, tt.guardrailPort); got != tt.want {
+				t.Errorf("isOllamaLoopback(%q, %d) = %v, want %v", tt.url, tt.guardrailPort, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInferProviderFromURL_Ollama(t *testing.T) {
+	got := inferProviderFromURL("http://localhost:11434/api/chat")
+	if got != "ollama" {
+		t.Errorf("inferProviderFromURL(ollama loopback) = %q, want %q", got, "ollama")
+	}
+}
+
+func TestIsKnownProviderDomain_OllamaLoopback(t *testing.T) {
+	if !isKnownProviderDomain("http://localhost:11434/api/chat") {
+		t.Error("expected Ollama loopback to be a known provider domain")
+	}
+	if isKnownProviderDomain("http://localhost:8080/secret") {
+		t.Error("non-Ollama localhost port should not be a known provider domain")
 	}
 }
 

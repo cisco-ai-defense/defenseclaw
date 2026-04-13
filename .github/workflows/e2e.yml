@@ -45,6 +45,22 @@ jobs:
         run: |
           defenseclaw-gateway stop 2>/dev/null || true
           openclaw gateway stop 2>/dev/null || true
+
+          echo "--- Disk before cleanup ---"
+          df -h / | tail -1
+
+          cd bundles/splunk_local_bridge/compose 2>/dev/null && {
+            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
+            cd -
+          } || true
+          docker volume prune -f 2>/dev/null || true
+          docker system prune -f --volumes 2>/dev/null || true
+          go clean -cache 2>/dev/null || true
+
+          echo "--- Disk after cleanup ---"
+          df -h / | tail -1
+
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
@@ -274,6 +290,30 @@ jobs:
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
 
+      - name: Post-run cleanup
+        if: always()
+        run: |
+          echo "--- Disk before post-run cleanup ---"
+          df -h / | tail -1
+
+          defenseclaw-gateway stop 2>/dev/null || true
+
+          cd bundles/splunk_local_bridge/compose 2>/dev/null && {
+            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
+            cd -
+          } || true
+          docker volume prune -f 2>/dev/null || true
+          docker system prune -f --volumes 2>/dev/null || true
+
+          rm -rf ~/.defenseclaw
+          rm -f ~/.local/bin/defenseclaw-gateway
+          rm -rf ~/.openclaw/extensions/defenseclaw*
+          go clean -cache 2>/dev/null || true
+
+          echo "--- Disk after post-run cleanup ---"
+          df -h / | tail -1
+
   full-live:
     name: Full Live E2E
     if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -329,6 +369,22 @@ jobs:
 
           defenseclaw-gateway stop 2>/dev/null || true
           openclaw gateway stop 2>/dev/null || true
+
+          echo "--- Disk before cleanup ---"
+          df -h / | tail -1
+
+          cd bundles/splunk_local_bridge/compose 2>/dev/null && {
+            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
+            cd -
+          } || true
+          docker volume prune -f 2>/dev/null || true
+          docker system prune -f --volumes 2>/dev/null || true
+          go clean -cache 2>/dev/null || true
+
+          echo "--- Disk after cleanup ---"
+          df -h / | tail -1
+
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
@@ -412,8 +468,6 @@ jobs:
             sleep 5
           done
 
-          # Lower minFreeSpace for CI runners with limited disk.
-          # Default is 5000MB; CI runners sometimes have < 5GB free → HTTP 503.
           echo "Disk free: $(df -h / | tail -1)"
           docker compose -f docker-compose.ci.yml exec -T -u splunk splunk bash -c '
             for d in /opt/splunk/etc/system/local /opt/splunk/etc/apps/search/local; do
@@ -740,6 +794,30 @@ jobs:
             rm -f ~/.openclaw/agents/main/agent/auth-profiles.json
             rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
+
+      - name: Post-run cleanup
+        if: always()
+        run: |
+          echo "--- Disk before post-run cleanup ---"
+          df -h / | tail -1
+
+          defenseclaw-gateway stop 2>/dev/null || true
+
+          cd bundles/splunk_local_bridge/compose 2>/dev/null && {
+            export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
+            docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
+            cd -
+          } || true
+          docker volume prune -f 2>/dev/null || true
+          docker system prune -f --volumes 2>/dev/null || true
+
+          rm -rf ~/.defenseclaw
+          rm -f ~/.local/bin/defenseclaw-gateway
+          rm -rf ~/.openclaw/extensions/defenseclaw*
+          go clean -cache 2>/dev/null || true
+
+          echo "--- Disk after post-run cleanup ---"
+          df -h / | tail -1
 
   e2e-required:
     name: E2E Required

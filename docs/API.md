@@ -584,11 +584,23 @@ programmatic skill-action policy lookups.
 
 ### POST /policy/reload
 
-Reload the OPA policy engine from the configured `policy_dir`. Useful
-after editing Rego policy files on disk to pick up changes without
-restarting the sidecar.
+Hot-reload the OPA policy engine from the configured `policy_dir`.
+Re-reads all `.rego` files and `data.json` from disk, compiles the
+modules, and atomically swaps the in-memory store used by **both** the
+REST API policy-evaluation endpoints and the install watcher's
+admission gate.  If compilation fails the previous engine state is
+preserved and an error is returned.
 
-**Callers:** No production callers currently.
+Use this after editing Rego policy files on disk to pick up changes
+without restarting the sidecar.
+
+> **Note:** This endpoint reloads _OPA Rego policies_, not the YAML
+> config file (`~/.defenseclaw/config.yaml`).  The `watch:` section
+> inside policy YAML templates (`policies/default.yaml` etc.) controls
+> rescan/drift-detection settings — it does **not** enable automatic
+> filesystem watching of policy files themselves.
+
+**Callers:** CLI `policy reload`, or any HTTP client.
 
 **Request:** No request body.
 
@@ -602,7 +614,7 @@ restarting the sidecar.
 ```
 
 **Errors:** `503` if `policy_dir` is not configured, `500` if engine
-creation fails, `400` if policy compilation fails.
+reload fails (disk read or compilation error).
 
 ---
 

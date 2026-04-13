@@ -44,6 +44,7 @@ from defenseclaw.config import (
     SeverityAction,
     SkillActionsConfig,
     SkillScannerConfig,
+    WatchConfig,
     _dedup,
     _expand,
     _merge_cisco_ai_defense,
@@ -290,6 +291,40 @@ class TestConfigLoadSave(unittest.TestCase):
                 raw = yaml.safe_load(f)
             self.assertEqual(raw["environment"], "macos")
             self.assertEqual(raw["data_dir"], tmpdir)
+
+    def test_save_and_reload_preserves_watch_rescan_fields(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                watch=WatchConfig(
+                    debounce_ms=750,
+                    auto_block=False,
+                    allow_list_bypass_scan=False,
+                    rescan_enabled=False,
+                    rescan_interval_min=15,
+                ),
+            )
+            cfg.save()
+
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+
+            self.assertFalse(raw["watch"]["rescan_enabled"])
+            self.assertEqual(raw["watch"]["rescan_interval_min"], 15)
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+
+            self.assertFalse(loaded.watch.rescan_enabled)
+            self.assertEqual(loaded.watch.rescan_interval_min, 15)
 
 
 class TestClawPaths(unittest.TestCase):

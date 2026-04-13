@@ -175,6 +175,23 @@ class TestPolicyActivate(PolicyCommandTestBase):
         self.assertIn("activated", result.output)
         self.assertEqual(self.app.cfg.skill_actions.medium.install, "block")
 
+    def test_activate_builtin_updates_watch_rescan_config(self):
+        import yaml
+
+        self.app.cfg.watch.rescan_enabled = False
+        self.app.cfg.watch.rescan_interval_min = 120
+
+        result = self.invoke(["activate", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertTrue(self.app.cfg.watch.rescan_enabled)
+        self.assertEqual(self.app.cfg.watch.rescan_interval_min, 30)
+
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["watch"]["rescan_enabled"])
+        self.assertEqual(raw["watch"]["rescan_interval_min"], 30)
+
     def test_activate_nonexistent(self):
         result = self.invoke(["activate", "ghost"])
         self.assertNotEqual(result.exit_code, 0)

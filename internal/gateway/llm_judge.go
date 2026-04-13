@@ -29,8 +29,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// judgeActive is the reentrancy guard — prevents the LLM judge's own API
-// calls from recursively triggering guardrail inspection.
+// judgeActive prevents the prompt/PII judge's own API calls from recursively
+// triggering guardrail inspection.
 var judgeActive atomic.Bool
 
 // LLMJudge uses an LLM to detect prompt injection and PII exfiltration.
@@ -326,13 +326,7 @@ func piiToVerdict(data map[string]interface{}) *ScanVerdict {
 			maxSev = meta.severity
 		}
 		if entities, ok := m["entities"].([]interface{}); ok && len(entities) > 0 {
-			var entityStrs []string
-			for _, e := range entities {
-				if s, ok := e.(string); ok {
-					entityStrs = append(entityStrs, s)
-				}
-			}
-			reasons = append(reasons, cat+": "+strings.Join(entityStrs, ", "))
+			reasons = append(reasons, fmt.Sprintf("%s: %d instance(s) detected", cat, len(entities)))
 		} else {
 			reasons = append(reasons, cat)
 		}
@@ -464,11 +458,6 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	if !j.cfg.ToolInjection {
 		return allowVerdict("llm-judge-tool")
 	}
-	if judgeActive.Load() {
-		return allowVerdict("llm-judge-tool")
-	}
-	judgeActive.Store(true)
-	defer judgeActive.Store(false)
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {
@@ -477,7 +466,8 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	systemPrompt := fmt.Sprintf(toolInjectionSystemPrompt, toolName)
+	sanitizedTool := sanitizeToolName(toolName)
+	systemPrompt := fmt.Sprintf(toolInjectionSystemPrompt, sanitizedTool)
 
 	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
 		Messages: []ChatMessage{
@@ -581,6 +571,25 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 		Findings: findings,
 		Scanner:  "llm-judge-tool",
 	}
+}
+
+// sanitizeToolName strips control characters and truncates the tool name to
+// prevent prompt injection via crafted tool names in the judge system prompt.
+func sanitizeToolName(name string) string {
+	var sb strings.Builder
+	count := 0
+	for _, r := range name {
+		if count >= 128 {
+			break
+		}
+		if r < 0x20 || r == 0x7f {
+			sb.WriteRune('_')
+		} else {
+			sb.WriteRune(r)
+		}
+		count++
+	}
+	return sb.String()
 }
 
 func intPtr(v int) *int { return &v }

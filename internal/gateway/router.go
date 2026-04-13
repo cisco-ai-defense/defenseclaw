@@ -52,13 +52,14 @@ type activeAgent struct {
 // EventRouter dispatches gateway events to the appropriate handlers and logs
 // everything to the audit store.
 type EventRouter struct {
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
-	policy *enforce.PolicyEngine
-	otel   *telemetry.Provider
-	notify *NotificationQueue
-	judge  *LLMJudge
+	client   *Client
+	store    *audit.Store
+	logger   *audit.Logger
+	policy   *enforce.PolicyEngine
+	otel     *telemetry.Provider
+	notify   *NotificationQueue
+	judge    *LLMJudge
+	judgeSem chan struct{} // bounds concurrent active tool-judge executions
 
 	autoApprove      bool
 	activeToolSpans  map[string][]*activeSpan
@@ -82,6 +83,7 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		activeToolSpans:  make(map[string][]*activeSpan),
 		activeAgentSpans: make(map[string]*activeAgent),
 		activeSessions:   make(map[string]time.Time),
+		judgeSem:         make(chan struct{}, 16),
 	}
 }
 
@@ -769,10 +771,16 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		}
 	}
 
-	// LLM judge — runs tool injection detection on arguments (async).
+	// LLM judge — runs tool injection detection on arguments asynchronously.
+	// The semaphore bounds concurrent judge executions while queued goroutines
+	// wait for a slot instead of dropping inspection entirely.
 	if r.judge != nil && len(payload.Args) > 0 {
 		go func(tool string, args json.RawMessage) {
-			verdict := r.judge.RunToolJudge(context.Background(), tool, string(args))
+			r.judgeSem <- struct{}{}
+			defer func() { <-r.judgeSem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
 			if verdict.Severity != "NONE" {
 				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
 					tool, verdict.Severity, verdict.Reason)
@@ -780,7 +788,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 					fmt.Sprintf("severity=%s findings=%d reason=%s",
 						verdict.Severity, len(verdict.Findings), verdict.Reason))
 				if r.otel != nil {
-					r.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
 				}
 			}
 		}(payload.Tool, payload.Args)

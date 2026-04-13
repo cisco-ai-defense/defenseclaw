@@ -180,3 +180,4 @@ class Counts:
     allowed_mcps: int = 0
     alerts: int = 0
     total_scans: int = 0
+    blocked_egress_calls: int = 0
