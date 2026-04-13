@@ -48,7 +48,6 @@ type webhookEndpoint struct {
 	secret      string
 	minSeverity int
 	events      map[string]bool
-	headers     map[string]string
 }
 
 const (
