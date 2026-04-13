@@ -419,17 +419,17 @@ func redactSecrets(text string) string {
 // blockMessage returns the message to send when a request/response is blocked.
 func blockMessage(customMsg, direction, reason string) string {
 	if customMsg != "" {
-		return customMsg
+		return "[DefenseClaw] " + customMsg
 	}
 	if direction == "prompt" {
 		return fmt.Sprintf(
-			"I'm unable to process this request. DefenseClaw detected a "+
-				"potential security concern in the prompt (%s). "+
+			"[DefenseClaw] This request was blocked. A potential security "+
+				"concern was detected in the prompt (%s). "+
 				"If you believe this is a false positive, contact your "+
 				"administrator or adjust the guardrail policy.", reason)
 	}
 	return fmt.Sprintf(
-		"The model's response was blocked by DefenseClaw due to a "+
+		"[DefenseClaw] The model's response was blocked due to a "+
 			"potential security concern (%s). "+
 			"If you believe this is a false positive, contact your "+
 			"administrator or adjust the guardrail policy.", reason)

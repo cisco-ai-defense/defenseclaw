@@ -324,18 +324,19 @@ func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 }
 
 type GuardrailConfig struct {
-	Enabled       bool        `mapstructure:"enabled"        yaml:"enabled"`
-	Mode          string      `mapstructure:"mode"            yaml:"mode"`
-	ScannerMode   string      `mapstructure:"scanner_mode"    yaml:"scanner_mode"`
-	Host          string      `mapstructure:"host"             yaml:"host,omitempty"`
-	Port          int         `mapstructure:"port"            yaml:"port"`
-	Model         string      `mapstructure:"model"           yaml:"model"`
-	ModelName     string      `mapstructure:"model_name"      yaml:"model_name"`
-	APIKeyEnv     string      `mapstructure:"api_key_env"     yaml:"api_key_env"`
-	OriginalModel string      `mapstructure:"original_model"  yaml:"original_model"`
-	BlockMessage  string      `mapstructure:"block_message"   yaml:"block_message"`
-	APIBase       string      `mapstructure:"api_base"        yaml:"api_base"`
-	Judge         JudgeConfig `mapstructure:"judge"           yaml:"judge"`
+	Enabled           bool        `mapstructure:"enabled"              yaml:"enabled"`
+	Mode              string      `mapstructure:"mode"                 yaml:"mode"`
+	ScannerMode       string      `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
+	Host              string      `mapstructure:"host"                 yaml:"host,omitempty"`
+	Port              int         `mapstructure:"port"                 yaml:"port"`
+	Model             string      `mapstructure:"model"                yaml:"model"`
+	ModelName         string      `mapstructure:"model_name"           yaml:"model_name"`
+	APIKeyEnv         string      `mapstructure:"api_key_env"          yaml:"api_key_env"`
+	OriginalModel     string      `mapstructure:"original_model"       yaml:"original_model"`
+	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
+	APIBase           string      `mapstructure:"api_base"             yaml:"api_base"`
+	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 }
 
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
@@ -363,12 +364,13 @@ func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
 
 // EffectiveHost returns the hostname clients (e.g. OpenClaw) use to reach the
 // guardrail proxy — same value written to openclaw.json baseUrl. Defaults to
-// "localhost" when not configured.
+// "127.0.0.1" when not configured so macOS IPv6-first resolution of
+// "localhost" (→ ::1) does not silently bypass the IPv4-only proxy.
 func (g *GuardrailConfig) EffectiveHost() string {
 	if g.Host != "" {
 		return g.Host
 	}
-	return "localhost"
+	return "127.0.0.1"
 }
 
 type GatewayConfig struct {
@@ -387,8 +389,17 @@ type GatewayConfig struct {
 	APIPort         int                  `mapstructure:"api_port"           yaml:"api_port"`
 	APIBind         string               `mapstructure:"api_bind"           yaml:"api_bind"`
 	Watcher         GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
+	Watchdog        WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
 	SandboxHome     string               `mapstructure:"-"                  yaml:"-"`
 	ClawHome        string               `mapstructure:"-"                  yaml:"-"`
+}
+
+// WatchdogConfig controls the health watchdog that notifies users when the
+// gateway is down and they lack protection.
+type WatchdogConfig struct {
+	Enabled  bool `mapstructure:"enabled"  yaml:"enabled"`
+	Interval int  `mapstructure:"interval" yaml:"interval"` // seconds between polls, default 30
+	Debounce int  `mapstructure:"debounce" yaml:"debounce"` // consecutive failures before alert, default 2
 }
 
 // defaultOpenClawGatewayTokenEnv matches gateway.auth.token when copied to ~/.defenseclaw/.env.
@@ -696,8 +707,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
 	viper.SetDefault("guardrail.scanner_mode", "both")
-	viper.SetDefault("guardrail.host", "localhost")
+	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
+	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
@@ -723,6 +735,10 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watcher.plugin.enabled", true)
 	viper.SetDefault("gateway.watcher.plugin.take_action", true)
 	viper.SetDefault("gateway.watcher.plugin.dirs", []string{})
+
+	viper.SetDefault("gateway.watchdog.enabled", false)
+	viper.SetDefault("gateway.watchdog.interval", 30)
+	viper.SetDefault("gateway.watchdog.debounce", 2)
 
 	viper.SetDefault("otel.enabled", false)
 	viper.SetDefault("otel.protocol", "grpc")

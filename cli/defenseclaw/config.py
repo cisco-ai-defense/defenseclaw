@@ -407,6 +407,7 @@ class GatewayWatcherConfig:
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 18789
+    api_bind: str = ""
     token: str = ""
     token_env: str = ""
     device_key_file: str = ""
@@ -1119,6 +1120,7 @@ def load() -> Config:
         gateway=GatewayConfig(
             host=gw_raw.get("host", "127.0.0.1"),
             port=gw_raw.get("port", 18789),
+            api_bind=gw_raw.get("api_bind", ""),
             token=gw_raw.get("token", ""),
             token_env=gw_raw.get("token_env", ""),
             device_key_file=gw_raw.get("device_key_file", os.path.join(data_dir, "device.key")),

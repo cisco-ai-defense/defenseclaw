@@ -105,180 +105,249 @@ func NewStore(dbPath string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// ---------------------------------------------------------------------------
+// Schema migration framework
+// ---------------------------------------------------------------------------
+
+// dbExecer is satisfied by both *sql.DB and *sql.Tx so migrations can run
+// inside a transaction.
+type dbExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// migration is a single versioned schema change. Migrations are applied
+// sequentially from the current schema_version to len(migrations).
+type migration struct {
+	description string
+	apply       func(ex dbExecer) error
+}
+
+// migrations is the ordered list of schema changes. Append new entries at the
+// end; never reorder or remove existing entries.
+var migrations = []migration{
+	{
+		description: "initial schema: audit_events, scan_results, findings, actions, egress, snapshots",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS audit_events (
+				id TEXT PRIMARY KEY,
+				timestamp DATETIME NOT NULL,
+				action TEXT NOT NULL,
+				target TEXT,
+				actor TEXT NOT NULL DEFAULT 'defenseclaw',
+				details TEXT,
+				severity TEXT,
+				run_id TEXT
+			);
+			CREATE TABLE IF NOT EXISTS scan_results (
+				id TEXT PRIMARY KEY,
+				scanner TEXT NOT NULL,
+				target TEXT NOT NULL,
+				timestamp DATETIME NOT NULL,
+				duration_ms INTEGER,
+				finding_count INTEGER,
+				max_severity TEXT,
+				raw_json TEXT,
+				run_id TEXT
+			);
+			CREATE TABLE IF NOT EXISTS findings (
+				id TEXT PRIMARY KEY,
+				scan_id TEXT NOT NULL,
+				severity TEXT NOT NULL,
+				title TEXT NOT NULL,
+				description TEXT,
+				location TEXT,
+				remediation TEXT,
+				scanner TEXT NOT NULL,
+				tags TEXT,
+				FOREIGN KEY (scan_id) REFERENCES scan_results(id)
+			);
+			CREATE TABLE IF NOT EXISTS actions (
+				id TEXT PRIMARY KEY,
+				target_type TEXT NOT NULL,
+				target_name TEXT NOT NULL,
+				source_path TEXT,
+				actions_json TEXT NOT NULL DEFAULT '{}',
+				reason TEXT,
+				updated_at DATETIME NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS network_egress_events (
+				id TEXT PRIMARY KEY,
+				timestamp DATETIME NOT NULL,
+				session_id TEXT,
+				hostname TEXT NOT NULL,
+				url TEXT,
+				http_method TEXT,
+				protocol TEXT,
+				policy_outcome TEXT NOT NULL,
+				decision_code TEXT,
+				blocked INTEGER NOT NULL DEFAULT 0,
+				severity TEXT NOT NULL DEFAULT 'INFO',
+				details TEXT
+			);
+			CREATE TABLE IF NOT EXISTS target_snapshots (
+				id TEXT PRIMARY KEY,
+				target_type TEXT NOT NULL,
+				target_path TEXT NOT NULL,
+				content_hash TEXT NOT NULL,
+				dependency_hashes TEXT,
+				config_hashes TEXT,
+				network_endpoints TEXT,
+				scan_id TEXT,
+				captured_at DATETIME NOT NULL,
+				UNIQUE(target_type, target_path)
+			);
+			CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+			CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
+			CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
+			CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
+			CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
+			CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
+			CREATE INDEX IF NOT EXISTS idx_egress_session ON network_egress_events(session_id);
+			CREATE INDEX IF NOT EXISTS idx_snapshots_target ON target_snapshots(target_type, target_path);
+			`)
+			return err
+		},
+	},
+	{
+		description: "add run_id columns and indexes; migrate old block/allow lists",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "run_id", `ALTER TABLE audit_events ADD COLUMN run_id TEXT`},
+				{"scan_results", "run_id", `ALTER TABLE scan_results ADD COLUMN run_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			for _, idx := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)`,
+			} {
+				if _, err := ex.Exec(idx); err != nil {
+					return fmt.Errorf("create run_id index: %w", err)
+				}
+			}
+			var blockCount, allowCount int
+			_ = ex.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'`).Scan(&blockCount)
+			_ = ex.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'`).Scan(&allowCount)
+			if blockCount > 0 {
+				if _, err := ex.Exec(`INSERT OR REPLACE INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
+					SELECT id, target_type, target_name, NULL, '{"install":"block"}', reason, created_at FROM block_list`); err != nil {
+					return fmt.Errorf("migrate block_list: %w", err)
+				}
+			}
+			if allowCount > 0 {
+				if _, err := ex.Exec(`INSERT OR REPLACE INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
+					SELECT id, target_type, target_name, NULL, '{"install":"allow"}', reason, created_at FROM allow_list`); err != nil {
+					return fmt.Errorf("migrate allow_list: %w", err)
+				}
+			}
+			_, _ = ex.Exec(`DROP TABLE IF EXISTS block_list`)
+			_, _ = ex.Exec(`DROP TABLE IF EXISTS allow_list`)
+			return nil
+		},
+	},
+}
+
 func (s *Store) Init() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS audit_events (
-		id TEXT PRIMARY KEY,
-		timestamp DATETIME NOT NULL,
-		action TEXT NOT NULL,
-		target TEXT,
-		actor TEXT NOT NULL DEFAULT 'defenseclaw',
-		details TEXT,
-		severity TEXT,
-		run_id TEXT
-	);
-
-	CREATE TABLE IF NOT EXISTS scan_results (
-		id TEXT PRIMARY KEY,
-		scanner TEXT NOT NULL,
-		target TEXT NOT NULL,
-		timestamp DATETIME NOT NULL,
-		duration_ms INTEGER,
-		finding_count INTEGER,
-		max_severity TEXT,
-		raw_json TEXT,
-		run_id TEXT
-	);
-
-	CREATE TABLE IF NOT EXISTS findings (
-		id TEXT PRIMARY KEY,
-		scan_id TEXT NOT NULL,
-		severity TEXT NOT NULL,
-		title TEXT NOT NULL,
-		description TEXT,
-		location TEXT,
-		remediation TEXT,
-		scanner TEXT NOT NULL,
-		tags TEXT,
-		FOREIGN KEY (scan_id) REFERENCES scan_results(id)
-	);
-
-	CREATE TABLE IF NOT EXISTS actions (
-		id TEXT PRIMARY KEY,
-		target_type TEXT NOT NULL,
-		target_name TEXT NOT NULL,
-		source_path TEXT,
-		actions_json TEXT NOT NULL DEFAULT '{}',
-		reason TEXT,
-		updated_at DATETIME NOT NULL
-	);
-
-	CREATE TABLE IF NOT EXISTS network_egress_events (
-		id TEXT PRIMARY KEY,
-		timestamp DATETIME NOT NULL,
-		session_id TEXT,
-		hostname TEXT NOT NULL,
-		url TEXT,
-		http_method TEXT,
-		protocol TEXT,
-		policy_outcome TEXT NOT NULL,
-		decision_code TEXT,
-		blocked INTEGER NOT NULL DEFAULT 0,
-		severity TEXT NOT NULL DEFAULT 'INFO',
-		details TEXT
-	);
-
-	CREATE TABLE IF NOT EXISTS target_snapshots (
-		id TEXT PRIMARY KEY,
-		target_type TEXT NOT NULL,
-		target_path TEXT NOT NULL,
-		content_hash TEXT NOT NULL,
-		dependency_hashes TEXT,
-		config_hashes TEXT,
-		network_endpoints TEXT,
-		scan_id TEXT,
-		captured_at DATETIME NOT NULL,
-		UNIQUE(target_type, target_path)
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
-	CREATE INDEX IF NOT EXISTS idx_scan_scanner ON scan_results(scanner);
-	CREATE INDEX IF NOT EXISTS idx_finding_severity ON findings(severity);
-	CREATE INDEX IF NOT EXISTS idx_finding_scan ON findings(scan_id);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_type_name ON actions(target_type, target_name);
-	CREATE INDEX IF NOT EXISTS idx_egress_timestamp ON network_egress_events(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_egress_hostname ON network_egress_events(hostname);
-	CREATE INDEX IF NOT EXISTS idx_egress_blocked ON network_egress_events(blocked);
-	CREATE INDEX IF NOT EXISTS idx_egress_session ON network_egress_events(session_id);
-	CREATE INDEX IF NOT EXISTS idx_snapshots_target ON target_snapshots(target_type, target_path);
-	`
-
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("audit: init schema: %w", err)
-	}
-	if err := s.ensureRunIDColumns(); err != nil {
-		return fmt.Errorf("audit: ensure run_id columns: %w", err)
+	// Ensure the schema_version tracking table exists.
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+		version INTEGER PRIMARY KEY,
+		applied_at DATETIME NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("audit: create schema_version table: %w", err)
 	}
 
-	if err := s.migrateOldLists(); err != nil {
-		return fmt.Errorf("audit: migrate old lists: %w", err)
+	current := 0
+	row := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`)
+	if err := row.Scan(&current); err != nil {
+		return fmt.Errorf("audit: read schema version: %w", err)
 	}
 
-	return nil
-}
-
-func (s *Store) migrateOldLists() error {
-	var blockCount, allowCount int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'`).Scan(&blockCount); err != nil {
-		return err
-	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'`).Scan(&allowCount); err != nil {
-		return err
-	}
-	if blockCount == 0 && allowCount == 0 {
-		return nil
-	}
-
-	if blockCount > 0 {
-		if _, err := s.db.Exec(`INSERT OR REPLACE INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-			SELECT id, target_type, target_name, NULL, '{"install":"block"}', reason, created_at FROM block_list`); err != nil {
-			return fmt.Errorf("migrate block_list: %w", err)
-		}
-	}
-	if allowCount > 0 {
-		if _, err := s.db.Exec(`INSERT OR REPLACE INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
-			SELECT id, target_type, target_name, NULL, '{"install":"allow"}', reason, created_at FROM allow_list`); err != nil {
-			return fmt.Errorf("migrate allow_list: %w", err)
-		}
-	}
-	if _, err := s.db.Exec(`DROP TABLE IF EXISTS block_list`); err != nil {
-		return err
-	}
-	if _, err := s.db.Exec(`DROP TABLE IF EXISTS allow_list`); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *Store) ensureRunIDColumns() error {
-	indexes := []string{
-		`CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)`,
-	}
-	for _, spec := range []struct {
-		table  string
-		column string
-		stmt   string
-	}{
-		{
-			table:  "audit_events",
-			column: "run_id",
-			stmt:   `ALTER TABLE audit_events ADD COLUMN run_id TEXT`,
-		},
-		{
-			table:  "scan_results",
-			column: "run_id",
-			stmt:   `ALTER TABLE scan_results ADD COLUMN run_id TEXT`,
-		},
-	} {
-		exists, err := s.hasColumn(spec.table, spec.column)
-		if err != nil {
+	for i := current; i < len(migrations); i++ {
+		m := migrations[i]
+		ver := i + 1
+		fmt.Fprintf(os.Stderr, "[audit] applying migration %d: %s\n", ver, m.description)
+		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
-		if exists {
-			continue
-		}
-		if _, err := s.db.Exec(spec.stmt); err != nil {
-			return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
-		}
 	}
-	for _, stmt := range indexes {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("create run_id index: %w", err)
-		}
+
+	return nil
+}
+
+// applyMigration runs a single migration inside a transaction so that both the
+// DDL and the schema_version bump are atomic. On failure the transaction is
+// rolled back and the version remains unchanged, making retries safe.
+func (s *Store) applyMigration(ver int, m migration) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("audit: begin migration %d: %w", ver, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := m.apply(tx); err != nil {
+		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+		ver, time.Now().UTC()); err != nil {
+		return fmt.Errorf("audit: record migration %d: %w", ver, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("audit: commit migration %d: %w", ver, err)
 	}
 	return nil
+}
+
+// SchemaVersion returns the current schema version number.
+func (s *Store) SchemaVersion() (int, error) {
+	var v int
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v)
+	return v, err
+}
+
+// hasColumnDB checks if a table has a specific column. Accepts dbExecer so it
+// works inside transactions too.
+func hasColumnDB(ex dbExecer, table, column string) (bool, error) {
+	if !knownTables[table] {
+		return false, fmt.Errorf("audit: hasColumn called with unknown table %q", table)
+	}
+	rows, err := ex.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("audit: pragma table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultV   sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultV, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // knownTables is the set of tables hasColumn is allowed to inspect.
@@ -288,6 +357,7 @@ var knownTables = map[string]bool{
 	"actions":               true,
 	"target_snapshots":      true,
 	"network_egress_events": true,
+	"schema_version":        true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

@@ -105,10 +105,21 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
 	printSplunkLocalHint()
 
+	// Auto-start watchdog if enabled in config.
+	cfg, cfgErr := config.Load()
+	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
+		if err := runWatchdogStart(nil, nil); err != nil {
+			fmt.Printf("  Warning: watchdog auto-start failed: %v\n", err)
+		}
+	}
+
 	return nil
 }
 
 func runStop(_ *cobra.Command, _ []string) error {
+	// Stop watchdog first since it monitors the gateway.
+	_ = runWatchdogStop(nil, nil)
+
 	d := daemon.New(config.DefaultDataPath())
 
 	running, pid := d.IsRunning()
@@ -130,6 +141,9 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+
+	// Stop the watchdog first so it doesn't fire false alarms during restart.
+	_ = runWatchdogStop(nil, nil)
 
 	if running, pid := d.IsRunning(); running {
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
@@ -153,6 +167,14 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println("Use 'defenseclaw-gateway status' to check health")
 	printSplunkLocalHint()
+
+	// Re-start watchdog if enabled in config.
+	cfg, cfgErr := config.Load()
+	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
+		if err := runWatchdogStart(nil, nil); err != nil {
+			fmt.Printf("  Warning: watchdog auto-start failed: %v\n", err)
+		}
+	}
 
 	return nil
 }
@@ -217,4 +239,3 @@ func collectDaemonArgs(cmd *cobra.Command) []string {
 
 	return args
 }
-

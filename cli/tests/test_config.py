@@ -238,6 +238,7 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(cfg.scanners.skill_scanner.binary, "skill-scanner")
         self.assertEqual(cfg.scanners.mcp_scanner.binary, "mcp-scanner")
         self.assertEqual(cfg.gateway.port, 18789)
+        self.assertEqual(cfg.gateway.api_bind, "")
         self.assertEqual(cfg.gateway.api_port, 18970)
         self.assertTrue(cfg.gateway.watcher.enabled)
         self.assertTrue(cfg.gateway.watcher.skill.enabled)
@@ -282,6 +283,7 @@ class TestConfigLoadSave(unittest.TestCase):
                 plugin_dir=os.path.join(tmpdir, "plugins"),
                 policy_dir=os.path.join(tmpdir, "policies"),
                 environment="macos",
+                gateway=GatewayConfig(api_bind="10.0.0.8"),
             )
             cfg.save()
 
@@ -293,6 +295,7 @@ class TestConfigLoadSave(unittest.TestCase):
                 raw = yaml.safe_load(f)
             self.assertEqual(raw["environment"], "macos")
             self.assertEqual(raw["data_dir"], tmpdir)
+            self.assertEqual(raw["gateway"]["api_bind"], "10.0.0.8")
 
     def test_save_and_reload_preserves_watch_rescan_fields(self):
         import yaml

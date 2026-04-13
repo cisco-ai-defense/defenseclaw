@@ -23,16 +23,8 @@ import (
 	"time"
 )
 
-func TestStoreInitMigratesRunIDColumns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "audit.db")
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	oldSchema := `
+// legacySchemaWithoutRunID is the pre-migration-2 schema (no run_id on audit_events / scan_results).
+const legacySchemaWithoutRunID = `
 	CREATE TABLE audit_events (
 		id TEXT PRIMARY KEY,
 		timestamp DATETIME NOT NULL,
@@ -54,7 +46,17 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 		raw_json TEXT
 	);
 	`
-	if _, err := db.Exec(oldSchema); err != nil {
+
+func TestStoreInitMigratesRunIDColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(legacySchemaWithoutRunID); err != nil {
 		t.Fatalf("create old schema: %v", err)
 	}
 	_ = db.Close()
@@ -149,5 +151,329 @@ func TestStoreInsertScanResultUsesEnvRunID(t *testing.T) {
 	}
 	if got := runID.String; got != "unit-run-scan" {
 		t.Fatalf("run_id = %q, want %q", got, "unit-run-scan")
+	}
+}
+
+func TestSchemaVersionTracking(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	want := len(migrations)
+	got, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if got != want {
+		t.Errorf("SchemaVersion() = %d, want %d (len(migrations))", got, want)
+	}
+
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open verify: %v", err)
+	}
+	defer verifyDB.Close()
+
+	var tableCount int
+	if err := verifyDB.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_version'`,
+	).Scan(&tableCount); err != nil {
+		t.Fatalf("schema_version table check: %v", err)
+	}
+	if tableCount != 1 {
+		t.Errorf("schema_version table exists: got count %d, want 1", tableCount)
+	}
+
+	var rowCount int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&rowCount); err != nil {
+		t.Fatalf("COUNT schema_version: %v", err)
+	}
+	if rowCount != want {
+		t.Errorf("schema_version rows = %d, want %d", rowCount, want)
+	}
+}
+
+func TestInitIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Init(); err != nil {
+		t.Fatalf("first Init: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Errorf("second Init: %v", err)
+	}
+
+	want := len(migrations)
+	got, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if got != want {
+		t.Errorf("SchemaVersion() after second Init = %d, want %d", got, want)
+	}
+
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open verify: %v", err)
+	}
+	defer verifyDB.Close()
+
+	var rowCount int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&rowCount); err != nil {
+		t.Fatalf("COUNT schema_version: %v", err)
+	}
+	if rowCount != want {
+		t.Errorf("schema_version rows after Init x2 = %d, want %d (not duplicated)", rowCount, want)
+	}
+}
+
+func TestMigrationFromFreshDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	wantTables := []string{
+		"actions",
+		"audit_events",
+		"findings",
+		"network_egress_events",
+		"scan_results",
+		"schema_version",
+		"target_snapshots",
+	}
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open verify: %v", err)
+	}
+	defer verifyDB.Close()
+
+	for _, name := range wantTables {
+		var n int
+		err := verifyDB.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
+		).Scan(&n)
+		if err != nil {
+			t.Fatalf("table %q lookup: %v", name, err)
+		}
+		if n != 1 {
+			t.Errorf("table %q: want 1 match in sqlite_master, got %d", name, n)
+		}
+	}
+
+	want := len(migrations)
+	got, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if got != want {
+		t.Errorf("SchemaVersion() = %d, want %d", got, want)
+	}
+
+	ok, err := store.hasColumn("audit_events", "run_id")
+	if err != nil {
+		t.Fatalf("hasColumn(audit_events, run_id): %v", err)
+	}
+	if !ok {
+		t.Errorf("hasColumn(audit_events, run_id) = false, want true")
+	}
+}
+
+func TestMigrationFromV1Schema(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit-v1.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(legacySchemaWithoutRunID); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE schema_version (
+			version INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL
+		);
+		INSERT INTO schema_version (version, applied_at) VALUES (1, '2020-01-01T00:00:00Z');
+	`); err != nil {
+		t.Fatalf("create schema_version v1: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	want := len(migrations)
+	got, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if got != want {
+		t.Errorf("SchemaVersion() = %d, want %d", got, want)
+	}
+
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open verify: %v", err)
+	}
+	defer verifyDB.Close()
+
+	var rowCount int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&rowCount); err != nil {
+		t.Fatalf("COUNT schema_version: %v", err)
+	}
+	if rowCount != want {
+		t.Errorf("schema_version rows = %d, want %d (v1 pre-seeded + migration %d only)", rowCount, want, want)
+	}
+
+	ok, err := store.hasColumn("audit_events", "run_id")
+	if err != nil {
+		t.Fatalf("hasColumn(audit_events, run_id): %v", err)
+	}
+	if !ok {
+		t.Errorf("hasColumn(audit_events, run_id) = false, want true after migration 2 only")
+	}
+}
+
+func TestMigrationTransactional(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	verifyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("second connection sql.Open: %v", err)
+	}
+	defer verifyDB.Close()
+
+	rows, err := verifyDB.Query(`SELECT version FROM schema_version ORDER BY version`)
+	if err != nil {
+		t.Fatalf("query schema_version: %v", err)
+	}
+	defer rows.Close()
+
+	var versions []int
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	if len(versions) != len(migrations) {
+		t.Fatalf("schema_version rows = %d, want %d (len(migrations))", len(versions), len(migrations))
+	}
+	for i, v := range versions {
+		want := i + 1
+		if v != want {
+			t.Fatalf("schema_version[%d] = %d, want consecutive starting at 1 (got %d)", i, v, want)
+		}
+	}
+
+	for _, v := range versions {
+		var n int
+		if err := verifyDB.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_events'`,
+		).Scan(&n); err != nil {
+			t.Fatalf("audit_events table check: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("version %d recorded but audit_events table missing or duplicate", v)
+		}
+		if v >= 2 {
+			ok, err := store.hasColumn("audit_events", "run_id")
+			if err != nil {
+				t.Fatalf("hasColumn after version %d: %v", v, err)
+			}
+			if !ok {
+				t.Errorf("version %d in schema_version but audit_events.run_id missing (migration not atomic with version bump)", v)
+			}
+		}
+	}
+}
+
+func TestMigrationApplyUsesTransaction(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	wantCount := len(migrations)
+	var rowCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_version`).Scan(&rowCount); err != nil {
+		t.Fatalf("COUNT schema_version: %v", err)
+	}
+	if rowCount != wantCount {
+		t.Fatalf("schema_version rows = %d, want %d", rowCount, wantCount)
+	}
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer rawDB.Close()
+
+	ok, err := store.hasColumn("audit_events", "run_id")
+	if err != nil {
+		t.Fatalf("hasColumn(audit_events, run_id): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected audit_events.run_id after migration 2")
+	}
+
+	var v1, v2 int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM schema_version WHERE version = 1`).Scan(&v1); err != nil {
+		t.Fatalf("count version 1: %v", err)
+	}
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM schema_version WHERE version = 2`).Scan(&v2); err != nil {
+		t.Fatalf("count version 2: %v", err)
+	}
+	if wantCount >= 1 && v1 != 1 {
+		t.Errorf("version 1 rows = %d, want 1", v1)
+	}
+	if wantCount >= 2 && v2 != 1 {
+		t.Errorf("version 2 rows = %d, want 1", v2)
 	}
 }

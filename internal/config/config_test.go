@@ -175,8 +175,11 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
 	}
-	if cfg.Guardrail.Host != "localhost" {
-		t.Errorf("expected default guardrail host %q, got %q", "localhost", cfg.Guardrail.Host)
+	if cfg.Guardrail.Host != "" {
+		t.Errorf("expected default guardrail host empty (Viper default), got %q", cfg.Guardrail.Host)
+	}
+	if got := cfg.Guardrail.EffectiveHost(); got != "127.0.0.1" {
+		t.Errorf("EffectiveHost() = %q, want 127.0.0.1 when host is empty", got)
 	}
 	if !cfg.Guardrail.Judge.Injection {
 		t.Error("expected judge.injection true by default")
@@ -1097,8 +1100,9 @@ func TestGuardrailConfig_EffectiveHost(t *testing.T) {
 		host string
 		want string
 	}{
-		{"", "localhost"},
+		{"", "127.0.0.1"},
 		{"localhost", "localhost"},
+		{"127.0.0.1", "127.0.0.1"},
 		{"10.200.0.1", "10.200.0.1"},
 	}
 	for _, tt := range tests {
@@ -1123,5 +1127,18 @@ func TestConfig_Save(t *testing.T) {
 	configFile := filepath.Join(tmpDir, DefaultConfigName)
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		t.Error("config file was not created")
+	}
+}
+
+func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg == nil {
+		t.Fatal("DefaultConfig() returned nil")
+	}
+	if cfg.Guardrail.Host != "" {
+		t.Fatalf("Guardrail.Host = %q, want empty string (not localhost); non-empty default breaks EffectiveHost IPv4 fallback", cfg.Guardrail.Host)
+	}
+	if got := cfg.Guardrail.EffectiveHost(); got != "127.0.0.1" {
+		t.Fatalf("EffectiveHost() = %q, want 127.0.0.1", got)
 	}
 }

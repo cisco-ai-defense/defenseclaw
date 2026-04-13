@@ -226,7 +226,15 @@ export function createFetchInterceptor(guardrailPort: number) {
         `[defenseclaw] intercepted LLM call → ${urlStr} proxied via ${proxyBase}`,
       );
 
-      return originalFetch!(proxied, newInit);
+      const response = await originalFetch!(proxied, newInit);
+
+      if (response.headers.get("x-defenseclaw-blocked") === "true") {
+        console.warn(
+          "[defenseclaw] REQUEST BLOCKED by guardrail policy",
+        );
+      }
+
+      return response;
     };
 
     // Also patch https.request so axios, undici, and other non-fetch HTTP

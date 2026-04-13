@@ -78,11 +78,11 @@ type GuardrailProxy struct {
 	store   *audit.Store
 	dataDir string
 
-	inspector        ContentInspector
-	masterKey        string
-	gatewayToken     string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
-	notify           *NotificationQueue
-	webhooks         *WebhookDispatcher
+	inspector    ContentInspector
+	masterKey    string
+	gatewayToken string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
+	notify       *NotificationQueue
+	webhooks     *WebhookDispatcher
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -305,7 +305,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Messages     []ChatMessage   `json:"messages"`
 		System       string          `json:"system,omitempty"`
 		Instructions string          `json:"instructions,omitempty"` // Responses API system prompt
-		Input        json.RawMessage `json:"input,omitempty"`         // Responses API
+		Input        json.RawMessage `json:"input,omitempty"`        // Responses API
 		Stream       bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
@@ -490,7 +490,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
 	} else {
-		// --- Streaming: accumulate text from SSE chunks, periodic + final scan ---
+		// --- Streaming: buffer initial bytes for pre-scan, then forward with periodic scans ---
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -503,20 +503,47 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		lastScanLen := 0
 		const scanInterval = 500
 		buf := make([]byte, 4096)
-		// lineBuf accumulates partial SSE lines across read boundaries.
 		var lineBuf strings.Builder
+
+		streamBufferSize := 1024
+		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
+			streamBufferSize = p.cfg.StreamBufferBytes
+		}
+		const maxInitialBufBytes = 1 << 20 // 1 MiB cap on passthrough initial buffer
+		var initialBuf []byte
+		initialFlushed := mode != "action"
+		preblocked := false
+		flushInitialBuf := func() bool {
+			if initialFlushed || len(initialBuf) == 0 {
+				return true
+			}
+			if accumulated.Len() > 0 {
+				initVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+					[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
+					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
+						initVerdict.Severity, initVerdict.Reason)
+					p.recordTelemetry("completion", label, initVerdict, 0, nil, nil)
+					preblocked = true
+					return false
+				}
+			}
+			lastScanLen = accumulated.Len()
+			_, _ = w.Write(initialBuf)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			initialBuf = nil
+			initialFlushed = true
+			return true
+		}
 
 		for {
 			n, readErr := resp.Body.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
-				// Forward the raw bytes immediately so the client isn't stalled.
-				_, _ = w.Write(chunk)
-				if flusher != nil {
-					flusher.Flush()
-				}
 
-				// Accumulate text from SSE data lines for inspection.
+				// Parse SSE text for inspection regardless of buffer state.
 				lineBuf.Write(chunk)
 				for {
 					line, rest, found := strings.Cut(lineBuf.String(), "\n")
@@ -540,21 +567,46 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 				}
 
-				// Periodic mid-stream scan.
-				if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
-					midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
-						[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
-					if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
-						fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-							midVerdict.Severity, midVerdict.Reason, lastScanLen+len(chunk))
-						p.recordTelemetry("completion", label, midVerdict, 0, nil, nil)
-						break // stop forwarding; client sees truncated stream
+				if !initialFlushed {
+					initialBuf = append(initialBuf, chunk...)
+					shouldFlush := accumulated.Len() >= streamBufferSize ||
+						readErr != nil ||
+						len(initialBuf) > maxInitialBufBytes
+
+					if shouldFlush {
+						if !flushInitialBuf() {
+							break
+						}
 					}
-					lastScanLen = accumulated.Len()
+				} else {
+					_, _ = w.Write(chunk)
+					if flusher != nil {
+						flusher.Flush()
+					}
+
+					if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
+						midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+							[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
+							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
+								midVerdict.Severity, midVerdict.Reason, lastScanLen+len(chunk))
+							p.recordTelemetry("completion", label, midVerdict, 0, nil, nil)
+							break
+						}
+						lastScanLen = accumulated.Len()
+					}
 				}
 			}
 			if readErr != nil {
 				break
+			}
+		}
+		if preblocked {
+			return
+		}
+		if !initialFlushed && len(initialBuf) > 0 {
+			if !flushInitialBuf() {
+				return
 			}
 		}
 
@@ -1248,6 +1300,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	streamCtx, streamCancel := context.WithCancel(r.Context())
 	defer streamCancel()
 
+	// Initial text buffering: hold early chunks until enough text accumulates
+	// for a meaningful guardrail scan, preventing partial output leakage.
+	streamBufSize := 1024
+	if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
+		streamBufSize = p.cfg.StreamBufferBytes
+	}
+	var initialChunkBuf [][]byte
+	initialBufFlushed := mode != "action"
+
 	usage, err := upstream.ChatCompletionStream(streamCtx, req, func(chunk StreamChunk) {
 		if streamBlocked {
 			return
@@ -1262,15 +1323,12 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				hasToolCalls = true
 			}
 		}
-		// Collect finish reasons from stream chunks.
 		for _, c := range chunk.Choices {
 			if c.FinishReason != nil && *c.FinishReason != "" {
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
 			}
 		}
 
-		// In action mode, inspect each newly accumulated content chunk before
-		// forwarding it so short harmful streams cannot slip past a size gate.
 		if accumulated.Len() > lastScanLen && mode == "action" {
 			midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
@@ -1287,11 +1345,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 		data, _ := json.Marshal(chunk)
 
-		// Buffer tool-call chunks and their finish sentinel so they are
-		// only released after post-stream inspection clears them.
-		// The finish_reason:"tool_calls" chunk carries no delta.ToolCalls
-		// but must stay behind the argument deltas or clients that stop
-		// accumulating on finish_reason will never see the arguments.
 		isToolCallFinish := len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil &&
 			*chunk.Choices[0].FinishReason == "tool_calls"
 		if mode == "action" && (hasToolCalls || isToolCallFinish || len(bufferedTCChunks) > 0) {
@@ -1306,9 +1359,31 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return
 		}
 
+		if !initialBufFlushed {
+			initialChunkBuf = append(initialChunkBuf, data)
+			if accumulated.Len() >= streamBufSize {
+				for _, buffered := range initialChunkBuf {
+					fmt.Fprintf(w, "data: %s\n\n", buffered)
+				}
+				flusher.Flush()
+				initialChunkBuf = nil
+				initialBufFlushed = true
+			}
+			return
+		}
+
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
+	// Flush any remaining initial buffer (short streams that completed
+	// before reaching the buffer threshold).
+	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
+		for _, buffered := range initialChunkBuf {
+			fmt.Fprintf(w, "data: %s\n\n", buffered)
+		}
+		flusher.Flush()
+		initialBufFlushed = true
+	}
 	if err != nil && !streamBlocked {
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
@@ -1439,7 +1514,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 // ---------------------------------------------------------------------------
 
 func (p *GuardrailProxy) writeBlockedResponse(w http.ResponseWriter, model, msg string) {
-	finishReason := "stop"
+	finishReason := "content_filter"
+	blocked := true
 	resp := ChatResponse{
 		ID:      "chatcmpl-blocked",
 		Object:  "chat.completion",
@@ -1450,9 +1526,12 @@ func (p *GuardrailProxy) writeBlockedResponse(w http.ResponseWriter, model, msg 
 			Message:      &ChatMessage{Role: "assistant", Content: msg},
 			FinishReason: &finishReason,
 		}},
-		Usage: &ChatUsage{},
+		Usage:              &ChatUsage{},
+		DefenseClawBlocked: &blocked,
+		DefenseClawReason:  msg,
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -1467,10 +1546,12 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 
 	created := time.Now().Unix()
 	id := "chatcmpl-blocked"
+	blocked := true
 
 	// Initial chunk with role.
 	role := "assistant"
@@ -1491,11 +1572,13 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 	fmt.Fprintf(w, "data: %s\n\n", data1)
 	flusher.Flush()
 
-	// Final chunk with finish_reason.
-	fr := "stop"
+	// Final chunk with finish_reason and block metadata.
+	fr := "content_filter"
 	chunk2 := StreamChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
-		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &fr}},
+		Choices:            []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &fr}},
+		DefenseClawBlocked: &blocked,
+		DefenseClawReason:  msg,
 	}
 	data2, _ := json.Marshal(chunk2)
 	fmt.Fprintf(w, "data: %s\n\n", data2)
@@ -1551,11 +1634,14 @@ func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg s
 				},
 				"role": "model",
 			},
-			"finishReason": "STOP",
+			"finishReason": "SAFETY",
 			"index":        0,
 		}},
+		"defenseclaw_blocked": true,
+		"defenseclaw_reason":  msg,
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -1585,8 +1671,11 @@ func (p *GuardrailProxy) writeBlockedResponseOpenAIResponses(w http.ResponseWrit
 			"output_tokens": 1,
 			"total_tokens":  1,
 		},
+		"defenseclaw_blocked": true,
+		"defenseclaw_reason":  msg,
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -1603,6 +1692,7 @@ func (p *GuardrailProxy) writeBlockedStreamOpenAIResponses(w http.ResponseWriter
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 
 	writeSSE := func(eventType string, data interface{}) {
@@ -1622,9 +1712,9 @@ func (p *GuardrailProxy) writeBlockedStreamOpenAIResponses(w http.ResponseWriter
 		},
 	})
 	writeSSE("response.output_item.added", map[string]interface{}{
-		"type":          "response.output_item.added",
-		"response_id":   respID,
-		"output_index":  0,
+		"type":         "response.output_item.added",
+		"response_id":  respID,
+		"output_index": 0,
 		"item": map[string]interface{}{
 			"id": itemID, "type": "message", "role": "assistant",
 			"status": "in_progress", "content": []interface{}{},
@@ -1699,9 +1789,12 @@ func (p *GuardrailProxy) writeBlockedResponseAnthropic(w http.ResponseWriter, mo
 		"content": []map[string]interface{}{
 			{"type": "text", "text": msg},
 		},
-		"usage": map[string]int{"input_tokens": 0, "output_tokens": 1},
+		"usage":               map[string]int{"input_tokens": 0, "output_tokens": 1},
+		"defenseclaw_blocked": true,
+		"defenseclaw_reason":  msg,
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -1718,6 +1811,7 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 
 	writeAnthropicSSE := func(eventType string, data interface{}) {

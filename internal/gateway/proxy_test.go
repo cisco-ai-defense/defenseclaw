@@ -1510,8 +1510,8 @@ func TestHandlePassthrough_PromptBlock(t *testing.T) {
 		if resp.Candidates[0].Content.Role != "model" {
 			t.Errorf("expected role=model, got %q", resp.Candidates[0].Content.Role)
 		}
-		if resp.Candidates[0].FinishReason != "STOP" {
-			t.Errorf("expected finishReason=STOP, got %q", resp.Candidates[0].FinishReason)
+		if resp.Candidates[0].FinishReason != "SAFETY" {
+			t.Errorf("expected finishReason=SAFETY, got %q", resp.Candidates[0].FinishReason)
 		}
 	})
 
@@ -1882,5 +1882,457 @@ func TestGuardrailListenAddr(t *testing.T) {
 				t.Errorf("guardrailListenAddr(%d, %q) = %q, want %q", tt.port, tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+func TestBlockedResponseMetadata(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "policy violation",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "blocked prompt"}},
+		"stream":   false,
+	})
+	rec := postChat(t, proxy, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.DefenseClawBlocked == nil || !*resp.DefenseClawBlocked {
+		t.Fatalf("expected defenseclaw_blocked true, got %#v", resp.DefenseClawBlocked)
+	}
+	if resp.DefenseClawReason == "" {
+		t.Fatal("expected non-empty defenseclaw_reason")
+	}
+	if len(resp.Choices) == 0 {
+		t.Fatal("expected at least one choice")
+	}
+	if resp.Choices[0].FinishReason == nil || *resp.Choices[0].FinishReason != "content_filter" {
+		got := ""
+		if resp.Choices[0].FinishReason != nil {
+			got = *resp.Choices[0].FinishReason
+		}
+		t.Fatalf("expected finish_reason content_filter, got %q", got)
+	}
+	if resp.Choices[0].Message == nil || !strings.HasPrefix(resp.Choices[0].Message.Content, "[DefenseClaw] ") {
+		t.Fatalf("expected message prefixed with [DefenseClaw] , got %#v", resp.Choices[0].Message)
+	}
+}
+
+func TestBlockedStreamMetadata(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "injection",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "stream block"}},
+		"stream":   true,
+	})
+	rec := postChat(t, proxy, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	raw := rec.Body.String()
+	if !strings.Contains(raw, `"defenseclaw_blocked":true`) {
+		t.Fatalf("expected defenseclaw_blocked in SSE body, got: %s", raw)
+	}
+
+	chunks := parseSSEChunks(t, strings.NewReader(raw))
+	var sawContentFilter bool
+	var sawDefenseClawContent bool
+	var sawBlockedMeta bool
+	for _, rawChunk := range chunks {
+		var sc StreamChunk
+		if err := json.Unmarshal(rawChunk, &sc); err != nil {
+			continue
+		}
+		if sc.DefenseClawBlocked != nil && *sc.DefenseClawBlocked {
+			sawBlockedMeta = true
+		}
+		for _, ch := range sc.Choices {
+			if ch.FinishReason != nil && *ch.FinishReason == "content_filter" {
+				sawContentFilter = true
+			}
+			if ch.Delta != nil && strings.HasPrefix(ch.Delta.Content, "[DefenseClaw] ") {
+				sawDefenseClawContent = true
+			}
+		}
+	}
+	if !sawBlockedMeta {
+		t.Fatal("expected a chunk with defenseclaw_blocked true")
+	}
+	if !sawContentFilter {
+		t.Fatal("expected a chunk with finish_reason content_filter")
+	}
+	if !sawDefenseClawContent {
+		t.Fatal("expected chunk delta content prefixed with [DefenseClaw] ")
+	}
+}
+
+func TestStreamBufferingPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("upstream ResponseWriter should implement Flusher")
+		}
+		parts := []string{
+			`data: {"choices":[{"index":0,"delta":{"content":"aa"}}]}` + "\n\n",
+			`data: {"choices":[{"index":0,"delta":{"content":"bb"}}]}` + "\n\n",
+			`data: {"choices":[{"index":0,"delta":{"content":"cc"}}]}` + "\n\n",
+			`data: [DONE]` + "\n\n",
+		}
+		for _, p := range parts {
+			_, _ = w.Write([]byte(p))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	origDomains := providerDomains
+	providerDomains = append(providerDomains, struct {
+		domain string
+		name   string
+	}{"127.0.0.1", "openai"})
+	defer func() { providerDomains = origDomains }()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.StreamBufferBytes = 2
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
+		"stream":   true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/passthrough-stream", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test-upstream")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected Content-Type to preserve text/event-stream, got %q", ct)
+	}
+	out := rec.Body.String()
+	for _, want := range []string{"aa", "bb", "cc"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("response missing upstream chunk %q; body=%q", want, out)
+		}
+	}
+}
+
+func TestStreamBufferingBlock(t *testing.T) {
+	const leakToken = "UPSTREAM_SECRET_LEAK_99"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		sse := `data: {"choices":[{"index":0,"delta":{"content":"` + leakToken + `"}}]}` + "\n\n"
+		_, _ = w.Write([]byte(sse))
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	origDomains := providerDomains
+	providerDomains = append(providerDomains, struct {
+		domain string
+		name   string
+	}{"127.0.0.1", "openai"})
+	defer func() { providerDomains = origDomains }()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("completion", &ScanVerdict{
+		Action:   "block",
+		Severity: "CRITICAL",
+		Reason:   "unsafe completion",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.StreamBufferBytes = 4
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "prompt"}},
+		"stream":   true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/passthrough-stream-block", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test-upstream")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+
+	if strings.Contains(rec.Body.String(), leakToken) {
+		t.Fatalf("blocked stream leaked upstream body: %s", rec.Body.String())
+	}
+}
+
+func TestStreamBufferingPassthroughFlushesBufferedEOF(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		parts := []string{
+			`data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}` + "\n\n",
+			`data: [DONE]` + "\n\n",
+		}
+		for _, p := range parts {
+			_, _ = w.Write([]byte(p))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	origDomains := providerDomains
+	providerDomains = append(providerDomains, struct {
+		domain string
+		name   string
+	}{"127.0.0.1", "openai"})
+	defer func() { providerDomains = origDomains }()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.StreamBufferBytes = 1024
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
+		"stream":   true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/passthrough-stream-short", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test-upstream")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"ok"`) {
+		t.Fatalf("expected buffered SSE body to be flushed on EOF, got %q", rec.Body.String())
+	}
+}
+
+func TestBlockedResponseAnthropicMetadata(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "anthropic block test",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "claude-3-opus",
+		"messages": []map[string]interface{}{{"role": "user", "content": "bad"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://api.anthropic.com")
+	req.Header.Set("X-AI-Auth", "Bearer sk-ant-test")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		DefenseClawBlocked bool   `json:"defenseclaw_blocked"`
+		DefenseClawReason  string `json:"defenseclaw_reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !resp.DefenseClawBlocked {
+		t.Fatal("expected defenseclaw_blocked true")
+	}
+	if resp.DefenseClawReason == "" {
+		t.Fatal("expected non-empty defenseclaw_reason")
+	}
+}
+
+func TestBlockedResponseGeminiMetadata(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "gemini block test",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gemini-2.5-pro",
+		"messages": []map[string]interface{}{{"role": "user", "content": "bad"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://generativelanguage.googleapis.com")
+	req.Header.Set("X-AI-Auth", "Bearer fake-google-key")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		DefenseClawBlocked bool `json:"defenseclaw_blocked"`
+		Candidates         []struct {
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if !resp.DefenseClawBlocked {
+		t.Fatal("expected defenseclaw_blocked true")
+	}
+	if len(resp.Candidates) == 0 {
+		t.Fatal("expected candidates")
+	}
+	if resp.Candidates[0].FinishReason != "SAFETY" {
+		t.Fatalf("expected finishReason SAFETY, got %q", resp.Candidates[0].FinishReason)
+	}
+}
+
+func TestBlockedResponseHeader(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "header test",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "blocked"}},
+		"stream":   false,
+	})
+	rec := postChat(t, proxy, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+}
+
+func TestBlockedResponseHeaderAnthropic(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "header test",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "claude-opus-4-5",
+		"messages": []map[string]interface{}{{"role": "user", "content": "blocked"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://api.anthropic.com")
+	req.Header.Set("X-AI-Auth", "Bearer key")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+}
+
+func TestBlockedResponseHeaderGemini(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "header test",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gemini-2.5-pro",
+		"messages": []map[string]interface{}{{"role": "user", "content": "blocked"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-pro:generateContent", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://generativelanguage.googleapis.com")
+	req.Header.Set("X-AI-Auth", "Bearer key")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
 	}
 }

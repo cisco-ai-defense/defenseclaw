@@ -21,6 +21,9 @@
 # Downloads the gateway binary and Python CLI wheel from a GitHub release,
 # runs version-specific migrations, and restarts services.
 #
+# Non-destructive: artifacts are downloaded and verified BEFORE the gateway
+# is stopped, so a failed download never disrupts a running gateway.
+#
 # Plugin installation is NOT handled here — it is part of the initial
 # release install (install.sh) and is release-specific.
 #
@@ -165,13 +168,11 @@ CURRENT_VERSION="${CURRENT_VERSION:-unknown}"
 ok "Installed version : ${CURRENT_VERSION}"
 ok "Upgrade target    : ${RELEASE_VERSION}"
 
+# ── Early exit if already at latest ──────────────────────────────────────────
+
 if [[ "${CURRENT_VERSION}" == "${RELEASE_VERSION}" && "${YES}" -eq 0 ]]; then
-    printf "\n  Already at version ${RELEASE_VERSION}.\n"
-    read -r -p "  Re-apply upgrade anyway? [y/N] " REPLY
-    case "$REPLY" in
-        [Yy]*) ;;
-        *) echo "  Aborted."; exit 0 ;;
-    esac
+    printf "\n  Already at version ${RELEASE_VERSION}. Nothing to do.\n\n"
+    exit 0
 fi
 
 # ── Artifact helper ───────────────────────────────────────────────────────────
@@ -182,14 +183,47 @@ fetch_artifact() {
         || die "Failed to download: ${url}"
 }
 
+# ── Pre-flight: verify artifacts exist before touching anything ───────────────
+
+section "Pre-flight Check"
+
+TARBALL_URL="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz"
+WHL_URL="https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
+
+for artifact_url in "${TARBALL_URL}" "${WHL_URL}"; do
+    http_code=$(curl -sSo /dev/null -w "%{http_code}" -L --head "${artifact_url}" 2>/dev/null || echo "000")
+    if [[ "${http_code}" -ge 400 || "${http_code}" == "000" ]]; then
+        die "Artifact not found (HTTP ${http_code}): ${artifact_url}
+  Version ${RELEASE_VERSION} may not exist or is missing platform artifacts."
+    fi
+done
+ok "Release artifacts verified"
+
+# ── Download artifacts to staging (gateway still running) ─────────────────────
+
+section "Downloading Artifacts"
+
+STAGING_DIR="$(mktemp -d)"
+trap 'rm -rf "${STAGING_DIR}"' EXIT
+
+step "Downloading gateway binary ..."
+fetch_artifact "${TARBALL_URL}" "${STAGING_DIR}/gateway.tar.gz"
+tar -xzf "${STAGING_DIR}/gateway.tar.gz" -C "${STAGING_DIR}"
+ok "Gateway binary downloaded"
+
+step "Downloading Python CLI wheel ..."
+whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
+fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${whl_name}"
+ok "Python CLI wheel downloaded"
+
 # ── Confirm ───────────────────────────────────────────────────────────────────
 
 if [[ "${YES}" -eq 0 ]]; then
     printf "\n  This will:\n"
     printf "    1. Back up config files in ${BOLD}~/.defenseclaw/${NC}\n"
-    printf "    2. Download and replace gateway binary and Python CLI wheel\n"
+    printf "    2. Stop gateway, install pre-downloaded artifacts\n"
     printf "    3. Run version-specific migrations\n"
-    printf "    4. Restart the gateway service\n"
+    printf "    4. Restart services and verify health\n"
     printf "       ${DIM}Source: github.com/${REPO}/releases/tag/${RELEASE_VERSION}${NC}\n\n"
     read -r -p "  Proceed? [y/N] " REPLY
     case "$REPLY" in
@@ -198,7 +232,7 @@ if [[ "${YES}" -eq 0 ]]; then
     esac
 fi
 
-# ── Step 1: Create backup ─────────────────────────────────────────────────────
+# ── Create backup ─────────────────────────────────────────────────────────────
 
 section "Creating Backup"
 
@@ -225,38 +259,25 @@ fi
 
 ok "Backup saved to: ${BACKUP_DIR}"
 
-# ── Step 2: Stop services ─────────────────────────────────────────────────────
+# ── Stop services ─────────────────────────────────────────────────────────────
 
 section "Stopping Services"
 
 step "Stopping defenseclaw-gateway ..."
 defenseclaw-gateway stop 2>/dev/null && ok "Gateway stopped" || warn "Gateway was not running"
 
-# ── Step 3: Download and replace gateway binary ───────────────────────────────
+# ── Install from staging (fast, no network) ───────────────────────────────────
 
-section "Replacing Gateway Binary"
+section "Installing Artifacts"
 
-step "Downloading defenseclaw-gateway from release ${RELEASE_VERSION} ..."
 mkdir -p "${INSTALL_DIR}"
-
-tmp_gw="$(mktemp -d)"
-fetch_artifact \
-    "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz" \
-    "${tmp_gw}/gateway.tar.gz"
-tar -xzf "${tmp_gw}/gateway.tar.gz" -C "${tmp_gw}"
-cp "${tmp_gw}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
+cp "${STAGING_DIR}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
 chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
-rm -rf "${tmp_gw}"
 
 if [[ "${OS}" == "darwin" ]]; then
     codesign -f -s - "${INSTALL_DIR}/defenseclaw-gateway" 2>/dev/null || true
 fi
-
-ok "Gateway binary replaced"
-
-# ── Step 4: Replace Python CLI from wheel ────────────────────────────────────
-
-section "Replacing Python CLI"
+ok "Gateway binary installed"
 
 UV_BIN="$(command -v uv 2>/dev/null || true)"
 [[ -z "${UV_BIN}" ]] \
@@ -268,21 +289,12 @@ if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
 fi
 
 VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-
-step "Downloading Python CLI wheel for ${RELEASE_VERSION} ..."
-whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
-tmp_whl="$(mktemp -d)"
-fetch_artifact \
-    "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${whl_name}" \
-    "${tmp_whl}/${whl_name}"
-"${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${tmp_whl}/${whl_name}" \
+"${UV_BIN}" pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
     || die "Failed to install CLI wheel"
-rm -rf "${tmp_whl}"
-
 ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
-ok "Python CLI replaced"
+ok "Python CLI installed"
 
-# ── Step 5: Run migrations ────────────────────────────────────────────────────
+# ── Run migrations ────────────────────────────────────────────────────────────
 
 section "Running Migrations"
 
@@ -298,7 +310,7 @@ else
     ok "Applied ${MIGRATION_COUNT} migration(s)"
 fi
 
-# ── Step 6: Start services ────────────────────────────────────────────────────
+# ── Start services ────────────────────────────────────────────────────────────
 
 section "Starting Services"
 
@@ -310,6 +322,49 @@ openclaw gateway restart 2>/dev/null \
     && ok "OpenClaw gateway restarted" \
     || warn "Could not restart OpenClaw gateway automatically. Run: openclaw gateway restart"
 
+# ── Health verification ───────────────────────────────────────────────────────
+
+section "Verifying Gateway Health"
+
+HEALTH_TIMEOUT=60
+HEALTH_INTERVAL=2
+ELAPSED=0
+HEALTH_OK=0
+HEALTH_URL="$("${VENV_PYTHON}" - <<'PY' 2>/dev/null || true
+from defenseclaw.config import load
+
+cfg = load()
+bind = getattr(cfg.gateway, "api_bind", "")
+if not bind:
+    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
+        bind = cfg.guardrail.host
+    else:
+        bind = "127.0.0.1"
+print(f"http://{bind}:{cfg.gateway.api_port}/health")
+PY
+)"
+if [[ -z "${HEALTH_URL}" ]]; then
+    HEALTH_URL="http://127.0.0.1:18970/health"
+fi
+
+while [[ "${ELAPSED}" -lt "${HEALTH_TIMEOUT}" ]]; do
+    STATUS=$(curl -s "${HEALTH_URL}" 2>/dev/null || echo "{}")
+    GW_STATE=$(echo "${STATUS}" | grep -oE '"state":"[^"]*"' | head -1 | grep -oE '"[^"]*"$' | tr -d '"' || echo "unknown")
+    if [[ "${GW_STATE}" == "running" ]]; then
+        ok "Gateway is healthy"
+        HEALTH_OK=1
+        break
+    fi
+    sleep "${HEALTH_INTERVAL}"
+    ELAPSED=$((ELAPSED + HEALTH_INTERVAL))
+done
+
+if [[ "${HEALTH_OK}" -eq 0 ]]; then
+    warn "Gateway did not become healthy within ${HEALTH_TIMEOUT}s"
+    info "Check logs: ~/.defenseclaw/gateway.log"
+    info "Run:  defenseclaw-gateway status"
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 section "Upgrade Complete"
@@ -317,7 +372,6 @@ section "Upgrade Complete"
 ok "DefenseClaw upgraded: ${CURRENT_VERSION} → ${RELEASE_VERSION}"
 printf "\n"
 printf "  Backup saved to: ${DIM}${BACKUP_DIR}${NC}\n"
-printf "  Run ${BOLD}defenseclaw status${NC} to verify all components are healthy.\n"
 printf "\n"
 
 } # end main()

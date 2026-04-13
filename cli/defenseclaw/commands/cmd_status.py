@@ -92,7 +92,7 @@ def status(app: AppContext) -> None:
     click.echo()
     from defenseclaw.gateway import OrchestratorClient
     bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost"):
+    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
         bind = cfg.guardrail.host
     client = OrchestratorClient(
         host=bind,

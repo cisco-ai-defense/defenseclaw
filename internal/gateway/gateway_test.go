@@ -358,18 +358,27 @@ func TestRedactSecrets(t *testing.T) {
 
 func TestBlockMessage(t *testing.T) {
 	custom := blockMessage("Custom block", "prompt", "injection")
-	if custom != "Custom block" {
+	if custom != "[DefenseClaw] Custom block" {
 		t.Errorf("blockMessage with custom = %q", custom)
+	}
+	if !strings.HasPrefix(custom, "[DefenseClaw] ") {
+		t.Errorf("blockMessage should have [DefenseClaw] prefix, got %q", custom)
 	}
 
 	prompt := blockMessage("", "prompt", "test reason")
 	if !strings.Contains(prompt, "test reason") {
 		t.Errorf("blockMessage prompt should contain reason, got %q", prompt)
 	}
+	if !strings.HasPrefix(prompt, "[DefenseClaw] ") {
+		t.Errorf("blockMessage prompt should have [DefenseClaw] prefix, got %q", prompt)
+	}
 
 	completion := blockMessage("", "completion", "test reason")
 	if !strings.Contains(completion, "test reason") {
 		t.Errorf("blockMessage completion should contain reason, got %q", completion)
+	}
+	if !strings.HasPrefix(completion, "[DefenseClaw] ") {
+		t.Errorf("blockMessage completion should have [DefenseClaw] prefix, got %q", completion)
 	}
 }
 

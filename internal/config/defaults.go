@@ -133,7 +133,7 @@ func DefaultConfig() *Config {
 		Guardrail: GuardrailConfig{
 			Mode:        "observe",
 			ScannerMode: "both",
-			Host:        "localhost",
+			Host:        "",
 			Port:        4000,
 			Judge: JudgeConfig{
 				Injection:     true,

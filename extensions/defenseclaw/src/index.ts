@@ -46,6 +46,7 @@ import type {
 import { compareSeverity, maxSeverity } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
+import { HealthMonitor } from "./health-monitor.js";
 
 function formatFindings(findings: Finding[], limit = 15): string[] {
   const lines: string[] = [];
@@ -75,6 +76,13 @@ export default function (api: PluginApi) {
   const SIDECAR_TOKEN = sidecarConfig.token;
   const INSPECT_TIMEOUT_MS = 2_000;
 
+  // ─── Health monitor ───
+  // Polls the sidecar /status endpoint and warns when protection is down.
+  const healthMonitor = new HealthMonitor({
+    statusUrl: `${SIDECAR_API}/status`,
+    token: SIDECAR_TOKEN,
+  });
+
   // ─── LLM fetch interceptor ───
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
   // the guardrail proxy regardless of which provider/model OpenClaw uses.
@@ -83,7 +91,13 @@ export default function (api: PluginApi) {
     id: "llm-interceptor",
     start: async () => {
       interceptor.start();
-      return { stop: () => interceptor.stop() };
+      healthMonitor.start();
+      return {
+        stop: () => {
+          interceptor.stop();
+          healthMonitor.stop();
+        },
+      };
     },
   });
 

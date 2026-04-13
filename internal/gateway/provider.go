@@ -139,23 +139,27 @@ type ChatUsage struct {
 // RawResponse carries the original upstream bytes so the proxy can
 // forward unknown fields (system_fingerprint, service_tier, etc.) verbatim.
 type ChatResponse struct {
-	ID          string          `json:"id"`
-	Object      string          `json:"object"`
-	Created     int64           `json:"created"`
-	Model       string          `json:"model"`
-	Choices     []ChatChoice    `json:"choices"`
-	Usage       *ChatUsage      `json:"usage,omitempty"`
-	RawResponse json.RawMessage `json:"-"`
+	ID                  string          `json:"id"`
+	Object              string          `json:"object"`
+	Created             int64           `json:"created"`
+	Model               string          `json:"model"`
+	Choices             []ChatChoice    `json:"choices"`
+	Usage               *ChatUsage      `json:"usage,omitempty"`
+	DefenseClawBlocked  *bool           `json:"defenseclaw_blocked,omitempty"`
+	DefenseClawReason   string          `json:"defenseclaw_reason,omitempty"`
+	RawResponse         json.RawMessage `json:"-"`
 }
 
 // StreamChunk is one SSE chunk in OpenAI format.
 type StreamChunk struct {
-	ID      string       `json:"id"`
-	Object  string       `json:"object"`
-	Created int64        `json:"created"`
-	Model   string       `json:"model"`
-	Choices []ChatChoice `json:"choices"`
-	Usage   *ChatUsage   `json:"usage,omitempty"`
+	ID                  string       `json:"id"`
+	Object              string       `json:"object"`
+	Created             int64        `json:"created"`
+	Model               string       `json:"model"`
+	Choices             []ChatChoice `json:"choices"`
+	Usage               *ChatUsage   `json:"usage,omitempty"`
+	DefenseClawBlocked  *bool        `json:"defenseclaw_blocked,omitempty"`
+	DefenseClawReason   string       `json:"defenseclaw_reason,omitempty"`
 }
 
 // LLMProvider abstracts the upstream LLM API.
