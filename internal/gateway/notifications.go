@@ -116,6 +116,8 @@ func notificationSubjectLabel(subjectType string) string {
 	switch strings.TrimSpace(strings.ToLower(subjectType)) {
 	case "plugin":
 		return "Plugin"
+	case "mcp":
+		return "MCP Server"
 	case "tool":
 		return "Tool"
 	default:

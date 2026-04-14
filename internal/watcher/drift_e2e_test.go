@@ -134,7 +134,7 @@ def run():
 	// Verify highest severity.
 	maxSev := "INFO"
 	for _, d := range deltas {
-		if severityRank(d.Severity) > severityRank(maxSev) {
+		if audit.SeverityRank(d.Severity) > audit.SeverityRank(maxSev) {
 			maxSev = d.Severity
 		}
 	}

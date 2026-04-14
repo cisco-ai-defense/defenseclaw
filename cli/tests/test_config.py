@@ -911,6 +911,7 @@ class TestWebhookConfig(unittest.TestCase):
         self.assertEqual(wh.type, "generic")
         self.assertEqual(wh.min_severity, "HIGH")
         self.assertEqual(wh.timeout_seconds, 10)
+        self.assertEqual(wh.cooldown_seconds, 300)
         self.assertFalse(wh.enabled)
 
     def test_resolved_secret_from_env(self):

@@ -186,6 +186,32 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 	return nil
 }
 
+// LogEvent persists a pre-built event through the full audit pipeline
+// (SQLite + Splunk HEC + OTel). Use this when the caller needs to control
+// severity or other fields that LogAction hardcodes.
+func (l *Logger) LogEvent(event Event) error {
+	if event.ID == "" {
+		event.ID = uuid.New().String()
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if event.RunID == "" {
+		event.RunID = currentRunID()
+	}
+	if err := l.store.LogEvent(event); err != nil {
+		if l.otel != nil {
+			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		}
+		return err
+	}
+	if l.otel != nil {
+		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+	}
+	l.forwardToSplunk(event)
+	return nil
+}
+
 func (l *Logger) forwardToSplunk(e Event) {
 	if l.splunk == nil {
 		return

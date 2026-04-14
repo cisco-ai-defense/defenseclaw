@@ -240,3 +240,95 @@ func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
 		t.Fatal("expected watch-start to flush to Splunk promptly")
 	}
 }
+
+func TestLoggerLogEventPreservesSeverity(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	evt := Event{
+		Action:   "drift",
+		Target:   "/path/to/skill",
+		Actor:    "defenseclaw-rescan",
+		Details:  "hash changed",
+		Severity: "HIGH",
+	}
+	if err := logger.LogEvent(evt); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if got := events[0].Severity; got != "HIGH" {
+		t.Fatalf("Severity = %q, want HIGH", got)
+	}
+	if events[0].ID == "" {
+		t.Fatal("expected ID to be auto-filled")
+	}
+}
+
+func TestLoggerLogEventSplunkForwarding(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var payload []byte
+	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		payload = append([]byte(nil), body...)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	logger := NewLogger(store)
+	logger.SetSplunkForwarder(forwarder)
+
+	evt := Event{
+		Action:   "drift",
+		Target:   "/path/to/skill",
+		Actor:    "defenseclaw-rescan",
+		Details:  "new finding",
+		Severity: "CRITICAL",
+	}
+	if err := logger.LogEvent(evt); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+	logger.Close()
+
+	if len(bytes.TrimSpace(payload)) == 0 {
+		t.Fatal("expected drift event to be forwarded to Splunk")
+	}
+
+	var env struct {
+		Event struct {
+			Action   string `json:"action"`
+			Severity string `json:"severity"`
+		} `json:"event"`
+	}
+	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
+	if err := json.Unmarshal(lines[0], &env); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if env.Event.Action != "drift" {
+		t.Fatalf("action = %q, want drift", env.Event.Action)
+	}
+	if env.Event.Severity != "CRITICAL" {
+		t.Fatalf("severity = %q, want CRITICAL", env.Event.Severity)
+	}
+}

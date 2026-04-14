@@ -544,6 +544,7 @@ class WebhookConfig:
     min_severity: str = "HIGH"
     events: list[str] = field(default_factory=list)
     timeout_seconds: int = 10
+    cooldown_seconds: int = 300
     enabled: bool = False
 
     def resolved_secret(self) -> str:
@@ -950,6 +951,7 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
             min_severity=entry.get("min_severity", "HIGH"),
             events=entry.get("events", []),
             timeout_seconds=entry.get("timeout_seconds", 10),
+            cooldown_seconds=entry.get("cooldown_seconds", 300),
             enabled=entry.get("enabled", False),
         ))
     return webhooks

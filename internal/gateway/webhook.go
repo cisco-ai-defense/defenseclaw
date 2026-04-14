@@ -61,6 +61,9 @@ type webhookEndpoint struct {
 	timeout     time.Duration
 	minSeverity int
 	events      map[string]bool
+	cooldown    time.Duration
+	mu          sync.Mutex
+	lastSent    map[string]time.Time // key: "target\x00action"
 }
 
 const (
@@ -68,6 +71,7 @@ const (
 	webhookRetryBackoff    = 2 * time.Second
 	webhookMaxConcurrency  = 20
 	webhookDefaultTimeout  = 10 * time.Second
+	webhookDefaultCooldown = 300 * time.Second // 5 minutes
 )
 
 // NewWebhookDispatcher creates a dispatcher from the config slice.
@@ -91,6 +95,15 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 		if timeout <= 0 {
 			timeout = webhookDefaultTimeout
 		}
+		var cooldown time.Duration
+		switch {
+		case c.CooldownSeconds == nil:
+			cooldown = webhookDefaultCooldown
+		case *c.CooldownSeconds <= 0:
+			cooldown = 0
+		default:
+			cooldown = time.Duration(*c.CooldownSeconds) * time.Second
+		}
 		endpoints = append(endpoints, webhookEndpoint{
 			url:         c.URL,
 			channelType: strings.ToLower(c.Type),
@@ -99,6 +112,8 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			minSeverity: audit.SeverityRank(c.MinSeverity),
 			events:      evts,
 			timeout:     timeout,
+			cooldown:    cooldown,
+			lastSent:    make(map[string]time.Time),
 		})
 	}
 	if len(endpoints) == 0 {
@@ -138,13 +153,23 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		if len(ep.events) > 0 && !ep.events[eventCategory] {
 			continue
 		}
+		cooldownKey := event.Target + "\x00" + action
+		if !ep.claimSlot(cooldownKey) {
+			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
+				event.Target, action, ep.url, ep.cooldown)
+			continue
+		}
 		d.wg.Add(1)
-		go func(ep *webhookEndpoint) {
+		go func(ep *webhookEndpoint, key string) {
 			defer d.wg.Done()
 			d.sem <- struct{}{}
 			defer func() { <-d.sem }()
-			d.send(ep, event)
-		}(ep)
+			if d.send(ep, event) {
+				ep.confirmSent(key)
+			} else {
+				ep.releaseSlot(key)
+			}
+		}(ep, cooldownKey)
 	}
 }
 
@@ -172,7 +197,54 @@ func (d *WebhookDispatcher) closing() bool {
 	}
 }
 
-func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
+// claimSlot atomically checks the cooldown and reserves the slot so
+// concurrent dispatches for the same key are suppressed. Returns false
+// if the key is already within its cooldown window.
+func (ep *webhookEndpoint) claimSlot(key string) bool {
+	if ep.cooldown <= 0 {
+		return true
+	}
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	if last, ok := ep.lastSent[key]; ok && time.Since(last) < ep.cooldown {
+		return false
+	}
+	ep.lastSent[key] = time.Now()
+	return true
+}
+
+// confirmSent refreshes the cooldown timestamp to the actual delivery
+// time and lazily prunes stale entries.
+func (ep *webhookEndpoint) confirmSent(key string) {
+	if ep.cooldown <= 0 {
+		return
+	}
+	now := time.Now()
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	ep.lastSent[key] = now
+	if len(ep.lastSent) > 64 {
+		pruneThreshold := 2 * ep.cooldown
+		for k, ts := range ep.lastSent {
+			if now.Sub(ts) > pruneThreshold {
+				delete(ep.lastSent, k)
+			}
+		}
+	}
+}
+
+// releaseSlot removes the cooldown claim when delivery fails, allowing
+// future dispatch attempts for the same key.
+func (ep *webhookEndpoint) releaseSlot(key string) {
+	if ep.cooldown <= 0 {
+		return
+	}
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	delete(ep.lastSent, key)
+}
+
+func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	var payload []byte
 	var err error
 
@@ -188,7 +260,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 	}
 	if err != nil {
 		d.logger.Printf("format error for %s: %v", ep.url, err)
-		return
+		return false
 	}
 
 	for attempt := 0; attempt <= webhookMaxRetries; attempt++ {
@@ -202,7 +274,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 		if reqErr != nil {
 			cancel()
 			d.logger.Printf("request error for %s: %v", ep.url, reqErr)
-			return
+			return false
 		}
 		req.Header.Set("Content-Type", "application/json")
 		d.setAuthHeaders(req, ep, payload)
@@ -222,13 +294,13 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 				d.logger.Printf("sent to %s (status=%d action=%s severity=%s)",
 					ep.url, resp.StatusCode, event.Action, event.Severity)
 			}
-			return
+			return true
 		}
 
 		if !isRetryable(resp.StatusCode) {
 			d.logger.Printf("%s returned %d (permanent failure), not retrying",
 				ep.url, resp.StatusCode)
-			return
+			return false
 		}
 
 		if resp.StatusCode == 429 {
@@ -244,6 +316,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) {
 			ep.url, resp.StatusCode, attempt+1, webhookMaxRetries+1)
 	}
 	d.logger.Printf("exhausted retries for %s", ep.url)
+	return false
 }
 
 // setAuthHeaders applies authentication and payload signing per channel type.
@@ -459,20 +532,25 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 }
 
 func formatGenericPayload(event audit.Event) ([]byte, error) {
+	eventData := map[string]interface{}{
+		"id":        event.ID,
+		"timestamp": event.Timestamp.Format(time.RFC3339),
+		"action":    event.Action,
+		"target":    event.Target,
+		"actor":     event.Actor,
+		"details":   event.Details,
+		"severity":  event.Severity,
+		"run_id":    event.RunID,
+		"trace_id":  event.TraceID,
+	}
+	if strings.Contains(strings.ToLower(event.Action), "block") {
+		eventData["defenseclaw_blocked"] = true
+		eventData["defenseclaw_reason"] = event.Details
+	}
 	payload := map[string]interface{}{
 		"webhook_type":        "defenseclaw_enforcement",
 		"defenseclaw_version": "1.0",
-		"event": map[string]interface{}{
-			"id":        event.ID,
-			"timestamp": event.Timestamp.Format(time.RFC3339),
-			"action":    event.Action,
-			"target":    event.Target,
-			"actor":     event.Actor,
-			"details":   event.Details,
-			"severity":  event.Severity,
-			"run_id":    event.RunID,
-			"trace_id":  event.TraceID,
-		},
+		"event":               eventData,
 	}
 	return json.Marshal(payload)
 }
@@ -513,6 +591,10 @@ func webexSeverityIcon(severity string) string {
 
 func categorizeAction(action string) string {
 	switch {
+	case strings.Contains(action, "gateway-down"),
+		strings.Contains(action, "gateway-recovered"),
+		strings.Contains(action, "guardrail-degraded"):
+		return "health"
 	case strings.Contains(action, "guardrail"):
 		return "guardrail"
 	case strings.Contains(action, "drift"),

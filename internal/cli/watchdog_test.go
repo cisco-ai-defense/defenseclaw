@@ -18,14 +18,20 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
+
+func intPtr(v int) *int { return &v }
 
 func TestProbeHealth(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -135,7 +141,7 @@ func TestWatchdogStateTransitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil)
 
 	if n := downProbes.Load(); n < 2 {
 		t.Fatalf("expected at least %d probes while server returned errors after flip, got %d", 2, n)
@@ -173,4 +179,84 @@ func TestWatchdogHealthURL(t *testing.T) {
 			t.Fatalf("watchdogHealthURL() = %q, want %q", got, want)
 		}
 	})
+}
+
+func TestWatchdogWebhookDispatchOnStateChange(t *testing.T) {
+	os.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	defer os.Unsetenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST")
+
+	var mu sync.Mutex
+	var received []map[string]interface{}
+
+	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			mu.Lock()
+			received = append(received, body)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookSrv.Close()
+
+	webhooks := gateway.NewWebhookDispatcher([]config.WebhookConfig{
+		{
+			URL:             webhookSrv.URL,
+			Type:            "generic",
+			Enabled:         true,
+			CooldownSeconds: intPtr(0), // disable cooldown for fast test loop
+		},
+	})
+	defer webhooks.Close()
+
+	var healthy atomic.Bool
+	healthy.Store(true)
+
+	healthSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if healthy.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"gateway":{"state":"running"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer healthSrv.Close()
+
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		healthy.Store(false)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	runWatchdogLoop(ctx, healthSrv.URL+"/health", 10*time.Millisecond, 2, webhooks)
+
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	count := len(received)
+	mu.Unlock()
+	if count < 1 {
+		t.Fatalf("expected at least 1 webhook event for gateway-down, got %d", count)
+	}
+
+	mu.Lock()
+	first := received[0]
+	mu.Unlock()
+	evt, ok := first["event"].(map[string]interface{})
+	if !ok {
+		t.Fatal("webhook payload missing event field")
+	}
+	if evt["action"] != "gateway-down" {
+		t.Errorf("expected action=gateway-down, got %v", evt["action"])
+	}
+	if evt["severity"] != "CRITICAL" {
+		t.Errorf("expected severity=CRITICAL, got %v", evt["severity"])
+	}
+}
+
+func TestDispatchHealthEventNilWebhooks(t *testing.T) {
+	dispatchHealthEvent(nil, "gateway-down", "CRITICAL", "test")
 }

@@ -115,6 +115,21 @@ watch:
   rescan_enabled: true
   rescan_interval_min: 60
 
+# Outbound webhook notifications. Valid event categories:
+#   block     - skill/plugin/MCP blocked or quarantined
+#   guardrail - prompt/completion guardrail actions
+#   drift     - rescan drift detection
+#   scan      - scan results
+#   health    - gateway-down, guardrail-degraded, gateway-recovered
+#
+# webhooks:
+#   - url: https://hooks.slack.com/services/T.../B.../xxx
+#     type: slack              # slack | pagerduty | webex | generic
+#     enabled: true
+#     min_severity: MEDIUM     # INFO | LOW | MEDIUM | HIGH | CRITICAL
+#     events: [block, health]  # empty = all categories
+#     cooldown_seconds: 300    # dedup window (seconds); omit for default (300s); 0 to disable
+#     secret_env: SLACK_WEBHOOK_SECRET
 webhooks: []
 
 enforcement:

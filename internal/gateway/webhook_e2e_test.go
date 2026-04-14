@@ -519,7 +519,7 @@ func TestWebhookE2E_ConcurrentDispatch(t *testing.T) {
 	defer receiver.Close()
 
 	d := newTestDispatcher([]config.WebhookConfig{
-		{URL: receiver.URL(), Type: "generic", MinSeverity: "INFO", Enabled: true},
+		{URL: receiver.URL(), Type: "generic", MinSeverity: "INFO", Enabled: true, CooldownSeconds: intPtr(0)},
 	})
 
 	const numEvents = 50

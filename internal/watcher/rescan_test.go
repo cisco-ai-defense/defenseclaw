@@ -368,9 +368,9 @@ func TestSeverityRank(t *testing.T) {
 		{"", 0},
 	}
 	for _, tt := range tests {
-		got := severityRank(tt.input)
+		got := audit.SeverityRank(tt.input)
 		if got != tt.expected {
-			t.Errorf("severityRank(%q) = %d, want %d", tt.input, got, tt.expected)
+			t.Errorf("audit.SeverityRank(%q) = %d, want %d", tt.input, got, tt.expected)
 		}
 	}
 }

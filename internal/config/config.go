@@ -147,14 +147,15 @@ func (c *SplunkConfig) ResolvedHECToken() string {
 }
 
 type WebhookConfig struct {
-	URL            string   `mapstructure:"url"             yaml:"url"`
-	Type           string   `mapstructure:"type"            yaml:"type"`
-	SecretEnv      string   `mapstructure:"secret_env"      yaml:"secret_env"`
-	RoomID         string   `mapstructure:"room_id"         yaml:"room_id"`
-	MinSeverity    string   `mapstructure:"min_severity"    yaml:"min_severity"`
-	Events         []string `mapstructure:"events"          yaml:"events"`
-	TimeoutSeconds int      `mapstructure:"timeout_seconds" yaml:"timeout_seconds"`
-	Enabled        bool     `mapstructure:"enabled"         yaml:"enabled"`
+	URL             string   `mapstructure:"url"              yaml:"url"`
+	Type            string   `mapstructure:"type"             yaml:"type"`
+	SecretEnv       string   `mapstructure:"secret_env"       yaml:"secret_env"`
+	RoomID          string   `mapstructure:"room_id"          yaml:"room_id"`
+	MinSeverity     string   `mapstructure:"min_severity"     yaml:"min_severity"`
+	Events          []string `mapstructure:"events"           yaml:"events"`
+	TimeoutSeconds  int      `mapstructure:"timeout_seconds"  yaml:"timeout_seconds"`
+	CooldownSeconds *int     `mapstructure:"cooldown_seconds" yaml:"cooldown_seconds,omitempty"`
+	Enabled         bool     `mapstructure:"enabled"          yaml:"enabled"`
 }
 
 // ResolvedSecret returns the webhook secret/token from the env var.
@@ -299,10 +300,15 @@ type GatewayWatcherPluginConfig struct {
 	Dirs       []string `mapstructure:"dirs"           yaml:"dirs"`
 }
 
+type GatewayWatcherMCPConfig struct {
+	TakeAction bool `mapstructure:"take_action" yaml:"take_action"`
+}
+
 type GatewayWatcherConfig struct {
 	Enabled bool                       `mapstructure:"enabled" yaml:"enabled"`
 	Skill   GatewayWatcherSkillConfig  `mapstructure:"skill"   yaml:"skill"`
 	Plugin  GatewayWatcherPluginConfig `mapstructure:"plugin"  yaml:"plugin"`
+	MCP     GatewayWatcherMCPConfig    `mapstructure:"mcp"     yaml:"mcp"`
 }
 
 type CiscoAIDefenseConfig struct {
@@ -735,6 +741,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watcher.plugin.enabled", true)
 	viper.SetDefault("gateway.watcher.plugin.take_action", true)
 	viper.SetDefault("gateway.watcher.plugin.dirs", []string{})
+	viper.SetDefault("gateway.watcher.mcp.take_action", true)
 
 	viper.SetDefault("gateway.watchdog.enabled", false)
 	viper.SetDefault("gateway.watchdog.interval", 30)

@@ -31,7 +31,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 )
 
@@ -109,6 +111,11 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 
 	healthURL := watchdogHealthURL(cfg)
 
+	var webhooks *gateway.WebhookDispatcher
+	if len(cfg.Webhooks) > 0 {
+		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks)
+	}
+
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
 		interval, debounce, healthURL)
 
@@ -121,7 +128,10 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	runWatchdogLoop(ctx, healthURL, interval, debounce)
+	runWatchdogLoop(ctx, healthURL, interval, debounce, webhooks)
+	if webhooks != nil {
+		webhooks.Close()
+	}
 	fmt.Fprintf(os.Stderr, "[watchdog] stopped\n")
 	return nil
 }
@@ -144,7 +154,7 @@ func watchdogHealthURL(cfg *config.Config) string {
 	return fmt.Sprintf("http://%s:%d/health", apiBind, apiPort)
 }
 
-func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int) {
+func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher) {
 	current := stateHealthy
 	failCount := 0
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -159,33 +169,50 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 		case <-ticker.C:
 			probed := probeHealth(client, healthURL)
 
-		switch probed {
-		case stateHealthy:
-			failCount = 0
-			if current != stateHealthy {
-				fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
-				_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
-			}
-			current = stateHealthy
+			switch probed {
+			case stateHealthy:
+				failCount = 0
+				if current != stateHealthy {
+					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
+					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
+					dispatchHealthEvent(webhooks, "gateway-recovered", "INFO", "Gateway recovered from "+current.String())
+				}
+				current = stateHealthy
 
-		case stateDegraded:
-			failCount++
-			if failCount >= debounce && current == stateHealthy {
-				fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
-				_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
-				current = stateDegraded
-			}
+			case stateDegraded:
+				failCount++
+				if failCount >= debounce && current == stateHealthy {
+					fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
+					_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
+					dispatchHealthEvent(webhooks, "guardrail-degraded", "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
+					current = stateDegraded
+				}
 
-		default: // stateDown
-			failCount++
-			if failCount >= debounce && current != stateDown {
-				fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
-				_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
-				current = stateDown
+			default: // stateDown
+				failCount++
+				if failCount >= debounce && current != stateDown {
+					fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
+					_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
+					dispatchHealthEvent(webhooks, "gateway-down", "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
+					current = stateDown
+				}
 			}
-		}
 		}
 	}
+}
+
+func dispatchHealthEvent(webhooks *gateway.WebhookDispatcher, action, severity, details string) {
+	if webhooks == nil {
+		return
+	}
+	webhooks.Dispatch(audit.Event{
+		Timestamp: time.Now().UTC(),
+		Action:    action,
+		Target:    "defenseclaw-gateway",
+		Actor:     "defenseclaw-watchdog",
+		Details:   details,
+		Severity:  severity,
+	})
 }
 
 func probeHealth(client *http.Client, url string) watchdogState {

@@ -1582,3 +1582,83 @@ func TestHandlePluginAdmissionRejectedInstallOnlyDoesNotDisable(t *testing.T) {
 		t.Fatalf("actions = %q, should not include disabled", got)
 	}
 }
+
+func TestHandleMCPAdmissionBlocked(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+	_, logger := testStoreAndLogger(t)
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				Watcher: config.GatewayWatcherConfig{
+					MCP: config.GatewayWatcherMCPConfig{TakeAction: true},
+				},
+			},
+		},
+		client:   client,
+		logger:   logger,
+		notify:   NewNotificationQueue(),
+		router:   &EventRouter{},
+		alertCtx: context.Background(),
+	}
+
+	s.handleAdmissionResult(watcher.AdmissionResult{
+		Event: watcher.InstallEvent{
+			Type: watcher.InstallMCP,
+			Name: "malicious-mcp-server",
+			Path: "/path/to/mcp",
+		},
+		Verdict:       watcher.VerdictBlocked,
+		Reason:        "on block list",
+		MaxSeverity:   "CRITICAL",
+		FindingCount:  2,
+		RuntimeAction: "block",
+	})
+
+	rpc := drainRPC(t, received)
+	if rpc.Method != "config.patch" {
+		t.Fatalf("expected config.patch, got %s", rpc.Method)
+	}
+
+	s.alertWg.Wait()
+	notes := s.notify.ActiveNotifications()
+	if len(notes) != 1 {
+		t.Fatalf("notification count = %d, want 1", len(notes))
+	}
+	if notes[0].SubjectType != "mcp" {
+		t.Fatalf("notification subject type = %q, want mcp", notes[0].SubjectType)
+	}
+}
+
+func TestHandleMCPAdmissionNoTakeAction(t *testing.T) {
+	_, logger := testStoreAndLogger(t)
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			Gateway: config.GatewayConfig{
+				Watcher: config.GatewayWatcherConfig{
+					MCP: config.GatewayWatcherMCPConfig{TakeAction: false},
+				},
+			},
+		},
+		logger: logger,
+	}
+
+	s.handleAdmissionResult(watcher.AdmissionResult{
+		Event: watcher.InstallEvent{
+			Type: watcher.InstallMCP,
+			Name: "some-mcp",
+		},
+		Verdict: watcher.VerdictBlocked,
+		Reason:  "on block list",
+	})
+}
+
+func TestNotificationSubjectLabelMCP(t *testing.T) {
+	got := notificationSubjectLabel("mcp")
+	if got != "MCP Server" {
+		t.Fatalf("notificationSubjectLabel(\"mcp\") = %q, want \"MCP Server\"", got)
+	}
+}

@@ -282,7 +282,7 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 
 	prevMax := string(prevScan.MaxSeverity())
 	curMax := string(current.MaxSeverity())
-	if severityRank(curMax) > severityRank(prevMax) {
+	if audit.SeverityRank(curMax) > audit.SeverityRank(prevMax) {
 		deltas = append(deltas, DriftDelta{
 			Type:        DriftSeverityChange,
 			Severity:    curMax,
@@ -474,7 +474,7 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 		}
 		if prevFinding.Severity != f.Severity {
 			sev := prevFinding.Severity
-			if severityRank(string(f.Severity)) > severityRank(string(prevFinding.Severity)) {
+			if audit.SeverityRank(string(f.Severity)) > audit.SeverityRank(string(prevFinding.Severity)) {
 				sev = f.Severity
 			}
 			deltas = append(deltas, DriftDelta{
@@ -505,7 +505,7 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) {
 	maxSev := "INFO"
 	for _, d := range deltas {
-		if severityRank(d.Severity) > severityRank(maxSev) {
+		if audit.SeverityRank(d.Severity) > audit.SeverityRank(maxSev) {
 			maxSev = d.Severity
 		}
 	}
@@ -523,7 +523,7 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 		Details:   string(detailsJSON),
 		Severity:  maxSev,
 	}
-	if err := w.store.LogEvent(event); err != nil {
+	if err := w.logger.LogEvent(event); err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] drift alert LogEvent failed for %s: %v\n", evt.Path, err)
 	}
 
@@ -555,22 +555,6 @@ func summarizeDrift(deltas []DriftDelta) string {
 	return strings.Join(parts, " ")
 }
 
-func severityRank(s string) int {
-	switch strings.ToUpper(s) {
-	case "CRITICAL":
-		return 5
-	case "HIGH":
-		return 4
-	case "MEDIUM":
-		return 3
-	case "LOW":
-		return 2
-	case "INFO":
-		return 1
-	default:
-		return 0
-	}
-}
 
 func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, error) {
 	switch evt.Type {

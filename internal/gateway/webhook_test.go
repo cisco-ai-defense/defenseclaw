@@ -293,12 +293,66 @@ func TestCategorizeAction(t *testing.T) {
 		{"guardrail-inspection", "guardrail"},
 		{"scan", "scan"},
 		{"init", "init"},
+		{"gateway-down", "health"},
+		{"gateway-recovered", "health"},
+		{"guardrail-degraded", "health"},
 	}
 	for _, tt := range tests {
 		got := categorizeAction(tt.action)
 		if got != tt.expected {
 			t.Errorf("categorizeAction(%q) = %q, want %q", tt.action, got, tt.expected)
 		}
+	}
+}
+
+func TestFormatGenericPayloadBlockMetadata(t *testing.T) {
+	evt := audit.Event{
+		ID:        "evt-block-001",
+		Timestamp: time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC),
+		Action:    "guardrail-block",
+		Target:    "gpt-4",
+		Actor:     "defenseclaw-guardrail",
+		Details:   "prompt injection detected",
+		Severity:  "HIGH",
+	}
+	payload, err := formatGenericPayload(evt)
+	if err != nil {
+		t.Fatalf("formatGenericPayload error: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	evtData := m["event"].(map[string]interface{})
+	if evtData["defenseclaw_blocked"] != true {
+		t.Errorf("expected defenseclaw_blocked=true for block action, got %v", evtData["defenseclaw_blocked"])
+	}
+	if evtData["defenseclaw_reason"] != "prompt injection detected" {
+		t.Errorf("expected defenseclaw_reason, got %v", evtData["defenseclaw_reason"])
+	}
+}
+
+func TestFormatGenericPayloadNonBlockOmitsMetadata(t *testing.T) {
+	evt := audit.Event{
+		ID:        "evt-drift-001",
+		Timestamp: time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC),
+		Action:    "drift",
+		Target:    "/path/to/skill",
+		Actor:     "defenseclaw-rescan",
+		Details:   "hash changed",
+		Severity:  "MEDIUM",
+	}
+	payload, err := formatGenericPayload(evt)
+	if err != nil {
+		t.Fatalf("formatGenericPayload error: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	evtData := m["event"].(map[string]interface{})
+	if _, ok := evtData["defenseclaw_blocked"]; ok {
+		t.Error("drift event should not include defenseclaw_blocked field")
 	}
 }
 
@@ -690,5 +744,206 @@ func TestComputeHMAC(t *testing.T) {
 
 	if got != want {
 		t.Errorf("computeHMAC mismatch: got %q, want %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cooldown suppression tests
+// ---------------------------------------------------------------------------
+
+func cooldownCollector(t *testing.T) (*httptest.Server, *int32) {
+	t.Helper()
+	var count int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&count, 1)
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &count
+}
+
+func cooldownDispatcher(t *testing.T, url string, cooldownSec *int) *WebhookDispatcher {
+	t.Helper()
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: url, Type: "generic", Enabled: true, CooldownSeconds: cooldownSec},
+	})
+	if d != nil {
+		d.retryBackoff = 0
+	}
+	return d
+}
+
+func TestCooldownSuppressesDuplicate(t *testing.T) {
+	srv, count := cooldownCollector(t)
+	d := cooldownDispatcher(t, srv.URL, intPtr(60))
+
+	evt := testEvent()
+	d.Dispatch(evt)
+	d.Dispatch(evt) // same target + category, should be suppressed
+	d.Close()
+
+	if got := atomic.LoadInt32(count); got != 1 {
+		t.Fatalf("expected 1 delivery (duplicate suppressed), got %d", got)
+	}
+}
+
+func TestCooldownAllowsAfterExpiry(t *testing.T) {
+	srv, count := cooldownCollector(t)
+	d := cooldownDispatcher(t, srv.URL, intPtr(1))
+
+	evt := testEvent()
+	d.Dispatch(evt)
+	d.wg.Wait()
+
+	time.Sleep(1100 * time.Millisecond)
+
+	d.Dispatch(evt)
+	d.Close()
+
+	if got := atomic.LoadInt32(count); got != 2 {
+		t.Fatalf("expected 2 deliveries (cooldown expired), got %d", got)
+	}
+}
+
+func TestCooldownZeroDisabled(t *testing.T) {
+	srv, count := cooldownCollector(t)
+	d := cooldownDispatcher(t, srv.URL, intPtr(0)) // explicit 0 → disabled
+
+	evt := testEvent()
+	d.Dispatch(evt)
+	d.Dispatch(evt)
+	d.Close()
+
+	if got := atomic.LoadInt32(count); got != 2 {
+		t.Fatalf("expected 2 deliveries (cooldown disabled), got %d", got)
+	}
+}
+
+func TestCooldownDifferentTargets(t *testing.T) {
+	srv, count := cooldownCollector(t)
+	d := cooldownDispatcher(t, srv.URL, intPtr(60))
+
+	evt1 := testEvent()
+	evt1.Target = "skill-a"
+	evt2 := testEvent()
+	evt2.Target = "skill-b"
+
+	d.Dispatch(evt1)
+	d.Dispatch(evt2)
+	d.Close()
+
+	if got := atomic.LoadInt32(count); got != 2 {
+		t.Fatalf("expected 2 deliveries (different targets), got %d", got)
+	}
+}
+
+func TestCooldownDifferentActions(t *testing.T) {
+	srv, count := cooldownCollector(t)
+	d := cooldownDispatcher(t, srv.URL, intPtr(60))
+
+	evt1 := testEvent()
+	evt1.Action = "block"
+	evt2 := testEvent()
+	evt2.Action = "drift"
+
+	d.Dispatch(evt1)
+	d.Dispatch(evt2)
+	d.Close()
+
+	if got := atomic.LoadInt32(count); got != 2 {
+		t.Fatalf("expected 2 deliveries (different categories), got %d", got)
+	}
+}
+
+func TestCooldownPerEndpoint(t *testing.T) {
+	srv1, count1 := cooldownCollector(t)
+	srv2, count2 := cooldownCollector(t)
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv1.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(60)},
+		{URL: srv2.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(0)}, // disabled
+	})
+	d.retryBackoff = 0
+
+	evt := testEvent()
+	d.Dispatch(evt)
+	d.Dispatch(evt)
+	d.Close()
+
+	if got := atomic.LoadInt32(count1); got != 1 {
+		t.Fatalf("endpoint 1: expected 1 delivery (cooldown active), got %d", got)
+	}
+	if got := atomic.LoadInt32(count2); got != 2 {
+		t.Fatalf("endpoint 2: expected 2 deliveries (cooldown disabled), got %d", got)
+	}
+}
+
+func TestCooldownNilDefaultsTo300(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: "http://127.0.0.1:19999", Type: "generic", Enabled: true},
+	})
+	if d == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	ep := &d.endpoints[0]
+	if ep.cooldown != 300*time.Second {
+		t.Errorf("expected 300s default cooldown, got %v", ep.cooldown)
+	}
+}
+
+func TestCooldownHealthTransitionsNotSuppressed(t *testing.T) {
+	srv, count := cooldownCollector(t)
+	d := cooldownDispatcher(t, srv.URL, intPtr(60))
+
+	down := audit.Event{
+		ID: "h-1", Timestamp: time.Now(), Action: "gateway-down",
+		Target: "defenseclaw-gw", Severity: "CRITICAL", Actor: "watchdog",
+	}
+	recovered := audit.Event{
+		ID: "h-2", Timestamp: time.Now(), Action: "gateway-recovered",
+		Target: "defenseclaw-gw", Severity: "INFO", Actor: "watchdog",
+	}
+
+	d.Dispatch(down)
+	d.Dispatch(recovered)
+	d.Close()
+
+	if got := atomic.LoadInt32(count); got != 2 {
+		t.Fatalf("expected 2 deliveries (different actions), got %d", got)
+	}
+}
+
+func TestCooldownNotBurnedOnFailedSend(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+
+	var batches int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&batches, 1)
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(60)},
+	})
+	d.retryBackoff = 1 * time.Millisecond
+
+	evt := testEvent()
+
+	d.Dispatch(evt)
+	d.wg.Wait()
+
+	// First dispatch exhausted all retries and failed. The cooldown slot
+	// should have been released, so the second dispatch must attempt delivery.
+	d.Dispatch(evt)
+	d.Close()
+
+	got := atomic.LoadInt32(&batches)
+	// 4 retries per dispatch × 2 dispatches = 8 total HTTP attempts
+	if got != 8 {
+		t.Fatalf("expected 8 HTTP attempts (2 full retry cycles), got %d", got)
 	}
 }
