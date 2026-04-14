@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,8 +39,9 @@ import (
 )
 
 const (
-	watchdogPIDFile = "watchdog.pid"
-	watchdogLogFile = "watchdog.log"
+	watchdogPIDFile   = "watchdog.pid"
+	watchdogLogFile   = "watchdog.log"
+	watchdogStateFile = "watchdog.state"
 )
 
 type watchdogState int
@@ -155,8 +157,12 @@ func watchdogHealthURL(cfg *config.Config) string {
 }
 
 func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher) {
-	current := stateHealthy
+	dataDir := config.DefaultDataPath()
+	current := loadWatchdogState(dataDir)
 	failCount := 0
+	if current != stateHealthy {
+		failCount = debounce // carry over so first healthy probe triggers recovery
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	ticker := time.NewTicker(interval)
@@ -178,6 +184,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					dispatchHealthEvent(webhooks, "gateway-recovered", "INFO", "Gateway recovered from "+current.String())
 				}
 				current = stateHealthy
+				saveWatchdogState(dataDir, current)
 
 			case stateDegraded:
 				failCount++
@@ -186,6 +193,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
 					dispatchHealthEvent(webhooks, "guardrail-degraded", "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
 					current = stateDegraded
+					saveWatchdogState(dataDir, current)
 				}
 
 			default: // stateDown
@@ -195,9 +203,29 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
 					dispatchHealthEvent(webhooks, "gateway-down", "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
 					current = stateDown
+					saveWatchdogState(dataDir, current)
 				}
 			}
 		}
+	}
+}
+
+func saveWatchdogState(dataDir string, state watchdogState) {
+	_ = os.WriteFile(filepath.Join(dataDir, watchdogStateFile), []byte(state.String()), 0o644)
+}
+
+func loadWatchdogState(dataDir string) watchdogState {
+	data, err := os.ReadFile(filepath.Join(dataDir, watchdogStateFile))
+	if err != nil {
+		return stateHealthy
+	}
+	switch strings.TrimSpace(string(data)) {
+	case "down":
+		return stateDown
+	case "degraded":
+		return stateDegraded
+	default:
+		return stateHealthy
 	}
 }
 

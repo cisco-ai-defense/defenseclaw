@@ -117,6 +117,7 @@ func TestProbeHealth(t *testing.T) {
 }
 
 func TestWatchdogStateTransitions(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	var healthy atomic.Bool
 	healthy.Store(true)
 
@@ -182,6 +183,7 @@ func TestWatchdogHealthURL(t *testing.T) {
 }
 
 func TestWatchdogWebhookDispatchOnStateChange(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	os.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
 	defer os.Unsetenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST")
 
@@ -259,4 +261,34 @@ func TestWatchdogWebhookDispatchOnStateChange(t *testing.T) {
 
 func TestDispatchHealthEventNilWebhooks(t *testing.T) {
 	dispatchHealthEvent(nil, "gateway-down", "CRITICAL", "test")
+}
+
+func TestWatchdogStatePersistenceAndRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", tmpDir)
+
+	saveWatchdogState(tmpDir, stateDown)
+	got := loadWatchdogState(tmpDir)
+	if got != stateDown {
+		t.Fatalf("expected stateDown after save/load, got %s", got)
+	}
+
+	// Simulate a new watchdog starting after gateway was down, with gateway
+	// now healthy. The loop should detect recovery on the first healthy probe.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"gateway":{"state":"running"}}`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil)
+
+	restored := loadWatchdogState(tmpDir)
+	if restored != stateHealthy {
+		t.Fatalf("expected stateHealthy after recovery, got %s", restored)
+	}
 }

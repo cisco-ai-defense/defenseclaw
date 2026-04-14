@@ -743,7 +743,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watcher.plugin.dirs", []string{})
 	viper.SetDefault("gateway.watcher.mcp.take_action", true)
 
-	viper.SetDefault("gateway.watchdog.enabled", false)
+	viper.SetDefault("gateway.watchdog.enabled", true)
 	viper.SetDefault("gateway.watchdog.interval", 30)
 	viper.SetDefault("gateway.watchdog.debounce", 2)
 

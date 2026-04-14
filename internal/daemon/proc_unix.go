@@ -51,7 +51,7 @@ func processExists(pid int) bool {
 
 // killStaleProcesses finds and kills any defenseclaw-gateway processes that
 // are not tracked by the PID file. This prevents orphaned daemons from
-// accumulating across restarts.
+// accumulating across restarts. The watchdog PID is preserved.
 func (d *Daemon) killStaleProcesses() {
 	self, _ := os.Executable()
 	binName := filepath.Base(self)
@@ -69,10 +69,11 @@ func (d *Daemon) killStaleProcesses() {
 		trackedPID = info.PID
 	}
 	myPID := os.Getpid()
+	watchdogPID := d.readWatchdogPID()
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err != nil || pid <= 0 || pid == myPID || pid == trackedPID {
+		if err != nil || pid <= 0 || pid == myPID || pid == trackedPID || pid == watchdogPID {
 			continue
 		}
 		proc, err := os.FindProcess(pid)
@@ -82,4 +83,17 @@ func (d *Daemon) killStaleProcesses() {
 		fmt.Fprintf(os.Stderr, "[daemon] killing stale gateway process (PID %d)\n", pid)
 		_ = proc.Signal(syscall.SIGTERM)
 	}
+}
+
+// readWatchdogPID reads the watchdog PID from watchdog.pid in the data dir.
+func (d *Daemon) readWatchdogPID() int {
+	data, err := os.ReadFile(filepath.Join(d.dataDir, "watchdog.pid"))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
 }
