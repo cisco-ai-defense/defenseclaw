@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -144,6 +143,7 @@ func runStop(_ *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println("OK")
+	printHint("Start again:  defenseclaw-gateway start")
 	return nil
 }
 
@@ -311,16 +311,6 @@ func summarizeHealth(body []byte) string {
 		return "ok"
 	}
 	return strings.Join(parts, ", ")
-}
-
-// sortedMapKeys returns sorted keys from a string map for deterministic output.
-func sortedMapKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func collectDaemonArgs(cmd *cobra.Command) []string {

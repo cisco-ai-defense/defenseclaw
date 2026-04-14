@@ -368,6 +368,9 @@ def list_skills(app: AppContext, as_json: bool) -> None:
 
     _print_skill_list_table(skills, scan_map, actions_map)
 
+    from defenseclaw.commands import hint
+    hint("Scan all skills:  defenseclaw skill scan all")
+
 
 def _print_skill_list_json(
     skills: list[dict[str, Any]],
@@ -583,6 +586,14 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bo
         click.echo(result.to_json())
     else:
         _print_result(name, result)
+        from defenseclaw.commands import hint
+        if result.is_clean():
+            hint("Scan MCP servers:  defenseclaw mcp scan --all")
+        else:
+            hint(
+                f"Block this skill:  defenseclaw skill block {name}",
+                "View alerts:       defenseclaw alerts",
+            )
 
     if not result.is_clean() and action:
         _apply_scan_enforcement(app, pe, name, scan_dir, result)
@@ -753,6 +764,11 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
         )
         warnings = len(verdicts) - clean - rejected
         click.echo(f"Summary: {clean} clean, {warnings} warnings, {rejected} rejected")
+        from defenseclaw.commands import hint
+        if rejected:
+            hint("View alerts:       defenseclaw alerts")
+        else:
+            hint("Scan MCP servers:  defenseclaw mcp scan --all")
 
 
 def _resolve_path(app: AppContext, target: str) -> str | None:
@@ -1171,6 +1187,9 @@ def block(app: AppContext, name: str, reason: str) -> None:
 
     if app.logger:
         app.logger.log_action("skill-block", skill_name, f"reason={reason}")
+
+    from defenseclaw.commands import hint
+    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}")
 
 
 # ---------------------------------------------------------------------------

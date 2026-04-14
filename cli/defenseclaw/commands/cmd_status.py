@@ -99,10 +99,16 @@ def status(app: AppContext) -> None:
         port=cfg.gateway.api_port,
         token=cfg.gateway.resolved_token(),
     )
+    from defenseclaw.commands import hint
     if client.is_running():
         click.secho("  Sidecar:      running", fg="green")
+        hint(
+            "Dashboard:     defenseclaw alerts",
+            "Health check:  defenseclaw doctor",
+        )
     else:
         click.echo("  Sidecar:      not running")
+        hint("Start sidecar:  defenseclaw-gateway start")
 
 
 def _print_splunk_integration_status(cfg) -> None:

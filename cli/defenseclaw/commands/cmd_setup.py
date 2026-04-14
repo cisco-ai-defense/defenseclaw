@@ -164,7 +164,7 @@ def _interactive_setup(sc, llm, aid, data_dir: str) -> None:
     click.echo()
     valid_policies = ["strict", "balanced", "permissive", "none"]
     val = click.prompt(
-        f"  Scan policy preset",
+        "  Scan policy preset",
         type=click.Choice(valid_policies),
         default=sc.policy if sc.policy in valid_policies else "none",
         show_default=True,
@@ -653,9 +653,12 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 @click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port")
 @click.option("--block-message", default=None,
               help="Custom message shown when a request is blocked (empty = default)")
-@click.option("--restart/--no-restart", default=True, help="Restart defenseclaw-gateway and openclaw gateway after setup (default: on)")
-@click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
-@click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts (alias: --accept-defaults)")
+@click.option("--restart/--no-restart", default=True,
+              help="Restart gateway and openclaw after setup (default: on)")
+@click.option("--verify/--no-verify", default=True,
+              help="Run connectivity checks after setup (default: on)")
+@click.option("--non-interactive", "--accept-defaults", is_flag=True,
+              help="Use flags instead of prompts (alias: --accept-defaults)")
 @pass_ctx
 def setup_guardrail(
     app: AppContext,
@@ -1375,10 +1378,14 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
 @click.option("--index", "logs_index", default=None, help="HEC index for --logs (default: defenseclaw_local)")
 @click.option("--source", "logs_source", default=None, help="HEC source for --logs (default: defenseclaw)")
-@click.option("--sourcetype", "logs_sourcetype", default=None, help="HEC sourcetype for --logs (default: defenseclaw:json)")
-@click.option("--traces/--no-traces", "enable_traces", default=None, help="Enable/disable trace export (O11y)")
-@click.option("--metrics/--no-metrics", "enable_metrics", default=None, help="Enable/disable metrics export (O11y)")
-@click.option("--logs-export/--no-logs-export", "enable_logs_export", default=None, help="Enable/disable logs export (O11y)")
+@click.option("--sourcetype", "logs_sourcetype", default=None,
+              help="HEC sourcetype for --logs (default: defenseclaw:json)")
+@click.option("--traces/--no-traces", "enable_traces", default=None,
+              help="Enable/disable trace export (O11y)")
+@click.option("--metrics/--no-metrics", "enable_metrics", default=None,
+              help="Enable/disable metrics export (O11y)")
+@click.option("--logs-export/--no-logs-export", "enable_logs_export",
+              default=None, help="Enable/disable logs export (O11y)")
 @click.option("--disable", is_flag=True, help="Disable Splunk integration(s)")
 @click.option("--accept-splunk-license", is_flag=True,
               help="Acknowledge the Splunk General Terms for local Splunk enablement")
@@ -1810,7 +1817,7 @@ def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:
             click.echo("    License: Free")
         click.echo()
         click.echo("  Splunk Web login:")
-        click.echo(f"    Username:  admin")
+        click.echo("    Username:  admin")
         env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
         click.echo(f"    Password:  (stored in {env_file})")
         click.echo("    Note: Free mode may still show a login page — use these credentials")
@@ -2026,7 +2033,7 @@ def _show_splunk_credentials(data_dir: str) -> None:
     click.echo()
     click.echo("  Splunk Web Credentials")
     click.echo("  ──────────────────────")
-    click.echo(f"    URL:       http://127.0.0.1:8000")
-    click.echo(f"    Username:  admin")
+    click.echo("    URL:       http://127.0.0.1:8000")
+    click.echo("    Username:  admin")
     click.echo(f"    Password:  {password}")
     click.echo()

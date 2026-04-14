@@ -157,6 +157,9 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
 
     console.print(table)
 
+    from defenseclaw.commands import hint
+    hint("Scan all servers:  defenseclaw mcp scan --all")
+
 
 def _build_mcp_scan_map(store, servers: list[MCPServerEntry]) -> dict[str, dict]:
     """Build a map of server-name -> latest scan from the DB."""
@@ -331,6 +334,7 @@ def scan(
         if not servers:
             click.echo("No MCP servers configured in openclaw.json.")
             return
+        has_findings = False
         for s in servers:
             scan_target = s.url or s.name
             if not as_json:
@@ -340,6 +344,14 @@ def scan(
                                server_entry=s, quiet=as_json)
             if result:
                 _print_scan_result(result, as_json)
+                if not result.is_clean():
+                    has_findings = True
+        if not as_json:
+            from defenseclaw.commands import hint
+            if has_findings:
+                hint("View alerts:  defenseclaw alerts")
+            else:
+                hint("Scan skills:  defenseclaw skill scan all")
         return
 
     pe = PolicyEngine(app.store)
@@ -354,6 +366,15 @@ def scan(
                        server_entry=entry, quiet=as_json)
     if result:
         _print_scan_result(result, as_json)
+        if not as_json:
+            from defenseclaw.commands import hint
+            if result.is_clean():
+                hint("Scan skills:  defenseclaw skill scan all")
+            else:
+                hint(
+                    f"Block server:  defenseclaw mcp block {target}",
+                    "View alerts:   defenseclaw alerts",
+                )
     else:
         raise SystemExit(1)
 
@@ -611,6 +632,9 @@ def set_server(
 
     if app.logger:
         app.logger.log_action("mcp-set", name, f"command={cmd} url={url}")
+
+    from defenseclaw.commands import hint
+    hint(f"Scan it now:  defenseclaw mcp scan {name}")
 
 
 @mcp.command("unset")
