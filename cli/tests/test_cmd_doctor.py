@@ -26,9 +26,8 @@ from defenseclaw.config import Config, GuardrailConfig, GatewayConfig, OpenShell
 
 
 class DoctorGuardrailTests(unittest.TestCase):
-    @patch("defenseclaw.commands.cmd_doctor._emit")
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe, mock_emit):
+    def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -46,11 +45,28 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 0)
         self.assertEqual(result.warned, 1)
         self.assertEqual(result.passed, 1)
-        mock_emit.assert_any_call(
-            "warn",
-            "Guardrail proxy",
-            "guardrail.model is empty — relying on fetch-interceptor routing",
-        )
+        warn_checks = [c for c in result.checks if c["status"] == "warn"]
+        self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+
+
+class DoctorJsonOutputTests(unittest.TestCase):
+    """Test --json-output flag on doctor."""
+
+    def test_doctor_result_to_dict(self):
+        r = _DoctorResult()
+        r.passed = 2
+        r.warned = 1
+        r.failed = 0
+        r.checks.append({"status": "pass", "label": "Config", "detail": "found"})
+        r.checks.append({"status": "pass", "label": "Audit DB", "detail": "ok"})
+        r.checks.append({"status": "warn", "label": "Scanner", "detail": "not found"})
+
+        d = r.to_dict()
+        self.assertEqual(d["passed"], 2)
+        self.assertEqual(d["warned"], 1)
+        self.assertEqual(d["failed"], 0)
+        self.assertEqual(len(d["checks"]), 3)
+        self.assertEqual(d["checks"][0]["label"], "Config")
 
 
 if __name__ == "__main__":

@@ -17,9 +17,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -109,8 +113,12 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	cfg, cfgErr := config.Load()
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
-			fmt.Printf("  Warning: watchdog auto-start failed: %v\n", err)
+			fmt.Printf("  Watchdog: auto-start failed: %v\n", err)
+		} else {
+			fmt.Println("  Watchdog: started")
 		}
+	} else {
+		fmt.Println("  Watchdog: disabled (enable with gateway.watchdog.enabled)")
 	}
 
 	return nil
@@ -165,7 +173,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("OK (PID %d)\n", pid)
 	fmt.Println()
-	fmt.Println("Use 'defenseclaw-gateway status' to check health")
+	fmt.Printf("  Log file: %s\n", d.LogFile())
+	fmt.Println()
+	printCompactHealthSummary(cfg)
 	printSplunkLocalHint()
 
 	// Re-start watchdog if enabled in config.
@@ -182,7 +192,22 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 // printSplunkLocalHint prints Splunk Web credentials when the local bridge
 // is configured, so the user knows how to access the dashboards.
 func printSplunkLocalHint() {
-	dotenvPath := filepath.Join(config.DefaultDataPath(), ".env")
+	dataDir := config.DefaultDataPath()
+
+	// Check bridge env first (written by Python setup splunk --logs)
+	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
+	bridgeEnv := readDotEnv(bridgeEnvPath)
+	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
+		fmt.Println()
+		fmt.Println("Splunk Local Mode:")
+		fmt.Printf("  Web UI:   http://127.0.0.1:8000\n")
+		fmt.Printf("  Username: admin\n")
+		fmt.Printf("  Password: (stored in %s)\n", bridgeEnvPath)
+		return
+	}
+
+	// Fallback: legacy DEFENSECLAW_LOCAL_* keys
+	dotenvPath := filepath.Join(dataDir, ".env")
 	env := readDotEnv(dotenvPath)
 	user := env["DEFENSECLAW_LOCAL_USERNAME"]
 	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
@@ -193,7 +218,7 @@ func printSplunkLocalHint() {
 	fmt.Println("Splunk Local Mode:")
 	fmt.Printf("  Web UI:   http://127.0.0.1:8000\n")
 	fmt.Printf("  Username: %s\n", user)
-	fmt.Printf("  Password: %s\n", pass)
+	fmt.Printf("  Password: (stored in %s)\n", dotenvPath)
 }
 
 // readDotEnv reads KEY=VALUE pairs from a .env file.
@@ -220,6 +245,82 @@ func readDotEnv(path string) map[string]string {
 		env[k] = v
 	}
 	return env
+}
+
+// printCompactHealthSummary polls /health and prints a one-line status.
+func printCompactHealthSummary(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	apiPort := cfg.Gateway.APIPort
+	if apiPort == 0 {
+		apiPort = 18790
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", apiPort)
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Second)
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		resp.Body.Close()
+		if resp.StatusCode == 200 {
+			fmt.Printf("  Health: %s\n", summarizeHealth(body))
+			return
+		}
+	}
+	fmt.Println("  Health: not responding yet (use 'defenseclaw-gateway status')")
+}
+
+func summarizeHealth(body []byte) string {
+	var health map[string]json.RawMessage
+	if err := json.Unmarshal(body, &health); err != nil {
+		return "ok"
+	}
+	subsystems := []string{"gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"}
+	var parts []string
+	for _, sub := range subsystems {
+		raw, ok := health[sub]
+		if !ok {
+			continue
+		}
+		var info struct {
+			State  string `json:"state"`
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(raw, &info) != nil {
+			continue
+		}
+		state := info.State
+		if state == "" {
+			state = info.Status
+		}
+		switch strings.ToLower(state) {
+		case "running", "healthy":
+			parts = append(parts, sub+":ok")
+		case "disabled", "stopped":
+			parts = append(parts, sub+":off")
+		default:
+			parts = append(parts, sub+":"+state)
+		}
+	}
+	if len(parts) == 0 {
+		return "ok"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// sortedMapKeys returns sorted keys from a string map for deterministic output.
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func collectDaemonArgs(cmd *cobra.Command) []string {

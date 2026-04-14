@@ -39,15 +39,16 @@ _SKIP = click.style("SKIP", fg="bright_black")
 
 
 class _DoctorResult:
-    __slots__ = ("passed", "failed", "warned", "skipped")
+    __slots__ = ("passed", "failed", "warned", "skipped", "checks")
 
     def __init__(self) -> None:
         self.passed = 0
         self.failed = 0
         self.warned = 0
         self.skipped = 0
+        self.checks: list[dict] = []
 
-    def record(self, tag: str) -> None:
+    def record(self, tag: str, label: str = "", detail: str = "") -> None:
         if tag == "pass":
             self.passed += 1
         elif tag == "fail":
@@ -56,15 +57,32 @@ class _DoctorResult:
             self.warned += 1
         else:
             self.skipped += 1
+        if label:
+            self.checks.append({"status": tag, "label": label, "detail": detail})
+
+    def to_dict(self) -> dict:
+        return {
+            "passed": self.passed,
+            "failed": self.failed,
+            "warned": self.warned,
+            "skipped": self.skipped,
+            "checks": self.checks,
+        }
 
 
-def _emit(tag: str, label: str, detail: str = "") -> None:
-    icons = {"pass": _PASS, "fail": _FAIL, "warn": _WARN, "skip": _SKIP}
-    icon = icons.get(tag, tag)
-    line = f"  [{icon}] {label}"
-    if detail:
-        line += f"  —  {detail}"
-    click.echo(line)
+_json_mode = False
+
+
+def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = None) -> None:
+    if not _json_mode:
+        icons = {"pass": _PASS, "fail": _FAIL, "warn": _WARN, "skip": _SKIP}
+        icon = icons.get(tag, tag)
+        line = f"  [{icon}] {label}"
+        if detail:
+            line += f"  —  {detail}"
+        click.echo(line)
+    if r is not None:
+        r.record(tag, label, detail)
 
 
 def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
@@ -113,21 +131,17 @@ def _http_probe(url: str, *, method: str = "GET", headers: dict | None = None,
 
 def _check_config(cfg, r: _DoctorResult) -> None:
     if os.path.isfile(os.path.join(cfg.data_dir, "config.yaml")):
-        _emit("pass", "Config file", cfg.data_dir + "/config.yaml")
-        r.record("pass")
+        _emit("pass", "Config file", cfg.data_dir + "/config.yaml", r=r)
     else:
-        _emit("fail", "Config file", "not found — run 'defenseclaw init'")
-        r.record("fail")
+        _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
 
 
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     db_path = cfg.audit_db
     if os.path.isfile(db_path):
-        _emit("pass", "Audit database", db_path)
-        r.record("pass")
+        _emit("pass", "Audit database", db_path, r=r)
     else:
-        _emit("fail", "Audit database", f"not found at {db_path}")
-        r.record("fail")
+        _emit("fail", "Audit database", f"not found at {db_path}", r=r)
 
 
 def _check_scanners(cfg, r: _DoctorResult) -> None:
@@ -136,12 +150,11 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
         ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
     ]
     for name, binary in bins:
-        if shutil.which(binary):
-            _emit("pass", f"Scanner: {name}", shutil.which(binary))
-            r.record("pass")
+        path = shutil.which(binary)
+        if path:
+            _emit("pass", f"Scanner: {name}", path, r=r)
         else:
-            _emit("warn", f"Scanner: {name}", f"'{binary}' not on PATH")
-            r.record("warn")
+            _emit("fail", f"Scanner: {name}", f"'{binary}' not on PATH", r=r)
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> None:
@@ -151,87 +164,77 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
     url = f"http://{bind}:{cfg.gateway.api_port}/health"
     code, body = _http_probe(url, timeout=5.0)
     if code == 200:
-        _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}")
-        r.record("pass")
+        _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
 
         try:
             health = json.loads(body)
-            for sub in ("gateway", "watcher", "guardrail"):
+            subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"]
+            for sub in subsystems:
                 info = health.get(sub, {})
+                if not info:
+                    continue
                 state = info.get("state", info.get("status", "unknown"))
                 if state.lower() in ("running", "healthy"):
                     detail = state
                     if sub == "guardrail" and info.get("details"):
                         detail += f" (mode={info['details'].get('mode', '?')})"
-                    _emit("pass", f"  └─ {sub}", detail)
-                    r.record("pass")
+                    _emit("pass", f"  └─ {sub}", detail, r=r)
                 elif state.lower() in ("disabled", "stopped"):
-                    _emit("skip", f"  └─ {sub}", "disabled in config")
-                    r.record("skip")
+                    _emit("skip", f"  └─ {sub}", "disabled in config", r=r)
                 else:
-                    _emit("fail", f"  └─ {sub}", state)
-                    r.record("fail")
+                    _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):
-            pass
+            _emit("warn", "Sidecar health JSON", "could not parse /health response", r=r)
     else:
-        _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}")
-        r.record("fail")
+        _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
 
 
 def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
     url = f"http://{cfg.gateway.host}:{cfg.gateway.port}/health"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
-        _emit("pass", "OpenClaw gateway", f"{cfg.gateway.host}:{cfg.gateway.port}")
-        r.record("pass")
+        _emit("pass", "OpenClaw gateway", f"{cfg.gateway.host}:{cfg.gateway.port}", r=r)
     else:
-        _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}")
-        r.record("fail")
+        _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
 
 
 def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     if not cfg.guardrail.enabled:
-        _emit("skip", "Guardrail proxy", "disabled")
-        r.record("skip")
+        _emit("skip", "Guardrail proxy", "disabled", r=r)
         return
 
     if not cfg.guardrail.model:
         _emit(
             "warn", "Guardrail proxy",
             "guardrail.model is empty — relying on fetch-interceptor routing",
+            r=r,
         )
-        r.record("warn")
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
     url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
-        _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}")
-        r.record("pass")
+        _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
     else:
-        _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}")
-        r.record("fail")
+        _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     gc = cfg.guardrail
     if not gc.enabled:
-        _emit("skip", "LLM API key", "guardrail disabled")
-        r.record("skip")
+        _emit("skip", "LLM API key", "guardrail disabled", r=r)
         return
 
     env_name = gc.api_key_env
     if not env_name:
-        _emit("fail", "LLM API key", "api_key_env not configured")
-        r.record("fail")
+        _emit("fail", "LLM API key", "api_key_env not configured", r=r)
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
     api_key = _resolve_api_key(env_name, dotenv_path)
 
     if not api_key:
-        _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})")
-        r.record("fail")
+        _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})", r=r)
         return
 
     model = gc.model or ""
@@ -262,31 +265,24 @@ def _verify_anthropic(api_key: str, r: _DoctorResult) -> None:
         timeout=15.0,
     )
     if code == 200:
-        _emit("pass", "LLM API key (Anthropic)", "authenticated successfully")
-        r.record("pass")
+        _emit("pass", "LLM API key (Anthropic)", "authenticated successfully", r=r)
     elif code == 401:
-        _emit("fail", "LLM API key (Anthropic)", "invalid key (401 Unauthorized)")
-        r.record("fail")
+        _emit("fail", "LLM API key (Anthropic)", "invalid key (401 Unauthorized)", r=r)
     elif code == 403:
-        _emit("fail", "LLM API key (Anthropic)", "forbidden (403) — key may be revoked or restricted")
-        r.record("fail")
+        _emit("fail", "LLM API key (Anthropic)", "forbidden (403) — key may be revoked or restricted", r=r)
     elif code == 429:
-        _emit("pass", "LLM API key (Anthropic)", "authenticated (rate limited, but key is valid)")
-        r.record("pass")
+        _emit("pass", "LLM API key (Anthropic)", "authenticated (rate limited, but key is valid)", r=r)
     elif code == 400:
-        _emit("pass", "LLM API key (Anthropic)", "authenticated (model/request error, but key accepted)")
-        r.record("pass")
+        _emit("pass", "LLM API key (Anthropic)", "authenticated (model/request error, but key accepted)", r=r)
     elif code == 0:
-        _emit("warn", "LLM API key (Anthropic)", f"could not reach api.anthropic.com: {body}")
-        r.record("warn")
+        _emit("warn", "LLM API key (Anthropic)", f"could not reach api.anthropic.com: {body}", r=r)
     else:
         try:
             err_body = json.loads(body)
             msg = err_body.get("error", {}).get("message", body[:120])
         except (json.JSONDecodeError, TypeError):
             msg = body[:120]
-        _emit("fail", "LLM API key (Anthropic)", f"HTTP {code}: {msg}")
-        r.record("fail")
+        _emit("fail", "LLM API key (Anthropic)", f"HTTP {code}: {msg}", r=r)
 
 
 def _verify_openai(api_key: str, r: _DoctorResult) -> None:
@@ -297,31 +293,25 @@ def _verify_openai(api_key: str, r: _DoctorResult) -> None:
         timeout=10.0,
     )
     if code == 200:
-        _emit("pass", "LLM API key (OpenAI)", "authenticated successfully")
-        r.record("pass")
+        _emit("pass", "LLM API key (OpenAI)", "authenticated successfully", r=r)
     elif code == 401:
-        _emit("fail", "LLM API key (OpenAI)", "invalid key (401 Unauthorized)")
-        r.record("fail")
+        _emit("fail", "LLM API key (OpenAI)", "invalid key (401 Unauthorized)", r=r)
     elif code == 0:
-        _emit("warn", "LLM API key (OpenAI)", f"could not reach api.openai.com: {body}")
-        r.record("warn")
+        _emit("warn", "LLM API key (OpenAI)", f"could not reach api.openai.com: {body}", r=r)
     else:
-        _emit("fail", "LLM API key (OpenAI)", f"HTTP {code}")
-        r.record("fail")
+        _emit("fail", "LLM API key (OpenAI)", f"HTTP {code}", r=r)
 
 
 def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     gc = cfg.guardrail
     if not gc.enabled or gc.scanner_mode not in ("remote", "both"):
-        _emit("skip", "Cisco AI Defense", "not configured for remote scanning")
-        r.record("skip")
+        _emit("skip", "Cisco AI Defense", "not configured for remote scanning", r=r)
         return
 
     endpoint = cfg.cisco_ai_defense.endpoint
     key_env = cfg.cisco_ai_defense.api_key_env
     if not endpoint:
-        _emit("fail", "Cisco AI Defense", "endpoint not configured")
-        r.record("fail")
+        _emit("fail", "Cisco AI Defense", "endpoint not configured", r=r)
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
@@ -329,8 +319,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
 
     if not api_key:
         display = key_env if key_env.isupper() and len(key_env) < 50 else "(env var not configured properly)"
-        _emit("fail", "Cisco AI Defense", f"{display} not set")
-        r.record("fail")
+        _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
         return
 
     health_url = endpoint.rstrip("/") + "/health"
@@ -341,29 +330,23 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     )
 
     if code == 200:
-        _emit("pass", "Cisco AI Defense", endpoint)
-        r.record("pass")
+        _emit("pass", "Cisco AI Defense", endpoint, r=r)
     elif code == 401 or code == 403:
-        _emit("fail", "Cisco AI Defense", f"authentication failed (HTTP {code})")
-        r.record("fail")
+        _emit("fail", "Cisco AI Defense", f"authentication failed (HTTP {code})", r=r)
     elif code == 0:
-        _emit("warn", "Cisco AI Defense", f"endpoint unreachable: {body[:100]}")
-        r.record("warn")
+        _emit("warn", "Cisco AI Defense", f"endpoint unreachable: {body[:100]}", r=r)
     else:
-        _emit("warn", "Cisco AI Defense", f"HTTP {code} (endpoint may not support /health)")
-        r.record("warn")
+        _emit("warn", "Cisco AI Defense", f"HTTP {code} (endpoint may not support /health)", r=r)
 
 
 def _check_splunk(cfg, r: _DoctorResult) -> None:
     if not cfg.splunk.enabled:
-        _emit("skip", "Splunk HEC", "disabled")
-        r.record("skip")
+        _emit("skip", "Splunk HEC", "disabled", r=r)
         return
 
     hec_token = cfg.splunk.resolved_hec_token()
     if not cfg.splunk.hec_endpoint or not hec_token:
-        _emit("fail", "Splunk HEC", "endpoint or token missing")
-        r.record("fail")
+        _emit("fail", "Splunk HEC", "endpoint or token missing", r=r)
         return
 
     code, body = _http_probe(
@@ -378,25 +361,20 @@ def _check_splunk(cfg, r: _DoctorResult) -> None:
     )
 
     if code == 200:
-        _emit("pass", "Splunk HEC", cfg.splunk.hec_endpoint)
-        r.record("pass")
+        _emit("pass", "Splunk HEC", cfg.splunk.hec_endpoint, r=r)
     elif code == 401 or code == 403:
-        _emit("fail", "Splunk HEC", f"authentication failed (HTTP {code})")
-        r.record("fail")
+        _emit("fail", "Splunk HEC", f"authentication failed (HTTP {code})", r=r)
     elif code == 0:
-        _emit("warn", "Splunk HEC", f"unreachable: {body[:100]}")
-        r.record("warn")
+        _emit("warn", "Splunk HEC", f"unreachable: {body[:100]}", r=r)
     else:
-        _emit("warn", "Splunk HEC", f"HTTP {code}")
-        r.record("warn")
+        _emit("warn", "Splunk HEC", f"HTTP {code}", r=r)
 
 
 def _check_virustotal(cfg, r: _DoctorResult) -> None:
     sc = cfg.scanners.skill_scanner
     vt_key = sc.resolved_virustotal_api_key()
     if not sc.use_virustotal or not vt_key:
-        _emit("skip", "VirusTotal API", "not enabled")
-        r.record("skip")
+        _emit("skip", "VirusTotal API", "not enabled", r=r)
         return
 
     code, _ = _http_probe(
@@ -406,17 +384,13 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
     )
 
     if code == 200:
-        _emit("pass", "VirusTotal API", "key valid")
-        r.record("pass")
+        _emit("pass", "VirusTotal API", "key valid", r=r)
     elif code == 401 or code == 403:
-        _emit("fail", "VirusTotal API", "invalid or unauthorized key")
-        r.record("fail")
+        _emit("fail", "VirusTotal API", "invalid or unauthorized key", r=r)
     elif code == 0:
-        _emit("warn", "VirusTotal API", "could not reach virustotal.com")
-        r.record("warn")
+        _emit("warn", "VirusTotal API", "could not reach virustotal.com", r=r)
     else:
-        _emit("warn", "VirusTotal API", f"HTTP {code}")
-        r.record("warn")
+        _emit("warn", "VirusTotal API", f"HTTP {code}", r=r)
 
 
 # ---------------------------------------------------------------------------
@@ -434,53 +408,58 @@ def doctor(app: AppContext, json_out: bool) -> None:
 
     Exit codes: 0 = all pass, 1 = any failure.
     """
+    global _json_mode
     cfg = app.cfg
-
-    click.echo()
-    click.echo("DefenseClaw Doctor")
-    click.echo("══════════════════")
-    click.echo()
-
     r = _DoctorResult()
+    _json_mode = json_out
+
+    if not json_out:
+        click.echo()
+        click.echo("DefenseClaw Doctor")
+        click.echo("══════════════════")
+        click.echo()
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
-    click.echo()
-
-    click.echo("  ── Scanners ──")
+    if not json_out:
+        click.echo()
+        click.echo("  ── Scanners ──")
     _check_scanners(cfg, r)
-    click.echo()
-
-    click.echo("  ── Services ──")
+    if not json_out:
+        click.echo()
+        click.echo("  ── Services ──")
     _check_sidecar(cfg, r)
     _check_openclaw_gateway(cfg, r)
     _check_guardrail_proxy(cfg, r)
-    click.echo()
-
-    click.echo("  ── Credentials ──")
+    if not json_out:
+        click.echo()
+        click.echo("  ── Credentials ──")
     _check_llm_api_key(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
     _check_splunk(cfg, r)
-    click.echo()
 
-    # Summary
-    click.echo("  ── Summary ──")
-    parts = []
-    if r.passed:
-        parts.append(click.style(f"{r.passed} passed", fg="green"))
-    if r.failed:
-        parts.append(click.style(f"{r.failed} failed", fg="red"))
-    if r.warned:
-        parts.append(click.style(f"{r.warned} warnings", fg="yellow"))
-    if r.skipped:
-        parts.append(click.style(f"{r.skipped} skipped", dim=True))
-    click.echo("  " + ", ".join(parts))
-    click.echo()
-
-    if r.failed:
-        click.echo("  Fix the failures above, then re-run: defenseclaw doctor")
+    if json_out:
+        click.echo(json.dumps(r.to_dict(), indent=2))
+    else:
         click.echo()
+        click.echo("  ── Summary ──")
+        parts = []
+        if r.passed:
+            parts.append(click.style(f"{r.passed} passed", fg="green"))
+        if r.failed:
+            parts.append(click.style(f"{r.failed} failed", fg="red"))
+        if r.warned:
+            parts.append(click.style(f"{r.warned} warnings", fg="yellow"))
+        if r.skipped:
+            parts.append(click.style(f"{r.skipped} skipped", dim=True))
+        click.echo("  " + ", ".join(parts))
+        click.echo()
+
+    if r.failed:
+        if not json_out:
+            click.echo("  Fix the failures above, then re-run: defenseclaw doctor")
+            click.echo()
         raise SystemExit(1)
 
     if app.logger:

@@ -90,6 +90,61 @@ class TestInitCommand(unittest.TestCase):
         self.assertEqual(init_events[0].action, "init")
         store.close()
 
+class TestInitVersionDisplay(unittest.TestCase):
+    """Tests for version info in init Environment section."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-ver-")
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_shows_cli_version(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which):
+        from pathlib import Path
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("DefenseClaw:", result.output)
+
+    @patch("defenseclaw.commands.cmd_init._get_gateway_version", return_value="v0.5.0")
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_shows_gateway_version(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw_ver):
+        from pathlib import Path
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Gateway:       v0.5.0", result.output)
+
+    @patch("defenseclaw.commands.cmd_init._get_gateway_version", return_value=None)
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_gateway_not_found(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw_ver):
+        from pathlib import Path
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Gateway:       not found", result.output)
+
+
 class TestInitPreservesExistingConfig(unittest.TestCase):
     """Regression tests for P5 fix: init must not overwrite existing config."""
 

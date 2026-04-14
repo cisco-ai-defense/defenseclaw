@@ -166,7 +166,7 @@ class TestSkillScan(SkillCommandTestBase):
         os.makedirs(skill_dir)
 
         result = self.invoke(["scan", "blocked-one", "--path", skill_dir])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("BLOCKED", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
@@ -178,7 +178,7 @@ class TestSkillScan(SkillCommandTestBase):
         os.makedirs(skill_dir)
 
         result = self.invoke(["scan", "allow-me", "--path", skill_dir])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("ALLOWED", result.output)
 
 

@@ -106,6 +106,8 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
     table.add_column("Verdict")
     table.add_column("Actions")
 
+    config_names = {s.name for s in servers}
+
     for s in servers:
         severity = "-"
         sev_style = ""
@@ -134,6 +136,22 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
             s.url or "",
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
             f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
+            actions_str,
+        )
+
+    for name, ae in actions_map.items():
+        if name in config_names:
+            continue
+        if ae.actions.is_empty():
+            continue
+        actions_str = ae.actions.summary()
+        table.add_row(
+            f"[dim]{name}[/dim]",
+            "[dim]—[/dim]",
+            "[dim]removed from config[/dim]",
+            "",
+            "-",
+            "[dim]enforcement only[/dim]",
             actions_str,
         )
 
@@ -222,7 +240,8 @@ def _resolve_scan_target(app: AppContext, target: str) -> tuple[str, MCPServerEn
 def _run_scan(app: AppContext, target: str, analyzers: str,
               scan_prompts: bool, scan_resources: bool,
               scan_instructions: bool,
-              server_entry: MCPServerEntry | None = None) -> ScanResult | None:
+              server_entry: MCPServerEntry | None = None,
+              quiet: bool = False) -> ScanResult | None:
     """Run the MCP scanner on *target*.  Returns None on fatal error."""
     from dataclasses import replace
 
@@ -239,7 +258,8 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         scan_cfg = replace(scan_cfg, scan_instructions=True)
 
     scanner = MCPScannerWrapper(scan_cfg, app.cfg.inspect_llm, app.cfg.cisco_ai_defense)
-    click.echo(f"Scanning MCP server: {target}")
+    if not quiet:
+        click.echo(f"Scanning MCP server: {target}")
 
     try:
         result = scanner.scan(target, server_entry=server_entry)
@@ -260,12 +280,24 @@ def _print_scan_result(result: ScanResult, as_json: bool) -> None:
     elif result.is_clean():
         click.secho("  Status: CLEAN", fg="green")
     else:
+        sev = result.max_severity()
+        color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
         click.secho(
-            f"  Status: {result.max_severity()} ({len(result.findings)} findings)",
-            fg="red",
+            f"  Status: {sev} ({len(result.findings)} findings)",
+            fg=color,
         )
+        click.echo()
         for f in result.findings:
-            click.echo(f"    [{f.severity}] {f.title}")
+            sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
+            click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+            click.echo(f" {f.title}")
+            if f.location:
+                click.echo(f"      Location: {f.location}")
+            if f.description:
+                desc = f.description[:120] + "..." if len(f.description) > 120 else f.description
+                click.echo(f"      {desc}")
+            if f.remediation:
+                click.echo(f"      Fix: {f.remediation}")
 
 
 @mcp.command()
@@ -301,10 +333,11 @@ def scan(
             return
         for s in servers:
             scan_target = s.url or s.name
-            click.echo(f"\n{'─' * 40}")
+            if not as_json:
+                click.echo(f"\n{'─' * 40}")
             result = _run_scan(app, scan_target, analyzers,
                                scan_prompts, scan_resources, scan_instructions,
-                               server_entry=s)
+                               server_entry=s, quiet=as_json)
             if result:
                 _print_scan_result(result, as_json)
         return
@@ -313,12 +346,12 @@ def scan(
     resolved, entry = _resolve_scan_target(app, target)
 
     if pe.is_blocked("mcp", target):
-        click.echo(f"BLOCKED: {target} — remove from block list first")
-        return
+        click.echo(f"BLOCKED: {target} — remove from block list first", err=True)
+        raise SystemExit(2)
 
     result = _run_scan(app, resolved, analyzers,
                        scan_prompts, scan_resources, scan_instructions,
-                       server_entry=entry)
+                       server_entry=entry, quiet=as_json)
     if result:
         _print_scan_result(result, as_json)
     else:

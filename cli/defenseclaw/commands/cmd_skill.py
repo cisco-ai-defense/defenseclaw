@@ -560,12 +560,12 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bo
     pe = PolicyEngine(app.store)
 
     if pe.is_blocked("skill", name):
-        click.echo(f"BLOCKED: {name} — remove from block list first")
-        return
+        click.echo(f"BLOCKED: {name} — remove from block list first", err=True)
+        raise SystemExit(2)
 
     if pe.is_allowed("skill", name):
         click.echo(f"ALLOWED (skip scan): {name}")
-        return
+        raise SystemExit(2)
 
     if not as_json:
         click.echo(f"[scan] skill-scanner -> {scan_dir}")

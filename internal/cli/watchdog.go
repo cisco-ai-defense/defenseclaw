@@ -90,9 +90,16 @@ var watchdogStopCmd = &cobra.Command{
 	RunE:  runWatchdogStop,
 }
 
+var watchdogStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show the watchdog daemon status",
+	RunE:  runWatchdogStatus,
+}
+
 func init() {
 	watchdogCmd.AddCommand(watchdogStartCmd)
 	watchdogCmd.AddCommand(watchdogStopCmd)
+	watchdogCmd.AddCommand(watchdogStatusCmd)
 	rootCmd.AddCommand(watchdogCmd)
 }
 
@@ -385,5 +392,52 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 
 	_ = os.Remove(pidPath)
 	fmt.Println("OK")
+	return nil
+}
+
+func runWatchdogStatus(_ *cobra.Command, _ []string) error {
+	dataDir := config.DefaultDataPath()
+	pidPath := filepath.Join(dataDir, watchdogPIDFile)
+
+	cfg, cfgErr := config.Load()
+	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		if enabled {
+			fmt.Println("Watchdog: enabled but not running")
+			fmt.Println("  Start with: defenseclaw-gateway watchdog start")
+		} else {
+			fmt.Println("Watchdog: disabled")
+			fmt.Println("  Enable in config: gateway.watchdog.enabled = true")
+		}
+		return nil
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		fmt.Println("Watchdog: not running (invalid PID file)")
+		_ = os.Remove(pidPath)
+		return nil
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		fmt.Printf("Watchdog: not running (PID %d not found)\n", pid)
+		_ = os.Remove(pidPath)
+		return nil
+	}
+
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		fmt.Printf("Watchdog: not running (PID %d is stale)\n", pid)
+		_ = os.Remove(pidPath)
+		return nil
+	}
+
+	fmt.Printf("Watchdog: running (PID %d)\n", pid)
+
+	state := loadWatchdogState(dataDir)
+	fmt.Printf("  Last known state: %s\n", state.String())
+
 	return nil
 }

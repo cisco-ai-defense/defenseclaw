@@ -86,9 +86,9 @@ def upgrade(
 
     # ── Early exit if already at latest ──────────────────────────────────────
 
-    if target_version == current_version and not yes:
+    if target_version == current_version:
         click.echo()
-        click.echo("  Already at the latest version. Nothing to do.")
+        click.echo(f"  Already at version {current_version}. Nothing to do.")
         return
 
     # ── Platform detection ───────────────────────────────────────────────────

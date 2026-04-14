@@ -190,7 +190,7 @@ class TestMCPScan(MCPCommandTestBase):
         pe.block("mcp", "http://evil.com", "unsafe")
 
         result = self.invoke(["scan", "http://evil.com"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("BLOCKED", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")

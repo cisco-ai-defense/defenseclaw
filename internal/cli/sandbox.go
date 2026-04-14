@@ -89,6 +89,10 @@ func runSandboxStart(_ *cobra.Command, _ []string) error {
 }
 
 func runSandboxStop(_ *cobra.Command, _ []string) error {
+	if !cfg.OpenShell.IsStandalone() {
+		return fmt.Errorf("sandbox: openshell.mode is not 'standalone' — nothing to stop")
+	}
+
 	fmt.Println("Stopping defenseclaw-sandbox.target ...")
 	return systemctl("stop", "defenseclaw-sandbox.target")
 }

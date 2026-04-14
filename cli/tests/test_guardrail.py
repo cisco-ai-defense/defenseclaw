@@ -956,7 +956,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -978,7 +978,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -994,7 +994,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1012,7 +1012,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             f.write("DEFENSECLAW_TEST_KEY_NOTSET_12345=test-val\n")
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1026,7 +1026,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1042,7 +1042,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1059,7 +1059,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(
             setup,
             ["guardrail", "--non-interactive", "--mode", "action",
-             "--block-message", custom_msg],
+             "--block-message", custom_msg, "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1082,7 +1082,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(
             setup,
             ["guardrail", "--non-interactive", "--mode", "action",
-             "--block-message", custom_msg],
+             "--block-message", custom_msg, "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1103,7 +1103,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1273,7 +1273,8 @@ class TestSetupGuardrailRestart(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def test_without_restart_shows_manual_instructions(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_default_restart_calls_restart_services(self, mock_restart):
         from defenseclaw.commands.cmd_setup import setup
         result = self.runner.invoke(
             setup,
@@ -1281,21 +1282,17 @@ class TestSetupGuardrailRestart(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        # Setup shows restart instructions when --restart not passed
-        self.assertIn("defenseclaw-gateway restart", result.output)
-        self.assertIn("--restart", result.output)
+        mock_restart.assert_called_once()
 
-    @patch("defenseclaw.commands.cmd_setup._restart_services")
-    def test_with_restart_calls_restart_services(self, mock_restart):
+    def test_no_restart_shows_manual_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
         result = self.runner.invoke(
             setup,
-            ["guardrail", "--non-interactive", "--mode", "observe", "--restart"],
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_restart.assert_called_once()
-        self.assertNotIn("Restart services for changes to take effect", result.output)
+        self.assertIn("defenseclaw-gateway restart", result.output)
 
     def test_disable_restarts_openclaw(self):
         """Disabling always restarts OpenClaw gateway to unload the plugin."""
@@ -1338,6 +1335,17 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         result = self.runner.invoke(setup, ["guardrail", "--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--restart", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_accept_defaults_alias_works(self, mock_restart):
+        from defenseclaw.commands.cmd_setup import setup
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--accept-defaults", "--mode", "observe"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Config saved", result.output)
 
 
 # ---------------------------------------------------------------------------

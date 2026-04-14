@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -134,8 +135,8 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		fmt.Println("Sidecar Status: NOT RUNNING")
 		fmt.Printf("  Could not reach %s\n", addr)
-		fmt.Println("  Start the sidecar with: defenseclaw sidecar")
-		return nil
+		fmt.Println("  Start the sidecar with: defenseclaw-gateway start")
+		return fmt.Errorf("sidecar unreachable")
 	}
 	defer resp.Body.Close()
 
@@ -177,11 +178,16 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 		fmt.Printf("             last error: %s\n", h.LastError)
 	}
 	if len(h.Details) > 0 {
-		for k, v := range h.Details {
+		keys := make([]string, 0, len(h.Details))
+		for k := range h.Details {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
-			fmt.Printf("             %s: %v\n", k, v)
+			fmt.Printf("             %s: %v\n", k, h.Details[k])
 		}
 	}
 	fmt.Println()
