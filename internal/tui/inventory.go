@@ -179,6 +179,7 @@ type InventoryPanel struct {
 	detailCache    *InventoryDetailInfo
 	detailCacheIdx int
 	detailCacheSub int
+	filter         string // "eligible", "warning", "blocked", "loaded", "disabled", "" = all
 }
 
 func NewInventoryPanel(theme *Theme, exec *CommandExecutor, store *audit.Store) InventoryPanel {
@@ -235,10 +236,112 @@ func (p *InventoryPanel) SetCursor(i int) {
 }
 
 func (p *InventoryPanel) CursorAt() int      { return p.cursor }
+func (p *InventoryPanel) Filter() string     { return p.filter }
 func (p *InventoryPanel) IsDetailOpen() bool { return p.detailOpen }
 func (p *InventoryPanel) ToggleDetail() {
 	p.detailOpen = !p.detailOpen
 	p.detailCache = nil
+}
+
+func (p *InventoryPanel) SetFilter(f string) {
+	if p.filter == f {
+		p.filter = ""
+	} else {
+		p.filter = f
+	}
+	p.cursor = 0
+	p.detailOpen = false
+	p.detailCache = nil
+}
+
+func (p *InventoryPanel) ClearFilter() {
+	p.filter = ""
+	p.cursor = 0
+}
+
+// SubTabHitTest returns the sub-tab index at the given x position, or -1.
+func (p *InventoryPanel) SubTabHitTest(x int) int {
+	pos := 2 // leading "  " indent
+	for i, name := range invSubNames {
+		count := ""
+		if p.loaded && p.inv != nil {
+			switch i {
+			case invSubSkills:
+				count = fmt.Sprintf("(%d)", len(p.inv.Skills))
+			case invSubPlugins:
+				count = fmt.Sprintf("(%d)", len(p.inv.Plugins))
+			case invSubMCPs:
+				count = fmt.Sprintf("(%d)", len(p.inv.MCPs))
+			case invSubAgents:
+				count = fmt.Sprintf("(%d)", len(p.inv.Agents))
+			case invSubModels:
+				count = fmt.Sprintf("(%d)", len(p.inv.Models))
+			case invSubMemory:
+				count = fmt.Sprintf("(%d)", len(p.inv.Memory))
+			}
+		}
+		label := fmt.Sprintf(" %s %s ", name, count)
+		w := lipgloss.Width(label)
+		if x >= pos && x < pos+w {
+			return i
+		}
+		pos += w + 1 // +1 for space separator
+	}
+	return -1
+}
+
+func (p *InventoryPanel) filteredSkills() []aibomSkill {
+	if p.inv == nil {
+		return nil
+	}
+	if p.filter == "" {
+		return p.inv.Skills
+	}
+	var out []aibomSkill
+	for _, s := range p.inv.Skills {
+		switch p.filter {
+		case "eligible":
+			if s.Eligible {
+				out = append(out, s)
+			}
+		case "warning":
+			if s.Verdict == "warning" {
+				out = append(out, s)
+			}
+		case "blocked":
+			if s.Verdict == "blocked" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func (p *InventoryPanel) filteredPlugins() []aibomPlugin {
+	if p.inv == nil {
+		return nil
+	}
+	if p.filter == "" {
+		return p.inv.Plugins
+	}
+	var out []aibomPlugin
+	for _, pl := range p.inv.Plugins {
+		switch p.filter {
+		case "loaded":
+			if pl.Status == "loaded" {
+				out = append(out, pl)
+			}
+		case "disabled":
+			if pl.Status == "disabled" {
+				out = append(out, pl)
+			}
+		case "blocked":
+			if pl.Verdict == "blocked" {
+				out = append(out, pl)
+			}
+		}
+	}
+	return out
 }
 
 func (p *InventoryPanel) detailHeight() int {
@@ -417,9 +520,9 @@ func (p *InventoryPanel) currentListLen() int {
 	}
 	switch p.activeSub {
 	case invSubSkills:
-		return len(p.inv.Skills)
+		return len(p.filteredSkills())
 	case invSubPlugins:
-		return len(p.inv.Plugins)
+		return len(p.filteredPlugins())
 	case invSubMCPs:
 		return len(p.inv.MCPs)
 	case invSubAgents:
@@ -736,17 +839,14 @@ func (p *InventoryPanel) mapVal(m map[string]interface{}, key string) string {
 
 // ---------- Skills tab ----------
 
-func (p *InventoryPanel) renderSkills(width, maxLines int) string {
-	var b strings.Builder
-	items := p.inv.Skills
-
-	if len(items) == 0 {
-		return p.theme.Dimmed.Render("  No skills found.")
+// SkillFilterPositions returns [start,end] x-positions for each clickable filter label.
+// Order: all, eligible, warnings, blocked
+func (p *InventoryPanel) SkillFilterPositions() [][2]int {
+	if p.inv == nil {
+		return nil
 	}
-
-	// Count summaries
 	var eligible, warned, blocked int
-	for _, s := range items {
+	for _, s := range p.inv.Skills {
 		if s.Eligible {
 			eligible++
 		}
@@ -757,16 +857,82 @@ func (p *InventoryPanel) renderSkills(width, maxLines int) string {
 			blocked++
 		}
 	}
-	fmt.Fprintf(&b, "  %d skills  ·  %s eligible  ·  %s warnings  ·  %s blocked\n\n",
-		len(items),
-		p.theme.Clean.Render(fmt.Sprintf("%d", eligible)),
-		p.warnCount(warned),
-		p.blockCount(blocked))
+	labels := []string{
+		fmt.Sprintf("%d skills", len(p.inv.Skills)),
+		fmt.Sprintf("%d eligible", eligible),
+		fmt.Sprintf("%d warnings", warned),
+		fmt.Sprintf("%d blocked", blocked),
+	}
+	pos := 2 // leading indent
+	var positions [][2]int
+	for i, l := range labels {
+		w := len(l)
+		positions = append(positions, [2]int{pos, pos + w})
+		pos += w
+		if i < len(labels)-1 {
+			pos += 5 // "  ·  " separator
+		}
+	}
+	return positions
+}
 
-	header := fmt.Sprintf("  %-3s %-26s %-12s %-8s %-12s %-6s %-10s",
-		"", "ID", "VERDICT", "ENABLED", "SEVERITY", "FINDS", "SOURCE")
-	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("243")).Render(header))
+func (p *InventoryPanel) renderSkills(width, maxLines int) string {
+	var b strings.Builder
+	allItems := p.inv.Skills
+
+	if len(allItems) == 0 {
+		return p.theme.Dimmed.Render("  No skills found.")
+	}
+
+	var eligible, warned, blocked int
+	for _, s := range allItems {
+		if s.Eligible {
+			eligible++
+		}
+		if s.Verdict == "warning" {
+			warned++
+		}
+		if s.Verdict == "blocked" {
+			blocked++
+		}
+	}
+
+	allLabel := fmt.Sprintf("%d skills", len(allItems))
+	eligLabel := fmt.Sprintf("%d eligible", eligible)
+	warnLabel := fmt.Sprintf("%d warnings", warned)
+	blockLabel := fmt.Sprintf("%d blocked", blocked)
+
+	renderLabel := func(label, filterKey string, style lipgloss.Style) string {
+		if p.filter == filterKey {
+			return lipgloss.NewStyle().Bold(true).Underline(true).Inherit(style).Render(label)
+		}
+		return style.Render(label)
+	}
+
+	fmt.Fprintf(&b, "  %s  ·  %s  ·  %s  ·  %s\n",
+		renderLabel(allLabel, "", lipgloss.NewStyle()),
+		renderLabel(eligLabel, "eligible", p.theme.Clean),
+		renderLabel(warnLabel, "warning", lipgloss.NewStyle().Foreground(lipgloss.Color("214"))),
+		renderLabel(blockLabel, "blocked", p.theme.Critical))
+	if p.filter != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
+			fmt.Sprintf("  Filtered: %s  (click again or press Esc to clear)", p.filter)))
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
+
+	items := p.filteredSkills()
+
+	dimHeader := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("243"))
+	header := fmt.Sprintf("  %-4s%-24s %-12s %-8s %-10s %-6s %s",
+		"", "ID", "VERDICT", "ON", "SEVERITY", "FINDS", "SOURCE")
+	b.WriteString(dimHeader.Render(header))
+	b.WriteString("\n")
+
+	if len(items) == 0 {
+		b.WriteString(p.theme.Dimmed.Render("  No items match the current filter."))
+		return b.String()
+	}
 
 	start := 0
 	if p.cursor >= maxLines {
@@ -790,8 +956,8 @@ func (p *InventoryPanel) renderSkills(width, maxLines int) string {
 		}
 
 		id := s.ID
-		if len(id) > 24 {
-			id = id[:21] + "…"
+		if len(id) > 22 {
+			id = id[:19] + "..."
 		}
 
 		verdict := p.verdictBadge(s.Verdict)
@@ -800,22 +966,32 @@ func (p *InventoryPanel) renderSkills(width, maxLines int) string {
 			enabled = p.theme.Clean.Render("yes")
 		}
 
-		severity := p.theme.Dimmed.Render("—")
+		severity := p.theme.Dimmed.Render("--")
 		if s.ScanSeverity != "" {
 			severity = p.theme.SeverityColor(s.ScanSeverity).Render(s.ScanSeverity)
 		}
-		findings := p.theme.Dimmed.Render("—")
+		findings := p.theme.Dimmed.Render("--")
 		if s.ScanFindings > 0 {
 			findings = p.theme.High.Render(fmt.Sprintf("%d", s.ScanFindings))
 		}
 
-		line := fmt.Sprintf("%s%s %-24s %s %-8s %-12s %-6s %-10s",
-			pointer, emoji, id, verdict, enabled, severity, findings, truncate(s.Source, 10))
+		src := truncate(s.Source, 18)
 
+		var line strings.Builder
+		line.WriteString(pointer)
+		line.WriteString(padRight(emoji, 2))
+		line.WriteString(padRight(id, 23))
+		line.WriteString(padRight(verdict, 13))
+		line.WriteString(padRight(enabled, 8))
+		line.WriteString(padRight(severity, 11))
+		line.WriteString(padRight(findings, 7))
+		line.WriteString(src)
+
+		row := line.String()
 		if i == p.cursor {
-			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(width).Render(line)
+			row = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(width).Render(row)
 		}
-		b.WriteString(line + "\n")
+		b.WriteString(row + "\n")
 	}
 
 	if len(items) > maxLines {
@@ -846,21 +1022,23 @@ func (p *InventoryPanel) renderSkills(width, maxLines int) string {
 		}
 	}
 
+	b.WriteString("\n\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true).Render(
+		"  Note: Inventory lists all skills found by AIBOM on disk. The Skills tab only shows skills with scan/enforcement records."))
+
 	return b.String()
 }
 
 // ---------- Plugins tab ----------
 
-func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
-	var b strings.Builder
-	items := p.inv.Plugins
-
-	if len(items) == 0 {
-		return p.theme.Dimmed.Render("  No plugins found.")
+// PluginFilterPositions returns [start,end] x-positions for each clickable filter label.
+// Order: all, loaded, disabled, blocked
+func (p *InventoryPanel) PluginFilterPositions() [][2]int {
+	if p.inv == nil {
+		return nil
 	}
-
 	var loaded, disabled, blocked int
-	for _, pl := range items {
+	for _, pl := range p.inv.Plugins {
 		if pl.Status == "loaded" {
 			loaded++
 		}
@@ -871,16 +1049,82 @@ func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
 			blocked++
 		}
 	}
-	fmt.Fprintf(&b, "  %d plugins  ·  %s loaded  ·  %s disabled  ·  %s blocked\n\n",
-		len(items),
-		p.theme.Clean.Render(fmt.Sprintf("%d", loaded)),
-		p.theme.Dimmed.Render(fmt.Sprintf("%d", disabled)),
-		p.blockCount(blocked))
+	labels := []string{
+		fmt.Sprintf("%d plugins", len(p.inv.Plugins)),
+		fmt.Sprintf("%d loaded", loaded),
+		fmt.Sprintf("%d disabled", disabled),
+		fmt.Sprintf("%d blocked", blocked),
+	}
+	pos := 2
+	var positions [][2]int
+	for i, l := range labels {
+		w := len(l)
+		positions = append(positions, [2]int{pos, pos + w})
+		pos += w
+		if i < len(labels)-1 {
+			pos += 5
+		}
+	}
+	return positions
+}
 
-	header := fmt.Sprintf("  %-3s %-22s %-10s %-10s %-8s %-12s %-6s %-10s",
-		"", "NAME", "VERSION", "ORIGIN", "STATUS", "VERDICT", "FINDS", "SEVERITY")
-	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("243")).Render(header))
+func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
+	var b strings.Builder
+	allItems := p.inv.Plugins
+
+	if len(allItems) == 0 {
+		return p.theme.Dimmed.Render("  No plugins found.")
+	}
+
+	var loaded, disabled, blocked int
+	for _, pl := range allItems {
+		if pl.Status == "loaded" {
+			loaded++
+		}
+		if pl.Status == "disabled" {
+			disabled++
+		}
+		if pl.Verdict == "blocked" {
+			blocked++
+		}
+	}
+
+	allLabel := fmt.Sprintf("%d plugins", len(allItems))
+	loadLabel := fmt.Sprintf("%d loaded", loaded)
+	disLabel := fmt.Sprintf("%d disabled", disabled)
+	blockLabel := fmt.Sprintf("%d blocked", blocked)
+
+	renderLabel := func(label, filterKey string, style lipgloss.Style) string {
+		if p.filter == filterKey {
+			return lipgloss.NewStyle().Bold(true).Underline(true).Inherit(style).Render(label)
+		}
+		return style.Render(label)
+	}
+
+	fmt.Fprintf(&b, "  %s  ·  %s  ·  %s  ·  %s\n",
+		renderLabel(allLabel, "", lipgloss.NewStyle()),
+		renderLabel(loadLabel, "loaded", p.theme.Clean),
+		renderLabel(disLabel, "disabled", p.theme.Dimmed),
+		renderLabel(blockLabel, "blocked", p.theme.Critical))
+	if p.filter != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
+			fmt.Sprintf("  Filtered: %s  (click again or press Esc to clear)", p.filter)))
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
+
+	items := p.filteredPlugins()
+
+	dimHeader := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("243"))
+	header := fmt.Sprintf("  %-3s%-20s %-10s %-10s %-8s %-12s %-6s %s",
+		"", "NAME", "VERSION", "ORIGIN", "STATUS", "VERDICT", "FINDS", "SEVERITY")
+	b.WriteString(dimHeader.Render(header))
+	b.WriteString("\n")
+
+	if len(items) == 0 {
+		b.WriteString(p.theme.Dimmed.Render("  No items match the current filter."))
+		return b.String()
+	}
 
 	start := 0
 	if p.cursor >= maxLines {
@@ -902,8 +1146,8 @@ func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
 		if name == "" {
 			name = pl.ID
 		}
-		if len(name) > 20 {
-			name = name[:17] + "…"
+		if len(name) > 18 {
+			name = name[:15] + "..."
 		}
 
 		statusStyle := p.theme.Dimmed
@@ -912,23 +1156,34 @@ func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
 		}
 
 		verdict := p.verdictBadge(pl.Verdict)
-		findings := p.theme.Dimmed.Render("—")
+		findings := p.theme.Dimmed.Render("--")
 		if pl.ScanFindings > 0 {
 			findings = p.theme.High.Render(fmt.Sprintf("%d", pl.ScanFindings))
 		}
-		severity := p.theme.Dimmed.Render("—")
+		severity := p.theme.Dimmed.Render("--")
 		if pl.ScanSeverity != "" {
 			severity = p.theme.SeverityColor(pl.ScanSeverity).Render(pl.ScanSeverity)
 		}
 
-		line := fmt.Sprintf("%s %-20s %-10s %-10s %s %s %-6s %-10s",
-			pointer, name, truncate(pl.Version, 10), truncate(pl.Origin, 10),
-			statusStyle.Render(fmt.Sprintf("%-8s", pl.Status)), verdict, findings, severity)
+		var line strings.Builder
+		line.WriteString(pointer)
+		line.WriteString(padRight(name, 20))
+		line.WriteString(" ")
+		line.WriteString(padRight(truncate(pl.Version, 10), 10))
+		line.WriteString(" ")
+		line.WriteString(padRight(truncate(pl.Origin, 10), 10))
+		line.WriteString(" ")
+		line.WriteString(padRight(statusStyle.Render(pl.Status), 8))
+		line.WriteString(" ")
+		line.WriteString(padRight(verdict, 13))
+		line.WriteString(padRight(findings, 7))
+		line.WriteString(severity)
 
+		row := line.String()
 		if i == p.cursor {
-			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(width).Render(line)
+			row = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(width).Render(row)
 		}
-		b.WriteString(line + "\n")
+		b.WriteString(row + "\n")
 	}
 
 	if len(items) > maxLines {
@@ -962,6 +1217,10 @@ func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
 			fmt.Fprintf(&b, "\n  Scan target: %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.ScanTarget))
 		}
 	}
+
+	b.WriteString("\n\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true).Render(
+		"  Note: Inventory lists all plugins found by AIBOM. The Plugins tab only shows plugins with scan/enforcement records."))
 
 	return b.String()
 }
@@ -999,6 +1258,10 @@ func (p *InventoryPanel) renderMCPs(width, maxLines int) string {
 		}
 		b.WriteString(line + "\n")
 	}
+
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true).Render(
+		"  Note: Inventory lists all MCP servers found by AIBOM. The MCPs tab only shows servers with scan/enforcement records."))
 
 	return b.String()
 }
@@ -1159,20 +1422,13 @@ func (p *InventoryPanel) verdictBadge(verdict string) string {
 	}
 }
 
-func (p *InventoryPanel) warnCount(n int) string {
-	s := fmt.Sprintf("%d", n)
-	if n > 0 {
-		return p.theme.Medium.Render(s)
+// padRight pads a styled string to a visual width using spaces.
+func padRight(s string, width int) string {
+	vw := lipgloss.Width(s)
+	if vw >= width {
+		return s
 	}
-	return p.theme.Clean.Render(s)
-}
-
-func (p *InventoryPanel) blockCount(n int) string {
-	s := fmt.Sprintf("%d", n)
-	if n > 0 {
-		return p.theme.Critical.Render(s)
-	}
-	return p.theme.Clean.Render(s)
+	return s + strings.Repeat(" ", width-vw)
 }
 
 func truncate(s string, max int) string {

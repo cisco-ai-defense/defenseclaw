@@ -555,25 +555,93 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 			m.plugins.SetCursor(idx)
 		}
 	case PanelInventory:
-		// subtab(1) + separator(1) + content-header(varies)
-		headerLines := 2
+		// Row 0: sub-tab bar
+		if relY == 0 {
+			if tab := m.inventory.SubTabHitTest(x); tab >= 0 {
+				m.inventory.activeSub = tab
+				m.inventory.cursor = 0
+				m.inventory.detailOpen = false
+				m.inventory.detailCache = nil
+				m.inventory.filter = ""
+			}
+			return m, nil
+		}
+		// subtab(1) + separator(1) = 2 lines before content
+		contentRelY := relY - 2
+		if contentRelY < 0 {
+			return m, nil
+		}
 		switch m.inventory.activeSub {
 		case invSubSummary:
-			// summary view has no list items to click
 			return m, nil
-		case invSubSkills, invSubPlugins:
-			headerLines += 2 // summary line + blank + column header
+		case invSubSkills:
+			// Row 0 of content = summary stats bar (clickable filters)
+			if contentRelY == 0 {
+				positions := m.inventory.SkillFilterPositions()
+				filterKeys := []string{"", "eligible", "warning", "blocked"}
+				for i, pos := range positions {
+					if x >= pos[0] && x < pos[1] {
+						m.inventory.SetFilter(filterKeys[i])
+						return m, nil
+					}
+				}
+				return m, nil
+			}
+			// filter indicator(0-1) + blank(1) + column header(1) + list items
+			headerLines := 2 // blank + column header
+			if m.inventory.filter != "" {
+				headerLines++ // filter indicator line
+			}
+			idx := contentRelY - 1 - headerLines // -1 for stats bar
+			if idx >= 0 {
+				prev := m.inventory.CursorAt()
+				m.inventory.SetCursor(idx)
+				if prev == idx {
+					return m.openInventoryDetail()
+				}
+			}
+		case invSubPlugins:
+			if contentRelY == 0 {
+				positions := m.inventory.PluginFilterPositions()
+				filterKeys := []string{"", "loaded", "disabled", "blocked"}
+				for i, pos := range positions {
+					if x >= pos[0] && x < pos[1] {
+						m.inventory.SetFilter(filterKeys[i])
+						return m, nil
+					}
+				}
+				return m, nil
+			}
+			headerLines := 2
+			if m.inventory.filter != "" {
+				headerLines++
+			}
+			idx := contentRelY - 1 - headerLines
+			if idx >= 0 {
+				prev := m.inventory.CursorAt()
+				m.inventory.SetCursor(idx)
+				if prev == idx {
+					return m.openInventoryDetail()
+				}
+			}
 		case invSubMCPs:
-			headerLines += 1 // column header
-		case invSubAgents, invSubModels, invSubMemory:
-			headerLines += 0 // free-form, approximate
-		}
-		idx := relY - headerLines
-		if idx >= 0 {
-			prev := m.inventory.CursorAt()
-			m.inventory.SetCursor(idx)
-			if prev == idx {
-				return m.openInventoryDetail()
+			headerLines := 1
+			idx := contentRelY - headerLines
+			if idx >= 0 {
+				prev := m.inventory.CursorAt()
+				m.inventory.SetCursor(idx)
+				if prev == idx {
+					return m.openInventoryDetail()
+				}
+			}
+		default:
+			idx := contentRelY
+			if idx >= 0 {
+				prev := m.inventory.CursorAt()
+				m.inventory.SetCursor(idx)
+				if prev == idx {
+					return m.openInventoryDetail()
+				}
 			}
 		}
 	case PanelAudit:
@@ -1268,6 +1336,7 @@ func (m Model) handleInventoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.inventory.cursor = 0
 			m.inventory.detailOpen = false
 			m.inventory.detailCache = nil
+			m.inventory.filter = ""
 		}
 	case "right", "l":
 		if m.inventory.activeSub < invSubCount-1 {
@@ -1275,6 +1344,7 @@ func (m Model) handleInventoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.inventory.cursor = 0
 			m.inventory.detailOpen = false
 			m.inventory.detailCache = nil
+			m.inventory.filter = ""
 		}
 	case "j", "down":
 		m.inventory.cursor++
@@ -1287,8 +1357,31 @@ func (m Model) handleInventoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.inventory.cursor--
 		}
 	case "esc":
-		if m.inventory.IsDetailOpen() {
+		if m.inventory.filter != "" {
+			m.inventory.ClearFilter()
+		} else if m.inventory.IsDetailOpen() {
 			m.inventory.ToggleDetail()
+		}
+	case "1":
+		m.inventory.SetFilter("")
+	case "2":
+		switch m.inventory.activeSub {
+		case invSubSkills:
+			m.inventory.SetFilter("eligible")
+		case invSubPlugins:
+			m.inventory.SetFilter("loaded")
+		}
+	case "3":
+		switch m.inventory.activeSub {
+		case invSubSkills:
+			m.inventory.SetFilter("warning")
+		case invSubPlugins:
+			m.inventory.SetFilter("disabled")
+		}
+	case "4":
+		switch m.inventory.activeSub {
+		case invSubSkills, invSubPlugins:
+			m.inventory.SetFilter("blocked")
 		}
 	case "enter":
 		return m.openInventoryDetail()
