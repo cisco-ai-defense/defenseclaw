@@ -57,6 +57,7 @@ type GuardrailInspector struct {
 	ciscoClient *CiscoInspectClient
 	judge       *LLMJudge
 	policyDir   string
+	rulePack    *RulePack
 }
 
 // NewGuardrailInspector creates an inspector from config parameters.
@@ -66,6 +67,15 @@ func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge 
 		ciscoClient: cisco,
 		judge:       judge,
 		policyDir:   policyDir,
+	}
+}
+
+// SetRulePack attaches a loaded rule pack so local pattern scanning and
+// the LLM judge read their config from external YAML files.
+func (g *GuardrailInspector) SetRulePack(rp *RulePack) {
+	g.rulePack = rp
+	if g.judge != nil {
+		g.judge.SetRulePack(rp)
 	}
 }
 
@@ -85,7 +95,11 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	sm := g.scannerMode
 
-	localResult = scanLocalPatterns(direction, content)
+	if g.rulePack != nil {
+		localResult = scanLocalPatternsRP(direction, content, g.rulePack)
+	} else {
+		localResult = scanLocalPatterns(direction, content)
+	}
 
 	// In local-only mode or if local already flagged HIGH+, skip the remote call.
 	if sm == "local" || (localResult != nil && localResult.Severity == "HIGH") {
@@ -260,6 +274,86 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	}
 
 	for _, p := range secretPatterns {
+		if strings.Contains(lower, p) {
+			flags = append(flags, p)
+		}
+	}
+
+	if len(flags) == 0 {
+		return allowVerdict("local-pattern")
+	}
+
+	severity := "MEDIUM"
+	if isHigh {
+		severity = "HIGH"
+	}
+
+	action := "alert"
+	if severity == "HIGH" || severity == "CRITICAL" {
+		action = "block"
+	}
+
+	top := flags
+	if len(top) > 5 {
+		top = top[:5]
+	}
+
+	return &ScanVerdict{
+		Action:         action,
+		Severity:       severity,
+		Reason:         "matched: " + strings.Join(top, ", "),
+		Findings:       flags,
+		Scanner:        "local-pattern",
+		ScannerSources: []string{"local-pattern"},
+	}
+}
+
+// scanLocalPatternsRP uses patterns loaded from the rule pack YAML.
+func scanLocalPatternsRP(direction, content string, rp *RulePack) *ScanVerdict {
+	lp := rp.GetLocalPatterns()
+	if lp == nil {
+		return scanLocalPatterns(direction, content)
+	}
+
+	lower := strings.ToLower(content)
+	var flags []string
+	isHigh := false
+
+	if direction == "prompt" {
+		for _, p := range lp.Injection {
+			if strings.Contains(lower, p) {
+				flags = append(flags, p)
+				isHigh = true
+			}
+		}
+		for _, re := range lp.InjectionRegexes {
+			if re.MatchString(lower) {
+				flags = append(flags, re.FindString(lower))
+				isHigh = true
+			}
+		}
+		for _, p := range lp.PIIRequests {
+			if strings.Contains(lower, p) {
+				flags = append(flags, "pii-request:"+p)
+				isHigh = true
+			}
+		}
+		for _, p := range lp.Exfiltration {
+			if strings.Contains(lower, p) {
+				flags = append(flags, p)
+				isHigh = true
+			}
+		}
+	}
+
+	for _, re := range lp.PIIDataRegexes {
+		if re.MatchString(content) {
+			flags = append(flags, "pii-data:"+re.FindString(content))
+			isHigh = true
+		}
+	}
+
+	for _, p := range lp.Secrets {
 		if strings.Contains(lower, p) {
 			flags = append(flags, p)
 		}

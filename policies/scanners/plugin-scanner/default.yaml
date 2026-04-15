@@ -1,0 +1,18 @@
+# DefenseClaw-curated plugin scanner policy: default
+# Compatible with PluginScanPolicy.from_yaml() format
+version: 1
+name: default
+description: "Default plugin scanner policy — balanced detection"
+
+profile: default
+
+analyzers:
+  - static
+  - manifest
+
+severity_overrides: {}
+
+disabled_rules: []
+
+max_file_size_kb: 512
+scan_node_modules: false

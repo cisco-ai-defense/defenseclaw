@@ -2168,6 +2168,57 @@ func TestStreamBufferingPassthroughFlushesBufferedEOF(t *testing.T) {
 	}
 }
 
+func TestStreamPreFlushScanBlocks(t *testing.T) {
+	const secretToken = "AKIAIOSFODNN7EXAMPLE"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fl, _ := w.(http.Flusher)
+		sse := `data: {"choices":[{"index":0,"delta":{"content":"` + secretToken + `"}}]}` + "\n\n"
+		_, _ = w.Write([]byte(sse))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	origDomains := providerDomains
+	providerDomains = append(providerDomains, struct {
+		domain string
+		name   string
+	}{"127.0.0.1", "openai"})
+	defer func() { providerDomains = origDomains }()
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	insp.setVerdict("completion", &ScanVerdict{
+		Action:   "block",
+		Severity: "CRITICAL",
+		Reason:   "pre-flush: AWS key detected",
+	})
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.StreamBufferBytes = 8192
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "show key"}},
+		"stream":   true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/passthrough-preflush", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test-upstream")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+
+	if strings.Contains(rec.Body.String(), secretToken) {
+		t.Fatalf("pre-flush scan should have blocked; body leaked secret: %s", rec.Body.String())
+	}
+}
+
 func TestBlockedResponseAnthropicMetadata(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()

@@ -1,0 +1,20 @@
+# DefenseClaw-curated plugin scanner policy: strict
+# Compatible with PluginScanPolicy.from_yaml() format
+version: 1
+name: strict
+description: "Strict plugin scanner policy — flags all potential risks"
+
+profile: strict
+
+analyzers:
+  - static
+  - manifest
+  - dependency
+
+severity_overrides:
+  MEDIUM: HIGH
+
+disabled_rules: []
+
+max_file_size_kb: 1024
+scan_node_modules: true

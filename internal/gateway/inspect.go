@@ -70,7 +70,17 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	argsStr := string(req.Args)
 	toolName := req.Tool
 
-	ruleFindings := ScanAllRules(argsStr, toolName)
+	ruleFindings := ScanAllRulesRP(argsStr, toolName, a.rulePack)
+
+	if a.rulePack != nil {
+		surviving, suppressed := FilterRuleFindings(ruleFindings, toolName, a.rulePack.GetSuppressions())
+		if len(suppressed) > 0 && a.logger != nil {
+			for _, s := range suppressed {
+				_ = a.logger.LogAction("guardrail-suppression", s.FindingID, fmt.Sprintf("rule=%s reason=%s entity=%s", s.SuppressionID, s.Reason, s.Entity))
+			}
+		}
+		ruleFindings = surviving
+	}
 
 	// CodeGuard: scan file content for write_file/edit_file tools.
 	tool := strings.ToLower(toolName)
@@ -173,8 +183,7 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
-	// Outbound messages get the full scan — tool name "message" for context
-	ruleFindings := ScanAllRules(content, "message")
+	ruleFindings := ScanAllRulesRP(content, "message", a.rulePack)
 
 	if len(ruleFindings) == 0 {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}

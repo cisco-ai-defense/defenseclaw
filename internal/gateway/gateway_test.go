@@ -4417,6 +4417,8 @@ func TestAPINetworkEgressHandlerRejectsInvalidBlockedFilter(t *testing.T) {
 }
 
 func TestToolInjectionToVerdict(t *testing.T) {
+	j := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}}
+
 	clean := func(cats ...string) map[string]interface{} {
 		all := []string{"Instruction Manipulation", "Context Manipulation", "Obfuscation", "Data Exfiltration", "Destructive Commands"}
 		d := map[string]interface{}{}
@@ -4431,15 +4433,14 @@ func TestToolInjectionToVerdict(t *testing.T) {
 	}
 
 	t.Run("clean", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean())
+		v := j.toolInjectionToVerdict(clean())
 		if v.Action != "allow" {
 			t.Errorf("action = %q, want allow", v.Action)
 		}
 	})
 
-	// Single soft flag (Obfuscation alone) → MEDIUM/alert, not block.
 	t.Run("obfuscation alone is medium alert", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean("Obfuscation"))
+		v := j.toolInjectionToVerdict(clean("Obfuscation"))
 		if v.Action != "alert" {
 			t.Errorf("action = %q, want alert", v.Action)
 		}
@@ -4448,9 +4449,8 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	// Single soft flag (Instruction Manipulation alone) → MEDIUM/alert.
 	t.Run("instruction manipulation alone is medium alert", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean("Instruction Manipulation"))
+		v := j.toolInjectionToVerdict(clean("Instruction Manipulation"))
 		if v.Action != "alert" {
 			t.Errorf("action = %q, want alert", v.Action)
 		}
@@ -4459,9 +4459,8 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	// Data Exfiltration alone → HIGH/block (structural signal, no benign interpretation).
 	t.Run("data exfiltration alone is high block", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean("Data Exfiltration"))
+		v := j.toolInjectionToVerdict(clean("Data Exfiltration"))
 		if v.Action != "block" {
 			t.Errorf("action = %q, want block", v.Action)
 		}
@@ -4470,9 +4469,8 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	// Destructive Commands alone → HIGH/block (structural signal).
 	t.Run("destructive commands alone is high block", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean("Destructive Commands"))
+		v := j.toolInjectionToVerdict(clean("Destructive Commands"))
 		if v.Action != "block" {
 			t.Errorf("action = %q, want block", v.Action)
 		}
@@ -4481,9 +4479,8 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	// Two soft flags → HIGH/block (corroboration reached).
 	t.Run("two soft flags escalate to high block", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean("Obfuscation", "Instruction Manipulation"))
+		v := j.toolInjectionToVerdict(clean("Obfuscation", "Instruction Manipulation"))
 		if v.Action != "block" {
 			t.Errorf("action = %q, want block", v.Action)
 		}
@@ -4492,14 +4489,43 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	// Three or more flags → CRITICAL/block.
 	t.Run("three flags escalate to critical", func(t *testing.T) {
-		v := toolInjectionToVerdict(clean("Obfuscation", "Instruction Manipulation", "Data Exfiltration"))
+		v := j.toolInjectionToVerdict(clean("Obfuscation", "Instruction Manipulation", "Data Exfiltration"))
 		if v.Action != "block" {
 			t.Errorf("action = %q, want block", v.Action)
 		}
 		if v.Severity != "CRITICAL" {
 			t.Errorf("severity = %q, want CRITICAL", v.Severity)
+		}
+	})
+
+	t.Run("uses rulepack categories when available", func(t *testing.T) {
+		rp := &RulePack{
+			JudgeConfigs: map[string]*CompiledJudgeConfig{
+				"tool-injection": {
+					Name:    "tool-injection",
+					Enabled: true,
+					Categories: map[string]*CompiledJudgeCategory{
+						"Instruction Manipulation": {FindingID: "CUSTOM-INJ-INSTRUCT"},
+						"Data Exfiltration":        {FindingID: "CUSTOM-INJ-EXFIL"},
+					},
+				},
+			},
+		}
+		j2 := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}}
+		j2.SetRulePack(rp)
+
+		data := map[string]interface{}{
+			"Instruction Manipulation": map[string]interface{}{"reasoning": "test", "label": true},
+			"Data Exfiltration":        map[string]interface{}{"reasoning": "test", "label": true},
+		}
+		v := j2.toolInjectionToVerdict(data)
+		found := map[string]bool{}
+		for _, f := range v.Findings {
+			found[f] = true
+		}
+		if !found["CUSTOM-INJ-INSTRUCT"] || !found["CUSTOM-INJ-EXFIL"] {
+			t.Errorf("expected custom finding IDs, got %v", v.Findings)
 		}
 	})
 }

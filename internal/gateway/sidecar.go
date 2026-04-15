@@ -50,6 +50,7 @@ type Sidecar struct {
 	notify   *NotificationQueue
 	opa      *policy.Engine
 	webhooks *WebhookDispatcher
+	rulePack *RulePack
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -88,6 +89,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 				cfg.Guardrail.Judge.Model)
 		}
 	}
+
+	// routerJudge will have SetRulePack called after rulePack is loaded in Run().
 
 
 	client.OnEvent = router.Route
@@ -150,6 +153,26 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
 		}
+	}
+
+	s.rulePack = LoadRulePack(s.cfg.Guardrail.RulePackDir)
+	if errs := s.rulePack.LoadErrors(); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "[sidecar] rule pack warning: %s\n", e)
+		}
+	} else {
+		src := "embedded defaults"
+		if s.cfg.Guardrail.RulePackDir != "" {
+			src = s.cfg.Guardrail.RulePackDir
+		}
+		fmt.Fprintf(os.Stderr, "[sidecar] rule pack loaded (%s)\n", src)
+	}
+	s.router.SetRulePack(s.rulePack)
+	if s.router.judge != nil {
+		s.router.judge.SetRulePack(s.rulePack)
+	}
+	if s.cfg.Guardrail.Mode != "" {
+		s.router.SetGuardrailMode(s.cfg.Guardrail.Mode)
 	}
 
 	var wg sync.WaitGroup
@@ -614,6 +637,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)
 	}
+	if err == nil && s.router != nil {
+		s.router.SetInspector(proxy.inspector)
+	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] init error: %v\n", err)
@@ -639,6 +665,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
+	if s.rulePack != nil {
+		api.SetRulePack(s.rulePack)
+	}
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}

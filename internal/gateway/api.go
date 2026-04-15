@@ -54,6 +54,7 @@ type APIServer struct {
 	addr       string
 	scannerCfg *config.Config
 	otel       *telemetry.Provider
+	rulePack   *RulePack
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -63,6 +64,11 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
+}
+
+// SetRulePack attaches a loaded rule pack for tool inspection.
+func (a *APIServer) SetRulePack(rp *RulePack) {
+	a.rulePack = rp
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events

@@ -1,0 +1,24 @@
+version: 1
+
+# Strict profile: minimal suppressions. Only suppress patterns that are
+# structurally impossible to be real PII (system identifiers, Teams chatIds).
+# No epoch or private-IP suppressions — operators must explicitly allow those.
+
+pre_judge_strips:
+  - id: STRIP-SYSTEM-SENDER
+    pattern: '\b(cli|system|bot|admin)\b'
+    context: "System sender metadata injected by agent framework"
+    applies_to: [pii]
+
+finding_suppressions:
+  - id: SUPP-USERNAME-METADATA
+    finding_pattern: JUDGE-PII-USER
+    entity_pattern: '^(cli|system|bot|admin|root)$'
+    reason: "System metadata, not real username"
+
+  - id: SUPP-EMAIL-CHATID
+    finding_pattern: JUDGE-PII-EMAIL
+    entity_pattern: '^19:[a-f0-9\-]+@unq\.gbl\.spaces$'
+    reason: "Teams chatId format, not email address"
+
+tool_suppressions: []

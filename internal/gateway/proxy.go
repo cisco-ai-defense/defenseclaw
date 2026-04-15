@@ -79,6 +79,7 @@ type GuardrailProxy struct {
 	dataDir string
 
 	inspector    ContentInspector
+	rulePack     *RulePack
 	masterKey    string
 	gatewayToken string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
 	notify       *NotificationQueue
@@ -119,7 +120,20 @@ func NewGuardrailProxy(
 
 	judge := NewLLMJudge(&cfg.Judge, dotenvPath)
 
+	var rp *RulePack
+	if cfg.RulePackDir != "" {
+		rp = LoadRulePack(cfg.RulePackDir)
+	} else {
+		rp = LoadRulePack("")
+	}
+	if errs := rp.LoadErrors(); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "[guardrail] rule pack warning: %s\n", e)
+		}
+	}
+
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
+	inspector.SetRulePack(rp)
 
 	masterKey := deriveMasterKey(dataDir)
 	gatewayToken := ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
@@ -139,6 +153,7 @@ func NewGuardrailProxy(
 		store:        store,
 		dataDir:      dataDir,
 		inspector:    inspector,
+		rulePack:     rp,
 		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		notify:       notify,
@@ -150,6 +165,12 @@ func NewGuardrailProxy(
 }
 
 // SetWebhookDispatcher attaches a webhook dispatcher for guardrail block notifications.
+// GetRulePack returns the loaded rule pack so it can be shared with the
+// API server for consistent tool inspection.
+func (p *GuardrailProxy) GetRulePack() *RulePack {
+	return p.rulePack
+}
+
 func (p *GuardrailProxy) SetWebhookDispatcher(d *WebhookDispatcher) {
 	p.webhooks = d
 }
@@ -1375,14 +1396,28 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
-	// Flush any remaining initial buffer (short streams that completed
-	// before reaching the buffer threshold).
+	// Pre-flush scan: short streams that completed before the buffer threshold
+	// must be scanned BEFORE delivering to the client. Without this, a short
+	// response containing PII or secrets would bypass the mid-stream check and
+	// be sent to the client before the post-stream scan runs.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
-		for _, buffered := range initialChunkBuf {
-			fmt.Fprintf(w, "data: %s\n\n", buffered)
+		if mode == "action" && accumulated.Len() > 0 {
+			preFlushVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+			if preFlushVerdict.Severity != "NONE" && preFlushVerdict.Action == "block" {
+				fmt.Fprintf(os.Stderr, "[guardrail] PRE-FLUSH-BLOCK severity=%s %s (stream_len=%d < buf=%d)\n",
+					preFlushVerdict.Severity, preFlushVerdict.Reason, accumulated.Len(), streamBufSize)
+				p.recordTelemetry("completion", aliasModel, preFlushVerdict, 0, nil, nil)
+				streamBlocked = true
+			}
 		}
-		flusher.Flush()
-		initialBufFlushed = true
+		if !streamBlocked {
+			for _, buffered := range initialChunkBuf {
+				fmt.Fprintf(w, "data: %s\n\n", buffered)
+			}
+			flusher.Flush()
+			initialBufFlushed = true
+		}
 	}
 	if err != nil && !streamBlocked {
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)

@@ -342,6 +342,7 @@ type GuardrailConfig struct {
 	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
 	APIBase           string      `mapstructure:"api_base"             yaml:"api_base"`
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir,omitempty"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 }
 

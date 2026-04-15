@@ -396,6 +396,70 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	return findings
 }
 
+// ScanAllRulesRP runs rule categories from the loaded rule pack instead of
+// the hardcoded allRuleCategories. Falls back to ScanAllRules if no pack.
+func ScanAllRulesRP(text, toolName string, rp *RulePack) []RuleFinding {
+	if rp == nil {
+		return ScanAllRules(text, toolName)
+	}
+	cats := rp.GetRuleCategories()
+	if len(cats) == 0 {
+		return ScanAllRules(text, toolName)
+	}
+
+	var findings []RuleFinding
+	seen := make(map[string]bool)
+
+	for _, cat := range cats {
+		for _, rule := range cat.Rules {
+			loc := rule.Pattern.FindStringIndex(text)
+			if loc == nil {
+				continue
+			}
+			evidence := text[loc[0]:minInt(loc[1], loc[0]+80)]
+			f := RuleFinding{
+				RuleID:     rule.ID,
+				Title:      rule.Title,
+				Severity:   rule.Severity,
+				Confidence: rule.Confidence,
+				Evidence:   sanitizeEvidence(evidence),
+				Tags:       rule.Tags,
+			}
+			f = adjustConfidence(toolName, f)
+			findings = append(findings, f)
+			seen[rule.ID] = true
+		}
+	}
+
+	normalized := normalizeShell(text)
+	if normalized != text {
+		for _, cat := range cats {
+			for _, rule := range cat.Rules {
+				if seen[rule.ID] {
+					continue
+				}
+				loc := rule.Pattern.FindStringIndex(normalized)
+				if loc == nil {
+					continue
+				}
+				evidence := normalized[loc[0]:minInt(loc[1], loc[0]+80)]
+				f := RuleFinding{
+					RuleID:     rule.ID,
+					Title:      rule.Title + " (obfuscated)",
+					Severity:   rule.Severity,
+					Confidence: rule.Confidence * 0.9,
+					Evidence:   sanitizeEvidence(evidence),
+					Tags:       rule.Tags,
+				}
+				f = adjustConfidence(toolName, f)
+				findings = append(findings, f)
+			}
+		}
+	}
+
+	return findings
+}
+
 // normalizeShell strips common shell obfuscation tricks so that regex rules
 // can match the effective path/command. This catches:
 //   - Empty string concatenation: sha""dow → shadow

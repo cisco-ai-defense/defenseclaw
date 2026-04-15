@@ -1,0 +1,159 @@
+version: 1
+category: command
+rules:
+  - id: CMD-REVSHELL-BASH
+    pattern: '(?i)bash\s+-i\s+>&\s*/dev/tcp/'
+    title: "Bash reverse shell"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [execution, reverse-shell]
+  - id: CMD-REVSHELL-DEVTCP
+    pattern: '/dev/tcp/\d{1,3}\.\d{1,3}'
+    title: "Reverse shell via /dev/tcp"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [execution, reverse-shell]
+  - id: CMD-REVSHELL-NC
+    pattern: '(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)'
+    title: "Netcat reverse shell with -e"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [execution, reverse-shell]
+  - id: CMD-REVSHELL-PYTHON
+    pattern: '(?i)python[23]?\s+-c\s+.*socket.*connect'
+    title: "Python reverse shell"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [execution, reverse-shell]
+  - id: CMD-PIPE-CURL
+    pattern: '(?i)\bcurl\b\s+[^|]*\|\s*(?:ba)?sh\b'
+    title: "curl piped to shell"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [execution, download-exec]
+  - id: CMD-PIPE-WGET
+    pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:ba)?sh\b'
+    title: "wget piped to shell"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [execution, download-exec]
+  - id: CMD-PIPE-BASE64
+    pattern: '(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:ba)?sh\b'
+    title: "base64 decode piped to shell"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [execution, obfuscation]
+  - id: CMD-EVAL
+    pattern: '(?i)\beval\s+["''\$\(]'
+    title: "Shell eval with dynamic input"
+    severity: HIGH
+    confidence: 0.85
+    tags: [execution]
+  - id: CMD-BASH-C
+    pattern: '(?i)\b(?:ba)?sh\s+-c\s+'
+    title: "Shell -c execution"
+    severity: LOW
+    confidence: 0.55
+    tags: [execution]
+  - id: CMD-PYTHON-C
+    pattern: '(?i)\bpython[23]?\s+-c\s+'
+    title: "Python inline execution"
+    severity: LOW
+    confidence: 0.55
+    tags: [execution]
+  - id: CMD-PERL-E
+    pattern: '(?i)\bperl\s+-e\s+'
+    title: "Perl inline execution"
+    severity: LOW
+    confidence: 0.55
+    tags: [execution]
+  - id: CMD-RUBY-E
+    pattern: '(?i)\bruby\s+-e\s+'
+    title: "Ruby inline execution"
+    severity: LOW
+    confidence: 0.55
+    tags: [execution]
+  - id: CMD-RM-RF
+    pattern: '(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/(?:$|["''\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["''\s,}\]]))'
+    title: "Recursive force delete from critical root path"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [destructive]
+  - id: CMD-MKFS
+    pattern: '(?i)\bmkfs\b'
+    title: "Filesystem format command"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [destructive]
+  - id: CMD-DD-IF
+    pattern: '(?i)\bdd\s+if='
+    title: "dd disk write"
+    severity: HIGH
+    confidence: 0.80
+    tags: [destructive]
+  - id: CMD-CHMOD-WORLD
+    pattern: '(?i)\bchmod\s+[0-7]*[0-7][0-7][2367]\s'
+    title: "chmod world-writable"
+    severity: HIGH
+    confidence: 0.80
+    tags: [privilege]
+  - id: CMD-CHOWN-ROOT
+    pattern: '(?i)\bchown\s+root\b'
+    title: "chown to root"
+    severity: HIGH
+    confidence: 0.75
+    tags: [privilege]
+  - id: CMD-SUDO
+    pattern: '(?i)\bsudo\s+'
+    title: "sudo invocation"
+    severity: LOW
+    confidence: 0.50
+    tags: [privilege]
+  - id: CMD-ETC-WRITE
+    pattern: '(?i)>\s*/etc/'
+    title: "Write redirect to /etc/"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [system-file]
+  - id: CMD-CRONTAB
+    pattern: '(?i)\bcrontab\s+(?:-[a-zA-Z]\s+)*(?:-e|-r|-l|/|[''"<>|])'
+    title: "Crontab modification"
+    severity: HIGH
+    confidence: 0.75
+    tags: [persistence]
+  - id: CMD-SYSTEMCTL
+    pattern: '(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b'
+    title: "Suspicious systemd persistence enablement"
+    severity: HIGH
+    confidence: 0.82
+    tags: [persistence]
+  - id: CMD-NETCAT-LISTEN
+    pattern: '(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*)*-?l'
+    title: "Netcat listener"
+    severity: HIGH
+    confidence: 0.85
+    tags: [network, reverse-shell]
+  - id: CMD-CURL-UPLOAD
+    pattern: '(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)'
+    title: "curl file upload"
+    severity: HIGH
+    confidence: 0.85
+    tags: [network, exfiltration]
+  - id: CMD-WGET-POST
+    pattern: '(?i)\bwget\b\s+.*--post-(?:data|file)'
+    title: "wget POST data exfil"
+    severity: HIGH
+    confidence: 0.85
+    tags: [network, exfiltration]
+  - id: CMD-SOCAT-EXEC
+    pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
+    title: "socat with EXEC (reverse shell)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [execution, reverse-shell]
+  - id: CMD-ENV-DUMP
+    pattern: '(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b'
+    title: "Environment variable dump"
+    severity: HIGH
+    confidence: 0.80
+    tags: [credential]

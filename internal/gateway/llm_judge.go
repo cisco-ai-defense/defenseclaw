@@ -37,6 +37,7 @@ var judgeActive atomic.Bool
 type LLMJudge struct {
 	cfg      *config.JudgeConfig
 	provider LLMProvider
+	rulePack *RulePack
 }
 
 // NewLLMJudge creates a judge from config. Returns nil if judge is disabled
@@ -54,6 +55,14 @@ func NewLLMJudge(cfg *config.JudgeConfig, dotenvPath string) *LLMJudge {
 	}
 	provider := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
 	return &LLMJudge{cfg: cfg, provider: provider}
+}
+
+// SetRulePack attaches a loaded rule pack so the judge reads prompts,
+// categories, severities, and suppressions from external YAML config.
+func (j *LLMJudge) SetRulePack(rp *RulePack) {
+	if j != nil {
+		j.rulePack = rp
+	}
 }
 
 // RunJudges runs injection and PII judges according to config.
@@ -97,9 +106,13 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content string) *Sc
 
 	if runInjection {
 		wg.Add(1)
+		injContent := content
+		if j.rulePack != nil {
+			injContent = StripContentForJudge(content, "injection", j.rulePack.GetSuppressions())
+		}
 		go func() {
 			defer wg.Done()
-			v := j.runInjectionJudge(ctx, content)
+			v := j.runInjectionJudge(ctx, injContent)
 			results <- judgeResult{verdict: v}
 		}()
 	}
@@ -152,9 +165,21 @@ Respond ONLY with a JSON object in this exact format:
 }`
 
 func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanVerdict {
+	prompt := injectionSystemPrompt
+	if j.rulePack != nil {
+		if jc := j.rulePack.GetJudgeConfig("injection"); jc != nil {
+			if !jc.Enabled {
+				return allowVerdict("llm-judge-injection")
+			}
+			if jc.SystemPrompt != "" {
+				prompt = jc.SystemPrompt
+			}
+		}
+	}
+
 	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
 		Messages: []ChatMessage{
-			{Role: "system", Content: injectionSystemPrompt},
+			{Role: "system", Content: prompt},
 			{Role: "user", Content: content},
 		},
 		MaxTokens: intPtr(1024),
@@ -173,7 +198,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		return allowVerdict("llm-judge-injection")
 	}
 
-	return injectionToVerdict(parsed)
+	return j.injectionToVerdictRP(parsed)
 }
 
 var injectionCategories = map[string]string{
@@ -228,6 +253,74 @@ func injectionToVerdict(data map[string]interface{}) *ScanVerdict {
 	}
 }
 
+// injectionToVerdictRP is the rule-pack-aware version that reads categories,
+// finding IDs, and min_categories_for_high from the loaded judge YAML.
+func (j *LLMJudge) injectionToVerdictRP(data map[string]interface{}) *ScanVerdict {
+	if j.rulePack == nil {
+		return injectionToVerdict(data)
+	}
+	jc := j.rulePack.GetJudgeConfig("injection")
+	if jc == nil || len(jc.Categories) == 0 {
+		return injectionToVerdict(data)
+	}
+
+	if data == nil {
+		return allowVerdict("llm-judge-injection")
+	}
+
+	var findings []string
+	var reasons []string
+	for catName, cat := range jc.Categories {
+		if !cat.Enabled {
+			continue
+		}
+		entry, ok := data[catName]
+		if !ok {
+			continue
+		}
+		m, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		label, _ := m["label"].(bool)
+		if label {
+			findings = append(findings, cat.FindingID)
+			if r, ok := m["reasoning"].(string); ok && r != "" {
+				reasons = append(reasons, catName+": "+r)
+			}
+		}
+	}
+
+	if len(findings) == 0 {
+		return allowVerdict("llm-judge-injection")
+	}
+
+	minHigh := jc.MinCategoriesForHigh
+	if minHigh <= 0 {
+		minHigh = 2
+	}
+	severity := "MEDIUM"
+	if len(findings) >= minHigh {
+		severity = "HIGH"
+	}
+	if len(findings) >= 3 {
+		severity = "CRITICAL"
+	}
+
+	action := "alert"
+	if severity == "HIGH" || severity == "CRITICAL" {
+		action = "block"
+	}
+
+	return &ScanVerdict{
+		Action:   action,
+		Severity: severity,
+		Reason:   "judge-injection: " + strings.Join(reasons, "; "),
+		Findings: findings,
+		Scanner:  "llm-judge-injection",
+	}
+}
+
 // ---------------------------------------------------------------------------
 // PII judge
 // ---------------------------------------------------------------------------
@@ -261,10 +354,27 @@ Respond ONLY with a JSON object in this exact format:
 }`
 
 func (j *LLMJudge) runPIIJudge(ctx context.Context, content string) *ScanVerdict {
+	prompt := piiSystemPrompt
+	if j.rulePack != nil {
+		if jc := j.rulePack.GetJudgeConfig("pii"); jc != nil {
+			if !jc.Enabled {
+				return allowVerdict("llm-judge-pii")
+			}
+			if jc.SystemPrompt != "" {
+				prompt = jc.SystemPrompt
+			}
+		}
+	}
+
+	scanContent := content
+	if j.rulePack != nil {
+		scanContent = StripContentForJudge(content, "pii", j.rulePack.GetSuppressions())
+	}
+
 	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
 		Messages: []ChatMessage{
-			{Role: "system", Content: piiSystemPrompt},
-			{Role: "user", Content: content},
+			{Role: "system", Content: prompt},
+			{Role: "user", Content: scanContent},
 		},
 		MaxTokens: intPtr(1024),
 	})
@@ -282,7 +392,11 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content string) *ScanVerdict
 		return allowVerdict("llm-judge-pii")
 	}
 
-	return piiToVerdict(parsed)
+	verdict := j.piiToVerdictRP(parsed)
+	if j.rulePack != nil && verdict.Action != "allow" {
+		verdict = applyJudgeSuppressionsToVerdict(verdict, "", j.rulePack.GetSuppressions())
+	}
+	return verdict
 }
 
 var piiCategories = map[string]struct {
@@ -345,6 +459,68 @@ func piiToVerdict(data map[string]interface{}) *ScanVerdict {
 	}
 }
 
+// piiToVerdictRP uses rule pack categories with direction-aware severity.
+func (j *LLMJudge) piiToVerdictRP(data map[string]interface{}) *ScanVerdict {
+	if j.rulePack == nil {
+		return piiToVerdict(data)
+	}
+	jc := j.rulePack.GetJudgeConfig("pii")
+	if jc == nil || len(jc.Categories) == 0 {
+		return piiToVerdict(data)
+	}
+
+	if data == nil {
+		return allowVerdict("llm-judge-pii")
+	}
+
+	var findings []string
+	var reasons []string
+	maxSev := "NONE"
+
+	for catName, cat := range jc.Categories {
+		if !cat.Enabled {
+			continue
+		}
+		entry, ok := data[catName]
+		if !ok {
+			continue
+		}
+		m, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		detected, _ := m["detection_result"].(bool)
+		if !detected {
+			continue
+		}
+		findings = append(findings, cat.FindingID)
+		sev := cat.SeverityDefault
+		if sev == "" {
+			sev = "MEDIUM"
+		}
+		if severityRank[sev] > severityRank[maxSev] {
+			maxSev = sev
+		}
+		if entities, ok := m["entities"].([]interface{}); ok && len(entities) > 0 {
+			reasons = append(reasons, fmt.Sprintf("%s: %d instance(s) detected", catName, len(entities)))
+		} else {
+			reasons = append(reasons, catName)
+		}
+	}
+
+	if len(findings) == 0 {
+		return allowVerdict("llm-judge-pii")
+	}
+
+	return &ScanVerdict{
+		Action:   "block",
+		Severity: maxSev,
+		Reason:   "judge-pii: " + strings.Join(reasons, "; "),
+		Findings: findings,
+		Scanner:  "llm-judge-pii",
+	}
+}
+
 // ---------------------------------------------------------------------------
 // JSON parsing (handles markdown-fenced output)
 // ---------------------------------------------------------------------------
@@ -373,18 +549,25 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 		return allowVerdict("llm-judge")
 	}
 
-	best := verdicts[0]
+	var best *ScanVerdict
 	var allFindings []string
 	var allReasons []string
 
 	for _, v := range verdicts {
-		if severityRank[v.Severity] > severityRank[best.Severity] {
+		if v == nil {
+			continue
+		}
+		if best == nil || severityRank[v.Severity] > severityRank[best.Severity] {
 			best = v
 		}
 		allFindings = append(allFindings, v.Findings...)
 		if v.Reason != "" {
 			allReasons = append(allReasons, v.Reason)
 		}
+	}
+
+	if best == nil {
+		return allowVerdict("llm-judge")
 	}
 
 	if best.Action == "allow" && len(allFindings) == 0 {
@@ -467,7 +650,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	defer cancel()
 
 	sanitizedTool := sanitizeToolName(toolName)
-	systemPrompt := fmt.Sprintf(toolInjectionSystemPrompt, sanitizedTool)
+	systemPrompt := j.resolveToolInjectionPrompt(sanitizedTool)
 
 	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
 		Messages: []ChatMessage{
@@ -490,7 +673,38 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		return allowVerdict("llm-judge-tool")
 	}
 
-	return toolInjectionToVerdict(parsed)
+	return j.toolInjectionToVerdict(parsed)
+}
+
+// resolveToolInjectionPrompt returns the system prompt for tool injection
+// judging. Uses the externalized rule pack config when available, falling
+// back to the hardcoded constant.
+func (j *LLMJudge) resolveToolInjectionPrompt(sanitizedTool string) string {
+	rp := j.rulePack
+	if rp != nil {
+		cfg := rp.GetJudgeConfig("tool-injection")
+		if cfg != nil && cfg.Enabled && cfg.SystemPrompt != "" {
+			return fmt.Sprintf(cfg.SystemPrompt, sanitizedTool)
+		}
+	}
+	return fmt.Sprintf(toolInjectionSystemPrompt, sanitizedTool)
+}
+
+// resolveToolInjectionCategories returns the category-to-finding-ID map
+// from the rule pack when available, falling back to the hardcoded default.
+func (j *LLMJudge) resolveToolInjectionCategories() map[string]string {
+	rp := j.rulePack
+	if rp != nil {
+		cfg := rp.GetJudgeConfig("tool-injection")
+		if cfg != nil && len(cfg.Categories) > 0 {
+			cats := make(map[string]string, len(cfg.Categories))
+			for name, cat := range cfg.Categories {
+				cats[name] = cat.FindingID
+			}
+			return cats
+		}
+	}
+	return toolInjectionCategories
 }
 
 var toolInjectionCategories = map[string]string{
@@ -509,15 +723,17 @@ var highConfidenceToolFindings = map[string]bool{
 	"JUDGE-TOOL-INJ-DESTRUCT": true,
 }
 
-func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
+func (j *LLMJudge) toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 	if data == nil {
 		return allowVerdict("llm-judge-tool")
 	}
 
+	cats := j.resolveToolInjectionCategories()
+
 	var findings []string
 	var reasons []string
 
-	for cat, findingID := range toolInjectionCategories {
+	for cat, findingID := range cats {
 		entry, ok := data[cat]
 		if !ok {
 			continue
@@ -582,7 +798,7 @@ func sanitizeToolName(name string) string {
 		if count >= 128 {
 			break
 		}
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || r == '%' {
 			sb.WriteRune('_')
 		} else {
 			sb.WriteRune(r)

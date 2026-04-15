@@ -41,7 +41,24 @@ first_party_allow_list:
     reason: first-party DefenseClaw skill
     source_path_contains: [".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills"]
 
+scanners:
+  skill_scanner:
+    policy: permissive
+    lenient: true
+    use_behavioral: false
+    use_llm: false
+  mcp_scanner:
+    analyzers: "yara"
+    scan_prompts: false
+    scan_resources: false
+  plugin_scanner:
+    profile: default
+    policy: permissive
+  codeguard:
+    custom_rules: default
+
 guardrail:
+  rule_pack: permissive
   block_threshold: 4
   alert_threshold: 3
   cisco_trust_level: advisory

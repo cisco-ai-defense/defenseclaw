@@ -59,6 +59,7 @@ type EventRouter struct {
 	otel     *telemetry.Provider
 	notify   *NotificationQueue
 	judge    *LLMJudge
+	rulePack *RulePack
 	judgeSem chan struct{} // bounds concurrent active tool-judge executions
 
 	autoApprove      bool
@@ -69,6 +70,10 @@ type EventRouter struct {
 
 	activeSessionsMu sync.RWMutex
 	activeSessions   map[string]time.Time // sessionKey → last seen
+
+	contextTracker *ContextTracker
+	inspector      ContentInspector
+	guardrailMode  string
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
@@ -84,6 +89,89 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		activeAgentSpans: make(map[string]*activeAgent),
 		activeSessions:   make(map[string]time.Time),
 		judgeSem:         make(chan struct{}, 16),
+		contextTracker:   NewContextTracker(0, 0),
+	}
+}
+
+// SetInspector attaches a content inspector for outbound message scanning.
+func (r *EventRouter) SetInspector(insp ContentInspector) {
+	r.inspector = insp
+}
+
+// SetRulePack attaches the loaded rule pack for tool result inspection.
+func (r *EventRouter) SetRulePack(rp *RulePack) {
+	r.rulePack = rp
+}
+
+// SetGuardrailMode sets the enforcement mode (enforce/observe) for outbound inspection.
+func (r *EventRouter) SetGuardrailMode(mode string) {
+	r.guardrailMode = mode
+}
+
+// inspectToolOutput scans tool result output for secrets and sensitive data.
+// Runs pattern rules and logs findings as alerts (non-blocking).
+func (r *EventRouter) inspectToolOutput(toolName, output string) {
+	if r.rulePack == nil {
+		return
+	}
+
+	st := r.rulePack.GetSensitiveTool(toolName)
+	if st == nil || !st.ResultInspection {
+		return
+	}
+
+	findings := ScanAllRulesRP(output, toolName, r.rulePack)
+	if len(findings) == 0 {
+		return
+	}
+
+	severity := HighestSeverity(findings)
+	top := make([]string, 0, 3)
+	for i, f := range findings {
+		if i >= 3 {
+			break
+		}
+		top = append(top, f.RuleID)
+	}
+
+	_ = r.logger.LogAction("guardrail-tool-result-alert", toolName,
+		fmt.Sprintf("severity=%s findings=%d top=%v", severity, len(findings), top))
+}
+
+// inspectOutboundMessage runs guardrail inspection on an assistant message
+// received via the WebSocket path (session.message). This provides defense-in-depth
+// for the WS-based message delivery that bypasses the HTTP proxy.
+func (r *EventRouter) inspectOutboundMessage(sessionKey, content, model string) {
+	if r.inspector == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	messages := []ChatMessage{{Role: "assistant", Content: content}}
+	if r.contextTracker != nil && sessionKey != "" {
+		if recent := r.contextTracker.RecentMessages(sessionKey, 5); len(recent) > 0 {
+			messages = append(recent, messages...)
+		}
+	}
+
+	mode := r.guardrailMode
+	if mode == "" {
+		mode = "observe"
+	}
+
+	verdict := r.inspector.Inspect(ctx, "completion", content, messages, model, mode)
+	if verdict == nil || verdict.Severity == "NONE" {
+		return
+	}
+
+	_ = r.logger.LogAction("gateway-outbound-message-flagged", sessionKey,
+		fmt.Sprintf("severity=%s action=%s findings=%d reason=%s",
+			verdict.Severity, verdict.Action, len(verdict.Findings), truncate(verdict.Reason, 200)))
+
+	if r.otel != nil {
+		r.otel.RecordGuardrailEvaluation(ctx, "outbound-message-judge", verdict.Action)
 	}
 }
 
@@ -432,6 +520,35 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				msg.Model, msg.Provider, system, promptTokens, completionTokens)
 		}
 
+		// Record message in context tracker for multi-turn analysis.
+		if r.contextTracker != nil && envelope.SessionKey != "" && contentStr != "" {
+			r.contextTracker.Record(envelope.SessionKey, msg.Role, contentStr)
+		}
+
+		// Outbound message judge: inspect assistant messages for policy violations
+		// (data leakage, PII in responses) via the WS path.
+		if msg.Role == "assistant" && r.inspector != nil && len(contentStr) > 0 {
+			go r.inspectOutboundMessage(envelope.SessionKey, contentStr, msg.Model)
+		}
+
+		// Multi-turn injection detection: if multiple user turns triggered
+		// local patterns, escalate severity in the audit log.
+		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3, r.rulePack) {
+				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
+					"repeated injection patterns detected across multiple user turns")
+				if r.otel != nil {
+					r.otel.EmitRuntimeAlert(
+						telemetry.AlertToolCallFlagged, "HIGH", telemetry.SourceLocalPattern,
+						fmt.Sprintf("Multi-turn injection attempt in session %s", truncate(envelope.SessionKey, 32)),
+						map[string]string{"session": envelope.SessionKey},
+						map[string]string{"action_taken": "alert"},
+						"", "",
+					)
+				}
+			}
+		}
+
 		_ = r.logger.LogAction("gateway-session-message", envelope.SessionKey,
 			fmt.Sprintf("role=%s msgId=%s seq=%d content_len=%d", msg.Role, envelope.MessageID, envelope.MessageSeq, len(contentStr)))
 		return
@@ -746,8 +863,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		}
 	}
 
-	// Use the shared rule engine — no tool-name gating.
-	findings := ScanAllRules(string(payload.Args), payload.Tool)
+	findings := ScanAllRulesRP(string(payload.Args), payload.Tool, r.rulePack)
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
 	flaggedPattern := ""
@@ -827,6 +943,10 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 
 	_ = r.logger.LogAction("gateway-tool-result", payload.Tool,
 		fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
+
+	if r.rulePack != nil && len(payload.Output) > 0 {
+		r.inspectToolOutput(payload.Tool, payload.Output)
+	}
 
 	if r.otel != nil {
 		r.spanMu.Lock()

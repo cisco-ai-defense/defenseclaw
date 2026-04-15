@@ -25,10 +25,13 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type CodeGuardScanner struct {
-	RulesDir string
+	RulesDir    string
+	customRules []rule
 }
 
 func NewCodeGuardScanner(rulesDir string) *CodeGuardScanner {
@@ -36,22 +39,35 @@ func NewCodeGuardScanner(rulesDir string) *CodeGuardScanner {
 		home, _ := os.UserHomeDir()
 		rulesDir = filepath.Join(home, ".defenseclaw", "codeguard-rules")
 	}
-	return &CodeGuardScanner{RulesDir: rulesDir}
+	s := &CodeGuardScanner{RulesDir: rulesDir}
+	s.customRules = loadCustomRules(rulesDir)
+	return s
+}
+
+func (s *CodeGuardScanner) allRules() []rule {
+	if len(s.customRules) == 0 {
+		return builtinRules
+	}
+	all := make([]rule, 0, len(builtinRules)+len(s.customRules))
+	all = append(all, builtinRules...)
+	all = append(all, s.customRules...)
+	return all
 }
 
 func (s *CodeGuardScanner) Name() string              { return "codeguard" }
 func (s *CodeGuardScanner) Version() string            { return "1.0.0" }
 func (s *CodeGuardScanner) SupportedTargets() []string { return []string{"code"} }
 
-// ScanContent scans an in-memory code string against builtin rules.
+// ScanContent scans an in-memory code string against builtin + custom rules.
 // The filename is used for extension-based rule filtering and finding locations.
 func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 	ext := filepath.Ext(filename)
 	var findings []Finding
+	rules := s.allRules()
 
 	lines := strings.Split(content, "\n")
 	for lineNum, line := range lines {
-		for _, r := range builtinRules {
+		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
@@ -97,8 +113,9 @@ func (s *CodeGuardScanner) Scan(_ context.Context, target string) (*ScanResult, 
 		files = []string{target}
 	}
 
+	rules := s.allRules()
 	for _, f := range files {
-		findings, err := scanFile(f)
+		findings, err := scanFileWithRules(f, rules)
 		if err != nil {
 			continue
 		}
@@ -231,6 +248,10 @@ var builtinRules = []rule{
 }
 
 func scanFile(path string) ([]Finding, error) {
+	return scanFileWithRules(path, builtinRules)
+}
+
+func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -240,13 +261,13 @@ func scanFile(path string) ([]Finding, error) {
 	ext := filepath.Ext(path)
 	var findings []Finding
 
-	scanner := bufio.NewScanner(f)
+	sc := bufio.NewScanner(f)
 	lineNum := 0
-	for scanner.Scan() {
+	for sc.Scan() {
 		lineNum++
-		line := scanner.Text()
+		line := sc.Text()
 
-		for _, r := range builtinRules {
+		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
@@ -265,7 +286,7 @@ func scanFile(path string) ([]Finding, error) {
 		}
 	}
 
-	return findings, scanner.Err()
+	return findings, sc.Err()
 }
 
 // RuleMeta exposes rule metadata for skill generation without leaking the
@@ -291,6 +312,76 @@ func BuiltinRulesMeta() []RuleMeta {
 		}
 	}
 	return out
+}
+
+// customRuleYAML is the schema for a custom CodeGuard rule file.
+type customRuleFileYAML struct {
+	Version int              `yaml:"version"`
+	Rules   []customRuleYAML `yaml:"rules"`
+}
+
+type customRuleYAML struct {
+	ID          string   `yaml:"id"`
+	Severity    string   `yaml:"severity"`
+	Title       string   `yaml:"title"`
+	Pattern     string   `yaml:"pattern"`
+	Remediation string   `yaml:"remediation"`
+	Extensions  []string `yaml:"extensions"`
+}
+
+func loadCustomRules(dir string) []rule {
+	if dir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var custom []rule
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var rf customRuleFileYAML
+		if err := yaml.Unmarshal(data, &rf); err != nil {
+			continue
+		}
+		for _, cr := range rf.Rules {
+			compiled, err := regexp.Compile(cr.Pattern)
+			if err != nil {
+				continue
+			}
+			sev := parseSeverity(cr.Severity)
+			custom = append(custom, rule{
+				id:          cr.ID,
+				severity:    sev,
+				title:       cr.Title,
+				pattern:     compiled,
+				remediation: cr.Remediation,
+				extensions:  cr.Extensions,
+			})
+		}
+	}
+	return custom
+}
+
+func parseSeverity(s string) Severity {
+	switch strings.ToLower(s) {
+	case "critical":
+		return SeverityCritical
+	case "high":
+		return SeverityHigh
+	case "medium":
+		return SeverityMedium
+	case "low":
+		return SeverityLow
+	default:
+		return SeverityMedium
+	}
 }
 
 func extMatch(ext string, exts []string) bool {
