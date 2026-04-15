@@ -40,7 +40,6 @@ type ActivityPanel struct {
 	theme   *Theme
 	entries []activityEntry
 	cursor  int
-	scroll  int
 	width   int
 	height  int
 }

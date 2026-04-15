@@ -228,7 +228,7 @@ func (p *AuditPanel) View(width, height int) string {
 		b.WriteString("\n")
 	}
 	if p.filtering {
-		b.WriteString(fmt.Sprintf("  / %s█\n", p.filter))
+		fmt.Fprintf(&b, "  / %s█\n", p.filter)
 	}
 
 	if len(p.filtered) == 0 && p.filter == "" {
@@ -239,9 +239,9 @@ func (p *AuditPanel) View(width, height int) string {
 	}
 
 	// Summary + header
-	b.WriteString(fmt.Sprintf("  %d events recorded", len(p.items)))
+	fmt.Fprintf(&b, "  %d events recorded", len(p.items))
 	if p.filter != "" {
-		b.WriteString(fmt.Sprintf("  ·  filtered: %s", p.filter))
+		fmt.Fprintf(&b, "  ·  filtered: %s", p.filter)
 	}
 	b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("[e] export  [/] filter") + "\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width)) + "\n")
@@ -377,7 +377,7 @@ func (p *AuditPanel) renderDetail() string {
 			if len(title) > 45 {
 				title = title[:42] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s %s", fSev, title))
+			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
 				if len(loc) > 25 {
@@ -404,11 +404,11 @@ func (p *AuditPanel) renderDetail() string {
 			if len(action) > 18 {
 				action = action[:15] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s  %-18s  %s\n",
+			fmt.Fprintf(&d, "    %s  %-18s  %s\n",
 				labelStyle.Render(ts),
 				action,
 				SeverityStyle(r.Severity).Render(r.Severity),
-			))
+			)
 			shown++
 		}
 	}

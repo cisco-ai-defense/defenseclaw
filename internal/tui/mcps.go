@@ -136,8 +136,16 @@ func (p *MCPsPanel) SetSize(w, h int) {
 	p.height = h
 }
 
-func (p *MCPsPanel) CursorUp()   { if p.cursor > 0 { p.cursor-- } }
-func (p *MCPsPanel) CursorDown() { if p.cursor < len(p.filtered)-1 { p.cursor++ } }
+func (p *MCPsPanel) CursorUp() {
+	if p.cursor > 0 {
+		p.cursor--
+	}
+}
+func (p *MCPsPanel) CursorDown() {
+	if p.cursor < len(p.filtered)-1 {
+		p.cursor++
+	}
+}
 
 func (p *MCPsPanel) Selected() *mcpItem {
 	if p.cursor >= 0 && p.cursor < len(p.filtered) {
@@ -161,9 +169,9 @@ func (p *MCPsPanel) ToggleBlock() string {
 	return fmt.Sprintf("Blocked MCP: %s", sel.URL)
 }
 
-func (p *MCPsPanel) Count() int        { return len(p.items) }
+func (p *MCPsPanel) Count() int         { return len(p.items) }
 func (p *MCPsPanel) FilteredCount() int { return len(p.filtered) }
-func (p *MCPsPanel) CursorAt() int     { return p.cursor }
+func (p *MCPsPanel) CursorAt() int      { return p.cursor }
 
 func (p *MCPsPanel) IsDetailOpen() bool { return p.detailOpen }
 func (p *MCPsPanel) ToggleDetail() {
@@ -312,7 +320,7 @@ func (p *MCPsPanel) View() string {
 		b.WriteString("\n")
 	}
 	if p.filtering {
-		b.WriteString(fmt.Sprintf("  / %s█\n", p.filter))
+		fmt.Fprintf(&b, "  / %s█\n", p.filter)
 	}
 
 	if len(p.filtered) == 0 {
@@ -458,7 +466,7 @@ func (p *MCPsPanel) renderDetail() string {
 			if len(title) > 45 {
 				title = title[:42] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s %s", fSev, title))
+			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
 				if len(loc) > 25 {
@@ -487,11 +495,10 @@ func (p *MCPsPanel) renderDetail() string {
 			if len(action) > 18 {
 				action = action[:15] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s  %-18s  %s\n",
+			fmt.Fprintf(&d, "    %s  %-18s  %s\n",
 				labelStyle.Render(ts),
 				action,
-				SeverityStyle(h.Severity).Render(h.Severity),
-			))
+				SeverityStyle(h.Severity).Render(h.Severity))
 			shown++
 		}
 	}

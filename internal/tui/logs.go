@@ -90,9 +90,7 @@ var filterLabels = map[string]string{
 	filterGuardrail: "Guardrail",
 }
 
-type logPollMsg struct {
-	lines []string
-}
+type logPollMsg struct{}
 
 // LogsPanel provides live log tailing for gateway.log and watchdog.log.
 type LogsPanel struct {
@@ -131,7 +129,7 @@ func (p LogsPanel) pollLogs() tea.Cmd {
 
 // Update handles messages for the logs panel.
 func (p LogsPanel) Update(msg tea.Msg) (LogsPanel, tea.Cmd) {
-	switch msg.(type) {
+	switch msg := msg.(type) {
 	case logPollMsg:
 		p.loadFile(logSourceGateway, filepath.Join(p.dataDir, "gateway.log"))
 		p.loadFile(logSourceWatchdog, filepath.Join(p.dataDir, "watchdog.log"))
@@ -144,7 +142,7 @@ func (p LogsPanel) Update(msg tea.Msg) (LogsPanel, tea.Cmd) {
 		}
 		return p, p.pollLogs()
 	case tea.KeyPressMsg:
-		return p.handleKey(msg.(tea.KeyPressMsg))
+		return p.handleKey(msg)
 	}
 	return p, nil
 }

@@ -52,50 +52,50 @@ var invSubNames = [invSubCount]string{
 // ---------- AIBOM JSON structures (matching actual output) ----------
 
 type aibomInventory struct {
-	Version       json.Number       `json:"version"`
-	GeneratedAt   string            `json:"generated_at"`
-	OpenclawCfg   string            `json:"openclaw_config"`
-	ClawHome      string            `json:"claw_home"`
-	ClawMode      string            `json:"claw_mode"`
-	Live          bool              `json:"live"`
-	Skills        []aibomSkill      `json:"skills"`
-	Plugins       []aibomPlugin     `json:"plugins"`
-	MCPs          []aibomMCP        `json:"mcp"`
-	Agents        []aibomAgent      `json:"agents"`
-	Tools         []aibomTool       `json:"tools"`
-	Models        []aibomModel      `json:"model_providers"`
-	Memory        []aibomMemory     `json:"memory"`
-	Errors        []json.RawMessage `json:"errors"`
-	Summary       aibomSummary      `json:"summary"`
+	Version     json.Number       `json:"version"`
+	GeneratedAt string            `json:"generated_at"`
+	OpenclawCfg string            `json:"openclaw_config"`
+	ClawHome    string            `json:"claw_home"`
+	ClawMode    string            `json:"claw_mode"`
+	Live        bool              `json:"live"`
+	Skills      []aibomSkill      `json:"skills"`
+	Plugins     []aibomPlugin     `json:"plugins"`
+	MCPs        []aibomMCP        `json:"mcp"`
+	Agents      []aibomAgent      `json:"agents"`
+	Tools       []aibomTool       `json:"tools"`
+	Models      []aibomModel      `json:"model_providers"`
+	Memory      []aibomMemory     `json:"memory"`
+	Errors      []json.RawMessage `json:"errors"`
+	Summary     aibomSummary      `json:"summary"`
 }
 
 type aibomSkill struct {
-	ID           string `json:"id"`
-	Source       string `json:"source"`
-	Eligible     bool   `json:"eligible"`
-	Enabled      bool   `json:"enabled"`
-	Bundled      bool   `json:"bundled"`
-	Description  string `json:"description"`
-	Emoji        string `json:"emoji"`
-	Verdict      string `json:"policy_verdict"`
+	ID            string `json:"id"`
+	Source        string `json:"source"`
+	Eligible      bool   `json:"eligible"`
+	Enabled       bool   `json:"enabled"`
+	Bundled       bool   `json:"bundled"`
+	Description   string `json:"description"`
+	Emoji         string `json:"emoji"`
+	Verdict       string `json:"policy_verdict"`
 	VerdictDetail string `json:"policy_detail"`
-	ScanFindings int    `json:"scan_findings"`
-	ScanSeverity string `json:"scan_severity"`
-	ScanTarget   string `json:"scan_target"`
+	ScanFindings  int    `json:"scan_findings"`
+	ScanSeverity  string `json:"scan_severity"`
+	ScanTarget    string `json:"scan_target"`
 }
 
 type aibomPlugin struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Version      string `json:"version"`
-	Origin       string `json:"origin"`
-	Enabled      bool   `json:"enabled"`
-	Status       string `json:"status"`
-	Verdict      string `json:"policy_verdict"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Origin        string `json:"origin"`
+	Enabled       bool   `json:"enabled"`
+	Status        string `json:"status"`
+	Verdict       string `json:"policy_verdict"`
 	VerdictDetail string `json:"policy_detail"`
-	ScanFindings int    `json:"scan_findings"`
-	ScanSeverity string `json:"scan_severity"`
-	ScanTarget   string `json:"scan_target"`
+	ScanFindings  int    `json:"scan_findings"`
+	ScanSeverity  string `json:"scan_severity"`
+	ScanTarget    string `json:"scan_target"`
 }
 
 type aibomMCP struct {
@@ -234,7 +234,7 @@ func (p *InventoryPanel) SetCursor(i int) {
 	p.cursor = i
 }
 
-func (p *InventoryPanel) CursorAt() int     { return p.cursor }
+func (p *InventoryPanel) CursorAt() int      { return p.cursor }
 func (p *InventoryPanel) IsDetailOpen() bool { return p.detailOpen }
 func (p *InventoryPanel) ToggleDetail() {
 	p.detailOpen = !p.detailOpen
@@ -256,10 +256,10 @@ func (p *InventoryPanel) detailHeight() int {
 }
 
 type InventoryDetailInfo struct {
-	Title    string
-	Fields   [][2]string // label, value pairs
-	Action   *audit.ActionEntry
-	History  []audit.Event
+	Title   string
+	Fields  [][2]string // label, value pairs
+	Action  *audit.ActionEntry
+	History []audit.Event
 }
 
 func (p *InventoryPanel) GetDetailInfo() *InventoryDetailInfo {
@@ -567,7 +567,7 @@ func (p *InventoryPanel) renderDetail() string {
 	if info.Action != nil {
 		d.WriteString("\n" + labelStyle.Render("  Enforcement: ") + valStyle.Render(info.Action.Actions.Summary()))
 		if info.Action.Reason != "" {
-			d.WriteString(labelStyle.Render("  ("+info.Action.Reason+")"))
+			d.WriteString(labelStyle.Render("  (" + info.Action.Reason + ")"))
 		}
 		d.WriteString("\n")
 	}
@@ -584,11 +584,10 @@ func (p *InventoryPanel) renderDetail() string {
 			if len(action) > 18 {
 				action = action[:15] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s  %-18s  %s\n",
+			fmt.Fprintf(&d, "    %s  %-18s  %s\n",
 				labelStyle.Render(ts),
 				action,
-				SeverityStyle(h.Severity).Render(h.Severity),
-			))
+				SeverityStyle(h.Severity).Render(h.Severity))
 			shown++
 		}
 	}
@@ -606,13 +605,13 @@ func (p *InventoryPanel) renderSummary(width int) string {
 	inv := p.inv
 
 	// Header
-	b.WriteString(fmt.Sprintf("\n  AIBOM v%s  generated %s\n", inv.Version.String(), inv.GeneratedAt))
-	b.WriteString(fmt.Sprintf("  %s  %s\n",
+	fmt.Fprintf(&b, "\n  AIBOM v%s  generated %s\n", inv.Version.String(), inv.GeneratedAt)
+	fmt.Fprintf(&b, "  %s  %s\n",
 		lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("Mode:"),
-		inv.ClawMode))
-	b.WriteString(fmt.Sprintf("  %s  %s\n\n",
+		inv.ClawMode)
+	fmt.Fprintf(&b, "  %s  %s\n\n",
 		lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("Home:"),
-		inv.ClawHome))
+		inv.ClawHome)
 
 	halfW := width/2 - 2
 	if halfW < 35 {
@@ -623,23 +622,23 @@ func (p *InventoryPanel) renderSummary(width int) string {
 	var left strings.Builder
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1).Width(halfW)
 	left.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62")).Render("COMPONENTS") + "\n")
-	left.WriteString(fmt.Sprintf("  Total items   %s\n", lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%d", s.TotalItems))))
-	left.WriteString(fmt.Sprintf("  Skills        %s", p.fmtCount(s.Skills, "count")))
+	fmt.Fprintf(&left, "  Total items   %s\n", lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%d", s.TotalItems)))
+	fmt.Fprintf(&left, "  Skills        %s", p.fmtCount(s.Skills, "count"))
 	if v := p.mapVal(s.Skills, "eligible"); v != "" && v != "0" {
-		left.WriteString(fmt.Sprintf("  (%s eligible)", v))
+		fmt.Fprintf(&left, "  (%s eligible)", v)
 	}
 	left.WriteString("\n")
-	left.WriteString(fmt.Sprintf("  Plugins       %s", p.fmtCount(s.Plugins, "count")))
+	fmt.Fprintf(&left, "  Plugins       %s", p.fmtCount(s.Plugins, "count"))
 	if loaded := p.mapVal(s.Plugins, "loaded"); loaded != "" {
-		left.WriteString(fmt.Sprintf("  (%s loaded, %s disabled)", loaded, p.mapVal(s.Plugins, "disabled")))
+		fmt.Fprintf(&left, "  (%s loaded, %s disabled)", loaded, p.mapVal(s.Plugins, "disabled"))
 	}
 	left.WriteString("\n")
-	left.WriteString(fmt.Sprintf("  MCPs          %s\n", p.fmtCount(s.MCP, "count")))
-	left.WriteString(fmt.Sprintf("  Agents        %s\n", p.fmtCount(s.Agents, "count")))
-	left.WriteString(fmt.Sprintf("  Models        %s\n", p.fmtCount(s.Models, "count")))
-	left.WriteString(fmt.Sprintf("  Memory        %s\n", p.fmtCount(s.Memory, "count")))
+	fmt.Fprintf(&left, "  MCPs          %s\n", p.fmtCount(s.MCP, "count"))
+	fmt.Fprintf(&left, "  Agents        %s\n", p.fmtCount(s.Agents, "count"))
+	fmt.Fprintf(&left, "  Models        %s\n", p.fmtCount(s.Models, "count"))
+	fmt.Fprintf(&left, "  Memory        %s\n", p.fmtCount(s.Memory, "count"))
 	if errCount := fmt.Sprintf("%v", s.Errors); errCount != "0" && errCount != "<nil>" {
-		left.WriteString(fmt.Sprintf("  Errors        %s\n", p.theme.Critical.Render(errCount)))
+		fmt.Fprintf(&left, "  Errors        %s\n", p.theme.Critical.Render(errCount))
 	}
 
 	// Right: Policy verdicts
@@ -660,15 +659,15 @@ func (p *InventoryPanel) renderSummary(width int) string {
 		scanned := p.mapVal(s.ScanSkills, "scanned")
 		unscanned := p.mapVal(s.ScanSkills, "unscanned")
 		findings := p.mapVal(s.ScanSkills, "total_findings")
-		right.WriteString(fmt.Sprintf("  Skills   %s scanned  %s unscanned  %s findings\n",
-			p.theme.Clean.Render(scanned), p.theme.Dimmed.Render(unscanned), p.colorFindings(findings)))
+		fmt.Fprintf(&right, "  Skills   %s scanned  %s unscanned  %s findings\n",
+			p.theme.Clean.Render(scanned), p.theme.Dimmed.Render(unscanned), p.colorFindings(findings))
 	}
 	if s.ScanPlugins != nil {
 		scanned := p.mapVal(s.ScanPlugins, "scanned")
 		unscanned := p.mapVal(s.ScanPlugins, "unscanned")
 		findings := p.mapVal(s.ScanPlugins, "total_findings")
-		right.WriteString(fmt.Sprintf("  Plugins  %s scanned  %s unscanned  %s findings\n",
-			p.theme.Clean.Render(scanned), p.theme.Dimmed.Render(unscanned), p.colorFindings(findings)))
+		fmt.Fprintf(&right, "  Plugins  %s scanned  %s unscanned  %s findings\n",
+			p.theme.Clean.Render(scanned), p.theme.Dimmed.Render(unscanned), p.colorFindings(findings))
 	}
 
 	leftBox := box.Render(left.String())
@@ -758,11 +757,11 @@ func (p *InventoryPanel) renderSkills(width, maxLines int) string {
 			blocked++
 		}
 	}
-	b.WriteString(fmt.Sprintf("  %d skills  ·  %s eligible  ·  %s warnings  ·  %s blocked\n\n",
+	fmt.Fprintf(&b, "  %d skills  ·  %s eligible  ·  %s warnings  ·  %s blocked\n\n",
 		len(items),
 		p.theme.Clean.Render(fmt.Sprintf("%d", eligible)),
 		p.warnCount(warned),
-		p.blockCount(blocked)))
+		p.blockCount(blocked))
 
 	header := fmt.Sprintf("  %-3s %-26s %-12s %-8s %-12s %-6s %-10s",
 		"", "ID", "VERDICT", "ENABLED", "SEVERITY", "FINDS", "SOURCE")
@@ -834,16 +833,16 @@ func (p *InventoryPanel) renderSkills(width, maxLines int) string {
 		b.WriteString("\n\n")
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width)))
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("  %s %s", sel.Emoji, lipgloss.NewStyle().Bold(true).Render(sel.ID)))
+		fmt.Fprintf(&b, "  %s %s", sel.Emoji, lipgloss.NewStyle().Bold(true).Render(sel.ID))
 		if sel.Description != "" {
-			b.WriteString(fmt.Sprintf(" — %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.Description)))
+			fmt.Fprintf(&b, " — %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.Description))
 		}
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("  Policy: %s  %s",
+		fmt.Fprintf(&b, "  Policy: %s  %s",
 			p.verdictBadge(sel.Verdict),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.VerdictDetail)))
+			lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.VerdictDetail))
 		if sel.ScanTarget != "" {
-			b.WriteString(fmt.Sprintf("\n  Scan target: %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.ScanTarget)))
+			fmt.Fprintf(&b, "\n  Scan target: %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.ScanTarget))
 		}
 	}
 
@@ -872,11 +871,11 @@ func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
 			blocked++
 		}
 	}
-	b.WriteString(fmt.Sprintf("  %d plugins  ·  %s loaded  ·  %s disabled  ·  %s blocked\n\n",
+	fmt.Fprintf(&b, "  %d plugins  ·  %s loaded  ·  %s disabled  ·  %s blocked\n\n",
 		len(items),
 		p.theme.Clean.Render(fmt.Sprintf("%d", loaded)),
 		p.theme.Dimmed.Render(fmt.Sprintf("%d", disabled)),
-		p.blockCount(blocked)))
+		p.blockCount(blocked))
 
 	header := fmt.Sprintf("  %-3s %-22s %-10s %-10s %-8s %-12s %-6s %-10s",
 		"", "NAME", "VERSION", "ORIGIN", "STATUS", "VERDICT", "FINDS", "SEVERITY")
@@ -951,16 +950,16 @@ func (p *InventoryPanel) renderPlugins(width, maxLines int) string {
 		if displayName == "" {
 			displayName = sel.ID
 		}
-		b.WriteString(fmt.Sprintf("  %s", lipgloss.NewStyle().Bold(true).Render(displayName)))
+		fmt.Fprintf(&b, "  %s", lipgloss.NewStyle().Bold(true).Render(displayName))
 		if sel.Version != "" {
-			b.WriteString(fmt.Sprintf(" v%s", sel.Version))
+			fmt.Fprintf(&b, " v%s", sel.Version)
 		}
-		b.WriteString(fmt.Sprintf("  [%s]", sel.Origin))
-		b.WriteString(fmt.Sprintf("\n  Policy: %s  %s",
+		fmt.Fprintf(&b, "  [%s]", sel.Origin)
+		fmt.Fprintf(&b, "\n  Policy: %s  %s",
 			p.verdictBadge(sel.Verdict),
-			lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.VerdictDetail)))
+			lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.VerdictDetail))
 		if sel.ScanTarget != "" {
-			b.WriteString(fmt.Sprintf("\n  Scan target: %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.ScanTarget)))
+			fmt.Fprintf(&b, "\n  Scan target: %s", lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(sel.ScanTarget))
 		}
 	}
 
@@ -1021,22 +1020,22 @@ func (p *InventoryPanel) renderAgents(width int) string {
 		}
 
 		idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
-		b.WriteString(fmt.Sprintf("  %s %s%s\n", idStyle.Render(a.ID), a.Source, isDefault))
+		fmt.Fprintf(&b, "  %s %s%s\n", idStyle.Render(a.ID), a.Source, isDefault)
 
 		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		if a.Model != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Model:"), a.Model))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Model:"), a.Model)
 		}
 		if a.MaxConc > 0 {
-			b.WriteString(fmt.Sprintf("    %s  %d\n", dim.Render("Max concurrent subagents:"), a.MaxConc))
+			fmt.Fprintf(&b, "    %s  %d\n", dim.Render("Max concurrent subagents:"), a.MaxConc)
 		}
 		if a.Workspace != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Workspace:"), a.Workspace))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Workspace:"), a.Workspace)
 		}
 		if len(a.Bindings) > 0 && string(a.Bindings) != "null" && string(a.Bindings) != "0" {
 			var bindMap map[string]interface{}
 			if json.Unmarshal(a.Bindings, &bindMap) == nil && len(bindMap) > 0 {
-				b.WriteString(fmt.Sprintf("    %s  %v\n", dim.Render("Bindings:"), bindMap))
+				fmt.Fprintf(&b, "    %s  %v\n", dim.Render("Bindings:"), bindMap)
 			}
 		}
 
@@ -1062,25 +1061,25 @@ func (p *InventoryPanel) renderModels(width int) string {
 
 	for i, m := range items {
 		idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
-		b.WriteString(fmt.Sprintf("  %s  %s\n", idStyle.Render(m.ID), dim.Render(m.Source)))
+		fmt.Fprintf(&b, "  %s  %s\n", idStyle.Render(m.ID), dim.Render(m.Source))
 
 		if m.DefaultModel != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Default model:"), m.DefaultModel))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Default model:"), m.DefaultModel)
 		}
 		if m.Status != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Status:"), m.Status))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Status:"), m.Status)
 		}
 		if m.ConfigPath != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Config:"), m.ConfigPath))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Config:"), m.ConfigPath)
 		}
 		if len(m.Allowed) > 0 {
-			b.WriteString(fmt.Sprintf("    %s\n", dim.Render("Allowed models:")))
+			fmt.Fprintf(&b, "    %s\n", dim.Render("Allowed models:"))
 			for _, model := range m.Allowed {
-				b.WriteString(fmt.Sprintf("      • %s\n", model))
+				fmt.Fprintf(&b, "      • %s\n", model)
 			}
 		}
 		if len(m.Fallbacks) > 0 {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Fallbacks:"), strings.Join(m.Fallbacks, ", ")))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Fallbacks:"), strings.Join(m.Fallbacks, ", "))
 		}
 
 		if i < len(items)-1 {
@@ -1105,20 +1104,20 @@ func (p *InventoryPanel) renderMemory(width int) string {
 
 	for _, m := range items {
 		idStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
-		b.WriteString(fmt.Sprintf("  %s  %s\n", idStyle.Render(m.ID), dim.Render(m.Backend)))
+		fmt.Fprintf(&b, "  %s  %s\n", idStyle.Render(m.ID), dim.Render(m.Backend))
 
-		b.WriteString(fmt.Sprintf("    %s  %d files, %d chunks\n", dim.Render("Data:"), m.Files, m.Chunks))
+		fmt.Fprintf(&b, "    %s  %d files, %d chunks\n", dim.Render("Data:"), m.Files, m.Chunks)
 		if m.DBPath != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("DB:"), m.DBPath))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("DB:"), m.DBPath)
 		}
 		if m.Provider != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Provider:"), m.Provider))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Provider:"), m.Provider)
 		}
 		if m.Workspace != "" {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Workspace:"), m.Workspace))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Workspace:"), m.Workspace)
 		}
 		if len(m.Sources) > 0 {
-			b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Sources:"), strings.Join(m.Sources, ", ")))
+			fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Sources:"), strings.Join(m.Sources, ", "))
 		}
 
 		features := []string{}
@@ -1132,7 +1131,7 @@ func (p *InventoryPanel) renderMemory(width int) string {
 		} else {
 			features = append(features, p.theme.Dimmed.Render("Vector ✗"))
 		}
-		b.WriteString(fmt.Sprintf("    %s  %s\n", dim.Render("Features:"), strings.Join(features, "  ")))
+		fmt.Fprintf(&b, "    %s  %s\n", dim.Render("Features:"), strings.Join(features, "  "))
 	}
 
 	return b.String()

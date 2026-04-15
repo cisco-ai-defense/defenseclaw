@@ -29,21 +29,21 @@ import (
 )
 
 type pluginItem struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Version     string     `json:"version"`
-	Origin      string     `json:"origin"`
-	Status      string     `json:"status"`
-	Enabled     bool       `json:"enabled"`
-	Verdict     string     `json:"verdict"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Version     string      `json:"version"`
+	Origin      string      `json:"origin"`
+	Status      string      `json:"status"`
+	Enabled     bool        `json:"enabled"`
+	Verdict     string      `json:"verdict"`
 	Scan        *pluginScan `json:"scan,omitempty"`
 }
 
 type pluginScan struct {
-	Clean        bool   `json:"clean"`
-	MaxSeverity  string `json:"max_severity"`
-	TotalFindings int   `json:"total_findings"`
+	Clean         bool   `json:"clean"`
+	MaxSeverity   string `json:"max_severity"`
+	TotalFindings int    `json:"total_findings"`
 }
 
 type PluginDetailInfo struct {
@@ -109,8 +109,16 @@ func (p *PluginsPanel) ApplyLoaded(msg PluginsLoadedMsg) {
 	}
 }
 
-func (p *PluginsPanel) CursorUp()   { if p.cursor > 0 { p.cursor-- } }
-func (p *PluginsPanel) CursorDown() { if p.cursor < len(p.items)-1 { p.cursor++ } }
+func (p *PluginsPanel) CursorUp() {
+	if p.cursor > 0 {
+		p.cursor--
+	}
+}
+func (p *PluginsPanel) CursorDown() {
+	if p.cursor < len(p.items)-1 {
+		p.cursor++
+	}
+}
 
 func (p *PluginsPanel) Selected() *pluginItem {
 	if p.cursor >= 0 && p.cursor < len(p.items) {
@@ -119,9 +127,9 @@ func (p *PluginsPanel) Selected() *pluginItem {
 	return nil
 }
 
-func (p *PluginsPanel) Count() int        { return len(p.items) }
+func (p *PluginsPanel) Count() int         { return len(p.items) }
 func (p *PluginsPanel) FilteredCount() int { return len(p.items) }
-func (p *PluginsPanel) CursorAt() int     { return p.cursor }
+func (p *PluginsPanel) CursorAt() int      { return p.cursor }
 
 func (p *PluginsPanel) ScrollOffset() int {
 	maxVisible := p.listHeight()
@@ -372,11 +380,10 @@ func (p *PluginsPanel) renderDetail() string {
 			if len(action) > 18 {
 				action = action[:15] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s  %-18s  %s\n",
+			fmt.Fprintf(&d, "    %s  %-18s  %s\n",
 				labelStyle.Render(ts),
 				action,
-				SeverityStyle(h.Severity).Render(h.Severity),
-			))
+				SeverityStyle(h.Severity).Render(h.Severity))
 			shown++
 		}
 	}

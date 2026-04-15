@@ -34,11 +34,11 @@ type skillItem struct {
 }
 
 type SkillDetailInfo struct {
-	Item       skillItem
-	Action     *audit.ActionEntry
-	Findings   []audit.FindingRow
-	History    []audit.Event
-	ScanInfo   *audit.LatestScanInfo
+	Item     skillItem
+	Action   *audit.ActionEntry
+	Findings []audit.FindingRow
+	History  []audit.Event
+	ScanInfo *audit.LatestScanInfo
 }
 
 type SkillsPanel struct {
@@ -136,8 +136,16 @@ func (p *SkillsPanel) SetSize(w, h int) {
 	p.height = h
 }
 
-func (p *SkillsPanel) CursorUp()   { if p.cursor > 0 { p.cursor-- } }
-func (p *SkillsPanel) CursorDown() { if p.cursor < len(p.filtered)-1 { p.cursor++ } }
+func (p *SkillsPanel) CursorUp() {
+	if p.cursor > 0 {
+		p.cursor--
+	}
+}
+func (p *SkillsPanel) CursorDown() {
+	if p.cursor < len(p.filtered)-1 {
+		p.cursor++
+	}
+}
 
 func (p *SkillsPanel) Selected() *skillItem {
 	if p.cursor >= 0 && p.cursor < len(p.filtered) {
@@ -161,9 +169,9 @@ func (p *SkillsPanel) ToggleBlock() string {
 	return fmt.Sprintf("Blocked skill: %s", sel.Name)
 }
 
-func (p *SkillsPanel) Count() int        { return len(p.items) }
+func (p *SkillsPanel) Count() int         { return len(p.items) }
 func (p *SkillsPanel) FilteredCount() int { return len(p.filtered) }
-func (p *SkillsPanel) CursorAt() int     { return p.cursor }
+func (p *SkillsPanel) CursorAt() int      { return p.cursor }
 
 func (p *SkillsPanel) ScrollOffset() int {
 	maxVisible := p.listHeight()
@@ -331,7 +339,7 @@ func (p *SkillsPanel) View() string {
 		b.WriteString("\n")
 	}
 	if p.filtering {
-		b.WriteString(fmt.Sprintf("  / %s█\n", p.filter))
+		fmt.Fprintf(&b, "  / %s█\n", p.filter)
 	}
 
 	if len(p.filtered) == 0 {
@@ -477,7 +485,7 @@ func (p *SkillsPanel) renderDetail() string {
 			if len(title) > 45 {
 				title = title[:42] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s %s", fSev, title))
+			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
 				if len(loc) > 25 {
@@ -506,11 +514,10 @@ func (p *SkillsPanel) renderDetail() string {
 			if len(action) > 18 {
 				action = action[:15] + "..."
 			}
-			d.WriteString(fmt.Sprintf("    %s  %-18s  %s\n",
+			fmt.Fprintf(&d, "    %s  %-18s  %s\n",
 				labelStyle.Render(ts),
 				action,
-				SeverityStyle(h.Severity).Render(h.Severity),
-			))
+				SeverityStyle(h.Severity).Render(h.Severity))
 			shown++
 		}
 	}

@@ -456,7 +456,7 @@ func (p *AlertsPanel) View() string {
 		b.WriteString("\n")
 	}
 	if p.filtering {
-		b.WriteString(fmt.Sprintf("  / %s█\n", p.filter))
+		fmt.Fprintf(&b, "  / %s█\n", p.filter)
 	}
 
 	if len(p.filtered) == 0 {
@@ -583,7 +583,7 @@ func (p *AlertsPanel) renderDetail() string {
 			if len(title) > 50 {
 				title = title[:47] + "…"
 			}
-			d.WriteString(fmt.Sprintf("    %s %s", fSev, title))
+			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
 				if len(loc) > 30 {
@@ -614,11 +614,11 @@ func (p *AlertsPanel) renderDetail() string {
 			if len(action) > 20 {
 				action = action[:17] + "…"
 			}
-			d.WriteString(fmt.Sprintf("    %s  %-20s  %s\n",
+			fmt.Fprintf(&d, "    %s  %-20s  %s\n",
 				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(ts),
 				action,
 				SeverityStyle(h.Severity).Render(h.Severity),
-			))
+			)
 			shown++
 		}
 	}

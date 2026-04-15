@@ -204,7 +204,7 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 		if detail != "" {
 			detail = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(" " + detail)
 		}
-		content.WriteString(fmt.Sprintf(" %s %-11s %-12s%s\n", dot, svc.name, stateStr, detail))
+		fmt.Fprintf(&content, " %s %-11s %-12s%s\n", dot, svc.name, stateStr, detail)
 	}
 
 	return box.Render(content.String())
@@ -240,7 +240,7 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 			rows = append(rows, [2]string{"AI Defense", p.cfg.CiscoAIDefense.Endpoint})
 		}
 		for _, r := range rows {
-			content.WriteString(fmt.Sprintf(" %s  %s\n", dimLabel.Render(fmt.Sprintf("%-14s", r[0])), r[1]))
+			fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-14s", r[0])), r[1])
 		}
 	} else {
 		content.WriteString(dimLabel.Render(" (config not loaded)") + "\n")
@@ -268,18 +268,18 @@ func (p *OverviewPanel) renderStatsBox(w int) string {
 	} else {
 		alertNum = p.theme.Clean.Render(alertNum)
 	}
-	content.WriteString(fmt.Sprintf(" Alerts      %s %s\n", alertNum, alertBar))
+	fmt.Fprintf(&content, " Alerts      %s %s\n", alertNum, alertBar)
 
 	// Scans
 	scanBar := p.miniBar(p.totalScans, 1000, 20)
-	content.WriteString(fmt.Sprintf(" Total scans %s %s\n", p.theme.Clean.Render(fmt.Sprintf("%d", p.totalScans)), scanBar))
+	fmt.Fprintf(&content, " Total scans %s %s\n", p.theme.Clean.Render(fmt.Sprintf("%d", p.totalScans)), scanBar)
 
 	content.WriteString(" ─────────────────────────\n")
 
-	content.WriteString(fmt.Sprintf(" Skills  %s blocked  %s allowed\n",
-		p.colorCount(p.blockedSkills, true), p.colorCount(p.allowedSkills, false)))
-	content.WriteString(fmt.Sprintf(" MCPs    %s blocked  %s allowed\n",
-		p.colorCount(p.blockedMCPs, true), p.colorCount(p.allowedMCPs, false)))
+	fmt.Fprintf(&content, " Skills  %s blocked  %s allowed\n",
+		p.colorCount(p.blockedSkills, true), p.colorCount(p.allowedSkills, false))
+	fmt.Fprintf(&content, " MCPs    %s blocked  %s allowed\n",
+		p.colorCount(p.blockedMCPs, true), p.colorCount(p.allowedMCPs, false))
 
 	return box.Render(content.String())
 }
@@ -304,17 +304,17 @@ func (p *OverviewPanel) renderScannersBox(w int) string {
 
 	for _, s := range scanners {
 		if s.kind == "built-in" {
-			content.WriteString(fmt.Sprintf(" %s %-16s %s\n",
+			fmt.Fprintf(&content, " %s %-16s %s\n",
 				p.theme.DotRunning, s.name,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("built-in")))
+				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("built-in"))
 		} else if _, err := exec.LookPath(s.name); err == nil {
-			content.WriteString(fmt.Sprintf(" %s %-16s %s\n",
+			fmt.Fprintf(&content, " %s %-16s %s\n",
 				p.theme.DotRunning, s.name,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("installed")))
+				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("installed"))
 		} else {
-			content.WriteString(fmt.Sprintf(" %s %-16s %s\n",
+			fmt.Fprintf(&content, " %s %-16s %s\n",
 				p.theme.DotError, s.name,
-				p.theme.Critical.Render("not found")))
+				p.theme.Critical.Render("not found"))
 		}
 	}
 
@@ -329,9 +329,9 @@ func (p *OverviewPanel) renderScannersBox(w int) string {
 			model = p.cfg.InspectLLM.Model
 		}
 		if model != "" {
-			content.WriteString(fmt.Sprintf(" %s %-16s %s\n",
+			fmt.Fprintf(&content, " %s %-16s %s\n",
 				p.theme.DotRunning, "guardrail",
-				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(mode+"/"+model)))
+				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(mode+"/"+model))
 		}
 	}
 

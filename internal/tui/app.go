@@ -1714,9 +1714,9 @@ func (m Model) renderHelp() string {
 		b.WriteString(m.theme.SectionHeader.Render("  " + sec.title))
 		b.WriteString("\n")
 		for _, k := range sec.keys {
-			b.WriteString(fmt.Sprintf("  %s  %s\n",
+			fmt.Fprintf(&b, "  %s  %s\n",
 				m.theme.KeyHint.Render(fmt.Sprintf("%-20s", k[0])),
-				k[1]))
+				k[1])
 		}
 		b.WriteString("\n")
 	}

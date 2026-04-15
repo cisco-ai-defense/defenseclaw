@@ -134,7 +134,7 @@ func (m *ActionMenu) View() string {
 		b.WriteString(strings.Repeat("─", modalW-4))
 		b.WriteString("\n")
 		for _, kv := range m.info {
-			b.WriteString(fmt.Sprintf("%s %s\n", m.theme.ModalLabel.Render(kv[0]+":"), kv[1]))
+			fmt.Fprintf(&b, "%s %s\n", m.theme.ModalLabel.Render(kv[0]+":"), kv[1])
 		}
 	}
 
