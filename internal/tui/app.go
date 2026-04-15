@@ -1078,10 +1078,14 @@ func (m Model) handleCmdInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.activePanel = PanelActivity
 			return m, nil
 		}
-		args := make([]string, len(entry.CLIArgs))
-		copy(args, entry.CLIArgs)
-		if extra != "" {
-			args = append(args, extra)
+		args, err := buildCLIArgs(entry, extra)
+		if err != nil {
+			m.toasts.Push(ToastWarn, "Invalid command arguments: "+err.Error())
+			m.activity.AddEntry("? " + input)
+			m.activity.AppendOutput("Invalid command arguments: " + err.Error())
+			m.activity.FinishEntry(1, 0)
+			m.activePanel = PanelActivity
+			return m, nil
 		}
 		displayName := entry.TUIName
 		if extra != "" {
@@ -1104,8 +1108,17 @@ func (m Model) handlePaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.palette.Close()
 		return m, nil
 	case "enter":
-		cmd := m.palette.Execute()
+		input := m.palette.input
+		cmd, err := m.palette.Execute()
 		m.palette.Close()
+		if err != nil {
+			m.toasts.Push(ToastWarn, "Invalid command arguments: "+err.Error())
+			m.activity.AddEntry("? " + strings.TrimSpace(input))
+			m.activity.AppendOutput("Invalid command arguments: " + err.Error())
+			m.activity.FinishEntry(1, 0)
+			m.activePanel = PanelActivity
+			return m, nil
+		}
 		if cmd != nil {
 			m.activePanel = PanelActivity
 			return m, cmd
@@ -1197,10 +1210,10 @@ func (m Model) handleActivityKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if last != "" {
 			entry, extra := MatchCommand(last, m.registry)
 			if entry != nil {
-				args := make([]string, len(entry.CLIArgs))
-				copy(args, entry.CLIArgs)
-				if extra != "" {
-					args = append(args, extra)
+				args, err := buildCLIArgs(entry, extra)
+				if err != nil {
+					m.toasts.Push(ToastWarn, "Cannot rerun command: "+err.Error())
+					return m, nil
 				}
 				return m, m.executor.Execute(entry.CLIBinary, args, last)
 			}

@@ -134,16 +134,15 @@ func (p *PaletteModel) MatchCount() int {
 }
 
 // Execute runs the matched command and returns a tea.Cmd.
-func (p *PaletteModel) Execute() tea.Cmd {
+func (p *PaletteModel) Execute() (tea.Cmd, error) {
 	entry, extra := MatchCommand(p.input, p.registry)
 	if entry == nil {
-		return nil
+		return nil, nil
 	}
 
-	args := make([]string, len(entry.CLIArgs))
-	copy(args, entry.CLIArgs)
-	if extra != "" {
-		args = append(args, extra)
+	args, err := buildCLIArgs(entry, extra)
+	if err != nil {
+		return nil, err
 	}
 
 	displayName := entry.TUIName
@@ -151,7 +150,7 @@ func (p *PaletteModel) Execute() tea.Cmd {
 		displayName += " " + extra
 	}
 
-	return p.executor.Execute(entry.CLIBinary, args, displayName)
+	return p.executor.Execute(entry.CLIBinary, args, displayName), nil
 }
 
 func (p *PaletteModel) updateMatches() {

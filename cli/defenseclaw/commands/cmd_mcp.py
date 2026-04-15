@@ -304,7 +304,7 @@ def _print_scan_result(result: ScanResult, as_json: bool) -> None:
 
 
 @mcp.command()
-@click.argument("target")
+@click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
 @click.option("--analyzers", default="", help="Comma-separated analyzer list")
 @click.option("--scan-prompts", is_flag=True, help="Also scan MCP prompts")
@@ -314,7 +314,7 @@ def _print_scan_result(result: ScanResult, as_json: bool) -> None:
 @pass_ctx
 def scan(
     app: AppContext,
-    target: str,
+    target: str | None,
     as_json: bool,
     analyzers: str,
     scan_prompts: bool,
@@ -353,6 +353,9 @@ def scan(
             else:
                 hint("Scan skills:  defenseclaw skill scan all")
         return
+
+    if not target:
+        raise click.UsageError("Missing argument 'TARGET'.")
 
     pe = PolicyEngine(app.store)
     resolved, entry = _resolve_scan_target(app, target)

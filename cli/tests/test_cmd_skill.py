@@ -178,8 +178,19 @@ class TestSkillScan(SkillCommandTestBase):
         os.makedirs(skill_dir)
 
         result = self.invoke(["scan", "allow-me", "--path", skill_dir])
-        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("ALLOWED", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_flag_uses_bulk_scan_path(self, mock_scanner_cls, mock_scan_all):
+        mock_scanner = MagicMock()
+        mock_scanner_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False)
 
 
 class TestSkillInstall(SkillCommandTestBase):

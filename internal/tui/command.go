@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/creack/pty"
@@ -57,6 +58,94 @@ type CommandDoneMsg struct {
 // CommandStartMsg signals that a command has started.
 type CommandStartMsg struct {
 	Command string
+}
+
+func buildCLIArgs(entry *CmdEntry, extra string) ([]string, error) {
+	if entry == nil {
+		return nil, fmt.Errorf("missing command entry")
+	}
+
+	args := make([]string, len(entry.CLIArgs))
+	copy(args, entry.CLIArgs)
+
+	if strings.TrimSpace(extra) == "" {
+		return args, nil
+	}
+
+	tailArgs, err := splitCommandTail(extra)
+	if err != nil {
+		return nil, err
+	}
+	return append(args, tailArgs...), nil
+}
+
+func splitCommandTail(tail string) ([]string, error) {
+	var (
+		args       []string
+		current    strings.Builder
+		inSingle   bool
+		inDouble   bool
+		escaping   bool
+		argStarted bool
+	)
+
+	flush := func() {
+		if !argStarted {
+			return
+		}
+		args = append(args, current.String())
+		current.Reset()
+		argStarted = false
+	}
+
+	for _, r := range tail {
+		switch {
+		case escaping:
+			current.WriteRune(r)
+			escaping = false
+			argStarted = true
+		case r == '\\' && !inSingle:
+			escaping = true
+			argStarted = true
+		case inSingle:
+			if r == '\'' {
+				inSingle = false
+				argStarted = true
+			} else {
+				current.WriteRune(r)
+				argStarted = true
+			}
+		case inDouble:
+			if r == '"' {
+				inDouble = false
+				argStarted = true
+			} else {
+				current.WriteRune(r)
+				argStarted = true
+			}
+		case r == '\'':
+			inSingle = true
+			argStarted = true
+		case r == '"':
+			inDouble = true
+			argStarted = true
+		case unicode.IsSpace(r):
+			flush()
+		default:
+			current.WriteRune(r)
+			argStarted = true
+		}
+	}
+
+	if escaping {
+		return nil, fmt.Errorf("command ends with an unfinished escape")
+	}
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("command has an unterminated quote")
+	}
+
+	flush()
+	return args, nil
 }
 
 // CommandExecutor manages async command execution, shelling out to
@@ -196,6 +285,9 @@ func readLineOutput(r io.Reader, program *tea.Program) {
 		if program != nil {
 			program.Send(CommandOutputMsg{Line: scanner.Text(), Timestamp: time.Now()})
 		}
+	}
+	if err := scanner.Err(); err != nil && program != nil {
+		program.Send(CommandOutputMsg{Line: fmt.Sprintf("[read error: %v]", err), Timestamp: time.Now()})
 	}
 }
 
@@ -446,7 +538,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "mcps", CLIBinary: dc, CLIArgs: []string{"mcp", "list"}, Description: "List MCP servers", Category: "info"},
 		{TUIName: "plugins", CLIBinary: dc, CLIArgs: []string{"plugin", "list"}, Description: "List plugins", Category: "info"},
 		{TUIName: "tools", CLIBinary: dc, CLIArgs: []string{"tool", "list"}, Description: "List tools", Category: "info"},
-		{TUIName: "alerts", CLIBinary: dc, CLIArgs: []string{"alerts", "list"}, Description: "List alerts", Category: "info"},
+		{TUIName: "alerts", CLIBinary: dc, CLIArgs: []string{"alerts", "--no-tui"}, Description: "List alerts", Category: "info"},
 		{TUIName: "help", CLIBinary: dc, CLIArgs: []string{"--help"}, Description: "Show CLI help", Category: "info"},
 	}
 }

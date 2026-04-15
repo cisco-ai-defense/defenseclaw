@@ -225,15 +225,15 @@ func TestMatchCommandCLIMapping(t *testing.T) {
 		wantExtra string
 	}{
 		{
-			input:    "scan skill my-skill",
-			wantBin:  "defenseclaw",
-			wantArgs: []string{"skill", "scan"},
+			input:     "scan skill my-skill",
+			wantBin:   "defenseclaw",
+			wantArgs:  []string{"skill", "scan"},
 			wantExtra: "my-skill",
 		},
 		{
-			input:    "block mcp https://mcp.example.com",
-			wantBin:  "defenseclaw",
-			wantArgs: []string{"mcp", "block"},
+			input:     "block mcp https://mcp.example.com",
+			wantBin:   "defenseclaw",
+			wantArgs:  []string{"mcp", "block"},
 			wantExtra: "https://mcp.example.com",
 		},
 		{
@@ -275,6 +275,78 @@ func TestMatchCommandCLIMapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildCLIArgsSplitsTailIntoArguments(t *testing.T) {
+	registry := BuildRegistry()
+	entry, extra := MatchCommand(`sandbox exec -- ls -la "/tmp/scan report.txt"`, registry)
+	if entry == nil {
+		t.Fatal("expected sandbox exec entry")
+	}
+
+	args, err := buildCLIArgs(entry, extra)
+	if err != nil {
+		t.Fatalf("buildCLIArgs returned error: %v", err)
+	}
+
+	want := []string{"sandbox", "exec", "--", "ls", "-la", "/tmp/scan report.txt"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func TestBuildCLIArgsPreservesQuotedJSON(t *testing.T) {
+	registry := BuildRegistry()
+	entry, extra := MatchCommand(`set mcp context7 --args '["-y", "@modelcontextprotocol/server"]' --url https://example.com/mcp`, registry)
+	if entry == nil {
+		t.Fatal("expected set mcp entry")
+	}
+
+	args, err := buildCLIArgs(entry, extra)
+	if err != nil {
+		t.Fatalf("buildCLIArgs returned error: %v", err)
+	}
+
+	want := []string{
+		"mcp", "set", "context7",
+		"--args", `["-y", "@modelcontextprotocol/server"]`,
+		"--url", "https://example.com/mcp",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func TestBuildRegistryAlertsAliasUsesPlainAlertsCommand(t *testing.T) {
+	registry := BuildRegistry()
+
+	for _, entry := range registry {
+		if entry.TUIName != "alerts" {
+			continue
+		}
+		want := []string{"alerts", "--no-tui"}
+		if len(entry.CLIArgs) != len(want) {
+			t.Fatalf("alerts CLIArgs = %v, want %v", entry.CLIArgs, want)
+		}
+		for i := range want {
+			if entry.CLIArgs[i] != want[i] {
+				t.Fatalf("alerts CLIArgs[%d] = %q, want %q", i, entry.CLIArgs[i], want[i])
+			}
+		}
+		return
+	}
+
+	t.Fatal("alerts entry not found")
 }
 
 func TestCommandExecutorInitialState(t *testing.T) {

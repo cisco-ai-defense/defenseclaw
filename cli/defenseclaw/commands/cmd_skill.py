@@ -477,16 +477,25 @@ def _print_skill_list_table(
 # ---------------------------------------------------------------------------
 
 @skill.command()
-@click.argument("target")
+@click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
 @click.option("--path", "scan_path", default="", help="Override skill directory path")
 @click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
+@click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills")
 @click.option(
     "--action", is_flag=True, default=False,
     help="Apply enforcement actions (quarantine/block/disable) based on findings",
 )
 @pass_ctx
-def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bool, action: bool) -> None:
+def scan(
+    app: AppContext,
+    target: str | None,
+    as_json: bool,
+    scan_path: str,
+    remote: bool,
+    scan_all: bool,
+    action: bool,
+) -> None:
     """Scan a skill by name, path, URL, or 'all' for all configured skills.
 
     Uses the native cisco-ai-skill-scanner SDK for local scans.
@@ -517,7 +526,11 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bo
         raise SystemExit(1)
 
     # URL target → fetch-to-temp scan (Option 3)
-    if _is_url_target(target):
+    if scan_all and target not in (None, "all"):
+        click.echo("error: provide either TARGET or --all, not both", err=True)
+        raise SystemExit(2)
+
+    if target and _is_url_target(target):
         if action:
             click.echo(
                 "error: --action is not supported with URL targets; "
@@ -530,12 +543,15 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bo
 
     scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.inspect_llm, app.cfg.cisco_ai_defense)
 
-    if target == "all":
+    if scan_all or target == "all":
         if remote:
             _scan_all_remote(app, as_json)
         else:
             _scan_all(app, scanner, as_json, enforce=action)
         return
+
+    if not target:
+        raise click.UsageError("Missing argument 'TARGET'.")
 
     # Resolve scan directory
     scan_dir = scan_path
@@ -568,7 +584,7 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bo
 
     if pe.is_allowed("skill", name):
         click.echo(f"ALLOWED (skip scan): {name}")
-        raise SystemExit(2)
+        return
 
     if not as_json:
         click.echo(f"[scan] skill-scanner -> {scan_dir}")
