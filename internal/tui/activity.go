@@ -37,11 +37,13 @@ type activityEntry struct {
 
 // ActivityPanel shows command execution output and history.
 type ActivityPanel struct {
-	theme   *Theme
-	entries []activityEntry
-	cursor  int
-	width   int
-	height  int
+	theme      *Theme
+	entries    []activityEntry
+	cursor     int
+	width      int
+	height     int
+	termMode   bool // when true, show raw terminal output for latest command
+	termScroll int  // scroll offset in terminal mode (from bottom)
 }
 
 // NewActivityPanel creates the activity panel.
@@ -49,7 +51,7 @@ func NewActivityPanel(theme *Theme) ActivityPanel {
 	return ActivityPanel{theme: theme}
 }
 
-// AddEntry adds a new running command entry.
+// AddEntry adds a new running command entry and enters terminal mode.
 func (p *ActivityPanel) AddEntry(command string) {
 	p.entries = append(p.entries, activityEntry{
 		Command:   command,
@@ -57,6 +59,8 @@ func (p *ActivityPanel) AddEntry(command string) {
 		Expanded:  true,
 	})
 	p.cursor = len(p.entries) - 1
+	p.termMode = true
+	p.termScroll = 0
 }
 
 // AppendOutput adds a line of output to the current running command.
@@ -98,8 +102,21 @@ func (p *ActivityPanel) Count() int {
 	return len(p.entries)
 }
 
-// ScrollBy adjusts the cursor position for mouse wheel.
+// ScrollBy adjusts the cursor position for mouse wheel, or scrolls in terminal mode.
 func (p *ActivityPanel) ScrollBy(delta int) {
+	if p.termMode {
+		p.termScroll -= delta // negative delta = scroll up = increase offset
+		if p.termScroll < 0 {
+			p.termScroll = 0
+		}
+		if p.cursor >= 0 && p.cursor < len(p.entries) {
+			maxScroll := len(p.entries[p.cursor].Output)
+			if p.termScroll > maxScroll {
+				p.termScroll = maxScroll
+			}
+		}
+		return
+	}
 	p.cursor += delta
 	if p.cursor < 0 {
 		p.cursor = 0
@@ -131,6 +148,19 @@ func (p *ActivityPanel) IsRunning() bool {
 // Update handles key events.
 func (p *ActivityPanel) Update(msg tea.Msg) {
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if p.termMode {
+			switch keyMsg.String() {
+			case "esc", "q":
+				p.termMode = false
+			case "up", "k":
+				p.termScroll++
+			case "down", "j":
+				if p.termScroll > 0 {
+					p.termScroll--
+				}
+			}
+			return
+		}
 		switch keyMsg.String() {
 		case "up", "k":
 			if p.cursor > 0 {
@@ -142,7 +172,15 @@ func (p *ActivityPanel) Update(msg tea.Msg) {
 			}
 		case "enter":
 			if p.cursor >= 0 && p.cursor < len(p.entries) {
-				p.entries[p.cursor].Expanded = !p.entries[p.cursor].Expanded
+				p.termMode = true
+				p.termScroll = 0
+				// point to the selected entry
+			}
+		case "t":
+			if len(p.entries) > 0 {
+				p.termMode = true
+				p.termScroll = 0
+				p.cursor = len(p.entries) - 1
 			}
 		}
 	}
@@ -154,20 +192,99 @@ func (p *ActivityPanel) View() string {
 		return p.theme.Dimmed.Render("  No commands run yet. Press : or Ctrl+K to open the command palette.\n  Try: \"doctor\", \"status\", or \"scan skill --all\".")
 	}
 
+	if p.termMode {
+		return p.viewTerminal()
+	}
+	return p.viewHistory()
+}
+
+func (p *ActivityPanel) viewTerminal() string {
+	if p.cursor < 0 || p.cursor >= len(p.entries) {
+		p.cursor = len(p.entries) - 1
+	}
+	entry := p.entries[p.cursor]
+
+	var b strings.Builder
+	// Minimal header: command name + status
+	header := p.theme.CmdName.Render("$ " + entry.Command)
+	if entry.Done {
+		if entry.ExitCode == 0 {
+			header += "  " + p.theme.ExitOK.Render(fmt.Sprintf("exit 0 (%s)", entry.Duration.Round(time.Millisecond)))
+		} else {
+			header += "  " + p.theme.ExitFail.Render(fmt.Sprintf("exit %d (%s)", entry.ExitCode, entry.Duration.Round(time.Millisecond)))
+		}
+	} else {
+		header += "  " + p.theme.Spinner.Render("running...")
+	}
+	b.WriteString(header)
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", p.width))
+	b.WriteString("\n")
+
+	maxVisible := p.height - 4 // header + separator + hint + padding
+	if maxVisible < 5 {
+		maxVisible = 5
+	}
+
+	output := entry.Output
+	totalLines := len(output)
+
+	// Auto-scroll to bottom (scroll=0 means bottom), scroll>0 means scrolled up
+	endIdx := totalLines - p.termScroll
+	if endIdx < 0 {
+		endIdx = 0
+	}
+	if endIdx > totalLines {
+		endIdx = totalLines
+	}
+	startIdx := endIdx - maxVisible
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	for i := startIdx; i < endIdx; i++ {
+		b.WriteString(output[i])
+		b.WriteString("\n")
+	}
+
+	// Pad remaining space
+	rendered := endIdx - startIdx
+	for rendered < maxVisible {
+		b.WriteString("\n")
+		rendered++
+	}
+
+	// Hint bar
+	hint := p.theme.Dimmed.Render("  [Esc] history  [Up/Down] scroll  [Ctrl+C] cancel")
+	if p.termScroll > 0 {
+		hint += p.theme.Dimmed.Render(fmt.Sprintf("  (scrolled up %d lines)", p.termScroll))
+	}
+	b.WriteString(hint)
+
+	return b.String()
+}
+
+func (p *ActivityPanel) viewHistory() string {
 	var lines []string
 
+	lines = append(lines, p.theme.Dimmed.Render("  Command History  [Enter] view output  [t] terminal mode"))
+	lines = append(lines, "")
+
 	for i, entry := range p.entries {
-		// Header line
 		header := p.formatEntryHeader(i, entry)
 		lines = append(lines, header)
 
-		// Output lines (when expanded)
 		if entry.Expanded {
-			for _, outLine := range entry.Output {
+			maxPreview := 5
+			for j, outLine := range entry.Output {
+				if j >= maxPreview {
+					lines = append(lines, p.theme.Dimmed.Render(fmt.Sprintf("    ... %d more lines (Enter to view)", len(entry.Output)-maxPreview)))
+					break
+				}
 				lines = append(lines, "    "+outLine)
 			}
 			if !entry.Done {
-				lines = append(lines, "    "+p.theme.Spinner.Render("⠋ running..."))
+				lines = append(lines, "    "+p.theme.Spinner.Render("running..."))
 			}
 		}
 		lines = append(lines, "")
@@ -183,22 +300,19 @@ func (p *ActivityPanel) View() string {
 		return strings.Join(lines, "\n")
 	}
 
-	// Find which rendered line corresponds to the cursor entry
+	// Scroll to keep cursor visible
 	cursorLine := 0
 	entryIdx := 0
-	for i, line := range lines {
-		_ = line
+	for i := range lines {
 		if entryIdx == p.cursor {
 			cursorLine = i
 			break
 		}
-		// Each entry is header + (expanded output) + blank line
 		if i > 0 && lines[i] == "" {
 			entryIdx++
 		}
 	}
 
-	// Window around cursor, biased toward showing latest
 	start := cursorLine - maxVisible/2
 	if start < 0 {
 		start = 0
@@ -212,8 +326,7 @@ func (p *ActivityPanel) View() string {
 		}
 	}
 
-	visible := lines[start:end]
-	return strings.Join(visible, "\n")
+	return strings.Join(lines[start:end], "\n")
 }
 
 func (p *ActivityPanel) formatEntryHeader(idx int, entry activityEntry) string {

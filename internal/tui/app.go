@@ -17,10 +17,7 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -42,32 +39,35 @@ const (
 	PanelLogs
 	PanelAudit
 	PanelActivity
+	PanelSetup
 	panelCount
 )
 
 var panelNames = [panelCount]string{
 	"Overview", "Alerts", "Skills", "MCPs", "Plugins",
-	"Inventory", "Logs", "Audit", "Activity",
+	"Inventory", "Logs", "Audit", "Activity", "Setup",
 }
 
 const refreshInterval = 5 * time.Second
+const slowRefreshInterval = 30 * time.Second
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type refreshMsg struct{}
+type slowRefreshMsg struct{}
 type spinTickMsg struct{}
 
 // HealthSnapshot mirrors the gateway /health JSON structure.
 type HealthSnapshot struct {
-	StartedAt string                   `json:"started_at"`
-	UptimeMS  int64                    `json:"uptime_ms"`
-	Gateway   SubsystemHealth          `json:"gateway"`
-	Watcher   SubsystemHealth          `json:"watcher"`
-	API       SubsystemHealth          `json:"api"`
-	Guardrail SubsystemHealth          `json:"guardrail"`
-	Telemetry SubsystemHealth          `json:"telemetry"`
-	Splunk    SubsystemHealth          `json:"splunk"`
-	Sandbox   *SubsystemHealth         `json:"sandbox,omitempty"`
+	StartedAt string           `json:"started_at"`
+	UptimeMS  int64            `json:"uptime_ms"`
+	Gateway   SubsystemHealth  `json:"gateway"`
+	Watcher   SubsystemHealth  `json:"watcher"`
+	API       SubsystemHealth  `json:"api"`
+	Guardrail SubsystemHealth  `json:"guardrail"`
+	Telemetry SubsystemHealth  `json:"telemetry"`
+	Splunk    SubsystemHealth  `json:"splunk"`
+	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
 }
 
 // SubsystemHealth mirrors a single subsystem from /health.
@@ -79,8 +79,8 @@ type SubsystemHealth struct {
 }
 
 type healthUpdateMsg struct {
-	Health  *HealthSnapshot
-	Err     error
+	Health *HealthSnapshot
+	Err    error
 }
 
 // Model is the root Bubbletea model for the unified TUI.
@@ -99,6 +99,7 @@ type Model struct {
 	logs      LogsPanel
 	auditHist AuditPanel
 	activity  ActivityPanel
+	setup     SetupPanel
 
 	// Overlays
 	detail     DetailModal
@@ -118,11 +119,15 @@ type Model struct {
 	executor *CommandExecutor
 	registry []CmdEntry
 
+	// Notifications
+	toasts ToastManager
+
 	// State
-	health       *HealthSnapshot
-	commandsRun  int
-	version      string
-	spinFrame    int
+	health      *HealthSnapshot
+	commandsRun int
+	version     string
+	spinFrame   int
+	lastRefresh time.Time
 
 	// v2 terminal state
 	isDark  bool
@@ -155,21 +160,23 @@ func New(deps Deps) Model {
 	ti.CharLimit = 256
 	ti.SetWidth(60)
 	s := textinput.DefaultStyles(true)
-	s.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true)
-	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	inputBg := lipgloss.Color("235")
+	s.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true).Background(inputBg)
+	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(inputBg)
+	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Background(inputBg)
 	ti.SetStyles(s)
 
 	m := Model{
-		overview:  NewOverviewPanel(theme, deps.Config, deps.Version),
-		alerts:    NewAlertsPanel(deps.Store),
-		skills:    NewSkillsPanel(deps.Store),
-		mcps:      NewMCPsPanel(deps.Store),
-		plugins:   NewPluginsPanel(theme, deps.Store),
-		inventory: NewInventoryPanel(theme, executor, deps.Store),
-		logs:      NewLogsPanel(theme, deps.Config),
-		auditHist: NewAuditPanel(theme, deps.Store),
-		activity:  NewActivityPanel(theme),
+		overview:   NewOverviewPanel(theme, deps.Config, deps.Version),
+		alerts:     NewAlertsPanel(deps.Store),
+		skills:     NewSkillsPanel(deps.Store),
+		mcps:       NewMCPsPanel(deps.Store),
+		plugins:    NewPluginsPanel(theme, deps.Store),
+		inventory:  NewInventoryPanel(theme, executor, deps.Store),
+		logs:       NewLogsPanel(theme, deps.Config),
+		auditHist:  NewAuditPanel(theme, deps.Store),
+		activity:   NewActivityPanel(theme),
+		setup:      NewSetupPanel(theme, deps.Config, executor),
 		detail:     NewDetailModal(),
 		palette:    NewPaletteModel(theme, registry, executor),
 		actionMenu: NewActionMenu(theme),
@@ -190,61 +197,15 @@ func New(deps Deps) Model {
 	return m
 }
 
-type autoInitDoneMsg struct{ exitCode int }
-
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		tickRefresh(),
+		tickSlowRefresh(),
 		func() tea.Msg { return refreshMsg{} },
 		m.logs.Init(),
 		tickSpin(),
 		func() tea.Msg { return tea.RequestBackgroundColor() },
-		m.autoInitCmd(),
 	)
-}
-
-func (m Model) autoInitCmd() tea.Cmd {
-	return func() tea.Msg {
-		m.activity.AddEntry("auto-init: defenseclaw init")
-
-		cmd := exec.Command("defenseclaw", "init")
-		cmd.Env = os.Environ()
-
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			m.activity.FinishEntry(1, 0)
-			return autoInitDoneMsg{exitCode: 1}
-		}
-		cmd.Stderr = cmd.Stdout
-
-		start := time.Now()
-		if err := cmd.Start(); err != nil {
-			if m.executor.program != nil {
-				m.executor.program.Send(CommandOutputMsg{Line: fmt.Sprintf("auto-init: failed to start: %v", err), Timestamp: time.Now()})
-			}
-			m.activity.FinishEntry(1, 0)
-			return autoInitDoneMsg{exitCode: 1}
-		}
-
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			if m.executor.program != nil {
-				m.executor.program.Send(CommandOutputMsg{Line: scanner.Text(), Timestamp: time.Now()})
-			}
-		}
-
-		exitCode := 0
-		if err := cmd.Wait(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
-			}
-		}
-
-		m.activity.FinishEntry(exitCode, time.Since(start))
-		return autoInitDoneMsg{exitCode: exitCode}
-	}
 }
 
 func tickSpin() tea.Cmd {
@@ -256,6 +217,12 @@ func tickSpin() tea.Cmd {
 func tickRefresh() tea.Cmd {
 	return tea.Tick(refreshInterval, func(_ time.Time) tea.Msg {
 		return refreshMsg{}
+	})
+}
+
+func tickSlowRefresh() tea.Cmd {
+	return tea.Tick(slowRefreshInterval, func(_ time.Time) tea.Msg {
+		return slowRefreshMsg{}
 	})
 }
 
@@ -271,12 +238,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		m.refresh()
+		m.toasts.Tick()
 		cmds = append(cmds, tickRefresh())
 		cmds = append(cmds, m.pollHealth())
 		return m, tea.Batch(cmds...)
 
+	case slowRefreshMsg:
+		cmds = append(cmds, tickSlowRefresh())
+		if m.inventory.loaded && !m.inventory.loading {
+			cmds = append(cmds, m.inventory.LoadCmd())
+		}
+		if m.plugins.loaded && !m.plugins.loading {
+			cmds = append(cmds, m.plugins.LoadCmd())
+		}
+		return m, tea.Batch(cmds...)
+
 	case healthUpdateMsg:
-		if msg.Err == nil {
+		if msg.Err != nil {
+			m.health = nil
+		} else {
 			m.health = msg.Health
 		}
 		m.overview.SetHealth(m.health)
@@ -289,15 +269,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CommandOutputMsg:
 		m.activity.AppendOutput(msg.Line)
+		if m.setup.IsWizardRunning() {
+			m.setup.WizardAppendOutput(msg.Line)
+		}
 		return m, nil
 
 	case CommandDoneMsg:
 		m.activity.FinishEntry(msg.ExitCode, msg.Duration)
 		m.refresh()
-		return m, nil
-
-	case autoInitDoneMsg:
-		m.refresh()
+		if m.setup.IsWizardRunning() {
+			m.setup.WizardFinished(msg.ExitCode)
+		}
+		if msg.ExitCode != 0 {
+			m.toasts.Push(ToastError, fmt.Sprintf("'%s' failed (exit %d)", msg.Command, msg.ExitCode))
+		} else {
+			m.toasts.Push(ToastSuccess, fmt.Sprintf("'%s' completed", msg.Command))
+		}
+		var postCmds []tea.Cmd
+		if m.inventory.loaded && !m.inventory.loading {
+			postCmds = append(postCmds, m.inventory.LoadCmd())
+		}
+		if m.plugins.loaded && !m.plugins.loading {
+			postCmds = append(postCmds, m.plugins.LoadCmd())
+		}
+		if len(postCmds) > 0 {
+			return m, tea.Batch(postCmds...)
+		}
 		return m, nil
 
 	case InventoryLoadedMsg:
@@ -342,6 +339,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleMouseClick(mouse)
 		case tea.MouseWheelMsg:
 			return m.handleMouseWheel(mouse)
+		case tea.MouseMotionMsg:
+			return m.handleMouseMotion(mouse)
 		}
 		return m, nil
 	}
@@ -377,10 +376,27 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	if mouse.Button != tea.MouseLeft {
 		return m, nil
 	}
+
+	// Block clicks when a full-screen overlay is active
+	if m.helpOpen {
+		m.helpOpen = false
+		return m, nil
+	}
+	if m.actionMenu.IsVisible() {
+		m.actionMenu.Hide()
+		return m, nil
+	}
+	if m.detail.IsVisible() {
+		m.detail.Hide()
+		return m, nil
+	}
+
 	// Click on header row => tab switch
 	if y == 0 {
 		if panel := m.tabHitTest(x); panel >= 0 {
-			m.activePanel = panel
+			if cmd := m.switchPanel(panel); cmd != nil {
+				return m, cmd
+			}
 		}
 		return m, nil
 	}
@@ -388,8 +404,9 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	if y == m.height-3 {
 		if !m.cmdInputFocus {
 			m.cmdInputFocus = true
-			m.cmdInput.Focus()
-			return m, nil
+			cmd := m.cmdInput.Focus()
+			m.palette.Open()
+			return m, cmd
 		}
 		return m, nil
 	}
@@ -417,15 +434,23 @@ func (m Model) handleMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.activePanel == PanelSetup {
+		panelStartY := 1
+		relY := mouse.Y - panelStartY
+		m.setup.HandleMouseMotion(mouse.X, relY)
+	}
+	return m, nil
+}
+
 func (m Model) tabHitTest(x int) int {
-	titleText := fmt.Sprintf(" DefenseClaw %s ", m.version)
 	titleWidth := lipgloss.Width(
 		lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("62")).
 			Padding(0, 1).
-			Render(titleText),
+			Render("DC " + m.version),
 	)
 	totalTabW := m.totalTabBarWidth()
 	tabBarStart := m.width - totalTabW
@@ -436,20 +461,11 @@ func (m Model) tabHitTest(x int) int {
 }
 
 func (m Model) tabLabelWidth(i int) int {
-	name := panelNames[i]
-	label := fmt.Sprintf("%d:%s", i+1, name)
-	if m.width < 120 {
-		if m.width >= 80 {
-			short := name
-			if len(short) > 5 {
-				short = short[:5]
-			}
-			label = fmt.Sprintf("%d:%s", i+1, short)
-		} else {
-			label = fmt.Sprintf("%d", i+1)
-		}
+	labels := m.buildTabLabels()
+	if i < 0 || i >= len(labels) {
+		return 0
 	}
-	return lipgloss.Width(label) + 2 // +2 for Padding(0,1)
+	return lipgloss.Width(labels[i]) + 2 // +2 for Padding(0,1)
 }
 
 func (m Model) totalTabBarWidth() int {
@@ -666,6 +682,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		if entryIdx >= 0 && entryIdx < m.activity.Count() {
 			m.activity.SetCursor(entryIdx)
 		}
+	case PanelSetup:
+		m.setup.HandleMouseClick(x, relY)
 	case PanelLogs:
 		if relY == 0 {
 			tabX := 2
@@ -721,6 +739,8 @@ func (m Model) handlePanelScroll(delta int) (tea.Model, tea.Cmd) {
 		m.auditHist.ScrollBy(delta)
 	case PanelActivity:
 		m.activity.ScrollBy(delta)
+	case PanelSetup:
+		m.setup.ScrollBy(delta)
 	}
 	return m, nil
 }
@@ -746,14 +766,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Command palette overlay (legacy, still usable)
-	if m.palette.Active {
-		return m.handlePaletteKey(msg)
-	}
-
 	// Persistent command input takes priority when focused
 	if m.cmdInputFocus {
 		return m.handleCmdInputKey(msg)
+	}
+
+	// Command palette overlay (legacy, still usable)
+	if m.palette.Active {
+		return m.handlePaletteKey(msg)
 	}
 
 	// Filter input mode takes priority
@@ -761,8 +781,32 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilterKey(msg)
 	}
 
+	// If Activity terminal mode is active, let it consume q/esc instead of quitting
+	if m.activePanel == PanelActivity && m.activity.termMode {
+		if msg.String() == "ctrl+c" {
+			m.executor.Cancel()
+			return m, nil
+		}
+		m.activity.Update(msg)
+		return m, nil
+	}
+
+	// If Setup has a form, wizard running, output visible, or field editing, let it consume keys
+	if m.activePanel == PanelSetup && (m.setup.editing || m.setup.wizFormEditing || m.setup.IsFormActive() || m.setup.IsWizardRunning() || len(m.setup.wizOutput) > 0) {
+		return m.handleSetupKey(msg)
+	}
+
+	if m.panelOwnsDigitShortcut(msg.String()) {
+		return m.handlePanelKey(msg)
+	}
+
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q":
+		if m.activePanel == PanelSetup {
+			return m.handlePanelKey(msg)
+		}
 		return m, tea.Quit
 
 	case "?":
@@ -771,8 +815,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ":", "ctrl+k":
 		m.cmdInputFocus = true
-		m.cmdInput.Focus()
-		return m, nil
+		cmd := m.cmdInput.Focus()
+		m.palette.Open()
+		return m, cmd
 
 	case "/":
 		return m.startFilter()
@@ -787,15 +832,21 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "4":
 		m.activePanel = PanelMCPs
 	case "5":
-		m.activePanel = PanelPlugins
+		if cmd := m.switchPanel(PanelPlugins); cmd != nil {
+			return m, cmd
+		}
 	case "6":
-		m.activePanel = PanelInventory
+		if cmd := m.switchPanel(PanelInventory); cmd != nil {
+			return m, cmd
+		}
 	case "7":
 		m.activePanel = PanelLogs
 	case "8":
 		m.activePanel = PanelAudit
 	case "9":
 		m.activePanel = PanelActivity
+	case "0":
+		m.activePanel = PanelSetup
 
 	case "tab":
 		m.activePanel = (m.activePanel + 1) % panelCount
@@ -807,6 +858,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) panelOwnsDigitShortcut(key string) bool {
+	switch m.activePanel {
+	case PanelAlerts:
+		return key >= "1" && key <= "5"
+	case PanelInventory:
+		return key >= "1" && key <= "4"
+	default:
+		return false
+	}
 }
 
 func (m Model) isFilterActive() bool {
@@ -982,17 +1044,38 @@ func (m Model) handleCmdInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cmdInputFocus = false
 		m.cmdInput.Blur()
 		m.cmdInput.SetValue("")
+		m.palette.Close()
+		return m, nil
+	case "tab":
+		if sel := m.palette.SelectedName(); sel != "" {
+			m.cmdInput.SetValue(sel + " ")
+			m.cmdInput.CursorEnd()
+			m.palette.SetInput(sel + " ")
+		}
+		return m, nil
+	case "up":
+		m.palette.MoveUp()
+		return m, nil
+	case "down":
+		m.palette.MoveDown()
 		return m, nil
 	case "enter":
 		input := m.cmdInput.Value()
 		m.cmdInputFocus = false
 		m.cmdInput.Blur()
 		m.cmdInput.SetValue("")
+		m.palette.Close()
 		if input == "" {
 			return m, nil
 		}
 		entry, extra := MatchCommand(input, m.registry)
 		if entry == nil {
+			m.toasts.Push(ToastWarn, "Unknown command: "+input)
+			m.activity.AddEntry("? " + input)
+			m.activity.AppendOutput("Unknown command: " + input)
+			m.activity.AppendOutput("Tip: type ':' and start typing to see available commands")
+			m.activity.FinishEntry(1, 0)
+			m.activePanel = PanelActivity
 			return m, nil
 		}
 		args := make([]string, len(entry.CLIArgs))
@@ -1008,9 +1091,10 @@ func (m Model) handleCmdInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.executor.Execute(entry.CLIBinary, args, displayName)
 	}
 
-	// Forward all other keys to the textinput
+	// Forward all other keys to the textinput, then sync palette
 	var cmd tea.Cmd
 	m.cmdInput, cmd = m.cmdInput.Update(msg)
+	m.palette.SetInput(m.cmdInput.Value())
 	return m, cmd
 }
 
@@ -1053,6 +1137,55 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleAuditKey(msg)
 	case PanelActivity:
 		return m.handleActivityKey(msg)
+	case PanelSetup:
+		return m.handleSetupKey(msg)
+	}
+	return m, nil
+}
+
+func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// Global setup shortcuts (not when editing, form active, or running a wizard)
+	if !m.setup.editing && !m.setup.IsFormActive() && !m.setup.IsWizardRunning() && len(m.setup.wizOutput) == 0 {
+		switch key {
+		case "S":
+			if m.setup.HasChanges() {
+				if err := m.setup.SaveConfig(); err != nil {
+					m.toasts.Push(ToastError, "Config save failed: "+err.Error())
+					return m, nil
+				}
+				m.cfg = m.setup.GetConfig()
+				m.toasts.Push(ToastSuccess, "Config saved — restarting gateway to apply changes…")
+				return m, m.executor.Execute("defenseclaw-gateway", []string{"restart"}, "restart (config changed)")
+			}
+			return m, nil
+		case "R":
+			if err := m.setup.RevertConfig(); err != nil {
+				m.toasts.Push(ToastError, "Config revert failed: "+err.Error())
+			} else {
+				m.cfg = m.setup.GetConfig()
+				m.toasts.Push(ToastInfo, "Config reverted from disk")
+			}
+			return m, nil
+		}
+	}
+
+	runCmd, binary, args, displayName := m.setup.HandleKey(msg)
+	var cmds []tea.Cmd
+	if focusCmd := m.setup.DrainFocusCmd(); focusCmd != nil {
+		cmds = append(cmds, focusCmd)
+	}
+	if runCmd {
+		if m.executor.IsRunning() {
+			m.setup.WizardFinished(-1)
+			m.toasts.Push(ToastWarn, "Another command is running — wait or press Ctrl+C first")
+		} else {
+			cmds = append(cmds, m.executor.Execute(binary, args, displayName))
+		}
+	}
+	if len(cmds) > 0 {
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -1093,9 +1226,17 @@ func (m Model) handleAuditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.auditHist.Refresh()
 	case "e":
-		cmd := m.executor.Execute("defenseclaw", []string{"alerts", "export", "--format", "json", "--output", "defenseclaw-audit-export.json"}, "export audit → defenseclaw-audit-export.json")
-		m.activePanel = PanelActivity
-		return m, cmd
+		const exportPath = "defenseclaw-audit-export.json"
+		m.activity.AddEntry("export audit → " + exportPath)
+		if err := m.exportAuditJSON(exportPath); err != nil {
+			m.activity.AppendOutput("Export failed: " + err.Error())
+			m.activity.FinishEntry(1, 0)
+			m.toasts.Push(ToastError, "Audit export failed: "+err.Error())
+			return m, nil
+		}
+		m.activity.AppendOutput("Wrote JSON audit export to " + exportPath)
+		m.activity.FinishEntry(0, 0)
+		m.toasts.Push(ToastSuccess, "Audit exported to "+exportPath)
 	}
 	return m, nil
 }
@@ -1111,7 +1252,9 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.activePanel = PanelActivity
 		return m, cmd
 	case "i":
-		m.activePanel = PanelInventory
+		if cmd := m.switchPanel(PanelInventory); cmd != nil {
+			return m, cmd
+		}
 	case "g":
 		cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
 		m.activePanel = PanelActivity
@@ -1149,7 +1292,9 @@ func (m Model) handleAlertsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.store != nil && m.alerts.SelectionCount() > 0 {
 			ids := m.alerts.SelectedIDs()
 			n, err := m.store.AcknowledgeByIDs(ids)
-			if err == nil {
+			if err != nil {
+				m.toasts.Push(ToastError, "Failed to acknowledge alerts: "+err.Error())
+			} else {
 				m.activity.AddEntry(fmt.Sprintf("Acknowledged %d selected alerts", n))
 				m.activity.FinishEntry(0, 0)
 			}
@@ -1186,7 +1331,9 @@ func (m Model) handleAlertsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			ids := m.alerts.FilteredIDs()
 			if len(ids) > 0 {
 				n, err := m.store.AcknowledgeByIDs(ids)
-				if err == nil {
+				if err != nil {
+					m.toasts.Push(ToastError, "Failed to clear alerts: "+err.Error())
+				} else {
 					label := "all"
 					if m.alerts.FilterText() != "" || m.alerts.SevFilter() != "" {
 						label = "filtered"
@@ -1479,20 +1626,22 @@ func (m Model) View() tea.View {
 	b.WriteString(panelContent)
 
 	// Pad to fill available space
-	usedLines := 5 // header(1) + newline(1) + input bar(1) + hint(1) + status strip(1)
-	if m.palette.Active {
-		usedLines += 12
+	toastLines := 0
+	if m.toasts.HasToasts() {
+		toastLines = len(m.toasts.items) + 1
 	}
+	paletteLines := 0
+	if m.cmdInputFocus && m.palette.Active && m.palette.MatchCount() > 0 {
+		paletteLines = m.palette.MatchCount()
+		if paletteLines > 8 {
+			paletteLines = 8
+		}
+	}
+	usedLines := 5 + toastLines + paletteLines
 	contentLines := lipgloss.Height(panelContent)
 	availableLines := m.height - usedLines
 	if contentLines < availableLines {
 		b.WriteString(strings.Repeat("\n", availableLines-contentLines))
-	}
-
-	// Command palette dropdown (when active, shown above input)
-	if m.palette.Active {
-		b.WriteString("\n")
-		b.WriteString(m.palette.View(m.width))
 	}
 
 	// Persistent command input bar
@@ -1500,10 +1649,22 @@ func (m Model) View() tea.View {
 	inputBar := m.renderInputBar()
 	b.WriteString(inputBar)
 
+	// Inline autocomplete dropdown (when command input is focused)
+	if m.cmdInputFocus && m.palette.Active && m.palette.MatchCount() > 0 {
+		b.WriteString(m.palette.InlineView(m.width))
+	}
+
 	// Hint bar
 	b.WriteString("\n")
 	hint := m.hints.HintForPanel(m.activePanel, m.buildSystemState())
-	b.WriteString(m.theme.HintText.Render("  "+hint))
+	b.WriteString(m.theme.HintText.Render("  " + hint))
+
+	// Toast notifications (above status strip)
+	if m.toasts.HasToasts() {
+		b.WriteString("\n")
+		m.toasts.SetWidth(m.width)
+		b.WriteString(m.toasts.View())
+	}
 
 	// Status strip
 	b.WriteString("\n")
@@ -1518,8 +1679,34 @@ func (m *Model) refresh() {
 	m.mcps.Refresh()
 	m.auditHist.Refresh()
 	if m.store != nil {
-		m.overview.SetEnforcementCounts(m.store)
+		if err := m.overview.SetEnforcementCounts(m.store); err != nil {
+			m.toasts.Push(ToastWarn, "Failed to refresh counts: "+err.Error())
+		}
 	}
+	m.lastRefresh = time.Now()
+}
+
+func (m Model) exportAuditJSON(path string) error {
+	if m.store == nil {
+		return fmt.Errorf("audit store not available")
+	}
+	return m.store.ExportJSON(path, 500)
+}
+
+// switchPanel sets the active panel and triggers auto-load for panels that need it.
+func (m *Model) switchPanel(panel int) tea.Cmd {
+	m.activePanel = panel
+	switch panel {
+	case PanelInventory:
+		if !m.inventory.loaded && !m.inventory.loading {
+			return m.inventory.LoadCmd()
+		}
+	case PanelPlugins:
+		if !m.plugins.loaded && !m.plugins.loading {
+			return m.plugins.LoadCmd()
+		}
+	}
+	return nil
 }
 
 func (m *Model) resizePanels() {
@@ -1599,7 +1786,7 @@ func (m Model) renderHeader() string {
 		Foreground(lipgloss.Color("230")).
 		Background(lipgloss.Color("62")).
 		Padding(0, 1)
-	title := titleStyle.Render("DefenseClaw " + m.version)
+	title := titleStyle.Render("DC " + m.version)
 
 	activeStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -1610,27 +1797,18 @@ func (m Model) renderHeader() string {
 		Foreground(lipgloss.Color("250")).
 		Padding(0, 1)
 
-	var tabs []string
-	for i, name := range panelNames {
-		label := fmt.Sprintf("%d:%s", i+1, name)
-		if m.width < 120 {
-			label = fmt.Sprintf("%d", i+1)
-			if m.width >= 80 {
-				short := name
-				if len(short) > 5 {
-					short = short[:5]
-				}
-				label = fmt.Sprintf("%d:%s", i+1, short)
-			}
-		}
+	tabs := m.buildTabLabels()
+
+	var rendered []string
+	for i, label := range tabs {
 		if i == m.activePanel {
-			tabs = append(tabs, activeStyle.Render(label))
+			rendered = append(rendered, activeStyle.Render(label))
 		} else {
-			tabs = append(tabs, inactiveStyle.Render(label))
+			rendered = append(rendered, inactiveStyle.Render(label))
 		}
 	}
 
-	tabBar := strings.Join(tabs, " ")
+	tabBar := strings.Join(rendered, " ")
 
 	gap := m.width - lipgloss.Width(title) - lipgloss.Width(tabBar) - 1
 	if gap < 1 {
@@ -1638,6 +1816,57 @@ func (m Model) renderHeader() string {
 	}
 
 	return title + strings.Repeat(" ", gap) + tabBar
+}
+
+// buildTabLabels returns tab label strings that fit within the terminal width.
+func (m Model) buildTabLabels() []string {
+	titleWidth := lipgloss.Width(
+		lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("62")).
+			Padding(0, 1).
+			Render("DC " + m.version),
+	)
+	available := m.width - titleWidth - 2 // 2 for gap
+
+	// Try progressively shorter label formats until one fits
+	formats := []func(int, string) string{
+		func(n int, name string) string { return fmt.Sprintf("%d:%s", n, name) },
+		func(n int, name string) string {
+			s := name
+			if len(s) > 4 {
+				s = s[:4]
+			}
+			return fmt.Sprintf("%d:%s", n, s)
+		},
+		func(n int, _ string) string { return fmt.Sprintf("%d", n) },
+	}
+
+	for _, fmtFn := range formats {
+		var labels []string
+		totalW := 0
+		for i, name := range panelNames {
+			numKey := (i + 1) % 10
+			label := fmtFn(numKey, name)
+			labels = append(labels, label)
+			totalW += lipgloss.Width(label) + 2 // padding(0,1) = +2
+			if i > 0 {
+				totalW++ // space separator
+			}
+		}
+		if totalW <= available {
+			return labels
+		}
+	}
+
+	// Absolute minimum: just numbers
+	var labels []string
+	for i := range panelNames {
+		numKey := (i + 1) % 10
+		labels = append(labels, fmt.Sprintf("%d", numKey))
+	}
+	return labels
 }
 
 func (m Model) renderActivePanel() string {
@@ -1660,6 +1889,8 @@ func (m Model) renderActivePanel() string {
 		return m.auditHist.View(m.width, m.height-5)
 	case PanelActivity:
 		return m.activity.View()
+	case PanelSetup:
+		return m.setup.View(m.width, m.height-5)
 	default:
 		return ""
 	}
@@ -1667,16 +1898,17 @@ func (m Model) renderActivePanel() string {
 
 func (m Model) renderInputBar() string {
 	barBg := lipgloss.Color("235")
+
+	if m.cmdInputFocus {
+		m.cmdInput.SetWidth(m.width - 2)
+		return m.cmdInput.View()
+	}
+
 	inputStyle := lipgloss.NewStyle().
 		Background(barBg).
 		Foreground(lipgloss.Color("252")).
 		Width(m.width).
 		Padding(0, 1)
-
-	if m.cmdInputFocus {
-		m.cmdInput.SetWidth(m.width - 6)
-		return inputStyle.Render(m.cmdInput.View())
-	}
 
 	hint := m.theme.Dimmed.Render("Press ")
 	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62")).Render(":")
@@ -1690,16 +1922,24 @@ func (m Model) renderStatusStrip() string {
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("  │  ")
 
 	gwState := "offline"
+	gwExtra := ""
 	if m.health != nil {
 		gwState = m.health.Gateway.State
+		if gwState != "running" && m.health.Gateway.LastError != "" {
+			gwExtra = " (" + truncate(m.health.Gateway.LastError, 30) + ")"
+		}
 	}
-	gwSeg := m.theme.StateDot(gwState) + " " + m.theme.StateColor(gwState).Render("Gateway")
+	gwSeg := m.theme.StateDot(gwState) + " " + m.theme.StateColor(gwState).Render("Gateway"+gwExtra)
 
 	wdState := "unknown"
+	wdExtra := ""
 	if m.health != nil {
 		wdState = m.health.Watcher.State
+		if wdState != "running" && m.health.Watcher.LastError != "" {
+			wdExtra = " (" + truncate(m.health.Watcher.LastError, 30) + ")"
+		}
 	}
-	wdSeg := m.theme.StateDot(wdState) + " " + m.theme.StateColor(wdState).Render("Watchdog")
+	wdSeg := m.theme.StateDot(wdState) + " " + m.theme.StateColor(wdState).Render("Watchdog"+wdExtra)
 
 	guardSeg := m.theme.DotOff + " " + m.theme.Disabled.Render("Guardrail")
 	if m.cfg != nil && m.cfg.Guardrail.Enabled {
@@ -1707,7 +1947,7 @@ func (m Model) renderStatusStrip() string {
 		if mode == "" {
 			mode = "observe"
 		}
-		guardSeg = m.theme.DotRunning + " " + m.theme.Clean.Render("Guardrail·" + mode)
+		guardSeg = m.theme.DotRunning + " " + m.theme.Clean.Render("Guardrail·"+mode)
 	}
 
 	alertCount := m.overview.activeAlerts
@@ -1726,9 +1966,17 @@ func (m Model) renderStatusStrip() string {
 
 	verSeg := m.theme.Dimmed.Render("v" + m.version)
 
+	staleSeg := ""
+	if !m.lastRefresh.IsZero() && time.Since(m.lastRefresh) > 3*refreshInterval {
+		staleSeg = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("(stale)")
+	}
+
 	segments := []string{gwSeg, wdSeg, guardSeg, alertSeg}
 	if cmdSeg != "" {
 		segments = append(segments, cmdSeg)
+	}
+	if staleSeg != "" {
+		segments = append(segments, staleSeg)
 	}
 	if !m.focused {
 		segments = append(segments, m.theme.Dimmed.Render("[unfocused]"))

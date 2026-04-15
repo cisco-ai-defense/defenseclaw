@@ -169,12 +169,12 @@ func (p *PluginsPanel) detailHeight() int {
 	if !p.detailOpen {
 		return 0
 	}
-	h := p.height / 3
-	if h < 6 {
-		h = 6
+	h := p.height / 2
+	if h < 8 {
+		h = 8
 	}
-	if h > 14 {
-		h = 14
+	if h > 26 {
+		h = 26
 	}
 	return h
 }
@@ -332,11 +332,7 @@ func (p *PluginsPanel) renderDetail() string {
 	d.WriteString("\n")
 
 	if info.Item.Description != "" {
-		desc := info.Item.Description
-		if len(desc) > 80 {
-			desc = desc[:77] + "..."
-		}
-		d.WriteString(labelStyle.Render("  Desc: ") + valStyle.Render(desc) + "\n")
+		d.WriteString(labelStyle.Render("  Description: ") + valStyle.Render(info.Item.Description) + "\n")
 	}
 
 	if info.Item.Verdict != "" {
@@ -372,7 +368,7 @@ func (p *PluginsPanel) renderDetail() string {
 		d.WriteString("\n" + titleStyle.Render("  Recent Activity:") + "\n")
 		shown := 0
 		for _, h := range info.History {
-			if shown >= 3 {
+			if shown >= 5 {
 				break
 			}
 			ts := h.Timestamp.Format("Jan 02 15:04")

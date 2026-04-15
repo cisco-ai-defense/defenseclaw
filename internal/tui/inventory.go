@@ -348,12 +348,12 @@ func (p *InventoryPanel) detailHeight() int {
 	if !p.detailOpen {
 		return 0
 	}
-	h := p.height / 3
-	if h < 6 {
-		h = 6
+	h := p.height / 2
+	if h < 8 {
+		h = 8
 	}
-	if h > 14 {
-		h = 14
+	if h > 26 {
+		h = 26
 	}
 	return h
 }
@@ -371,10 +371,11 @@ func (p *InventoryPanel) GetDetailInfo() *InventoryDetailInfo {
 	}
 	switch p.activeSub {
 	case invSubSkills:
-		if p.cursor < 0 || p.cursor >= len(p.inv.Skills) {
+		skills := p.filteredSkills()
+		if p.cursor < 0 || p.cursor >= len(skills) {
 			return nil
 		}
-		sk := p.inv.Skills[p.cursor]
+		sk := skills[p.cursor]
 		info := &InventoryDetailInfo{
 			Title: "SKILL: " + sk.ID,
 			Fields: [][2]string{
@@ -395,10 +396,11 @@ func (p *InventoryPanel) GetDetailInfo() *InventoryDetailInfo {
 		return info
 
 	case invSubPlugins:
-		if p.cursor < 0 || p.cursor >= len(p.inv.Plugins) {
+		plugins := p.filteredPlugins()
+		if p.cursor < 0 || p.cursor >= len(plugins) {
 			return nil
 		}
-		pl := p.inv.Plugins[p.cursor]
+		pl := plugins[p.cursor]
 		info := &InventoryDetailInfo{
 			Title: "PLUGIN: " + pl.Name,
 			Fields: [][2]string{
@@ -510,7 +512,7 @@ func (p *InventoryPanel) enrichInventoryDetail(info *InventoryDetailInfo, target
 	if err == nil && action != nil {
 		info.Action = action
 	}
-	history, _ := p.store.ListEventsByTarget(targetName, 5)
+	history, _ := p.store.ListEventsByTarget(targetName, 10)
 	info.History = history
 }
 
@@ -654,16 +656,12 @@ func (p *InventoryPanel) renderDetail() string {
 		if f[1] == "" || f[1] == "0" || f[1] == "false" {
 			continue
 		}
-		val := f[1]
-		if len(val) > 70 {
-			val = val[:67] + "..."
-		}
 		if f[0] == "Verdict" {
-			d.WriteString(labelStyle.Render(fmt.Sprintf("  %-16s", f[0]+":")) + p.verdictBadge(val) + "\n")
-		} else if f[0] == "Scan Severity" && val != "" {
-			d.WriteString(labelStyle.Render(fmt.Sprintf("  %-16s", f[0]+":")) + SeverityStyle(val).Render(val) + "\n")
+			d.WriteString(labelStyle.Render(fmt.Sprintf("  %-16s", f[0]+":")) + p.verdictBadge(f[1]) + "\n")
+		} else if f[0] == "Scan Severity" && f[1] != "" {
+			d.WriteString(labelStyle.Render(fmt.Sprintf("  %-16s", f[0]+":")) + SeverityStyle(f[1]).Render(f[1]) + "\n")
 		} else {
-			d.WriteString(labelStyle.Render(fmt.Sprintf("  %-16s", f[0]+":")) + valStyle.Render(val) + "\n")
+			d.WriteString(labelStyle.Render(fmt.Sprintf("  %-16s", f[0]+":")) + valStyle.Render(f[1]) + "\n")
 		}
 	}
 
@@ -679,7 +677,7 @@ func (p *InventoryPanel) renderDetail() string {
 		d.WriteString("\n" + titleStyle.Render("  Recent Activity:") + "\n")
 		shown := 0
 		for _, h := range info.History {
-			if shown >= 3 {
+			if shown >= 5 {
 				break
 			}
 			ts := h.Timestamp.Format("Jan 02 15:04")

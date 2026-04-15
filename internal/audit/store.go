@@ -790,7 +790,7 @@ func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
 		Action:   "acknowledge-alerts",
 		Target:   severityFilter,
 		Details:  fmt.Sprintf("acknowledged %d alerts", n),
-		Severity: "INFO",
+		Severity: "ACK",
 	})
 
 	return n, nil
@@ -819,7 +819,7 @@ func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
 	_ = s.LogEvent(Event{
 		Action:   "acknowledge-alerts",
 		Details:  fmt.Sprintf("acknowledged %d selected alerts", n),
-		Severity: "INFO",
+		Severity: "ACK",
 	})
 
 	return n, nil

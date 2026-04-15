@@ -99,6 +99,40 @@ func (p *PaletteModel) HandleKey(msg tea.KeyPressMsg) {
 	}
 }
 
+// SetInput updates the palette's search text and re-runs fuzzy matching.
+func (p *PaletteModel) SetInput(s string) {
+	p.input = s
+	p.cursor = 0
+	p.updateMatches()
+}
+
+// SelectedName returns the TUIName of the currently highlighted match, or "".
+func (p *PaletteModel) SelectedName() string {
+	if p.cursor >= 0 && p.cursor < len(p.matches) {
+		return p.registry[p.matches[p.cursor].Index].TUIName
+	}
+	return ""
+}
+
+// MoveUp moves the cursor up in the match list.
+func (p *PaletteModel) MoveUp() {
+	if p.cursor > 0 {
+		p.cursor--
+	}
+}
+
+// MoveDown moves the cursor down in the match list.
+func (p *PaletteModel) MoveDown() {
+	if p.cursor < len(p.matches)-1 {
+		p.cursor++
+	}
+}
+
+// MatchCount returns the number of current fuzzy matches.
+func (p *PaletteModel) MatchCount() int {
+	return len(p.matches)
+}
+
 // Execute runs the matched command and returns a tea.Cmd.
 func (p *PaletteModel) Execute() tea.Cmd {
 	entry, extra := MatchCommand(p.input, p.registry)
@@ -131,15 +165,35 @@ func (p *PaletteModel) updateMatches() {
 	p.matches = fuzzy.Find(p.input, p.cmdNames)
 }
 
-// View renders the palette.
+// View renders the palette as a full overlay (with its own prompt).
 func (p *PaletteModel) View(width int) string {
 	var b strings.Builder
 
-	prompt := p.theme.PaletteInput.Render(fmt.Sprintf(" > %s█", p.input))
+	prompt := p.theme.PaletteInput.Render(fmt.Sprintf(" > %s", p.input))
 	b.WriteString(prompt)
 	b.WriteString("\n")
 
-	maxItems := 10
+	b.WriteString(p.renderMatches(width))
+
+	if p.input == "" {
+		b.WriteString(p.theme.HintText.Render("   Type a command (no \"defenseclaw\" prefix needed). Try: scan, block, status, doctor"))
+	}
+
+	return b.String()
+}
+
+// InlineView renders only the match dropdown (no prompt), for use under the textinput bar.
+func (p *PaletteModel) InlineView(width int) string {
+	if len(p.matches) == 0 {
+		return ""
+	}
+	return p.renderMatches(width)
+}
+
+func (p *PaletteModel) renderMatches(width int) string {
+	var b strings.Builder
+
+	maxItems := 8
 	if len(p.matches) < maxItems {
 		maxItems = len(p.matches)
 	}
@@ -158,10 +212,6 @@ func (p *PaletteModel) View(width int) string {
 			line = SelectedStyle.Width(width).Render(line)
 		}
 		b.WriteString(line + "\n")
-	}
-
-	if p.input == "" {
-		b.WriteString(p.theme.HintText.Render("   Type a command (no \"defenseclaw\" prefix needed). Try: scan, block, status, doctor"))
 	}
 
 	return b.String()

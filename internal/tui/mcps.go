@@ -183,12 +183,12 @@ func (p *MCPsPanel) detailHeight() int {
 	if !p.detailOpen {
 		return 0
 	}
-	h := p.height / 3
-	if h < 6 {
-		h = 6
+	h := p.height / 2
+	if h < 8 {
+		h = 8
 	}
-	if h > 14 {
-		h = 14
+	if h > 26 {
+		h = 26
 	}
 	return h
 }
@@ -433,8 +433,13 @@ func (p *MCPsPanel) renderDetail() string {
 
 	if info.Action != nil {
 		if info.Action.SourcePath != "" {
-			d.WriteString(labelStyle.Render("  Source: ") + valStyle.Render(info.Action.SourcePath) + "\n")
+			d.WriteString(labelStyle.Render("  Scan target: ") + valStyle.Render(info.Action.SourcePath) + "\n")
 		}
+		d.WriteString(labelStyle.Render("  Enforcement: ") + valStyle.Render(info.Action.Actions.Summary()))
+		if info.Action.Reason != "" {
+			d.WriteString(labelStyle.Render("  (") + valStyle.Render(info.Action.Reason) + labelStyle.Render(")"))
+		}
+		d.WriteString("\n")
 		var policyParts []string
 		if info.Action.Actions.Install != "" {
 			policyParts = append(policyParts, "install="+info.Action.Actions.Install)
@@ -450,11 +455,19 @@ func (p *MCPsPanel) renderDetail() string {
 		}
 	}
 
+	if info.ScanInfo != nil {
+		d.WriteString(labelStyle.Render("  Last scanned: ") + valStyle.Render(info.ScanInfo.Timestamp.Format("2006-01-02 15:04:05")))
+		if info.ScanInfo.MaxSeverity != "" {
+			d.WriteString(labelStyle.Render("    Severity: ") + SeverityStyle(info.ScanInfo.MaxSeverity).Render(info.ScanInfo.MaxSeverity))
+		}
+		d.WriteString("\n")
+	}
+
 	if len(info.Findings) > 0 {
 		d.WriteString("\n" + titleStyle.Render(fmt.Sprintf("  Findings (%d):", len(info.Findings))) + "\n")
-		limit := dh - 8
-		if limit < 2 {
-			limit = 2
+		limit := dh - 10
+		if limit < 3 {
+			limit = 3
 		}
 		if limit > len(info.Findings) {
 			limit = len(info.Findings)
@@ -463,14 +476,14 @@ func (p *MCPsPanel) renderDetail() string {
 			f := info.Findings[i]
 			fSev := SeverityStyle(f.Severity).Render(fmt.Sprintf("%-8s", f.Severity))
 			title := f.Title
-			if len(title) > 45 {
-				title = title[:42] + "..."
+			if len(title) > 70 {
+				title = title[:67] + "..."
 			}
 			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
-				if len(loc) > 25 {
-					loc = loc[:22] + "..."
+				if len(loc) > 40 {
+					loc = loc[:37] + "..."
 				}
 				d.WriteString(labelStyle.Render("  @ " + loc))
 			}
@@ -487,7 +500,7 @@ func (p *MCPsPanel) renderDetail() string {
 		d.WriteString("\n" + titleStyle.Render("  Recent Activity:") + "\n")
 		shown := 0
 		for _, h := range info.History {
-			if shown >= 3 {
+			if shown >= 5 {
 				break
 			}
 			ts := h.Timestamp.Format("Jan 02 15:04")

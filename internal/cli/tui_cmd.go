@@ -22,8 +22,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/tui"
 )
 
@@ -43,30 +41,6 @@ func init() {
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
-	if tui.ShouldRunWizard() {
-		theme := tui.DefaultTheme()
-		result, err := tui.RunWizard(theme)
-		if err != nil {
-			return fmt.Errorf("tui: wizard: %w", err)
-		}
-		tui.ApplyWizardResult(result, nil)
-
-		// Reload config after wizard
-		var loadErr error
-		cfg, loadErr = config.Load()
-		if loadErr != nil {
-			return fmt.Errorf("tui: post-wizard config load: %w", loadErr)
-		}
-		auditStore, loadErr = audit.NewStore(cfg.AuditDB)
-		if loadErr != nil {
-			return fmt.Errorf("tui: post-wizard audit store: %w", loadErr)
-		}
-		if err := auditStore.Init(); err != nil {
-			return fmt.Errorf("tui: post-wizard audit init: %w", err)
-		}
-		auditLog = audit.NewLogger(auditStore)
-	}
-
 	deps := tui.Deps{
 		Store:   auditStore,
 		Config:  cfg,

@@ -351,12 +351,12 @@ func (p *AlertsPanel) detailHeight() int {
 	if !p.detailOpen {
 		return 0
 	}
-	h := p.height / 3
-	if h < 6 {
-		h = 6
+	h := p.height / 2
+	if h < 8 {
+		h = 8
 	}
-	if h > 14 {
-		h = 14
+	if h > 26 {
+		h = 26
 	}
 	return h
 }
@@ -561,17 +561,17 @@ func (p *AlertsPanel) renderDetail() string {
 	d.WriteString(labelStyle.Render("  Target: ") + valStyle.Render(e.Target) + "\n")
 	d.WriteString(labelStyle.Render("  Time:   ") + valStyle.Render(e.Timestamp.Format("2006-01-02 15:04:05")) + "\n")
 	if e.Details != "" {
-		d.WriteString(labelStyle.Render("  Detail: ") + valStyle.Render(e.Details) + "\n")
+		d.WriteString(labelStyle.Render("  Details: ") + valStyle.Render(e.Details) + "\n")
 	}
 	if e.RunID != "" {
 		d.WriteString(labelStyle.Render("  RunID:  ") + lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(e.RunID) + "\n")
 	}
 
 	if len(info.Findings) > 0 {
-		d.WriteString("\n" + titleStyle.Render("  Findings:") + "\n")
-		limit := dh - 6
-		if limit < 2 {
-			limit = 2
+		d.WriteString("\n" + titleStyle.Render(fmt.Sprintf("  Findings (%d):", len(info.Findings))) + "\n")
+		limit := dh - 8
+		if limit < 3 {
+			limit = 3
 		}
 		if limit > len(info.Findings) {
 			limit = len(info.Findings)
@@ -580,14 +580,14 @@ func (p *AlertsPanel) renderDetail() string {
 			f := info.Findings[i]
 			fSev := SeverityStyle(f.Severity).Render(fmt.Sprintf("%-8s", f.Severity))
 			title := f.Title
-			if len(title) > 50 {
-				title = title[:47] + "…"
+			if len(title) > 70 {
+				title = title[:67] + "..."
 			}
 			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
-				if len(loc) > 30 {
-					loc = loc[:27] + "…"
+				if len(loc) > 40 {
+					loc = loc[:37] + "..."
 				}
 				d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("  @ " + loc))
 			}
@@ -595,7 +595,7 @@ func (p *AlertsPanel) renderDetail() string {
 		}
 		if len(info.Findings) > limit {
 			d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
-				fmt.Sprintf("    … and %d more findings\n", len(info.Findings)-limit)))
+				fmt.Sprintf("    ... and %d more findings\n", len(info.Findings)-limit)))
 		}
 	}
 
@@ -606,7 +606,7 @@ func (p *AlertsPanel) renderDetail() string {
 			if h.ID == e.ID {
 				continue
 			}
-			if shown >= 3 {
+			if shown >= 5 {
 				break
 			}
 			ts := h.Timestamp.Format("Jan 02 15:04")

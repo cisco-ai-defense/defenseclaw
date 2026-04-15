@@ -239,6 +239,63 @@ func TestInitIdempotent(t *testing.T) {
 	}
 }
 
+func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	if err := store.LogEvent(Event{
+		Action:   "scan",
+		Target:   "skill/test-skill",
+		Details:  "found suspicious behavior",
+		Severity: "HIGH",
+	}); err != nil {
+		t.Fatalf("LogEvent alert: %v", err)
+	}
+
+	n, err := store.AcknowledgeAlerts("all")
+	if err != nil {
+		t.Fatalf("AcknowledgeAlerts: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RowsAffected = %d, want 1", n)
+	}
+
+	alerts, err := store.ListAlerts(10)
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("ListAlerts returned %d rows after acknowledgement, want 0", len(alerts))
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("ListEvents returned %d rows, want 2", len(events))
+	}
+
+	foundAck := false
+	for _, event := range events {
+		if event.Action == "acknowledge-alerts" {
+			foundAck = true
+			if event.Severity != "ACK" {
+				t.Fatalf("acknowledge-alerts severity = %q, want ACK", event.Severity)
+			}
+		}
+	}
+	if !foundAck {
+		t.Fatal("expected acknowledge-alerts event to remain in audit history")
+	}
+}
+
 func TestMigrationFromFreshDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
 	store, err := NewStore(dbPath)

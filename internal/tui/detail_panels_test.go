@@ -49,14 +49,14 @@ func TestSkillsPanelDetailHeightOpenBounds(t *testing.T) {
 
 	p.height = 18
 	h := p.detailHeight()
-	if h < 6 || h > 14 {
-		t.Errorf("detailHeight %d out of [6,14] range for height=18", h)
+	if h < 8 || h > 26 {
+		t.Errorf("detailHeight %d out of [8,26] range for height=18", h)
 	}
 
 	p.height = 100
 	h = p.detailHeight()
-	if h > 14 {
-		t.Errorf("detailHeight %d exceeds max 14 for height=100", h)
+	if h > 26 {
+		t.Errorf("detailHeight %d exceeds max 26 for height=100", h)
 	}
 }
 

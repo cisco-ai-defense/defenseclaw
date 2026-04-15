@@ -19,6 +19,7 @@ package tui
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/creack/pty"
 )
 
 // CmdEntry describes a TUI command that maps to a CLI invocation.
@@ -64,6 +66,7 @@ type CommandExecutor struct {
 	running bool
 	cancel  chan struct{}
 	program *tea.Program
+	stdin   io.WriteCloser // non-nil only during interactive execution
 }
 
 // NewCommandExecutor creates a new executor.
@@ -95,6 +98,152 @@ func (e *CommandExecutor) Cancel() {
 	}
 }
 
+// WriteInput sends a line of text to the running interactive command's stdin.
+func (e *CommandExecutor) WriteInput(line string) {
+	e.mu.Lock()
+	w := e.stdin
+	e.mu.Unlock()
+	if w != nil {
+		_, _ = io.WriteString(w, line+"\n")
+	}
+}
+
+// IsInteractive returns true when the currently running command has stdin attached.
+func (e *CommandExecutor) IsInteractive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stdin != nil
+}
+
+// ExecuteInteractive runs a command inside a PTY so the child process sees a
+// real terminal. This ensures Python and other runtimes use unbuffered/line-
+// buffered output, making interactive prompts appear immediately.
+func (e *CommandExecutor) ExecuteInteractive(binary string, args []string, displayName string) tea.Cmd {
+	return func() tea.Msg {
+		e.mu.Lock()
+		if e.running {
+			e.mu.Unlock()
+			return CommandOutputMsg{Line: "A command is already running. Wait for it to finish or press Ctrl+C.", Timestamp: time.Now()}
+		}
+		e.running = true
+		e.cancel = make(chan struct{})
+		prog := e.program
+		e.mu.Unlock()
+
+		if prog != nil {
+			prog.Send(CommandStartMsg{Command: displayName})
+		}
+
+		start := time.Now()
+		cmd := exec.Command(binary, args...)
+		cmd.Env = os.Environ()
+
+		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 120})
+		if err != nil {
+			e.mu.Lock()
+			e.running = false
+			close(e.cancel)
+			e.cancel = nil
+			e.mu.Unlock()
+			if prog != nil {
+				prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start PTY: %v", err), Timestamp: time.Now()})
+			}
+			return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: time.Since(start)}
+		}
+
+		e.mu.Lock()
+		e.stdin = ptmx
+		e.mu.Unlock()
+
+		cancelCh := e.cancel
+		go func() {
+			<-cancelCh
+			if cmd.Process != nil {
+				cmd.Process.Signal(os.Interrupt)
+			}
+		}()
+
+		readInteractiveOutput(ptmx, prog)
+
+		exitCode := 0
+		if err := cmd.Wait(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+		ptmx.Close()
+
+		e.mu.Lock()
+		e.stdin = nil
+		e.running = false
+		if e.cancel != nil {
+			close(e.cancel)
+			e.cancel = nil
+		}
+		e.mu.Unlock()
+
+		return CommandDoneMsg{Command: displayName, ExitCode: exitCode, Duration: time.Since(start)}
+	}
+}
+
+// readLineOutput reads from r line-by-line. Used for non-interactive commands
+// where output is typically line-buffered and lines should not be split.
+func readLineOutput(r io.Reader, program *tea.Program) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		if program != nil {
+			program.Send(CommandOutputMsg{Line: scanner.Text(), Timestamp: time.Now()})
+		}
+	}
+}
+
+// readInteractiveOutput reads from r using small reads so that partial lines
+// (e.g. interactive prompts that don't end with '\n') are delivered to the TUI
+// immediately, just like a real terminal would display them.
+func readInteractiveOutput(r io.Reader, program *tea.Program) {
+	buf := make([]byte, 256)
+	var lineBuf strings.Builder
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			chunk := string(buf[:n])
+			for len(chunk) > 0 {
+				nlIdx := strings.IndexByte(chunk, '\n')
+				if nlIdx >= 0 {
+					lineBuf.WriteString(chunk[:nlIdx])
+					line := strings.TrimRight(lineBuf.String(), "\r")
+					if program != nil {
+						program.Send(CommandOutputMsg{Line: line, Timestamp: time.Now()})
+					}
+					lineBuf.Reset()
+					chunk = chunk[nlIdx+1:]
+				} else {
+					lineBuf.WriteString(chunk)
+					chunk = ""
+				}
+			}
+			if lineBuf.Len() > 0 {
+				line := strings.TrimRight(lineBuf.String(), "\r")
+				if program != nil {
+					program.Send(CommandOutputMsg{Line: line, Timestamp: time.Now()})
+				}
+				lineBuf.Reset()
+			}
+		}
+		if readErr != nil {
+			if lineBuf.Len() > 0 {
+				line := strings.TrimRight(lineBuf.String(), "\r")
+				if program != nil {
+					program.Send(CommandOutputMsg{Line: line, Timestamp: time.Now()})
+				}
+			}
+			break
+		}
+	}
+}
+
 // Execute runs a command asynchronously and streams output to the TUI.
 func (e *CommandExecutor) Execute(binary string, args []string, displayName string) tea.Cmd {
 	return func() tea.Msg {
@@ -105,10 +254,11 @@ func (e *CommandExecutor) Execute(binary string, args []string, displayName stri
 		}
 		e.running = true
 		e.cancel = make(chan struct{})
+		prog := e.program
 		e.mu.Unlock()
 
-		if e.program != nil {
-			e.program.Send(CommandStartMsg{Command: displayName})
+		if prog != nil {
+			prog.Send(CommandStartMsg{Command: displayName})
 		}
 
 		start := time.Now()
@@ -119,7 +269,12 @@ func (e *CommandExecutor) Execute(binary string, args []string, displayName stri
 		if err != nil {
 			e.mu.Lock()
 			e.running = false
+			close(e.cancel)
+			e.cancel = nil
 			e.mu.Unlock()
+			if prog != nil {
+				prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to create pipe: %v", err), Timestamp: time.Now()})
+			}
 			return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: time.Since(start)}
 		}
 		cmd.Stderr = cmd.Stdout
@@ -127,9 +282,11 @@ func (e *CommandExecutor) Execute(binary string, args []string, displayName stri
 		if err := cmd.Start(); err != nil {
 			e.mu.Lock()
 			e.running = false
+			close(e.cancel)
+			e.cancel = nil
 			e.mu.Unlock()
-			if e.program != nil {
-				e.program.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start: %v", err), Timestamp: time.Now()})
+			if prog != nil {
+				prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start: %v", err), Timestamp: time.Now()})
 			}
 			return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: time.Since(start)}
 		}
@@ -143,13 +300,7 @@ func (e *CommandExecutor) Execute(binary string, args []string, displayName stri
 			}
 		}()
 
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if e.program != nil {
-				e.program.Send(CommandOutputMsg{Line: line, Timestamp: time.Now()})
-			}
-		}
+		readLineOutput(stdout, prog)
 
 		exitCode := 0
 		if err := cmd.Wait(); err != nil {
@@ -162,6 +313,10 @@ func (e *CommandExecutor) Execute(binary string, args []string, displayName stri
 
 		e.mu.Lock()
 		e.running = false
+		if e.cancel != nil {
+			close(e.cancel)
+			e.cancel = nil
+		}
 		e.mu.Unlock()
 
 		return CommandDoneMsg{Command: displayName, ExitCode: exitCode, Duration: time.Since(start)}
@@ -176,9 +331,9 @@ func BuildRegistry() []CmdEntry {
 	return []CmdEntry{
 		// Setup
 		{TUIName: "init", CLIBinary: dc, CLIArgs: []string{"init"}, Description: "Initialize DefenseClaw", Category: "setup"},
-		{TUIName: "setup skill-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "skill-scanner", "--non-interactive"}, Description: "Configure skill scanner", Category: "setup"},
-		{TUIName: "setup mcp-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "mcp-scanner", "--non-interactive"}, Description: "Configure MCP scanner", Category: "setup"},
-		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway", "--non-interactive"}, Description: "Configure gateway connection", Category: "setup"},
+		{TUIName: "setup skill-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "skill-scanner"}, Description: "Configure skill scanner (interactive)", Category: "setup"},
+		{TUIName: "setup mcp-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "mcp-scanner"}, Description: "Configure MCP scanner (interactive)", Category: "setup"},
+		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway"}, Description: "Configure gateway connection (interactive)", Category: "setup"},
 		{TUIName: "setup guardrail", CLIBinary: dc, CLIArgs: []string{"setup", "guardrail"}, Description: "Configure LLM guardrail", Category: "setup"},
 		{TUIName: "setup splunk", CLIBinary: dc, CLIArgs: []string{"setup", "splunk"}, Description: "Configure Splunk / O11y", Category: "setup"},
 
@@ -276,6 +431,23 @@ func BuildRegistry() []CmdEntry {
 
 		// Other
 		{TUIName: "upgrade", CLIBinary: dc, CLIArgs: []string{"upgrade", "--yes"}, Description: "Upgrade DefenseClaw", Category: "other"},
+
+		// Aliases (noun-first forms)
+		{TUIName: "skill list", CLIBinary: dc, CLIArgs: []string{"skill", "list"}, Description: "List skills with scan status", Category: "info"},
+		{TUIName: "skill scan", CLIBinary: dc, CLIArgs: []string{"skill", "scan"}, Description: "Scan a skill", Category: "scan", NeedsArg: true, ArgHint: "<skill-name>"},
+		{TUIName: "skill info", CLIBinary: dc, CLIArgs: []string{"skill", "info"}, Description: "Show skill details", Category: "info", NeedsArg: true, ArgHint: "<skill-name>"},
+		{TUIName: "mcp list", CLIBinary: dc, CLIArgs: []string{"mcp", "list"}, Description: "List MCP servers with status", Category: "info"},
+		{TUIName: "mcp scan", CLIBinary: dc, CLIArgs: []string{"mcp", "scan"}, Description: "Scan an MCP server", Category: "scan", NeedsArg: true, ArgHint: "<url>"},
+		{TUIName: "plugin list", CLIBinary: dc, CLIArgs: []string{"plugin", "list"}, Description: "List installed plugins", Category: "info"},
+		{TUIName: "plugin scan", CLIBinary: dc, CLIArgs: []string{"plugin", "scan"}, Description: "Scan a plugin", Category: "scan", NeedsArg: true, ArgHint: "<plugin-name>"},
+		{TUIName: "plugin info", CLIBinary: dc, CLIArgs: []string{"plugin", "info"}, Description: "Show plugin details", Category: "info", NeedsArg: true, ArgHint: "<plugin-name>"},
+		{TUIName: "tool list", CLIBinary: dc, CLIArgs: []string{"tool", "list"}, Description: "List tool rules", Category: "info"},
+		{TUIName: "skills", CLIBinary: dc, CLIArgs: []string{"skill", "list"}, Description: "List skills", Category: "info"},
+		{TUIName: "mcps", CLIBinary: dc, CLIArgs: []string{"mcp", "list"}, Description: "List MCP servers", Category: "info"},
+		{TUIName: "plugins", CLIBinary: dc, CLIArgs: []string{"plugin", "list"}, Description: "List plugins", Category: "info"},
+		{TUIName: "tools", CLIBinary: dc, CLIArgs: []string{"tool", "list"}, Description: "List tools", Category: "info"},
+		{TUIName: "alerts", CLIBinary: dc, CLIArgs: []string{"alerts", "list"}, Description: "List alerts", Category: "info"},
+		{TUIName: "help", CLIBinary: dc, CLIArgs: []string{"--help"}, Description: "Show CLI help", Category: "info"},
 	}
 }
 

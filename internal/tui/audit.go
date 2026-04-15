@@ -45,6 +45,7 @@ type AuditPanel struct {
 	height         int
 	detailCache    *AuditDetailInfo
 	detailCacheIdx int
+	errMsg         string
 }
 
 // NewAuditPanel creates the audit history panel.
@@ -59,8 +60,10 @@ func (p *AuditPanel) Refresh() {
 	}
 	events, err := p.store.ListEvents(500)
 	if err != nil {
+		p.errMsg = fmt.Sprintf("Audit refresh failed: %v", err)
 		return
 	}
+	p.errMsg = ""
 	p.items = events
 	p.applyFilter()
 }
@@ -153,12 +156,12 @@ func (p *AuditPanel) detailHeight() int {
 	if !p.detailOpen {
 		return 0
 	}
-	h := p.height / 3
-	if h < 6 {
-		h = 6
+	h := p.height / 2
+	if h < 8 {
+		h = 8
 	}
-	if h > 14 {
-		h = 14
+	if h > 26 {
+		h = 26
 	}
 	return h
 }
@@ -350,11 +353,7 @@ func (p *AuditPanel) renderDetail() string {
 		d.WriteString(labelStyle.Render("  Actor: ") + valStyle.Render(e.Actor) + "\n")
 	}
 	if e.Details != "" {
-		det := e.Details
-		if len(det) > 100 {
-			det = det[:97] + "..."
-		}
-		d.WriteString(labelStyle.Render("  Details: ") + valStyle.Render(det) + "\n")
+		d.WriteString(labelStyle.Render("  Details: ") + valStyle.Render(e.Details) + "\n")
 	}
 	if e.RunID != "" {
 		d.WriteString(labelStyle.Render("  Run ID: ") + valStyle.Render(e.RunID) + "\n")
@@ -366,7 +365,10 @@ func (p *AuditPanel) renderDetail() string {
 
 	if len(info.Findings) > 0 {
 		d.WriteString("\n" + titleStyle.Render(fmt.Sprintf("  Findings (%d):", len(info.Findings))) + "\n")
-		limit := 3
+		limit := dh - 10
+		if limit < 3 {
+			limit = 3
+		}
 		if limit > len(info.Findings) {
 			limit = len(info.Findings)
 		}
@@ -374,14 +376,14 @@ func (p *AuditPanel) renderDetail() string {
 			f := info.Findings[i]
 			fSev := SeverityStyle(f.Severity).Render(fmt.Sprintf("%-8s", f.Severity))
 			title := f.Title
-			if len(title) > 45 {
-				title = title[:42] + "..."
+			if len(title) > 70 {
+				title = title[:67] + "..."
 			}
 			fmt.Fprintf(&d, "    %s %s", fSev, title)
 			if f.Location != "" {
 				loc := f.Location
-				if len(loc) > 25 {
-					loc = loc[:22] + "..."
+				if len(loc) > 40 {
+					loc = loc[:37] + "..."
 				}
 				d.WriteString(labelStyle.Render("  @ " + loc))
 			}
@@ -396,7 +398,7 @@ func (p *AuditPanel) renderDetail() string {
 		d.WriteString("\n" + titleStyle.Render("  Related Events:") + "\n")
 		shown := 0
 		for _, r := range info.Related {
-			if r.ID == e.ID || shown >= 3 {
+			if r.ID == e.ID || shown >= 5 {
 				continue
 			}
 			ts := r.Timestamp.Format("Jan 02 15:04")

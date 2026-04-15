@@ -74,10 +74,10 @@ func (p *OverviewPanel) SetHealth(h *HealthSnapshot) {
 	p.buildNotices()
 }
 
-func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) {
+func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) error {
 	counts, err := store.GetCounts()
 	if err != nil {
-		return
+		return err
 	}
 	p.blockedSkills = counts.BlockedSkills
 	p.allowedSkills = counts.AllowedSkills
@@ -85,17 +85,27 @@ func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) {
 	p.allowedMCPs = counts.AllowedMCPs
 	p.totalScans = counts.TotalScans
 	p.activeAlerts = counts.Alerts
+	return nil
 }
 
 func (p *OverviewPanel) buildNotices() {
 	p.notices = nil
-	if p.health == nil || p.health.Gateway.State != "running" {
+
+	gatewayOff := p.health == nil || p.health.Gateway.State != "running"
+	guardrailOff := p.cfg == nil || !p.cfg.Guardrail.Enabled
+	_, scannerErr := exec.LookPath("skill-scanner")
+
+	if gatewayOff && guardrailOff && scannerErr != nil {
+		p.notices = append(p.notices, notice{"info", "First time? Head to the Setup tab (press 0) to configure DefenseClaw."})
+	}
+
+	if gatewayOff {
 		p.notices = append(p.notices, notice{"error", "Gateway is offline — press : then \"start\" to launch"})
 	}
-	if p.cfg != nil && !p.cfg.Guardrail.Enabled {
+	if p.cfg != nil && guardrailOff {
 		p.notices = append(p.notices, notice{"warn", "LLM guardrail not configured — press [g] to set up"})
 	}
-	if _, err := exec.LookPath("skill-scanner"); err != nil {
+	if scannerErr != nil {
 		p.notices = append(p.notices, notice{"warn", "skill-scanner not on PATH — run: pip install skill-scanner"})
 	}
 }
@@ -126,6 +136,9 @@ func (p *OverviewPanel) View(width, height int) string {
 		case "warn":
 			icon = " [*] "
 			style = p.theme.High.Render(icon + n.message)
+		case "info":
+			icon = " [>] "
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true).Render(icon + n.message)
 		default:
 			icon = " [-] "
 			style = p.theme.Clean.Render(icon + n.message)
@@ -162,7 +175,15 @@ func (p *OverviewPanel) View(width, height int) string {
 	// Quick actions bar
 	b.WriteString(p.renderQuickActions(width))
 
-	return b.String()
+	content := b.String()
+	if p.scroll > 0 {
+		lines := strings.Split(content, "\n")
+		if p.scroll >= len(lines) {
+			p.scroll = len(lines) - 1
+		}
+		content = strings.Join(lines[p.scroll:], "\n")
+	}
+	return content
 }
 
 func (p *OverviewPanel) renderServicesBox(w int) string {
@@ -186,6 +207,9 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 		{"Sandbox", "sandbox"},
 	}
 
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+
 	for _, svc := range services {
 		state := p.subsystemState(p.health, svc.key)
 		dot := p.theme.StateDot(state)
@@ -202,9 +226,20 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 			detail = p.apiDetail()
 		}
 		if detail != "" {
-			detail = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(" " + detail)
+			detail = dim.Render(" " + detail)
 		}
-		fmt.Fprintf(&content, " %s %-11s %-12s%s\n", dot, svc.name, stateStr, detail)
+
+		sinceStr := ""
+		lastErr := ""
+		if sh := p.subsystemHealth(svc.key); sh != nil {
+			if sh.Since != "" {
+				sinceStr = dim.Render(" since " + truncate(sh.Since, 16))
+			}
+			if state != "running" && sh.LastError != "" {
+				lastErr = errStyle.Render(" " + truncate(sh.LastError, 40))
+			}
+		}
+		fmt.Fprintf(&content, " %s %-11s %-12s%s%s%s\n", dot, svc.name, stateStr, detail, sinceStr, lastErr)
 	}
 
 	return box.Render(content.String())
@@ -419,6 +454,31 @@ func (p *OverviewPanel) subsystemState(h *HealthSnapshot, name string) string {
 		return "disabled"
 	default:
 		return "unknown"
+	}
+}
+
+func (p *OverviewPanel) subsystemHealth(name string) *SubsystemHealth {
+	h := p.health
+	if h == nil {
+		return nil
+	}
+	switch name {
+	case "gateway":
+		return &h.Gateway
+	case "watcher":
+		return &h.Watcher
+	case "guardrail":
+		return &h.Guardrail
+	case "splunk":
+		return &h.Splunk
+	case "telemetry":
+		return &h.Telemetry
+	case "api":
+		return &h.API
+	case "sandbox":
+		return h.Sandbox
+	default:
+		return nil
 	}
 }
 

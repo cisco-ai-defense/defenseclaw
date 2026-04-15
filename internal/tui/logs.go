@@ -98,6 +98,7 @@ type LogsPanel struct {
 	dataDir    string
 	source     int
 	lines      [logSourceCount][]string
+	errMsgs    [logSourceCount]string
 	scroll     int
 	width      int
 	height     int
@@ -586,14 +587,17 @@ func (p *LogsPanel) loadFile(source int, path string) {
 	const maxBytes = 512 * 1024
 	f, err := os.Open(path)
 	if err != nil {
+		p.errMsgs[source] = fmt.Sprintf("Cannot open: %v", err)
 		return
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
+		p.errMsgs[source] = fmt.Sprintf("Cannot stat: %v", err)
 		return
 	}
+	p.errMsgs[source] = ""
 	size := info.Size()
 	readSize := size
 	if readSize > maxBytes {
