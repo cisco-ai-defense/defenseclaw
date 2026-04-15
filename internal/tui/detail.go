@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 type DetailModal struct {
@@ -77,6 +77,18 @@ func (d *DetailModal) ShowMCP(url, status, actions, reason, since string) {
 		{"Actions", actions},
 		{"Reason", reason},
 		{"Since", since},
+	}
+	d.visible = true
+}
+
+func (d *DetailModal) Show(title string, pairs [][2]string) {
+	d.title = title
+	d.fields = nil
+	for _, p := range pairs {
+		if p[1] == "" {
+			continue
+		}
+		d.fields = append(d.fields, detailField{label: p[0], value: p[1]})
 	}
 	d.visible = true
 }

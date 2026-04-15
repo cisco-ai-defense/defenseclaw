@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-defenseclaw = "defenseclaw.main:cli"
+defenseclaw = "defenseclaw.main:main"
 
 [build-system]
 requires = ["setuptools==82.0.1"]

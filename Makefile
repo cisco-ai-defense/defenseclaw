@@ -12,7 +12,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 DIST_DIR    := dist
 
 .PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
+        plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
@@ -38,8 +38,9 @@ install: cli-install gateway-install plugin-install
 	@echo ""
 	@echo "Next steps:"
 	@echo "  source $(VENV)/bin/activate"
-	@echo "  defenseclaw init"
-	@echo "  defenseclaw setup guardrail   # configure LLM guardrail"
+	@echo "  defenseclaw              # launch the interactive TUI (first run starts setup wizard)"
+	@echo "  defenseclaw init         # or initialize via CLI (scripting / CI)"
+	@echo "  defenseclaw --help       # see all CLI commands"
 	@echo ""
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		echo "Sandbox mode (Linux):"; \
@@ -166,7 +167,10 @@ cli-test-cov:
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
 gateway-test:
-	go test -race ./internal/gateway/ ./test/... -v
+	go test -race ./internal/gateway/ ./internal/tui/ ./test/... -v
+
+tui-test:
+	go test -race -count=1 ./internal/tui/ -v
 
 go-test-cov:
 	go test -race -count=1 -coverprofile=coverage.out ./...

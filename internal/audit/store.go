@@ -767,6 +767,104 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	return events, rows.Err()
 }
 
+// AcknowledgeAlerts clears alerts by downgrading their severity to ACK.
+// Returns the number of alerts acknowledged.
+func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
+	var res sql.Result
+	var err error
+	if severityFilter == "" || severityFilter == "all" {
+		res, err = s.db.Exec(
+			`UPDATE audit_events SET severity = 'ACK'
+			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`)
+	} else {
+		res, err = s.db.Exec(
+			`UPDATE audit_events SET severity = 'ACK'
+			 WHERE severity = ?`, severityFilter)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("audit: acknowledge alerts: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	_ = s.LogEvent(Event{
+		Action:   "acknowledge-alerts",
+		Target:   severityFilter,
+		Details:  fmt.Sprintf("acknowledged %d alerts", n),
+		Severity: "INFO",
+	})
+
+	return n, nil
+}
+
+// AcknowledgeByIDs clears specific alerts by their event IDs.
+func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(
+		`UPDATE audit_events SET severity = 'ACK' WHERE id IN (%s) AND severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`,
+		strings.Join(placeholders, ","))
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("audit: acknowledge by IDs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	_ = s.LogEvent(Event{
+		Action:   "acknowledge-alerts",
+		Details:  fmt.Sprintf("acknowledged %d selected alerts", n),
+		Severity: "INFO",
+	})
+
+	return n, nil
+}
+
+// ListEventsByTarget returns recent audit events for a given target path.
+func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		 FROM audit_events
+		 WHERE target = ?
+		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list events by target: %w", err)
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var tgt, details, severity, runID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &tgt, &e.Actor, &details, &severity, &runID); err != nil {
+			return nil, fmt.Errorf("audit: scan event row: %w", err)
+		}
+		e.Target = tgt.String
+		e.Details = details.String
+		e.Severity = severity.String
+		e.RunID = runID.String
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// ListFindingsByRunID returns findings from the scan whose ID matches the run_id.
+func (s *Store) ListFindingsByRunID(runID string) ([]FindingRow, error) {
+	if runID == "" {
+		return nil, nil
+	}
+	return s.ListFindingsByScan(runID)
+}
+
 func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 	if limit <= 0 {
 		limit = 50
