@@ -247,10 +247,6 @@ var builtinRules = []rule{
 	},
 }
 
-func scanFile(path string) ([]Finding, error) {
-	return scanFileWithRules(path, builtinRules)
-}
-
 func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	f, err := os.Open(path)
 	if err != nil {
