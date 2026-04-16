@@ -95,10 +95,14 @@ Run without arguments to start the sidecar daemon.`,
 	SilenceUsage: true,
 }
 
-func Execute() {
+// Execute runs the root command and returns the exit code. The actual
+// os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
+// always executes.
+func Execute() int {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func initOTelProvider() {

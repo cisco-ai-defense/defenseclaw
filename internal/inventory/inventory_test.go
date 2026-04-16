@@ -14,22 +14,20 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package main
+package inventory
 
-import (
-	"os"
+import "testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/cli"
-)
+func TestNew(t *testing.T) {
+	inv := New()
+	if inv == nil {
+		t.Fatal("New() returned nil")
+	}
+}
 
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
-)
-
-func main() {
-	cli.SetVersion(version)
-	cli.SetBuildInfo(commit, date)
-	os.Exit(cli.Execute())
+func TestNewDependencyGraph(t *testing.T) {
+	g := NewDependencyGraph()
+	if g == nil {
+		t.Fatal("NewDependencyGraph() returned nil")
+	}
 }

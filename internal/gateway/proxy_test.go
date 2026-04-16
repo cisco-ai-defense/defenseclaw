@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"golang.org/x/time/rate"
 )
 
 // ---------------------------------------------------------------------------
@@ -2342,5 +2343,139 @@ func TestBlockedResponseHeaderGemini(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
 		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SSRF hardening: decimal/hex IP, DNS rebinding, IPv6 encoding
+// ---------------------------------------------------------------------------
+
+func TestHandlePassthrough_SSRFHardening(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "test",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+
+	tests := []struct {
+		name      string
+		targetURL string
+		wantCode  int
+	}{
+		{"decimal IP (127.0.0.1)", "http://2130706433/latest/meta-data/", http.StatusForbidden},
+		{"hex IP", "http://0x7f000001/secret", http.StatusForbidden},
+		{"IPv6 loopback", "http://[::1]:8080/secret", http.StatusForbidden},
+		{"IPv6 mapped v4 loopback", "http://[::ffff:127.0.0.1]:8080/secret", http.StatusForbidden},
+		{"cloud IMDS IPv6", "http://[fd00::1]/meta-data/", http.StatusForbidden},
+		{"private 172.16.x.x", "http://172.16.0.1:9200/elasticsearch", http.StatusForbidden},
+		{"private 192.168.x.x", "http://192.168.1.1/admin", http.StatusForbidden},
+		{"link-local", "http://169.254.169.254/latest/meta-data/", http.StatusForbidden},
+		{"file protocol blocked", "file:///etc/passwd", http.StatusForbidden},
+		{"ftp protocol blocked", "ftp://evil.com/exfil", http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DC-Target-URL", tt.targetURL)
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+
+			proxy.handlePassthrough(rec, req)
+			if rec.Code != tt.wantCode {
+				t.Errorf("expected %d, got %d: %s", tt.wantCode, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting middleware
+// ---------------------------------------------------------------------------
+
+func TestRateLimitMiddleware(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "observe")
+
+	// Tight limiter: 1 req/s, burst 2
+	proxy.limiter = rate.NewLimiter(rate.Limit(1), 2)
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":      "gpt-4",
+		"messages":   []map[string]interface{}{{"role": "user", "content": "hi"}},
+		"max_tokens": 10,
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", proxy.handleChatCompletion)
+	handler := proxy.rateLimitMiddleware(mux)
+
+	// Burst of 2 should succeed
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			t.Errorf("request %d within burst should not be rate limited", i+1)
+		}
+	}
+
+	// Third request should be rate limited
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 after burst exhausted, got %d", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("429 response should include Retry-After header")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Header injection / smuggling prevention
+// ---------------------------------------------------------------------------
+
+func TestHeaderInjectionRejection(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "test",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+
+	tests := []struct {
+		name      string
+		targetURL string
+		wantBlock bool
+	}{
+		{"CRLF in URL", "https://api.openai.com\r\nX-Injected: true", true},
+		{"newline in URL", "https://api.openai.com\nX-Injected: true", true},
+		{"null byte in URL", "https://api.openai.com\x00/secret", true},
+		{"normal URL passes", "https://api.openai.com/v1/chat/completions", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DC-Target-URL", tt.targetURL)
+			req.Header.Set("X-AI-Auth", "Bearer key")
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+
+			proxy.handlePassthrough(rec, req)
+			blocked := rec.Code == http.StatusForbidden || rec.Code == http.StatusBadRequest
+			if tt.wantBlock && !blocked {
+				t.Errorf("expected blocked response, got %d", rec.Code)
+			}
+		})
 	}
 }

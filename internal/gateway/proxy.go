@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -90,6 +91,10 @@ type GuardrailProxy struct {
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
 	// Tests can override this to inject a mock provider.
 	resolveProviderFn func(req *ChatRequest) LLMProvider
+
+	// limiter caps the overall request rate to the proxy (all clients).
+	// Defaults to 100 req/s with a burst of 200.
+	limiter *rate.Limiter
 
 	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
 	// endpoint on the API server writes guardrail_runtime.json; the proxy
@@ -167,6 +172,7 @@ func NewGuardrailProxy(
 		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		notify:       notify,
+		limiter:      rate.NewLimiter(rate.Limit(100), 200),
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
 	}
@@ -193,7 +199,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/chat/completions", p.handleChatCompletion)
 	mux.HandleFunc("/v1/models", p.handleModels)
 	mux.HandleFunc("/models", p.handleModels)
-	mux.HandleFunc("/health/liveliness", p.handleHealth)
+	mux.HandleFunc("/health/liveness", p.handleHealth)
+	mux.HandleFunc("/health/liveliness", p.handleHealth) // backward compat
 	mux.HandleFunc("/health/readiness", p.handleHealth)
 	mux.HandleFunc("/health", p.handleHealth)
 	// Catch-all for provider-native paths (e.g. /v1/messages for Anthropic,
@@ -203,7 +210,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/", p.handlePassthrough)
 
 	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
-	logged := p.requestLogger(mux)
+	limited := p.rateLimitMiddleware(mux)
+	logged := p.requestLogger(limited)
 	srv := &http.Server{Addr: addr, Handler: logged}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
@@ -251,6 +259,19 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------
+
+// rateLimitMiddleware rejects requests that exceed the proxy-wide rate limit
+// with HTTP 429 to prevent upstream provider saturation and LLM judge overload.
+func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p.limiter != nil && !p.limiter.Allow() {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, `{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`, http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // requestLogger wraps a handler and logs every incoming request so we can
 // diagnose 404s and unexpected paths from upstream callers.

@@ -2224,6 +2224,96 @@ PY
         fail "provider detection: extension and internal providers.json are in sync" "files differ"
     fi
 
+    # ── 6B-5. Bifrost provider: multi-provider model routing ──
+    # Verify that model strings with provider prefixes are correctly routed
+    # through the Bifrost SDK by checking the gateway accepts them.
+    local bifrost_models=(
+        "openai/gpt-4o-mini"
+        "anthropic/claude-haiku-4-5-20251001"
+    )
+    for bmodel in "${bifrost_models[@]}"; do
+        local bprov bname
+        bprov="${bmodel%%/*}"
+        bname="${bmodel#*/}"
+        local bkey_var
+        case "$bprov" in
+            openai)     bkey_var="OPENAI_API_KEY" ;;
+            anthropic)  bkey_var="ANTHROPIC_API_KEY" ;;
+            *)          bkey_var="" ;;
+        esac
+        local bkey="${!bkey_var:-}"
+        if [ -z "$bkey" ]; then
+            skip "bifrost multi-provider: $bmodel" "$bkey_var not set"
+            continue
+        fi
+        sleep 1
+        response=$(curl -sS --max-time 45 \
+            -H "Authorization: Bearer $master_key" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -cn --arg model "$bmodel" '{model: $model, messages: [{role: "user", content: "Reply with exactly: BIFROST_OK"}], max_tokens: 20}')" \
+            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if echo "$content" | grep -qi "BIFROST_OK"; then
+            pass "bifrost multi-provider: $bmodel round-trip succeeded"
+        elif echo "$err" | grep -Eqi '429|rate|overload|busy'; then
+            skip "bifrost multi-provider: $bmodel" "rate limited (transient)"
+        else
+            fail "bifrost multi-provider: $bmodel round-trip" "err='$err' content='$content'"
+        fi
+    done
+
+    # ── 6B-6. Bifrost provider: API key via X-AI-Auth header ──
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        sleep 1
+        response=$(curl -sS --max-time 45 \
+            -H "X-DC-Auth: Bearer ${gateway_token:-$master_key}" \
+            -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"anthropic/claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Reply: HEADER_KEY_OK"}],"max_tokens":20}' \
+            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        if echo "$content" | grep -qi "HEADER_KEY_OK"; then
+            pass "bifrost API key: X-AI-Auth header propagated to Bifrost"
+        else
+            err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+            if echo "$err" | grep -Eqi '429|rate|overload|busy'; then
+                skip "bifrost API key via header" "rate limited (transient)"
+            else
+                fail "bifrost API key: X-AI-Auth header" "err='$err' content='$content'"
+            fi
+        fi
+    else
+        skip "bifrost API key via header" "ANTHROPIC_API_KEY not set"
+    fi
+
+    # ── 6B-7. Bifrost provider: detection_strategy field in config ──
+    local strategy_check
+    strategy_check=$(python3 - <<'PY'
+from defenseclaw.config import load
+try:
+    cfg = load()
+    ds = getattr(cfg.guardrail, "detection_strategy", "")
+    if ds in ("regex_only", "regex_judge", "judge_first", ""):
+        print("ok:" + (ds or "default"))
+    else:
+        print("bad:" + ds)
+except Exception as e:
+    print("skip:" + str(e))
+PY
+)
+    case "$strategy_check" in
+        ok:*)
+            pass "bifrost config: detection_strategy is valid (${strategy_check#ok:})"
+            ;;
+        skip:*)
+            skip "bifrost config: detection_strategy" "${strategy_check#skip:}"
+            ;;
+        *)
+            fail "bifrost config: detection_strategy" "unexpected: $strategy_check"
+            ;;
+    esac
+
     phase_timer_end "Phase 6B"
 }
 

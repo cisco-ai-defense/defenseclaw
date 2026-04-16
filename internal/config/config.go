@@ -39,7 +39,12 @@ type ClawConfig struct {
 	ConfigFile string   `mapstructure:"config_file" yaml:"config_file"`
 }
 
+// CurrentConfigVersion is bumped when the config schema changes in a way
+// that requires migration (new required fields, renamed keys, etc.).
+const CurrentConfigVersion = 2
+
 type Config struct {
+	ConfigVersion  int                  `mapstructure:"config_version"   yaml:"config_version"`
 	DataDir        string               `mapstructure:"data_dir"         yaml:"data_dir"`
 	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
 	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
@@ -575,6 +580,9 @@ func Load() (*Config, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+
+	migrateConfig(&cfg)
+
 	if err := cfg.SkillActions.Validate(); err != nil {
 		return nil, err
 	}
@@ -594,6 +602,29 @@ func Load() (*Config, error) {
 
 	warnPlaintextSecrets(&cfg)
 	return &cfg, nil
+}
+
+// migrateConfig applies forward migrations when config_version is behind
+// CurrentConfigVersion. Each migration step is idempotent.
+func migrateConfig(cfg *Config) {
+	if cfg.ConfigVersion >= CurrentConfigVersion {
+		return
+	}
+
+	oldVersion := cfg.ConfigVersion
+
+	// v0/v1 → v2: ensure detection_strategy defaults are populated
+	if cfg.ConfigVersion < 2 {
+		if cfg.Guardrail.DetectionStrategy == "" {
+			cfg.Guardrail.DetectionStrategy = "regex_only"
+		}
+		if cfg.Guardrail.Mode == "" {
+			cfg.Guardrail.Mode = "observe"
+		}
+	}
+
+	cfg.ConfigVersion = CurrentConfigVersion
+	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
 }
 
 // warnPlaintextSecrets logs a deprecation warning for each secret stored as
