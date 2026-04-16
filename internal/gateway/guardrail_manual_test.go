@@ -869,7 +869,7 @@ func TestPIIToVerdict_SetsEntityCount(t *testing.T) {
 		},
 	}
 
-	v := j.piiToVerdict(piiData, "completion")
+	v := j.piiToVerdict(piiData, "completion", "")
 
 	if v.EntityCount != 4 {
 		t.Errorf("EntityCount=%d, want 4 (3 emails + 1 phone)", v.EntityCount)
@@ -893,7 +893,7 @@ func TestPIIToVerdict_EntityCount_AfterSuppression(t *testing.T) {
 		},
 	}
 
-	v := j.piiToVerdict(piiData, "completion")
+	v := j.piiToVerdict(piiData, "completion", "")
 
 	if v.EntityCount > 3 {
 		t.Errorf("EntityCount=%d, should not exceed raw entity count", v.EntityCount)

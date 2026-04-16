@@ -17,13 +17,16 @@
 package gateway
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
 
 const (
-	defaultMaxTurns    = 10
-	defaultMaxSessions = 200
+	defaultMaxTurns     = 10
+	defaultMaxSessions  = 200
+	defaultSessionTTL   = 30 * time.Minute
+	staleSweepFrequency = 50 // run a stale sweep roughly every N Record calls
 )
 
 // contextMessage represents a single turn stored in the context tracker.
@@ -40,18 +43,30 @@ type SessionContext struct {
 }
 
 // ContextTracker maintains per-session conversation buffers for multi-turn
-// analysis. The buffer is bounded: only the most recent maxTurns messages
-// are retained per session, and sessions are pruned when the total count
-// exceeds maxSessions.
+// analysis. The buffer is bounded on three axes:
+//   - maxTurns: messages retained per session (FIFO).
+//   - maxSessions: total sessions retained (LRU-evict when exceeded).
+//   - ttl: sessions untouched for longer than ttl are eligible for
+//     eviction on the next sweep. TTL-based eviction prevents the
+//     tracker from retaining conversation buffers for sessions the
+//     user has long-abandoned.
 type ContextTracker struct {
 	mu          sync.RWMutex
 	sessions    map[string]*SessionContext
 	maxTurns    int
 	maxSessions int
+	ttl         time.Duration
+	// writesSinceSweep counts Record calls since the last stale sweep.
+	// We amortize the sweep cost across many writes rather than running
+	// a separate goroutine.
+	writesSinceSweep int
+	// now is injected for tests; production uses time.Now.
+	now func() time.Time
 }
 
 // NewContextTracker creates a tracker with the given limits.
-// Zero values use defaults: 10 turns per session, 200 sessions max.
+// Zero values use defaults: 10 turns per session, 200 sessions max,
+// 30 minute TTL.
 func NewContextTracker(maxTurns, maxSessions int) *ContextTracker {
 	if maxTurns <= 0 {
 		maxTurns = defaultMaxTurns
@@ -63,7 +78,18 @@ func NewContextTracker(maxTurns, maxSessions int) *ContextTracker {
 		sessions:    make(map[string]*SessionContext),
 		maxTurns:    maxTurns,
 		maxSessions: maxSessions,
+		ttl:         defaultSessionTTL,
+		now:         time.Now,
 	}
+}
+
+// SetTTL overrides the default session TTL. A non-positive value disables
+// TTL-based eviction (sessions are only evicted by LRU when maxSessions
+// is exceeded). Primarily used in tests.
+func (ct *ContextTracker) SetTTL(ttl time.Duration) {
+	ct.mu.Lock()
+	ct.ttl = ttl
+	ct.mu.Unlock()
 }
 
 // Record adds a message to the session's conversation buffer.
@@ -75,6 +101,8 @@ func (ct *ContextTracker) Record(sessionKey, role, content string) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
+	now := ct.now()
+
 	sc, ok := ct.sessions[sessionKey]
 	if !ok {
 		sc = &SessionContext{}
@@ -84,12 +112,18 @@ func (ct *ContextTracker) Record(sessionKey, role, content string) {
 	sc.Messages = append(sc.Messages, contextMessage{
 		Role:      role,
 		Content:   content,
-		Timestamp: time.Now(),
+		Timestamp: now,
 	})
-	sc.LastSeen = time.Now()
+	sc.LastSeen = now
 
 	if len(sc.Messages) > ct.maxTurns {
 		sc.Messages = sc.Messages[len(sc.Messages)-ct.maxTurns:]
+	}
+
+	ct.writesSinceSweep++
+	if ct.writesSinceSweep >= staleSweepFrequency {
+		ct.evictStaleLocked(now)
+		ct.writesSinceSweep = 0
 	}
 
 	if len(ct.sessions) > ct.maxSessions {
@@ -154,25 +188,49 @@ func (ct *ContextTracker) SessionCount() int {
 
 // pruneOldestLocked removes the oldest quarter of sessions by LastSeen.
 // Caller must hold ct.mu write lock.
+//
+// The previous implementation repeatedly scanned the whole map to find
+// the single oldest entry, giving O(n²) total work when shrinking from
+// N to 3N/4. We now snapshot all (key, LastSeen) pairs once, sort them,
+// and delete the oldest in a single pass: O(n log n).
 func (ct *ContextTracker) pruneOldestLocked() {
 	target := ct.maxSessions * 3 / 4
 	if target < 1 {
 		target = 1
 	}
+	if len(ct.sessions) <= target {
+		return
+	}
 
-	for len(ct.sessions) > target {
-		var oldestKey string
-		var oldestTime time.Time
-		first := true
-		for k, sc := range ct.sessions {
-			if first || sc.LastSeen.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = sc.LastSeen
-				first = false
-			}
-		}
-		if oldestKey != "" {
-			delete(ct.sessions, oldestKey)
+	type keyAge struct {
+		key  string
+		seen time.Time
+	}
+	ages := make([]keyAge, 0, len(ct.sessions))
+	for k, sc := range ct.sessions {
+		ages = append(ages, keyAge{key: k, seen: sc.LastSeen})
+	}
+	sort.Slice(ages, func(i, j int) bool {
+		return ages[i].seen.Before(ages[j].seen)
+	})
+
+	toDelete := len(ct.sessions) - target
+	for i := 0; i < toDelete && i < len(ages); i++ {
+		delete(ct.sessions, ages[i].key)
+	}
+}
+
+// evictStaleLocked removes any session whose LastSeen is older than
+// now-ttl. No-op when ttl is non-positive. Caller must hold ct.mu write
+// lock.
+func (ct *ContextTracker) evictStaleLocked(now time.Time) {
+	if ct.ttl <= 0 {
+		return
+	}
+	cutoff := now.Add(-ct.ttl)
+	for k, sc := range ct.sessions {
+		if sc.LastSeen.Before(cutoff) {
+			delete(ct.sessions, k)
 		}
 	}
 }

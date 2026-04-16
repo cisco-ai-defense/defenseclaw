@@ -17,35 +17,65 @@
 package guardrail
 
 import (
+	"container/list"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 )
 
+// regexCacheMaxEntries bounds the compiled-regex cache. 1024 is far more
+// than any realistic rule-pack (default pack has ~12 patterns) but safely
+// protects against pathological inputs where an attacker-controlled path
+// causes the cache to grow unbounded. On overflow the least-recently-used
+// entry is evicted.
+const regexCacheMaxEntries = 1024
+
 var (
-	regexCacheMu sync.RWMutex
-	regexCache   = make(map[string]*regexp.Regexp)
+	regexCacheMu    sync.Mutex
+	regexCache      = make(map[string]*list.Element, regexCacheMaxEntries)
+	regexCacheOrder = list.New()
 )
 
+type regexCacheEntry struct {
+	pattern string
+	re      *regexp.Regexp // nil means "pattern is invalid; cache the negative result"
+}
+
 // compileRegex returns a compiled regex from cache or compiles and caches it.
-// Returns nil if the pattern is invalid.
+// Returns nil if the pattern is invalid. Negative results are also cached
+// so a pathological pattern can't burn CPU on every request.
 func compileRegex(pattern string) *regexp.Regexp {
-	regexCacheMu.RLock()
-	if re, ok := regexCache[pattern]; ok {
-		regexCacheMu.RUnlock()
+	regexCacheMu.Lock()
+	if el, ok := regexCache[pattern]; ok {
+		regexCacheOrder.MoveToFront(el)
+		re := el.Value.(*regexCacheEntry).re
+		regexCacheMu.Unlock()
 		return re
 	}
-	regexCacheMu.RUnlock()
+	regexCacheMu.Unlock()
 
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil
-	}
+	re, _ := regexp.Compile(pattern)
 
 	regexCacheMu.Lock()
-	regexCache[pattern] = re
-	regexCacheMu.Unlock()
+	defer regexCacheMu.Unlock()
+	// Double-check after reacquiring the lock to avoid a race adding the
+	// same pattern twice.
+	if el, ok := regexCache[pattern]; ok {
+		regexCacheOrder.MoveToFront(el)
+		return el.Value.(*regexCacheEntry).re
+	}
+	el := regexCacheOrder.PushFront(&regexCacheEntry{pattern: pattern, re: re})
+	regexCache[pattern] = el
+	for regexCacheOrder.Len() > regexCacheMaxEntries {
+		oldest := regexCacheOrder.Back()
+		if oldest == nil {
+			break
+		}
+		regexCacheOrder.Remove(oldest)
+		entry := oldest.Value.(*regexCacheEntry)
+		delete(regexCache, entry.pattern)
+	}
 	return re
 }
 
@@ -115,7 +145,7 @@ func FilterPIIEntities(entities []PIIEntity, supps []FindingSuppression) (kept [
 
 func matchSuppression(ent PIIEntity, supps []FindingSuppression) (id, reason string) {
 	for _, s := range supps {
-		if s.FindingPattern != ent.FindingID {
+		if !findingPatternMatches(s.FindingPattern, ent.FindingID) {
 			continue
 		}
 		re := compileRegex(s.EntityPattern)
@@ -131,6 +161,33 @@ func matchSuppression(ent PIIEntity, supps []FindingSuppression) (id, reason str
 		return s.ID, s.Reason
 	}
 	return "", ""
+}
+
+// findingPatternMatches reports whether the YAML finding_pattern matches the
+// runtime finding ID. The YAML surface is advertised as a pattern, so we
+// treat it as an anchored regex: operators can write literal IDs like
+// "JUDGE-PII-EMAIL" (which match themselves) or wildcards like
+// "JUDGE-PII-.*" (which match every JUDGE-PII finding).
+//
+// Anchoring with \A...\z prevents "JUDGE-PII-EMAIL" from accidentally
+// matching "JUDGE-PII-EMAIL-EXTERNAL" and keeps the common literal case
+// behaving exactly as operators expect.
+//
+// A pattern that fails to compile falls back to exact string equality so
+// misconfiguration doesn't silently disable the suppression — compileRegex
+// also logs the failure once via the rule-pack Validate path.
+func findingPatternMatches(pattern, findingID string) bool {
+	if pattern == "" {
+		return false
+	}
+	if pattern == findingID {
+		return true
+	}
+	re := compileRegex(`\A(?:` + pattern + `)\z`)
+	if re == nil {
+		return pattern == findingID
+	}
+	return re.MatchString(findingID)
 }
 
 func checkCondition(condition, value string) bool {
@@ -155,8 +212,19 @@ func IsEpoch(value string) bool {
 }
 
 // IsPlatformID returns true if value looks like a channel platform numeric
-// ID (Telegram, Slack, etc.) rather than a phone number. Heuristic: a bare
-// 9-12 digit number that does NOT have formatted phone structure.
+// ID (Telegram, Slack, etc.) rather than a phone number.
+//
+// The default policy is: fail-OPEN for real phones. If the value has the
+// structure of a valid NANP (US/Canada) phone number, we return false so
+// the PII finding is surfaced. Operators who run integrations where bare
+// phone-looking strings are known to be platform IDs (e.g. Telegram user
+// IDs in channel metadata) can add their own context-specific suppression
+// on top.
+//
+// Previously this heuristic returned true for any 9-12 digit number,
+// which silently suppressed legitimate phone numbers like 844-908-8619.
+// The NANP structure check below rules out invalid area/exchange codes
+// (N11 service codes, leading-1 blocks, etc.).
 func IsPlatformID(value string) bool {
 	v := strings.TrimSpace(value)
 	if len(v) < 9 || len(v) > 12 {
@@ -168,32 +236,47 @@ func IsPlatformID(value string) bool {
 		}
 	}
 
-	// If it looks like a valid epoch, it's definitely not a phone number.
 	if IsEpoch(v) {
 		return true
 	}
 
-	// Telegram IDs are typically large numbers. We treat any purely-numeric
-	// 9-12 digit string without standard phone formatting as a platform ID
-	// candidate. The key insight: the PII judge already decided it's a
-	// phone number; our job is to un-decide that when the entity came from
-	// channel metadata context rather than user-visible content.
-	// A 10-digit number matching US phone pattern (NXX-NXX-XXXX where N>1)
-	// is more likely a real phone number.
-	if len(v) == 10 {
-		d0 := v[0]
-		d3 := v[3]
-		if d0 >= '2' && d3 >= '2' {
-			// Looks like a valid US phone: area code starts >=2, exchange starts >=2.
-			// Suppress anyway — in the context of channel metadata, these are
-			// almost always platform IDs, not phone numbers. The user can
-			// remove this suppression rule if they need phone detection in
-			// channel metadata.
-			return true
-		}
+	if len(v) == 10 && looksLikeNANPPhone(v) {
+		// Real-looking NANP phone number — do NOT suppress by default.
+		return false
+	}
+	if len(v) == 11 && v[0] == '1' && looksLikeNANPPhone(v[1:]) {
+		// 1 + 10-digit NANP number (country code prefix).
+		return false
 	}
 
-	return len(v) >= 9
+	// 9-digit, 12-digit, or a 10/11-digit value whose NANP structure is
+	// invalid: treat as a platform ID.
+	return true
+}
+
+// looksLikeNANPPhone reports whether a 10-digit string has valid
+// North-American Numbering Plan structure: NPA (area code) first digit
+// 2-9 and not N11, NXX (exchange) first digit 2-9 and not N11.
+func looksLikeNANPPhone(v string) bool {
+	if len(v) != 10 {
+		return false
+	}
+	return isNANPBlock(v[0:3]) && isNANPBlock(v[3:6])
+}
+
+func isNANPBlock(s string) bool {
+	if len(s) != 3 {
+		return false
+	}
+	if s[0] < '2' || s[0] > '9' {
+		return false
+	}
+	// N11 service codes (211, 311, 411, 511, 611, 711, 811, 911) are
+	// never valid area/exchange codes.
+	if s[1] == '1' && s[2] == '1' {
+		return false
+	}
+	return true
 }
 
 // FilterToolFindings applies tool-specific suppressions.

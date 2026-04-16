@@ -879,64 +879,89 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 }
 
 // inspectToolResult checks tool output against sensitive-tools configuration
-// from the rule pack. If the tool is flagged for result inspection, its output
-// is scanned for PII. If judge_result is true and a judge is configured, the
-// LLM PII judge is also run against the output.
+// from the rule pack.
+//
+// The flow is:
+//  1. A deterministic regex scan (scanLocalPatterns) runs whenever
+//     result_inspection=true, regardless of judge availability. Previously
+//     the function was a no-op when judge_result=false OR when the judge
+//     was nil — that meant tools like users_org_info (shipped default has
+//     result_inspection=true, judge_result=false) received no inspection
+//     at all, and any judge-init failure silently disabled every sensitive
+//     tool-result scan in the process.
+//  2. If judge_result=true AND a judge is configured, the LLM PII judge
+//     also runs and its findings are merged with the regex findings.
+//  3. If judge_result=true but the judge is unavailable, a warning is
+//     logged once per call so the operator can see the degraded state —
+//     the deterministic scan still runs.
 func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	if r.rp == nil || payload.Output == "" {
 		return
 	}
 	stool := r.rp.LookupSensitiveTool(payload.Tool)
-	if stool == nil {
-		return
-	}
-	if !stool.ResultInspection {
+	if stool == nil || !stool.ResultInspection {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[sidecar] inspecting sensitive tool result: %s (output_len=%d)\n",
-		payload.Tool, len(payload.Output))
+	fmt.Fprintf(os.Stderr, "[sidecar] inspecting sensitive tool result: %s (output_len=%d judge=%t)\n",
+		payload.Tool, len(payload.Output), stool.JudgeResult && r.judge != nil)
 
-	if stool.JudgeResult && r.judge != nil {
-		select {
-		case r.judgeSem <- struct{}{}:
-			defer func() { <-r.judgeSem }()
-		default:
-			fmt.Fprintf(os.Stderr, "[sidecar] tool result judge skipped (at capacity): %s\n", payload.Tool)
-			return
-		}
+	// Stage 1: deterministic regex scan. Always runs.
+	verdict := scanLocalPatterns("completion", payload.Output)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		verdict := r.judge.RunJudges(ctx, "completion", payload.Output)
-		if verdict != nil && verdict.Action != "allow" {
-			minEntities := stool.MinEntitiesAlert
-			if minEntities <= 0 {
-				minEntities = 1
-			}
-			entityCount := verdict.EntityCount
-			if entityCount == 0 {
-				entityCount = len(verdict.Findings)
-			}
-			if entityCount >= minEntities {
-				fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
-					payload.Tool, verdict.Action, verdict.Severity, entityCount, verdict.Findings)
-				_ = r.logger.LogAction("tool-result-pii-alert", payload.Tool,
-					fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
-						verdict.Severity, entityCount, len(verdict.Findings), verdict.Reason))
-				if r.notify != nil {
-					r.notify.Push(SecurityNotification{
-						SubjectType: "tool-result",
-						SkillName:   payload.Tool,
-						Severity:    verdict.Severity,
-						Findings:    entityCount,
-						Actions:     []string{"alert"},
-						Reason:      verdict.Reason,
-					})
-				}
+	// Stage 2: LLM judge, if requested and available. Merge into verdict.
+	if stool.JudgeResult {
+		if r.judge == nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] tool %s requests judge_result but judge unavailable; using regex-only verdict\n",
+				payload.Tool)
+		} else {
+			select {
+			case r.judgeSem <- struct{}{}:
+				func() {
+					defer func() { <-r.judgeSem }()
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if jv := r.judge.RunJudges(ctx, "completion", payload.Output, payload.Tool); jv != nil {
+						verdict = mergeWithJudge(verdict, jv)
+					}
+				}()
+			default:
+				fmt.Fprintf(os.Stderr, "[sidecar] tool result judge skipped (at capacity), regex scan kept: %s\n",
+					payload.Tool)
 			}
 		}
+	}
+
+	if verdict == nil || verdict.Action == "allow" {
+		return
+	}
+
+	minEntities := stool.MinEntitiesAlert
+	if minEntities <= 0 {
+		minEntities = 1
+	}
+	entityCount := verdict.EntityCount
+	if entityCount == 0 {
+		entityCount = len(verdict.Findings)
+	}
+	if entityCount < minEntities {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
+		payload.Tool, verdict.Action, verdict.Severity, entityCount, verdict.Findings)
+	_ = r.logger.LogAction("tool-result-pii-alert", payload.Tool,
+		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
+			verdict.Severity, entityCount, len(verdict.Findings), verdict.Reason))
+	if r.notify != nil {
+		r.notify.Push(SecurityNotification{
+			SubjectType: "tool-result",
+			SkillName:   payload.Tool,
+			Severity:    verdict.Severity,
+			Findings:    entityCount,
+			Actions:     []string{"alert"},
+			Reason:      verdict.Reason,
+		})
 	}
 }
 

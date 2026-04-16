@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -29,8 +31,9 @@ import (
 )
 
 // bifrostProvider implements LLMProvider by delegating to the Bifrost Go SDK.
-// A single Bifrost client instance is shared across all requests via a
-// package-level singleton, initialized lazily on first use.
+// Each distinct (providerKey, apiKey, baseURL) tuple gets its own dedicated
+// Bifrost client with an immutable Account, so credentials and endpoints for
+// one tenant are isolated from other in-flight requests.
 type bifrostProvider struct {
 	providerKey schemas.ModelProvider
 	model       string
@@ -38,75 +41,52 @@ type bifrostProvider struct {
 	baseURL     string
 }
 
+// tenantKey identifies a unique (provider, api-key, base-url) tuple. Each
+// tuple gets its own dedicated Bifrost client + frozen Account so that
+// credentials and endpoints for one tenant can never leak into an in-flight
+// request for another. Previously a single package-level client + mutable
+// account map was shared across all tenants: two concurrent requests hitting
+// the same provider with different keys or base URLs could race so that the
+// Bifrost client executed request A using tenant B's credentials.
+type tenantKey struct {
+	provider schemas.ModelProvider
+	keyID    string // sha256 of apiKey — the raw key is never in the map key.
+	baseURL  string
+}
+
 var (
-	bifrostMu       sync.Mutex
-	bifrostClient   *bifrost.Bifrost
-	bifrostAccMu    sync.Mutex
-	bifrostAccounts = make(map[schemas.ModelProvider]*providerAccount)
-	bifrostUpdated  = make(map[schemas.ModelProvider]bool)
+	bifrostTenantsMu sync.RWMutex
+	bifrostTenants   = make(map[tenantKey]*bifrost.Bifrost)
 )
 
-// providerAccount holds per-provider key and config data for the Bifrost
-// Account interface.
-type providerAccount struct {
-	keys   []schemas.Key
-	config *schemas.ProviderConfig
+// tenantAccount implements schemas.Account and is frozen at construction
+// time: it returns the same single key + config for its pinned provider and
+// errors for any other provider. No mutators exist.
+type tenantAccount struct {
+	provider schemas.ModelProvider
+	keys     []schemas.Key
+	config   *schemas.ProviderConfig
 }
 
-// globalBifrostAccount implements schemas.Account, returning keys and configs
-// that have been registered by bifrostProvider instances.
-type globalBifrostAccount struct{}
-
-func (a *globalBifrostAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
-	bifrostAccMu.Lock()
-	defer bifrostAccMu.Unlock()
-	providers := make([]schemas.ModelProvider, 0, len(bifrostAccounts))
-	for k := range bifrostAccounts {
-		providers = append(providers, k)
-	}
-	return providers, nil
+func (a *tenantAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+	return []schemas.ModelProvider{a.provider}, nil
 }
 
-func (a *globalBifrostAccount) GetKeysForProvider(_ context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
-	bifrostAccMu.Lock()
-	defer bifrostAccMu.Unlock()
-	acc, ok := bifrostAccounts[providerKey]
-	if !ok {
-		return nil, fmt.Errorf("gateway: no keys configured for provider %q", providerKey)
+func (a *tenantAccount) GetKeysForProvider(_ context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
+	if providerKey != a.provider {
+		return nil, fmt.Errorf("gateway: provider %q not configured for this tenant (expected %q)", providerKey, a.provider)
 	}
-	return acc.keys, nil
+	return a.keys, nil
 }
 
-func (a *globalBifrostAccount) GetConfigForProvider(providerKey schemas.ModelProvider) (*schemas.ProviderConfig, error) {
-	bifrostAccMu.Lock()
-	defer bifrostAccMu.Unlock()
-	acc, ok := bifrostAccounts[providerKey]
-	if !ok {
-		return nil, fmt.Errorf("gateway: no config for provider %q", providerKey)
+func (a *tenantAccount) GetConfigForProvider(providerKey schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	if providerKey != a.provider {
+		return nil, fmt.Errorf("gateway: provider %q not configured for this tenant (expected %q)", providerKey, a.provider)
 	}
-	return acc.config, nil
+	return a.config, nil
 }
 
-// registerProvider ensures the given provider/key/baseURL combo is registered
-// with the global account so that the Bifrost client can route to it.
-// If the provider already exists but the key or baseURL changed, the
-// registration is updated and the provider is marked for re-sync.
-func registerProvider(providerKey schemas.ModelProvider, apiKey, baseURL string) (changed bool) {
-	bifrostAccMu.Lock()
-	defer bifrostAccMu.Unlock()
-
-	keyID := string(providerKey) + ":" + apiKey
-
-	if existing, ok := bifrostAccounts[providerKey]; ok {
-		same := len(existing.keys) == 1 &&
-			existing.keys[0].ID == keyID &&
-			existing.config.NetworkConfig.BaseURL == baseURL
-		if same {
-			return false
-		}
-		delete(bifrostUpdated, providerKey)
-	}
-
+func newTenantAccount(providerKey schemas.ModelProvider, apiKey, keyID, baseURL string) *tenantAccount {
 	key := schemas.Key{
 		ID:     keyID,
 		Name:   string(providerKey) + "-key",
@@ -114,62 +94,66 @@ func registerProvider(providerKey schemas.ModelProvider, apiKey, baseURL string)
 		Models: schemas.WhiteList{"*"},
 		Weight: 1.0,
 	}
-
 	nc := schemas.NetworkConfig{
 		DefaultRequestTimeoutInSeconds: 120,
 	}
 	if baseURL != "" {
 		nc.BaseURL = baseURL
 	}
-
-	bifrostAccounts[providerKey] = &providerAccount{
-		keys: []schemas.Key{key},
-		config: &schemas.ProviderConfig{
-			NetworkConfig: nc,
-		},
+	return &tenantAccount{
+		provider: providerKey,
+		keys:     []schemas.Key{key},
+		config:   &schemas.ProviderConfig{NetworkConfig: nc},
 	}
-	return true
 }
 
 func isBedrockAPIKey(key string) bool {
 	return strings.HasPrefix(key, "ABSK")
 }
 
-// getBifrostClient returns a lazily-initialized, shared Bifrost client.
-// If the initial Init call fails, subsequent calls retry instead of
-// permanently returning the cached error.
+// bifrostKeyID returns a stable, non-reversible identifier for a
+// provider + API-key pair. Never embed the raw API key here — the ID
+// surfaces in Bifrost's internal structures and may reach logs, and is
+// used as part of the tenant cache key.
+func bifrostKeyID(providerKey schemas.ModelProvider, apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return string(providerKey) + ":sha256:" + hex.EncodeToString(sum[:8])
+}
+
+// getBifrostClient returns a Bifrost client dedicated to the given
+// (provider, apiKey, baseURL) tuple. Distinct tuples get distinct clients;
+// identical tuples share a cached client. The returned client's Account is
+// immutable for the tuple's lifetime, so a concurrent call with different
+// credentials cannot change what this client uses mid-request.
 func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string) (*bifrost.Bifrost, error) {
-	regChanged := registerProvider(providerKey, apiKey, baseURL)
-
-	bifrostMu.Lock()
-	defer bifrostMu.Unlock()
-
-	if bifrostClient == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		client, err := bifrost.Init(ctx, schemas.BifrostConfig{
-			Account: &globalBifrostAccount{},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("gateway: bifrost init: %w", err)
-		}
-		bifrostClient = client
+	tk := tenantKey{
+		provider: providerKey,
+		keyID:    bifrostKeyID(providerKey, apiKey),
+		baseURL:  baseURL,
 	}
 
-	bifrostAccMu.Lock()
-	alreadyUpdated := bifrostUpdated[providerKey]
-	bifrostAccMu.Unlock()
+	bifrostTenantsMu.RLock()
+	if c, ok := bifrostTenants[tk]; ok {
+		bifrostTenantsMu.RUnlock()
+		return c, nil
+	}
+	bifrostTenantsMu.RUnlock()
 
-	if !alreadyUpdated || regChanged {
-		if err := bifrostClient.UpdateProvider(providerKey); err != nil {
-			return nil, fmt.Errorf("gateway: bifrost update provider %s: %w", providerKey, err)
-		}
-		bifrostAccMu.Lock()
-		bifrostUpdated[providerKey] = true
-		bifrostAccMu.Unlock()
+	bifrostTenantsMu.Lock()
+	defer bifrostTenantsMu.Unlock()
+	if c, ok := bifrostTenants[tk]; ok {
+		return c, nil
 	}
 
-	return bifrostClient, nil
+	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
+	if err != nil {
+		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
+	}
+	bifrostTenants[tk] = client
+	return client, nil
 }
 
 // mapProviderKey translates a DefenseClaw provider string to a Bifrost
@@ -458,11 +442,16 @@ func fromBifrostMessage(bm *schemas.ChatMessage) *ChatMessage {
 			}
 		}
 	}
-	if bm.ChatToolMessage != nil && bm.ToolCallID != nil {
-		m.ToolCallID = *bm.ToolCallID
+	if bm.ChatToolMessage != nil && bm.ChatToolMessage.ToolCallID != nil {
+		m.ToolCallID = *bm.ChatToolMessage.ToolCallID
 	}
-	if bm.ChatAssistantMessage != nil && len(bm.ToolCalls) > 0 {
-		if raw, err := json.Marshal(bm.ToolCalls); err == nil {
+	// Access ToolCalls through the explicit struct pointer rather than
+	// the promoted field from the embedded ChatAssistantMessage. Symmetric
+	// with toBifrostMessages (which assigns `bm.ChatAssistantMessage =
+	// &schemas.ChatAssistantMessage{ToolCalls: ...}`) so this direction
+	// doesn't silently break if upstream changes how the field is promoted.
+	if bm.ChatAssistantMessage != nil && len(bm.ChatAssistantMessage.ToolCalls) > 0 {
+		if raw, err := json.Marshal(bm.ChatAssistantMessage.ToolCalls); err == nil {
 			m.ToolCalls = raw
 		}
 	}

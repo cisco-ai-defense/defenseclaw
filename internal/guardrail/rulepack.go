@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -273,6 +274,11 @@ func (c *JudgeCategory) EffectiveSeverity(direction, fallback string) string {
 
 // Validate checks basic integrity of the rule pack. Logs warnings but
 // does not return errors — the rule pack degrades gracefully.
+//
+// As a side effect, every regex pattern referenced by the rule pack is
+// compiled here (via compileRegex, which memoizes). This surfaces bad
+// patterns at load time as a warning — previously an invalid pattern
+// would silently be skipped on every request with no operator signal.
 func (rp *RulePack) Validate() {
 	if rp == nil {
 		return
@@ -287,6 +293,38 @@ func (rp *RulePack) Validate() {
 		if jc.SystemPrompt == "" {
 			log.Printf("guardrail: judge/%s.yaml has empty system_prompt", name)
 		}
+	}
+
+	if rp.Suppressions != nil {
+		for _, s := range rp.Suppressions.PreJudgeStrips {
+			checkPattern("pre_judge_strip", s.ID, s.Pattern)
+		}
+		for _, s := range rp.Suppressions.FindingSupps {
+			checkPattern("finding_suppression:finding_pattern", s.ID, s.FindingPattern)
+			checkPattern("finding_suppression:entity_pattern", s.ID, s.EntityPattern)
+		}
+		for _, s := range rp.Suppressions.ToolSuppressions {
+			checkPattern("tool_suppression:tool_pattern", s.ToolPattern, s.ToolPattern)
+		}
+	}
+
+	for _, rf := range rp.RuleFiles {
+		for _, r := range rf.Rules {
+			checkPattern("rule:"+rf.Category, r.ID, r.Pattern)
+		}
+	}
+}
+
+// checkPattern compiles pattern and logs a warning if it is invalid.
+// Uses regexp.Compile directly (not compileRegex) so validation surfaces
+// the exact error message. compileRegex will itself cache the negative
+// result the first time it's queried for an invalid pattern in a hot path.
+func checkPattern(kind, id, pattern string) {
+	if pattern == "" {
+		return
+	}
+	if _, err := regexp.Compile(pattern); err != nil {
+		log.Printf("guardrail: %s %q has invalid regex %q: %v", kind, id, pattern, err)
 	}
 }
 

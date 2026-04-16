@@ -29,21 +29,41 @@ func TestIsEpoch(t *testing.T) {
 
 func TestIsPlatformID(t *testing.T) {
 	tests := []struct {
+		name string
 		val  string
 		want bool
 	}{
-		{"8449088619", true},
-		{"123456789", true},
-		{"1234567890", true},
-		{"999999999999", true},
-		{"12345678", false},
-		{"1234567890123", false},
-		{"123-456-789", false},
-		{"", false},
-		{"notdigits", false},
+		// Real NANP phone numbers — must NOT be suppressed by default.
+		// These are the regressions the narrower heuristic fixes:
+		// 844-908-8619 is a valid toll-free number, 212-555-1234 is a
+		// valid NYC number, 415-867-5309 is a valid SF number. Treating
+		// them as platform IDs meant real PII findings silently vanished.
+		{"toll_free_phone", "8449088619", false},
+		{"valid_nyc_phone", "2125551234", false},
+		{"valid_sf_phone", "4158675309", false},
+		{"valid_phone_with_country_code", "12125551234", false},
+
+		// Not-really-phone-shaped 10/11-digit strings → still platform IDs.
+		// 123... fails because area code must start with 2-9 (N11 blocks
+		// and leading-1 blocks are reserved).
+		{"leading_one", "1234567890", true},
+		// 411 is a valid N11 service code, so the area-code check
+		// rejects it and we treat the whole thing as a platform ID.
+		{"n11_area_code", "4115551234", true},
+
+		// Other platform-ID-shaped values.
+		{"9_digits", "123456789", true},
+		{"12_digits", "999999999999", true},
+
+		// Out-of-range or malformed values are not platform IDs.
+		{"too_short", "12345678", false},
+		{"too_long", "1234567890123", false},
+		{"contains_dashes", "123-456-789", false},
+		{"empty", "", false},
+		{"not_digits", "notdigits", false},
 	}
 	for _, tc := range tests {
-		t.Run(tc.val, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			if got := IsPlatformID(tc.val); got != tc.want {
 				t.Errorf("IsPlatformID(%q) = %v, want %v", tc.val, got, tc.want)
 			}
@@ -156,15 +176,26 @@ func TestFilterPIIEntities(t *testing.T) {
 			wantSuppID: "SUPP-PHONE-EPOCH",
 		},
 		{
+			// Telegram-style numeric ID (9 digits, no valid NANP
+			// structure) should still be suppressed.
 			name: "telegram ID phone suppressed",
 			entities: []PIIEntity{
-				{FindingID: "JUDGE-PII-PHONE", Entity: "8449088619"},
+				{FindingID: "JUDGE-PII-PHONE", Entity: "123456789"},
 			},
 			wantKept:   0,
 			wantSuppID: "SUPP-PHONE-PLATFORM-ID",
 		},
 		{
-			name: "real phone kept",
+			// Real-looking NANP phone must NOT be suppressed anymore.
+			// This was the regression the narrower IsPlatformID fixes.
+			name: "real NANP phone kept",
+			entities: []PIIEntity{
+				{FindingID: "JUDGE-PII-PHONE", Entity: "8449088619"},
+			},
+			wantKept: 1,
+		},
+		{
+			name: "real phone with country code kept",
 			entities: []PIIEntity{
 				{FindingID: "JUDGE-PII-PHONE", Entity: "+15551234567"},
 			},

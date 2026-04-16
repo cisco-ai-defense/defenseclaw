@@ -249,11 +249,15 @@ var trustExploitRules = []PatternRule{
 // ApplyRulePackOverrides writes at startup; ScanAllRules reads on every request.
 var ruleCategoriesMu sync.RWMutex
 
-// allRuleCategories groups all rule slices for iteration.
-var allRuleCategories = []struct {
+// ruleCategory is one named group of detection rules.
+type ruleCategory struct {
 	Name  string
 	Rules []PatternRule
-}{
+}
+
+// defaultRuleCategories is the pristine compiled-in set, used as the baseline
+// that ApplyRulePackOverrides merges against. It must never be mutated.
+var defaultRuleCategories = []ruleCategory{
 	{"secret", secretRules},
 	{"command", commandRules},
 	{"sensitive-path", sensitivePathRules},
@@ -261,6 +265,11 @@ var allRuleCategories = []struct {
 	{"cognitive-file", cognitiveFileRules},
 	{"trust-exploit", trustExploitRules},
 }
+
+// allRuleCategories groups all rule slices for iteration. Seeded from the
+// compiled-in defaults; a rule pack can override individual categories by
+// name via ApplyRulePackOverrides without removing the others.
+var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
 
 // ApplyRulePackOverrides replaces the hardcoded rule categories with rules
 // loaded from the rule-pack's rules/*.yaml files. Each YAML file becomes
@@ -291,15 +300,39 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 	}
 }
 
+// ApplyRulePackOverrides merges rule-pack rule files into the compiled-in
+// defaults. For each rules/*.yaml in the pack, the category named by
+// `category:` replaces the same-named compiled-in category. Categories not
+// mentioned by the pack keep their compiled-in defaults, so a partial or
+// corrupt deployment cannot silently drop whole detection categories — the
+// previous implementation wholesale-replaced allRuleCategories, which meant
+// one valid rules/commands.yaml on disk would delete secret/sensitive-path/
+// c2/cognitive-file/trust-exploit enforcement.
+//
+// Unknown category names (not in the compiled-in set) are appended so rule
+// packs can add new categories without modifying Go source.
+//
+// This function is idempotent: it always starts from defaultRuleCategories,
+// so repeated calls (config reload, tests) converge on the same state.
 func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 	if rp == nil || len(rp.RuleFiles) == 0 {
 		return
 	}
-	var categories []struct {
-		Name  string
-		Rules []PatternRule
+
+	merged := make([]ruleCategory, len(defaultRuleCategories))
+	copy(merged, defaultRuleCategories)
+
+	idx := make(map[string]int, len(merged))
+	for i, c := range merged {
+		idx[c.Name] = i
 	}
+
+	overridden := 0
+	added := 0
 	for _, rf := range rp.RuleFiles {
+		if rf == nil || rf.Category == "" {
+			continue
+		}
 		var compiled []PatternRule
 		for _, r := range rf.Rules {
 			re, err := compileRegexSafe(r.Pattern)
@@ -316,19 +349,24 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 				Tags:       r.Tags,
 			})
 		}
-		if len(compiled) > 0 {
-			categories = append(categories, struct {
-				Name  string
-				Rules []PatternRule
-			}{Name: rf.Category, Rules: compiled})
+		if len(compiled) == 0 {
+			continue
+		}
+		if i, ok := idx[rf.Category]; ok {
+			merged[i].Rules = compiled
+			overridden++
+		} else {
+			merged = append(merged, ruleCategory{Name: rf.Category, Rules: compiled})
+			idx[rf.Category] = len(merged) - 1
+			added++
 		}
 	}
-	if len(categories) > 0 {
-		ruleCategoriesMu.Lock()
-		allRuleCategories = categories
-		ruleCategoriesMu.Unlock()
-		fmt.Fprintf(os.Stderr, "[guardrail] loaded %d rule categories from rule pack\n", len(categories))
-	}
+
+	ruleCategoriesMu.Lock()
+	allRuleCategories = merged
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
+		overridden, added, len(defaultRuleCategories)-overridden)
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.

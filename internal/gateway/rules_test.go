@@ -635,7 +635,12 @@ func filterBySeverity(findings []RuleFinding, severity string) []RuleFinding {
 // ApplyRulePackOverrides
 // ---------------------------------------------------------------------------
 
-func TestApplyRulePackOverrides_ReplacesHardcoded(t *testing.T) {
+// TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults verifies that a
+// rule pack introducing a previously-unknown category appends it to the
+// active set without removing any of the compiled-in defaults. The previous
+// implementation wholesale-replaced allRuleCategories, which silently
+// dropped whole detection surfaces whenever a pack was deployed.
+func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
 	savedCategories := allRuleCategories
 	defer func() { allRuleCategories = savedCategories }()
 
@@ -653,19 +658,71 @@ func TestApplyRulePackOverrides_ReplacesHardcoded(t *testing.T) {
 
 	ApplyRulePackOverrides(rp)
 
-	if len(allRuleCategories) != 1 {
-		t.Fatalf("expected 1 category after override, got %d", len(allRuleCategories))
+	if got, want := len(allRuleCategories), len(defaultRuleCategories)+1; got != want {
+		t.Fatalf("expected %d categories (defaults + new), got %d", want, got)
 	}
-	if allRuleCategories[0].Name != "test-override" {
-		t.Errorf("category name = %s, want test-override", allRuleCategories[0].Name)
+	names := map[string]bool{}
+	for _, c := range allRuleCategories {
+		names[c.Name] = true
+	}
+	for _, dc := range defaultRuleCategories {
+		if !names[dc.Name] {
+			t.Errorf("default category %q dropped after override", dc.Name)
+		}
+	}
+	if !names["test-override"] {
+		t.Error("new category test-override not present after override")
 	}
 
 	findings := ScanAllRules("found test_secret_deadbeef here", "exec")
 	if len(findings) == 0 {
 		t.Error("ScanAllRules should find the overridden pattern")
 	}
-	if findings[0].RuleID != "TEST-1" {
-		t.Errorf("finding RuleID = %s, want TEST-1", findings[0].RuleID)
+}
+
+// TestApplyRulePackOverrides_ReplacesNamedCategoryOnly verifies that a pack
+// with category="secret" replaces the compiled-in secret rules but leaves
+// the other default categories untouched.
+func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	rp := &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "secret",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: "CUSTOM-SECRET", Pattern: `custom_secret_[a-f0-9]+`, Severity: "HIGH", Confidence: 0.99},
+				},
+			},
+		},
+	}
+
+	ApplyRulePackOverrides(rp)
+
+	if got, want := len(allRuleCategories), len(defaultRuleCategories); got != want {
+		t.Fatalf("expected %d categories, got %d", want, got)
+	}
+
+	var secretCat *ruleCategory
+	for i := range allRuleCategories {
+		if allRuleCategories[i].Name == "secret" {
+			secretCat = &allRuleCategories[i]
+			break
+		}
+	}
+	if secretCat == nil {
+		t.Fatal("secret category missing after override")
+	}
+	if len(secretCat.Rules) != 1 || secretCat.Rules[0].ID != "CUSTOM-SECRET" {
+		t.Errorf("secret rules = %+v, want exactly CUSTOM-SECRET", secretCat.Rules)
+	}
+
+	// Other defaults must be intact: command rules should still fire.
+	findings := ScanAllRules("custom_secret_deadbeef", "exec")
+	if len(findings) == 0 || findings[0].RuleID != "CUSTOM-SECRET" {
+		t.Errorf("custom secret not detected: %+v", findings)
 	}
 }
 

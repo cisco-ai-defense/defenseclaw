@@ -22,6 +22,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
+    _ANTHROPIC_DEFAULT_PROBE_MODEL,
+    _anthropic_probe_model,
     _check_guardrail_proxy,
     _check_llm_api_key,
     _DoctorResult,
@@ -134,6 +136,68 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
         _check_llm_api_key(cfg, r)
 
         mock_openai.assert_called_once()
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-ant-test")
+    @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
+    @patch("defenseclaw.commands.cmd_doctor._verify_openai")
+    def test_env_name_fallback_only_when_model_has_no_prefix(
+        self, mock_openai, mock_anthropic, _mock_resolve,
+    ):
+        # Empty model string — env-name fallback kicks in and routes to
+        # Anthropic. Previously an env_name prefix of "ANTHROPIC_" would
+        # *always* match even when model had a contradicting prefix;
+        # that ambiguous routing is the bug M7 fixes.
+        cfg = self._make_cfg(model="", api_key_env="ANTHROPIC_API_KEY")
+        r = _DoctorResult()
+
+        _check_llm_api_key(cfg, r)
+
+        mock_anthropic.assert_called_once()
+        mock_openai.assert_not_called()
+
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "ABSK-bedrock-in-anthropic-slot"}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key",
+           return_value="ABSK-bedrock-in-anthropic-slot")
+    @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
+    @patch("defenseclaw.commands.cmd_doctor._verify_openai")
+    def test_model_prefix_wins_over_env_name(
+        self, mock_openai, mock_anthropic, _mock_resolve,
+    ):
+        # Operator accidentally stored a Bedrock bearer token in a variable
+        # called ANTHROPIC_API_KEY. The model says amazon-bedrock/... so
+        # we must NOT probe api.anthropic.com with that key.
+        cfg = self._make_cfg(
+            model="amazon-bedrock/us.anthropic.claude-haiku-4-5",
+            api_key_env="ANTHROPIC_API_KEY",
+        )
+        r = _DoctorResult()
+
+        _check_llm_api_key(cfg, r)
+
+        mock_anthropic.assert_not_called()
+        mock_openai.assert_not_called()
+
+
+class AnthropicProbeModelTests(unittest.TestCase):
+    """Tests for the hardcoded-probe-model fix (M6)."""
+
+    def test_prefers_configured_anthropic_model(self):
+        got = _anthropic_probe_model("anthropic/claude-opus-4-20250805")
+        self.assertEqual(got, "claude-opus-4-20250805")
+
+    def test_env_override(self):
+        with patch.dict(os.environ,
+                        {"DEFENSECLAW_ANTHROPIC_PROBE_MODEL": "claude-3-opus-20240229"},
+                        clear=False):
+            got = _anthropic_probe_model("")
+        self.assertEqual(got, "claude-3-opus-20240229")
+
+    def test_default_when_no_configured_model(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ANTHROPIC_PROBE_MODEL", None)
+            got = _anthropic_probe_model("")
+        self.assertEqual(got, _ANTHROPIC_DEFAULT_PROBE_MODEL)
 
 
 class DoctorJsonOutputTests(unittest.TestCase):

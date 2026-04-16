@@ -19,6 +19,7 @@ package gateway
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestContextTracker_Record(t *testing.T) {
@@ -103,6 +104,37 @@ func TestContextTracker_PrunesSessions(t *testing.T) {
 
 	if ct.SessionCount() > 4 {
 		t.Errorf("expected at most 4 sessions after prune, got %d", ct.SessionCount())
+	}
+}
+
+func TestContextTracker_EvictsStaleSessions(t *testing.T) {
+	ct := NewContextTracker(5, 200)
+	ct.SetTTL(10 * time.Minute)
+
+	fakeNow := time.Unix(1_700_000_000, 0)
+	ct.now = func() time.Time { return fakeNow }
+
+	// Record a handful of sessions "now".
+	for i := 0; i < 3; i++ {
+		ct.Record(fmt.Sprintf("live-%d", i), "user", "hello")
+	}
+
+	// Advance time well past the TTL, then record enough new writes to
+	// trigger the amortized stale sweep (staleSweepFrequency).
+	fakeNow = fakeNow.Add(20 * time.Minute)
+	for i := 0; i < staleSweepFrequency; i++ {
+		ct.Record(fmt.Sprintf("fresh-%d", i), "user", "hello")
+	}
+
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("live-%d", i)
+		if msgs := ct.RecentMessages(key, 5); len(msgs) > 0 {
+			t.Errorf("stale session %q should have been evicted, still has %d messages", key, len(msgs))
+		}
+	}
+
+	if msgs := ct.RecentMessages("fresh-0", 5); len(msgs) == 0 {
+		t.Error("fresh session should still be present")
 	}
 }
 

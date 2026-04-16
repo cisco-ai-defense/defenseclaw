@@ -23,7 +23,9 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
@@ -85,6 +87,17 @@ type GuardrailInspector struct {
 	strategyComplete  string
 	strategyToolCall  string
 	judgeSweep        bool
+
+	// Rego policy engine — lazily constructed on first finalize() call and
+	// cached for the lifetime of the inspector. Previously policy.New() ran
+	// on every inspection (parsing every .rego file and compiling the
+	// module set from scratch), which dominated guardrail latency under
+	// load. Reload is caller-driven via ReloadPolicies().
+	engineMu     sync.RWMutex
+	engine       *policy.Engine
+	engineLoadErr error
+	engineInitOnce sync.Once
+	engineErrLogged sync.Once
 }
 
 // NewGuardrailInspector creates an inspector from config parameters.
@@ -272,7 +285,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 
 	// NO_SIGNAL + judge_sweep: run full classification.
 	if len(signals) == 0 && g.judgeSweep && g.judge != nil {
-		judgeVerdict = g.judge.RunJudges(ctx, direction, content)
+		judgeVerdict = g.judge.RunJudges(ctx, direction, content, "")
 	}
 
 	// Cisco AI Defense (if configured).
@@ -318,7 +331,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Run judge and triage in parallel.
 	if g.judge != nil {
 		go func() {
-			v := g.judge.RunJudges(ctx, direction, content)
+			v := g.judge.RunJudges(ctx, direction, content, "")
 			judgeCh <- result{verdict: v}
 		}()
 	} else {
@@ -411,6 +424,50 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
 }
 
+// policyEngine returns the cached Rego engine, initializing it on first call.
+// Returns nil if construction failed; the error is logged exactly once so
+// OPA misconfiguration surfaces in logs without flooding them on every
+// request. Callers fall back to the merged scanner verdict when nil.
+func (g *GuardrailInspector) policyEngine() *policy.Engine {
+	g.engineInitOnce.Do(func() {
+		eng, err := policy.New(g.policyDir)
+		g.engineMu.Lock()
+		g.engine = eng
+		g.engineLoadErr = err
+		g.engineMu.Unlock()
+	})
+	g.engineMu.RLock()
+	eng, err := g.engine, g.engineLoadErr
+	g.engineMu.RUnlock()
+	if err != nil {
+		g.engineErrLogged.Do(func() {
+			fmt.Fprintf(defaultLogWriter,
+				"  [guardrail] policy engine unavailable, falling back to scanner verdict: %v\n", err)
+		})
+		return nil
+	}
+	return eng
+}
+
+// ReloadPolicies rebuilds the policy engine from disk. Call this when the
+// policy directory has changed (e.g. config reload). If the new bundle
+// fails to compile, the previous engine is retained and an error is
+// returned.
+func (g *GuardrailInspector) ReloadPolicies() error {
+	if g.policyDir == "" {
+		return nil
+	}
+	eng, err := policy.New(g.policyDir)
+	if err != nil {
+		return err
+	}
+	g.engineMu.Lock()
+	g.engine = eng
+	g.engineLoadErr = nil
+	g.engineMu.Unlock()
+	return nil
+}
+
 // finalize runs OPA policy evaluation if available, otherwise returns the
 // merged verdict directly.
 func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
@@ -418,8 +475,8 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		return merged
 	}
 
-	engine, err := policy.New(g.policyDir)
-	if err != nil {
+	engine := g.policyEngine()
+	if engine == nil {
 		return merged
 	}
 
@@ -858,16 +915,43 @@ func signalsToVerdict(signals []TriageSignal, scanner string) *ScanVerdict {
 
 // extractEvidence returns ~200 chars of context around the first occurrence
 // of pattern in the lowercase content, but returns the original-case text.
+//
+// This is UTF-8-safe in the common case: strings.ToLower preserves byte
+// length for all ASCII and for the BMP letters we care about (Latin, Greek,
+// Cyrillic). When length drift does occur (e.g. "İ" 0x130 → "i̇" 2 bytes
+// mapped to "i" 1 byte in some locales), the byte offset from lower may
+// fall mid-rune in original; extractEvidenceAt clamps both ends to the
+// nearest rune boundary to avoid emitting invalid UTF-8 to logs.
 func extractEvidence(original, lower, pattern string) string {
 	idx := strings.Index(lower, pattern)
 	if idx < 0 {
 		return ""
+	}
+	// Guard against exotic cases where ToLower changed byte length and the
+	// idx now exceeds original's length. Fall back to a plain search on
+	// original for a best-effort window.
+	if idx > len(original) {
+		if orig := strings.Index(strings.ToLower(original), pattern); orig >= 0 {
+			idx = orig
+		} else {
+			return ""
+		}
 	}
 	return extractEvidenceAt(original, idx, idx+len(pattern))
 }
 
 func extractEvidenceAt(content string, matchStart, matchEnd int) string {
 	const window = 100
+	if matchStart < 0 {
+		matchStart = 0
+	}
+	if matchEnd > len(content) {
+		matchEnd = len(content)
+	}
+	if matchEnd < matchStart {
+		matchEnd = matchStart
+	}
+
 	start := matchStart - window
 	if start < 0 {
 		start = 0
@@ -876,6 +960,17 @@ func extractEvidenceAt(content string, matchStart, matchEnd int) string {
 	if end > len(content) {
 		end = len(content)
 	}
+
+	// Clamp boundaries to rune starts so we never slice across a multi-byte
+	// rune and produce invalid UTF-8 in the evidence string (which gets
+	// logged, written to audit records, and may reach downstream systems).
+	for start > 0 && start < len(content) && !utf8.RuneStart(content[start]) {
+		start--
+	}
+	for end > 0 && end < len(content) && !utf8.RuneStart(content[end]) {
+		end++
+	}
+
 	snippet := content[start:end]
 	if start > 0 {
 		snippet = "..." + snippet

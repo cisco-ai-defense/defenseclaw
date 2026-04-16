@@ -238,17 +238,26 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         return
 
     model = gc.model or ""
-    # Route by *provider prefix* (the segment before the first "/"), not by
-    # substring. A substring check on "anthropic" used to match Bedrock
-    # inference profile ids like "amazon-bedrock/us.anthropic.claude-haiku-4-5"
-    # and send non-Anthropic credentials (e.g. an AWS Bedrock bearer token held
-    # in BIFROST_API_KEY) to api.anthropic.com, producing a spurious 401 FAIL.
-    # Provider prefixes come from OpenClaw's model registry; see the docs at
-    # https://docs.openclaw.ai/providers/ for the canonical list.
-    provider = model.split("/", 1)[0].lower() if "/" in model else model.lower()
-    if provider == "anthropic" or env_name.startswith("ANTHROPIC"):
-        _verify_anthropic(api_key, r)
-    elif provider == "openai" or env_name.startswith("OPENAI"):
+    # Route by *provider prefix* (the segment before the first "/"). The
+    # env-name prefix is a last-resort fallback ONLY used when the model
+    # string is empty or has no provider prefix — routing on env name can
+    # easily misfire (e.g. an operator reusing ANTHROPIC_API_KEY to hold a
+    # bearer token for a proxy). Provider prefixes come from OpenClaw's
+    # model registry; see https://docs.openclaw.ai/providers/.
+    provider = ""
+    if "/" in model:
+        provider = model.split("/", 1)[0].lower()
+    elif model:
+        provider = model.lower()
+
+    if provider == "anthropic":
+        _verify_anthropic(api_key, r, model)
+    elif provider == "openai":
+        _verify_openai(api_key, r)
+    elif provider == "" and env_name.startswith("ANTHROPIC"):
+        # Model string missing — fall back to env name prefix.
+        _verify_anthropic(api_key, r, model)
+    elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
     else:
         _emit(
@@ -257,9 +266,31 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         )
 
 
-def _verify_anthropic(api_key: str, r: _DoctorResult) -> None:
+# Default model used for the Anthropic auth probe when the configured model
+# is not an Anthropic model. The probe sends max_tokens=1 so cost is
+# negligible; any valid model id accepted by the account works. We pick a
+# stable identifier that the OpenClaw docs list as generally available.
+# Operators running against an older plan can override via
+# DEFENSECLAW_ANTHROPIC_PROBE_MODEL.
+_ANTHROPIC_DEFAULT_PROBE_MODEL = "claude-3-5-haiku-latest"
+
+
+def _anthropic_probe_model(configured_model: str) -> str:
+    if configured_model.startswith("anthropic/"):
+        # Use the model the operator actually intends to call — avoids a
+        # surprising "valid key, but model not enabled" 403 when the
+        # default probe model isn't in the account's allowed list.
+        return configured_model.split("/", 1)[1]
+    override = os.environ.get("DEFENSECLAW_ANTHROPIC_PROBE_MODEL", "").strip()
+    if override:
+        return override
+    return _ANTHROPIC_DEFAULT_PROBE_MODEL
+
+
+def _verify_anthropic(api_key: str, r: _DoctorResult, configured_model: str = "") -> None:
+    probe_model = _anthropic_probe_model(configured_model)
     payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": probe_model,
         "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}],
     }).encode()

@@ -114,45 +114,46 @@ func TestBifrostProvider_ABSKKeyDetection(t *testing.T) {
 	}
 }
 
-func TestBifrostProvider_RegisterProvider(t *testing.T) {
-	bifrostAccMu.Lock()
-	delete(bifrostAccounts, schemas.ModelProvider("test-provider"))
-	bifrostAccMu.Unlock()
+func TestBifrostProvider_NewTenantAccount(t *testing.T) {
+	provKey := schemas.ModelProvider("test-provider")
+	keyID := bifrostKeyID(provKey, "test-key-123")
+	acc := newTenantAccount(provKey, "test-key-123", keyID, "")
 
-	registerProvider("test-provider", "test-key-123", "")
-
-	bifrostAccMu.Lock()
-	acc, ok := bifrostAccounts["test-provider"]
-	bifrostAccMu.Unlock()
-
-	if !ok {
-		t.Fatal("expected provider to be registered")
-	}
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))
 	}
 	if acc.keys[0].Value.Val != "test-key-123" {
 		t.Errorf("key value = %q, want test-key-123", acc.keys[0].Value.Val)
 	}
+	if acc.keys[0].ID != keyID {
+		t.Errorf("key ID = %q, want %q", acc.keys[0].ID, keyID)
+	}
 
-	bifrostAccMu.Lock()
-	delete(bifrostAccounts, schemas.ModelProvider("test-provider"))
-	bifrostAccMu.Unlock()
+	// Verify the account rejects requests for other providers — the
+	// previous global-account implementation served every configured
+	// provider from one instance, so a misrouted request could silently
+	// pick up another tenant's key.
+	other := schemas.ModelProvider("not-this-provider")
+	if _, err := acc.GetKeysForProvider(context.Background(), other); err == nil {
+		t.Error("tenantAccount should reject GetKeysForProvider for a different provider")
+	}
+	if _, err := acc.GetConfigForProvider(other); err == nil {
+		t.Error("tenantAccount should reject GetConfigForProvider for a different provider")
+	}
+
+	// And must serve its pinned provider.
+	gotKeys, err := acc.GetKeysForProvider(context.Background(), provKey)
+	if err != nil || len(gotKeys) != 1 || gotKeys[0].Value.Val != "test-key-123" {
+		t.Errorf("GetKeysForProvider(own) = %+v, %v", gotKeys, err)
+	}
 }
 
-func TestBifrostProvider_RegisterBedrockWithABSK(t *testing.T) {
-	bifrostAccMu.Lock()
-	delete(bifrostAccounts, schemas.Bedrock)
-	bifrostAccMu.Unlock()
+func TestBifrostProvider_NewTenantAccountBedrockABSK(t *testing.T) {
+	keyID := bifrostKeyID(schemas.Bedrock, "ABSKtest123")
+	acc := newTenantAccount(schemas.Bedrock, "ABSKtest123", keyID, "")
 
-	registerProvider(schemas.Bedrock, "ABSKtest123", "")
-
-	bifrostAccMu.Lock()
-	acc := bifrostAccounts[schemas.Bedrock]
-	bifrostAccMu.Unlock()
-
-	if acc == nil {
-		t.Fatal("expected bedrock provider to be registered")
+	if len(acc.keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(acc.keys))
 	}
 	key := acc.keys[0]
 	if key.Value.Val != "ABSKtest123" {
@@ -161,10 +162,6 @@ func TestBifrostProvider_RegisterBedrockWithABSK(t *testing.T) {
 	if key.BedrockKeyConfig != nil {
 		t.Error("ABSK keys should NOT have BedrockKeyConfig (IAM) set")
 	}
-
-	bifrostAccMu.Lock()
-	delete(bifrostAccounts, schemas.Bedrock)
-	bifrostAccMu.Unlock()
 }
 
 func TestBifrostProvider_MessageConversion(t *testing.T) {
@@ -488,50 +485,57 @@ func TestMapProviderKey_AllKnownProviders(t *testing.T) {
 	}
 }
 
-func TestBifrostProvider_RegisterUpdatesKey(t *testing.T) {
-	provKey := schemas.ModelProvider("test-update-provider")
+// TestBifrostProvider_TenantIsolation verifies the core correctness
+// property the tenant-keyed client cache exists to enforce: a distinct
+// (provider, apiKey, baseURL) tuple must not share credentials with any
+// other tuple. Previously a single shared account and bifrost client were
+// overwritten on every new registration, so a concurrent request for
+// tenant A could be executed with tenant B's key mid-flight.
+func TestBifrostProvider_TenantIsolation(t *testing.T) {
+	provKey := schemas.ModelProvider("test-tenant-provider")
 
-	bifrostAccMu.Lock()
-	delete(bifrostAccounts, provKey)
-	delete(bifrostUpdated, provKey)
-	bifrostAccMu.Unlock()
-
-	changed := registerProvider(provKey, "key-1", "")
-	if !changed {
-		t.Error("first registration should report changed")
+	k1 := bifrostKeyID(provKey, "key-1")
+	k2 := bifrostKeyID(provKey, "key-2")
+	if k1 == k2 {
+		t.Fatal("bifrostKeyID should differ for different API keys")
+	}
+	if k1 != bifrostKeyID(provKey, "key-1") {
+		t.Error("bifrostKeyID should be stable for the same input")
 	}
 
-	changed = registerProvider(provKey, "key-1", "")
-	if changed {
-		t.Error("same key should not report changed")
+	tenants := []tenantKey{
+		{provider: provKey, keyID: k1, baseURL: ""},
+		{provider: provKey, keyID: k2, baseURL: ""},
+		{provider: provKey, keyID: k1, baseURL: "http://a"},
+		{provider: provKey, keyID: k1, baseURL: "http://b"},
+	}
+	seen := map[tenantKey]bool{}
+	for _, tk := range tenants {
+		if seen[tk] {
+			t.Errorf("tenantKey collision for %+v — distinct inputs must produce distinct tuples", tk)
+		}
+		seen[tk] = true
 	}
 
-	changed = registerProvider(provKey, "key-2", "")
-	if !changed {
-		t.Error("different key should report changed")
+	// Each tuple builds an independent, immutable Account. Mutating one's
+	// input arguments can't affect another's cached state.
+	a1 := newTenantAccount(provKey, "key-1", k1, "")
+	a2 := newTenantAccount(provKey, "key-2", k2, "")
+	if a1 == a2 {
+		t.Fatal("newTenantAccount must return distinct instances for distinct tenants")
+	}
+	if a1.keys[0].Value.Val == a2.keys[0].Value.Val {
+		t.Errorf("distinct tenants must hold distinct keys; both had %q", a1.keys[0].Value.Val)
 	}
 
-	bifrostAccMu.Lock()
-	acc := bifrostAccounts[provKey]
-	bifrostAccMu.Unlock()
-
-	if acc.keys[0].Value.Val != "key-2" {
-		t.Errorf("key should be updated to key-2, got %q", acc.keys[0].Value.Val)
+	// BaseURL variation must flow into NetworkConfig.
+	aURL := newTenantAccount(provKey, "key-1", k1, "http://custom:8080")
+	if aURL.config.NetworkConfig.BaseURL != "http://custom:8080" {
+		t.Errorf("baseURL = %q, want http://custom:8080", aURL.config.NetworkConfig.BaseURL)
 	}
-
-	changed = registerProvider(provKey, "key-2", "http://custom:8080")
-	if !changed {
-		t.Error("different baseURL should report changed")
+	if a1.config.NetworkConfig.BaseURL != "" {
+		t.Error("mutating a new tenant's baseURL must not leak back into sibling tenants")
 	}
-
-	bifrostAccMu.Lock()
-	updatedAcc := bifrostAccounts[provKey]
-	if updatedAcc.config.NetworkConfig.BaseURL != "http://custom:8080" {
-		t.Errorf("baseURL should be updated, got %q", updatedAcc.config.NetworkConfig.BaseURL)
-	}
-	delete(bifrostAccounts, provKey)
-	delete(bifrostUpdated, provKey)
-	bifrostAccMu.Unlock()
 }
 
 func TestMapProviderKey_UnknownReturnsError(t *testing.T) {

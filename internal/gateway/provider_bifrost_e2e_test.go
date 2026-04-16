@@ -175,54 +175,63 @@ func TestBifrostE2E_BaseURLPropagation(t *testing.T) {
 // Registration state management
 // ---------------------------------------------------------------------------
 
-func TestBifrostE2E_RegistrationIdempotency(t *testing.T) {
-	provKey := schemas.ModelProvider("e2e-idempotent-test")
+// TestBifrostE2E_TenantKeyUniqueness verifies that the tenant-keyed
+// client cache treats distinct credentials and endpoints as distinct
+// cache entries. This is what prevents a request for tenant A from
+// being executed with tenant B's key when both use the same provider.
+func TestBifrostE2E_TenantKeyUniqueness(t *testing.T) {
+	provKey := schemas.ModelProvider("e2e-tenant-key-test")
 
-	bifrostAccMu.Lock()
-	delete(bifrostAccounts, provKey)
-	delete(bifrostUpdated, provKey)
-	bifrostAccMu.Unlock()
-
-	defer func() {
-		bifrostAccMu.Lock()
-		delete(bifrostAccounts, provKey)
-		delete(bifrostUpdated, provKey)
-		bifrostAccMu.Unlock()
-	}()
-
-	// First registration must report changed.
-	if !registerProvider(provKey, "key-1", "") {
-		t.Error("first registration should report changed")
+	k1 := bifrostKeyID(provKey, "key-1")
+	k2 := bifrostKeyID(provKey, "key-2")
+	if k1 == k2 {
+		t.Fatal("bifrostKeyID should produce different IDs for different keys")
 	}
 
-	// Same key+base = no change.
-	if registerProvider(provKey, "key-1", "") {
-		t.Error("identical registration should not report changed")
+	// Same tuple → same key.
+	if k1 != bifrostKeyID(provKey, "key-1") {
+		t.Error("bifrostKeyID must be stable for identical inputs")
 	}
 
-	// Different key = changed.
-	if !registerProvider(provKey, "key-2", "") {
-		t.Error("key change should report changed")
+	// Building tenant accounts directly rather than going through
+	// getBifrostClient so the unit test doesn't spin up the Bifrost
+	// runtime. getBifrostClient caches exactly on tenantKey, so if the
+	// tuples differ the cache entries differ.
+	cases := []struct {
+		name   string
+		apiKey string
+		base   string
+	}{
+		{"key1_no_base", "key-1", ""},
+		{"key2_no_base", "key-2", ""},
+		{"key1_base_a", "key-1", "http://a:8080"},
+		{"key1_base_b", "key-1", "http://b:8080"},
+	}
+	seen := make(map[tenantKey]string)
+	for _, c := range cases {
+		tk := tenantKey{provider: provKey, keyID: bifrostKeyID(provKey, c.apiKey), baseURL: c.base}
+		if prev, ok := seen[tk]; ok {
+			t.Errorf("tenantKey collision: %q and %q both produced %+v", prev, c.name, tk)
+		}
+		seen[tk] = c.name
 	}
 
-	// Verify key was updated.
-	bifrostAccMu.Lock()
-	acc := bifrostAccounts[provKey]
-	bifrostAccMu.Unlock()
-	if acc.keys[0].Value.Val != "key-2" {
-		t.Errorf("key should be key-2, got %q", acc.keys[0].Value.Val)
+	// Verify each tuple materializes to an account carrying exactly its
+	// own credentials — no mutation from sibling tuples.
+	a1 := newTenantAccount(provKey, "key-1", k1, "")
+	a2 := newTenantAccount(provKey, "key-2", k2, "")
+	if a1.keys[0].Value.Val != "key-1" || a2.keys[0].Value.Val != "key-2" {
+		t.Errorf("tenant accounts leaked keys: a1=%q a2=%q",
+			a1.keys[0].Value.Val, a2.keys[0].Value.Val)
 	}
 
-	// Different base URL = changed.
-	if !registerProvider(provKey, "key-2", "http://custom:8080") {
-		t.Error("base URL change should report changed")
+	withBase := newTenantAccount(provKey, "key-1", k1, "http://custom:8080")
+	if withBase.config.NetworkConfig.BaseURL != "http://custom:8080" {
+		t.Errorf("baseURL not propagated: got %q", withBase.config.NetworkConfig.BaseURL)
 	}
-
-	bifrostAccMu.Lock()
-	if bifrostAccounts[provKey].config.NetworkConfig.BaseURL != "http://custom:8080" {
-		t.Error("base URL should be updated")
+	if a1.config.NetworkConfig.BaseURL != "" {
+		t.Error("baseURL mutation leaked across sibling tenant accounts")
 	}
-	bifrostAccMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -631,36 +640,12 @@ func TestBifrostE2E_EmptyModelProviderInference(t *testing.T) {
 // Bedrock ABSK key handling
 // ---------------------------------------------------------------------------
 
-func TestBifrostE2E_BedrockABSKKeyRegistration(t *testing.T) {
-	provKey := schemas.Bedrock
+func TestBifrostE2E_BedrockABSKTenantAccount(t *testing.T) {
+	keyID := bifrostKeyID(schemas.Bedrock, "ABSKe2eTestKey123")
+	acc := newTenantAccount(schemas.Bedrock, "ABSKe2eTestKey123", keyID, "")
 
-	bifrostAccMu.Lock()
-	origAcc := bifrostAccounts[provKey]
-	origUpd := bifrostUpdated[provKey]
-	delete(bifrostAccounts, provKey)
-	delete(bifrostUpdated, provKey)
-	bifrostAccMu.Unlock()
-
-	defer func() {
-		bifrostAccMu.Lock()
-		if origAcc != nil {
-			bifrostAccounts[provKey] = origAcc
-			bifrostUpdated[provKey] = origUpd
-		} else {
-			delete(bifrostAccounts, provKey)
-			delete(bifrostUpdated, provKey)
-		}
-		bifrostAccMu.Unlock()
-	}()
-
-	registerProvider(schemas.Bedrock, "ABSKe2eTestKey123", "")
-
-	bifrostAccMu.Lock()
-	acc := bifrostAccounts[schemas.Bedrock]
-	bifrostAccMu.Unlock()
-
-	if acc == nil {
-		t.Fatal("Bedrock not registered")
+	if len(acc.keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(acc.keys))
 	}
 	if acc.keys[0].Value.Val != "ABSKe2eTestKey123" {
 		t.Errorf("ABSK key should be in Value, got %q", acc.keys[0].Value.Val)
