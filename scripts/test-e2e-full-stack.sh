@@ -1074,12 +1074,16 @@ phase_start() {
     sleep 5
 
     echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
-    # Self-heal pattern: the ARM64 self-hosted runner occasionally sees a
-    # race where the sidecar daemon exits during early init (e.g. the init-
-    # era sidecar is already dead by the time we get here, or the new one
-    # loses a port-binding race to a stale listener). Each
-    # `defenseclaw-gateway start` call internally runs killStaleProcesses
-    # via pgrep, so a stop+start loop naturally reaps stragglers.
+    # Self-heal pattern: the ARM64 self-hosted runner occasionally sees the
+    # sidecar daemon reach "event loop running" and then vanish silently
+    # within ~60s (no panic in gateway.log, no shutdown message). Signature
+    # is consistent with SIGKILL from outside (OOM killer is the prime
+    # suspect on a shared self-hosted runner). We retry up to 3 times AND
+    # sample the sidecar process memory + dmesg on each failure so we can
+    # prove or disprove OOM from the CI logs.
+    local mem_trace_file
+    mem_trace_file="$(mktemp -t dc-mem-trace.XXXXXX.log)"
+    : >"$mem_trace_file"
     sidecar_healthy=0
     for attempt in 1 2 3; do
         if [ "$attempt" -gt 1 ]; then
@@ -1087,14 +1091,48 @@ phase_start() {
         fi
         defenseclaw-gateway stop 2>/dev/null || true
         sleep 2
+        echo "  [attempt ${attempt}/3] free -m before start:" | tee -a "$mem_trace_file" >/dev/null
+        free -m 2>/dev/null | sed 's/^/    /' | tee -a "$mem_trace_file" >/dev/null || true
         defenseclaw-gateway start
         sleep 5
 
+        # Sample sidecar memory every 3s in the background while we poll
+        # /health. We identify the sidecar as the defenseclaw-gateway
+        # process that is NOT the watchdog. If the process vanishes, the
+        # trace will show its last-known RSS and the wall-clock of death,
+        # which — correlated with dmesg below — pinpoints OOM.
+        (
+            for _ in $(seq 1 25); do
+                ts="$(date -u +%H:%M:%S)"
+                pid="$(pgrep -f 'defenseclaw-gateway' 2>/dev/null | while read -r p; do
+                    cmd_line="$(tr '\0' ' ' 2>/dev/null </proc/"$p"/cmdline 2>/dev/null)"
+                    case "$cmd_line" in
+                        *watchdog*|*status*|*stop*|*start*) ;;
+                        *) echo "$p"; break ;;
+                    esac
+                done | head -1)"
+                if [ -z "$pid" ]; then
+                    echo "[attempt ${attempt}/3] ${ts} sidecar pid: <none> (process gone)" >>"$mem_trace_file"
+                else
+                    # /proc is reliable and cheap; avoids ps invocation cost
+                    rss="$(awk '/^VmRSS:/ {print $2" "$3}' /proc/"$pid"/status 2>/dev/null)"
+                    vsz="$(awk '/^VmSize:/ {print $2" "$3}' /proc/"$pid"/status 2>/dev/null)"
+                    echo "[attempt ${attempt}/3] ${ts} sidecar pid=${pid} rss=${rss:-?} vsize=${vsz:-?}" >>"$mem_trace_file"
+                fi
+                sleep 3
+            done
+        ) &
+        local sampler_pid=$!
+
         if wait_for_url "$SIDECAR_URL/health" 60 2; then
             sidecar_healthy=1
+            kill "$sampler_pid" 2>/dev/null || true
+            wait "$sampler_pid" 2>/dev/null || true
             echo "  [attempt ${attempt}/3] sidecar healthy"
             break
         fi
+        kill "$sampler_pid" 2>/dev/null || true
+        wait "$sampler_pid" 2>/dev/null || true
         echo "  [attempt ${attempt}/3] /health unreachable after 60s"
     done
 
@@ -1104,6 +1142,7 @@ phase_start() {
 
     if [ "$sidecar_healthy" = "1" ]; then
         pass "sidecar health endpoint reachable"
+        rm -f "$mem_trace_file"
     else
         fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
         echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
@@ -1111,9 +1150,31 @@ phase_start() {
         echo "  --- last 40 lines of ~/.defenseclaw/watchdog.log ---" >&2
         tail -n 40 "$HOME/.defenseclaw/watchdog.log" 2>&1 | sed 's/^/    /' >&2 || true
         echo "  --- defenseclaw / openclaw processes ---" >&2
-        ps -eo pid,ppid,stat,etime,cmd 2>&1 | grep -Ei 'defenseclaw|openclaw' | grep -v grep | sed 's/^/    /' >&2 || true
+        ps -eo pid,ppid,stat,etime,rss,vsz,cmd 2>&1 | grep -Ei 'defenseclaw|openclaw' | grep -v grep | sed 's/^/    /' >&2 || true
         echo "  --- listeners on 127.0.0.1:18789 and 127.0.0.1:18970 ---" >&2
         { ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null || true; } | grep -E '18789|18970' | sed 's/^/    /' >&2 || true
+        echo "  --- sidecar memory trace (3s sampling across all attempts) ---" >&2
+        sed 's/^/    /' "$mem_trace_file" >&2 || true
+        rm -f "$mem_trace_file"
+        echo "  --- system memory at failure ---" >&2
+        free -h 2>/dev/null | sed 's/^/    /' >&2 || true
+        # Kernel OOM killer messages: the definitive signal. If the sidecar
+        # was OOM-killed, dmesg will have a line like
+        #   "Out of memory: Killed process 3739988 (defenseclaw-gat) ..."
+        # Note: dmesg on some distros requires CAP_SYSLOG but self-hosted
+        # runners usually run as a user with read access. We try both
+        # dmesg and journalctl -k as fallbacks.
+        echo "  --- kernel OOM / kill messages (last 5 min) ---" >&2
+        {
+            dmesg -T 2>/dev/null | tail -n 500 \
+                | grep -iE 'out of memory|killed process|oom[- ]killer|invoked oom|defenseclaw-gat' \
+                || echo "(no OOM/kill messages found in dmesg tail)"
+        } | sed 's/^/    /' >&2 || true
+        {
+            journalctl -k --since "5 minutes ago" --no-pager 2>/dev/null \
+                | grep -iE 'out of memory|killed process|oom[- ]killer|invoked oom|defenseclaw-gat' \
+                || echo "(no OOM/kill messages found in journalctl -k)"
+        } | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 1"
         return 1
     fi
