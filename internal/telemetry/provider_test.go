@@ -162,32 +162,19 @@ func TestExpandHeaders_MissingEnv(t *testing.T) {
 	}
 }
 
-func TestExpandHeaders_SplunkTokenAutoInject(t *testing.T) {
-	t.Setenv("SPLUNK_ACCESS_TOKEN", "splunk-secret-123")
-	headers := map[string]string{}
-	expanded := expandHeaders(headers)
-	if expanded["X-SF-Token"] != "splunk-secret-123" {
-		t.Errorf("expected auto-injected X-SF-Token, got %q", expanded["X-SF-Token"])
+// TestExpandHeaders_NoAutoInjection enforces the post-decoupling
+// contract: expandHeaders is vendor-neutral. Legacy builds auto-injected
+// X-SF-Token from SPLUNK_ACCESS_TOKEN; that coupling was removed so the
+// telemetry stack is a plain OTLP client. Operators who need a Splunk
+// token now put it in cfg.OTel.Headers or OTEL_EXPORTER_OTLP_HEADERS.
+func TestExpandHeaders_NoAutoInjection(t *testing.T) {
+	t.Setenv("SPLUNK_ACCESS_TOKEN", "should-be-ignored")
+	expanded := expandHeaders(map[string]string{})
+	if _, ok := expanded["X-SF-Token"]; ok {
+		t.Fatalf("expandHeaders must not auto-inject Splunk token, got %v", expanded)
 	}
-}
-
-func TestExpandHeaders_SplunkTokenNoOverride(t *testing.T) {
-	t.Setenv("SPLUNK_ACCESS_TOKEN", "from-env")
-	headers := map[string]string{
-		"X-SF-Token": "explicit-value",
-	}
-	expanded := expandHeaders(headers)
-	if expanded["X-SF-Token"] != "explicit-value" {
-		t.Errorf("explicit header should not be overridden, got %q", expanded["X-SF-Token"])
-	}
-}
-
-func TestExpandHeaders_NoSplunkToken(t *testing.T) {
-	t.Setenv("SPLUNK_ACCESS_TOKEN", "")
-	headers := map[string]string{}
-	expanded := expandHeaders(headers)
-	if _, ok := expanded["X-SF-Token"]; ok && expanded["X-SF-Token"] != "" {
-		t.Errorf("should not inject empty token, got %q", expanded["X-SF-Token"])
+	if len(expanded) != 0 {
+		t.Fatalf("expandHeaders should return empty map for empty input, got %v", expanded)
 	}
 }
 

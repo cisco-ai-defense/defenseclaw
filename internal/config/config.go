@@ -41,7 +41,12 @@ type ClawConfig struct {
 
 // CurrentConfigVersion is bumped when the config schema changes in a way
 // that requires migration (new required fields, renamed keys, etc.).
-const CurrentConfigVersion = 3
+//
+// v4: replaces the legacy `splunk:` block with a generic `audit_sinks:`
+// list; decouples OTel from any vendor-specific auto-injection. There is
+// no in-process migration shim — the v3→v4 step requires operator action,
+// and Load() emits a hard error when a legacy `splunk:` block is found.
+const CurrentConfigVersion = 4
 
 type Config struct {
 	ConfigVersion     int                  `mapstructure:"config_version"        yaml:"config_version"`
@@ -61,12 +66,16 @@ type Config struct {
 	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
 	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
 	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Splunk         SplunkConfig         `mapstructure:"splunk"           yaml:"splunk"`
 	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
 	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
 	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
+	// It supports an arbitrary number of named sinks of any registered
+	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
+	// detected at Load() and emit a hard migration error.
+	AuditSinks     []AuditSink          `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
 }
 
@@ -155,29 +164,6 @@ type FirewallConfig struct {
 	ConfigFile string `mapstructure:"config_file" yaml:"config_file"`
 	RulesFile  string `mapstructure:"rules_file"  yaml:"rules_file"`
 	AnchorName string `mapstructure:"anchor_name" yaml:"anchor_name"`
-}
-
-type SplunkConfig struct {
-	HECEndpoint   string `mapstructure:"hec_endpoint"    yaml:"hec_endpoint"`
-	HECToken      string `mapstructure:"hec_token"       yaml:"hec_token"`
-	HECTokenEnv   string `mapstructure:"hec_token_env"   yaml:"hec_token_env"`
-	Index         string `mapstructure:"index"            yaml:"index"`
-	Source        string `mapstructure:"source"           yaml:"source"`
-	SourceType    string `mapstructure:"sourcetype"       yaml:"sourcetype"`
-	VerifyTLS     bool   `mapstructure:"verify_tls"       yaml:"verify_tls"`
-	Enabled       bool   `mapstructure:"enabled"          yaml:"enabled"`
-	BatchSize     int    `mapstructure:"batch_size"       yaml:"batch_size"`
-	FlushInterval int    `mapstructure:"flush_interval_s" yaml:"flush_interval_s"`
-}
-
-// ResolvedHECToken returns the HEC token from the env var (if set) or the direct value.
-func (c *SplunkConfig) ResolvedHECToken() string {
-	if c.HECTokenEnv != "" {
-		if v := os.Getenv(c.HECTokenEnv); v != "" {
-			return v
-		}
-	}
-	return c.HECToken
 }
 
 type WebhookConfig struct {
@@ -591,6 +577,14 @@ type PluginActionsConfig struct {
 }
 
 func Load() (*Config, error) {
+	// viper holds a process-global keystore. Without resetting it, a
+	// previous Load() (e.g. from another binary path or test case)
+	// leaves stale keys behind — including a legacy `splunk.*` block
+	// that detectLegacySplunk() would then flag forever. Reset gives
+	// us a clean slate per Load(); setDefaults() re-installs defaults
+	// and BindEnv() bindings immediately after.
+	viper.Reset()
+
 	dataDir := DefaultDataPath()
 	configFile := filepath.Join(dataDir, DefaultConfigName)
 
@@ -616,12 +610,28 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// v3 → v4 hard migration: the `splunk:` block was removed in favor
+	// of audit_sinks. Detect any populated legacy keys and refuse to
+	// start so operators don't silently lose Splunk forwarding.
+	if legacy := detectLegacySplunk(); legacy != "" {
+		return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
+			"DefenseClaw v4 replaced it with `audit_sinks:`. "+
+			"Run `defenseclaw config migrate` or see docs/OBSERVABILITY.md for the new schema",
+			configFile, legacy)
+	}
+
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 
 	migrateConfig(&cfg)
+
+	for i := range cfg.AuditSinks {
+		if err := cfg.AuditSinks[i].Validate(); err != nil {
+			return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
+		}
+	}
 
 	if err := cfg.SkillActions.Validate(); err != nil {
 		return nil, err
@@ -680,8 +690,43 @@ func migrateConfig(cfg *Config) {
 		}
 	}
 
+	// v3 → v4: there is no in-process upgrade. The legacy `splunk:` block
+	// is detected in Load() before unmarshal and produces a hard error,
+	// so reaching this branch with v<4 simply means the file was created
+	// without a splunk block at all — safe to bump the version stamp.
+	if cfg.ConfigVersion < 4 {
+		// no-op: hard migration is enforced at file-load time.
+	}
+
 	cfg.ConfigVersion = CurrentConfigVersion
 	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
+}
+
+// detectLegacySplunk returns the first populated splunk.* key found in the
+// already-loaded viper state, or "" when none are present. Callers use a
+// non-empty result to fail fast with a migration error rather than
+// silently dropping the legacy block.
+//
+// We probe a small set of meaningful keys instead of `viper.IsSet("splunk")`
+// because viper treats default values as "set" and all `splunk.*` defaults
+// were removed; the only way a key shows up here now is if the operator's
+// config file (or env var) populated it.
+func detectLegacySplunk() string {
+	keys := []string{
+		"splunk.hec_endpoint",
+		"splunk.hec_token",
+		"splunk.hec_token_env",
+		"splunk.enabled",
+		"splunk.index",
+		"splunk.source",
+		"splunk.sourcetype",
+	}
+	for _, k := range keys {
+		if viper.IsSet(k) {
+			return k
+		}
+	}
+	return ""
 }
 
 // warnPlaintextSecrets logs a deprecation warning for each secret stored as
@@ -701,8 +746,15 @@ func warnPlaintextSecrets(cfg *Config) {
 	if cfg.Scanners.SkillScanner.VirusTotalKey != "" {
 		warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
 	}
-	if cfg.Splunk.HECToken != "" {
-		warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+	for _, s := range cfg.AuditSinks {
+		if s.SplunkHEC != nil && s.SplunkHEC.Token != "" {
+			log.Printf("WARNING: audit_sinks[%q].splunk_hec.token is set inline — "+
+				"prefer token_env to keep secrets out of config.yaml", s.Name)
+		}
+		if s.HTTPJSONL != nil && s.HTTPJSONL.BearerToken != "" {
+			log.Printf("WARNING: audit_sinks[%q].http_jsonl.bearer_token is set inline — "+
+				"prefer bearer_env to keep secrets out of config.yaml", s.Name)
+		}
 	}
 }
 
@@ -772,16 +824,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
 
-	viper.SetDefault("splunk.hec_endpoint", "https://localhost:8088/services/collector/event")
-	viper.SetDefault("splunk.hec_token", "")
-	viper.SetDefault("splunk.hec_token_env", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
-	viper.SetDefault("splunk.index", "defenseclaw")
-	viper.SetDefault("splunk.source", "defenseclaw")
-	viper.SetDefault("splunk.sourcetype", "_json")
-	viper.SetDefault("splunk.verify_tls", false)
-	viper.SetDefault("splunk.enabled", false)
-	viper.SetDefault("splunk.batch_size", 50)
-	viper.SetDefault("splunk.flush_interval_s", 5)
+	viper.SetDefault("audit_sinks", []AuditSink{})
 
 	viper.SetDefault("skill_actions.critical.file", string(FileActionQuarantine))
 	viper.SetDefault("skill_actions.critical.runtime", string(RuntimeDisable))

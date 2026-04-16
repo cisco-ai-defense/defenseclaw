@@ -67,7 +67,7 @@ type HealthSnapshot struct {
 	API       SubsystemHealth  `json:"api"`
 	Guardrail SubsystemHealth  `json:"guardrail"`
 	Telemetry SubsystemHealth  `json:"telemetry"`
-	Splunk    SubsystemHealth  `json:"splunk"`
+	Sinks     SubsystemHealth  `json:"sinks"`
 	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
 }
 

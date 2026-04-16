@@ -216,8 +216,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		s.otel.EmitStartupSpan(ctx)
 	}
 
-	// Report Splunk HEC health — not a goroutine, just state
-	s.reportSplunkHealth()
+	// Report aggregate audit-sink health — not a goroutine, just state
+	s.reportSinksHealth()
 
 	// Report sandbox health — only present when standalone mode is active
 	s.reportSandboxHealth(ctx)
@@ -821,66 +821,61 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
 }
 
-// reportSplunkHealth sets the Splunk HEC subsystem health based on config.
-func (s *Sidecar) reportSplunkHealth() {
-	if !s.cfg.Splunk.Enabled {
-		s.health.SetSplunk(StateDisabled, "", nil)
+// reportSinksHealth aggregates the configured audit-sink declarations
+// into the sidecar health snapshot. Per-sink Forward/Flush errors are
+// surfaced separately on the sinks.Manager itself; this function only
+// reports static configuration health (count, kinds, names) so the TUI
+// can render a "Sinks: 2 enabled (splunk_hec, otlp_logs)" row.
+//
+// The legacy splunk-bridge auto-generated credentials surface (Splunk
+// Web URL, local user/password) is intentionally dropped — the v4
+// audit_sinks model is provider-agnostic and operators bring their own
+// collector/SIEM credentials.
+func (s *Sidecar) reportSinksHealth() {
+	enabled := 0
+	kinds := make([]string, 0, len(s.cfg.AuditSinks))
+	rows := make([]map[string]interface{}, 0, len(s.cfg.AuditSinks))
+	for _, sink := range s.cfg.AuditSinks {
+		if !sink.Enabled {
+			continue
+		}
+		enabled++
+		kinds = append(kinds, string(sink.Kind))
+		row := map[string]interface{}{
+			"name":    sink.Name,
+			"kind":    string(sink.Kind),
+			"enabled": true,
+		}
+		switch sink.Kind {
+		case config.SinkKindSplunkHEC:
+			if sink.SplunkHEC != nil {
+				row["endpoint"] = sink.SplunkHEC.Endpoint
+				row["index"] = sink.SplunkHEC.Index
+			}
+		case config.SinkKindOTLPLogs:
+			if sink.OTLPLogs != nil {
+				row["endpoint"] = sink.OTLPLogs.Endpoint
+				row["protocol"] = sink.OTLPLogs.Protocol
+			}
+		case config.SinkKindHTTPJSONL:
+			if sink.HTTPJSONL != nil {
+				row["url"] = sink.HTTPJSONL.URL
+			}
+		}
+		rows = append(rows, row)
+	}
+
+	if enabled == 0 {
+		s.health.SetSinks(StateDisabled, "", nil)
 		return
 	}
 
 	details := map[string]interface{}{
-		"hec_endpoint": s.cfg.Splunk.HECEndpoint,
-		"index":        s.cfg.Splunk.Index,
+		"count": enabled,
+		"kinds": kinds,
+		"sinks": rows,
 	}
-
-	bridgeEnv := readDotEnvFile(filepath.Join(s.cfg.DataDir, "splunk-bridge", "env"))
-	if bridgeEnv == nil {
-		bridgeEnv = readDotEnvFile(s.cfg.DataDir)
-	}
-	if bridgeEnv["SPLUNK_PASSWORD"] != "" {
-		details["web_url"] = "http://127.0.0.1:8000"
-		details["web_user"] = "admin"
-		details["web_password_set"] = true
-	}
-	if user := bridgeEnv["DEFENSECLAW_LOCAL_USERNAME"]; user != "" {
-		details["username"] = user
-	}
-	if bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"] != "" {
-		details["password_set"] = true
-	}
-
-	s.health.SetSplunk(StateRunning, "", details)
-}
-
-// readDotEnvFile reads KEY=VALUE pairs from the .env (or .env.example) file in dataDir.
-func readDotEnvFile(dataDir string) map[string]string {
-	path := filepath.Join(dataDir, ".env")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		path = filepath.Join(dataDir, ".env.example")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-	}
-	env := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
-			v = v[1 : len(v)-1]
-		}
-		env[k] = v
-	}
-	return env
+	s.health.SetSinks(StateRunning, "", details)
 }
 
 // Client returns the underlying gateway client for direct RPC calls.

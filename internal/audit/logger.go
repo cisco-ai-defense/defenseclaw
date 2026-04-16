@@ -25,22 +25,29 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
+
 type Logger struct {
-	store  *Store
-	splunk *SplunkForwarder
-	otel   *telemetry.Provider
+	store *Store
+	// sinks is the v4 generic fan-out manager. nil is a safe no-op
+	// (matches the legacy nil-splunk behavior).
+	sinks *sinks.Manager
+	otel  *telemetry.Provider
 }
 
 func NewLogger(store *Store) *Logger {
 	return &Logger{store: store}
 }
 
-func (l *Logger) SetSplunkForwarder(sf *SplunkForwarder) {
-	l.splunk = sf
+// SetSinks installs the audit-sink fan-out manager. Pass nil to disable
+// downstream forwarding (events still hit SQLite + OTel when those are
+// configured).
+func (l *Logger) SetSinks(m *sinks.Manager) {
+	l.sinks = m
 }
 
 func (l *Logger) SetOTelProvider(p *telemetry.Provider) {
@@ -105,7 +112,7 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	if l.otel != nil {
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSplunk(event)
+	l.forwardToSinks(event)
 
 	if l.otel != nil {
 		targetType := inferTargetType(result.Scanner)
@@ -143,7 +150,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 	if l.otel != nil {
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSplunk(event)
+	l.forwardToSinks(event)
 
 	if l.otel != nil {
 		assetType := inferAssetTypeFromAction(action, details)
@@ -176,7 +183,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 	if l.otel != nil {
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSplunk(event)
+	l.forwardToSinks(event)
 
 	if l.otel != nil {
 		assetType := inferAssetTypeFromAction(action, details)
@@ -187,8 +194,8 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 }
 
 // LogEvent persists a pre-built event through the full audit pipeline
-// (SQLite + Splunk HEC + OTel). Use this when the caller needs to control
-// severity or other fields that LogAction hardcodes.
+// (SQLite + audit sinks + OTel). Use this when the caller needs to
+// control severity or other fields that LogAction hardcodes.
 func (l *Logger) LogEvent(event Event) error {
 	if event.ID == "" {
 		event.ID = uuid.New().String()
@@ -208,42 +215,43 @@ func (l *Logger) LogEvent(event Event) error {
 	if l.otel != nil {
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSplunk(event)
+	l.forwardToSinks(event)
 	return nil
 }
 
-func (l *Logger) forwardToSplunk(e Event) {
-	if l.splunk == nil {
+// forwardToSinks fans the event out to every configured audit sink. The
+// Manager handles per-sink filtering, immediate-flush actions, and
+// per-sink error logging — we only translate from the audit Event type.
+//
+// We use a short context here because the sinks are best-effort
+// downstream forwarders; a stalled remote endpoint must not block the
+// hot path. Sinks that need longer-lived connections own their own
+// background goroutines.
+func (l *Logger) forwardToSinks(e Event) {
+	if l.sinks == nil {
 		return
 	}
-	if err := l.splunk.ForwardEvent(e); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: splunk forward: %v\n", err)
-		return
-	}
-	if shouldFlushSplunkImmediately(e.Action) {
-		go func() {
-			if err := l.splunk.Flush(); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: splunk flush: %v\n", err)
-			}
-		}()
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = l.sinks.Forward(ctx, sinks.Event{
+		ID:        e.ID,
+		Timestamp: e.Timestamp,
+		Action:    e.Action,
+		Target:    e.Target,
+		Actor:     e.Actor,
+		Details:   e.Details,
+		Severity:  e.Severity,
+		RunID:     e.RunID,
+		TraceID:   e.TraceID,
+	})
 }
 
-func shouldFlushSplunkImmediately(action string) bool {
-	switch action {
-	case "watch-start", "watch-stop",
-		"sidecar-start", "sidecar-stop",
-		"sidecar-connected", "sidecar-disconnected":
-		return true
-	default:
-		return false
-	}
-}
-
+// Close flushes and closes every audit sink. Safe to call when no sinks
+// are configured.
 func (l *Logger) Close() {
-	if l.splunk != nil {
-		if err := l.splunk.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: splunk flush on close: %v\n", err)
+	if l.sinks != nil {
+		if err := l.sinks.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: audit sinks close: %v\n", err)
 		}
 	}
 }

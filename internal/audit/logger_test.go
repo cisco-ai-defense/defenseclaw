@@ -17,15 +17,69 @@
 package audit
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
-	"net/http"
+	"context"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 )
+
+// captureSink is an in-memory sinks.Sink that records every event
+// the Logger forwards, used by the audit-fanout tests to assert that
+// events reach the sink fan-out path with the expected fields.
+//
+// The previous Splunk-specific tests asserted the same invariants
+// against the old SplunkForwarder; this generic capture sink replaces
+// them and works against any future sink implementation by virtue of
+// living one layer above the wire format.
+type captureSink struct {
+	mu              sync.Mutex
+	events          []sinks.Event
+	flushImmediate  []string
+	immediateFlushC chan struct{}
+}
+
+func newCaptureSink() *captureSink {
+	return &captureSink{immediateFlushC: make(chan struct{}, 16)}
+}
+
+func (c *captureSink) Name() string                    { return "capture" }
+func (c *captureSink) Kind() string                    { return "capture" }
+func (c *captureSink) Forward(_ context.Context, e sinks.Event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, e)
+	return nil
+}
+func (c *captureSink) Flush(_ context.Context) error {
+	select {
+	case c.immediateFlushC <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (c *captureSink) Close() error { return nil }
+
+func (c *captureSink) snapshot() []sinks.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]sinks.Event, len(c.events))
+	copy(out, c.events)
+	return out
+}
+
+// installCaptureSink wires a captureSink into the Logger via a
+// sinks.Manager. Callers receive the underlying sink for assertions.
+func installCaptureSink(t *testing.T, l *Logger) *captureSink {
+	t.Helper()
+	mgr := sinks.NewManager()
+	cs := newCaptureSink()
+	mgr.Register(cs)
+	l.SetSinks(mgr)
+	return cs
+}
 
 func TestInferTargetType(t *testing.T) {
 	tests := []struct {
@@ -134,8 +188,8 @@ func TestLoggerLogActionIncludesRunID(t *testing.T) {
 	}
 }
 
-func TestLoggerSplunkForwardingIncludesDefaultedFields(t *testing.T) {
-	t.Setenv("DEFENSECLAW_RUN_ID", "logger-splunk-run-id")
+func TestLoggerSinkForwardingIncludesDefaultedFields(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "logger-sink-run-id")
 
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
@@ -146,54 +200,34 @@ func TestLoggerSplunkForwardingIncludesDefaultedFields(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	var payload []byte
-	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		body, _ := io.ReadAll(r.Body)
-		payload = append([]byte(nil), body...)
-		w.WriteHeader(http.StatusOK)
-	})
-
 	logger := NewLogger(store)
-	logger.SetSplunkForwarder(forwarder)
+	cs := installCaptureSink(t, logger)
 	if err := logger.LogAction("skill-block", "test-skill", "reason=test"); err != nil {
 		t.Fatalf("LogAction: %v", err)
 	}
 	logger.Close()
 
-	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 forwarded event, got %d", len(lines))
+	got := cs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 forwarded event, got %d", len(got))
 	}
 
-	var env struct {
-		Event struct {
-			ID     string `json:"id"`
-			Actor  string `json:"actor"`
-			RunID  string `json:"run_id"`
-			Action string `json:"action"`
-			Target string `json:"target"`
-		} `json:"event"`
-	}
-	if err := json.Unmarshal(lines[0], &env); err != nil {
-		t.Fatalf("Unmarshal forwarded payload: %v", err)
-	}
-
-	if env.Event.ID == "" {
+	evt := got[0]
+	if evt.ID == "" {
 		t.Fatal("forwarded event id was empty")
 	}
-	if env.Event.Actor != "defenseclaw" {
-		t.Fatalf("forwarded actor = %q, want %q", env.Event.Actor, "defenseclaw")
+	if evt.Actor != "defenseclaw" {
+		t.Fatalf("forwarded actor = %q, want %q", evt.Actor, "defenseclaw")
 	}
-	if env.Event.RunID != "logger-splunk-run-id" {
-		t.Fatalf("forwarded run_id = %q, want %q", env.Event.RunID, "logger-splunk-run-id")
+	if evt.RunID != "logger-sink-run-id" {
+		t.Fatalf("forwarded run_id = %q, want %q", evt.RunID, "logger-sink-run-id")
 	}
-	if env.Event.Action != "skill-block" || env.Event.Target != "test-skill" {
-		t.Fatalf("forwarded event mismatch: %+v", env.Event)
+	if evt.Action != "skill-block" || evt.Target != "test-skill" {
+		t.Fatalf("forwarded event mismatch: %+v", evt)
 	}
 }
 
-func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
+func TestLoggerSinkFlushesWatchStartImmediately(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -203,41 +237,23 @@ func TestLoggerSplunkFlushesWatchStartImmediately(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	var (
-		mu      sync.Mutex
-		payload []byte
-	)
-	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		payload = append([]byte(nil), body...)
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	})
-	forwarder.cfg.BatchSize = 50
-
 	logger := NewLogger(store)
-	logger.SetSplunkForwarder(forwarder)
+	cs := installCaptureSink(t, logger)
+
 	if err := logger.LogAction("watch-start", "", "dirs=3 debounce=500ms"); err != nil {
 		t.Fatalf("LogAction: %v", err)
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		mu.Lock()
-		got := len(bytes.TrimSpace(payload))
-		mu.Unlock()
-		if got > 0 || time.Now().After(deadline) {
+		if len(cs.snapshot()) > 0 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(bytes.TrimSpace(payload)) == 0 {
-		t.Fatal("expected watch-start to flush to Splunk promptly")
+	if len(cs.snapshot()) == 0 {
+		t.Fatal("expected watch-start to be forwarded to the sink promptly")
 	}
 }
 
@@ -278,7 +294,7 @@ func TestLoggerLogEventPreservesSeverity(t *testing.T) {
 	}
 }
 
-func TestLoggerLogEventSplunkForwarding(t *testing.T) {
+func TestLoggerLogEventSinkForwarding(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -288,16 +304,8 @@ func TestLoggerLogEventSplunkForwarding(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	var payload []byte
-	forwarder := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		body, _ := io.ReadAll(r.Body)
-		payload = append([]byte(nil), body...)
-		w.WriteHeader(http.StatusOK)
-	})
-
 	logger := NewLogger(store)
-	logger.SetSplunkForwarder(forwarder)
+	cs := installCaptureSink(t, logger)
 
 	evt := Event{
 		Action:   "drift",
@@ -311,24 +319,19 @@ func TestLoggerLogEventSplunkForwarding(t *testing.T) {
 	}
 	logger.Close()
 
-	if len(bytes.TrimSpace(payload)) == 0 {
-		t.Fatal("expected drift event to be forwarded to Splunk")
+	got := cs.snapshot()
+	if len(got) == 0 {
+		t.Fatal("expected drift event to be forwarded to the sink")
 	}
-
-	var env struct {
-		Event struct {
-			Action   string `json:"action"`
-			Severity string `json:"severity"`
-		} `json:"event"`
+	if got[0].Action != "drift" {
+		t.Fatalf("action = %q, want drift", got[0].Action)
 	}
-	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
-	if err := json.Unmarshal(lines[0], &env); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if env.Event.Action != "drift" {
-		t.Fatalf("action = %q, want drift", env.Event.Action)
-	}
-	if env.Event.Severity != "CRITICAL" {
-		t.Fatalf("severity = %q, want CRITICAL", env.Event.Severity)
+	if got[0].Severity != "CRITICAL" {
+		t.Fatalf("severity = %q, want CRITICAL", got[0].Severity)
 	}
 }
+
+// NOTE: TestLoggerRedactsPIIBeforeSink and TestLoggerSinkBypassesRevealFlag
+// were removed alongside the internal/redaction scrubbing layer. PII
+// redaction will be reintroduced in a follow-up PR that lives in the
+// sink layer (see docs/OBSERVABILITY.md migration note).

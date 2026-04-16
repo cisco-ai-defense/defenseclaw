@@ -74,7 +74,7 @@ Run without arguments to start the sidecar daemon.`,
 
 		auditLog = audit.NewLogger(auditStore)
 		loadDotEnvIntoOS(filepath.Join(cfg.DataDir, ".env"))
-		initSplunkForwarder()
+		initAuditSinks()
 		initOTelProvider()
 		return nil
 	},
@@ -122,9 +122,10 @@ func initOTelProvider() {
 
 // loadDotEnvIntoOS reads KEY=VALUE pairs from path and sets them as
 // environment variables unless already present. This ensures secrets
-// persisted by "defenseclaw setup splunk" (e.g. SPLUNK_ACCESS_TOKEN)
-// are available to the OTel provider and Splunk HEC forwarder when
-// the sidecar runs as a daemon without the user's shell environment.
+// persisted by `defenseclaw setup` (Splunk HEC tokens, OTLP bearer
+// tokens, generic webhook auth) are visible to the audit-sink Manager
+// and OTel provider when the sidecar runs as a daemon without the
+// user's interactive shell environment.
 func loadDotEnvIntoOS(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -150,34 +151,21 @@ func loadDotEnvIntoOS(path string) {
 	}
 }
 
-func initSplunkForwarder() {
-	if cfg == nil || !cfg.Splunk.Enabled {
+// initAuditSinks builds every enabled `audit_sinks:` entry from config
+// and installs them on the audit logger. Build errors are logged but
+// non-fatal — a misconfigured sink should not take down the sidecar.
+//
+// Per-sink construction lives in internal/cli/audit_sinks.go to keep
+// root.go focused on lifecycle.
+func initAuditSinks() {
+	if cfg == nil || len(cfg.AuditSinks) == 0 {
 		return
 	}
-
-	token := cfg.Splunk.ResolvedHECToken()
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "warning: splunk.enabled=true but no HEC token configured")
-		return
-	}
-
-	splunkCfg := audit.SplunkConfig{
-		HECEndpoint:   cfg.Splunk.HECEndpoint,
-		HECToken:      token,
-		Index:         cfg.Splunk.Index,
-		Source:        cfg.Splunk.Source,
-		SourceType:    cfg.Splunk.SourceType,
-		VerifyTLS:     cfg.Splunk.VerifyTLS,
-		Enabled:       true,
-		BatchSize:     cfg.Splunk.BatchSize,
-		FlushInterval: cfg.Splunk.FlushInterval,
-	}
-
-	fwd, err := audit.NewSplunkForwarder(splunkCfg)
+	mgr, err := buildAuditSinks(cfg.AuditSinks, appVersion)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: splunk init: %v\n", err)
-		return
+		fmt.Fprintf(os.Stderr, "warning: audit sinks init: %v\n", err)
 	}
-
-	auditLog.SetSplunkForwarder(fwd)
+	if mgr != nil && mgr.Len() > 0 {
+		auditLog.SetSinks(mgr)
+	}
 }

@@ -85,17 +85,9 @@ func (s *Store) ExportCSV(path string, limit int) error {
 	return w.Error()
 }
 
-func (s *Store) ExportSplunk(cfg SplunkConfig, limit int) error {
-	events, err := s.ListEvents(limit)
-	if err != nil {
-		return fmt.Errorf("audit: export splunk: %w", err)
-	}
-
-	fwd, err := NewSplunkForwarder(cfg)
-	if err != nil {
-		return err
-	}
-	defer fwd.Close()
-
-	return fwd.ExportEvents(events)
-}
+// ExportSplunk used to backfill historical events into Splunk HEC. The
+// generic audit-sinks system now performs the same job declaratively
+// (configure a `splunk_hec` sink, then call `defenseclaw audit replay
+// --to-sinks`). The function is intentionally unexported here; the
+// replay path lives in internal/cli and constructs sinks from
+// config.AuditSink directly.

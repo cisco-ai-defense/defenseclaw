@@ -181,8 +181,9 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 		fmt.Fprintf(os.Stderr, "[audit] network egress: alert event write failed: %v\n", err)
 	}
 
-	// Forward to Splunk HEC when configured.
-	l.forwardToSplunk(alert)
+	// Fan out to all configured audit sinks (Splunk HEC, OTLP logs,
+	// generic webhooks). No-op when no sinks are configured.
+	l.forwardToSinks(alert)
 
 	// Emit OTel alert counter.
 	if l.otel != nil {

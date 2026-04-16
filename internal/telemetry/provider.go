@@ -404,10 +404,12 @@ func resolveValue(signal, global string) string {
 	return global
 }
 
-// expandHeaders substitutes ${ENV_VAR} references in header values
-// and auto-injects X-SF-Token from SPLUNK_ACCESS_TOKEN when present.
+// expandHeaders substitutes ${ENV_VAR} references in header values so
+// operators can keep secrets out of the YAML file. Header semantics stay
+// vendor-neutral: if you need an auth header (X-SF-Token, api-key, etc.)
+// put it in cfg.OTel.Headers or export it via OTEL_EXPORTER_OTLP_HEADERS.
 func expandHeaders(headers map[string]string) map[string]string {
-	out := make(map[string]string, len(headers)+1)
+	out := make(map[string]string, len(headers))
 	for k, v := range headers {
 		out[k] = os.Expand(v, func(key string) string {
 			if strings.HasPrefix(key, "{") && strings.HasSuffix(key, "}") {
@@ -415,11 +417,6 @@ func expandHeaders(headers map[string]string) map[string]string {
 			}
 			return os.Getenv(key)
 		})
-	}
-	if _, ok := out["X-SF-Token"]; !ok {
-		if tok := os.Getenv("SPLUNK_ACCESS_TOKEN"); tok != "" {
-			out["X-SF-Token"] = tok
-		}
 	}
 	return out
 }

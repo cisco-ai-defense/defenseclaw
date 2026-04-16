@@ -237,15 +237,12 @@ func (p *SetupPanel) loadSections() {
 			{Label: "MCP Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers},
 			{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard},
 		}},
-		{Name: "Splunk", Fields: []configField{
-			{Label: "Enabled", Key: "splunk.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Splunk.Enabled)},
-			{Label: "HEC Endpoint", Key: "splunk.hec_endpoint", Kind: "string", Value: c.Splunk.HECEndpoint},
-			{Label: "HEC Token Env", Key: "splunk.hec_token_env", Kind: "password", Value: c.Splunk.HECTokenEnv},
-			{Label: "Index", Key: "splunk.index", Kind: "string", Value: c.Splunk.Index},
-			{Label: "Source", Key: "splunk.source", Kind: "string", Value: c.Splunk.Source},
-			{Label: "Verify TLS", Key: "splunk.verify_tls", Kind: "bool", Value: fmt.Sprintf("%v", c.Splunk.VerifyTLS)},
-			{Label: "Batch Size", Key: "splunk.batch_size", Kind: "int", Value: fmt.Sprintf("%d", c.Splunk.BatchSize)},
-		}},
+		// Audit sinks live in their own list-based section editor (Phase
+		// 3.3). The single-key-per-row form below cannot represent the
+		// audit_sinks[] schema without losing per-sink kind/filter
+		// metadata, so we surface a read-only summary here and direct
+		// the operator to the dedicated editor.
+		{Name: "Audit Sinks", Fields: auditSinkSummaryFields(c)},
 		{Name: "OTel", Fields: []configField{
 			{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled)},
 			{Label: "Protocol", Key: "otel.protocol", Kind: "string", Value: c.OTel.Protocol},
@@ -1484,4 +1481,48 @@ func (p *SetupPanel) renderConfigEditor() string {
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// auditSinkSummaryFields renders one read-only row per declared audit
+// sink. The single-key configField form cannot represent the
+// audit_sinks[] schema (per-sink kind, filter, kind-specific block),
+// so this view shows a summary and "no sinks configured" when empty.
+func auditSinkSummaryFields(c *config.Config) []configField {
+	if len(c.AuditSinks) == 0 {
+		return []configField{{
+			Label: "Status",
+			Key:   "audit_sinks.summary",
+			Kind:  "header",
+			Value: "no sinks configured",
+		}}
+	}
+	out := make([]configField, 0, len(c.AuditSinks))
+	for _, s := range c.AuditSinks {
+		state := "enabled"
+		if !s.Enabled {
+			state = "disabled"
+		}
+		summary := fmt.Sprintf("%s [%s] %s", s.Name, s.Kind, state)
+		switch s.Kind {
+		case config.SinkKindSplunkHEC:
+			if s.SplunkHEC != nil {
+				summary += " → " + s.SplunkHEC.Endpoint
+			}
+		case config.SinkKindOTLPLogs:
+			if s.OTLPLogs != nil {
+				summary += " → " + s.OTLPLogs.Endpoint
+			}
+		case config.SinkKindHTTPJSONL:
+			if s.HTTPJSONL != nil {
+				summary += " → " + s.HTTPJSONL.URL
+			}
+		}
+		out = append(out, configField{
+			Label: s.Name,
+			Key:   "audit_sinks." + s.Name,
+			Kind:  "header",
+			Value: summary,
+		})
+	}
+	return out
 }

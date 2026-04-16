@@ -790,6 +790,11 @@ func TestOTelEnvVarBindings(t *testing.T) {
 
 	for _, tt := range envTests {
 		t.Run(tt.envKey, func(t *testing.T) {
+			// Isolate Load() from the developer's real ~/.defenseclaw/
+			// config.yaml. Without this, a stale legacy `splunk:` block
+			// in the host config trips detectLegacySplunk() and the test
+			// fails for reasons unrelated to env var binding.
+			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 			t.Setenv(tt.envKey, tt.value)
 
 			cfg, err := Load()
@@ -805,6 +810,7 @@ func TestOTelEnvVarBindings(t *testing.T) {
 }
 
 func TestOTelEnvVarEnabled(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
 
 	cfg, err := Load()
@@ -817,6 +823,7 @@ func TestOTelEnvVarEnabled(t *testing.T) {
 }
 
 func TestOTelEnvVarTLSInsecure(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
 
 	cfg, err := Load()
