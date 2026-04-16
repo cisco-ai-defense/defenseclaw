@@ -1073,24 +1073,47 @@ phase_start() {
     start_openclaw_gateway
     sleep 5
 
-    echo "  Starting DefenseClaw sidecar..."
-    defenseclaw-gateway stop 2>/dev/null || true
-    defenseclaw-gateway start
-    sleep 5
+    echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
+    # Self-heal pattern: the ARM64 self-hosted runner occasionally sees a
+    # race where the sidecar daemon exits during early init (e.g. the init-
+    # era sidecar is already dead by the time we get here, or the new one
+    # loses a port-binding race to a stale listener). Each
+    # `defenseclaw-gateway start` call internally runs killStaleProcesses
+    # via pgrep, so a stop+start loop naturally reaps stragglers.
+    sidecar_healthy=0
+    for attempt in 1 2 3; do
+        if [ "$attempt" -gt 1 ]; then
+            echo "  [attempt ${attempt}/3] restarting sidecar after previous attempt failed health check..."
+        fi
+        defenseclaw-gateway stop 2>/dev/null || true
+        sleep 2
+        defenseclaw-gateway start
+        sleep 5
+
+        if wait_for_url "$SIDECAR_URL/health" 60 2; then
+            sidecar_healthy=1
+            echo "  [attempt ${attempt}/3] sidecar healthy"
+            break
+        fi
+        echo "  [attempt ${attempt}/3] /health unreachable after 60s"
+    done
 
     echo "  Sidecar status:"
     defenseclaw-gateway status || true
     echo ""
 
-    echo "  Waiting for sidecar health..."
-    if wait_for_url "$SIDECAR_URL/health" 180 3; then
+    if [ "$sidecar_healthy" = "1" ]; then
         pass "sidecar health endpoint reachable"
     else
-        fail "sidecar health endpoint reachable" "timed out after 180s"
+        fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
         echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
         tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
-        echo "  --- defenseclaw-gateway status ---" >&2
-        defenseclaw-gateway status 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 40 lines of ~/.defenseclaw/watchdog.log ---" >&2
+        tail -n 40 "$HOME/.defenseclaw/watchdog.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- defenseclaw / openclaw processes ---" >&2
+        ps -eo pid,ppid,stat,etime,cmd 2>&1 | grep -Ei 'defenseclaw|openclaw' | grep -v grep | sed 's/^/    /' >&2 || true
+        echo "  --- listeners on 127.0.0.1:18789 and 127.0.0.1:18970 ---" >&2
+        { ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null || true; } | grep -E '18789|18970' | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 1"
         return 1
     fi
