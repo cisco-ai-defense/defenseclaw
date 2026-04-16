@@ -74,6 +74,16 @@
     "log_all_actions": true,
     "log_scan_results": true
   },
+  "model_governance": {
+    "providers": {
+      "allow": [],
+      "deny": []
+    },
+    "models": {
+      "allow": [],
+      "deny": []
+    }
+  },
   "guardrail": {
     "severity_rank": {
       "NONE": 0,

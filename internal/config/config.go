@@ -168,8 +168,9 @@ type Config struct {
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+	AuditSinks      []AuditSink           `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks        []WebhookConfig       `mapstructure:"webhooks"         yaml:"webhooks"`
+	ModelGovernance ModelGovernanceConfig `mapstructure:"model_governance" yaml:"model_governance"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -581,6 +582,18 @@ type WebhookConfig struct {
 	TimeoutSeconds  int      `mapstructure:"timeout_seconds"  yaml:"timeout_seconds"`
 	CooldownSeconds *int     `mapstructure:"cooldown_seconds" yaml:"cooldown_seconds,omitempty"`
 	Enabled         bool     `mapstructure:"enabled"          yaml:"enabled"`
+}
+
+// ModelGovernanceConfig controls which LLM models and providers are
+// permitted through the guardrail proxy. When enabled, requests for
+// disallowed models or providers are blocked before content inspection.
+// Allow/deny lists are defined in the OPA Rego data layer (data.json),
+// not in config.yaml.
+type ModelGovernanceConfig struct {
+	Enabled      bool   `mapstructure:"enabled"       yaml:"enabled"`
+	Mode         string `mapstructure:"mode"           yaml:"mode"`
+	BlockMessage string `mapstructure:"block_message"  yaml:"block_message"`
+	LogAllowed   bool   `mapstructure:"log_allowed"    yaml:"log_allowed"`
 }
 
 // ResolvedSecret returns the webhook secret/token from the env var.
@@ -1802,4 +1815,9 @@ func setDefaults(dataDir string) {
 	_ = viper.BindEnv("otel.logs.endpoint", "DEFENSECLAW_OTEL_LOGS_ENDPOINT")
 	_ = viper.BindEnv("otel.logs.protocol", "DEFENSECLAW_OTEL_LOGS_PROTOCOL")
 	_ = viper.BindEnv("otel.logs.url_path", "DEFENSECLAW_OTEL_LOGS_URL_PATH")
+
+	viper.SetDefault("model_governance.enabled", false)
+	viper.SetDefault("model_governance.mode", "enforce")
+	viper.SetDefault("model_governance.block_message", "This model or provider is not authorized by your organization's policy.")
+	viper.SetDefault("model_governance.log_allowed", false)
 }

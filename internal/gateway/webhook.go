@@ -738,6 +738,8 @@ func webexSeverityIcon(severity string) string {
 
 func categorizeAction(action string) string {
 	switch {
+	case strings.Contains(action, "governance"):
+		return "governance"
 	case strings.Contains(action, "gateway-down"),
 		strings.Contains(action, "gateway-recovered"),
 		strings.Contains(action, "guardrail-degraded"):

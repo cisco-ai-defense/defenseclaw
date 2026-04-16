@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
@@ -85,6 +86,7 @@ type GuardrailProxy struct {
 	dataDir string
 
 	inspector    ContentInspector
+	governor     *ModelGovernor
 	masterKey    string
 	gatewayToken string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
 	notify       *NotificationQueue
@@ -174,6 +176,8 @@ func NewGuardrailProxy(
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
 	judgeLLM config.LLMConfig,
+	modelGov config.ModelGovernanceConfig,
+	opa *policy.Engine,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -226,6 +230,8 @@ func NewGuardrailProxy(
 			"Set OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env to require auth on all connections.\n")
 	}
 
+	governor := NewModelGovernor(modelGov, opa)
+
 	p := &GuardrailProxy{
 		cfg:          cfg,
 		logger:       logger,
@@ -234,6 +240,7 @@ func NewGuardrailProxy(
 		store:        store,
 		dataDir:      dataDir,
 		inspector:    inspector,
+		governor:     governor,
 		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		notify:       notify,
@@ -248,6 +255,65 @@ func NewGuardrailProxy(
 // SetWebhookDispatcher attaches a webhook dispatcher for guardrail block notifications.
 func (p *GuardrailProxy) SetWebhookDispatcher(d *WebhookDispatcher) {
 	p.webhooks = d
+}
+
+// checkModelGovernance evaluates the model and provider against configured
+// governance rules. Returns true if the request was blocked (caller should
+// return). In monitor mode, denials are logged but not enforced.
+func (p *GuardrailProxy) checkModelGovernance(provider, model string) *GovernanceVerdict {
+	if p.governor == nil {
+		return nil
+	}
+
+	verdict := p.governor.Check(provider, model)
+
+	if verdict.Allowed {
+		if p.governor.LogAllowed() {
+			fmt.Fprintf(os.Stderr, "[governance] allowed: provider=%s model=%s\n", provider, model)
+		}
+		return nil
+	}
+
+	target := model
+	if provider != "" {
+		target = provider + "/" + model
+	}
+
+	fmt.Fprintf(os.Stderr, "[governance] denied: %s (rule=%s reason=%s mode=%s)\n",
+		target, verdict.Rule, verdict.Reason,
+		map[bool]string{true: "monitor", false: "enforce"}[p.governor.IsMonitorOnly()])
+
+	if p.logger != nil {
+		_ = p.logger.LogAction("model-governance-deny", target, verdict.Reason)
+	}
+	if p.store != nil {
+		evt := audit.Event{
+			Action:    "model-governance-deny",
+			Target:    target,
+			Actor:     "defenseclaw-governance",
+			Severity:  "HIGH",
+			Details:   fmt.Sprintf("rule=%s %s", verdict.Rule, verdict.Reason),
+			Timestamp: time.Now().UTC(),
+		}
+		_ = p.store.LogEvent(evt)
+	}
+	if p.webhooks != nil {
+		evt := audit.Event{
+			ID:        uuid.New().String(),
+			Timestamp: time.Now().UTC(),
+			Action:    "model-governance-deny",
+			Target:    target,
+			Actor:     "defenseclaw-governance",
+			Severity:  "HIGH",
+			Details:   fmt.Sprintf("rule=%s %s", verdict.Rule, verdict.Reason),
+		}
+		p.webhooks.Dispatch(evt)
+	}
+
+	if p.governor.IsMonitorOnly() {
+		return nil
+	}
+	return verdict
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
@@ -548,6 +614,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
+
+	// --- Model/provider governance (pre-inspection gate) ---
+	if p.governor != nil {
+		if gv := p.checkModelGovernance(provider, partial.Model); gv != nil {
+			msg := p.governor.BlockMessage()
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
+			return
+		}
+	}
 
 	userText := lastUserText(partial.Messages)
 	if userText == "" && partial.System != "" {
@@ -1384,6 +1459,20 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	if len(req.Messages) == 0 {
 		writeOpenAIError(w, http.StatusBadRequest, "messages array is required and must not be empty")
 		return
+	}
+
+	// --- Model/provider governance (pre-inspection gate) ---
+	if p.governor != nil {
+		provider := inferProviderFromURL(req.TargetURL)
+		if gv := p.checkModelGovernance(provider, req.Model); gv != nil {
+			msg := p.governor.BlockMessage()
+			if req.Stream {
+				p.writeBlockedStream(w, req.Model, msg)
+			} else {
+				p.writeBlockedResponse(w, req.Model, msg)
+			}
+			return
+		}
 	}
 
 	p.reloadRuntimeConfig()

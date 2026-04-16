@@ -130,6 +130,19 @@ type AuditOutput struct {
 	ExportTo     []string `json:"export_to"`
 }
 
+// ModelGovernanceInput is the structured input passed to the OPA model_governance policy.
+type ModelGovernanceInput struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// ModelGovernanceOutput is the structured output from the OPA model_governance policy.
+type ModelGovernanceOutput struct {
+	Action string `json:"action"` // "allow" or "deny"
+	Reason string `json:"reason"`
+	Rule   string `json:"rule"` // "provider-allow", "provider-deny", "model-allow", "model-deny"
+}
+
 // SkillActionsInput is the structured input passed to the OPA skill_actions policy.
 type SkillActionsInput struct {
 	Severity   string `json:"severity"`

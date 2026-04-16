@@ -131,6 +131,13 @@ watch:
 #     secret_env: SLACK_WEBHOOK_SECRET
 webhooks: []
 
+# Model & provider governance — blocks unauthorized models/providers before
+# guardrail content inspection. Allow/deny lists are configured in the OPA
+# Rego data layer (data.json), not here.
+model_governance:
+  enabled: false
+  mode: enforce
+
 enforcement:
   max_enforcement_delay_seconds: 2
 

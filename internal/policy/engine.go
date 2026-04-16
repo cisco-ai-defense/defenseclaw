@@ -241,6 +241,24 @@ func (e *Engine) EvaluateSkillActions(ctx context.Context, input SkillActionsInp
 }
 
 // ---------------------------------------------------------------------------
+// Model Governance
+// ---------------------------------------------------------------------------
+
+// EvaluateModelGovernance runs the model governance policy to determine if a
+// model/provider combination is allowed or denied.
+func (e *Engine) EvaluateModelGovernance(ctx context.Context, input ModelGovernanceInput) (*ModelGovernanceOutput, error) {
+	result, err := e.eval(ctx, "data.defenseclaw.model_governance", input)
+	if err != nil {
+		return nil, fmt.Errorf("policy: model_governance eval: %w", err)
+	}
+	return &ModelGovernanceOutput{
+		Action: stringVal(result, "action"),
+		Reason: stringVal(result, "reason"),
+		Rule:   stringVal(result, "rule"),
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
 // Compile
 // ---------------------------------------------------------------------------
 
