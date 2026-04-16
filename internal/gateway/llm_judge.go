@@ -973,7 +973,7 @@ func formatSignalEvidence(signals []TriageSignal) string {
 		if i > 0 {
 			sb.WriteString("\n")
 		}
-		sb.WriteString(fmt.Sprintf("- Pattern %q matched near: %q", s.Pattern, truncateEvidence(s.Evidence, 200)))
+		fmt.Fprintf(&sb, "- Pattern %q matched near: %q", s.Pattern, truncateEvidence(s.Evidence, 200))
 	}
 	return sb.String()
 }

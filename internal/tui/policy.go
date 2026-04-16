@@ -609,7 +609,7 @@ func (p *PolicyPanel) viewRuleDetail(w, h int) string {
 		b.WriteString(line + "\n")
 	}
 
-	b.WriteString(fmt.Sprintf("\n%s", dim.Render(fmt.Sprintf("  %d rules total", len(rules)))))
+	fmt.Fprintf(&b, "\n%s", dim.Render(fmt.Sprintf("  %d rules total", len(rules))))
 	return b.String()
 }
 
@@ -690,12 +690,12 @@ func (p *PolicyPanel) viewJudge(w, h int) string {
 				if !cat.Enabled {
 					enabledTag = "off"
 				}
-				right.WriteString(fmt.Sprintf("  %-20s %s  %s  %s\n",
+				fmt.Fprintf(&right, "  %-20s %s  %s  %s\n",
 					catName,
 					SeverityStyle(strings.ToUpper(sev)).Render(sev),
 					dim.Render(cat.FindingID),
 					dim.Render("["+enabledTag+"]"),
-				))
+				)
 			}
 		}
 	}
