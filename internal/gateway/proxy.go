@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
@@ -86,6 +87,7 @@ type GuardrailProxy struct {
 	gatewayToken string // OPENCLAW_GATEWAY_TOKEN, accepted in X-DC-Auth
 	notify       *NotificationQueue
 	webhooks     *WebhookDispatcher
+	budget       *BudgetEnforcer
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -133,6 +135,8 @@ func NewGuardrailProxy(
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
 	sharedAPIKey string,
+	budgetCfg config.BudgetConfig,
+	opa *policy.Engine,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -176,6 +180,7 @@ func NewGuardrailProxy(
 		limiter:      rate.NewLimiter(rate.Limit(100), 200),
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
+		budget:       NewBudgetEnforcer(budgetCfg, opa),
 	}
 	p.resolveProviderFn = p.resolveProviderFromHeaders
 	return p, nil
@@ -1036,6 +1041,23 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// --- Pre-call budget check (LLM-04 Model DoS + cost enforcement) ---
+	// Runs before content inspection so we reject flood patterns as
+	// cheaply as possible. Estimated tokens = rough prompt size + any
+	// caller-supplied max_tokens cap (fallback 1024).
+	if decision := p.checkBudget(r, &req); decision != nil && !decision.Allowed {
+		p.emitBudgetEvent(decision, req.Model, "deny")
+		msg := p.budget.BlockMessage(decision)
+		if req.Stream {
+			p.writeBlockedStream(w, req.Model, msg)
+		} else {
+			p.writeBlockedResponse(w, req.Model, msg)
+		}
+		return
+	} else if decision != nil && decision.Monitor {
+		p.emitBudgetEvent(decision, req.Model, "monitor")
+	}
+
 	// --- Inject pending security notifications as a system message ---
 	if p.notify != nil {
 		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
@@ -1296,6 +1318,12 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			completionTok = int(resp.Usage.CompletionTokens)
 		}
 		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+	}
+
+	// Record post-call usage into the budget tracker so the next
+	// request sees accurate sliding-window counts.
+	if resp.Usage != nil {
+		p.recordBudgetUsage(r, aliasModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1567,6 +1595,12 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			completionTok = int(usage.CompletionTokens)
 		}
 		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+	}
+
+	// Record post-call usage into the budget tracker so streaming
+	// requests get the same accounting as non-streaming ones.
+	if usage != nil {
+		p.recordBudgetUsage(r, aliasModel, usage.PromptTokens, usage.CompletionTokens)
 	}
 
 	// Flush buffered tool-call chunks only when inspection passed.
@@ -2629,4 +2663,95 @@ func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw j
 
 		p.otel.EndToolSpan(span, 0, 0, time.Now(), name, "")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Budget enforcement helpers
+// ---------------------------------------------------------------------------
+
+// checkBudget runs the OPA budget policy before forwarding a chat request.
+// Returns nil when the enforcer is disabled. A decision with Allowed=false
+// means the caller should refuse the request; Monitor=true means a deny
+// would have fired but the enforcer is in monitor mode.
+func (p *GuardrailProxy) checkBudget(r *http.Request, req *ChatRequest) *BudgetDecision {
+	if p.budget == nil || !p.budget.Enabled() {
+		return nil
+	}
+
+	est := estimateRequestTokens(req)
+	decision := p.budget.Check(r.Context(), r, req.Model, est)
+	return decision
+}
+
+// recordBudgetUsage books upstream-reported token usage into the tracker.
+// Called from both the streaming and non-streaming paths after the
+// upstream response is complete.
+func (p *GuardrailProxy) recordBudgetUsage(r *http.Request, model string, prompt, completion int64) {
+	if p.budget == nil {
+		return
+	}
+	subject := p.budget.SubjectFor(r)
+	p.budget.Record(subject, model, prompt, completion)
+}
+
+// emitBudgetEvent records an audit/webhook event when a budget policy
+// fires. "outcome" is "deny" for enforced denials and "monitor" for
+// monitor-mode observations.
+func (p *GuardrailProxy) emitBudgetEvent(d *BudgetDecision, model, outcome string) {
+	if d == nil {
+		return
+	}
+	details := fmt.Sprintf("subject=%s rule=%s limit=%.4f outcome=%s reason=%s",
+		d.Subject, d.Rule, d.Limit, outcome, d.Reason)
+
+	action := "guardrail-budget-block"
+	severity := "HIGH"
+	if outcome == "monitor" {
+		action = "guardrail-budget-monitor"
+		severity = "MEDIUM"
+	}
+
+	if p.logger != nil {
+		_ = p.logger.LogAction(action, model, details)
+	}
+	if p.store != nil {
+		evt := audit.Event{
+			ID:        uuid.New().String(),
+			Action:    action,
+			Target:    model,
+			Severity:  severity,
+			Details:   details,
+			Timestamp: time.Now().UTC(),
+		}
+		_ = p.store.LogEvent(evt)
+		if p.webhooks != nil {
+			p.webhooks.Dispatch(evt)
+		}
+	}
+	if p.otel != nil {
+		p.otel.RecordGuardrailEvaluation(context.Background(), "budget-enforcer", outcome)
+	}
+}
+
+// estimateRequestTokens returns a coarse projection of total tokens for
+// budgeting purposes. Uses a rough 4-bytes-per-token heuristic for
+// prompts plus the caller-supplied max_tokens (or 1024 default) for the
+// completion — the real count comes back in resp.Usage post-call.
+func estimateRequestTokens(req *ChatRequest) int64 {
+	if req == nil {
+		return 0
+	}
+	var chars int64
+	for _, m := range req.Messages {
+		chars += int64(len(m.Content))
+	}
+	promptTokens := chars / 4
+	if promptTokens < 1 && chars > 0 {
+		promptTokens = 1
+	}
+	completion := int64(1024)
+	if req.MaxTokens != nil && *req.MaxTokens > 0 {
+		completion = int64(*req.MaxTokens)
+	}
+	return promptTokens + completion
 }

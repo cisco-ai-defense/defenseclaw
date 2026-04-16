@@ -131,6 +131,22 @@ watch:
 #     secret_env: SLACK_WEBHOOK_SECRET
 webhooks: []
 
+# Token/cost budget enforcement (LLM-04 Model DoS + spend caps).
+# Per-subject limits and model pricing live in
+# ~/.defenseclaw/policies/rego/data.json under `data.budget`.
+# Start in monitor mode to collect baseline usage before switching to enforce.
+#
+# budget:
+#   enabled: true
+#   mode: monitor                # monitor | enforce
+#   subject_header: X-DC-Subject
+#   default_subject: default
+#   block_message: ""
+#   log_allowed: false
+budget:
+  enabled: false
+  mode: monitor
+
 enforcement:
   max_enforcement_delay_seconds: 2
 

@@ -68,6 +68,65 @@ type Config struct {
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
 	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
+	Budget         BudgetConfig         `mapstructure:"budget"           yaml:"budget"`
+}
+
+// BudgetConfig controls the token/cost budget enforcer that throttles LLM
+// traffic to mitigate LLM-04 (Model DoS) and runaway spend. The per-subject
+// limits and pricing table are defined in the OPA Rego data layer
+// (policies/rego/data.json under "budget"), not here.
+type BudgetConfig struct {
+	// Enabled turns enforcement on. When false the enforcer is a no-op and
+	// the proxy records token telemetry only.
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
+
+	// Mode selects the enforcement posture:
+	//   "enforce" — deny requests that would exceed budgets
+	//   "monitor" — allow but log + emit audit/webhook events
+	Mode string `mapstructure:"mode" yaml:"mode"`
+
+	// SubjectHeader is the HTTP header the enforcer reads to identify the
+	// caller (e.g. "X-DC-Subject"). When empty or header is missing the
+	// enforcer falls back to DefaultSubject.
+	SubjectHeader string `mapstructure:"subject_header" yaml:"subject_header"`
+
+	// DefaultSubject is used when no subject header is provided. Keep as
+	// "default" to share the default entry in policies/rego/data.json.
+	DefaultSubject string `mapstructure:"default_subject" yaml:"default_subject"`
+
+	// BlockMessage is the user-facing message returned when a request is
+	// denied. An empty value selects a sensible default.
+	BlockMessage string `mapstructure:"block_message" yaml:"block_message"`
+
+	// LogAllowed emits an audit event for each allowed request. Disabled
+	// by default because it can be noisy; enable only when investigating.
+	LogAllowed bool `mapstructure:"log_allowed" yaml:"log_allowed"`
+}
+
+// IsEnforcing reports whether the budget enforcer should actively block
+// requests. Monitor mode returns false so the proxy lets traffic through.
+func (b *BudgetConfig) IsEnforcing() bool {
+	return b.Enabled && b.Mode == "enforce"
+}
+
+// EffectiveSubjectHeader returns the configured header name or the sensible
+// default. The gateway never trusts this header on its own — the enforcer
+// pairs it with auth context.
+func (b *BudgetConfig) EffectiveSubjectHeader() string {
+	if b.SubjectHeader != "" {
+		return b.SubjectHeader
+	}
+	return "X-DC-Subject"
+}
+
+// EffectiveDefaultSubject returns the fallback subject for unidentified
+// callers. Keeping this aligned with data.budget.subjects.default ensures a
+// sane enforcement floor.
+func (b *BudgetConfig) EffectiveDefaultSubject() string {
+	if b.DefaultSubject != "" {
+		return b.DefaultSubject
+	}
+	return "default"
 }
 
 // ResolvedDefaultLLMAPIKey returns the shared LLM API key from the configured
@@ -849,6 +908,13 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+
+	viper.SetDefault("budget.enabled", false)
+	viper.SetDefault("budget.mode", "monitor")
+	viper.SetDefault("budget.subject_header", "X-DC-Subject")
+	viper.SetDefault("budget.default_subject", "default")
+	viper.SetDefault("budget.block_message", "")
+	viper.SetDefault("budget.log_allowed", false)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)

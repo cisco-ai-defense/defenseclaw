@@ -222,4 +222,79 @@ webhooks:
 |---|---|
 | **Set by** | Operator, manually in `config.yaml`. |
 | **Read by** | **Go sidecar** at startup via `config.Load()`. **Python CLI** via `config.load()` (read-only, for display). |
-| **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors). |
+| **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block, budget) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors). |
+
+---
+
+## Token/Cost Budget Enforcement Config
+
+The `budget` section in `config.yaml` controls the **token and cost budget
+enforcer**. Budgets mitigate LLM-04 (Model Denial of Service) and runaway
+spend by rejecting or logging requests that would exceed per-subject limits
+defined in the OPA `budget` policy.
+
+The runtime knobs (enabled / mode / subject header) live in `config.yaml`.
+**All limits and model pricing live in
+`~/.defenseclaw/policies/rego/data.json` under `data.budget`** so they can
+be edited and hot-reloaded without restarting the sidecar.
+
+```yaml
+budget:
+  enabled: true                 # master switch
+  mode: enforce                 # enforce | monitor
+  subject_header: X-DC-Subject  # HTTP header carrying the subject ID
+  default_subject: default      # used when no subject header is set
+  block_message: ""             # optional custom message returned on deny
+  log_allowed: false            # when true, audits every allowed request
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch. When false, the enforcer is a no-op and the tracker is not consulted. |
+| `mode` | string | `"monitor"` | `"enforce"` blocks over-limit requests; `"monitor"` lets them through but emits a webhook/audit event. |
+| `subject_header` | string | `"X-DC-Subject"` | HTTP header used to identify the subject (user, team, org) for per-subject accounting. Empty disables header lookup. |
+| `default_subject` | string | `"default"` | Subject used when the header is absent or blank. Must match a key under `data.budget.subjects`, otherwise the `default` entry is used. |
+| `block_message` | string | `""` | Replaces the default deny message ("Request denied by DefenseClaw budget policy…") in the OpenAI-compatible blocked response. |
+| `log_allowed` | bool | `false` | When true, every allowed request is audited — useful during rollout, expensive in production. |
+
+### Policy data (`data.budget` in `data.json`)
+
+```json
+{
+  "budget": {
+    "subjects": {
+      "default": {
+        "tokens_per_minute": 0,
+        "tokens_per_hour": 0,
+        "tokens_per_day": 0,
+        "requests_per_minute": 0,
+        "requests_per_hour": 0,
+        "requests_per_day": 0,
+        "cost_per_hour": 0,
+        "cost_per_day": 0
+      },
+      "user:alice@example.com": {
+        "tokens_per_minute": 5000,
+        "tokens_per_hour": 100000,
+        "cost_per_day": 25.0
+      }
+    },
+    "pricing": {
+      "gpt-4o":     { "input_per_1k": 0.0025, "output_per_1k": 0.010 },
+      "gpt-4o-mini":{ "input_per_1k": 0.00015, "output_per_1k": 0.0006 },
+      "default":    { "input_per_1k": 0.001,  "output_per_1k": 0.003 }
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `subjects` | Map of subject ID → limits. `default` is the fallback when a subject has no entry. A limit of `0` means "unlimited" for that window. |
+| `pricing` | Per-model USD cost per 1k tokens. Used by the pricing table to estimate request cost for the `cost_per_*` deny rules. The `default` key is used when a model isn't listed. |
+
+| | |
+|---|---|
+| **Set by** | Operator, manually in `config.yaml` (runtime) and `data.json` (limits + pricing). |
+| **Read by** | **Go sidecar** at startup via `config.Load()`. The OPA engine reads `data.budget` on every evaluation (with automatic reload). |
+| **Effect** | When enabled, `internal/gateway/proxy.go` runs the OPA `defenseclaw.budget` policy **before** each chat request is forwarded. Allowed requests are tracked post-call using the upstream's reported token usage; subsequent requests see the updated sliding-window counters. Denied requests return an OpenAI-compatible response with `defenseclaw_blocked: true`. Denial and monitor events are dispatched to webhooks under the `budget` category. |

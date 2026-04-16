@@ -78,6 +78,14 @@ watch:
 
 webhooks: []
 
+# Token/cost budget enforcement is disabled in the permissive preset.
+# Set `enabled: true` and `mode: monitor` to surface usage telemetry
+# without blocking, or `mode: enforce` once limits are dialed in via
+# ~/.defenseclaw/policies/rego/data.json (`data.budget`).
+budget:
+  enabled: false
+  mode: monitor
+
 enforcement:
   max_enforcement_delay_seconds: 5
 

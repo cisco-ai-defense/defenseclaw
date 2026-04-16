@@ -636,6 +636,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.notify,
 		rp,
 		s.cfg.ResolvedDefaultLLMAPIKey(),
+		s.cfg.Budget,
+		s.opa,
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)
