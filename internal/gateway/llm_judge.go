@@ -29,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -279,6 +280,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		prompt = jc.SystemPrompt
 	}
 
+	start := time.Now()
 	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: prompt},
@@ -287,12 +289,19 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		MaxTokens: intPtr(1024),
 		Fallbacks: j.cfg.Fallbacks,
 	})
+	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection error: %v\n", err)
+		emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
+			err.Error(), "")
 		return errorVerdict("llm-judge-injection")
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
+			"empty-response", "")
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -308,13 +317,31 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		// triage fallback (MEDIUM alert) applies instead of a blanket
 		// allow. JudgeFailed also prevents the verdict from being counted
 		// as an authoritative clean.
+		emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
+			"parse-failed", judgeRawForEmit(rawResponse))
 		return errorVerdict("llm-judge-injection")
 	}
 
 	verdict := j.injectionToVerdict(parsed)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection verdict: action=%s severity=%s findings=%v\n",
 		verdict.Action, verdict.Severity, verdict.Findings)
+	emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
+		"", judgeRawForEmit(rawResponse))
 	return verdict
+}
+
+// judgeRawForEmit returns the raw judge body only when the trace
+// flag is on. This mirrors the stderr gate (judgeLogTrace) so the
+// JSONL stream never surfaces PII-heavy bodies unless an operator
+// has explicitly opted in. When retain_judge_bodies ships in
+// config (Phase 2.3), that flag will OR into this check.
+func judgeRawForEmit(raw string) string {
+	if judgeLogTrace() {
+		return truncateJudgeLog(raw, 500)
+	}
+	return ""
 }
 
 var injectionCategories = map[string]string{
@@ -437,6 +464,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	}
 
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: calling provider (dir=%s, content_len=%d)\n", direction, len(content))
+	start := time.Now()
 	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: prompt},
@@ -445,13 +473,20 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		MaxTokens: intPtr(1024),
 		Fallbacks: j.cfg.Fallbacks,
 	})
+	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii error (dir=%s): %v\n", direction, err)
+		emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
+			err.Error(), "")
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
+			"empty-response", "")
 		return errorVerdict("llm-judge-pii")
 	}
 
@@ -465,12 +500,18 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 
 	parsed := parseJudgeJSON(rawResponse)
 	if parsed == nil {
+		emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
+			"parse-failed", judgeRawForEmit(rawResponse))
 		return errorVerdict("llm-judge-pii")
 	}
 
 	verdict := j.piiToVerdict(parsed, direction, toolName)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii verdict (dir=%s): action=%s severity=%s findings=%v\n",
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
+	emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
+		"", judgeRawForEmit(rawResponse))
 	return verdict
 }
 

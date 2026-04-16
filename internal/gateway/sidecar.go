@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -55,6 +56,12 @@ type Sidecar struct {
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
 	alertWg     sync.WaitGroup
+
+	// events is the structured gatewaylog.Writer (gateway.jsonl +
+	// stderr pretty-print). Installed during NewSidecar so every
+	// verdict/judge/lifecycle emission lands here without plumbing
+	// the writer through every call site.
+	events *gatewaylog.Writer
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -117,6 +124,25 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		}
 	}
 
+	events, err := gatewaylog.New(gatewaylog.Config{
+		JSONLPath: filepath.Join(cfg.DataDir, "gateway.jsonl"),
+		Pretty:    os.Stderr,
+		Compress:  true,
+	})
+	if err != nil {
+		// Release the alertCtx we just acquired so we don't leak a
+		// goroutine-waiting context when boot fails before Run() picks
+		// up alertCancel.
+		alertCancel()
+		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
+	}
+	SetEventWriter(events)
+	emitLifecycle("gateway", "init", map[string]string{
+		"host":         cfg.Gateway.Host,
+		"api_port":     fmt.Sprintf("%d", cfg.Gateway.APIPort),
+		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
+	})
+
 	return &Sidecar{
 		cfg:         cfg,
 		client:      client,
@@ -130,6 +156,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		webhooks:    webhooks,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
+		events:      events,
 	}, nil
 }
 
@@ -230,12 +257,17 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertCancel()
 	s.alertWg.Wait()
 
+	emitLifecycle("gateway", "stop", nil)
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
 	}
 	s.logger.Close()
 	_ = s.client.Close()
+	if s.events != nil {
+		_ = s.events.Close()
+		SetEventWriter(nil)
+	}
 
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {

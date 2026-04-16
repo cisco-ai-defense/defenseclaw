@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -150,14 +151,58 @@ func (g *GuardrailInspector) SetScannerMode(mode string) {
 func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	strategy := g.effectiveStrategy(direction)
 
+	start := time.Now()
+	var verdict *ScanVerdict
 	switch strategy {
 	case "regex_judge":
-		return g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
+		verdict = g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
 	case "judge_first":
-		return g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
+		verdict = g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
 	default:
-		return g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
 	}
+
+	// Structured verdict emission — one record per top-level Inspect
+	// call, regardless of strategy. Skipping NONE/empty verdicts keeps
+	// the JSONL focused on real decisions; lifecycle events already
+	// cover the "nothing happened" case.
+	if verdict != nil && verdict.Severity != "" && verdict.Severity != "NONE" {
+		emitVerdict(
+			gatewaylog.Stage("guardrail"),
+			gatewaylog.Direction(direction),
+			model,
+			verdict.Action,
+			verdict.Reason,
+			deriveSeverity(verdict.Severity),
+			categoriesOf(verdict.Findings),
+			time.Since(start).Milliseconds(),
+		)
+	}
+	return verdict
+}
+
+// categoriesOf returns deduped finding identifiers in insertion
+// order. ScanVerdict.Findings is a flat []string (e.g. "pii:email",
+// "injection:ignore-previous"), so we just preserve distinct entries
+// without trying to parse them — parsing happens downstream in the
+// TUI/sink consumers that know their own schema.
+func categoriesOf(findings []string) []string {
+	if len(findings) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(findings))
+	out := make([]string, 0, len(findings))
+	for _, f := range findings {
+		if f == "" {
+			continue
+		}
+		if _, ok := seen[f]; ok {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
+	}
+	return out
 }
 
 // InspectMidStream runs regex-only inspection for mid-stream SSE chunks.
