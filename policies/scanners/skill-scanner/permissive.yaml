@@ -1,0 +1,29 @@
+# DefenseClaw-curated skill scanner policy: permissive
+# Compatible with cisco-ai-skill-scanner ScanPolicy.from_file()
+version: 1
+name: permissive
+description: "Dev-friendly — only flags critical/high severity findings"
+
+thresholds:
+  permission_risk: 0.8
+  data_access_risk: 0.8
+  code_quality_risk: 0.9
+
+analyzers:
+  static:
+    enabled: true
+    max_file_size_kb: 256
+  behavioral:
+    enabled: false
+    trace_depth: 1
+  llm:
+    enabled: false
+
+severity_overrides:
+  MEDIUM: LOW
+  LOW: LOW
+
+disabled_rules:
+  - SKILL-INFO-001
+  - SKILL-INFO-002
+  - SKILL-STYLE-001

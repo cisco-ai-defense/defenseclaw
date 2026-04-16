@@ -71,6 +71,8 @@ type EventRouter struct {
 
 	activeSessionsMu sync.RWMutex
 	activeSessions   map[string]time.Time // sessionKey → last seen
+
+	contextTracker *ContextTracker
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
@@ -86,6 +88,7 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		activeAgentSpans: make(map[string]*activeAgent),
 		activeSessions:   make(map[string]time.Time),
 		judgeSem:         make(chan struct{}, 16),
+		contextTracker:   NewContextTracker(0, 0),
 	}
 }
 
@@ -437,6 +440,26 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 
 			readLoopLogf("[bifrost] session.message: emitted LLM span model=%s provider=%s system=%s tokens=%d/%d",
 				msg.Model, msg.Provider, system, promptTokens, completionTokens)
+		}
+
+		if r.contextTracker != nil && envelope.SessionKey != "" && contentStr != "" {
+			r.contextTracker.Record(envelope.SessionKey, msg.Role, contentStr)
+		}
+
+		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
+				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
+					"repeated injection patterns detected across multiple user turns")
+				if r.otel != nil {
+					r.otel.EmitRuntimeAlert(
+						telemetry.AlertToolCallFlagged, "HIGH", telemetry.SourceLocalPattern,
+						fmt.Sprintf("Multi-turn injection attempt in session %s", truncate(envelope.SessionKey, 32)),
+						map[string]string{"session": envelope.SessionKey},
+						map[string]string{"action_taken": "alert"},
+						"", "",
+					)
+				}
+			}
 		}
 
 		_ = r.logger.LogAction("gateway-session-message", envelope.SessionKey,

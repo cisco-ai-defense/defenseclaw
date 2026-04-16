@@ -1,0 +1,39 @@
+# DefenseClaw-curated CodeGuard scanner policy: strict
+# Compatible with CodeGuardScanner custom rules loading
+version: 1
+name: strict
+description: "Strict CodeGuard policy — elevated sensitivity, broad file coverage"
+
+rule_dirs:
+  - rules/
+  - custom/
+  - enterprise/
+
+max_file_size_kb: 512
+
+severity_overrides:
+  MEDIUM: HIGH
+
+disabled_rules: []
+
+file_extensions:
+  - .py
+  - .js
+  - .ts
+  - .go
+  - .java
+  - .rb
+  - .yaml
+  - .yml
+  - .json
+  - .sh
+  - .bash
+  - .c
+  - .cpp
+  - .h
+  - .rs
+  - .php
+  - .sql
+  - .tf
+  - .dockerfile
+  - .toml
