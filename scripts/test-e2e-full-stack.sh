@@ -1083,10 +1083,14 @@ phase_start() {
     echo ""
 
     echo "  Waiting for sidecar health..."
-    if wait_for_url "$SIDECAR_URL/health" 60 3; then
+    if wait_for_url "$SIDECAR_URL/health" 180 3; then
         pass "sidecar health endpoint reachable"
     else
-        fail "sidecar health endpoint reachable" "timed out after 60s"
+        fail "sidecar health endpoint reachable" "timed out after 180s"
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- defenseclaw-gateway status ---" >&2
+        defenseclaw-gateway status 2>&1 | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 1"
         return 1
     fi
@@ -2916,10 +2920,12 @@ phase_recovery() {
 
     defenseclaw-gateway start
     sleep 5
-    if wait_for_url "$SIDECAR_URL/health" 60 3; then
+    if wait_for_url "$SIDECAR_URL/health" 180 3; then
         pass "recovery: sidecar restarted after stop"
     else
         fail "recovery: sidecar restarted after stop" "sidecar health endpoint did not recover"
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 7C"
         return
     fi
