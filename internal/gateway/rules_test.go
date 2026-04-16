@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // ---------------------------------------------------------------------------
@@ -627,4 +629,76 @@ func filterBySeverity(findings []RuleFinding, severity string) []RuleFinding {
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// ApplyRulePackOverrides
+// ---------------------------------------------------------------------------
+
+func TestApplyRulePackOverrides_ReplacesHardcoded(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	rp := &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "test-override",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: "TEST-1", Pattern: `test_secret_[a-f0-9]+`, Severity: "HIGH", Confidence: 0.95},
+				},
+			},
+		},
+	}
+
+	ApplyRulePackOverrides(rp)
+
+	if len(allRuleCategories) != 1 {
+		t.Fatalf("expected 1 category after override, got %d", len(allRuleCategories))
+	}
+	if allRuleCategories[0].Name != "test-override" {
+		t.Errorf("category name = %s, want test-override", allRuleCategories[0].Name)
+	}
+
+	findings := ScanAllRules("found test_secret_deadbeef here", "exec")
+	if len(findings) == 0 {
+		t.Error("ScanAllRules should find the overridden pattern")
+	}
+	if findings[0].RuleID != "TEST-1" {
+		t.Errorf("finding RuleID = %s, want TEST-1", findings[0].RuleID)
+	}
+}
+
+func TestApplyRulePackOverrides_NilRulePack(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	originalLen := len(allRuleCategories)
+	ApplyRulePackOverrides(nil)
+	if len(allRuleCategories) != originalLen {
+		t.Error("nil rule pack should not change allRuleCategories")
+	}
+}
+
+func TestApplyRulePackOverrides_InvalidRegexSkipped(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	rp := &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "bad-regex",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: "BAD-1", Pattern: `[invalid`, Severity: "HIGH", Confidence: 0.9},
+				},
+			},
+		},
+	}
+
+	ApplyRulePackOverrides(rp)
+
+	if len(allRuleCategories) != len(savedCategories) {
+		t.Error("category with only invalid regexes should be skipped, leaving originals unchanged")
+	}
 }

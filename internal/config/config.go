@@ -342,7 +342,37 @@ type GuardrailConfig struct {
 	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
 	APIBase           string      `mapstructure:"api_base"             yaml:"api_base"`
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+
+	// Detection strategy: "regex_only" (default), "regex_judge", "judge_first".
+	// Per-direction overrides take precedence over the global setting.
+	DetectionStrategy           string `mapstructure:"detection_strategy"            yaml:"detection_strategy,omitempty"`
+	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
+	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
+	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
+	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+}
+
+// EffectiveStrategy returns the detection strategy for the given direction,
+// falling back to the global DetectionStrategy (default: "regex_only").
+func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
+	var override string
+	switch direction {
+	case "prompt":
+		override = g.DetectionStrategyPrompt
+	case "completion":
+		override = g.DetectionStrategyCompletion
+	case "tool_call":
+		override = g.DetectionStrategyToolCall
+	}
+	if override != "" {
+		return override
+	}
+	if g.DetectionStrategy != "" {
+		return g.DetectionStrategy
+	}
+	return "regex_only"
 }
 
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
@@ -358,6 +388,9 @@ type JudgeConfig struct {
 	APIKeyEnv     string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
 	APIBase       string  `mapstructure:"api_base"        yaml:"api_base"`
 	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
+
+	Fallbacks           []string `mapstructure:"fallbacks"            yaml:"fallbacks,omitempty"`
+	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
 }
 
 // ResolvedJudgeAPIKey returns the judge API key from the env var.
@@ -717,6 +750,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
+	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)
@@ -724,6 +758,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.pii_completion", true)
 	viper.SetDefault("guardrail.judge.tool_injection", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
+	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
+	viper.SetDefault("guardrail.detection_strategy", "regex_only")
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)

@@ -120,6 +120,10 @@ func (m *mockInspector) Inspect(_ context.Context, direction, _ string, _ []Chat
 	return allowVerdict("mock")
 }
 
+func (m *mockInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	return m.Inspect(ctx, direction, content, messages, model, mode)
+}
+
 func (m *mockInspector) SetScannerMode(_ string) {}
 
 func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
@@ -930,6 +934,10 @@ func (c *conditionalInspector) Inspect(_ context.Context, direction, content str
 	return allowVerdict("conditional-mock")
 }
 
+func (c *conditionalInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	return c.Inspect(ctx, direction, content, messages, model, mode)
+}
+
 func (c *conditionalInspector) SetScannerMode(_ string) {}
 
 // ---------------------------------------------------------------------------
@@ -1194,28 +1202,28 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 			targetURL: "https://api.openai.com",
 			apiKey:    "sk-openai-key",
 			model:     "gpt-4",
-			wantType:  "*gateway.openaiProvider",
+			wantType:  "*gateway.bifrostProvider",
 		},
 		{
 			name:      "azure",
 			targetURL: "https://myresource.openai.azure.com",
 			apiKey:    "azure-test-key",
 			model:     "gpt-4.1",
-			wantType:  "*gateway.azureOpenAIProvider",
+			wantType:  "*gateway.bifrostProvider",
 		},
 		{
 			name:      "anthropic",
 			targetURL: "https://api.anthropic.com",
 			apiKey:    "sk-ant-key",
 			model:     "claude-opus-4-5",
-			wantType:  "*gateway.anthropicProvider",
+			wantType:  "*gateway.bifrostProvider",
 		},
 		{
 			name:      "missing_target_url_with_config_fallback",
 			targetURL: "",
 			apiKey:    "sk-key",
 			model:     "gpt-4",
-			wantType:  "*gateway.openaiProvider",
+			wantType:  "*gateway.bifrostProvider",
 		},
 		{
 			name:      "missing_target_url_no_api_key",

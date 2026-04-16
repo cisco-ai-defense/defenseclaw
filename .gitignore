@@ -74,3 +74,4 @@ coverage*.xml
 scripts/provision-*
 scripts/e2e-*-session*
 .worktrees/
+tmp/

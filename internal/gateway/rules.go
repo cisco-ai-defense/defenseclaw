@@ -17,8 +17,14 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // PatternRule is a single detection rule with a compiled regex, severity,
@@ -239,6 +245,10 @@ var trustExploitRules = []PatternRule{
 // Scan engine — runs all rules against input, no tool-name gating
 // ---------------------------------------------------------------------------
 
+// ruleCategoriesMu guards reads and writes to allRuleCategories.
+// ApplyRulePackOverrides writes at startup; ScanAllRules reads on every request.
+var ruleCategoriesMu sync.RWMutex
+
 // allRuleCategories groups all rule slices for iteration.
 var allRuleCategories = []struct {
 	Name  string
@@ -250,6 +260,75 @@ var allRuleCategories = []struct {
 	{"c2", c2Rules},
 	{"cognitive-file", cognitiveFileRules},
 	{"trust-exploit", trustExploitRules},
+}
+
+// ApplyRulePackOverrides replaces the hardcoded rule categories with rules
+// loaded from the rule-pack's rules/*.yaml files. Each YAML file becomes
+// one category entry. Invalid regex patterns are logged and skipped.
+// If the rule pack has no rule files, the hardcoded defaults remain active.
+// maxRegexCompileTime caps how long a single user-supplied regex may take to
+// compile, guarding against ReDoS-style patterns in rule pack YAML files.
+const maxRegexCompileTime = 2 * time.Second
+
+func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
+	if len(pattern) > 2048 {
+		return nil, fmt.Errorf("pattern too long (%d chars)", len(pattern))
+	}
+	type result struct {
+		re  *regexp.Regexp
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		re, err := regexp.Compile(pattern)
+		ch <- result{re, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.re, r.err
+	case <-time.After(maxRegexCompileTime):
+		return nil, fmt.Errorf("compile timed out after %v", maxRegexCompileTime)
+	}
+}
+
+func ApplyRulePackOverrides(rp *guardrail.RulePack) {
+	if rp == nil || len(rp.RuleFiles) == 0 {
+		return
+	}
+	var categories []struct {
+		Name  string
+		Rules []PatternRule
+	}
+	for _, rf := range rp.RuleFiles {
+		var compiled []PatternRule
+		for _, r := range rf.Rules {
+			re, err := compileRegexSafe(r.Pattern)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] skip rule %s: bad pattern: %v\n", r.ID, err)
+				continue
+			}
+			compiled = append(compiled, PatternRule{
+				ID:         r.ID,
+				Pattern:    re,
+				Title:      r.Title,
+				Severity:   r.Severity,
+				Confidence: r.Confidence,
+				Tags:       r.Tags,
+			})
+		}
+		if len(compiled) > 0 {
+			categories = append(categories, struct {
+				Name  string
+				Rules []PatternRule
+			}{Name: rf.Category, Rules: compiled})
+		}
+	}
+	if len(categories) > 0 {
+		ruleCategoriesMu.Lock()
+		allRuleCategories = categories
+		ruleCategoriesMu.Unlock()
+		fmt.Fprintf(os.Stderr, "[guardrail] loaded %d rule categories from rule pack\n", len(categories))
+	}
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.
@@ -335,11 +414,15 @@ func adjustConfidence(toolName string, f RuleFinding) RuleFinding {
 // variable-like constructions). This defeats path obfuscation tricks
 // like /etc/sha""dow, /etc/sha\dow, ${P}/shadow, and /etc/shad?w.
 func ScanAllRules(text string, toolName string) []RuleFinding {
+	ruleCategoriesMu.RLock()
+	cats := allRuleCategories
+	ruleCategoriesMu.RUnlock()
+
 	var findings []RuleFinding
 	seen := make(map[string]bool)
 
 	// Scan raw text first
-	for _, cat := range allRuleCategories {
+	for _, cat := range cats {
 		for _, rule := range cat.Rules {
 			loc := rule.Pattern.FindStringIndex(text)
 			if loc == nil {
@@ -366,7 +449,7 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
-		for _, cat := range allRuleCategories {
+		for _, cat := range cats {
 			for _, rule := range cat.Rules {
 				if seen[rule.ID] {
 					continue // already found on raw pass

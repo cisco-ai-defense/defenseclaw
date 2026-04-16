@@ -57,6 +57,15 @@ defenseclaw = [
     "_data/scripts/*.sh",
     "_data/policies/openshell/*.rego",
     "_data/policies/openshell/*.yaml",
+    "_data/policies/guardrail/default/*.yaml",
+    "_data/policies/guardrail/default/judge/*.yaml",
+    "_data/policies/guardrail/default/rules/*.yaml",
+    "_data/policies/guardrail/strict/*.yaml",
+    "_data/policies/guardrail/strict/judge/*.yaml",
+    "_data/policies/guardrail/strict/rules/*.yaml",
+    "_data/policies/guardrail/permissive/*.yaml",
+    "_data/policies/guardrail/permissive/judge/*.yaml",
+    "_data/policies/guardrail/permissive/rules/*.yaml",
 ]
 
 [tool.uv]

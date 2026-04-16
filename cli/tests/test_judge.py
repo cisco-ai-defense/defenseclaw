@@ -110,6 +110,103 @@ class TestCLIFlagParsing(unittest.TestCase):
         gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
         self.assertTrue(gc.judge.tool_injection)
 
+    def test_judge_fallbacks_roundtrip(self):
+        from defenseclaw.config import _merge_guardrail
+
+        raw = {
+            "enabled": True,
+            "judge": {
+                "enabled": True,
+                "fallbacks": ["openai/gpt-4o-mini", "anthropic/claude-haiku-4-5-20251001"],
+                "adjudication_timeout": 3.5,
+            },
+        }
+        gc = _merge_guardrail(raw, "/tmp/test")
+        self.assertEqual(gc.judge.fallbacks, ["openai/gpt-4o-mini", "anthropic/claude-haiku-4-5-20251001"])
+        self.assertEqual(gc.judge.adjudication_timeout, 3.5)
+
+    def test_judge_fallbacks_default_empty(self):
+        from defenseclaw.config import _merge_guardrail
+
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
+        self.assertEqual(gc.judge.fallbacks, [])
+        self.assertEqual(gc.judge.adjudication_timeout, 5.0)
+
+    def test_guardrail_detection_strategy_roundtrip(self):
+        from defenseclaw.config import _merge_guardrail
+
+        raw = {
+            "enabled": True,
+            "detection_strategy": "judge_first",
+            "detection_strategy_prompt": "regex_judge",
+            "detection_strategy_completion": "regex_only",
+            "detection_strategy_tool_call": "",
+            "judge_sweep": True,
+            "rule_pack_dir": "/opt/defenseclaw/policies/strict",
+        }
+        gc = _merge_guardrail(raw, "/tmp/test")
+        self.assertEqual(gc.detection_strategy, "judge_first")
+        self.assertEqual(gc.detection_strategy_prompt, "regex_judge")
+        self.assertEqual(gc.detection_strategy_completion, "regex_only")
+        self.assertEqual(gc.detection_strategy_tool_call, "")
+        self.assertTrue(gc.judge_sweep)
+        self.assertEqual(gc.rule_pack_dir, "/opt/defenseclaw/policies/strict")
+
+    def test_guardrail_detection_strategy_defaults(self):
+        from defenseclaw.config import _merge_guardrail
+
+        gc = _merge_guardrail({"enabled": True}, "/tmp/test")
+        self.assertEqual(gc.detection_strategy, "regex_only")
+        self.assertEqual(gc.detection_strategy_prompt, "")
+        self.assertFalse(gc.judge_sweep)
+        self.assertEqual(gc.rule_pack_dir, "")
+
+    def test_guardrail_full_yaml_roundtrip(self):
+        """All guardrail + judge fields survive load→asdict→reload cycle."""
+        from dataclasses import asdict
+        from defenseclaw.config import _merge_guardrail
+
+        raw = {
+            "enabled": True,
+            "mode": "action",
+            "scanner_mode": "local",
+            "host": "10.0.0.1",
+            "port": 5000,
+            "model": "bedrock/anthropic.claude-3-haiku",
+            "model_name": "claude-haiku",
+            "api_key_env": "BEDROCK_KEY",
+            "block_message": "Blocked by policy",
+            "detection_strategy": "regex_judge",
+            "detection_strategy_prompt": "judge_first",
+            "judge_sweep": True,
+            "rule_pack_dir": "/etc/defenseclaw/policies/strict",
+            "judge": {
+                "enabled": True,
+                "injection": True,
+                "pii": True,
+                "pii_prompt": False,
+                "pii_completion": True,
+                "tool_injection": False,
+                "model": "openai/gpt-4o",
+                "timeout": 15.0,
+                "fallbacks": ["anthropic/claude-sonnet-4-20250514"],
+                "adjudication_timeout": 2.0,
+            },
+        }
+        gc = _merge_guardrail(raw, "/tmp/test")
+        d = asdict(gc)
+        gc2 = _merge_guardrail(d, "/tmp/test")
+
+        self.assertEqual(gc2.detection_strategy, "regex_judge")
+        self.assertEqual(gc2.detection_strategy_prompt, "judge_first")
+        self.assertTrue(gc2.judge_sweep)
+        self.assertEqual(gc2.rule_pack_dir, "/etc/defenseclaw/policies/strict")
+        self.assertFalse(gc2.judge.pii_prompt)
+        self.assertFalse(gc2.judge.tool_injection)
+        self.assertEqual(gc2.judge.fallbacks, ["anthropic/claude-sonnet-4-20250514"])
+        self.assertEqual(gc2.judge.adjudication_timeout, 2.0)
+        self.assertEqual(gc2.judge.timeout, 15.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -533,6 +533,8 @@ class JudgeConfig:
     api_key_env: str = ""
     api_base: str = ""
     timeout: float = 30.0
+    fallbacks: list[str] = field(default_factory=list)
+    adjudication_timeout: float = 5.0
 
 
 @dataclass
@@ -568,6 +570,12 @@ class GuardrailConfig:
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
     api_base: str = ""              # base URL override for Azure, custom endpoints
     judge: JudgeConfig = field(default_factory=JudgeConfig)
+    detection_strategy: str = "regex_only"  # regex_only | regex_judge | judge_first
+    detection_strategy_prompt: str = ""     # per-direction override
+    detection_strategy_completion: str = "" # per-direction override
+    detection_strategy_tool_call: str = ""  # per-direction override
+    judge_sweep: bool = False               # run full judge on no-signal content (regex_judge mode)
+    rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
 
 
 @dataclass
@@ -846,6 +854,8 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         api_key_env=raw.get("api_key_env", ""),
         api_base=raw.get("api_base", ""),
         timeout=raw.get("timeout", 30.0),
+        fallbacks=raw.get("fallbacks", []),
+        adjudication_timeout=raw.get("adjudication_timeout", 5.0),
     )
 
 
@@ -865,6 +875,12 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         block_message=raw.get("block_message", ""),
         api_base=raw.get("api_base", ""),
         judge=_merge_judge(raw.get("judge")),
+        detection_strategy=raw.get("detection_strategy", "regex_only"),
+        detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
+        detection_strategy_completion=raw.get("detection_strategy_completion", ""),
+        detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
+        judge_sweep=raw.get("judge_sweep", False),
+        rule_pack_dir=raw.get("rule_pack_dir", ""),
     )
 
 

@@ -224,9 +224,9 @@ dist-cli: _bundle-data
 _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
+	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
-	@mkdir -p cli/defenseclaw/_data/scripts
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
@@ -234,10 +234,12 @@ _bundle-data:
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
 	cp policies/openshell/*.rego cli/defenseclaw/_data/policies/openshell/
 	cp policies/openshell/*.yaml cli/defenseclaw/_data/policies/openshell/
+	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/default
+	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/strict
+	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/permissive
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
-	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:

@@ -653,6 +653,12 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 @click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port")
 @click.option("--block-message", default=None,
               help="Custom message shown when a request is blocked (empty = default)")
+@click.option("--detection-strategy",
+              type=click.Choice(["regex_only", "regex_judge", "judge_first"]), default=None,
+              help="Detection strategy (regex_only, regex_judge, judge_first)")
+@click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
+@click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
+@click.option("--judge-api-key-env", default=None, help="Env var name for judge API key")
 @click.option("--restart/--no-restart", default=True,
               help="Restart gateway and openclaw after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
@@ -666,6 +672,7 @@ def setup_guardrail(
     guard_mode, guard_port,
     scanner_mode, cisco_endpoint, cisco_api_key_env, cisco_timeout_ms,
     block_message,
+    detection_strategy, judge_model, judge_api_base, judge_api_key_env,
     restart: bool,
     verify: bool,
     non_interactive: bool,
@@ -706,6 +713,15 @@ def setup_guardrail(
         gc.port = guard_port or gc.port or 4000
         if block_message is not None:
             gc.block_message = block_message
+        if detection_strategy is not None:
+            gc.detection_strategy = detection_strategy
+        if judge_model is not None:
+            gc.judge.model = judge_model
+            gc.judge.enabled = True
+        if judge_api_base is not None:
+            gc.judge.api_base = judge_api_base
+        if judge_api_key_env is not None:
+            gc.judge.api_key_env = judge_api_key_env
         gc.enabled = True
 
         if gc.scanner_mode in ("remote", "both"):
@@ -741,12 +757,21 @@ def setup_guardrail(
         ("guardrail.model", gc.model),
         ("guardrail.model_name", gc.model_name),
         ("guardrail.api_key_env", gc.api_key_env),
+        ("guardrail.detection_strategy", gc.detection_strategy),
     ]
     if gc.api_base:
         rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     if gc.block_message:
         truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
         rows.append(("guardrail.block_message", truncated))
+    if gc.judge.enabled:
+        rows.append(("guardrail.judge.enabled", "true"))
+        rows.append(("guardrail.judge.model", gc.judge.model))
+        if gc.judge.api_base:
+            rows.append(("guardrail.judge.api_base", gc.judge.api_base[:60] + "..." if len(gc.judge.api_base) > 60 else gc.judge.api_base))
+        rows.append(("guardrail.judge.api_key_env", gc.judge.api_key_env))
+        if gc.judge.fallbacks:
+            rows.append(("guardrail.judge.fallbacks", ", ".join(gc.judge.fallbacks)))
     if gc.scanner_mode in ("remote", "both"):
         rows.append(("cisco_ai_defense.endpoint", aid.endpoint))
         rows.append(("cisco_ai_defense.api_key_env", aid.api_key_env))
@@ -992,6 +1017,71 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         )
 
     gc.port = proxy_port
+
+    # --- LLM Judge section ---
+    click.echo()
+    click.echo("  LLM Judge (reduces false positives)")
+    click.echo("  ────────────────────────────────────")
+    click.echo("  Uses an LLM to verify detections and catch novel attacks.")
+    click.echo("  Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
+    click.echo()
+
+    enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
+    gc.judge.enabled = enable_judge
+
+    if enable_judge:
+        click.echo()
+        click.echo("  Detection strategy:")
+        click.echo("    [1] regex_only  — regex patterns only, no LLM calls (fastest)")
+        click.echo("    [2] regex_judge — regex triages, LLM verifies ambiguous matches (recommended)")
+        click.echo("    [3] judge_first — LLM runs primary detection, regex as safety net (most accurate)")
+        strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
+        current_strat = gc.detection_strategy or "regex_only"
+        strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")
+        strat_choice = click.prompt(
+            "  Select strategy", type=click.Choice(["1", "2", "3"]), default=strat_default,
+        )
+        gc.detection_strategy = strategy_map[strat_choice]
+
+        click.echo()
+        gc.judge.api_base = click.prompt(
+            "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
+            default=gc.judge.api_base or "", show_default=False,
+        )
+        gc.judge.model = click.prompt(
+            "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
+            default=gc.judge.model or "", show_default=False,
+        )
+
+        default_key_env = gc.judge.api_key_env or "JUDGE_API_KEY"
+        gc.judge.api_key_env = click.prompt(
+            "  API key env var name", default=default_key_env,
+        )
+        env_val = os.environ.get(gc.judge.api_key_env, "")
+        if env_val:
+            click.echo(f"    Current value: {_mask(env_val)} (set)")
+        else:
+            click.echo(f"    {gc.judge.api_key_env} is not set in environment")
+        _prompt_and_save_secret(gc.judge.api_key_env, "", app.cfg.data_dir)
+
+        click.echo()
+        if click.confirm("  Configure fallback models?", default=bool(gc.judge.fallbacks)):
+            fallbacks: list[str] = []
+            for i in range(1, 6):
+                fb = click.prompt(f"    Fallback model {i} (blank to finish)", default="", show_default=False)
+                if not fb:
+                    break
+                fallbacks.append(fb)
+            gc.judge.fallbacks = fallbacks
+        else:
+            gc.judge.fallbacks = []
+
+        gc.judge.injection = True
+        gc.judge.pii = True
+        gc.judge.pii_prompt = True
+        gc.judge.pii_completion = True
+    else:
+        gc.detection_strategy = "regex_only"
 
     if click.confirm("  Configure advanced options?", default=False):
         gc.port = click.prompt("  Guardrail proxy port", default=gc.port, type=int)

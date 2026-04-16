@@ -1,0 +1,114 @@
+version: 1
+category: enterprise-data
+rules:
+  - id: ENT-BULK-SSN
+    pattern: '\b\d{3}-\d{2}-\d{4}\b'
+    title: "US Social Security Number"
+    severity: CRITICAL
+    confidence: 0.85
+    tags: [pii, regulated]
+
+  - id: ENT-BULK-SSN-NOHYPHEN
+    pattern: '\b(?!000|666|9\d{2})\d{3}(?!00)\d{2}(?!0000)\d{4}\b'
+    title: "US SSN (no hyphens)"
+    severity: HIGH
+    confidence: 0.55
+    tags: [pii, regulated]
+
+  - id: ENT-CC-VISA
+    pattern: '\b4\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+    title: "Visa credit card number"
+    severity: CRITICAL
+    confidence: 0.80
+    tags: [pii, pci]
+
+  - id: ENT-CC-MC
+    pattern: '\b5[1-5]\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+    title: "Mastercard credit card number"
+    severity: CRITICAL
+    confidence: 0.80
+    tags: [pii, pci]
+
+  - id: ENT-CC-AMEX
+    pattern: '\b3[47]\d{2}[\s-]?\d{6}[\s-]?\d{5}\b'
+    title: "American Express card number"
+    severity: CRITICAL
+    confidence: 0.80
+    tags: [pii, pci]
+
+  - id: ENT-CC-DISCOVER
+    pattern: '\b6(?:011|5\d{2})[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+    title: "Discover card number"
+    severity: CRITICAL
+    confidence: 0.80
+    tags: [pii, pci]
+
+  - id: ENT-IBAN
+    pattern: '\b[A-Z]{2}\d{2}[\s]?[\dA-Z]{4}[\s]?(?:[\dA-Z]{4}[\s]?){1,7}[\dA-Z]{1,4}\b'
+    title: "International Bank Account Number (IBAN)"
+    severity: HIGH
+    confidence: 0.75
+    tags: [pii, financial]
+
+  - id: ENT-US-PHONE
+    pattern: '\b(?:\+1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b'
+    title: "US phone number"
+    severity: MEDIUM
+    confidence: 0.50
+    tags: [pii]
+
+  - id: ENT-EMAIL-BULK
+    pattern: '(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
+    title: "Email address"
+    severity: MEDIUM
+    confidence: 0.40
+    tags: [pii]
+
+  - id: ENT-PASSPORT-US
+    pattern: '\b[A-Z]\d{8}\b'
+    title: "US passport number pattern"
+    severity: HIGH
+    confidence: 0.50
+    tags: [pii, regulated]
+
+  - id: ENT-DL-CA
+    pattern: '\b[A-Z]\d{7}\b'
+    title: "California drivers license pattern"
+    severity: HIGH
+    confidence: 0.40
+    tags: [pii, regulated]
+
+  - id: ENT-MEDICAL-RECORD
+    pattern: '(?i)\b(?:mrn|medical record|patient id)\s*[:#]?\s*\d{6,12}\b'
+    title: "Medical record number"
+    severity: CRITICAL
+    confidence: 0.70
+    tags: [pii, hipaa]
+
+  - id: ENT-DOB-PATTERN
+    pattern: '(?i)\b(?:dob|date of birth|birth[\s-]?date)\s*[:#]?\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b'
+    title: "Date of birth with label"
+    severity: HIGH
+    confidence: 0.75
+    tags: [pii, hipaa]
+
+  - id: ENT-NHS-NUMBER
+    pattern: '\b\d{3}[\s]?\d{3}[\s]?\d{4}\b'
+    title: "UK NHS number pattern"
+    severity: HIGH
+    confidence: 0.40
+    tags: [pii, regulated]
+
+  - id: ENT-BULK-CSV-PII
+    pattern: '(?i)(?:first[\s_]?name|last[\s_]?name|ssn|social[\s_]?security|credit[\s_]?card|card[\s_]?number|account[\s_]?number),.*(?:first[\s_]?name|last[\s_]?name|ssn|social[\s_]?security|credit[\s_]?card|card[\s_]?number|account[\s_]?number)'
+    title: "CSV/TSV header with multiple PII columns"
+    severity: HIGH
+    confidence: 0.80
+    tags: [pii, bulk-data]
+
+  - id: ENT-BULK-JSON-PII
+    pattern: '(?i)"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*"'
+    title: "JSON field with PII key"
+    severity: HIGH
+    confidence: 0.75
+    tags: [pii, bulk-data]
