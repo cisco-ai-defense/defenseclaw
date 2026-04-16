@@ -110,15 +110,76 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Diagnostic instrumentation (see PR #111 / pre-existing E2E sidecar
+	// flake on ARM64 runner where the sidecar silently vanishes within ~5s
+	// of reaching steady state, no panic trace, no shutdown message,
+	// while its watchdog sibling survives). OOM has been ruled out. This
+	// widens signal capture so we can identify any catchable signal that
+	// might be terminating us, and emits a periodic heartbeat so the
+	// post-mortem CI log can narrow the kill time to <5s. If NO signal
+	// line appears and heartbeats simply stop, the kill was SIGKILL
+	// (uncatchable — i.e. external kernel/supervisor termination).
+	sigCh := make(chan os.Signal, 8)
+	signal.Notify(sigCh,
+		syscall.SIGINT, syscall.SIGTERM,
+		syscall.SIGHUP, syscall.SIGQUIT,
+		syscall.SIGPIPE, syscall.SIGUSR1, syscall.SIGUSR2)
 	go func() {
-		<-sigCh
-		fmt.Println("\n[sidecar] shutting down...")
-		cancel()
+		for sig := range sigCh {
+			fmt.Fprintf(os.Stderr,
+				"[sidecar][diag] received signal %v (%d) at %s; pid=%d cancelling ctx\n",
+				sig, sig.(syscall.Signal),
+				time.Now().UTC().Format(time.RFC3339Nano),
+				os.Getpid())
+			// SIGPIPE is a normal condition when a client disconnects on
+			// a non-TTY fd; don't treat it as a shutdown trigger. Go
+			// would normally terminate the process on unhandled SIGPIPE
+			// to fds 1/2 — registering it here suppresses that default.
+			if s, ok := sig.(syscall.Signal); ok && s == syscall.SIGPIPE {
+				continue
+			}
+			cancel()
+			return
+		}
 	}()
 
-	return sc.Run(ctx)
+	// Heartbeat: 5s ticker for diagnostic purposes. If the gateway.log
+	// stops receiving these lines but the process is in ps, a goroutine
+	// is hung. If the process vanishes, the last heartbeat timestamp
+	// narrows the kill window to at most 5s.
+	go func() {
+		tick := time.NewTicker(5 * time.Second)
+		defer tick.Stop()
+		start := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case t := <-tick.C:
+				fmt.Fprintf(os.Stderr,
+					"[sidecar][diag][heartbeat] alive at %s pid=%d uptime=%s\n",
+					t.UTC().Format("15:04:05.000"),
+					os.Getpid(),
+					t.Sub(start).Truncate(time.Second))
+			}
+		}
+	}()
+
+	defer func() {
+		fmt.Fprintf(os.Stderr,
+			"[sidecar][diag] runSidecar defer: ctxErr=%v at %s pid=%d\n",
+			ctx.Err(),
+			time.Now().UTC().Format(time.RFC3339Nano),
+			os.Getpid())
+	}()
+
+	runErr := sc.Run(ctx)
+	fmt.Fprintf(os.Stderr,
+		"[sidecar][diag] sc.Run returned: err=%v ctxErr=%v at %s pid=%d\n",
+		runErr, ctx.Err(),
+		time.Now().UTC().Format(time.RFC3339Nano),
+		os.Getpid())
+	return runErr
 }
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
