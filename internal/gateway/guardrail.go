@@ -183,13 +183,6 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	merged := mergeVerdicts(localResult, ciscoResult)
 	merged.CiscoElapsedMs = ciscoElapsedMs
 
-	if g.judge != nil {
-		judgeVerdict := g.judge.RunJudges(ctx, direction, content)
-		if judgeVerdict != nil && judgeVerdict.Severity != "NONE" {
-			merged = mergeWithJudge(merged, judgeVerdict)
-		}
-	}
-
 	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
 }
 
@@ -357,7 +350,17 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
 		}
-		return g.finalize(ctx, direction, model, mode, content, localResult, nil)
+		// Also run Cisco remote on fallback for full parity with regex_only path.
+		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+			t0 := time.Now()
+			ciscoResult = g.ciscoClient.Inspect(messages)
+			ciscoElapsedMs = float64(time.Since(t0).Milliseconds())
+			localResult = mergeVerdicts(localResult, ciscoResult)
+			if localResult != nil {
+				localResult.CiscoElapsedMs = ciscoElapsedMs
+			}
+		}
+		return g.finalize(ctx, direction, model, mode, content, localResult, ciscoResult)
 	}
 
 	merged := judgeRes.verdict
@@ -509,16 +512,21 @@ var secretPatterns = []string{
 }
 
 // secretPatternRegexes tighten patterns that cause false positives as bare
-// substrings. "token:" alone matches any YAML key; the regex requires an
-// assignment with a value of 8+ non-whitespace characters.
+// substrings. Requires assignment-like context with a long alphanumeric value
+// (20+ chars) to avoid matching conversational "reply with this token: XYZ".
 var secretPatternRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?\S{8,}`),
+	regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`),
 }
 
 var exfilPatterns = []string{
 	"/etc/passwd", "/etc/shadow", "base64 -d", "base64 --decode",
 	"exfiltrate", "exfil", "send to my server", "curl http",
 }
+
+// bulkAccessRegex detects prompts requesting bulk extraction from sensitive tools
+// (e.g. "users_list with top 10", "contacts_list top 50").
+var bulkAccessRegex = regexp.MustCompile(
+	`(?i)\b(?:users_list|contacts_list|mail_search|delegated_email_list_principals)\b.*\btop\s+\d{2,}\b`)
 
 func scanLocalPatterns(direction, content string) *ScanVerdict {
 	lower := strings.ToLower(content)
@@ -550,6 +558,9 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 				flags = append(flags, p)
 				isHigh = true
 			}
+		}
+		if bulkAccessRegex.MatchString(lower) {
+			flags = append(flags, "bulk-access:sensitive-tool")
 		}
 	}
 
@@ -726,6 +737,15 @@ func triagePatterns(direction, content string) []TriageSignal {
 					Evidence: extractEvidence(content, lower, p), Confidence: 0.90,
 				})
 			}
+		}
+
+		// Bulk data access (NEEDS_REVIEW — judge decides if intent is benign).
+		if loc := bulkAccessRegex.FindStringIndex(lower); loc != nil {
+			signals = append(signals, TriageSignal{
+				Level: "NEEDS_REVIEW", FindingID: "TRIAGE-BULK-ACCESS",
+				Category: "data-access", Pattern: "sensitive tool bulk access",
+				Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.60,
+			})
 		}
 	}
 
@@ -963,6 +983,41 @@ func lastUserText(messages []ChatMessage) string {
 		}
 	}
 	return ""
+}
+
+// isHeartbeatMessage detects OpenClaw's internal liveness probes that should
+// bypass guardrail inspection. The heartbeat sends a short system prompt
+// ("Read HEARTBEAT.md") + expects "HEARTBEAT_OK" back; flagging it as prompt
+// injection is a false positive.
+//
+// The match is intentionally narrow (requires the specific OpenClaw tokens
+// "HEARTBEAT.md" or "HEARTBEAT_OK" AND a short overall message) so a user
+// merely mentioning the word "heartbeat" cannot bypass the guardrail.
+func isHeartbeatMessage(userText string, messages []ChatMessage) bool {
+	if !containsHeartbeatToken(userText) {
+		hasToken := false
+		for _, m := range messages {
+			if containsHeartbeatToken(m.Content) {
+				hasToken = true
+				break
+			}
+		}
+		if !hasToken {
+			return false
+		}
+	}
+	// Heartbeat payloads are small (OpenClaw probe is ~170 chars). Cap to
+	// prevent a large crafted message from riding on the bypass.
+	totalLen := len(userText)
+	for _, m := range messages {
+		totalLen += len(m.Content)
+	}
+	return totalLen <= 512
+}
+
+func containsHeartbeatToken(s string) bool {
+	upper := strings.ToUpper(s)
+	return strings.Contains(upper, "HEARTBEAT.MD") || strings.Contains(upper, "HEARTBEAT_OK")
 }
 
 // ---------------------------------------------------------------------------

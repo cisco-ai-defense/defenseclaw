@@ -614,8 +614,8 @@ func TestFullFlow_JudgeFirst_JudgeFails_CleanPassesRegex(t *testing.T) {
 func TestConfigGuardrailDefaults(t *testing.T) {
 	cfg := config.GuardrailConfig{}
 	s := cfg.EffectiveStrategy("prompt")
-	if s != "regex_only" {
-		t.Errorf("default strategy should be regex_only, got %s", s)
+	if s != "regex_judge" {
+		t.Errorf("default strategy should be regex_judge, got %s", s)
 	}
 }
 

@@ -27,7 +27,7 @@ import logging
 import os
 import platform
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -570,7 +570,7 @@ class GuardrailConfig:
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
     api_base: str = ""              # base URL override for Azure, custom endpoints
     judge: JudgeConfig = field(default_factory=JudgeConfig)
-    detection_strategy: str = "regex_only"  # regex_only | regex_judge | judge_first
+    detection_strategy: str = "regex_judge"  # regex_only | regex_judge | judge_first
     detection_strategy_prompt: str = ""     # per-direction override
     detection_strategy_completion: str = "" # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
@@ -581,6 +581,8 @@ class GuardrailConfig:
 @dataclass
 class Config:
     data_dir: str = ""
+    default_llm_api_key_env: str = ""
+    default_llm_model: str = ""
     audit_db: str = ""
     quarantine_dir: str = ""
     plugin_dir: str = ""
@@ -650,6 +652,32 @@ class Config:
             name = name.rsplit("/", 1)[-1]
         name = name.lstrip("@")
         return [os.path.join(d, name) for d in self.skill_dirs()]
+
+    def resolved_default_llm_api_key(self) -> str:
+        """Return the shared LLM API key from the configured env var.
+
+        Mirrors Go's Config.ResolvedDefaultLLMAPIKey() so Python and Go
+        scanner invocations share the same fallback semantics.
+        """
+        if self.default_llm_api_key_env:
+            return os.environ.get(self.default_llm_api_key_env, "")
+        return ""
+
+    def effective_inspect_llm(self) -> InspectLLMConfig:
+        """Return inspect_llm with the shared default key/model applied.
+
+        Mirrors Go's Config.EffectiveInspectLLM(). When the dedicated
+        inspect_llm.api_key is empty, fall back to default_llm_api_key_env;
+        when inspect_llm.model is empty, fall back to default_llm_model.
+        """
+        llm = replace(self.inspect_llm)
+        if not llm.resolved_api_key() and not llm.api_key:
+            shared = self.resolved_default_llm_api_key()
+            if shared:
+                llm.api_key = shared
+        if not llm.model and self.default_llm_model:
+            llm.model = self.default_llm_model
+        return llm
 
     def save(self) -> None:
         path = os.path.join(self.data_dir, CONFIG_FILE_NAME)
@@ -875,7 +903,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         block_message=raw.get("block_message", ""),
         api_base=raw.get("api_base", ""),
         judge=_merge_judge(raw.get("judge")),
-        detection_strategy=raw.get("detection_strategy", "regex_only"),
+        detection_strategy=raw.get("detection_strategy", "regex_judge"),
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
@@ -1077,6 +1105,8 @@ def load() -> Config:
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
+        default_llm_api_key_env=raw.get("default_llm_api_key_env", ""),
+        default_llm_model=raw.get("default_llm_model", ""),
         audit_db=raw.get("audit_db", os.path.join(data_dir, AUDIT_DB_NAME)),
         quarantine_dir=raw.get("quarantine_dir", os.path.join(data_dir, "quarantine")),
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),

@@ -748,6 +748,23 @@ jobs:
               cfg['guardrail']['model'] = os.environ.get('OC_MODEL', '')
               cfg['guardrail']['model_name'] = os.environ.get('MODEL_NAME', '')
               cfg['guardrail']['api_key_env'] = os.environ.get('API_KEY_ENV', '')
+              cfg['guardrail']['detection_strategy'] = 'regex_judge'
+              cfg['guardrail']['detection_strategy_completion'] = 'regex_only'
+              cfg['guardrail'].setdefault('judge', {})
+              cfg['guardrail']['judge']['enabled'] = True
+              cfg['guardrail']['judge']['injection'] = True
+              cfg['guardrail']['judge']['pii'] = True
+              cfg['guardrail']['judge']['pii_prompt'] = True
+              cfg['guardrail']['judge']['pii_completion'] = True
+              cfg['guardrail']['judge']['tool_injection'] = True
+              cfg['guardrail']['judge']['model'] = os.environ.get('JUDGE_MODEL', os.environ.get('OC_MODEL', ''))
+              cfg['guardrail']['judge']['api_key_env'] = os.environ.get('JUDGE_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
+              cfg['guardrail']['judge']['api_base'] = os.environ.get('JUDGE_API_BASE', '')
+              cfg['guardrail']['judge']['timeout'] = 30
+              # Shared LLM key — scanners and judge can fall back to this
+              shared_key_env = os.environ.get('DEFAULT_LLM_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
+              if shared_key_env:
+                  cfg['default_llm_api_key_env'] = shared_key_env
               cfg['skill_actions'] = {
                   'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
                   'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},

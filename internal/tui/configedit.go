@@ -18,6 +18,7 @@ package tui
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -42,6 +43,10 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.PolicyDir = val
 	case "environment":
 		c.Environment = val
+	case "default_llm_api_key_env":
+		c.DefaultLLMAPIKeyEnv = val
+	case "default_llm_model":
+		c.DefaultLLMModel = val
 
 	// Claw
 	case "claw.mode":
@@ -86,6 +91,54 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.APIKeyEnv = val
 	case "guardrail.block_message":
 		c.Guardrail.BlockMessage = val
+	case "guardrail.detection_strategy":
+		c.Guardrail.DetectionStrategy = val
+	case "guardrail.detection_strategy_prompt":
+		c.Guardrail.DetectionStrategyPrompt = val
+	case "guardrail.detection_strategy_completion":
+		c.Guardrail.DetectionStrategyCompletion = val
+	case "guardrail.detection_strategy_tool_call":
+		c.Guardrail.DetectionStrategyToolCall = val
+	case "guardrail.stream_buffer_bytes":
+		c.Guardrail.StreamBufferBytes = intVal
+	case "guardrail.rule_pack_dir":
+		c.Guardrail.RulePackDir = val
+	case "guardrail.judge_sweep":
+		c.Guardrail.JudgeSweep = boolVal
+
+	// Judge
+	case "guardrail.judge.enabled":
+		c.Guardrail.Judge.Enabled = boolVal
+	case "guardrail.judge.model":
+		c.Guardrail.Judge.Model = val
+	case "guardrail.judge.api_key_env":
+		c.Guardrail.Judge.APIKeyEnv = val
+	case "guardrail.judge.api_base":
+		c.Guardrail.Judge.APIBase = val
+	case "guardrail.judge.timeout":
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			c.Guardrail.Judge.Timeout = f
+		}
+	case "guardrail.judge.adjudication_timeout":
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			c.Guardrail.Judge.AdjudicationTimeout = f
+		}
+	case "guardrail.judge.injection":
+		c.Guardrail.Judge.Injection = boolVal
+	case "guardrail.judge.pii":
+		c.Guardrail.Judge.PII = boolVal
+	case "guardrail.judge.pii_prompt":
+		c.Guardrail.Judge.PIIPrompt = boolVal
+	case "guardrail.judge.pii_completion":
+		c.Guardrail.Judge.PIICompletion = boolVal
+	case "guardrail.judge.tool_injection":
+		c.Guardrail.Judge.ToolInjection = boolVal
+	case "guardrail.judge.fallbacks":
+		if val == "" {
+			c.Guardrail.Judge.Fallbacks = nil
+		} else {
+			c.Guardrail.Judge.Fallbacks = strings.Split(val, ",")
+		}
 
 	// Scanners
 	case "scanners.skill_scanner.binary":

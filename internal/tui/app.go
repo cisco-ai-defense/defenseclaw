@@ -36,6 +36,7 @@ const (
 	PanelMCPs
 	PanelPlugins
 	PanelInventory
+	PanelPolicy
 	PanelLogs
 	PanelAudit
 	PanelActivity
@@ -45,7 +46,7 @@ const (
 
 var panelNames = [panelCount]string{
 	"Overview", "Alerts", "Skills", "MCPs", "Plugins",
-	"Inventory", "Logs", "Audit", "Activity", "Setup",
+	"Inventory", "Policy", "Logs", "Audit", "Activity", "Setup",
 }
 
 const refreshInterval = 5 * time.Second
@@ -96,6 +97,7 @@ type Model struct {
 	mcps      MCPsPanel
 	plugins   PluginsPanel
 	inventory InventoryPanel
+	policy    PolicyPanel
 	logs      LogsPanel
 	auditHist AuditPanel
 	activity  ActivityPanel
@@ -173,6 +175,7 @@ func New(deps Deps) Model {
 		mcps:       NewMCPsPanel(deps.Store),
 		plugins:    NewPluginsPanel(theme, deps.Store),
 		inventory:  NewInventoryPanel(theme, executor, deps.Store),
+		policy:     NewPolicyPanel(theme, deps.Config),
 		logs:       NewLogsPanel(theme, deps.Config),
 		auditHist:  NewAuditPanel(theme, deps.Store),
 		activity:   NewActivityPanel(theme),
@@ -425,6 +428,9 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.helpOpen || m.actionMenu.IsVisible() || m.detail.IsVisible() {
+		return m, nil
+	}
 	switch mouse.Button {
 	case tea.MouseWheelUp:
 		return m.handlePanelScroll(-3)
@@ -502,6 +508,44 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.activePanel {
+	case PanelOverview:
+		// Quick actions bar: the rendered line is at p.quickActionY (pre-scroll),
+		// but after scrolling the visible line shifts. The quick actions box is 3
+		// lines tall (border-top, content, border-bottom).
+		qaVisY := m.overview.quickActionY - m.overview.scroll
+		if relY >= qaVisY && relY <= qaVisY+2 {
+			if key := m.overview.QuickActionHitTest(x); key != "" {
+				switch key {
+				case "s":
+					cmd := m.executor.Execute("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all")
+					m.activePanel = PanelActivity
+					return m, cmd
+				case "d":
+					cmd := m.executor.Execute("defenseclaw", []string{"doctor"}, "doctor")
+					m.activePanel = PanelActivity
+					return m, cmd
+				case "i":
+					if cmd := m.switchPanel(PanelInventory); cmd != nil {
+						return m, cmd
+					}
+				case "g":
+					cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
+					m.activePanel = PanelActivity
+					return m, cmd
+				case "p":
+					m.activePanel = PanelPolicy
+				case "l":
+					m.activePanel = PanelLogs
+				case "u":
+					cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
+					m.activePanel = PanelActivity
+					return m, cmd
+				case "?":
+					m.helpOpen = true
+				}
+				return m, nil
+			}
+		}
 	case PanelAlerts:
 		if relY == 0 {
 			positions := m.alerts.SevButtonPositions()
@@ -682,8 +726,24 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		if entryIdx >= 0 && entryIdx < m.activity.Count() {
 			m.activity.SetCursor(entryIdx)
 		}
+	case PanelPolicy:
+		if relY == 0 {
+			if tab := m.policy.SubTabHitTest(x); tab >= 0 {
+				m.policy.SetSubTab(tab)
+			}
+			return m, nil
+		}
+		bin, args, name := m.policy.HandleMouseClick(x, relY)
+		if bin != "" {
+			m.activePanel = PanelActivity
+			return m, m.executor.Execute(bin, args, name)
+		}
 	case PanelSetup:
-		m.setup.HandleMouseClick(x, relY)
+		run, bin, args, name := m.setup.HandleMouseClick(x, relY)
+		if run && bin != "" {
+			m.activePanel = PanelActivity
+			return m, m.executor.Execute(bin, args, name)
+		}
 	case PanelLogs:
 		if relY == 0 {
 			tabX := 2
@@ -733,6 +793,8 @@ func (m Model) handlePanelScroll(delta int) (tea.Model, tea.Cmd) {
 		m.plugins.ScrollBy(delta)
 	case PanelInventory:
 		m.inventory.ScrollBy(delta)
+	case PanelPolicy:
+		m.policy.ScrollBy(delta)
 	case PanelLogs:
 		m.logs.ScrollBy(delta)
 	case PanelAudit:
@@ -840,17 +902,23 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case "7":
-		m.activePanel = PanelLogs
+		m.activePanel = PanelPolicy
 	case "8":
-		m.activePanel = PanelAudit
+		m.activePanel = PanelLogs
 	case "9":
-		m.activePanel = PanelActivity
+		m.activePanel = PanelAudit
 	case "0":
 		m.activePanel = PanelSetup
 
 	case "tab":
+		if m.activePanel == PanelPolicy {
+			return m.handlePolicyKey(msg)
+		}
 		m.activePanel = (m.activePanel + 1) % panelCount
 	case "shift+tab":
+		if m.activePanel == PanelPolicy {
+			return m.handlePolicyKey(msg)
+		}
 		m.activePanel = (m.activePanel - 1 + panelCount) % panelCount
 
 	default:
@@ -1146,12 +1214,23 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleLogsKey(msg)
 	case PanelInventory:
 		return m.handleInventoryKey(msg)
+	case PanelPolicy:
+		return m.handlePolicyKey(msg)
 	case PanelAudit:
 		return m.handleAuditKey(msg)
 	case PanelActivity:
 		return m.handleActivityKey(msg)
 	case PanelSetup:
 		return m.handleSetupKey(msg)
+	}
+	return m, nil
+}
+
+func (m Model) handlePolicyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	bin, args, name := m.policy.HandleKey(msg.String())
+	if bin != "" {
+		m.activePanel = PanelActivity
+		return m, m.executor.Execute(bin, args, name)
 	}
 	return m, nil
 }
@@ -1272,6 +1351,8 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
 		m.activePanel = PanelActivity
 		return m, cmd
+	case "p":
+		m.activePanel = PanelPolicy
 	case "l":
 		m.activePanel = PanelLogs
 	case "u":
@@ -1831,6 +1912,21 @@ func (m Model) renderHeader() string {
 	return title + strings.Repeat(" ", gap) + tabBar
 }
 
+// tabNumKey returns the keyboard shortcut number for panel index i, or -1 if
+// the panel has no dedicated number key (e.g. Activity when there are >10 panels).
+func tabNumKey(i int) int {
+	// Panels 0-8 map to keys 1-9; panel panelCount-1 (Setup) always maps to 0.
+	// If there are more than 10 panels, the second-to-last (Activity) has no key.
+	if i == panelCount-1 {
+		return 0
+	}
+	key := i + 1
+	if key <= 9 {
+		return key
+	}
+	return -1
+}
+
 // buildTabLabels returns tab label strings that fit within the terminal width.
 func (m Model) buildTabLabels() []string {
 	titleWidth := lipgloss.Width(
@@ -1860,8 +1956,13 @@ func (m Model) buildTabLabels() []string {
 		var labels []string
 		totalW := 0
 		for i, name := range panelNames {
-			numKey := (i + 1) % 10
-			label := fmtFn(numKey, name)
+			numKey := tabNumKey(i)
+			var label string
+			if numKey < 0 {
+				label = name
+			} else {
+				label = fmtFn(numKey, name)
+			}
 			labels = append(labels, label)
 			totalW += lipgloss.Width(label) + 2 // padding(0,1) = +2
 			if i > 0 {
@@ -1873,11 +1974,15 @@ func (m Model) buildTabLabels() []string {
 		}
 	}
 
-	// Absolute minimum: just numbers
+	// Absolute minimum: just numbers (or name for keyless panels)
 	var labels []string
 	for i := range panelNames {
-		numKey := (i + 1) % 10
-		labels = append(labels, fmt.Sprintf("%d", numKey))
+		numKey := tabNumKey(i)
+		if numKey < 0 {
+			labels = append(labels, panelNames[i][:1])
+		} else {
+			labels = append(labels, fmt.Sprintf("%d", numKey))
+		}
 	}
 	return labels
 }
@@ -1896,6 +2001,8 @@ func (m Model) renderActivePanel() string {
 		return m.plugins.View(m.width, m.height-5)
 	case PanelInventory:
 		return m.inventory.View(m.width, m.height-5)
+	case PanelPolicy:
+		return m.policy.View(m.width, m.height-5)
 	case PanelLogs:
 		return m.logs.View()
 	case PanelAudit:
@@ -2054,10 +2161,20 @@ func (m Model) renderHelp() string {
 			{"w", "Warnings+"},
 			{"G / g", "Jump to end / start"},
 		}},
+		{"Policy Panel (7)", [][2]string{
+			{"Tab / Shift+Tab", "Switch sub-tab"},
+			{"j/k or Up/Down", "Navigate items"},
+			{"Enter", "Activate pack / drill into rules"},
+			{"Esc", "Back from rule detail"},
+			{"d", "Delete suppression (Suppressions tab)"},
+			{"v / T / r", "Validate / test / reload (OPA tab)"},
+			{"t", "Toggle test files (OPA tab)"},
+		}},
 		{"Overview Quick Actions", [][2]string{
 			{"s", "Scan all skills"},
 			{"d", "Run doctor"},
 			{"g", "Setup guardrail"},
+			{"p", "Go to Policy"},
 			{"i", "Go to Inventory"},
 			{"l", "Go to Logs"},
 			{"u", "Upgrade"},

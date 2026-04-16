@@ -74,9 +74,10 @@ type configSection struct {
 type configField struct {
 	Label    string
 	Key      string
-	Kind     string // "string", "int", "bool", "password"
+	Kind     string // "string", "int", "bool", "password", "choice", "header"
 	Value    string
 	Original string
+	Options  []string // valid choices for "choice" kind
 }
 
 // wizardFormField defines a single field in a wizard setup form.
@@ -84,7 +85,7 @@ type wizardFormField struct {
 	Label   string
 	Flag    string   // CLI flag (e.g., "--use-llm")
 	NoFlag  string   // negation flag for bool toggles (e.g., "--no-verify")
-	Kind    string   // "bool", "string", "choice", "int"
+	Kind    string   // "bool", "string", "choice", "int", "section" (divider)
 	Value   string   // current value set by user
 	Default string   // pre-filled default
 	Options []string // valid choices for "choice" kind
@@ -172,6 +173,9 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Plugin Dir", Key: "plugin_dir", Kind: "string", Value: c.PluginDir},
 			{Label: "Policy Dir", Key: "policy_dir", Kind: "string", Value: c.PolicyDir},
 			{Label: "Environment", Key: "environment", Kind: "string", Value: c.Environment},
+			{Label: "── Shared LLM ──", Kind: "header"},
+			{Label: "Default LLM API Key Env", Key: "default_llm_api_key_env", Kind: "password", Value: c.DefaultLLMAPIKeyEnv},
+			{Label: "Default LLM Model", Key: "default_llm_model", Kind: "string", Value: c.DefaultLLMModel},
 		}},
 		{Name: "Claw", Fields: []configField{
 			{Label: "Mode", Key: "claw.mode", Kind: "string", Value: string(c.Claw.Mode)},
@@ -190,13 +194,40 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Token Env", Key: "gateway.token_env", Kind: "password", Value: c.Gateway.TokenEnv},
 		}},
 		{Name: "Guardrail", Fields: []configField{
+			// Core
+			{Label: "── Core ──", Kind: "header"},
 			{Label: "Enabled", Key: "guardrail.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Enabled)},
-			{Label: "Mode", Key: "guardrail.mode", Kind: "string", Value: c.Guardrail.Mode},
-			{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "string", Value: c.Guardrail.ScannerMode},
+			{Label: "Mode", Key: "guardrail.mode", Kind: "choice", Value: c.Guardrail.Mode, Options: []string{"observe", "action"}},
+			{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"}},
 			{Label: "Port", Key: "guardrail.port", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Port)},
 			{Label: "Model", Key: "guardrail.model", Kind: "string", Value: c.Guardrail.Model},
 			{Label: "API Key Env", Key: "guardrail.api_key_env", Kind: "password", Value: c.Guardrail.APIKeyEnv},
 			{Label: "Block Message", Key: "guardrail.block_message", Kind: "string", Value: c.Guardrail.BlockMessage},
+			{Label: "Stream Buffer", Key: "guardrail.stream_buffer_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.StreamBufferBytes)},
+			// Detection
+			{Label: "── Detection ──", Kind: "header"},
+			{Label: "Strategy", Key: "guardrail.detection_strategy", Kind: "choice", Value: c.Guardrail.DetectionStrategy, Options: []string{"regex_only", "regex_judge", "judge_first"}},
+			{Label: "Strategy (Prompt)", Key: "guardrail.detection_strategy_prompt", Kind: "choice", Value: c.Guardrail.DetectionStrategyPrompt, Options: []string{"", "regex_only", "regex_judge", "judge_first"}},
+			{Label: "Strategy (Completion)", Key: "guardrail.detection_strategy_completion", Kind: "choice", Value: c.Guardrail.DetectionStrategyCompletion, Options: []string{"", "regex_only", "regex_judge", "judge_first"}},
+			{Label: "Strategy (Tool Call)", Key: "guardrail.detection_strategy_tool_call", Kind: "choice", Value: c.Guardrail.DetectionStrategyToolCall, Options: []string{"", "regex_only", "regex_judge", "judge_first"}},
+			{Label: "Rule Pack Dir", Key: "guardrail.rule_pack_dir", Kind: "string", Value: c.Guardrail.RulePackDir},
+			{Label: "Judge Sweep", Key: "guardrail.judge_sweep", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.JudgeSweep)},
+			// LLM Judge
+			{Label: "── LLM Judge ──", Kind: "header"},
+			{Label: "Judge Enabled", Key: "guardrail.judge.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Enabled)},
+			{Label: "Judge Model", Key: "guardrail.judge.model", Kind: "string", Value: c.Guardrail.Judge.Model},
+			{Label: "Judge API Key Env", Key: "guardrail.judge.api_key_env", Kind: "password", Value: c.Guardrail.Judge.APIKeyEnv},
+			{Label: "Judge API Base", Key: "guardrail.judge.api_base", Kind: "string", Value: c.Guardrail.Judge.APIBase},
+			{Label: "Judge Timeout", Key: "guardrail.judge.timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.Timeout)},
+			{Label: "Adjudication Timeout", Key: "guardrail.judge.adjudication_timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.AdjudicationTimeout)},
+			{Label: "Fallbacks", Key: "guardrail.judge.fallbacks", Kind: "string", Value: strings.Join(c.Guardrail.Judge.Fallbacks, ",")},
+			// Judge Categories
+			{Label: "── Judge Categories ──", Kind: "header"},
+			{Label: "Injection", Key: "guardrail.judge.injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Injection)},
+			{Label: "PII", Key: "guardrail.judge.pii", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PII)},
+			{Label: "PII (Prompt)", Key: "guardrail.judge.pii_prompt", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIIPrompt)},
+			{Label: "PII (Completion)", Key: "guardrail.judge.pii_completion", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIICompletion)},
+			{Label: "Tool Injection", Key: "guardrail.judge.tool_injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.ToolInjection)},
 		}},
 		{Name: "Scanners", Fields: []configField{
 			{Label: "Skill Binary", Key: "scanners.skill_scanner.binary", Kind: "string", Value: c.Scanners.SkillScanner.Binary},
@@ -363,8 +394,12 @@ func (p *SetupPanel) showWizardForm(idx int) {
 		return
 	}
 	p.wizFormActive = true
-	p.wizFormFields = wizardFormDefs(idx)
+	p.wizFormFields = p.wizardFormDefs(idx)
 	p.wizFormCursor = 0
+	// Skip initial section divider so cursor starts on first real field
+	for p.wizFormCursor < len(p.wizFormFields) && p.wizFormFields[p.wizFormCursor].Kind == "section" {
+		p.wizFormCursor++
+	}
 	p.wizFormEditing = false
 	p.wizFormScroll = 0
 	p.wizRunIdx = idx
@@ -401,6 +436,9 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 	case "up", "k":
 		if p.wizFormCursor > 0 {
 			p.wizFormCursor--
+			for p.wizFormCursor > 0 && p.wizFormFields[p.wizFormCursor].Kind == "section" {
+				p.wizFormCursor--
+			}
 			if p.wizFormCursor < p.wizFormScroll {
 				p.wizFormScroll = p.wizFormCursor
 			}
@@ -408,6 +446,9 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 	case "down", "j":
 		if p.wizFormCursor < len(p.wizFormFields)-1 {
 			p.wizFormCursor++
+			for p.wizFormCursor < len(p.wizFormFields)-1 && p.wizFormFields[p.wizFormCursor].Kind == "section" {
+				p.wizFormCursor++
+			}
 			visibleLines := p.height - 8
 			if visibleLines < 5 {
 				visibleLines = 5
@@ -419,6 +460,8 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 	case "enter", " ":
 		f := &p.wizFormFields[p.wizFormCursor]
 		switch f.Kind {
+		case "section":
+			// no-op: section dividers are non-interactive
 		case "bool":
 			if f.Value == "yes" {
 				f.Value = "no"
@@ -470,7 +513,22 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 	copy(base, wizardCommands[idx])
 	base = append(base, "--non-interactive")
 
+	// For guardrail wizard, combine Provider + Model into --judge-model provider/model
+	var judgeProvider, judgeModel string
+
 	for _, f := range p.wizFormFields {
+		if f.Kind == "section" {
+			continue
+		}
+		// The Judge section uses "Provider" and "Model" labels (under "LLM Judge" section)
+		if f.Label == "Provider" && f.Flag == "" {
+			judgeProvider = f.Value
+			continue
+		}
+		if f.Label == "Model" && f.Flag == "--judge-model" {
+			judgeModel = f.Value
+			continue
+		}
 		if f.Value == "" || f.Value == f.Default {
 			continue
 		}
@@ -487,6 +545,15 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 			}
 		}
 	}
+
+	if judgeModel != "" {
+		combined := judgeModel
+		if judgeProvider != "" {
+			combined = judgeProvider + "/" + judgeModel
+		}
+		base = append(base, "--judge-model", combined)
+	}
+
 	return base
 }
 
@@ -517,18 +584,23 @@ func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []strin
 	case "left", "h":
 		if p.activeSection > 0 {
 			p.activeSection--
-			p.activeLine = 0
+			p.activeLine = p.firstEditableLine()
 			p.scroll = 0
 		}
 	case "right", "l":
 		if p.activeSection < len(p.sections)-1 {
 			p.activeSection++
-			p.activeLine = 0
+			p.activeLine = p.firstEditableLine()
 			p.scroll = 0
 		}
 	case "up", "k":
 		if p.activeLine > 0 {
 			p.activeLine--
+			if sec := p.currentSection(); sec != nil {
+				for p.activeLine > 0 && sec.Fields[p.activeLine].Kind == "header" {
+					p.activeLine--
+				}
+			}
 			if p.activeLine < p.scroll {
 				p.scroll = p.activeLine
 			}
@@ -538,6 +610,9 @@ func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []strin
 			sec := p.sections[p.activeSection]
 			if p.activeLine < len(sec.Fields)-1 {
 				p.activeLine++
+				for p.activeLine < len(sec.Fields)-1 && sec.Fields[p.activeLine].Kind == "header" {
+					p.activeLine++
+				}
 				visibleLines := p.height - 8
 				if visibleLines < 5 {
 					visibleLines = 5
@@ -550,13 +625,28 @@ func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []strin
 	case "enter":
 		f := p.currentField()
 		if f != nil {
-			if f.Kind == "bool" {
+			switch f.Kind {
+			case "header":
+				// non-interactive
+			case "bool":
 				if f.Value == "true" {
 					f.Value = "false"
 				} else {
 					f.Value = "true"
 				}
-			} else {
+			case "choice":
+				// Cycle through options
+				if len(f.Options) > 0 {
+					cur := 0
+					for i, o := range f.Options {
+						if o == f.Value {
+							cur = i
+							break
+						}
+					}
+					f.Value = f.Options[(cur+1)%len(f.Options)]
+				}
+			default:
 				p.editing = true
 				p.editInput.SetValue(f.Value)
 				p.pendingFocusCmd = p.editInput.Focus()
@@ -565,6 +655,27 @@ func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []strin
 		}
 	}
 	return false, "", nil, ""
+}
+
+// firstEditableLine returns the index of the first non-header field in the
+// currently active config section, or 0 if none found.
+func (p *SetupPanel) firstEditableLine() int {
+	if p.activeSection >= len(p.sections) {
+		return 0
+	}
+	for i, f := range p.sections[p.activeSection].Fields {
+		if f.Kind != "header" {
+			return i
+		}
+	}
+	return 0
+}
+
+func (p *SetupPanel) currentSection() *configSection {
+	if p.activeSection >= len(p.sections) {
+		return nil
+	}
+	return &p.sections[p.activeSection]
 }
 
 func (p *SetupPanel) currentField() *configField {
@@ -578,8 +689,117 @@ func (p *SetupPanel) currentField() *configField {
 	return &sec.Fields[p.activeLine]
 }
 
+// bifrostProviders returns the list of LLM providers supported by the Bifrost SDK.
+// guardrailWizardFields builds the guardrail wizard form with section dividers
+// and pre-fills values from the current config.
+func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
+	// Resolve current config values for pre-fill
+	mode := "observe"
+	scannerMode := "local"
+	strategy := "regex_only"
+	rulePack := "default"
+	judgeProvider := "bedrock"
+	judgeModel := ""
+	judgeKeyEnv := ""
+	judgeBase := ""
+	port := ""
+	blockMsg := ""
+	ciscoEndpoint := ""
+	ciscoKeyEnv := ""
+	ciscoTimeout := ""
+
+	if p.cfg != nil {
+		g := &p.cfg.Guardrail
+		if g.Mode != "" {
+			mode = g.Mode
+		}
+		if g.ScannerMode != "" {
+			scannerMode = g.ScannerMode
+		}
+		if g.DetectionStrategy != "" {
+			strategy = g.DetectionStrategy
+		}
+		if g.Port > 0 {
+			port = fmt.Sprintf("%d", g.Port)
+		}
+		blockMsg = g.BlockMessage
+
+		// Resolve rule pack from dir path
+		if g.RulePackDir != "" {
+			parts := strings.Split(g.RulePackDir, "/")
+			if len(parts) > 0 {
+				last := parts[len(parts)-1]
+				if last == "default" || last == "strict" || last == "permissive" {
+					rulePack = last
+				}
+			}
+		}
+
+		// Judge pre-fill: extract provider from "provider/model"
+		if g.Judge.Model != "" {
+			if idx := strings.Index(g.Judge.Model, "/"); idx > 0 {
+				judgeProvider = g.Judge.Model[:idx]
+				judgeModel = g.Judge.Model[idx+1:]
+			} else {
+				judgeModel = g.Judge.Model
+			}
+		}
+		judgeKeyEnv = g.Judge.APIKeyEnv
+		judgeBase = g.Judge.APIBase
+
+		cisco := &p.cfg.CiscoAIDefense
+		ciscoEndpoint = cisco.Endpoint
+		ciscoKeyEnv = cisco.APIKeyEnv
+		if cisco.TimeoutMs > 0 {
+			ciscoTimeout = fmt.Sprintf("%d", cisco.TimeoutMs)
+		}
+	}
+
+	return []wizardFormField{
+		// ─── Core ───
+		{Label: "Core", Kind: "section"},
+		{Label: "Mode", Flag: "--mode", Kind: "choice", Options: []string{"observe", "action"}, Value: mode, Default: "observe", Hint: "observe=log only, action=block threats"},
+		{Label: "Scanner Mode", Flag: "--scanner-mode", Kind: "choice", Options: []string{"local", "remote", "both"}, Value: scannerMode, Default: "local", Hint: "local=regex+judge, remote=Cisco AI Defense, both=all"},
+		{Label: "Proxy Port", Flag: "--port", Kind: "int", Value: port, Hint: "Guardrail proxy listen port"},
+		{Label: "Block Message", Flag: "--block-message", Kind: "string", Value: blockMsg, Hint: "Custom block response (action mode)"},
+
+		// ─── Detection ───
+		{Label: "Detection", Kind: "section"},
+		{Label: "Strategy", Flag: "--detection-strategy", Kind: "choice", Options: []string{"regex_only", "regex_judge", "judge_first"}, Value: strategy, Default: "regex_only", Hint: "regex_only=fast, regex_judge=recommended, judge_first=most accurate"},
+		{Label: "Rule Pack", Flag: "--rule-pack", Kind: "choice", Options: []string{"default", "strict", "permissive"}, Value: rulePack, Default: "default", Hint: "Detection rules profile (manage in Policy tab)"},
+
+		// ─── LLM Judge ───
+		{Label: "LLM Judge", Kind: "section"},
+		{Label: "Provider", Flag: "", Kind: "choice", Options: bifrostProviders(), Value: judgeProvider, Default: "bedrock", Hint: "LLM provider via Bifrost SDK (Tab to cycle, type to search)"},
+		{Label: "Model", Flag: "--judge-model", Kind: "string", Value: judgeModel, Hint: "e.g. us.anthropic.claude-3-5-haiku-20241022-v1:0"},
+		{Label: "API Key Env", Flag: "--judge-api-key-env", Kind: "string", Value: judgeKeyEnv, Hint: "Env var holding API key (e.g. BIFROST_API_KEY)"},
+		{Label: "API Base URL", Flag: "--judge-api-base", Kind: "string", Value: judgeBase, Hint: "Leave blank for direct provider access"},
+
+		// ─── Cisco AI Defense (Remote) ───
+		{Label: "Cisco AI Defense", Kind: "section"},
+		{Label: "Endpoint", Flag: "--cisco-endpoint", Kind: "string", Value: ciscoEndpoint, Hint: "Cisco AI Defense API URL (remote/both mode)"},
+		{Label: "API Key Env", Flag: "--cisco-api-key-env", Kind: "string", Value: ciscoKeyEnv, Hint: "Env var holding Cisco API key"},
+		{Label: "Timeout (ms)", Flag: "--cisco-timeout-ms", Kind: "int", Value: ciscoTimeout, Hint: "Cisco AI Defense timeout"},
+
+		// ─── Post-Setup ───
+		{Label: "Post-Setup", Kind: "section"},
+		{Label: "Restart After", Flag: "--restart", NoFlag: "--no-restart", Kind: "bool", Default: "yes", Value: "yes"},
+		{Label: "Verify After Setup", Flag: "--verify", NoFlag: "--no-verify", Kind: "bool", Default: "yes", Value: "yes"},
+		{Label: "Disable", Flag: "--disable", Kind: "bool", Default: "no", Value: "no", Hint: "Disable guardrail and revert config"},
+	}
+}
+
+func bifrostProviders() []string {
+	return []string{
+		"openai", "azure", "anthropic", "bedrock", "cohere", "vertex",
+		"mistral", "ollama", "groq", "sgl", "parasail", "perplexity",
+		"cerebras", "gemini", "openrouter", "elevenlabs", "huggingface",
+		"nebius", "xai", "replicate", "vllm", "runway", "fireworks",
+	}
+}
+
 // wizardFormDefs returns the form fields for a given wizard index.
-func wizardFormDefs(idx int) []wizardFormField {
+func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 	switch idx {
 	case wizardSkillScanner:
 		return []wizardFormField{
@@ -619,18 +839,7 @@ func wizardFormDefs(idx int) []wizardFormField {
 			{Label: "Verify After Setup", Flag: "--verify", NoFlag: "--no-verify", Kind: "bool", Default: "yes", Value: "yes"},
 		}
 	case wizardGuardrail:
-		return []wizardFormField{
-			{Label: "Disable", Flag: "--disable", Kind: "bool", Default: "no", Value: "no", Hint: "Disable guardrail and revert config"},
-			{Label: "Mode", Flag: "--mode", Kind: "choice", Options: []string{"observe", "action"}, Value: "observe", Default: "observe"},
-			{Label: "Scanner Mode", Flag: "--scanner-mode", Kind: "choice", Options: []string{"local", "remote"}, Value: "local", Default: "local"},
-			{Label: "Cisco Endpoint", Flag: "--cisco-endpoint", Kind: "string", Hint: "Cisco AI Defense API endpoint (remote only)"},
-			{Label: "Cisco API Key Env", Flag: "--cisco-api-key-env", Kind: "string", Hint: "Env var holding Cisco API key (remote only)"},
-			{Label: "Cisco Timeout (ms)", Flag: "--cisco-timeout-ms", Kind: "int", Hint: "Cisco AI Defense timeout"},
-			{Label: "Proxy Port", Flag: "--port", Kind: "int", Hint: "Guardrail proxy port"},
-			{Label: "Block Message", Flag: "--block-message", Kind: "string", Hint: "Custom block message (action mode)"},
-			{Label: "Restart After", Flag: "--restart", NoFlag: "--no-restart", Kind: "bool", Default: "yes", Value: "yes"},
-			{Label: "Verify After Setup", Flag: "--verify", NoFlag: "--no-verify", Kind: "bool", Default: "yes", Value: "yes"},
-		}
+		return p.guardrailWizardFields()
 	case wizardSplunk:
 		return []wizardFormField{
 			{Label: "Enable O11y", Flag: "--o11y", Kind: "bool", Default: "no", Value: "no", Hint: "Splunk Observability Cloud (OTLP)"},
@@ -722,7 +931,7 @@ func (p *SetupPanel) handleConfigClick(x, y int) (bool, string, []string, string
 			w := lipgloss.Width(sec.Name) + 2
 			if x >= cursor && x < cursor+w+1 {
 				p.activeSection = i
-				p.activeLine = 0
+				p.activeLine = p.firstEditableLine()
 				p.scroll = 0
 				return false, "", nil, ""
 			}
@@ -737,15 +946,30 @@ func (p *SetupPanel) handleConfigClick(x, y int) (bool, string, []string, string
 		idx := p.scroll + fieldY
 		sec := &p.sections[p.activeSection]
 		if idx >= 0 && idx < len(sec.Fields) {
+			f := &sec.Fields[idx]
+			if f.Kind == "header" {
+				return false, "", nil, ""
+			}
 			if p.activeLine == idx && !p.editing {
-				f := &sec.Fields[idx]
-				if f.Kind == "bool" {
+				switch f.Kind {
+				case "bool":
 					if f.Value == "true" {
 						f.Value = "false"
 					} else {
 						f.Value = "true"
 					}
-				} else {
+				case "choice":
+					if len(f.Options) > 0 {
+						cur := 0
+						for i, o := range f.Options {
+							if o == f.Value {
+								cur = i
+								break
+							}
+						}
+						f.Value = f.Options[(cur+1)%len(f.Options)]
+					}
+				default:
 					p.editing = true
 					p.editInput.SetValue(f.Value)
 					p.pendingFocusCmd = p.editInput.Focus()
@@ -891,18 +1115,6 @@ func (p *SetupPanel) ScrollBy(delta int) {
 	}
 }
 
-// WizardDone marks a wizard as complete (legacy compat).
-func (p *SetupPanel) WizardDone(idx int, exitCode int) {
-	if idx < 0 || idx >= wizardCount {
-		return
-	}
-	if exitCode == 0 {
-		p.wizardStatus[idx] = "Configured"
-	} else {
-		p.wizardStatus[idx] = fmt.Sprintf("Failed (exit %d)", exitCode)
-	}
-}
-
 // View renders the setup panel.
 func (p *SetupPanel) View(width, height int) string {
 	p.width = width
@@ -963,12 +1175,25 @@ func (p *SetupPanel) renderWizardForm() string {
 		endIdx = len(p.wizFormFields)
 	}
 
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
+
 	for i := p.wizFormScroll; i < endIdx; i++ {
 		f := p.wizFormFields[i]
+
+		// Section dividers are non-interactive visual headers
+		if f.Kind == "section" {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("  " + sectionStyle.Render("─── "+f.Label+" ───"))
+			b.WriteString("\n")
+			continue
+		}
+
 		label := fmt.Sprintf("  %-24s", f.Label)
 
 		mod := " "
-		if f.Value != f.Default {
+		if f.Value != f.Default && f.Default != "" {
 			mod = changed.Render("*")
 		}
 
@@ -1182,8 +1407,20 @@ func (p *SetupPanel) renderConfigEditor() string {
 		endIdx = len(sec.Fields)
 	}
 
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
+	choiceStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
+	boolTrue := lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
+	boolFalse := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+
 	for i := p.scroll; i < endIdx; i++ {
 		f := sec.Fields[i]
+
+		// Sub-section headers are non-interactive visual dividers
+		if f.Kind == "header" {
+			b.WriteString("\n  " + headerStyle.Render(f.Label) + "\n")
+			continue
+		}
+
 		label := fmt.Sprintf("  %-24s", f.Label)
 		val := f.Value
 
@@ -1192,14 +1429,43 @@ func (p *SetupPanel) renderConfigEditor() string {
 			mod = changed.Render("*")
 		}
 
+		// Apply type-specific styling to values
+		var styledVal string
+		switch f.Kind {
+		case "bool":
+			if val == "true" {
+				styledVal = boolTrue.Render(val)
+			} else {
+				styledVal = boolFalse.Render(val)
+			}
+		case "choice":
+			if val == "" {
+				styledVal = dim.Render("(inherit)")
+			} else {
+				styledVal = choiceStyle.Render(val)
+			}
+		case "password":
+			if val != "" {
+				styledVal = val
+			} else {
+				styledVal = dim.Render("(empty)")
+			}
+		default:
+			if val == "" {
+				styledVal = dim.Render("(empty)")
+			} else {
+				styledVal = val
+			}
+		}
+
 		if i == p.activeLine && p.editing {
 			b.WriteString(highlight.Render(label) + mod + " " + p.editInput.View() + "\n")
 		} else if i == p.activeLine {
-			b.WriteString(highlight.Render(label) + mod + " [" + val + "]\n")
+			b.WriteString(highlight.Render(label) + mod + " [" + styledVal + "]\n")
 		} else if i == p.configHover {
-			b.WriteString(hoverFg.Render(label) + mod + " " + val + "\n")
+			b.WriteString(hoverFg.Render(label) + mod + " " + styledVal + "\n")
 		} else {
-			b.WriteString(dim.Render(label) + mod + " " + val + "\n")
+			b.WriteString(dim.Render(label) + mod + " " + styledVal + "\n")
 		}
 	}
 

@@ -722,7 +722,16 @@ def setup_guardrail(
             gc.judge.api_base = judge_api_base
         if judge_api_key_env is not None:
             gc.judge.api_key_env = judge_api_key_env
+            if not app.cfg.default_llm_api_key_env:
+                app.cfg.default_llm_api_key_env = judge_api_key_env
         gc.enabled = True
+
+        # Apply sensible strategy defaults when judge is enabled
+        if gc.judge.enabled:
+            if not gc.detection_strategy or gc.detection_strategy == "regex_only":
+                gc.detection_strategy = "regex_judge"
+            if not getattr(gc, "detection_strategy_completion", None):
+                gc.detection_strategy_completion = "regex_only"
 
         if gc.scanner_mode in ("remote", "both"):
             key_env = aid.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
@@ -768,7 +777,10 @@ def setup_guardrail(
         rows.append(("guardrail.judge.enabled", "true"))
         rows.append(("guardrail.judge.model", gc.judge.model))
         if gc.judge.api_base:
-            rows.append(("guardrail.judge.api_base", gc.judge.api_base[:60] + "..." if len(gc.judge.api_base) > 60 else gc.judge.api_base))
+            judge_api_base = gc.judge.api_base
+            if len(judge_api_base) > 60:
+                judge_api_base = judge_api_base[:60] + "..."
+            rows.append(("guardrail.judge.api_base", judge_api_base))
         rows.append(("guardrail.judge.api_key_env", gc.judge.api_key_env))
         if gc.judge.fallbacks:
             rows.append(("guardrail.judge.fallbacks", ", ".join(gc.judge.fallbacks)))
@@ -1036,7 +1048,7 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         click.echo("    [2] regex_judge — regex triages, LLM verifies ambiguous matches (recommended)")
         click.echo("    [3] judge_first — LLM runs primary detection, regex as safety net (most accurate)")
         strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
-        current_strat = gc.detection_strategy or "regex_only"
+        current_strat = gc.detection_strategy or "regex_judge"
         strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")
         strat_choice = click.prompt(
             "  Select strategy", type=click.Choice(["1", "2", "3"]), default=strat_default,
@@ -1080,8 +1092,22 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         gc.judge.pii = True
         gc.judge.pii_prompt = True
         gc.judge.pii_completion = True
+
+        # Completion-side strategy defaults to regex_only (no judge latency)
+        if not getattr(gc, "detection_strategy_completion", None):
+            gc.detection_strategy_completion = "regex_only"
+
+        # If no component-specific judge key was configured, offer to share it
+        # across all LLM components via default_llm_api_key_env.
+        if gc.judge.api_key_env:
+            if click.confirm(
+                f"  Use {gc.judge.api_key_env} as the shared LLM key for all scanners too?",
+                default=True,
+            ):
+                app.cfg.default_llm_api_key_env = gc.judge.api_key_env
     else:
         gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
 
     if click.confirm("  Configure advanced options?", default=False):
         gc.port = click.prompt("  Guardrail proxy port", default=gc.port, type=int)

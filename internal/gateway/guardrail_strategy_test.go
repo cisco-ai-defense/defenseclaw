@@ -19,10 +19,10 @@ func TestEffectiveStrategy(t *testing.T) {
 		want      string
 	}{
 		{
-			name:      "default is regex_only",
+			name:      "default is regex_judge",
 			cfg:       config.GuardrailConfig{},
 			direction: "prompt",
-			want:      "regex_only",
+			want:      "regex_judge",
 		},
 		{
 			name:      "global strategy",

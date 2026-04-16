@@ -132,6 +132,7 @@ func NewGuardrailProxy(
 	policyDir string,
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
+	sharedAPIKey string,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -140,7 +141,7 @@ func NewGuardrailProxy(
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
 	}
 
-	judge := NewLLMJudge(&cfg.Judge, dotenvPath, rp)
+	judge := NewLLMJudge(&cfg.Judge, dotenvPath, rp, sharedAPIKey)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
 	inspector.SetDetectionStrategy(
@@ -410,7 +411,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		userText = partial.Instructions
 	}
 
-	if userText != "" {
+	if userText != "" && !isHeartbeatMessage(userText, partial.Messages) {
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
 		elapsed := time.Since(t0)
@@ -1077,7 +1078,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
-	if userText != "" {
+	if userText != "" && !isHeartbeatMessage(userText, req.Messages) {
 		t0 := time.Now()
 
 		// Start guardrail span for input inspection.

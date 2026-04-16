@@ -45,7 +45,8 @@ type LLMJudge struct {
 // NewLLMJudge creates a judge from config. Returns nil if judge is disabled
 // or no model/API key is configured. The optional RulePack supplies
 // externalized judge prompts, suppressions, and severity overrides.
-func NewLLMJudge(cfg *config.JudgeConfig, dotenvPath string, rp *guardrail.RulePack) *LLMJudge {
+// sharedAPIKey is the fallback key from Config.ResolvedDefaultLLMAPIKey().
+func NewLLMJudge(cfg *config.JudgeConfig, dotenvPath string, rp *guardrail.RulePack, sharedAPIKey string) *LLMJudge {
 	if cfg == nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: config is nil\n")
 		return nil
@@ -58,7 +59,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, dotenvPath string, rp *guardrail.RuleP
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no model configured\n")
 		return nil
 	}
-	apiKey := cfg.ResolvedJudgeAPIKey()
+	apiKey := cfg.ResolvedJudgeAPIKeyWithFallback(sharedAPIKey)
 	if apiKey == "" {
 		apiKey = ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
 	}
@@ -565,6 +566,7 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 	best := verdicts[0]
 	var allFindings []string
 	var allReasons []string
+	totalEntityCount := 0
 	allFailed := true
 
 	for _, v := range verdicts {
@@ -572,6 +574,7 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 			best = v
 		}
 		allFindings = append(allFindings, v.Findings...)
+		totalEntityCount += v.EntityCount
 		if v.Reason != "" {
 			allReasons = append(allReasons, v.Reason)
 		}
@@ -587,11 +590,12 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 	}
 
 	return &ScanVerdict{
-		Action:   best.Action,
-		Severity: best.Severity,
-		Reason:   strings.Join(allReasons, "; "),
-		Findings: allFindings,
-		Scanner:  "llm-judge",
+		Action:      best.Action,
+		Severity:    best.Severity,
+		Reason:      strings.Join(allReasons, "; "),
+		Findings:    allFindings,
+		EntityCount: totalEntityCount,
+		Scanner:     "llm-judge",
 	}
 }
 

@@ -541,7 +541,7 @@ def scan(
         _scan_from_url(app, target, as_json)
         return
 
-    scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.inspect_llm, app.cfg.cisco_ai_defense)
+    scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.effective_inspect_llm(), app.cfg.cisco_ai_defense)
 
     if scan_all or target == "all":
         if remote:
@@ -963,7 +963,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
         if not as_json:
             click.echo(f"[scan] skill-scanner -> {skill_dir}")
 
-        scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.inspect_llm, app.cfg.cisco_ai_defense)
+        scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.effective_inspect_llm(), app.cfg.cisco_ai_defense)
         result = scanner.scan(skill_dir)
 
         if app.logger:
@@ -1049,7 +1049,7 @@ def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
         if not as_json:
             click.echo(f"[scan] skill-scanner -> {skill_dir} (fetched)")
 
-        scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.inspect_llm, app.cfg.cisco_ai_defense)
+        scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.effective_inspect_llm(), app.cfg.cisco_ai_defense)
         result = scanner.scan(skill_dir)
 
         if app.logger:
@@ -1652,7 +1652,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         return
 
     click.echo(f"[install] scanning {skill_path}...")
-    scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.inspect_llm, app.cfg.cisco_ai_defense)
+    scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner, app.cfg.effective_inspect_llm(), app.cfg.cisco_ai_defense)
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:

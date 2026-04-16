@@ -48,8 +48,9 @@ type OverviewPanel struct {
 	totalScans    int
 	activeAlerts  int
 
-	notices []notice
-	scroll  int
+	notices      []notice
+	scroll       int
+	quickActionY int // line offset (pre-scroll) of the quick actions row, set by View
 }
 
 // ScrollBy adjusts the overview scroll for mouse wheel.
@@ -172,10 +173,12 @@ func (p *OverviewPanel) View(width, height int) string {
 	b.WriteString(columns)
 	b.WriteString("\n\n")
 
-	// Quick actions bar
+	// Quick actions bar — record pre-scroll line offset for mouse hit-testing
+	preQA := strings.Count(b.String(), "\n")
 	b.WriteString(p.renderQuickActions(width))
 
 	content := b.String()
+	p.quickActionY = preQA
 	if p.scroll > 0 {
 		lines := strings.Split(content, "\n")
 		if p.scroll >= len(lines) {
@@ -388,12 +391,43 @@ func (p *OverviewPanel) renderQuickActions(width int) string {
 		key.Render("[d]") + dim.Render(" Doctor"),
 		key.Render("[i]") + dim.Render(" Inventory"),
 		key.Render("[g]") + dim.Render(" Guardrail"),
+		key.Render("[p]") + dim.Render(" Policy"),
 		key.Render("[l]") + dim.Render(" Logs"),
 		key.Render("[u]") + dim.Render(" Upgrade"),
 		key.Render("[?]") + dim.Render(" Help"),
 	}
 
 	return actionStyle.Render("  " + strings.Join(actions, "    "))
+}
+
+// quickActionDefs defines the overview quick actions in display order.
+// Each entry is (key-char, label-plaintext-width-including-brackets-and-space).
+var quickActionDefs = []struct {
+	key   string
+	width int // len("[x] Label")
+}{
+	{"s", 12}, // "[s] Scan all"
+	{"d", 10}, // "[d] Doctor"
+	{"i", 13}, // "[i] Inventory"
+	{"g", 13}, // "[g] Guardrail"
+	{"p", 10}, // "[p] Policy"
+	{"l", 8},  // "[l] Logs"
+	{"u", 11}, // "[u] Upgrade"
+	{"?", 8},  // "[?] Help"
+}
+
+// QuickActionHitTest returns the key character of the quick action at
+// horizontal position x within the quick actions row, or "" if none matched.
+// The caller should account for the border/padding offset (typically 3-4 cols).
+func (p *OverviewPanel) QuickActionHitTest(x int) string {
+	pos := 4 // border (1) + padding (1) + leading spaces (2)
+	for _, a := range quickActionDefs {
+		if x >= pos && x < pos+a.width {
+			return a.key
+		}
+		pos += a.width + 4 // 4 spaces between actions
+	}
+	return ""
 }
 
 func (p *OverviewPanel) miniBar(value, max, barWidth int) string {
@@ -524,6 +558,11 @@ func (p *OverviewPanel) guardrailDetail() string {
 	}
 	if p.cfg.Guardrail.Port > 0 {
 		parts = append(parts, fmt.Sprintf("port %d", p.cfg.Guardrail.Port))
+	}
+	strategy := p.cfg.Guardrail.EffectiveStrategy("")
+	parts = append(parts, strategy)
+	if p.cfg.Guardrail.Judge.Enabled && p.cfg.Guardrail.Judge.Model != "" {
+		parts = append(parts, "judge:"+p.cfg.Guardrail.Judge.Model)
 	}
 	return strings.Join(parts, ", ")
 }

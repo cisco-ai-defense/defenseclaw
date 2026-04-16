@@ -41,11 +41,13 @@ type ClawConfig struct {
 
 // CurrentConfigVersion is bumped when the config schema changes in a way
 // that requires migration (new required fields, renamed keys, etc.).
-const CurrentConfigVersion = 2
+const CurrentConfigVersion = 3
 
 type Config struct {
-	ConfigVersion  int                  `mapstructure:"config_version"   yaml:"config_version"`
-	DataDir        string               `mapstructure:"data_dir"         yaml:"data_dir"`
+	ConfigVersion     int                  `mapstructure:"config_version"        yaml:"config_version"`
+	DefaultLLMAPIKeyEnv string             `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
+	DefaultLLMModel   string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
+	DataDir           string               `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
 	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
 	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
@@ -66,6 +68,33 @@ type Config struct {
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
 	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
+}
+
+// ResolvedDefaultLLMAPIKey returns the shared LLM API key from the configured
+// env var. Components (judge, scanners) fall back to this when they have no
+// component-specific key configured.
+func (c *Config) ResolvedDefaultLLMAPIKey() string {
+	if c.DefaultLLMAPIKeyEnv != "" {
+		if v := os.Getenv(c.DefaultLLMAPIKeyEnv); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// EffectiveInspectLLM returns InspectLLM with the shared default key applied
+// as a fallback so callers don't need to wire the fallback themselves.
+func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
+	llm := c.InspectLLM
+	if llm.ResolvedAPIKey() == "" {
+		if sharedKey := c.ResolvedDefaultLLMAPIKey(); sharedKey != "" && llm.APIKey == "" {
+			llm.APIKey = sharedKey
+		}
+	}
+	if llm.Model == "" && c.DefaultLLMModel != "" {
+		llm.Model = c.DefaultLLMModel
+	}
+	return llm
 }
 
 type OTelConfig struct {
@@ -377,7 +406,7 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	if g.DetectionStrategy != "" {
 		return g.DetectionStrategy
 	}
-	return "regex_only"
+	return "regex_judge"
 }
 
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
@@ -401,9 +430,20 @@ type JudgeConfig struct {
 // ResolvedJudgeAPIKey returns the judge API key from the env var.
 func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
 	if c.APIKeyEnv != "" {
-		return os.Getenv(c.APIKeyEnv)
+		if v := os.Getenv(c.APIKeyEnv); v != "" {
+			return v
+		}
 	}
 	return ""
+}
+
+// ResolvedJudgeAPIKeyWithFallback returns the judge key, falling back to the
+// shared default LLM key when none is configured.
+func (c *JudgeConfig) ResolvedJudgeAPIKeyWithFallback(sharedKey string) string {
+	if k := c.ResolvedJudgeAPIKey(); k != "" {
+		return k
+	}
+	return sharedKey
 }
 
 // EffectiveHost returns the hostname clients (e.g. OpenClaw) use to reach the
@@ -621,6 +661,23 @@ func migrateConfig(cfg *Config) {
 		if cfg.Guardrail.Mode == "" {
 			cfg.Guardrail.Mode = "observe"
 		}
+		if cfg.Guardrail.RulePackDir == "" {
+			cfg.Guardrail.RulePackDir = filepath.Join(cfg.DataDir, "policies", "guardrail", "default")
+		}
+		if cfg.Guardrail.StreamBufferBytes == 0 {
+			cfg.Guardrail.StreamBufferBytes = 1024
+		}
+	}
+
+	// v2 → v3: upgrade detection_strategy to regex_judge when judge is
+	// enabled, add completion-specific strategy, wire shared LLM key
+	if cfg.ConfigVersion < 3 {
+		if cfg.Guardrail.Judge.Enabled && cfg.Guardrail.DetectionStrategy == "regex_only" {
+			cfg.Guardrail.DetectionStrategy = "regex_judge"
+		}
+		if cfg.Guardrail.DetectionStrategyCompletion == "" {
+			cfg.Guardrail.DetectionStrategyCompletion = "regex_only"
+		}
 	}
 
 	cfg.ConfigVersion = CurrentConfigVersion
@@ -790,7 +847,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.tool_injection", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
-	viper.SetDefault("guardrail.detection_strategy", "regex_only")
+	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
+	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
