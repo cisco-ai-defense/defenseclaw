@@ -28,7 +28,11 @@ import subprocess
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.paths import bundled_rego_dir, bundled_splunk_bridge_dir
+from defenseclaw.paths import (
+    bundled_guardrail_profiles_dir,
+    bundled_rego_dir,
+    bundled_splunk_bridge_dir,
+)
 
 
 @click.command("init")
@@ -100,6 +104,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     click.echo("  Directories:   created")
 
     _seed_rego_policies(cfg.policy_dir)
+    _seed_guardrail_profiles(cfg.policy_dir)
     _seed_splunk_bridge(cfg.data_dir)
 
     cfg.save()
@@ -220,6 +225,36 @@ def _seed_rego_policies(policy_dir: str) -> None:
                 shutil.copy2(str(src), dst)
 
     click.echo(f"  Rego policies: {dest_rego}")
+
+
+def _seed_guardrail_profiles(policy_dir: str) -> None:
+    """Copy bundled guardrail rule-pack profiles (default/strict/permissive) into
+    the user's policy_dir if not already present. Operators can then edit the
+    YAML in place and `defenseclaw policy reload` will pick up the changes.
+    """
+    bundled = bundled_guardrail_profiles_dir()
+    if bundled is None:
+        return
+
+    dest_root = os.path.join(policy_dir, "guardrail")
+    os.makedirs(dest_root, exist_ok=True)
+
+    seeded: list[str] = []
+    preserved: list[str] = []
+    for profile_dir in bundled.iterdir():
+        if not profile_dir.is_dir() or profile_dir.name.startswith("."):
+            continue
+        dst = os.path.join(dest_root, profile_dir.name)
+        if os.path.isdir(dst):
+            preserved.append(profile_dir.name)
+            continue
+        shutil.copytree(str(profile_dir), dst)
+        seeded.append(profile_dir.name)
+
+    if seeded:
+        click.echo(f"  Guardrail rule packs: seeded {', '.join(sorted(seeded))} in {dest_root}")
+    if preserved:
+        click.echo(f"  Guardrail rule packs: preserved existing ({', '.join(sorted(preserved))})")
 
 
 def _seed_splunk_bridge(data_dir: str) -> None:

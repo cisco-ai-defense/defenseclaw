@@ -3129,6 +3129,46 @@ func TestHandleGuardrailEvent(t *testing.T) {
 	}
 }
 
+func TestHandleGuardrailEventEmitsCanonicalIDs(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
+
+	body, _ := json.Marshal(guardrailEventRequest{
+		Direction: "prompt",
+		Model:     "gpt-4",
+		Action:    "block",
+		Severity:  "HIGH",
+		Reason:    "matched secrets",
+		Findings:  []string{"SEC-AWS-KEY:AWS access key", "ghp_abc123"},
+		ElapsedMs: 2.0,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/event", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleGuardrailEvent(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+
+	events, _ := store.ListEvents(10)
+	var details string
+	for _, e := range events {
+		if e.Action == "guardrail-verdict" {
+			details = e.Details
+			break
+		}
+	}
+	if details == "" {
+		t.Fatal("expected guardrail-verdict audit event")
+	}
+	if !strings.Contains(details, "canonical=") {
+		t.Errorf("details missing canonical= field: %s", details)
+	}
+	if !strings.Contains(details, "SEC-AWS-KEY") {
+		t.Errorf("details missing SEC-AWS-KEY canonical id: %s", details)
+	}
+}
+
 func TestHandleGuardrailEventBadJSON(t *testing.T) {
 	_, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), logger: logger}

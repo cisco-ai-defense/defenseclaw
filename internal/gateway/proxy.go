@@ -2266,6 +2266,26 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 		details += fmt.Sprintf(" reason=%s", reason)
 	}
 
+	// Emit canonical finding IDs for cross-scanner correlation. The scanner
+	// (local-pattern / CiscoAID / judge) produces raw finding strings; the
+	// normalizer maps them to a stable ID scheme so downstream tooling can
+	// match findings across scanners without parsing scanner-specific formats.
+	if nfs := NormalizeScanVerdict(verdict); len(nfs) > 0 {
+		ids := make([]string, 0, len(nfs))
+		seen := make(map[string]bool, len(nfs))
+		for _, nf := range nfs {
+			if seen[nf.CanonicalID] {
+				continue
+			}
+			seen[nf.CanonicalID] = true
+			ids = append(ids, nf.CanonicalID)
+			if len(ids) >= 8 {
+				break
+			}
+		}
+		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
+	}
+
 	if p.logger != nil {
 		_ = p.logger.LogAction("guardrail-verdict", model, details)
 	}

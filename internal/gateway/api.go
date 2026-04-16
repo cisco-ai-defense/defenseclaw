@@ -1171,6 +1171,25 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		details += fmt.Sprintf(" reason=%s", truncate(req.Reason, 120))
 	}
 
+	if nfs := NormalizeScanVerdict(&ScanVerdict{
+		Severity: req.Severity,
+		Findings: req.Findings,
+	}); len(nfs) > 0 {
+		ids := make([]string, 0, len(nfs))
+		seen := make(map[string]bool, len(nfs))
+		for _, nf := range nfs {
+			if seen[nf.CanonicalID] {
+				continue
+			}
+			seen[nf.CanonicalID] = true
+			ids = append(ids, nf.CanonicalID)
+			if len(ids) >= 8 {
+				break
+			}
+		}
+		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
+	}
+
 	switch req.Action {
 	case "block":
 		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s: model=%s severity=%s reason=%q findings=%v\n",

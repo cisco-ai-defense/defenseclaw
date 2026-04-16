@@ -579,6 +579,61 @@ class TestInitSeedsSplunkBridge(unittest.TestCase):
         self.assertTrue(os.access(seeded_bin, os.X_OK))
 
 
+class TestSeedGuardrailProfiles(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-guardrail-")
+        self.bundle_dir = tempfile.mkdtemp(prefix="dclaw-bundle-guardrail-")
+        for profile in ("default", "strict", "permissive"):
+            rules_dir = os.path.join(self.bundle_dir, profile, "rules")
+            os.makedirs(rules_dir, exist_ok=True)
+            with open(os.path.join(rules_dir, "secrets.yaml"), "w", encoding="utf-8") as handle:
+                handle.write("rules: []\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        shutil.rmtree(self.bundle_dir, ignore_errors=True)
+
+    @patch("defenseclaw.commands.cmd_init.bundled_guardrail_profiles_dir")
+    def test_seeds_profiles_when_absent(self, mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_guardrail_profiles
+
+        mock_bundled.return_value = Path(self.bundle_dir)
+        _seed_guardrail_profiles(self.tmp_dir)
+
+        for profile in ("default", "strict", "permissive"):
+            seeded = os.path.join(self.tmp_dir, "guardrail", profile, "rules", "secrets.yaml")
+            self.assertTrue(os.path.isfile(seeded), f"expected seeded file {seeded}")
+
+    @patch("defenseclaw.commands.cmd_init.bundled_guardrail_profiles_dir")
+    def test_preserves_existing_profile(self, mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_guardrail_profiles
+
+        mock_bundled.return_value = Path(self.bundle_dir)
+        existing_dir = os.path.join(self.tmp_dir, "guardrail", "default")
+        os.makedirs(existing_dir, exist_ok=True)
+        marker = os.path.join(existing_dir, "user-edited.yaml")
+        with open(marker, "w", encoding="utf-8") as handle:
+            handle.write("custom: true\n")
+
+        _seed_guardrail_profiles(self.tmp_dir)
+
+        self.assertTrue(os.path.isfile(marker), "existing profile must be preserved intact")
+        self.assertFalse(
+            os.path.isfile(os.path.join(existing_dir, "rules", "secrets.yaml")),
+            "existing profile must not be overwritten",
+        )
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.tmp_dir, "guardrail", "strict", "rules", "secrets.yaml"))
+        )
+
+    @patch("defenseclaw.commands.cmd_init.bundled_guardrail_profiles_dir", return_value=None)
+    def test_missing_bundle_is_noop(self, _mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_guardrail_profiles
+
+        _seed_guardrail_profiles(self.tmp_dir)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp_dir, "guardrail")))
+
+
 class TestInstallScanners(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_init._verify_scanner_sdk")
     def test_install_scanners_verifies_sdks(self, mock_verify):
