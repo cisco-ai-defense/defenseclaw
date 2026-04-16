@@ -238,13 +238,23 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         return
 
     model = gc.model or ""
-    if "anthropic" in model or env_name.startswith("ANTHROPIC"):
+    # Route by *provider prefix* (the segment before the first "/"), not by
+    # substring. A substring check on "anthropic" used to match Bedrock
+    # inference profile ids like "amazon-bedrock/us.anthropic.claude-haiku-4-5"
+    # and send non-Anthropic credentials (e.g. an AWS Bedrock bearer token held
+    # in BIFROST_API_KEY) to api.anthropic.com, producing a spurious 401 FAIL.
+    # Provider prefixes come from OpenClaw's model registry; see the docs at
+    # https://docs.openclaw.ai/providers/ for the canonical list.
+    provider = model.split("/", 1)[0].lower() if "/" in model else model.lower()
+    if provider == "anthropic" or env_name.startswith("ANTHROPIC"):
         _verify_anthropic(api_key, r)
-    elif "openai" in model or env_name.startswith("OPENAI"):
+    elif provider == "openai" or env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
     else:
-        _emit("pass", "LLM API key", f"{env_name} is set (cannot verify provider '{model}')")
-        r.record("pass")
+        _emit(
+            "pass", "LLM API key",
+            f"{env_name} is set (cannot verify provider '{model}')", r=r,
+        )
 
 
 def _verify_anthropic(api_key: str, r: _DoctorResult) -> None:

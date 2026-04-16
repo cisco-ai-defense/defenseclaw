@@ -347,7 +347,21 @@ jobs:
     timeout-minutes: 45
     env:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # ANTHROPIC_API_KEY intentionally NOT plumbed into this job. The full-live
+      # guardrail agent now runs on OpenClaw's stock amazon-bedrock provider
+      # (auth=aws-sdk, AWS_BEARER_TOKEN_BEDROCK below). Injecting a stale /
+      # low-balance Anthropic key here triggers three false-positive failures:
+      #   (a) the defenseclaw doctor "LLM API key" check hits api.anthropic.com
+      #       because its current provider routing does a substring match on
+      #       "anthropic" in the model name (see cli/defenseclaw/commands/
+      #       cmd_doctor.py),
+      #   (b) the Anthropic /v1/messages passthrough test gets 400 "credit
+      #       balance too low",
+      #   (c) the duplicate-header / X-AI-Auth tests likewise call
+      #       api.anthropic.com directly.
+      # Those tests all skip cleanly with "ANTHROPIC_API_KEY not set" when the
+      # env var is absent, which is the correct behavior for a Bedrock-only
+      # live run.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
@@ -634,15 +648,23 @@ jobs:
               ],
           }
 
-          # Auth profile entry: amazon-bedrock with mode=none (aws-sdk handles
-          # credential discovery; no keyRef needed).
+          # IMPORTANT: do NOT add an amazon-bedrock entry under auth.profiles.
+          # OpenClaw's config schema restricts profile mode values to
+          # {"api_key", "oauth", "token"} (an earlier version of this file
+          # tried mode="aws_sdk" and OpenClaw rejected the whole config at
+          # startup). Per https://docs.openclaw.ai/providers/bedrock, the
+          # provider entry above sets auth="aws-sdk", which tells OpenClaw to
+          # resolve credentials through the AWS SDK default chain
+          # (AWS_BEARER_TOKEN_BEDROCK / AWS_ACCESS_KEY_ID / AWS_PROFILE) at
+          # request time — no auth profile is needed.
+          #
+          # Scrub any stale amazon-bedrock entries from an older run's config
+          # (e.g. if the backup/restore flow somehow leaked a bad profile).
           auth_cfg = cfg.setdefault("auth", {})
           auth_profiles = auth_cfg.setdefault("profiles", {})
-          auth_profiles[f"{bedrock_provider}:default"] = {
-              "provider": bedrock_provider,
-              "mode": "aws_sdk",
-          }
-          auth_cfg.setdefault("order", {})[bedrock_provider] = [f"{bedrock_provider}:default"]
+          auth_profiles.pop(f"{bedrock_provider}:default", None)
+          auth_order = auth_cfg.setdefault("order", {})
+          auth_order.pop(bedrock_provider, None)
 
           agents = cfg.setdefault("agents", {})
           defaults = agents.setdefault("defaults", {})
@@ -656,18 +678,17 @@ jobs:
               json.dump(cfg, f, indent=2)
               f.write("\n")
 
+          # auth-profiles.json: empty profile store. amazon-bedrock
+          # authenticates via the AWS SDK default chain driven by the
+          # provider's auth="aws-sdk" setting, so we don't register a keyref
+          # here. Writing an empty store (rather than leaving a stale file)
+          # ensures a prior run's ANTHROPIC_API_KEY-based profile doesn't
+          # bleed through.
           auth_path.parent.mkdir(parents=True, exist_ok=True)
           auth_store = {
               "version": 1,
-              "profiles": {
-                  f"{bedrock_provider}:default": {
-                      "type": "aws_sdk",
-                      "provider": bedrock_provider,
-                  }
-              },
-              "order": {
-                  bedrock_provider: [f"{bedrock_provider}:default"],
-              },
+              "profiles": {},
+              "order": {},
           }
           with auth_path.open("w") as f:
               json.dump(auth_store, f, indent=2)
