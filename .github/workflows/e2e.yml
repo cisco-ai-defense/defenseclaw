@@ -573,7 +573,16 @@ jobs:
           import os
           from pathlib import Path
 
-          target_model = "anthropic/claude-sonnet-4-5"
+          # NOTE: CI LLM provider for full-live E2E was migrated from Anthropic
+          # to OpenAI on 2026-04-16. Rationale: the shared Anthropic test account
+          # had run out of credits, causing Full Live E2E to FAIL on every run
+          # with "Your credit balance is too low to access the Anthropic API".
+          # OpenAI has an active balance on OPENAI_API_KEY already wired in the
+          # job env above. This change also keeps the live-guardrail round-trip
+          # working because OpenClaw's openai-provider speaks the OpenAI HTTP
+          # shape our guardrail proxy handles natively via /v1/chat/completions
+          # without any extra translation in the hot path.
+          target_model = "openai/gpt-4o-mini"
           state_dir = Path(os.path.expanduser("~/.openclaw"))
           cfg_path = state_dir / "openclaw.json"
           auth_path = state_dir / "agents" / "main" / "agent" / "auth-profiles.json"
@@ -598,11 +607,11 @@ jobs:
 
           auth_cfg = cfg.setdefault("auth", {})
           auth_profiles = auth_cfg.setdefault("profiles", {})
-          auth_profiles["anthropic:default"] = {
-              "provider": "anthropic",
+          auth_profiles["openai:default"] = {
+              "provider": "openai",
               "mode": "api_key",
           }
-          auth_cfg.setdefault("order", {})["anthropic"] = ["anthropic:default"]
+          auth_cfg.setdefault("order", {})["openai"] = ["openai:default"]
 
           agents = cfg.setdefault("agents", {})
           defaults = agents.setdefault("defaults", {})
@@ -620,18 +629,18 @@ jobs:
           auth_store = {
               "version": 1,
               "profiles": {
-                  "anthropic:default": {
+                  "openai:default": {
                       "type": "api_key",
-                      "provider": "anthropic",
+                      "provider": "openai",
                       "keyRef": {
                           "source": "env",
                           "provider": "default",
-                          "id": "ANTHROPIC_API_KEY",
+                          "id": "OPENAI_API_KEY",
                       },
                   }
               },
               "order": {
-                  "anthropic": ["anthropic:default"],
+                  "openai": ["openai:default"],
               },
           }
           with auth_path.open("w") as f:
@@ -664,7 +673,7 @@ jobs:
           systemctl --user daemon-reload
 
           echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
-          echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
+          echo "GUARDRAIL_REQUEST_MODEL=openai/gpt-4o-mini" >> "$GITHUB_ENV"
 
       - name: Init DefenseClaw
         run: |
@@ -844,7 +853,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Restore OpenClaw Anthropic model
+      - name: Restore OpenClaw model and auth backups
         if: always()
         run: |
           rm -f "${OPENCLAW_SERVICE_ENV_PATH}" "${OPENCLAW_SERVICE_DROPIN_PATH}"
