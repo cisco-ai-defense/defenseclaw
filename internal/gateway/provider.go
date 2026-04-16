@@ -245,6 +245,10 @@ var knownProviders = map[string]bool{
 	"gemini":      true,
 	"gemini-openai": true,
 	"bedrock":     true,
+	// amazon-bedrock is OpenClaw's stock provider name for AWS Bedrock; see
+	// https://docs.openclaw.ai/providers/bedrock. Both prefixes are accepted
+	// and routed to the same Bifrost Bedrock backend via mapProviderKey.
+	"amazon-bedrock": true,
 	"groq":        true,
 	"mistral":     true,
 	"ollama":      true,

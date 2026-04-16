@@ -181,7 +181,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 		return schemas.OpenAI, nil
 	case "anthropic":
 		return schemas.Anthropic, nil
-	case "bedrock":
+	case "bedrock", "amazon-bedrock":
 		return schemas.Bedrock, nil
 	case "azure":
 		return schemas.Azure, nil

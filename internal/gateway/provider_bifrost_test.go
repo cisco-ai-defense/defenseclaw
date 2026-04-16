@@ -28,6 +28,17 @@ func TestBifrostProvider_Creation(t *testing.T) {
 			wantModel:    "us.anthropic.claude-3-5-haiku-20241022-v1:0",
 		},
 		{
+			// OpenClaw's stock provider name is "amazon-bedrock" (see
+			// https://docs.openclaw.ai/providers/bedrock). The guardrail
+			// sidecar must accept that literal prefix and route it to the
+			// same Bifrost Bedrock backend as "bedrock/…".
+			name:         "amazon_bedrock_openclaw_prefix",
+			model:        "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+			apiKey:       "ABSKtest123",
+			wantProvider: schemas.Bedrock,
+			wantModel:    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		},
+		{
 			name:         "bedrock_inferred_from_absk",
 			model:        "us.anthropic.claude-3-5-haiku-20241022-v1:0",
 			apiKey:       "ABSKtest123",
@@ -464,7 +475,7 @@ func TestNewProvider_UnknownProvider(t *testing.T) {
 
 func TestMapProviderKey_AllKnownProviders(t *testing.T) {
 	known := []string{
-		"openai", "anthropic", "bedrock", "azure", "gemini",
+		"openai", "anthropic", "bedrock", "amazon-bedrock", "azure", "gemini",
 		"gemini-openai", "openrouter", "groq", "mistral", "ollama",
 		"vertex", "cohere", "perplexity", "cerebras", "fireworks",
 		"xai", "huggingface", "replicate", "vllm",

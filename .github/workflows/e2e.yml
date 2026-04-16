@@ -352,6 +352,13 @@ jobs:
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
       BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
+      # BIFROST_API_KEY holds an AWS Bedrock bearer token (ABSK…). Expose it to
+      # both our in-process Bifrost (via BIFROST_API_KEY) and to OpenClaw's
+      # stock amazon-bedrock provider (via AWS_BEARER_TOKEN_BEDROCK) so OC can
+      # talk to Bedrock natively through the AWS SDK default credential chain.
+      # See https://docs.openclaw.ai/providers/bedrock ("auth: aws-sdk").
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BIFROST_API_KEY }}
+      AWS_REGION: us-east-1
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
       E2E_PROFILE: full-live
@@ -573,7 +580,17 @@ jobs:
           import os
           from pathlib import Path
 
-          target_model = "anthropic/claude-sonnet-4-5"
+          # Full-live CI LLM provider: AWS Bedrock via OpenClaw's stock
+          # amazon-bedrock provider. We use a Claude Haiku 4.5 inference profile
+          # because it's the cheapest current Anthropic model on Bedrock with
+          # tool-calling support (required by block/allow enforcement tests) —
+          # same model family our in-process Bifrost e2e test covers.
+          # Auth is the AWS SDK default chain, which picks up
+          # AWS_BEARER_TOKEN_BEDROCK from the job env (set to BIFROST_API_KEY).
+          # See https://docs.openclaw.ai/providers/bedrock.
+          bedrock_provider = "amazon-bedrock"
+          bedrock_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+          target_model = f"{bedrock_provider}/{bedrock_model_id}"
           state_dir = Path(os.path.expanduser("~/.openclaw"))
           cfg_path = state_dir / "openclaw.json"
           auth_path = state_dir / "agents" / "main" / "agent" / "auth-profiles.json"
@@ -596,13 +613,36 @@ jobs:
           with cfg_path.open() as f:
               cfg = json.load(f)
 
+          # Register amazon-bedrock provider explicitly with bedrock-converse-stream
+          # API + aws-sdk auth. No apiKey field — AWS SDK chain supplies creds
+          # from AWS_BEARER_TOKEN_BEDROCK at request time.
+          aws_region = os.environ.get("AWS_REGION", "us-east-1")
+          models_cfg = cfg.setdefault("models", {})
+          providers_cfg = models_cfg.setdefault("providers", {})
+          providers_cfg[bedrock_provider] = {
+              "baseUrl": f"https://bedrock-runtime.{aws_region}.amazonaws.com",
+              "api": "bedrock-converse-stream",
+              "auth": "aws-sdk",
+              "models": [
+                  {
+                      "id": bedrock_model_id,
+                      "name": "Claude Haiku 4.5 (Bedrock)",
+                      "input": ["text"],
+                      "contextWindow": 200000,
+                      "maxTokens": 8192,
+                  }
+              ],
+          }
+
+          # Auth profile entry: amazon-bedrock with mode=none (aws-sdk handles
+          # credential discovery; no keyRef needed).
           auth_cfg = cfg.setdefault("auth", {})
           auth_profiles = auth_cfg.setdefault("profiles", {})
-          auth_profiles["anthropic:default"] = {
-              "provider": "anthropic",
-              "mode": "api_key",
+          auth_profiles[f"{bedrock_provider}:default"] = {
+              "provider": bedrock_provider,
+              "mode": "aws_sdk",
           }
-          auth_cfg.setdefault("order", {})["anthropic"] = ["anthropic:default"]
+          auth_cfg.setdefault("order", {})[bedrock_provider] = [f"{bedrock_provider}:default"]
 
           agents = cfg.setdefault("agents", {})
           defaults = agents.setdefault("defaults", {})
@@ -620,18 +660,13 @@ jobs:
           auth_store = {
               "version": 1,
               "profiles": {
-                  "anthropic:default": {
-                      "type": "api_key",
-                      "provider": "anthropic",
-                      "keyRef": {
-                          "source": "env",
-                          "provider": "default",
-                          "id": "ANTHROPIC_API_KEY",
-                      },
+                  f"{bedrock_provider}:default": {
+                      "type": "aws_sdk",
+                      "provider": bedrock_provider,
                   }
               },
               "order": {
-                  "anthropic": ["anthropic:default"],
+                  bedrock_provider: [f"{bedrock_provider}:default"],
               },
           }
           with auth_path.open("w") as f:
@@ -653,7 +688,18 @@ jobs:
           dropin_path = Path(os.environ["OPENCLAW_SERVICE_DROPIN_PATH"])
           env_path.parent.mkdir(parents=True, exist_ok=True)
           lines = []
-          for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCLAW_GATEWAY_TOKEN"):
+          # AWS_BEARER_TOKEN_BEDROCK + AWS_REGION are required by OpenClaw's
+          # amazon-bedrock provider (AWS SDK default chain). BIFROST_API_KEY is
+          # kept for our in-process Bifrost callers. Both point at the same
+          # ABSK… token held in the BIFROST_API_KEY secret.
+          for key in (
+              "ANTHROPIC_API_KEY",
+              "OPENAI_API_KEY",
+              "OPENCLAW_GATEWAY_TOKEN",
+              "AWS_BEARER_TOKEN_BEDROCK",
+              "AWS_REGION",
+              "BIFROST_API_KEY",
+          ):
               value = os.environ.get(key, "")
               if value:
                   lines.append(f"{key}={value}")
@@ -664,7 +710,11 @@ jobs:
           systemctl --user daemon-reload
 
           echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
-          echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
+          # Set a provisional guardrail target. The Init DefenseClaw step
+          # overwrites this with the actual OC_MODEL it discovers from
+          # openclaw.json, so this value is just a safe default if that step
+          # somehow fails to read the freshly-patched config.
+          echo "GUARDRAIL_REQUEST_MODEL=amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0" >> "$GITHUB_ENV"
 
       - name: Init DefenseClaw
         run: |
@@ -683,6 +733,20 @@ jobs:
           fi
           if [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
             echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          # BIFROST_API_KEY = AWS Bedrock bearer token (ABSK…). Consumed by the
+          # guardrail sidecar via api_key_env=BIFROST_API_KEY (set in the
+          # guardrail config step below) and by our in-process Bifrost SDK.
+          # AWS_BEARER_TOKEN_BEDROCK + AWS_REGION feed OpenClaw's stock
+          # amazon-bedrock provider (AWS SDK default chain).
+          if [ -n "${BIFROST_API_KEY:-}" ]; then
+            echo "BIFROST_API_KEY=${BIFROST_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${AWS_BEARER_TOKEN_BEDROCK:-}" ]; then
+            echo "AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${AWS_REGION:-}" ]; then
+            echo "AWS_REGION=${AWS_REGION}" >> ~/.defenseclaw/.env
           fi
           if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
@@ -717,14 +781,19 @@ jobs:
 
           if [ -n "$OC_MODEL" ]; then
             MODEL_NAME=$(echo "$OC_MODEL" | sed 's|.*/||')
-            if echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
+            # Bedrock must be matched BEFORE the generic anthropic/claude pattern
+            # because a Bedrock inference profile id looks like
+            # "amazon-bedrock/us.anthropic.claude-haiku-4-5-...".
+            if echo "$OC_MODEL" | grep -qi "^\(amazon-\)\?bedrock/\|bedrock\|/us\.anthropic\.\|/amazon\.\|/nova"; then
+              # Our embedded Bifrost Go SDK accepts an AWS Bedrock bearer token
+              # (ABSK…) directly as BIFROST_API_KEY. No SigV4 signing required.
+              API_KEY_ENV="BIFROST_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
               API_KEY_ENV="ANTHROPIC_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
               API_KEY_ENV="OPENAI_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "gemini\|google"; then
               API_KEY_ENV="GOOGLE_API_KEY"
-            elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
-              GUARDRAIL_REASON="Bedrock model detected — live guardrail proxy does not yet support SigV4 auth"
             else
               GUARDRAIL_REASON="model provider is not supported by the live guardrail proxy"
             fi
