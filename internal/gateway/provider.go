@@ -176,6 +176,8 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 		provider = inferProvider(modelID, apiKey)
 	}
 	switch provider {
+	case "ollama":
+		return &ollamaProvider{model: modelID, baseURL: ollamaBaseURL}, nil
 	case "anthropic":
 		return &anthropicProvider{model: modelID, apiKey: apiKey}, nil
 	case "openai":
@@ -207,6 +209,9 @@ func inferProvider(model string, apiKey string) string {
 	}
 	if strings.HasPrefix(apiKey, "AIza") {
 		return "gemini"
+	}
+	if strings.HasPrefix(apiKey, "ollama-") || apiKey == "ollama-local" {
+		return "ollama"
 	}
 	return "openai"
 }
@@ -241,6 +246,7 @@ var knownProviders = map[string]bool{
 	"azure":         true,
 	"gemini":        true,
 	"gemini-openai": true,
+	"ollama":        true,
 }
 
 func splitModel(model string) (provider, modelID string) {
