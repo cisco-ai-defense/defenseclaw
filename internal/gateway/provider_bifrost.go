@@ -442,16 +442,18 @@ func fromBifrostMessage(bm *schemas.ChatMessage) *ChatMessage {
 			}
 		}
 	}
-	if bm.ChatToolMessage != nil && bm.ChatToolMessage.ToolCallID != nil {
-		m.ToolCallID = *bm.ChatToolMessage.ToolCallID
+	// Access fields through the explicit embedded struct pointers rather than
+	// the promoted fields. Symmetric with toBifrostMessages (which assigns
+	// `bm.ChatToolMessage = &schemas.ChatToolMessage{...}` and
+	// `bm.ChatAssistantMessage = &schemas.ChatAssistantMessage{...}`) so this
+	// direction doesn't silently break if upstream changes how the fields are
+	// promoted (e.g. by adding another embedded struct with a conflicting
+	// name).
+	if bm.ChatToolMessage != nil && bm.ChatToolMessage.ToolCallID != nil { //nolint:staticcheck // QF1008: explicit access preserves symmetry with toBifrostMessages
+		m.ToolCallID = *bm.ChatToolMessage.ToolCallID //nolint:staticcheck // QF1008: see comment above
 	}
-	// Access ToolCalls through the explicit struct pointer rather than
-	// the promoted field from the embedded ChatAssistantMessage. Symmetric
-	// with toBifrostMessages (which assigns `bm.ChatAssistantMessage =
-	// &schemas.ChatAssistantMessage{ToolCalls: ...}`) so this direction
-	// doesn't silently break if upstream changes how the field is promoted.
-	if bm.ChatAssistantMessage != nil && len(bm.ChatAssistantMessage.ToolCalls) > 0 {
-		if raw, err := json.Marshal(bm.ChatAssistantMessage.ToolCalls); err == nil {
+	if bm.ChatAssistantMessage != nil && len(bm.ChatAssistantMessage.ToolCalls) > 0 { //nolint:staticcheck // QF1008: explicit access preserves symmetry with toBifrostMessages
+		if raw, err := json.Marshal(bm.ChatAssistantMessage.ToolCalls); err == nil { //nolint:staticcheck // QF1008: see comment above
 			m.ToolCalls = raw
 		}
 	}
