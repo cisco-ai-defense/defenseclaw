@@ -156,7 +156,9 @@ class TestCLIFlagParsing(unittest.TestCase):
         from defenseclaw.config import _merge_guardrail
 
         gc = _merge_guardrail({"enabled": True}, "/tmp/test")
-        self.assertEqual(gc.detection_strategy, "regex_only")
+        # Default strategy is regex_judge so the judge triages ambiguous
+        # regex matches when enabled; per-direction overrides stay empty.
+        self.assertEqual(gc.detection_strategy, "regex_judge")
         self.assertEqual(gc.detection_strategy_prompt, "")
         self.assertFalse(gc.judge_sweep)
         self.assertEqual(gc.rule_pack_dir, "")

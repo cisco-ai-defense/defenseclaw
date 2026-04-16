@@ -122,9 +122,9 @@ func (ct *ContextTracker) RecentMessages(sessionKey string, n int) []ChatMessage
 
 // HasRepeatedInjection checks whether injection-like patterns appear in
 // multiple recent user turns, indicating a multi-turn attack.
-// When rp is non-nil, patterns are loaded from the rule pack; otherwise
-// the hardcoded builtin patterns are used as a fallback.
-func (ct *ContextTracker) HasRepeatedInjection(sessionKey string, threshold int, rp *RulePack) bool {
+// Uses the globally active pattern set (populated via ApplyRulePackOverrides
+// at startup), so rule pack customizations are honored automatically.
+func (ct *ContextTracker) HasRepeatedInjection(sessionKey string, threshold int) bool {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
 
@@ -138,13 +138,7 @@ func (ct *ContextTracker) HasRepeatedInjection(sessionKey string, threshold int,
 		if m.Role != "user" {
 			continue
 		}
-		var sev string
-		if rp != nil {
-			sev = scanLocalPatternsRP("prompt", m.Content, rp).Severity
-		} else {
-			sev = scanLocalPatterns("prompt", m.Content).Severity
-		}
-		if sev != "NONE" {
+		if scanLocalPatterns("prompt", m.Content).Severity != "NONE" {
 			count++
 		}
 	}
