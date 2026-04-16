@@ -275,8 +275,22 @@ jobs:
           PY
 
           defenseclaw-gateway restart || defenseclaw-gateway start
-          sleep 5
-          defenseclaw-gateway status
+          # Wait up to 30s for the sidecar to become healthy rather than a
+          # fixed 5s sleep (self-hosted runners can be slow under load).
+          for i in $(seq 1 30); do
+            if defenseclaw-gateway status >/dev/null 2>&1; then
+              echo "sidecar healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          defenseclaw-gateway status || {
+            echo "--- gateway.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            echo "--- watchdog.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
+            exit 1
+          }
 
       - name: Unit tests
         run: make test
@@ -289,6 +303,17 @@ jobs:
 
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
+
+      - name: Upload DefenseClaw logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: defenseclaw-logs-core
+          path: |
+            ~/.defenseclaw/*.log
+            ~/.defenseclaw/config.yaml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Post-run cleanup
         if: always()
@@ -777,8 +802,22 @@ jobs:
           PY
 
           defenseclaw-gateway restart || defenseclaw-gateway start
-          sleep 5
-          defenseclaw-gateway status
+          # Wait up to 30s for the sidecar to become healthy rather than a
+          # fixed 5s sleep (self-hosted runners can be slow under load).
+          for i in $(seq 1 30); do
+            if defenseclaw-gateway status >/dev/null 2>&1; then
+              echo "sidecar healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          defenseclaw-gateway status || {
+            echo "--- gateway.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            echo "--- watchdog.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
+            exit 1
+          }
 
       - name: Unit tests
         run: make test
@@ -791,6 +830,17 @@ jobs:
 
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
+
+      - name: Upload DefenseClaw logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: defenseclaw-logs-full-live
+          path: |
+            ~/.defenseclaw/*.log
+            ~/.defenseclaw/config.yaml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Restore OpenClaw Anthropic model
         if: always()

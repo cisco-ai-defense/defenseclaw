@@ -396,8 +396,8 @@ func fromBifrostChatResponse(resp *schemas.BifrostChatResponse) *ChatResponse {
 			Index:        c.Index,
 			FinishReason: c.FinishReason,
 		}
-		if c.ChatNonStreamResponseChoice != nil && c.ChatNonStreamResponseChoice.Message != nil {
-			cc.Message = fromBifrostMessage(c.ChatNonStreamResponseChoice.Message)
+		if c.ChatNonStreamResponseChoice != nil && c.Message != nil {
+			cc.Message = fromBifrostMessage(c.Message)
 		}
 		cr.Choices = append(cr.Choices, cc)
 	}
@@ -419,8 +419,8 @@ func fromBifrostStreamChunk(resp *schemas.BifrostChatResponse) StreamChunk {
 			Index:        c.Index,
 			FinishReason: c.FinishReason,
 		}
-		if c.ChatStreamResponseChoice != nil && c.ChatStreamResponseChoice.Delta != nil {
-			d := c.ChatStreamResponseChoice.Delta
+		if c.ChatStreamResponseChoice != nil && c.Delta != nil {
+			d := c.Delta
 			msg := &ChatMessage{
 				Content: ptrStr(d.Content),
 			}
@@ -458,11 +458,11 @@ func fromBifrostMessage(bm *schemas.ChatMessage) *ChatMessage {
 			}
 		}
 	}
-	if bm.ChatToolMessage != nil && bm.ChatToolMessage.ToolCallID != nil {
-		m.ToolCallID = *bm.ChatToolMessage.ToolCallID
+	if bm.ChatToolMessage != nil && bm.ToolCallID != nil {
+		m.ToolCallID = *bm.ToolCallID
 	}
-	if bm.ChatAssistantMessage != nil && len(bm.ChatAssistantMessage.ToolCalls) > 0 {
-		if raw, err := json.Marshal(bm.ChatAssistantMessage.ToolCalls); err == nil {
+	if bm.ChatAssistantMessage != nil && len(bm.ToolCalls) > 0 {
+		if raw, err := json.Marshal(bm.ToolCalls); err == nil {
 			m.ToolCalls = raw
 		}
 	}

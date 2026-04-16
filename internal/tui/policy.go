@@ -535,18 +535,18 @@ func (p *PolicyPanel) viewRulePacks(w, h int) string {
 			for _, rf := range rp.RuleFiles {
 				nRules += len(rf.Rules)
 			}
-			right.WriteString(fmt.Sprintf("  Rule files:       %d (%d rules)\n", len(rp.RuleFiles), nRules))
-			right.WriteString(fmt.Sprintf("  Judge configs:    %d\n", len(rp.JudgeConfigs)))
+			fmt.Fprintf(&right, "  Rule files:       %d (%d rules)\n", len(rp.RuleFiles), nRules)
+			fmt.Fprintf(&right, "  Judge configs:    %d\n", len(rp.JudgeConfigs))
 			nSupp := 0
 			if rp.Suppressions != nil {
 				nSupp = len(rp.Suppressions.PreJudgeStrips) + len(rp.Suppressions.FindingSupps) + len(rp.Suppressions.ToolSuppressions)
 			}
-			right.WriteString(fmt.Sprintf("  Suppressions:     %d\n", nSupp))
+			fmt.Fprintf(&right, "  Suppressions:     %d\n", nSupp)
 			nTools := 0
 			if rp.SensitiveTools != nil {
 				nTools = len(rp.SensitiveTools.Tools)
 			}
-			right.WriteString(fmt.Sprintf("  Sensitive tools:  %d\n", nTools))
+			fmt.Fprintf(&right, "  Sensitive tools:  %d\n", nTools)
 		}
 	}
 

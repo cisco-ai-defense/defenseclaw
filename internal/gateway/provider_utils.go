@@ -17,11 +17,8 @@
 package gateway
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 	"strings"
 )
 
@@ -77,35 +74,3 @@ func modelMaxTokens(model string) int {
 	}
 }
 
-// readOpenAISSE parses an SSE stream from an OpenAI-compatible endpoint.
-// Used by the proxy's passthrough code path.
-func readOpenAISSE(r io.Reader, cb func(StreamChunk)) (*ChatUsage, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	var usage *ChatUsage
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-		var chunk StreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			truncated := data
-			if len(truncated) > 120 {
-				truncated = truncated[:120] + "..."
-			}
-			fmt.Fprintf(os.Stderr, "[sse] skipping malformed chunk: %v data=%s\n", err, truncated)
-			continue
-		}
-		if chunk.Usage != nil {
-			usage = chunk.Usage
-		}
-		cb(chunk)
-	}
-	return usage, scanner.Err()
-}
