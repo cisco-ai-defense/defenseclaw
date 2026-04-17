@@ -256,16 +256,23 @@ jobs:
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          cfg.setdefault('splunk', {})
-          cfg['splunk']['enabled'] = True
-          cfg['splunk']['hec_endpoint'] = 'http://127.0.0.1:8088/services/collector/event'
-          cfg['splunk']['index'] = 'defenseclaw_local'
-          cfg['splunk']['source'] = 'defenseclaw'
-          cfg['splunk']['sourcetype'] = 'defenseclaw:json'
-          cfg['splunk']['verify_tls'] = False
-          cfg['splunk']['batch_size'] = 50
-          cfg['splunk']['flush_interval_s'] = 5
-          cfg['splunk']['hec_token_env'] = 'DEFENSECLAW_SPLUNK_HEC_TOKEN'
+          # v4 config schema: legacy `splunk:` block is rejected at startup.
+          # Point the local Splunk container (brought up by the "Start
+          # Splunk" step above) at the new generic sinks framework.
+          cfg.pop('splunk', None)
+          cfg['audit_sinks'] = [{
+              'name':    'splunk-local',
+              'kind':    'splunk_hec',
+              'enabled': True,
+              'splunk_hec': {
+                  'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_local',
+                  'source':     'defenseclaw',
+                  'sourcetype': 'defenseclaw:json',
+                  'verify_tls': False,
+              },
+          }]
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -322,6 +329,7 @@ jobs:
           name: defenseclaw-logs-core
           path: |
             ~/.defenseclaw/*.log
+            ~/.defenseclaw/*.jsonl
             ~/.defenseclaw/config.yaml
           if-no-files-found: ignore
           retention-days: 7
@@ -854,16 +862,23 @@ jobs:
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          cfg.setdefault('splunk', {})
-          cfg['splunk']['enabled'] = True
-          cfg['splunk']['hec_endpoint'] = 'http://127.0.0.1:8088/services/collector/event'
-          cfg['splunk']['index'] = 'defenseclaw_local'
-          cfg['splunk']['source'] = 'defenseclaw'
-          cfg['splunk']['sourcetype'] = 'defenseclaw:json'
-          cfg['splunk']['verify_tls'] = False
-          cfg['splunk']['batch_size'] = 50
-          cfg['splunk']['flush_interval_s'] = 5
-          cfg['splunk']['hec_token_env'] = 'DEFENSECLAW_SPLUNK_HEC_TOKEN'
+          # v4 config schema: legacy `splunk:` block is rejected at startup.
+          # Point the local Splunk container (brought up by the "Start
+          # Splunk" step above) at the new generic sinks framework.
+          cfg.pop('splunk', None)
+          cfg['audit_sinks'] = [{
+              'name':    'splunk-local',
+              'kind':    'splunk_hec',
+              'enabled': True,
+              'splunk_hec': {
+                  'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_local',
+                  'source':     'defenseclaw',
+                  'sourcetype': 'defenseclaw:json',
+                  'verify_tls': False,
+              },
+          }]
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -950,6 +965,7 @@ jobs:
           name: defenseclaw-logs-full-live
           path: |
             ~/.defenseclaw/*.log
+            ~/.defenseclaw/*.jsonl
             ~/.defenseclaw/config.yaml
           if-no-files-found: ignore
           retention-days: 7
