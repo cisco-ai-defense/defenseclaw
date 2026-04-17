@@ -485,6 +485,7 @@ func findKVBoundaries(clause string) []int {
 	scanKey := func(p int) int {
 		start := p
 		hasLetter := false
+	keyLoop:
 		for p < n {
 			c := clause[p]
 			switch {
@@ -495,11 +496,10 @@ func findKVBoundaries(clause string) []int {
 			case c >= '0' && c <= '9':
 			case c == '_' || c == '-' || c == '.' || c == '/':
 			default:
-				goto done
+				break keyLoop
 			}
 			p++
 		}
-	done:
 		if !hasLetter || p == start || p >= n || clause[p] != '=' {
 			return -1
 		}

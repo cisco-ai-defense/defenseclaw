@@ -209,6 +209,16 @@ only affects operator-facing stderr logs (for local incident triage); it
 has no effect on SQLite, webhooks, Splunk HEC, or OTLP logs — those
 always receive the scrubbed copy.
 
+> **Never set `DEFENSECLAW_REVEAL_PII=1` in production.** This flag is
+> intended for developer workstations and short-lived incident-triage
+> sessions only. When set, the gateway will print matched literals
+> (secrets, credentials, PII) to stderr — any shared terminal,
+> `tmux`/`screen` buffer, recorded session, support bundle, or shell
+> history that captures that output becomes a new exfiltration channel.
+> Restrict its use to isolated reproduction environments with
+> throwaway data, and unset it before attaching the process to any
+> shared transport (journald, syslog, container log drivers, CI logs).
+
 Masked placeholders are deterministic (they include a SHA-256 prefix of
 the literal), so SIEM/observability workflows can still correlate on
 identifier hash across events without handling the raw secret.
