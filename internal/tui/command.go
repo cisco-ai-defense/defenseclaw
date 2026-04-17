@@ -428,6 +428,8 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway"}, Description: "Configure gateway connection (interactive)", Category: "setup"},
 		{TUIName: "setup guardrail", CLIBinary: dc, CLIArgs: []string{"setup", "guardrail"}, Description: "Configure LLM guardrail", Category: "setup"},
 		{TUIName: "setup splunk", CLIBinary: dc, CLIArgs: []string{"setup", "splunk"}, Description: "Configure Splunk / O11y", Category: "setup"},
+		{TUIName: "setup observability list", CLIBinary: dc, CLIArgs: []string{"setup", "observability", "list"}, Description: "List configured observability destinations", Category: "setup"},
+		{TUIName: "setup observability migrate-splunk", CLIBinary: dc, CLIArgs: []string{"setup", "observability", "migrate-splunk", "--apply"}, Description: "Migrate legacy splunk: block into audit_sinks[]", Category: "setup"},
 
 		// Scan
 		{TUIName: "scan skill", CLIBinary: dc, CLIArgs: []string{"skill", "scan"}, Description: "Scan a skill", Category: "scan", NeedsArg: true, ArgHint: "<skill-name>"},

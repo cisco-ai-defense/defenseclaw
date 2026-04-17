@@ -40,13 +40,15 @@ const (
 	wizardGateway
 	wizardGuardrail
 	wizardSplunk
+	wizardObservability
+	wizardWebhook
 	wizardSandbox
 	wizardCount
 )
 
 var wizardNames = [wizardCount]string{
 	"Skill Scanner", "MCP Scanner", "Gateway",
-	"Guardrail", "Splunk", "Sandbox",
+	"Guardrail", "Splunk", "Observability", "Webhooks", "Sandbox",
 }
 
 var wizardCommands = [wizardCount][]string{
@@ -55,6 +57,12 @@ var wizardCommands = [wizardCount][]string{
 	{"setup", "gateway"},
 	{"setup", "guardrail"},
 	{"setup", "splunk"},
+	// Observability: preset id is injected positionally by
+	// buildWizardArgs from the form's "preset" field.
+	{"setup", "observability", "add"},
+	// Webhook: channel type is injected positionally from the form's
+	// "type" field. See buildWizardArgs + webhookWizardFields.
+	{"setup", "webhook", "add"},
 	{"sandbox", "setup"},
 }
 
@@ -64,7 +72,27 @@ var wizardDescriptions = [wizardCount]string{
 	"Configure gateway connection settings (host, port, TLS, auto-approve, reconnect parameters).",
 	"Configure LLM guardrail proxy (mode, model, scanner mode, judge settings).",
 	"Configure Splunk HEC integration for SIEM (endpoint, token, index, source).",
+	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
+	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
+}
+
+// observabilityPresets mirrors cli/defenseclaw/observability/presets.py::preset_choices().
+// The preset id is passed positionally to `setup observability add`; the
+// display label is shown in the TUI picker.
+//
+// Keep this in sync with presets.py — ordering drives the default cursor
+// position and matches the CLI `--help` output so users see one menu
+// across both front-ends.
+var observabilityPresets = [][2]string{
+	{"splunk-o11y", "Splunk Observability Cloud"},
+	{"splunk-hec", "Splunk HEC"},
+	{"datadog", "Datadog"},
+	{"honeycomb", "Honeycomb"},
+	{"newrelic", "New Relic"},
+	{"grafana-cloud", "Grafana Cloud"},
+	{"otlp", "Generic OTLP"},
+	{"webhook", "Generic HTTP JSONL"},
 }
 
 type configSection struct {
@@ -83,14 +111,15 @@ type configField struct {
 
 // wizardFormField defines a single field in a wizard setup form.
 type wizardFormField struct {
-	Label   string
-	Flag    string   // CLI flag (e.g., "--use-llm")
-	NoFlag  string   // negation flag for bool toggles (e.g., "--no-verify")
-	Kind    string   // "bool", "string", "choice", "int", "section" (divider)
-	Value   string   // current value set by user
-	Default string   // pre-filled default
-	Options []string // valid choices for "choice" kind
-	Hint    string   // help text shown when selected
+	Label    string
+	Flag     string   // CLI flag (e.g., "--use-llm")
+	NoFlag   string   // negation flag for bool toggles (e.g., "--no-verify")
+	Kind     string   // "bool", "string", "choice", "int", "section" (divider)
+	Value    string   // current value set by user
+	Default  string   // pre-filled default
+	Options  []string // valid choices for "choice" kind
+	Hint     string   // help text shown when selected
+	Required bool     // submit blocked + visual marker if empty (string/int/choice/password)
 }
 
 // SetupPanel provides the Setup Wizards + Config Editor panel.
@@ -110,12 +139,28 @@ type SetupPanel struct {
 	wizFormCursor  int
 	wizFormEditing bool
 	wizFormScroll  int
+	// wizFormError is rendered above the action bar when the user
+	// tries to submit a form with missing required fields. Cleared
+	// on the next keystroke so it doesn't linger after the user
+	// fixes the issue.
+	wizFormError string
 
 	// Wizard output terminal (shows command output after form submission)
 	wizRunning bool
 	wizRunIdx  int // which wizard is running
 	wizOutput  []string
 	wizScroll  int // lines from bottom (0 = pinned)
+	// sinkEditorResume is set when a wizard command was kicked off
+	// by the Audit Sinks editor. On CommandDoneMsg we refresh the
+	// editor list and re-open it on ESC so operators don't lose
+	// their place after e/d/r/t/m actions.
+	sinkEditorResume bool
+
+	// sinkEditor is the interactive Audit Sinks sub-mode (list mode
+	// over defenseclaw setup observability list|enable|disable|remove|
+	// test|migrate-splunk). Opened by pressing 'E' while the cursor
+	// is on the Audit Sinks section in the Config Editor.
+	sinkEditor SinkEditorModel
 
 	// Config editor
 	sections      []configSection
@@ -149,6 +194,7 @@ func NewSetupPanel(theme *Theme, cfg *config.Config, executor *CommandExecutor) 
 		wizardHover: -1,
 		configHover: -1,
 		wizRunIdx:   -1,
+		sinkEditor:  NewSinkEditorModel(),
 	}
 	p.loadSections()
 	return p
@@ -159,6 +205,7 @@ func (p *SetupPanel) SetSize(w, h int) {
 	p.width = w
 	p.height = h
 	p.editInput.SetWidth(w/2 - 4)
+	p.sinkEditor.SetSize(w, h)
 }
 
 func (p *SetupPanel) loadSections() {
@@ -244,6 +291,13 @@ func (p *SetupPanel) loadSections() {
 		// metadata, so we surface a read-only summary here and direct
 		// the operator to the dedicated editor.
 		{Name: "Audit Sinks", Fields: auditSinkSummaryFields(c)},
+		// Webhooks: notifier list (``webhooks[]``) is managed via the
+		// ``setup webhook`` wizard + CLI. Inline single-key edits can't
+		// represent the per-entry schema (type, secret_env, events,
+		// etc.) and re-hydrating secrets in a TUI form is out of scope,
+		// so we expose a read-only summary here and route operators to
+		// the dedicated wizard.
+		{Name: "Webhooks", Fields: webhookSummaryFields(c)},
 		{Name: "OTel", Fields: []configField{
 			{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled)},
 			{Label: "Protocol", Key: "otel.protocol", Kind: "string", Value: c.OTel.Protocol},
@@ -287,6 +341,15 @@ func (p *SetupPanel) IsWizardRunning() bool {
 // IsFormActive returns true when the wizard form is visible.
 func (p *SetupPanel) IsFormActive() bool {
 	return p.wizFormActive
+}
+
+// IsSinkEditorActive reports whether the Audit Sinks interactive
+// sub-mode is currently visible. app.go routes keys through the
+// setup panel whenever this is true so the editor owns bindings
+// like 'e' / 'd' / 'r' / 't' / 'a' / 'm' that would otherwise be
+// captured by the global palette or the panel-switch shortcuts.
+func (p *SetupPanel) IsSinkEditorActive() bool {
+	return p.sinkEditor.IsActive()
 }
 
 // DrainFocusCmd returns and clears any pending focus command from textinput.Focus().
@@ -334,6 +397,15 @@ func (p *SetupPanel) HandleKey(msg tea.KeyPressMsg) (runCmd bool, binary string,
 			p.wizOutput = nil
 			p.wizScroll = 0
 			p.wizRunIdx = -1
+			// If the finished wizard was triggered from the sinks
+			// editor, re-open the editor with a refreshed list so
+			// the operator resumes where they left off.
+			if p.sinkEditorResume {
+				p.sinkEditorResume = false
+				p.sinkEditor.ResumeAfterCommand()
+				p.sinkEditor.DrainResume()
+				p.sinkEditor.active = true
+			}
 			return false, "", nil, ""
 		}
 		if key == "up" || key == "k" {
@@ -345,6 +417,35 @@ func (p *SetupPanel) HandleKey(msg tea.KeyPressMsg) (runCmd bool, binary string,
 			}
 		}
 		return false, "", nil, ""
+	}
+
+	// Audit Sinks sub-mode editor runs inside the Setup panel.
+	// Route all keys there when active.
+	if p.sinkEditor.IsActive() {
+		runCmd, binary, args, displayName = p.sinkEditor.HandleKey(key)
+		// User pressed 'a' — open the Observability wizard and let
+		// the editor handoff state drain naturally.
+		if p.sinkEditor.WantsObservabilityWizard() {
+			p.showWizardForm(wizardObservability)
+			return false, "", nil, ""
+		}
+		if runCmd {
+			// Re-use the wizard output terminal for streaming CLI
+			// output — the editor itself is list-only, and making a
+			// dedicated pty view would duplicate the wizard UI.
+			p.wizRunning = true
+			p.wizRunIdx = -1
+			p.wizOutput = []string{
+				fmt.Sprintf("-- Running: %s %s --", binary, strings.Join(args, " ")),
+				"",
+			}
+			p.wizScroll = 0
+			p.sinkEditorResume = true
+			// Hide the editor while the command streams; it will
+			// be re-opened on ESC after WizardFinished.
+			p.sinkEditor.active = false
+		}
+		return runCmd, binary, args, displayName
 	}
 
 	if p.mode == setupModeWizards {
@@ -406,6 +507,7 @@ func (p *SetupPanel) showWizardForm(idx int) {
 	}
 	p.wizFormEditing = false
 	p.wizFormScroll = 0
+	p.wizFormError = ""
 	p.wizRunIdx = idx
 }
 
@@ -432,10 +534,15 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 		return false, "", nil, ""
 	}
 
+	// Any navigation/edit keystroke clears a stale validation banner
+	// — the user is acting on the feedback, no need to keep shouting.
+	p.wizFormError = ""
+
 	switch key {
 	case "esc":
 		p.wizFormActive = false
 		p.wizFormFields = nil
+		p.wizFormError = ""
 		p.wizRunIdx = -1
 	case "up", "k":
 		if p.wizFormCursor > 0 {
@@ -483,6 +590,39 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 				}
 				f.Value = f.Options[(cur+1)%len(f.Options)]
 			}
+		case "preset":
+			// Cycling the preset rebuilds the entire form so the
+			// prompts match the selected destination. Cursor is
+			// pinned to the preset row so the operator can keep
+			// cycling without losing their place.
+			if len(f.Options) > 0 {
+				cur := 0
+				for i, o := range f.Options {
+					if o == f.Value {
+						cur = i
+						break
+					}
+				}
+				next := f.Options[(cur+1)%len(f.Options)]
+				p.wizFormFields = observabilityWizardFields(next)
+				p.wizFormCursor = 0
+			}
+		case "whtype":
+			// Same behaviour as "preset" but rebuilds via
+			// webhookWizardFields so per-type prompts (room_id,
+			// secret_env, etc.) come and go with the selection.
+			if len(f.Options) > 0 {
+				cur := 0
+				for i, o := range f.Options {
+					if o == f.Value {
+						cur = i
+						break
+					}
+				}
+				next := f.Options[(cur+1)%len(f.Options)]
+				p.wizFormFields = webhookWizardFields(next)
+				p.wizFormCursor = 0
+			}
 		default:
 			p.wizFormEditing = true
 			p.editInput.SetValue(f.Value)
@@ -500,6 +640,26 @@ func (p *SetupPanel) submitWizardForm() (bool, string, []string, string) {
 	if idx < 0 || idx >= wizardCount {
 		return false, "", nil, ""
 	}
+
+	// Validate required fields before shelling out. The non-interactive
+	// CLI cannot prompt the user, so missing required inputs would
+	// either produce a writer ValueError (template-rendered presets)
+	// or write a half-broken sink. Block submit and surface the list
+	// inline so the user can fix it without leaving the form.
+	if missing := p.missingRequiredFields(); len(missing) > 0 {
+		p.wizFormError = "Missing required field(s): " + strings.Join(missing, ", ")
+		// Park the cursor on the first missing field so the user
+		// can hit Enter and start typing immediately.
+		for i, f := range p.wizFormFields {
+			if f.Label == missing[0] {
+				p.wizFormCursor = i
+				break
+			}
+		}
+		return false, "", nil, ""
+	}
+	p.wizFormError = ""
+
 	args := p.buildWizardArgs(idx)
 	name := wizardNames[idx]
 
@@ -512,16 +672,84 @@ func (p *SetupPanel) submitWizardForm() (bool, string, []string, string) {
 	return true, "defenseclaw", args, "setup " + name
 }
 
+// missingRequiredFields returns labels of Required fields whose Value
+// is empty. Bool/section/preset kinds are never required (booleans
+// always have a defined yes/no value; presets are always set).
+func (p *SetupPanel) missingRequiredFields() []string {
+	var missing []string
+	for _, f := range p.wizFormFields {
+		if !f.Required {
+			continue
+		}
+		switch f.Kind {
+		case "section", "preset", "whtype", "bool":
+			continue
+		}
+		if strings.TrimSpace(f.Value) == "" {
+			missing = append(missing, f.Label)
+		}
+	}
+	return missing
+}
+
 func (p *SetupPanel) buildWizardArgs(idx int) []string {
 	base := make([]string, len(wizardCommands[idx]))
 	copy(base, wizardCommands[idx])
+
+	// Observability: extract the preset id and insert it positionally
+	// before the --non-interactive flag. Dry-run is always last so the
+	// preview lands at the end of the output pane.
+	if idx == wizardObservability {
+		presetID := ""
+		for _, f := range p.wizFormFields {
+			if f.Kind == "preset" {
+				presetID = f.Value
+				break
+			}
+		}
+		if presetID != "" {
+			base = append(base, presetID)
+		}
+	}
+
+	// Webhook: extract the channel type (slack/pagerduty/webex/generic)
+	// from the whtype picker and insert it positionally after ``add``.
+	// The CLI surface is ``defenseclaw setup webhook add <type>``.
+	if idx == wizardWebhook {
+		channelType := ""
+		for _, f := range p.wizFormFields {
+			if f.Kind == "whtype" {
+				channelType = f.Value
+				break
+			}
+		}
+		if channelType != "" {
+			base = append(base, channelType)
+		}
+	}
+
 	base = append(base, "--non-interactive")
 
 	// For guardrail wizard, combine Provider + Model into --judge-model provider/model
 	var judgeProvider, judgeModel string
 
+	// Observability has different "skip" semantics: every non-bool
+	// input feeds the writer's inputs dict verbatim, so we must pass
+	// even values that match the form default — otherwise a user who
+	// keeps `realm=us1` ends up with a CLI invocation missing
+	// --realm and the writer raises KeyError when rendering the
+	// endpoint template. Webhook follows the same rule so defaults
+	// (min-severity=HIGH, events=…, timeout=10) land in the YAML
+	// even when the user never moves the cursor.
+	isObservability := idx == wizardObservability
+	isWebhook := idx == wizardWebhook
+	alwaysPassDefaults := isObservability || isWebhook
+
 	for _, f := range p.wizFormFields {
-		if f.Kind == "section" {
+		switch f.Kind {
+		case "section", "preset", "whtype":
+			// Section dividers are cosmetic; preset/whtype are
+			// already consumed as positionals above.
 			continue
 		}
 		// The Judge section uses "Provider" and "Model" labels (under "LLM Judge" section)
@@ -533,20 +761,27 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 			judgeModel = f.Value
 			continue
 		}
-		if f.Value == "" || f.Value == f.Default {
-			continue
-		}
+
 		switch f.Kind {
 		case "bool":
+			// Bool defaults match the CLI's defaults, so we only
+			// need to send the toggle when the user changed it.
+			if f.Value == f.Default {
+				continue
+			}
 			if f.Value == "yes" && f.Flag != "" {
 				base = append(base, f.Flag)
 			} else if f.Value == "no" && f.NoFlag != "" {
 				base = append(base, f.NoFlag)
 			}
-		case "string", "int", "choice":
-			if f.Value != "" && f.Flag != "" {
-				base = append(base, f.Flag, f.Value)
+		case "string", "int", "choice", "password":
+			if f.Value == "" || f.Flag == "" {
+				continue
 			}
+			if !alwaysPassDefaults && f.Value == f.Default && !f.Required {
+				continue
+			}
+			base = append(base, f.Flag, f.Value)
 		}
 	}
 
@@ -585,6 +820,15 @@ func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []strin
 	switch key {
 	case "`":
 		p.mode = setupModeWizards
+	case "E":
+		// Open the Audit Sinks interactive editor when on the Audit
+		// Sinks section. The config form can't represent the
+		// per-sink schema (see auditSinkSummaryFields docstring),
+		// so this key transitions into a purpose-built list mode.
+		if sec := p.currentSection(); sec != nil && sec.Name == "Audit Sinks" {
+			p.sinkEditor.Open()
+			return false, "", nil, ""
+		}
 	case "left", "h":
 		if p.activeSection > 0 {
 			p.activeSection--
@@ -861,6 +1105,10 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 			{Label: "Show Credentials", Flag: "--show-credentials", Kind: "bool", Default: "no", Value: "no"},
 			{Label: "Disable", Flag: "--disable", Kind: "bool", Default: "no", Value: "no"},
 		}
+	case wizardObservability:
+		return observabilityWizardFields("splunk-o11y")
+	case wizardWebhook:
+		return webhookWizardFields("slack")
 	case wizardSandbox:
 		return []wizardFormField{
 			{Label: "Sandbox IP", Flag: "--sandbox-ip", Kind: "string", Default: "10.200.0.2", Value: "10.200.0.2"},
@@ -877,6 +1125,174 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 	default:
 		return nil
 	}
+}
+
+// observabilityWizardFields builds the Observability wizard form for a
+// given preset. The first field is always the preset picker (Kind
+// "preset") followed by the preset-specific prompts and a secret field
+// when the preset declares a token_env.
+//
+// Field schemas here mirror
+// cli/defenseclaw/observability/presets.py. Drift between the two would
+// show up as "unknown flag" errors from the CLI — the Python side is
+// the source of truth, Go is the UI layer.
+func observabilityWizardFields(presetID string) []wizardFormField {
+	presetOpts := make([]string, 0, len(observabilityPresets))
+	for _, p := range observabilityPresets {
+		presetOpts = append(presetOpts, p[0])
+	}
+	fields := []wizardFormField{
+		{
+			Label:   "Preset",
+			Flag:    "", // positional — handled in buildWizardArgs
+			Kind:    "preset",
+			Options: presetOpts,
+			Value:   presetID,
+			Default: presetID,
+			Hint:    "Destination type. Changing this rebuilds the form below.",
+		},
+		{Label: "Name (optional)", Flag: "--name", Kind: "string", Hint: "Override auto-derived destination name"},
+		{Label: "Enabled", Flag: "--enabled", NoFlag: "--disabled", Kind: "bool", Default: "yes", Value: "yes"},
+		{Label: "Dry Run", Flag: "--dry-run", Kind: "bool", Default: "no", Value: "no", Hint: "Preview without writing"},
+	}
+
+	// Preset-specific prompts — keep in strict lockstep with
+	// presets.py::Preset.prompts. Hints mirror the CLI descriptions.
+	//
+	// Required=true is reserved for inputs the writer cannot synthesize
+	// from a default: template-rendered hostnames (realm/site/region/
+	// dataset), the generic OTLP endpoint, and the webhook URL. The
+	// writer raises ValueError for these when missing, so we block
+	// submit before the user discovers it in the run pane.
+	switch presetID {
+	case "splunk-o11y":
+		fields = append(fields,
+			wizardFormField{Label: "Realm", Flag: "--realm", Kind: "string", Default: "us1", Value: "us1", Required: true, Hint: "Splunk O11y realm (us1, us0, eu0)"},
+			wizardFormField{Label: "Signals", Flag: "--signals", Kind: "string", Default: "traces,metrics", Value: "traces,metrics", Hint: "Comma-separated: traces,metrics,logs"},
+			wizardFormField{Label: "Access Token", Flag: "--token", Kind: "password", Hint: "Splunk Observability access token (leave blank if already in $SPLUNK_ACCESS_TOKEN)"},
+		)
+	case "splunk-hec":
+		fields = append(fields,
+			wizardFormField{Label: "Host", Flag: "--host", Kind: "string", Default: "localhost", Value: "localhost", Required: true},
+			wizardFormField{Label: "Port", Flag: "--port", Kind: "int", Default: "8088", Value: "8088", Required: true},
+			wizardFormField{Label: "Index", Flag: "--index", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
+			wizardFormField{Label: "Source", Flag: "--source", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
+			wizardFormField{Label: "Sourcetype", Flag: "--sourcetype", Kind: "string", Default: "_json", Value: "_json"},
+			wizardFormField{Label: "Verify TLS", Flag: "--verify-tls", NoFlag: "--no-verify-tls", Kind: "bool", Default: "no", Value: "no"},
+			wizardFormField{Label: "HEC Token", Flag: "--token", Kind: "password", Hint: "Splunk HEC token (leave blank if already in $DEFENSECLAW_SPLUNK_HEC_TOKEN)"},
+		)
+	case "datadog":
+		fields = append(fields,
+			wizardFormField{Label: "Site", Flag: "--site", Kind: "string", Default: "us5", Value: "us5", Required: true, Hint: "us1, us3, us5, eu, ap1"},
+			wizardFormField{Label: "Signals", Flag: "--signals", Kind: "string", Default: "traces,metrics,logs", Value: "traces,metrics,logs"},
+			wizardFormField{Label: "API Key", Flag: "--token", Kind: "password", Hint: "Datadog API key (leave blank if already in $DD_API_KEY)"},
+		)
+	case "honeycomb":
+		fields = append(fields,
+			wizardFormField{Label: "Dataset", Flag: "--dataset", Kind: "string", Default: "defenseclaw", Value: "defenseclaw", Required: true},
+			wizardFormField{Label: "Signals", Flag: "--signals", Kind: "string", Default: "traces,metrics,logs", Value: "traces,metrics,logs"},
+			wizardFormField{Label: "API Key", Flag: "--token", Kind: "password", Hint: "Honeycomb API key (leave blank if already in $HONEYCOMB_API_KEY)"},
+		)
+	case "newrelic":
+		fields = append(fields,
+			wizardFormField{Label: "Region", Flag: "--region", Kind: "choice", Options: []string{"us", "eu"}, Default: "us", Value: "us", Required: true},
+			wizardFormField{Label: "Signals", Flag: "--signals", Kind: "string", Default: "traces,metrics,logs", Value: "traces,metrics,logs"},
+			wizardFormField{Label: "License Key", Flag: "--token", Kind: "password", Hint: "New Relic license key (leave blank if already in $NEW_RELIC_LICENSE_KEY)"},
+		)
+	case "grafana-cloud":
+		fields = append(fields,
+			wizardFormField{Label: "Region/Zone", Flag: "--region", Kind: "string", Default: "prod-us-east-0", Value: "prod-us-east-0", Required: true},
+			wizardFormField{Label: "Signals", Flag: "--signals", Kind: "string", Default: "traces,metrics,logs", Value: "traces,metrics,logs"},
+			wizardFormField{Label: "OTLP Token", Flag: "--token", Kind: "password", Hint: "base64(instance_id:token) (leave blank if already in $GRAFANA_OTLP_TOKEN)"},
+		)
+	case "otlp":
+		fields = append(fields,
+			wizardFormField{Label: "Endpoint", Flag: "--endpoint", Kind: "string", Required: true, Hint: "host:port or full URL (e.g. otel.example.com:4317)"},
+			wizardFormField{Label: "Protocol", Flag: "--protocol", Kind: "choice", Options: []string{"grpc", "http"}, Default: "grpc", Value: "grpc"},
+			wizardFormField{Label: "Target", Flag: "--target", Kind: "choice", Options: []string{"otel", "audit_sinks"}, Default: "otel", Value: "otel", Hint: "otel=exporter, audit_sinks=log forwarder"},
+			wizardFormField{Label: "Signals", Flag: "--signals", Kind: "string", Default: "traces,metrics,logs", Value: "traces,metrics,logs", Hint: "Only used when target=otel"},
+		)
+	case "webhook":
+		fields = append(fields,
+			wizardFormField{Label: "URL", Flag: "--url", Kind: "string", Required: true, Hint: "https://example.com/webhook"},
+			wizardFormField{Label: "Method", Flag: "--method", Kind: "choice", Options: []string{"POST", "PUT"}, Default: "POST", Value: "POST"},
+			wizardFormField{Label: "Verify TLS", Flag: "--verify-tls", NoFlag: "--no-verify-tls", Kind: "bool", Default: "yes", Value: "yes"},
+			wizardFormField{Label: "Bearer Token (optional)", Flag: "--token", Kind: "password", Hint: "Sent as Authorization: Bearer <token>"},
+		)
+	}
+
+	return fields
+}
+
+// webhookTypes mirrors cli/defenseclaw/webhooks/writer.py::VALID_TYPES.
+// Ordering drives the default cursor position in the wizard picker and
+// matches the CLI's ``add <type>`` argument choices so both front-ends
+// feel identical.
+var webhookTypes = [][2]string{
+	{"slack", "Slack (incoming webhook)"},
+	{"pagerduty", "PagerDuty (Events API v2)"},
+	{"webex", "Cisco Webex (bot)"},
+	{"generic", "Generic HMAC-signed"},
+}
+
+// webhookWizardFields builds the Webhooks wizard form for a given
+// channel type. First field is the type picker ("whtype") — changing
+// it rebuilds the form below via handleFormKey's rebuild branch.
+//
+// Required=true is reserved for inputs the writer cannot synthesize:
+// the URL is always required; PagerDuty/Webex demand ``secret-env``;
+// Webex additionally requires ``room-id``. These line up with
+// webhooks/writer.py::apply_webhook's server-side validation so the
+// TUI catches missing fields before the CLI ever runs.
+func webhookWizardFields(channelType string) []wizardFormField {
+	typeOpts := make([]string, 0, len(webhookTypes))
+	for _, t := range webhookTypes {
+		typeOpts = append(typeOpts, t[0])
+	}
+
+	fields := []wizardFormField{
+		{
+			Label:   "Type",
+			Flag:    "", // positional — handled in buildWizardArgs
+			Kind:    "whtype",
+			Options: typeOpts,
+			Value:   channelType,
+			Default: channelType,
+			Hint:    "Channel type. Changing this rebuilds the form below.",
+		},
+		{Label: "Name (optional)", Flag: "--name", Kind: "string", Hint: "Override auto-derived name (default: <type>-<host>)"},
+		{Label: "URL", Flag: "--url", Kind: "string", Required: true, Hint: "Webhook endpoint URL (https)"},
+		{Label: "Enabled", Flag: "--enabled", NoFlag: "--disabled", Kind: "bool", Default: "yes", Value: "yes"},
+		{Label: "Min Severity", Flag: "--min-severity", Kind: "choice", Options: []string{"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}, Default: "HIGH", Value: "HIGH"},
+		{Label: "Events", Flag: "--events", Kind: "string", Default: "block,scan,guardrail,drift,health", Value: "block,scan,guardrail,drift,health", Hint: "Comma-separated (block,scan,guardrail,drift,health)"},
+		{Label: "Timeout (seconds)", Flag: "--timeout-seconds", Kind: "int", Default: "10", Value: "10"},
+		{Label: "Cooldown (seconds)", Flag: "--cooldown-seconds", Kind: "string", Hint: "Blank=runtime default (300s), 0=disabled, N=override"},
+		{Label: "Dry Run", Flag: "--dry-run", Kind: "bool", Default: "no", Value: "no", Hint: "Preview without writing"},
+	}
+
+	// Type-specific prompts. Labels + defaults mirror the CLI prompts in
+	// cmd_setup_webhook.py so users see consistent copy across front-ends.
+	switch channelType {
+	case "slack":
+		fields = append(fields,
+			wizardFormField{Label: "Secret env (optional)", Flag: "--secret-env", Kind: "string", Hint: "Env var NAME for signed-secret flow (optional for Slack)"},
+		)
+	case "pagerduty":
+		fields = append(fields,
+			wizardFormField{Label: "Routing key env", Flag: "--secret-env", Kind: "string", Default: "DEFENSECLAW_PD_ROUTING_KEY", Value: "DEFENSECLAW_PD_ROUTING_KEY", Required: true, Hint: "Env var NAME holding the PagerDuty Events API v2 routing key"},
+		)
+	case "webex":
+		fields = append(fields,
+			wizardFormField{Label: "Bot token env", Flag: "--secret-env", Kind: "string", Default: "DEFENSECLAW_WEBEX_TOKEN", Value: "DEFENSECLAW_WEBEX_TOKEN", Required: true, Hint: "Env var NAME holding the Webex bot token"},
+			wizardFormField{Label: "Room ID", Flag: "--room-id", Kind: "string", Required: true, Hint: "Target Webex room/space ID"},
+		)
+	case "generic":
+		fields = append(fields,
+			wizardFormField{Label: "HMAC secret env (optional)", Flag: "--secret-env", Kind: "string", Default: "DEFENSECLAW_WEBHOOK_SECRET", Value: "DEFENSECLAW_WEBHOOK_SECRET", Hint: "Env var NAME for HMAC-SHA256 signing; blank disables signing"},
+		)
+	}
+
+	return fields
 }
 
 // HandleMouseClick processes mouse clicks relative to the panel. Returns same tuple as HandleKey.
@@ -1123,6 +1539,7 @@ func (p *SetupPanel) ScrollBy(delta int) {
 func (p *SetupPanel) View(width, height int) string {
 	p.width = width
 	p.height = height
+	p.sinkEditor.SetSize(width, height)
 
 	if p.wizFormActive {
 		return p.renderWizardForm()
@@ -1130,6 +1547,10 @@ func (p *SetupPanel) View(width, height int) string {
 
 	if p.wizRunning || len(p.wizOutput) > 0 {
 		return p.renderWizardTerminal()
+	}
+
+	if p.sinkEditor.IsActive() {
+		return p.sinkEditor.View()
 	}
 
 	var b strings.Builder
@@ -1165,7 +1586,7 @@ func (p *SetupPanel) renderWizardForm() string {
 	if p.wizRunIdx >= 0 && p.wizRunIdx < wizardCount {
 		wizName = wizardNames[p.wizRunIdx]
 	}
-	b.WriteString(bold.Render("  -- "+wizName+" Setup --"))
+	b.WriteString(bold.Render("  -- " + wizName + " Setup --"))
 	b.WriteString("\n")
 	b.WriteString(dim.Render("  Fill in the fields below, then press Ctrl+R to run."))
 	b.WriteString("\n\n")
@@ -1194,10 +1615,24 @@ func (p *SetupPanel) renderWizardForm() string {
 			continue
 		}
 
-		label := fmt.Sprintf("  %-24s", f.Label)
+		// Required-but-empty fields get a "•" marker in the label
+		// gutter so the user can spot them while scrolling. We use
+		// the '*' modifier for changed values as before, with a
+		// red '!' winning when both apply (changed but empty —
+		// e.g. user cleared a default).
+		labelText := f.Label
+		if f.Required && strings.TrimSpace(f.Value) == "" {
+			labelText = "• " + labelText
+		} else if f.Required {
+			labelText = "  " + labelText
+		}
+		label := fmt.Sprintf("  %-24s", labelText)
 
 		mod := " "
-		if f.Value != f.Default && f.Default != "" {
+		switch {
+		case f.Required && strings.TrimSpace(f.Value) == "":
+			mod = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("!")
+		case f.Value != f.Default && f.Default != "":
 			mod = changed.Render("*")
 		}
 
@@ -1214,6 +1649,41 @@ func (p *SetupPanel) renderWizardForm() string {
 				}
 			case "choice":
 				val = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Render(f.Value)
+			case "preset":
+				// Emphasise the picker so users see it's the row
+				// that drives the rest of the form.
+				label := f.Value
+				for _, p := range observabilityPresets {
+					if p[0] == f.Value {
+						label = fmt.Sprintf("%s (%s)", p[1], p[0])
+						break
+					}
+				}
+				val = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Render(label)
+			case "whtype":
+				// Same as "preset" but for the webhook wizard; its
+				// options come from webhookTypes so we look up the
+				// display label there.
+				label := f.Value
+				for _, t := range webhookTypes {
+					if t[0] == f.Value {
+						label = fmt.Sprintf("%s (%s)", t[1], t[0])
+						break
+					}
+				}
+				val = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Render(label)
+			case "password":
+				// Secret-like field: render a mask so the value
+				// doesn't leak into TUI screen recordings or bug
+				// reports. The underlying CLI still sees the
+				// plaintext value via --token.
+				if f.Value == "" {
+					val = dim.Render("(empty)")
+				} else if len(f.Value) <= 4 {
+					val = dim.Render("****")
+				} else {
+					val = dim.Render("****" + f.Value[len(f.Value)-4:])
+				}
 			default:
 				if f.Value == "" {
 					val = dim.Render("(empty)")
@@ -1241,6 +1711,12 @@ func (p *SetupPanel) renderWizardForm() string {
 	}
 
 	b.WriteString("\n")
+
+	if p.wizFormError != "" {
+		errStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("196")).Padding(0, 1)
+		b.WriteString("  " + errStyle.Render(p.wizFormError))
+		b.WriteString("\n\n")
+	}
 
 	runBtn := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("34")).Padding(0, 2)
 	b.WriteString("  " + runBtn.Render("Ctrl+R  Run Setup"))
@@ -1518,7 +1994,7 @@ func auditSinkSummaryFields(c *config.Config) []configField {
 		Label: "How to edit",
 		Key:   "audit_sinks.hint",
 		Kind:  "header",
-		Value: "edit ~/.defenseclaw/config.yaml -> audit_sinks: (see docs/OBSERVABILITY.md)",
+		Value: "press E to open the interactive editor (enable/disable/remove/test) — or edit ~/.defenseclaw/config.yaml",
 	}
 	if len(c.AuditSinks) == 0 {
 		return []configField{
@@ -1555,6 +2031,65 @@ func auditSinkSummaryFields(c *config.Config) []configField {
 		out = append(out, configField{
 			Label: s.Name,
 			Key:   "audit_sinks." + s.Name,
+			Kind:  "header",
+			Value: summary,
+		})
+	}
+	out = append(out, hint)
+	return out
+}
+
+// webhookSummaryFields renders one read-only row per notifier webhook
+// (``webhooks[]``). Like audit sinks, the list-of-structs schema can't
+// be represented as single-key configFields, and re-hydrating secrets
+// (``secret_env``) inside a TUI form is out of scope for v1, so we
+// show a summary and point at the wizard / CLI. See
+// docs/OBSERVABILITY.md for the webhook vs audit-sink disambiguation.
+func webhookSummaryFields(c *config.Config) []configField {
+	hint := configField{
+		Label: "How to edit",
+		Key:   "webhooks.hint",
+		Kind:  "header",
+		Value: "use `defenseclaw setup webhook add|list|enable|disable|remove|test` or the Setup wizard (Webhooks)",
+	}
+	if len(c.Webhooks) == 0 {
+		return []configField{
+			{
+				Label: "Status",
+				Key:   "webhooks.summary",
+				Kind:  "header",
+				Value: "no webhooks configured",
+			},
+			hint,
+		}
+	}
+	out := make([]configField, 0, len(c.Webhooks)+1)
+	for i, w := range c.Webhooks {
+		state := "enabled"
+		if !w.Enabled {
+			state = "disabled"
+		}
+		kind := w.Type
+		if kind == "" {
+			kind = "webhook"
+		}
+		label := fmt.Sprintf("%s[%d]", kind, i)
+		summary := fmt.Sprintf("[%s] %s", state, w.URL)
+		if w.MinSeverity != "" {
+			summary += "  min=" + w.MinSeverity
+		}
+		if len(w.Events) > 0 {
+			summary += "  events=" + strings.Join(w.Events, ",")
+		}
+		if w.SecretEnv != "" {
+			summary += "  secret=$" + w.SecretEnv
+		}
+		if w.RoomID != "" {
+			summary += "  room=" + w.RoomID
+		}
+		out = append(out, configField{
+			Label: label,
+			Key:   fmt.Sprintf("webhooks.%d", i),
 			Kind:  "header",
 			Value: summary,
 		})

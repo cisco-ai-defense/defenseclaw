@@ -18,6 +18,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -853,8 +854,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// If Setup has a form, wizard running, output visible, or field editing, let it consume keys
-	if m.activePanel == PanelSetup && (m.setup.editing || m.setup.wizFormEditing || m.setup.IsFormActive() || m.setup.IsWizardRunning() || len(m.setup.wizOutput) > 0) {
+	// If Setup has a form, wizard running, output visible, field
+	// editing, or the Audit Sinks editor is active, let it consume keys.
+	if m.activePanel == PanelSetup && (m.setup.editing || m.setup.wizFormEditing || m.setup.IsFormActive() || m.setup.IsWizardRunning() || len(m.setup.wizOutput) > 0 || m.setup.IsSinkEditorActive()) {
 		return m.handleSetupKey(msg)
 	}
 
@@ -1238,8 +1240,10 @@ func (m Model) handlePolicyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global setup shortcuts (not when editing, form active, or running a wizard)
-	if !m.setup.editing && !m.setup.IsFormActive() && !m.setup.IsWizardRunning() && len(m.setup.wizOutput) == 0 {
+	// Global setup shortcuts (not when editing, form active, running a
+	// wizard, or inside the Audit Sinks editor — the editor owns 'R'/'E'
+	// and 'S' would unexpectedly save pending config changes).
+	if !m.setup.editing && !m.setup.IsFormActive() && !m.setup.IsWizardRunning() && len(m.setup.wizOutput) == 0 && !m.setup.IsSinkEditorActive() {
 		switch key {
 		case "S":
 			if m.setup.HasChanges() {
@@ -1564,11 +1568,12 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
 	// On the Verdicts source, Enter opens a detail modal for the
 	// most-recent visible event. We intercept before handing the
 	// key to the panel so the panel's own "search entry" path
 	// doesn't swallow Enter while searching is inactive.
-	if msg.String() == "enter" && !m.logs.searching && m.logs.source == logSourceVerdicts {
+	if key == "enter" && !m.logs.searching && m.logs.source == logSourceVerdicts {
 		if row := m.logs.SelectedVerdict(); row != nil {
 			pairs := verdictDetailPairs(*row)
 			m.detail.SetSize(m.width, m.height)
@@ -1576,15 +1581,106 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	// 'J' (capital — lowercase is used for "down" in the panel)
+	// opens the SQLite-backed Judge Response viewer. The panel
+	// gateway.jsonl tail shows only the last 2 KB of body; the
+	// SQLite copy preserves the full redacted response, the input
+	// hash, and the correlation IDs for forensic review. We pull
+	// the 20 most-recent rows because the detail modal is a simple
+	// kv renderer — pagination can come later once operators tell
+	// us the cap is too tight.
+	if key == "J" && !m.logs.searching && m.logs.source == logSourceVerdicts && m.store != nil {
+		rows, err := m.store.ListJudgeResponses(20)
+		m.detail.SetSize(m.width, m.height)
+		if err != nil {
+			m.detail.Show("Judge Responses — error", [][2]string{{"Error", err.Error()}})
+			return m, nil
+		}
+		if len(rows) == 0 {
+			m.detail.Show("Judge Responses", [][2]string{{"Info", "No judge responses persisted yet. Ensure guardrail.retain_judge_bodies is on (default) and traffic has been inspected."}})
+			return m, nil
+		}
+		m.detail.Show(fmt.Sprintf("Judge Responses — last %d", len(rows)), judgeResponsesDetailPairs(rows))
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.logs, cmd = m.logs.Update(msg)
 	return m, cmd
+}
+
+// judgeResponsesDetailPairs formats a slice of audit.JudgeResponse
+// rows into the label/value list the shared DetailModal expects.
+// The rows are laid out newest-first with a blank separator between
+// entries so long redacted bodies don't blur into each other. Each
+// row surfaces:
+//   - correlation keys (request_id, trace_id, run_id)
+//   - verdict shape (kind, action, severity, confidence, fail_closed)
+//   - performance (latency_ms)
+//   - inspected model vs judge model
+//   - the redacted raw body (truncated to 2 KB by the persistor)
+//
+// Anything that could contain PII is expected to already be
+// redacted before we reach this code path; we render the fields
+// verbatim.
+func judgeResponsesDetailPairs(rows []audit.JudgeResponse) [][2]string {
+	pairs := make([][2]string, 0, len(rows)*12)
+	for i, r := range rows {
+		if i > 0 {
+			pairs = append(pairs, [2]string{"", ""})
+		}
+		prefix := fmt.Sprintf("[%d] ", i+1)
+		pairs = append(pairs,
+			[2]string{prefix + "Timestamp", r.Timestamp.Format(time.RFC3339Nano)},
+			[2]string{prefix + "Kind", r.Kind},
+			[2]string{prefix + "Direction", r.Direction},
+			[2]string{prefix + "Action", r.Action},
+			[2]string{prefix + "Severity", r.Severity},
+			[2]string{prefix + "Latency (ms)", fmt.Sprintf("%d", r.LatencyMs)},
+		)
+		if r.InspectedModel != "" {
+			pairs = append(pairs, [2]string{prefix + "Inspected model", r.InspectedModel})
+		}
+		if r.Model != "" {
+			pairs = append(pairs, [2]string{prefix + "Judge model", r.Model})
+		}
+		if r.RequestID != "" {
+			pairs = append(pairs, [2]string{prefix + "Request ID", r.RequestID})
+		}
+		if r.TraceID != "" {
+			pairs = append(pairs, [2]string{prefix + "Trace ID", r.TraceID})
+		}
+		if r.RunID != "" {
+			pairs = append(pairs, [2]string{prefix + "Run ID", r.RunID})
+		}
+		if r.InputHash != "" {
+			pairs = append(pairs, [2]string{prefix + "Input hash", r.InputHash})
+		}
+		if r.Confidence != 0 {
+			pairs = append(pairs, [2]string{prefix + "Confidence", fmt.Sprintf("%.3f", r.Confidence)})
+		}
+		if r.FailClosedApplied {
+			pairs = append(pairs, [2]string{prefix + "Fail-closed", "yes"})
+		}
+		if r.PromptTemplateID != "" {
+			pairs = append(pairs, [2]string{prefix + "Prompt template", r.PromptTemplateID})
+		}
+		if r.ParseError != "" {
+			pairs = append(pairs, [2]string{prefix + "Parse error", r.ParseError})
+		}
+		pairs = append(pairs, [2]string{prefix + "Raw (redacted)", r.Raw})
+	}
+	return pairs
 }
 
 // verdictDetailPairs formats a structured event into the ordered
 // label/value pairs the shared DetailModal expects. Larger bodies
 // (judge raw response, error cause) come last so the modal can
 // scroll without hiding the identification block.
+//
+// Fields are grouped by intent so operators can read the modal like
+// an incident report: identification → correlation → verdict →
+// judge details → lifecycle/error/diagnostic → raw JSON escape
+// hatch.
 func verdictDetailPairs(r verdictRow) [][2]string {
 	pairs := [][2]string{
 		{"Timestamp", r.timestamp.Format(time.RFC3339Nano)},
@@ -1595,12 +1691,116 @@ func verdictDetailPairs(r verdictRow) [][2]string {
 		{"Direction", r.direction},
 		{"Model", r.model},
 	}
+
+	// Correlation IDs — the whole point of request_id/run_id is to
+	// let an operator pivot from the TUI into SQLite, Splunk, or an
+	// OTel trace view. Surface them right after identification so
+	// they're never more than a skim away.
+	if r.provider != "" {
+		pairs = append(pairs, [2]string{"Provider", r.provider})
+	}
+	if r.requestID != "" {
+		pairs = append(pairs, [2]string{"Request ID", r.requestID})
+	}
+	if r.runID != "" {
+		pairs = append(pairs, [2]string{"Run ID", r.runID})
+	}
+	if r.sessionID != "" {
+		pairs = append(pairs, [2]string{"Session ID", r.sessionID})
+	}
+
+	// Verdict-specific extras — only surface when non-empty so a
+	// lifecycle/error modal doesn't show "Categories: " with an
+	// empty right-hand side.
+	if len(r.categories) > 0 {
+		pairs = append(pairs, [2]string{"Categories", strings.Join(r.categories, ", ")})
+	}
+	if r.latencyMs > 0 {
+		pairs = append(pairs, [2]string{"Latency (ms)", fmt.Sprintf("%d", r.latencyMs)})
+	}
 	if r.kind != "" {
 		pairs = append(pairs, [2]string{"Judge kind", r.kind})
 	}
 	if r.reason != "" {
 		pairs = append(pairs, [2]string{"Reason", r.reason})
 	}
+
+	// Judge-specific fields — the envelope severity already shows
+	// up above as "Severity"; show the judge's own severity only
+	// when it disagrees, to avoid visual duplication.
+	if r.judgeSeverity != "" && !strings.EqualFold(r.judgeSeverity, r.severity) {
+		pairs = append(pairs, [2]string{"Judge severity", r.judgeSeverity})
+	}
+	if r.judgeInputBytes > 0 {
+		pairs = append(pairs, [2]string{"Judge input bytes", fmt.Sprintf("%d", r.judgeInputBytes)})
+	}
+	if r.judgeParseError != "" {
+		pairs = append(pairs, [2]string{"Judge parse error", r.judgeParseError})
+	}
+	for i, f := range r.judgeFindings {
+		label := fmt.Sprintf("Finding %d", i+1)
+		val := fmt.Sprintf("category=%s severity=%s", f.Category, f.Severity)
+		if f.Rule != "" {
+			val += " rule=" + f.Rule
+		}
+		if f.Source != "" {
+			val += " source=" + f.Source
+		}
+		if f.Conf > 0 {
+			val += fmt.Sprintf(" conf=%.2f", f.Conf)
+		}
+		pairs = append(pairs, [2]string{label, val})
+	}
+
+	// Lifecycle, error, diagnostic payload details. Operators open
+	// lifecycle events to see "what subsystem transitioned and
+	// why"; error events to see code+message+cause; diagnostic to
+	// see component+message.
+	if r.lifecycleSubsystem != "" {
+		pairs = append(pairs, [2]string{"Subsystem", r.lifecycleSubsystem})
+	}
+	if r.lifecycleTransition != "" {
+		pairs = append(pairs, [2]string{"Transition", r.lifecycleTransition})
+	}
+	if len(r.lifecycleDetails) > 0 {
+		// Stable alphabetical ordering — same contract as the
+		// inline renderer — so the modal doesn't shuffle between
+		// opens.
+		keys := make([]string, 0, len(r.lifecycleDetails))
+		for k := range r.lifecycleDetails {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			pairs = append(pairs, [2]string{"Detail: " + k, r.lifecycleDetails[k]})
+		}
+	}
+	if r.errorSubsystem != "" {
+		pairs = append(pairs, [2]string{"Error subsystem", r.errorSubsystem})
+	}
+	if r.errorCode != "" {
+		pairs = append(pairs, [2]string{"Error code", r.errorCode})
+	}
+	if r.errorMessage != "" {
+		pairs = append(pairs, [2]string{"Error message", r.errorMessage})
+	}
+	if r.errorCause != "" {
+		pairs = append(pairs, [2]string{"Error cause", r.errorCause})
+	}
+	if r.diagnosticComponent != "" {
+		pairs = append(pairs, [2]string{"Diagnostic component", r.diagnosticComponent})
+	}
+	if r.diagnosticMessage != "" {
+		pairs = append(pairs, [2]string{"Diagnostic message", r.diagnosticMessage})
+	}
+
+	// Judge raw response is intentionally one of the last fields
+	// because it's usually the largest string in the modal and
+	// pushes higher-signal correlation IDs off-screen otherwise.
+	if r.judgeRaw != "" {
+		pairs = append(pairs, [2]string{"Judge raw response", r.judgeRaw})
+	}
+
 	pairs = append(pairs, [2]string{"Raw JSON", r.raw})
 	return pairs
 }
