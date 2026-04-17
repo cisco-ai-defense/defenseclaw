@@ -1108,7 +1108,39 @@ def load() -> Config:
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
-    splunk_raw = raw.get("splunk", {})
+    splunk_raw = raw.get("splunk", {}) or {}
+
+    # v4 compatibility: the Go gateway routes Splunk forwarding through
+    # the generic `audit_sinks:` list. The Python CLI still has its own
+    # fire-and-forget Splunk forwarder for events raised in process
+    # (aibom scan, skill quarantine, plugin disable, etc.), so mirror
+    # the first enabled `splunk_hec` sink into the legacy SplunkConfig
+    # shape *in memory only* — we never write the legacy block back to
+    # disk (see _config_to_dict). This preserves parallel Python → HEC
+    # forwarding without reintroducing the migration tripwire in
+    # internal/config/config.go::detectLegacySplunk.
+    if not splunk_raw:
+        for sink in raw.get("audit_sinks") or []:
+            if not isinstance(sink, dict):
+                continue
+            if sink.get("kind") != "splunk_hec":
+                continue
+            if sink.get("enabled") is False:
+                continue
+            hec = sink.get("splunk_hec") or {}
+            if not isinstance(hec, dict) or not hec.get("endpoint"):
+                continue
+            splunk_raw = {
+                "enabled": True,
+                "hec_endpoint": hec.get("endpoint", ""),
+                "hec_token": hec.get("token", ""),
+                "hec_token_env": hec.get("token_env", ""),
+                "index": hec.get("index", "defenseclaw"),
+                "source": hec.get("source", "defenseclaw"),
+                "sourcetype": hec.get("sourcetype", "_json"),
+                "verify_tls": bool(hec.get("verify_tls", False)),
+            }
+            break
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
