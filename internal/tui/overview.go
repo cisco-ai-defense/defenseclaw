@@ -48,6 +48,15 @@ type OverviewPanel struct {
 	totalScans    int
 	activeAlerts  int
 
+	// doctor is a cached copy of the most recent `defenseclaw
+	// doctor --json-output` run, loaded by the owning Model from
+	// data_dir on startup and refreshed in the background after
+	// Ctrl-R or the quick-action key. It is rendered as a
+	// compact status box on the home screen so operators can
+	// see "all green" (or top failures) at a glance without
+	// re-running the full probe each time. See P3-#21.
+	doctor *DoctorCache
+
 	notices      []notice
 	scroll       int
 	quickActionY int // line offset (pre-scroll) of the quick actions row, set by View
@@ -73,6 +82,23 @@ func NewOverviewPanel(theme *Theme, cfg *config.Config, version string) Overview
 func (p *OverviewPanel) SetHealth(h *HealthSnapshot) {
 	p.health = h
 	p.buildNotices()
+}
+
+// SetDoctorCache plugs in (or clears) the cached doctor snapshot.
+// The Overview renderer treats nil and IsEmpty() equivalently —
+// both show the "not yet run" placeholder — so callers don't need
+// to guard their loads. Rebuilds notices because a "doctor reports
+// N failures" line can be surfaced up top when helpful.
+func (p *OverviewPanel) SetDoctorCache(c *DoctorCache) {
+	p.doctor = c
+	p.buildNotices()
+}
+
+// DoctorCache returns the currently cached doctor result, or nil
+// if none has been loaded yet. Primarily exposed for tests and
+// parity with SetDoctorCache.
+func (p *OverviewPanel) DoctorCache() *DoctorCache {
+	return p.doctor
 }
 
 func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) error {
@@ -108,6 +134,27 @@ func (p *OverviewPanel) buildNotices() {
 	}
 	if scannerErr != nil {
 		p.notices = append(p.notices, notice{"warn", "skill-scanner not on PATH — run: pip install skill-scanner"})
+	}
+
+	// Surface cached doctor failures up top so they aren't
+	// buried in the side panel. We only raise this when we
+	// actually have data — an un-run doctor is already covered
+	// by the "first time?" info notice, and spamming both would
+	// be noise.
+	if p.doctor != nil && !p.doctor.IsEmpty() {
+		if p.doctor.Failed > 0 {
+			p.notices = append(p.notices, notice{
+				"error",
+				fmt.Sprintf("Doctor found %d failure(s) — see the DOCTOR panel or run: defenseclaw doctor", p.doctor.Failed),
+			})
+		} else if p.doctor.IsStale() {
+			// Only nudge about staleness if there are zero
+			// failures; a failing cache speaks for itself.
+			p.notices = append(p.notices, notice{
+				"info",
+				"Doctor cache is stale — press [d] on Overview to re-probe",
+			})
+		}
 	}
 }
 
@@ -161,11 +208,13 @@ func (p *OverviewPanel) View(width, height int) string {
 	leftCol.WriteString("\n")
 	leftCol.WriteString(p.renderConfigBox(colWidth - 4))
 
-	// Right column: Stats + Scanners
+	// Right column: Stats + Scanners + Doctor
 	var rightCol strings.Builder
 	rightCol.WriteString(p.renderStatsBox(colWidth - 4))
 	rightCol.WriteString("\n")
 	rightCol.WriteString(p.renderScannersBox(colWidth - 4))
+	rightCol.WriteString("\n")
+	rightCol.WriteString(p.renderDoctorBox(colWidth - 4))
 
 	leftStr := leftCol.String()
 	rightStr := rightCol.String()
@@ -371,6 +420,92 @@ func (p *OverviewPanel) renderScannersBox(w int) string {
 				p.theme.DotRunning, "guardrail",
 				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(mode+"/"+model))
 		}
+	}
+
+	return box.Render(content.String())
+}
+
+// renderDoctorBox paints the Overview "Doctor" status panel.
+// Intentionally minimal: the summary line, a freshness hint, and
+// the top 3 failures/warnings. The full list lives in the Doctor
+// CLI output / future detail modal — this box is a smoke signal,
+// not a report viewer.
+func (p *OverviewPanel) renderDoctorBox(w int) string {
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(0, 1).
+		Width(w)
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62")).Render("DOCTOR")
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	crit := p.theme.Critical
+	ok := p.theme.Clean
+
+	var content strings.Builder
+	content.WriteString(title + "\n")
+
+	if p.doctor == nil || p.doctor.IsEmpty() {
+		content.WriteString(" " + dim.Render("not yet run — press [d] to probe") + "\n")
+		return box.Render(content.String())
+	}
+
+	// Summary line with colored counts so the eye can triage at
+	// a glance. Keep units plain-text to avoid relying on emoji
+	// or icons that don't render uniformly across terminals.
+	var parts []string
+	if p.doctor.Passed > 0 {
+		parts = append(parts, ok.Render(fmt.Sprintf("%d pass", p.doctor.Passed)))
+	}
+	if p.doctor.Failed > 0 {
+		parts = append(parts, crit.Render(fmt.Sprintf("%d fail", p.doctor.Failed)))
+	}
+	if p.doctor.Warned > 0 {
+		parts = append(parts, warn.Render(fmt.Sprintf("%d warn", p.doctor.Warned)))
+	}
+	if p.doctor.Skipped > 0 {
+		parts = append(parts, dim.Render(fmt.Sprintf("%d skip", p.doctor.Skipped)))
+	}
+	summary := strings.Join(parts, "  ")
+
+	age := FormatAge(p.doctor.Age())
+	staleSuffix := ""
+	if p.doctor.IsStale() {
+		staleSuffix = warn.Render(" (stale — [d] to rerun)")
+	}
+	fmt.Fprintf(&content, " %s %s%s\n", summary, dim.Render("· "+age), staleSuffix)
+
+	// Show the top 3 fail/warn checks inline so the overview
+	// answers "what's broken?" without a panel switch.
+	top := p.doctor.TopFailures(3)
+	if len(top) > 0 {
+		content.WriteString(" " + dim.Render("─────────────────────────") + "\n")
+		for _, ck := range top {
+			var badge string
+			switch ck.Status {
+			case "fail":
+				badge = crit.Render("[FAIL]")
+			case "warn":
+				badge = warn.Render("[WARN]")
+			default:
+				badge = dim.Render("[" + strings.ToUpper(ck.Status) + "]")
+			}
+			label := truncate(ck.Label, 32)
+			detail := ""
+			if ck.Detail != "" {
+				// Keep the combined line under the box width
+				// so lipgloss doesn't word-wrap awkwardly.
+				budget := w - 4 /*padding*/ - 8 /*badge*/ - len(label) - 3
+				if budget < 8 {
+					budget = 8
+				}
+				detail = dim.Render("  " + truncate(ck.Detail, budget))
+			}
+			fmt.Fprintf(&content, " %s %s%s\n", badge, label, detail)
+		}
+	} else {
+		content.WriteString(" " + ok.Render("all green") + dim.Render(" — safe to proceed") + "\n")
 	}
 
 	return box.Render(content.String())

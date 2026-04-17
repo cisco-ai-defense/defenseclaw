@@ -220,7 +220,46 @@ func (m Model) Init() tea.Cmd {
 		m.logs.Init(),
 		tickSpin(),
 		func() tea.Msg { return tea.RequestBackgroundColor() },
+		// P3-#21: load the cached doctor snapshot from disk so
+		// the Overview panel can render status immediately
+		// without waiting for the user to manually re-run doctor.
+		m.loadDoctorCacheCmd(),
 	)
+}
+
+// isDoctorCommand reports whether the display-name passed to
+// CommandExecutor.Execute corresponds to a `defenseclaw doctor`
+// invocation. We match on the prefix rather than exact string so
+// future variants ("doctor --json-output", "doctor --verbose")
+// keep triggering a cache reload without a code change here.
+func isDoctorCommand(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	return cmd == "doctor" || strings.HasPrefix(cmd, "doctor ")
+}
+
+// doctorCacheLoadedMsg carries either a successfully-loaded
+// DoctorCache or a soft load error. We always include both so the
+// Update handler can decide whether to toast the error — a
+// NotExist error on first launch is perfectly normal and should
+// stay quiet.
+type doctorCacheLoadedMsg struct {
+	Cache *DoctorCache
+	Err   error
+}
+
+// loadDoctorCacheCmd produces a tea.Cmd that reads the on-disk
+// doctor cache (if any) off the hot path and emits a
+// doctorCacheLoadedMsg. Safe to invoke at any time; it's a
+// single-file read with no network calls.
+func (m *Model) loadDoctorCacheCmd() tea.Cmd {
+	dataDir := ""
+	if m.cfg != nil {
+		dataDir = m.cfg.DataDir
+	}
+	return func() tea.Msg {
+		c, err := LoadDoctorCache(dataDir)
+		return doctorCacheLoadedMsg{Cache: c, Err: err}
+	}
 }
 
 func tickSpin() tea.Cmd {
@@ -307,9 +346,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.plugins.loaded && !m.plugins.loading {
 			postCmds = append(postCmds, m.plugins.LoadCmd())
 		}
+		// P3-#21: any successful `defenseclaw doctor` run writes
+		// the cache file from the CLI side — re-read it so the
+		// Overview DOCTOR box reflects the new numbers without
+		// forcing the user to restart the TUI. A failing run
+		// (ExitCode != 0) still updates the cache — doctor
+		// intentionally writes before exit — so we refresh
+		// regardless of the exit code.
+		if isDoctorCommand(msg.Command) {
+			postCmds = append(postCmds, m.loadDoctorCacheCmd())
+		}
 		if len(postCmds) > 0 {
 			return m, tea.Batch(postCmds...)
 		}
+		return m, nil
+
+	case doctorCacheLoadedMsg:
+		// Soft-fail: a NotExist is normal on first launch, and a
+		// parse error means the cache is corrupt — either way
+		// we just leave the Overview panel showing "not yet
+		// run" rather than crashing the TUI. For parse errors
+		// we surface a single toast so the operator knows to
+		// run doctor again.
+		if msg.Err != nil {
+			m.toasts.Push(ToastError, fmt.Sprintf("doctor cache: %v", msg.Err))
+			return m, nil
+		}
+		m.overview.SetDoctorCache(msg.Cache)
 		return m, nil
 
 	case InventoryLoadedMsg:

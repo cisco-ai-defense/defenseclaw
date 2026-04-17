@@ -71,6 +71,56 @@ class _DoctorResult:
         }
 
 
+DOCTOR_CACHE_FILENAME = "doctor_cache.json"
+
+
+def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
+    """Persist the doctor snapshot to ``<data_dir>/doctor_cache.json``.
+
+    The Go TUI Overview panel (see ``internal/tui/doctor_cache.go``,
+    P3-#21) reads this file to show a cached pass/fail/warn/skip
+    summary without having to re-probe every network endpoint on
+    every redraw. Writing the cache from inside the CLI means the
+    two frontends never drift: anything a user sees in
+    ``defenseclaw doctor`` is exactly what the TUI will display on
+    next refresh, and operators running under cron pick up the same
+    status for Overview.
+
+    The write is best-effort — a failure here must not break the
+    actual doctor run, so we swallow and log to stderr.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return
+    path = os.path.join(data_dir, DOCTOR_CACHE_FILENAME)
+    payload = dict(result.to_dict())
+    # Use a consistent ISO-8601 timestamp the Go side already parses
+    # as time.Time. RFC3339 in UTC avoids any TZ-confusion between
+    # CLI and TUI runs.
+    import datetime as _dt
+    payload["captured_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+    tmp_path = path + ".tmp"
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        # Atomic replace so a concurrent TUI read never sees a
+        # half-written JSON document.
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        click.echo(
+            f"warning: could not write doctor cache at {path}: {exc}",
+            err=True,
+        )
+        # Best-effort cleanup of the tempfile on failure.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 _json_mode = False
 
 
@@ -724,6 +774,13 @@ def doctor(app: AppContext, json_out: bool) -> None:
         click.echo("  ── Webhooks ──")
     _check_webhooks(cfg, r)
 
+    # Persist the cached snapshot before exit so the Go TUI (and any
+    # other cron-style caller) can pick it up without re-probing. We
+    # do this *before* the SystemExit(1) below so failing runs still
+    # update the cache — the TUI needs to see "doctor last reported
+    # 2 failures", not a stale green state from yesterday.
+    _write_doctor_cache(cfg, r)
+
     if json_out:
         click.echo(json.dumps(r.to_dict(), indent=2))
     else:
@@ -775,4 +832,8 @@ def run_doctor_checks(cfg) -> _DoctorResult:
     else:
         click.echo(click.style(f"  All {r.passed} checks passed", fg="green"))
     click.echo()
+    # Mirror the same cache-write as the top-level doctor command so
+    # callers of ``setup --verify`` also keep the Overview panel in
+    # sync with reality.
+    _write_doctor_cache(cfg, r)
     return r

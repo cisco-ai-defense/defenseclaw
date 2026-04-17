@@ -200,6 +200,92 @@ class AnthropicProbeModelTests(unittest.TestCase):
         self.assertEqual(got, _ANTHROPIC_DEFAULT_PROBE_MODEL)
 
 
+class DoctorCacheWriteTests(unittest.TestCase):
+    """P3-#21: `_write_doctor_cache` must emit a JSON file that the
+    Go TUI can parse into a ``DoctorCache`` via
+    ``internal/tui/doctor_cache.go``. Keep these assertions in
+    lockstep with ``TestDoctorCache_PythonCompatibleTimestamp`` on
+    the Go side.
+    """
+
+    def _run_write(self, tmpdir, result):
+        from defenseclaw.commands.cmd_doctor import (
+            DOCTOR_CACHE_FILENAME,
+            _write_doctor_cache,
+        )
+        cfg = Config(
+            data_dir=tmpdir,
+            audit_db=os.path.join(tmpdir, "audit.db"),
+            quarantine_dir=os.path.join(tmpdir, "quarantine"),
+            plugin_dir=os.path.join(tmpdir, "plugins"),
+            policy_dir=os.path.join(tmpdir, "policies"),
+            guardrail=GuardrailConfig(),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        _write_doctor_cache(cfg, result)
+        return os.path.join(tmpdir, DOCTOR_CACHE_FILENAME)
+
+    def test_writes_cache_with_counts_and_checks(self):
+        import json
+        import tempfile
+        r = _DoctorResult()
+        r.passed = 3
+        r.failed = 1
+        r.warned = 2
+        r.skipped = 0
+        r.checks = [
+            {"status": "pass", "label": "Config", "detail": "/etc/dc"},
+            {"status": "fail", "label": "Sidecar", "detail": "unreachable"},
+            {"status": "warn", "label": "Guardrail", "detail": "model empty"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._run_write(tmp, r)
+            self.assertTrue(os.path.isfile(path), path)
+            with open(path) as fh:
+                payload = json.load(fh)
+        self.assertEqual(payload["passed"], 3)
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(payload["warned"], 2)
+        self.assertEqual(payload["skipped"], 0)
+        self.assertEqual(len(payload["checks"]), 3)
+        # captured_at must be an ISO-8601 with Z suffix so Go's
+        # time.Time parser accepts it.
+        self.assertIn("captured_at", payload)
+        self.assertTrue(payload["captured_at"].endswith("Z"),
+                        payload["captured_at"])
+
+    def test_skips_write_when_no_data_dir(self):
+        from defenseclaw.commands.cmd_doctor import _write_doctor_cache
+        # A cfg with data_dir="" must not raise and must not touch
+        # the filesystem — we silently no-op so nothing is logged
+        # to stderr for the common "--help" / embedded-runner case.
+        cfg = Config(
+            data_dir="",
+            audit_db="",
+            quarantine_dir="",
+            plugin_dir="",
+            policy_dir="",
+            guardrail=GuardrailConfig(),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        _write_doctor_cache(cfg, _DoctorResult())
+
+    def test_atomic_replace(self):
+        # Two back-to-back writes must leave exactly one cache file
+        # — no `.tmp` residue — so the TUI never sees a half-written
+        # JSON document.
+        import tempfile
+        r1 = _DoctorResult(); r1.passed = 1
+        r2 = _DoctorResult(); r2.failed = 7
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run_write(tmp, r1)
+            self._run_write(tmp, r2)
+            files = sorted(os.listdir(tmp))
+        self.assertEqual(files, ["doctor_cache.json"], files)
+
+
 class DoctorJsonOutputTests(unittest.TestCase):
     """Test --json-output flag on doctor."""
 
