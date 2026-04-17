@@ -162,6 +162,17 @@ type SetupPanel struct {
 	// is on the Audit Sinks section in the Config Editor.
 	sinkEditor SinkEditorModel
 
+	// webhookEditorResume mirrors sinkEditorResume for the Webhooks
+	// sub-mode — set when a webhook mutation was kicked off so the
+	// editor gets re-opened with a fresh list on CommandDoneMsg.
+	webhookEditorResume bool
+
+	// webhookEditor is the interactive Webhooks sub-mode (list mode
+	// over defenseclaw setup webhook list|enable|disable|remove|
+	// test|show). Opened by pressing 'E' while the cursor is on the
+	// Webhooks section in the Config Editor.
+	webhookEditor WebhookEditorModel
+
 	// Config editor
 	sections      []configSection
 	activeSection int
@@ -194,7 +205,8 @@ func NewSetupPanel(theme *Theme, cfg *config.Config, executor *CommandExecutor) 
 		wizardHover: -1,
 		configHover: -1,
 		wizRunIdx:   -1,
-		sinkEditor:  NewSinkEditorModel(),
+		sinkEditor:    NewSinkEditorModel(),
+		webhookEditor: NewWebhookEditorModel(),
 	}
 	p.loadSections()
 	return p
@@ -206,6 +218,7 @@ func (p *SetupPanel) SetSize(w, h int) {
 	p.height = h
 	p.editInput.SetWidth(w/2 - 4)
 	p.sinkEditor.SetSize(w, h)
+	p.webhookEditor.SetSize(w, h)
 }
 
 func (p *SetupPanel) loadSections() {
@@ -396,6 +409,19 @@ func (p *SetupPanel) IsSinkEditorActive() bool {
 	return p.sinkEditor.IsActive()
 }
 
+// IsWebhookEditorActive is the webhook counterpart to
+// IsSinkEditorActive. Both sub-modes are mutually exclusive —
+// IsEditorActive below hides this detail from app.go.
+func (p *SetupPanel) IsWebhookEditorActive() bool {
+	return p.webhookEditor.IsActive()
+}
+
+// IsEditorActive reports whether either list-mode editor is visible.
+// Kept so app.go can gate panel-switch hotkeys with a single check.
+func (p *SetupPanel) IsEditorActive() bool {
+	return p.sinkEditor.IsActive() || p.webhookEditor.IsActive()
+}
+
 // DrainFocusCmd returns and clears any pending focus command from textinput.Focus().
 func (p *SetupPanel) DrainFocusCmd() tea.Cmd {
 	cmd := p.pendingFocusCmd
@@ -450,6 +476,12 @@ func (p *SetupPanel) HandleKey(msg tea.KeyPressMsg) (runCmd bool, binary string,
 				p.sinkEditor.DrainResume()
 				p.sinkEditor.active = true
 			}
+			if p.webhookEditorResume {
+				p.webhookEditorResume = false
+				p.webhookEditor.ResumeAfterCommand()
+				p.webhookEditor.DrainResume()
+				p.webhookEditor.active = true
+			}
 			return false, "", nil, ""
 		}
 		if key == "up" || key == "k" {
@@ -488,6 +520,27 @@ func (p *SetupPanel) HandleKey(msg tea.KeyPressMsg) (runCmd bool, binary string,
 			// Hide the editor while the command streams; it will
 			// be re-opened on ESC after WizardFinished.
 			p.sinkEditor.active = false
+		}
+		return runCmd, binary, args, displayName
+	}
+
+	// Webhooks sub-mode editor — same pattern as Audit Sinks.
+	if p.webhookEditor.IsActive() {
+		runCmd, binary, args, displayName = p.webhookEditor.HandleKey(key)
+		if p.webhookEditor.WantsWebhookWizard() {
+			p.showWizardForm(wizardWebhook)
+			return false, "", nil, ""
+		}
+		if runCmd {
+			p.wizRunning = true
+			p.wizRunIdx = -1
+			p.wizOutput = []string{
+				fmt.Sprintf("-- Running: %s %s --", binary, strings.Join(args, " ")),
+				"",
+			}
+			p.wizScroll = 0
+			p.webhookEditorResume = true
+			p.webhookEditor.active = false
 		}
 		return runCmd, binary, args, displayName
 	}
@@ -865,12 +918,19 @@ func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []strin
 	case "`":
 		p.mode = setupModeWizards
 	case "E":
-		// Open the Audit Sinks interactive editor when on the Audit
-		// Sinks section. The config form can't represent the
-		// per-sink schema (see auditSinkSummaryFields docstring),
-		// so this key transitions into a purpose-built list mode.
-		if sec := p.currentSection(); sec != nil && sec.Name == "Audit Sinks" {
+		// Open the appropriate interactive editor based on the
+		// active section. The config form can't represent the
+		// per-entry schemas (see auditSinkSummaryFields /
+		// webhookSummaryFields docstrings), so this key transitions
+		// into a purpose-built list mode.
+		switch sec := p.currentSection(); {
+		case sec == nil:
+			// nothing
+		case sec.Name == "Audit Sinks":
 			p.sinkEditor.Open()
+			return false, "", nil, ""
+		case sec.Name == "Webhooks":
+			p.webhookEditor.Open()
 			return false, "", nil, ""
 		}
 	case "left", "h":
@@ -1584,6 +1644,7 @@ func (p *SetupPanel) View(width, height int) string {
 	p.width = width
 	p.height = height
 	p.sinkEditor.SetSize(width, height)
+	p.webhookEditor.SetSize(width, height)
 
 	if p.wizFormActive {
 		return p.renderWizardForm()
@@ -1595,6 +1656,9 @@ func (p *SetupPanel) View(width, height int) string {
 
 	if p.sinkEditor.IsActive() {
 		return p.sinkEditor.View()
+	}
+	if p.webhookEditor.IsActive() {
+		return p.webhookEditor.View()
 	}
 
 	var b strings.Builder
@@ -2325,7 +2389,7 @@ func webhookSummaryFields(c *config.Config) []configField {
 		Label: "How to edit",
 		Key:   "webhooks.hint",
 		Kind:  "header",
-		Value: "use `defenseclaw setup webhook add|list|enable|disable|remove|test` or the Setup wizard (Webhooks)",
+		Value: "press [E] for interactive editor, or run `defenseclaw setup webhook add|list|enable|disable|remove|test`",
 	}
 	if len(c.Webhooks) == 0 {
 		return []configField{

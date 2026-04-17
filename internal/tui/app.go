@@ -869,7 +869,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// If Setup has a form, wizard running, output visible, field
 	// editing, or the Audit Sinks editor is active, let it consume keys.
-	if m.activePanel == PanelSetup && (m.setup.editing || m.setup.wizFormEditing || m.setup.IsFormActive() || m.setup.IsWizardRunning() || len(m.setup.wizOutput) > 0 || m.setup.IsSinkEditorActive()) {
+	if m.activePanel == PanelSetup && (m.setup.editing || m.setup.wizFormEditing || m.setup.IsFormActive() || m.setup.IsWizardRunning() || len(m.setup.wizOutput) > 0 || m.setup.IsEditorActive()) {
 		return m.handleSetupKey(msg)
 	}
 
@@ -1357,7 +1357,7 @@ func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Global setup shortcuts (not when editing, form active, running a
 	// wizard, or inside the Audit Sinks editor — the editor owns 'R'/'E'
 	// and 'S' would unexpectedly save pending config changes).
-	if !m.setup.editing && !m.setup.IsFormActive() && !m.setup.IsWizardRunning() && len(m.setup.wizOutput) == 0 && !m.setup.IsSinkEditorActive() {
+	if !m.setup.editing && !m.setup.IsFormActive() && !m.setup.IsWizardRunning() && len(m.setup.wizOutput) == 0 && !m.setup.IsEditorActive() {
 		switch key {
 		case "S":
 			if m.setup.HasChanges() {
