@@ -173,8 +173,7 @@ func TestSkillEnforcerQuarantineAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	shell := sandbox.New("nonexistent-openshell", filepath.Join(tmpDir, "policies"))
-	se := enforce.NewSkillEnforcer(quarantineDir, shell)
+	se := enforce.NewSkillEnforcer(quarantineDir)
 
 	dest, err := se.Quarantine(skillDir)
 	if err != nil {
