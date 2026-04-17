@@ -147,6 +147,84 @@ func TestAuditBridge_SkipsGuardrailVerdict(t *testing.T) {
 	}
 }
 
+// The gateway hot path calls emitJudge to write an EventJudge row to
+// gateway.jsonl, and a matching audit.LogEvent("llm-judge-response")
+// to drive SQLite/Splunk fan-out. The bridge must drop the audit twin
+// or JSONL ends up with a Judge row *and* a Lifecycle row for the
+// same inference — this was the M2 finding from the review round.
+func TestAuditBridge_SkipsLLMJudgeResponse(t *testing.T) {
+	w, path := newWriterForTest(t)
+	b := newAuditBridge(w)
+
+	b.EmitAudit(audit.Event{
+		Action:    "llm-judge-response",
+		Target:    "anthropic/claude-3-sonnet",
+		RequestID: "req-judge-1",
+		Severity:  "HIGH",
+		Details:   "kind=pii latency_ms=12",
+	})
+	_ = w.Close()
+
+	if events := readJSONLEvents(t, path); len(events) != 0 {
+		t.Fatalf("bridge duplicated a native judge emission into "+
+			"JSONL: %+v", events)
+	}
+}
+
+// The gatewaylog envelope already carries request_id at the top
+// level. Copying it into Lifecycle.Details created a drift risk and
+// forced downstream consumers to reconcile two places — L3 dropped
+// the duplicate. This test pins that contract.
+func TestAuditBridge_DetailsOmitEnvelopeFields(t *testing.T) {
+	w, path := newWriterForTest(t)
+	b := newAuditBridge(w)
+
+	b.EmitAudit(audit.Event{
+		ID:        "evt-42",
+		Action:    "watcher-block",
+		Target:    "demo-skill",
+		Severity:  "HIGH",
+		RunID:     "run-xyz",
+		RequestID: "req-abc-001",
+		TraceID:   "trace-abc",
+	})
+	_ = w.Close()
+
+	events := readJSONLEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	got := events[0]
+
+	// Envelope must carry the correlation key.
+	if got.RequestID != "req-abc-001" {
+		t.Errorf("envelope request_id=%q want req-abc-001", got.RequestID)
+	}
+	if got.RunID != "run-xyz" {
+		t.Errorf("envelope run_id=%q want run-xyz", got.RunID)
+	}
+
+	// Details must NOT duplicate fields that already live on the
+	// envelope (request_id). trace_id has no envelope slot so it
+	// stays in details; audit_id and action stay for pivot-back.
+	if got.Lifecycle == nil {
+		t.Fatalf("lifecycle payload missing")
+	}
+	if _, dup := got.Lifecycle.Details["request_id"]; dup {
+		t.Errorf("details.request_id leaked — should only live on envelope: %v",
+			got.Lifecycle.Details)
+	}
+	if got.Lifecycle.Details["trace_id"] != "trace-abc" {
+		t.Errorf("trace_id dropped: %q", got.Lifecycle.Details["trace_id"])
+	}
+	if got.Lifecycle.Details["audit_id"] != "evt-42" {
+		t.Errorf("audit_id dropped: %q", got.Lifecycle.Details["audit_id"])
+	}
+	if got.Lifecycle.Details["action"] != "watcher-block" {
+		t.Errorf("action dropped: %q", got.Lifecycle.Details["action"])
+	}
+}
+
 func TestAuditBridge_SubsystemMapping(t *testing.T) {
 	cases := []struct {
 		action string

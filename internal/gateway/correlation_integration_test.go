@@ -51,14 +51,21 @@ func (c *hecCapture) all() [][]byte {
 }
 
 // TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk is the
-// Phase 5 capstone integration test. It drives a single synthetic
-// judge audit event through the full fan-out and asserts the same
-// request_id lands in:
+// Phase 5 capstone integration test. It asserts the same request_id
+// flows through all three observability tiers for a single
+// judge invocation:
 //
-//  1. SQLite (audit_events.request_id column)
-//  2. gateway.jsonl (top-level request_id field)
+//  1. SQLite (audit_events.request_id column) — written by
+//     logger.LogEvent("llm-judge-response").
+//  2. gateway.jsonl (top-level request_id field) — written by the
+//     native emitJudge path in production. The audit bridge
+//     intentionally skips "llm-judge-response" so JSONL is not
+//     double-emitted; this test reproduces that production contract
+//     by calling writer.Emit with an EventJudge payload alongside
+//     LogEvent, matching what sidecar.go does at runtime.
 //  3. Splunk HEC (inner event.request_id with the judge-specific
-//     sourcetype override)
+//     defenseclaw:judge sourcetype override) — written by the
+//     logger sink fan-out.
 //
 // Without this invariant, SOC teams pivoting between local forensics
 // and the enterprise SIEM silently lose the correlation key — the
@@ -126,6 +133,37 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 	const wantTraceID = "trace-correlation-test"
 	eventTime := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
 
+	// Mirror the production fan-out for an llm-judge-response:
+	//
+	//   * logger.LogEvent     → SQLite audit row + Splunk HEC envelope
+	//   * writer.Emit(Judge)  → gateway.jsonl EventJudge row
+	//
+	// The audit bridge skips "llm-judge-response" (see
+	// skipBridgeAction) so JSONL is written only once, via the native
+	// emitter. This test exercises both legs so an end-to-end
+	// regression on either side still trips the assertions below.
+	// writer.Emit is fire-and-forget (drops the event on queue
+	// overflow rather than blocking callers in the hot-path). The
+	// downstream capture wait-loop below is what gates correctness.
+	writer.Emit(gatewaylog.Event{
+		Timestamp: eventTime,
+		EventType: gatewaylog.EventJudge,
+		Severity:  gatewaylog.SeverityHigh,
+		RunID:     "run-corr-1",
+		RequestID: wantRequestID,
+		Provider:  "anthropic",
+		Model:     "anthropic/claude-3-sonnet",
+		Direction: gatewaylog.DirectionPrompt,
+		Judge: &gatewaylog.JudgePayload{
+			Kind:       "pii",
+			Model:      "anthropic/claude-3-sonnet",
+			InputBytes: 42,
+			LatencyMs:  42,
+			Action:     "alert",
+			Severity:   gatewaylog.SeverityHigh,
+		},
+	})
+
 	err = logger.LogEvent(audit.Event{
 		Timestamp: eventTime,
 		Action:    "llm-judge-response",
@@ -176,7 +214,12 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 		}
 	})
 
-	// ---- Assert gateway.jsonl has matching request_id. ----
+	// ---- Assert gateway.jsonl has a judge row with matching request_id. ----
+	//
+	// The expected shape is event_type=judge (written by writer.Emit
+	// above), NOT a lifecycle twin from the audit bridge. A lifecycle
+	// row with action=llm-judge-response would mean skipBridgeAction
+	// regressed and we are double-emitting judges.
 	t.Run("jsonl_has_request_id", func(t *testing.T) {
 		f, err := os.Open(jsonlPath)
 		if err != nil {
@@ -184,7 +227,7 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 		}
 		defer f.Close()
 
-		seen := false
+		seenJudge := false
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 		for scanner.Scan() {
@@ -198,22 +241,24 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 			if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
 				t.Fatalf("bad jsonl line: %v (%s)", err, scanner.Text())
 			}
-			if ev.Lifecycle.Details["action"] == "llm-judge-response" {
+			if ev.EventType == "judge" {
 				if ev.RequestID != wantRequestID {
-					t.Fatalf("jsonl request_id=%q want %q", ev.RequestID, wantRequestID)
+					t.Fatalf("jsonl judge request_id=%q want %q",
+						ev.RequestID, wantRequestID)
 				}
-				if ev.Lifecycle.Details["trace_id"] != wantTraceID {
-					t.Fatalf("jsonl trace_id detail=%q want %q",
-						ev.Lifecycle.Details["trace_id"], wantTraceID)
-				}
-				seen = true
+				seenJudge = true
+			}
+			if ev.EventType == "lifecycle" &&
+				ev.Lifecycle.Details["action"] == "llm-judge-response" {
+				t.Fatalf("audit bridge leaked an llm-judge-response " +
+					"lifecycle row — skipBridgeAction regressed")
 			}
 		}
 		if err := scanner.Err(); err != nil {
 			t.Fatalf("scanner: %v", err)
 		}
-		if !seen {
-			t.Fatal("gateway.jsonl never received the judge audit event")
+		if !seenJudge {
+			t.Fatal("gateway.jsonl never received the native judge event")
 		}
 	})
 
@@ -265,10 +310,15 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 }
 
 // TestCorrelation_MultipleRequestsKeepDistinctIDs guards against the
-// classic fan-out bug where the bridge captures a request_id in a
-// closure and reuses it for subsequent events. We drive two judge
-// events with different request IDs back-to-back and verify both
-// sinks segregate them correctly.
+// classic fan-out bug where a shared writer captures a request_id in
+// a closure and reuses it for subsequent events. We drive multiple
+// judge invocations with different request IDs back-to-back and
+// verify both sinks segregate them.
+//
+// We emit via writer.Emit(EventJudge) (the production JSONL path)
+// plus logger.LogEvent (the SQLite path); the audit bridge no longer
+// forwards llm-judge-response so the JSONL row must come from the
+// native emitter.
 func TestCorrelation_MultipleRequestsKeepDistinctIDs(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "audit.db")
@@ -295,8 +345,21 @@ func TestCorrelation_MultipleRequestsKeepDistinctIDs(t *testing.T) {
 
 	reqIDs := []string{"req-alpha-001", "req-bravo-002", "req-charlie-003"}
 	for i, rid := range reqIDs {
+		ts := time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
+		writer.Emit(gatewaylog.Event{
+			Timestamp: ts,
+			EventType: gatewaylog.EventJudge,
+			Severity:  gatewaylog.SeverityInfo,
+			RequestID: rid,
+			Judge: &gatewaylog.JudgePayload{
+				Kind:       "pii",
+				Model:      "model-x",
+				InputBytes: 1,
+				LatencyMs:  1,
+			},
+		})
 		if err := logger.LogEvent(audit.Event{
-			Timestamp: time.Now().UTC().Add(time.Duration(i) * time.Millisecond),
+			Timestamp: ts,
 			Action:    "llm-judge-response",
 			Target:    "model-x",
 			Details:   "row " + rid,
@@ -329,7 +392,9 @@ func TestCorrelation_MultipleRequestsKeepDistinctIDs(t *testing.T) {
 		}
 	}
 
-	// JSONL side — three distinct top-level request_ids.
+	// JSONL side — three distinct top-level request_ids on EventJudge
+	// rows. A lifecycle row with action=llm-judge-response would
+	// indicate the audit bridge regressed and started double-emitting.
 	f, err := os.Open(jsonlPath)
 	if err != nil {
 		t.Fatalf("open jsonl: %v", err)
@@ -341,6 +406,7 @@ func TestCorrelation_MultipleRequestsKeepDistinctIDs(t *testing.T) {
 	for scanner.Scan() {
 		var ev struct {
 			RequestID string `json:"request_id"`
+			EventType string `json:"event_type"`
 			Lifecycle struct {
 				Details map[string]string `json:"details"`
 			} `json:"lifecycle"`
@@ -348,12 +414,17 @@ func TestCorrelation_MultipleRequestsKeepDistinctIDs(t *testing.T) {
 		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
 			t.Fatalf("jsonl parse: %v", err)
 		}
-		if ev.Lifecycle.Details["action"] == "llm-judge-response" {
+		if ev.EventType == "judge" {
 			gotJSONL = append(gotJSONL, ev.RequestID)
+			continue
+		}
+		if ev.EventType == "lifecycle" &&
+			ev.Lifecycle.Details["action"] == "llm-judge-response" {
+			t.Fatalf("audit bridge leaked llm-judge-response into JSONL")
 		}
 	}
 	if len(gotJSONL) != len(reqIDs) {
-		t.Fatalf("jsonl rows=%d want %d", len(gotJSONL), len(reqIDs))
+		t.Fatalf("jsonl judge rows=%d want %d", len(gotJSONL), len(reqIDs))
 	}
 	for i, want := range reqIDs {
 		if gotJSONL[i] != want {

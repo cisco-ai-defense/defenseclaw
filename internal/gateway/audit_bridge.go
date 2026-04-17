@@ -35,9 +35,13 @@ import (
 //     redacts Details at the sanitizer choke point before we see the
 //     event, so the bridge can forward text verbatim without
 //     re-running PII detection.
-//   - We skip "guardrail-verdict" actions because the guardrail hot
-//     path already emits a Verdict event via emitVerdict. Bridging
-//     them would double-count in the JSONL stream.
+//   - We skip actions that already have a dedicated structured
+//     emission on the gateway hot path (guardrail verdicts and
+//     llm-judge responses): the proxy calls emitVerdict/emitJudge
+//     *and* persists a matching audit event for SQLite/OTLP/Splunk
+//     fan-out, so bridging the audit twin into JSONL would produce
+//     duplicate rows in gateway.jsonl. The dedicated structured
+//     emission wins and this bridge stays out of its way.
 //   - All other actions surface as Lifecycle events — the schema's
 //     catch-all for non-verdict state transitions. The subsystem is
 //     inferred from the action prefix so TUI/sinks can filter on it.
@@ -81,10 +85,18 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 
 // skipBridgeAction returns true for audit actions whose structured
 // event is already emitted directly by the gateway hot path. Bridging
-// those here would produce duplicate rows in gateway.jsonl.
+// those here would produce duplicate rows in gateway.jsonl (one from
+// the native emit* call, one from this bridge translating the audit
+// twin). The set is intentionally tiny and explicit — adding a new
+// native emitter means auditing this switch too.
 func skipBridgeAction(action string) bool {
 	switch action {
-	case "guardrail-verdict":
+	case "guardrail-verdict",
+		// emitJudge already writes an EventJudge row; the matching
+		// "llm-judge-response" audit event exists for SQLite/Splunk
+		// fan-out (see sidecar.go judgePersistor) and must not be
+		// re-translated into a Lifecycle JSONL row.
+		"llm-judge-response":
 		return true
 	}
 	return false
@@ -148,6 +160,15 @@ func transitionForAction(action string) string {
 // the Lifecycle details bag. We keep the redaction invariant intact:
 // every field originated from audit.sanitizeEvent, so no raw user
 // content reaches here.
+//
+// Fields already surfaced by the gatewaylog.Event envelope (RequestID,
+// RunID, Severity, Timestamp) are deliberately *not* copied into the
+// details map — they would drift against the canonical envelope copy
+// if schema normalisation diverged, and downstream consumers already
+// key on the envelope. trace_id stays in details because the envelope
+// has no first-class field for it; audit_id and action stay so
+// operators can pivot from a JSONL row back to the SQLite row that
+// produced it.
 func auditDetailsToMap(e audit.Event) map[string]string {
 	out := map[string]string{}
 	if e.Target != "" {
@@ -161,9 +182,6 @@ func auditDetailsToMap(e audit.Event) map[string]string {
 	}
 	if e.TraceID != "" {
 		out["trace_id"] = e.TraceID
-	}
-	if e.RequestID != "" {
-		out["request_id"] = e.RequestID
 	}
 	if e.ID != "" {
 		out["audit_id"] = e.ID

@@ -14,6 +14,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -91,7 +92,7 @@ func requestIDFromHeaders(h http.Header) string {
 
 // sanitizeClientRequestID normalizes a client-supplied correlation
 // identifier so it is safe to replicate across every observability
-// sink. Two concerns are addressed:
+// sink. Three concerns are addressed:
 //
 //  1. Length. Go's net/http already strips CR/LF from header values,
 //     but a pathological (or malicious) client can still send a
@@ -99,31 +100,78 @@ func requestIDFromHeaders(h http.Header) string {
 //     JSONL, OTel attributes, and Splunk HEC, unbounded input is a
 //     cheap amplification vector — truncating to maxRequestIDLength
 //     bounds the per-request storage cost.
-//  2. Log injection defence-in-depth. We drop any remaining control
+//  2. UTF-8 integrity. A naive byte-index truncation at the length
+//     cap can land in the middle of a multi-byte rune and leave
+//     invalid UTF-8 in the tail, which would poison JSON encoders
+//     (json.Marshal replaces invalid sequences with U+FFFD in some
+//     configurations) and SQLite TEXT columns (which expect valid
+//     UTF-8). We walk back to the preceding rune boundary so the
+//     result is always a well-formed UTF-8 string.
+//  3. Log injection defence-in-depth. We drop any remaining control
 //     characters (ASCII < 0x20, plus DEL). Production-grade HTTP
 //     stacks already enforce this, but a defence-in-depth strip is
 //     cheap and keeps the field trivially safe to splice into
 //     structured log fields that might be consumed by permissive
-//     log viewers.
+//     log viewers. Non-ASCII runes are preserved — the cardinality
+//     cap above is what bounds abuse, not an ASCII filter.
 //
 // The function is intentionally lossy: we never reject the request
 // because correlation IDs are a convenience, not a trust boundary.
 func sanitizeClientRequestID(id string) string {
 	if len(id) > maxRequestIDLength {
-		id = id[:maxRequestIDLength]
+		id = truncateToRuneBoundary(id, maxRequestIDLength)
 	}
 	if !needsRequestIDClean(id) {
 		return id
 	}
+	// Walk by rune, not by byte, so multi-byte code points survive
+	// the control-character strip. ASCII control characters are
+	// dropped; everything else (including printable Unicode) is
+	// preserved verbatim.
 	b := make([]byte, 0, len(id))
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		if c < 0x20 || c == 0x7f {
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
 			continue
 		}
-		b = append(b, c)
+		b = utf8.AppendRune(b, r)
 	}
 	return string(b)
+}
+
+// truncateToRuneBoundary returns s truncated to at most max bytes,
+// walking back to a rune boundary if the naive byte cut would split
+// a multi-byte UTF-8 sequence. Caller must have already checked
+// len(s) > max; the extra bounds guard keeps the helper
+// self-contained for direct unit testing.
+//
+// The returned string is always valid UTF-8 up to its final rune,
+// and its byte length is always <= max. If max<=0 or every prefix
+// is malformed, the empty string is returned — a safe no-op for the
+// correlation-ID use case.
+func truncateToRuneBoundary(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	// Walk back over UTF-8 continuation bytes (0b10xxxxxx) until we
+	// land on a rune-start byte. RuneStart says "b is the first
+	// byte of an encoded rune", which is true for ASCII (<0x80)
+	// and for UTF-8 leaders (>=0xC0).
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	// Decide whether the rune that starts at cut fits within the
+	// cap. If it does, include it; if it doesn't, return the
+	// prefix that ended on the previous rune boundary. The zero-
+	// size path (cut at end of string) can't trigger here because
+	// len(s) > max guarantees s[cut:] is non-empty.
+	if _, size := utf8.DecodeRuneInString(s[cut:]); cut+size <= max {
+		return s[:cut+size]
+	}
+	return s[:cut]
 }
 
 // needsRequestIDClean is a fast scan that avoids the allocation in

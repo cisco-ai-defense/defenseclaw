@@ -37,10 +37,13 @@ import (
 // either the bridge's routing is wrong or your new category leaks
 // past the coverage matrix.
 //
-// guardrail-verdict is deliberately excluded: the gateway hot path
-// emits a dedicated Verdict event via emitVerdict, and the bridge's
-// skipBridgeAction prevents double-counting. That invariant has its
-// own dedicated test (TestAuditToJSONL_SkipsGuardrailVerdict).
+// guardrail-verdict and llm-judge-response are deliberately excluded:
+// the gateway hot path emits dedicated Verdict / Judge events via
+// emitVerdict / emitJudge, and the bridge's skipBridgeAction prevents
+// double-counting. Those invariants have their own dedicated tests
+// (TestAuditToJSONL_SkipsGuardrailVerdict and the
+// correlation_integration_test.go assertions that no lifecycle row
+// appears for llm-judge-response).
 func TestAuditCoverage_EveryCategoryLandsInJSONL(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "audit.db")
@@ -95,7 +98,10 @@ func TestAuditCoverage_EveryCategoryLandsInJSONL(t *testing.T) {
 		{"block", "enforcement"},
 		{"allow", "enforcement"},
 		{"quarantine", "enforcement"},
-		{"llm-judge-response", "gateway"},
+		// llm-judge-response is intentionally omitted here: it has a
+		// dedicated EventJudge emission via emitJudge and the bridge
+		// skipBridgeAction's invariant is enforced by
+		// correlation_integration_test.go.
 		// Unknown categories must still bridge (fallback subsystem).
 		{"future-unknown-action", "gateway"},
 	}
@@ -193,8 +199,13 @@ func TestAuditCoverage_EveryCategoryLandsInJSONL(t *testing.T) {
 // must be accompanied by an equivalent dedicated emission and an
 // update to this allowlist.
 func TestAuditCoverage_SkipListIsMinimal(t *testing.T) {
+	// Both entries have a dedicated hot-path emitter upstream:
+	//   * guardrail-verdict → emitVerdict writes an EventVerdict row
+	//   * llm-judge-response → emitJudge writes an EventJudge row
+	// Bridging either would duplicate rows in gateway.jsonl.
 	allowed := map[string]struct{}{
-		"guardrail-verdict": {},
+		"guardrail-verdict":  {},
+		"llm-judge-response": {},
 	}
 
 	// Probe a representative set of actions. If a caller adds a new
