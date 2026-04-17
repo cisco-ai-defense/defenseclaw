@@ -25,6 +25,94 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
+// humanizeAlertDetails is a Go port of
+// cli/defenseclaw/commands/cmd_alerts.py:_humanize_details. It turns
+// a space-separated `key=value` audit details blob into a friendlier
+// summary — e.g. `host=api port=443 mode=strict model=openai/gpt-4o`
+// collapses to `api:443 strict gpt-4o`. P3-#20 ported this so the Go
+// TUI's enriched detail pane has the same signal-to-noise ratio the
+// retired Textual TUI had without having to shell back out to Python.
+// Keeps the logic byte-for-byte aligned with the CLI so a later
+// internal/tui/cli_parity_test.go can compare outputs directly.
+func humanizeAlertDetails(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	tokens := strings.Fields(raw)
+	hasKV := false
+	for _, t := range tokens {
+		if strings.Contains(t, "=") {
+			hasKV = true
+			break
+		}
+	}
+	if !hasKV {
+		return raw
+	}
+	// Preserve insertion order so two events with the same keys
+	// produce the same summary — critical for parity tests.
+	type kvPair struct{ k, v string }
+	var ordered []kvPair
+	var plain []string
+	seen := map[string]bool{}
+	for _, tok := range tokens {
+		if idx := strings.Index(tok, "="); idx >= 0 {
+			k, v := tok[:idx], tok[idx+1:]
+			if !seen[k] {
+				ordered = append(ordered, kvPair{k, v})
+				seen[k] = true
+			}
+		} else {
+			plain = append(plain, tok)
+		}
+	}
+	take := func(key string) (string, bool) {
+		for i, p := range ordered {
+			if p.k == key {
+				ordered = append(ordered[:i], ordered[i+1:]...)
+				delete(seen, key)
+				return p.v, true
+			}
+		}
+		return "", false
+	}
+
+	var parts []string
+	host, hasHost := take("host")
+	port, hasPort := take("port")
+	switch {
+	case hasHost && hasPort:
+		parts = append(parts, host+":"+port)
+	case hasPort:
+		parts = append(parts, ":"+port)
+	case hasHost:
+		parts = append(parts, host)
+	}
+	for _, key := range []string{"mode", "environment", "status", "protocol", "scanner_mode"} {
+		if v, ok := take(key); ok {
+			parts = append(parts, v)
+		}
+	}
+	if v, ok := take("model"); ok {
+		// Model names are often vendor-prefixed (openai/gpt-4o,
+		// anthropic/claude-3-sonnet). The summary takes the last
+		// segment since that's the actionable identifier.
+		if slash := strings.LastIndex(v, "/"); slash >= 0 && slash < len(v)-1 {
+			v = v[slash+1:]
+		}
+		parts = append(parts, v)
+	}
+	// These keys add noise once the summary exists; drop them.
+	for _, key := range []string{"max_severity", "scanner", "findings"} {
+		_, _ = take(key)
+	}
+	for _, p := range ordered {
+		parts = append(parts, p.k+"="+p.v)
+	}
+	parts = append(parts, plain...)
+	return strings.Join(parts, " ")
+}
+
 // Severity filter constants matching button order in the summary bar.
 const (
 	sevFilterAll      = ""
@@ -560,11 +648,25 @@ func (p *AlertsPanel) renderDetail() string {
 	d.WriteString("\n")
 	d.WriteString(labelStyle.Render("  Target: ") + valStyle.Render(e.Target) + "\n")
 	d.WriteString(labelStyle.Render("  Time:   ") + valStyle.Render(e.Timestamp.Format("2006-01-02 15:04:05")) + "\n")
+	// P3-#20: enrichment — show a humanized key=value details line so
+	// `host=... port=... mode=... model=openai/gpt-4o-mini` collapses
+	// to `host:port mode gpt-4o-mini` the way the retired Textual TUI
+	// used to. Raw details are kept below so nothing is hidden — the
+	// operator can still copy-paste exact tokens into the audit log.
 	if e.Details != "" {
+		if human := humanizeAlertDetails(e.Details); human != "" && human != e.Details {
+			d.WriteString(labelStyle.Render("  Summary: ") + valStyle.Render(human) + "\n")
+		}
 		d.WriteString(labelStyle.Render("  Details: ") + valStyle.Render(e.Details) + "\n")
 	}
 	if e.RunID != "" {
 		d.WriteString(labelStyle.Render("  RunID:  ") + lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(e.RunID) + "\n")
+	}
+	if e.TraceID != "" {
+		d.WriteString(labelStyle.Render("  TraceID: ") + lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(e.TraceID) + "\n")
+	}
+	if e.RequestID != "" {
+		d.WriteString(labelStyle.Render("  ReqID:  ") + lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(e.RequestID) + "\n")
 	}
 
 	if len(info.Findings) > 0 {
@@ -584,6 +686,9 @@ func (p *AlertsPanel) renderDetail() string {
 				title = title[:67] + "..."
 			}
 			fmt.Fprintf(&d, "    %s %s", fSev, title)
+			if f.Scanner != "" {
+				d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(" [" + f.Scanner + "]"))
+			}
 			if f.Location != "" {
 				loc := f.Location
 				if len(loc) > 40 {
@@ -592,6 +697,18 @@ func (p *AlertsPanel) renderDetail() string {
 				d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("  @ " + loc))
 			}
 			d.WriteString("\n")
+			// P3-#20: surface remediation inline when present —
+			// the retired Textual TUI never showed this, but
+			// operators asked for it repeatedly. Indented under
+			// the finding so it doesn't visually split the list.
+			if f.Remediation != "" {
+				rem := f.Remediation
+				if len(rem) > 120 {
+					rem = rem[:117] + "..."
+				}
+				d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("      ↳ fix: " + rem))
+				d.WriteString("\n")
+			}
 		}
 		if len(info.Findings) > limit {
 			d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(

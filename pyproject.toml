@@ -14,8 +14,10 @@ dependencies = [
     "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
 ]
 
-[project.optional-dependencies]
-tui = ["textual>=0.50"]
+# P3-#20: the legacy Textual TUI (`defenseclaw alerts --tui`) was
+# retired in favour of the Go-based TUI launched via `defenseclaw tui`.
+# No Python-side TUI extra is shipped anymore; the alerts command now
+# renders a plain Rich table.
 
 [dependency-groups]
 dev = [
