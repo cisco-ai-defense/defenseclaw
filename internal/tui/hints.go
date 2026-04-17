@@ -146,7 +146,7 @@ func (h *HintEngine) toolsHint(_ SystemState) string {
 }
 
 func (h *HintEngine) inventoryHint(_ SystemState) string {
-	return "Left/Right to switch sub-tabs (Skills, Plugins, MCPs, Agents, Models, Tools, Memory). \"r\" to refresh."
+	return "Left/Right to switch sub-tabs (Skills, Plugins, MCPs, Agents, Models, Tools, Memory). \"r\" to refresh, \"o\" toggles fast scope (skills+plugins+mcp)."
 }
 
 func (h *HintEngine) logsHint(state SystemState) string {

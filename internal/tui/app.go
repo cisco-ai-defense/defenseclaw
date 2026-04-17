@@ -2095,6 +2095,14 @@ func (m Model) handleInventoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openInventoryDetail()
 	case "r":
 		return m, m.inventory.LoadCmd()
+	case "o":
+		// P3-#19: 'o' toggles the fast-scan preset (skills+
+		// plugins+mcp) that maps to `defenseclaw aibom scan
+		// --only skills,plugins,mcp`. Not auto-reloading — the
+		// operator presses 'r' next to trigger the scan so
+		// they can see the new scope before paying the 15-30s
+		// cost.
+		m.inventory.ToggleFastScan()
 	}
 	return m, nil
 }

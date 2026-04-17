@@ -180,7 +180,31 @@ type InventoryPanel struct {
 	detailCacheIdx int
 	detailCacheSub int
 	filter         string // "eligible", "warning", "blocked", "loaded", "disabled", "" = all
+
+	// P3-#19: category scope mirrors the CLI --only flag. nil means
+	// "scan everything" (the CLI default); a non-nil slice narrows
+	// the scan to the listed categories and is forwarded to
+	// `defenseclaw aibom scan --only <csv>`. Keeping a slice rather
+	// than a bool preset lets future toggles grow cleanly; today the
+	// UI only exposes a fast-mode preset via the 'o' key but the
+	// internals already round-trip arbitrary subsets so tests can
+	// exercise them.
+	categoryScope []string
 }
+
+// InventoryCategories lists the seven categories the Python AIBOM
+// scanner knows about (cli/defenseclaw/commands/cmd_aibom.py). Kept
+// ordered so chip rendering stays deterministic — the UI sorts by
+// this slice, not by map iteration.
+var InventoryCategories = []string{
+	"skills", "plugins", "mcp", "agents", "tools", "models", "memory",
+}
+
+// fastScanCategories is the "just the security surface" preset —
+// skills/plugins/mcp are the scanned-and-enforced items, so this
+// skips the slow discovery calls for agents/tools/models/memory
+// that AIBOM otherwise makes. Matches the UX hint text.
+var fastScanCategories = []string{"skills", "plugins", "mcp"}
 
 func NewInventoryPanel(theme *Theme, exec *CommandExecutor, store *audit.Store) InventoryPanel {
 	return InventoryPanel{theme: theme, executor: exec, store: store}
@@ -188,8 +212,9 @@ func NewInventoryPanel(theme *Theme, exec *CommandExecutor, store *audit.Store) 
 
 func (p *InventoryPanel) LoadCmd() tea.Cmd {
 	p.loading = true
+	args := p.loadCmdArgs()
 	return func() tea.Msg {
-		cmd := exec.Command("defenseclaw", "aibom", "scan", "--json")
+		cmd := exec.Command("defenseclaw", args...)
 		out, err := cmd.Output()
 		if err != nil {
 			return InventoryLoadedMsg{Err: err}
@@ -200,6 +225,110 @@ func (p *InventoryPanel) LoadCmd() tea.Cmd {
 		}
 		return InventoryLoadedMsg{Inv: &inv}
 	}
+}
+
+// loadCmdArgs builds the argv for the aibom scan, adding `--only`
+// only when the operator has narrowed the scope. This is extracted
+// so tests can assert the exact flag surface without needing to
+// exec the binary (which would require an installed defenseclaw
+// CLI in CI).
+func (p *InventoryPanel) loadCmdArgs() []string {
+	args := []string{"aibom", "scan", "--json"}
+	if len(p.categoryScope) > 0 {
+		args = append(args, "--only", strings.Join(p.categoryScope, ","))
+	}
+	return args
+}
+
+// CategoryScope returns the active category filter (nil = scan all).
+// Exported for tests and for the renderer.
+func (p *InventoryPanel) CategoryScope() []string { return p.categoryScope }
+
+// SetCategoryScope replaces the scope. nil / empty clears back to
+// "scan all". Values not in InventoryCategories are dropped so a
+// malformed persisted value can't land a bogus --only on the next
+// reload.
+func (p *InventoryPanel) SetCategoryScope(cats []string) {
+	if len(cats) == 0 {
+		p.categoryScope = nil
+		return
+	}
+	allowed := make(map[string]bool, len(InventoryCategories))
+	for _, c := range InventoryCategories {
+		allowed[c] = true
+	}
+	out := cats[:0:0]
+	for _, c := range cats {
+		if allowed[c] {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		p.categoryScope = nil
+		return
+	}
+	p.categoryScope = out
+}
+
+// ToggleCategory flips membership for a single chip. Unknown
+// categories are ignored so a stray keystroke doesn't corrupt
+// scope. Empty scope after a toggle falls back to nil, which is
+// semantically "scan all" and is what LoadCmd emits when no
+// --only is needed.
+func (p *InventoryPanel) ToggleCategory(cat string) {
+	found := false
+	for _, c := range InventoryCategories {
+		if c == cat {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	for i, existing := range p.categoryScope {
+		if existing == cat {
+			p.categoryScope = append(p.categoryScope[:i], p.categoryScope[i+1:]...)
+			if len(p.categoryScope) == 0 {
+				p.categoryScope = nil
+			}
+			return
+		}
+	}
+	p.categoryScope = append(p.categoryScope, cat)
+}
+
+// ToggleFastScan flips between "all" and the fast-scan preset
+// (skills+plugins+mcp). Used by the 'o' hotkey to give operators a
+// one-press way to skip the slow discovery tails (agents/tools/
+// models/memory) when they're iterating on security work.
+func (p *InventoryPanel) ToggleFastScan() {
+	if p.isFastScan() {
+		p.categoryScope = nil
+		return
+	}
+	scope := make([]string, len(fastScanCategories))
+	copy(scope, fastScanCategories)
+	p.categoryScope = scope
+}
+
+// isFastScan reports whether the current scope matches the fast
+// preset exactly (regardless of order). Used by View to render the
+// chip row and by tests.
+func (p *InventoryPanel) isFastScan() bool {
+	if len(p.categoryScope) != len(fastScanCategories) {
+		return false
+	}
+	want := map[string]bool{}
+	for _, c := range fastScanCategories {
+		want[c] = true
+	}
+	for _, c := range p.categoryScope {
+		if !want[c] {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *InventoryPanel) ApplyLoaded(msg InventoryLoadedMsg) {
@@ -241,6 +370,51 @@ func (p *InventoryPanel) IsDetailOpen() bool { return p.detailOpen }
 func (p *InventoryPanel) ToggleDetail() {
 	p.detailOpen = !p.detailOpen
 	p.detailCache = nil
+}
+
+// renderCategoryChips draws the "Load scope" chip row showing which
+// AIBOM categories will be requested on the next scan. Active chips
+// are highlighted; when the scope is nil (scan-all) every chip is
+// dimmed-but-on so the visual matches the "no --only flag"
+// semantics. The row is prefixed with "Scope:" so operators can
+// tell at a glance whether they're looking at a fast scan vs the
+// default full scan — which matters because counts in the sub-tab
+// bar only cover what was actually scanned.
+func (p *InventoryPanel) renderCategoryChips(width int) string {
+	var b strings.Builder
+	b.WriteString("  ")
+	active := map[string]bool{}
+	if len(p.categoryScope) == 0 {
+		// nil scope = "all on" for display purposes.
+		for _, c := range InventoryCategories {
+			active[c] = true
+		}
+	} else {
+		for _, c := range p.categoryScope {
+			active[c] = true
+		}
+	}
+	label := "Scope"
+	if len(p.categoryScope) == 0 {
+		label = "Scope (all)"
+	} else if p.isFastScan() {
+		label = "Scope (fast)"
+	}
+	b.WriteString(p.theme.Dimmed.Render(label + ": "))
+	for i, cat := range InventoryCategories {
+		chip := " " + cat + " "
+		if active[cat] {
+			b.WriteString(p.theme.ActiveTab.Render(chip))
+		} else {
+			b.WriteString(p.theme.InactiveTab.Render(chip))
+		}
+		if i < len(InventoryCategories)-1 {
+			b.WriteString(" ")
+		}
+	}
+	b.WriteString(p.theme.Dimmed.Render("  (o toggles fast, r reloads)"))
+	b.WriteString("\n")
+	return b.String()
 }
 
 func (p *InventoryPanel) SetFilter(f string) {
@@ -575,6 +749,7 @@ func (p *InventoryPanel) View(width, height int) string {
 		}
 	}
 	b.WriteString("\n")
+	b.WriteString(p.renderCategoryChips(width))
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
 
