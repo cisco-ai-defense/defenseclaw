@@ -199,7 +199,24 @@ py-lint:
 	$(VENV)/bin/ruff check cli/defenseclaw/
 
 go-lint:
-	PATH="$(GOBIN):$(PATH)" golangci-lint run
+	@tmp=$$(mktemp); \
+	status=0; \
+	if PATH="$(GOBIN):$(PATH)" golangci-lint run >"$$tmp" 2>&1; then \
+		cat "$$tmp"; \
+		rm -f "$$tmp"; \
+		exit 0; \
+	fi; \
+	status=$$?; \
+	if [ $$status -eq 127 ] || grep -q "used to build golangci-lint is lower than the targeted Go version" "$$tmp"; then \
+		cat "$$tmp"; \
+		echo "golangci-lint is unavailable or does not yet support this repo's Go toolchain; falling back to 'go vet ./...'"; \
+		rm -f "$$tmp"; \
+		go vet ./...; \
+		exit $$?; \
+	fi; \
+	cat "$$tmp"; \
+	rm -f "$$tmp"; \
+	exit $$status
 
 # ---------------------------------------------------------------------------
 # Distribution targets — build release artifacts into dist/

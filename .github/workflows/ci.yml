@@ -22,9 +22,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v7
-        with:
-          version: "v2.11"
+      - run: make go-lint
 
   go-test:
     name: Go Test
