@@ -261,6 +261,40 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Phase 2.3 of the observability refactor: when
+		// guardrail.retain_judge_bodies is on, the sidecar mirrors
+		// every LLM-judge response body to this table so operators
+		// can later reconstruct why the judge returned a given
+		// verdict (parse failures, model drift, prompt regressions).
+		//
+		// The table is separate from audit_events because (a)
+		// bodies can be kilobytes, (b) it makes per-sink retention
+		// policies trivial (drop the whole table without touching
+		// verdict history), and (c) schema drift is cheaper when
+		// bodies and verdicts live on different migration tracks.
+		description: "add judge_responses table for retained LLM-judge bodies",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS judge_responses (
+				id TEXT PRIMARY KEY,
+				timestamp DATETIME NOT NULL,
+				kind TEXT NOT NULL,
+				direction TEXT,
+				model TEXT,
+				action TEXT,
+				severity TEXT,
+				latency_ms INTEGER,
+				parse_error TEXT,
+				raw_response TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_judge_timestamp ON judge_responses(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_judge_kind ON judge_responses(kind);
+			CREATE INDEX IF NOT EXISTS idx_judge_severity ON judge_responses(severity);
+			`)
+			return err
+		},
+	},
 }
 
 func (s *Store) Init() error {
@@ -357,6 +391,7 @@ var knownTables = map[string]bool{
 	"actions":               true,
 	"target_snapshots":      true,
 	"network_egress_events": true,
+	"judge_responses":       true,
 	"schema_version":        true,
 }
 
@@ -415,6 +450,94 @@ func (s *Store) LogEvent(e Event) error {
 		return fmt.Errorf("audit: log event: %w", err)
 	}
 	return nil
+}
+
+// JudgeResponse is the persisted shape of a single LLM-judge call
+// (prompt-injection or PII detector). Rows are only written when
+// guardrail.retain_judge_bodies is true — without that flag the sink
+// pipeline receives a redacted placeholder and SQLite stores
+// nothing, which is the safer default for PII.
+type JudgeResponse struct {
+	ID         string
+	Timestamp  time.Time
+	Kind       string
+	Direction  string
+	Model      string
+	Action     string
+	Severity   string
+	LatencyMs  int64
+	ParseError string
+	Raw        string
+}
+
+// InsertJudgeResponse persists a single judge body. The caller is
+// expected to supply a non-empty Raw; an empty body is treated as a
+// no-op so the "retain off" path does not waste a row per request.
+func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
+	if e.Raw == "" {
+		return nil
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO judge_responses
+			(id, timestamp, kind, direction, model, action, severity, latency_ms, parse_error, raw_response)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID,
+		e.Timestamp.Format(time.RFC3339Nano),
+		e.Kind,
+		nullStr(e.Direction),
+		nullStr(e.Model),
+		nullStr(e.Action),
+		nullStr(e.Severity),
+		e.LatencyMs,
+		nullStr(e.ParseError),
+		e.Raw,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert judge response: %w", err)
+	}
+	return nil
+}
+
+// ListJudgeResponses returns the most recent N persisted judge bodies,
+// newest first. Intended for operator review via the CLI / TUI once
+// retention is turned on during an incident.
+func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
+			COALESCE(parse_error,''), raw_response
+		FROM judge_responses ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list judge responses: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]JudgeResponse, 0, limit)
+	for rows.Next() {
+		var r JudgeResponse
+		var ts string
+		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw); err != nil {
+			return nil, fmt.Errorf("audit: scan judge response: %w", err)
+		}
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			r.Timestamp = t
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("audit: iterate judge responses: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) InsertScanResult(id, scannerName, target string, ts time.Time, durationMs int64, findingCount int, maxSeverity, rawJSON string) error {

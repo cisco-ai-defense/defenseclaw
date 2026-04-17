@@ -65,9 +65,20 @@ func (p *Provider) RecordGatewayEvent(e gatewaylog.Event) {
 		p.metrics.judgeLatency.Record(ctx, float64(e.Judge.LatencyMs),
 			metric.WithAttributes(attribute.String("judge.kind", e.Judge.Kind)))
 		if e.Judge.Action == "error" || e.Judge.ParseError != "" {
+			// Label set is intentionally small (kind + reason
+			// class) to keep the time series bounded. The raw
+			// parse-error string is redacted and may embed a
+			// hash prefix, which would otherwise explode the
+			// counter's cardinality to one series per unique
+			// redacted value. The detailed reason lives in
+			// the log record emitted below.
+			reason := "provider"
+			if e.Judge.ParseError != "" {
+				reason = "parse"
+			}
 			p.metrics.judgeErrors.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("judge.kind", e.Judge.Kind),
-				attribute.String("judge.parse_error", e.Judge.ParseError),
+				attribute.String("judge.reason", reason),
 			))
 		}
 	case gatewaylog.EventError:

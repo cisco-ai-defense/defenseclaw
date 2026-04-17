@@ -285,6 +285,122 @@ func TestForSinkReasonBypassesReveal(t *testing.T) {
 	}
 }
 
+// TestForSinkReason_SecretShapes pins the high-severity bypasses
+// turned up in the Phase 4 review. These strings all look like
+// `<rule-id>:<literal>` where the literal would previously slip
+// through because it happened to share the rule-id charset with
+// the catalog identifiers. The sink barrier must redact each
+// literal while preserving the rule-id prefix that operators
+// rely on for triage.
+func TestForSinkReason_SecretShapes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	cases := []struct {
+		name      string
+		in        string
+		keep      []string // substrings that MUST appear in the redacted form
+		leak      []string // substrings that MUST NOT appear
+	}{
+		{
+			name: "aws access key by rule id",
+			in:   "SEC-AWS:AKIAIOSFODNN7EXAMPLE",
+			keep: []string{"SEC-AWS", "<redacted"},
+			leak: []string{"AKIAIOSFODNN7EXAMPLE"},
+		},
+		{
+			name: "bare alphanumeric secret token",
+			in:   "MySecretP4ssword",
+			keep: []string{"<redacted"},
+			leak: []string{"MySecretP4ssword"},
+		},
+		{
+			name: "openai short project key",
+			in:   "SEC-OPENAI:sk-proj-abcdefghij1234567",
+			keep: []string{"SEC-OPENAI", "<redacted"},
+			leak: []string{"sk-proj-abcdefghij1234567"},
+		},
+		{
+			name: "partial-redacted carrier concatenated with new literal",
+			// Attacker-style carrier: a string that already
+			// contains a placeholder and a fresh literal.
+			// The fresh literal must be scrubbed.
+			in:   "PII-SECRET:<redacted len=10 sha=abc12345>; AnotherLiteralPayload",
+			keep: []string{"PII-SECRET", "<redacted"},
+			leak: []string{"AnotherLiteralPayload"},
+		},
+		{
+			name: "matched wrapper preserves inner rule ids",
+			in:   "matched: SEC-AWS-KEY:AWS access key, SEC-ANTHROPIC:Anthropic API key",
+			keep: []string{"SEC-AWS-KEY", "SEC-ANTHROPIC", "matched"},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := ForSinkReason(tc.in)
+			for _, want := range tc.keep {
+				if !strings.Contains(got, want) {
+					t.Errorf("ForSinkReason(%q) = %q; missing %q", tc.in, got, want)
+				}
+			}
+			for _, noLeak := range tc.leak {
+				if strings.Contains(got, noLeak) {
+					t.Errorf("ForSinkReason(%q) = %q; leaked %q", tc.in, got, noLeak)
+				}
+			}
+		})
+	}
+}
+
+// TestIsPlaceholder_Narrow pins the hardened idempotency check — a
+// string that is only cosmetically wrapped in `<redacted…>` must
+// not be honored as already-redacted.
+func TestIsPlaceholder_Narrow(t *testing.T) {
+	safe := []string{
+		"<empty>",
+		"<redacted len=10>",
+		"<redacted len=32 sha=abcdef12>",
+		"<redacted-evidence len=512 match=[3:20] sha=deadbeef>",
+	}
+	for _, s := range safe {
+		if !isPlaceholder(s) {
+			t.Errorf("isPlaceholder(%q) = false; want true", s)
+		}
+	}
+	spoofs := []string{
+		"<redacted len=10 sha=abc><script>alert(1)</script>",
+		"<redacted " + strings.Repeat("A", 200) + ">",
+		"<redacted\nlen=5>",
+		"<redacted len=5> + extra",
+	}
+	for _, s := range spoofs {
+		if isPlaceholder(s) {
+			t.Errorf("isPlaceholder(%q) = true; want false (spoofed)", s)
+		}
+	}
+}
+
+// TestForSinkEntity_ShortValuesHideFirstRune ensures short entities
+// (< entityPrefixRevealMinBytes bytes) do not leak their first
+// character. 6-8 byte secrets are narrow enough that a single
+// character is a meaningful fraction of the value.
+func TestForSinkEntity_ShortValuesHideFirstRune(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	for _, in := range []string{"secret", "Abcdef1", "P4ssword"} {
+		got := ForSinkEntity(in)
+		if strings.Contains(got, "prefix=") {
+			t.Errorf("ForSinkEntity(%q) = %q; leaked first rune", in, got)
+		}
+		if strings.Contains(got, in) {
+			t.Errorf("ForSinkEntity(%q) = %q; leaked value", in, got)
+		}
+	}
+	// Long enough to include the rune preview.
+	got := ForSinkEntity("carol@example.com")
+	if !strings.Contains(got, `prefix="c"`) {
+		t.Errorf("ForSinkEntity long = %q; expected prefix", got)
+	}
+}
+
 func TestDeterministicHash(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
 	a := String("4155551234")

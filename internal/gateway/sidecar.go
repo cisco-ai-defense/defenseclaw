@@ -150,6 +150,28 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		events.WithFanout(otel.EmitGatewayEvent)
 	}
 	SetEventWriter(events)
+
+	// Phase 2.3: when retention is enabled, persist judge bodies to
+	// the local SQLite audit store so operators can triage judge
+	// behaviour after the fact. Only installed under the flag — the
+	// default remains "nothing persisted, nothing leaked".
+	if cfg.Guardrail.RetainJudgeBodies && store != nil {
+		SetJudgePersistor(func(p gatewaylog.JudgePayload) {
+			if err := store.InsertJudgeResponse(audit.JudgeResponse{
+				Kind:       p.Kind,
+				Direction:  "",
+				Model:      p.Model,
+				Action:     p.Action,
+				Severity:   string(p.Severity),
+				LatencyMs:  p.LatencyMs,
+				ParseError: p.ParseError,
+				Raw:        p.RawResponse,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
+			}
+		})
+	}
+
 	emitLifecycle("gateway", "init", map[string]string{
 		"host":         cfg.Gateway.Host,
 		"api_port":     fmt.Sprintf("%d", cfg.Gateway.APIPort),
@@ -290,6 +312,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	if s.events != nil {
 		_ = s.events.Close()
 		SetEventWriter(nil)
+		SetJudgePersistor(nil)
 	}
 
 	// Return the first non-nil error if any subsystem failed before shutdown

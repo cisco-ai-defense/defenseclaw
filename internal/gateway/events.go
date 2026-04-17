@@ -34,7 +34,29 @@ import (
 var (
 	gatewayEventsMu sync.RWMutex
 	gatewayEvents   *gatewaylog.Writer
+
+	// judgePersistor is an optional hook invoked for every Judge
+	// event when guardrail.retain_judge_bodies is on and the
+	// sidecar wired up a persistence callback. Left nil in unit
+	// tests and in the "retention off" path.
+	judgePersistor func(gatewaylog.JudgePayload)
 )
+
+// SetJudgePersistor installs the optional SQLite persistence hook
+// invoked from emitJudge when retention is enabled. Passing nil
+// disables persistence (safe default).
+func SetJudgePersistor(fn func(gatewaylog.JudgePayload)) {
+	gatewayEventsMu.Lock()
+	defer gatewayEventsMu.Unlock()
+	judgePersistor = fn
+}
+
+// judgePersist returns the currently installed persistor (may be nil).
+func judgePersist() func(gatewaylog.JudgePayload) {
+	gatewayEventsMu.RLock()
+	defer gatewayEventsMu.RUnlock()
+	return judgePersistor
+}
 
 // SetEventWriter installs the process-wide gatewaylog.Writer. The
 // sidecar calls this exactly once, right after the writer is
@@ -59,38 +81,48 @@ func EventWriter() *gatewaylog.Writer {
 // canonical IDs survive (ForSinkReason/ForSinkString preserve the
 // metadata token shape); matched literals are masked with a
 // deterministic hash prefix so operators can still correlate.
+//
+// Copy-on-write discipline: every payload struct that we need to
+// mutate is shallow-copied before we touch its fields, so a caller
+// that kept a reference to the original (e.g. for a subsequent
+// audit.Log call) does NOT observe the redacted values. The
+// scrubbing here is a sink-only transform.
+//
+// Lifecycle.Details and Diagnostic.Fields are NOT redacted. Those
+// bags carry operator-authored metadata — ports, file paths,
+// version strings, subsystem names — which operators need in the
+// clear to triage incidents. Redacting them turns every startup
+// event into an opaque smear of `<redacted len=6 sha=…>`
+// placeholders, breaking the primary use case for structured
+// lifecycle logs. If a caller ever needs to put user-provided
+// content into one of these fields they must run it through the
+// appropriate redaction helper before the emit.
 func emitEvent(e gatewaylog.Event) {
 	w := EventWriter()
 	if w == nil {
 		return
 	}
 	if v := e.Verdict; v != nil {
-		v.Reason = redaction.ForSinkReason(v.Reason)
+		cp := *v
+		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		e.Verdict = &cp
 	}
 	if j := e.Judge; j != nil {
+		cp := *j
 		// RawResponse routinely echoes the triggering
 		// prompt verbatim — sinks must only ever see the
 		// redacted form. ParseError is short caller-owned
 		// metadata but we redact it too in case a parser
 		// embeds a snippet of the offending body.
-		j.RawResponse = redaction.ForSinkString(j.RawResponse)
-		j.ParseError = redaction.ForSinkString(j.ParseError)
+		cp.RawResponse = redaction.ForSinkString(cp.RawResponse)
+		cp.ParseError = redaction.ForSinkString(cp.ParseError)
+		e.Judge = &cp
 	}
 	if er := e.Error; er != nil {
-		er.Message = redaction.ForSinkString(er.Message)
-		er.Cause = redaction.ForSinkString(er.Cause)
-	}
-	if d := e.Diagnostic; d != nil && len(d.Fields) > 0 {
-		for k, val := range d.Fields {
-			if s, ok := val.(string); ok {
-				d.Fields[k] = redaction.ForSinkString(s)
-			}
-		}
-	}
-	if l := e.Lifecycle; l != nil && len(l.Details) > 0 {
-		for k, v := range l.Details {
-			l.Details[k] = redaction.ForSinkString(v)
-		}
+		cp := *er
+		cp.Message = redaction.ForSinkString(cp.Message)
+		cp.Cause = redaction.ForSinkString(cp.Cause)
+		e.Error = &cp
 	}
 	w.Emit(e)
 }
@@ -134,21 +166,34 @@ func emitJudge(
 	parseError string,
 	raw string,
 ) {
+	payload := gatewaylog.JudgePayload{
+		Kind:        kind,
+		Model:       model,
+		InputBytes:  inputBytes,
+		LatencyMs:   latencyMs,
+		Action:      action,
+		Severity:    severity,
+		ParseError:  parseError,
+		RawResponse: raw,
+	}
+
+	// SQLite persistence runs first because emitEvent mutates its own
+	// shallow copy of the payload (it scrubs RawResponse before
+	// forwarding to the sinks pipeline). We want the local,
+	// operator-owned store to receive the un-redacted body — retention
+	// is explicit opt-in via guardrail.retain_judge_bodies and the SQLite
+	// file is already covered by the same filesystem ACLs as the rest
+	// of ~/.defenseclaw.
+	if persist := judgePersist(); persist != nil && raw != "" {
+		persist(payload)
+	}
+
 	emitEvent(gatewaylog.Event{
 		EventType: gatewaylog.EventJudge,
 		Severity:  severity,
 		Direction: direction,
 		Model:     model,
-		Judge: &gatewaylog.JudgePayload{
-			Kind:        kind,
-			Model:       model,
-			InputBytes:  inputBytes,
-			LatencyMs:   latencyMs,
-			Action:      action,
-			Severity:    severity,
-			ParseError:  parseError,
-			RawResponse: raw,
-		},
+		Judge:     &payload,
 	})
 }
 

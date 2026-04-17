@@ -119,16 +119,17 @@ type Event struct {
 	Diagnostic *DiagnosticPayload `json:"diagnostic,omitempty"`
 }
 
-// VerdictPayload describes a single pipeline stage decision. The
-// Findings slice carries the structured evidence used for OPA input
-// and for operator-facing replay.
+// VerdictPayload describes a single pipeline stage decision.
+// Structured findings live on JudgePayload (or on the pipeline-level
+// audit record). This envelope carries only the decision and a
+// redacted, operator-facing reason — enough to drive the TUI and
+// SIEM without re-deriving shape for every sink.
 type VerdictPayload struct {
-	Stage      Stage     `json:"stage"`
-	Action     string    `json:"action"`                // allow | warn | block
-	Reason     string    `json:"reason,omitempty"`      // short, redacted
-	Categories []string  `json:"categories,omitempty"`  // e.g. [pii.email, injection.system_prompt]
-	Findings   []Finding `json:"findings,omitempty"`
-	LatencyMs  int64     `json:"latency_ms,omitempty"`
+	Stage      Stage    `json:"stage"`
+	Action     string   `json:"action"`               // allow | warn | block
+	Reason     string   `json:"reason,omitempty"`     // short, redacted
+	Categories []string `json:"categories,omitempty"` // e.g. [pii.email, injection.system_prompt]
+	LatencyMs  int64    `json:"latency_ms,omitempty"`
 }
 
 // Finding matches the shape guardrail scanners emit. Keep the field

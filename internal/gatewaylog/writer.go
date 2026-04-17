@@ -84,9 +84,13 @@ func New(cfg Config) (*Writer, error) {
 }
 
 // WithFanout registers an additional per-event callback. Callbacks
-// run synchronously under the Writer's mutex, so they must be fast
-// and non-blocking (typically they hand off to a channel). The
-// canonical use case is mapping events onto OTel LogRecords.
+// run synchronously on the Emit goroutine, but OUTSIDE the writer's
+// mutex — so a slow callback cannot stall other Emit callers. The
+// trade-off is that a concurrent Emit may interleave fanout
+// delivery order across callbacks; implementations that require
+// strict ordering should marshal onto a dedicated goroutine via a
+// buffered channel. The canonical use case is mapping events onto
+// OTel LogRecords.
 func (w *Writer) WithFanout(fn func(Event)) {
 	if w == nil || fn == nil {
 		return
@@ -99,6 +103,14 @@ func (w *Writer) WithFanout(fn func(Event)) {
 // Emit writes a single event to every configured tier. The Timestamp
 // is defaulted to time.Now() if unset so callers don't have to
 // sprinkle clock calls.
+//
+// Fanout callbacks run OUTSIDE the writer mutex. A slow OTel
+// exporter or sinks.Manager should not be able to stall the
+// guardrail hot path — if multiple concurrent Emit calls happen
+// they may arrive at a single fanout callback in an interleaved
+// order, which is the fanout's responsibility to handle (typically
+// via a buffered channel). Under-mutex file/stderr writes keep the
+// JSONL tier strictly append-ordered per-emit.
 func (w *Writer) Emit(e Event) {
 	if w == nil {
 		return
@@ -110,12 +122,12 @@ func (w *Writer) Emit(e Event) {
 		e.Severity = SeverityInfo
 	}
 
+	var fanout []func(Event)
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.closed {
+		w.mu.Unlock()
 		return
 	}
-
 	if w.encoder != nil {
 		// encoder writes a trailing newline, giving us JSONL natively.
 		if err := w.encoder.Encode(e); err != nil && w.pretty != nil {
@@ -125,7 +137,17 @@ func (w *Writer) Emit(e Event) {
 	if w.pretty != nil {
 		writePretty(w.pretty, e)
 	}
-	for _, fn := range w.fanout {
+	if len(w.fanout) > 0 {
+		// Snapshot under the lock so a concurrent WithFanout /
+		// Close cannot race with our iteration. The slice header
+		// is copied but the backing array is the same — fanout
+		// callbacks are append-only in WithFanout so this is safe.
+		fanout = make([]func(Event), len(w.fanout))
+		copy(fanout, w.fanout)
+	}
+	w.mu.Unlock()
+
+	for _, fn := range fanout {
 		fn(e)
 	}
 }

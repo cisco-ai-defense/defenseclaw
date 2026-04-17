@@ -77,6 +77,22 @@ const hashPrefixHex = 8
 // nearly always non-PII metadata anyway (status codes, "ok", etc.).
 const shortValueByteThreshold = 5
 
+// entityPrefixRevealMinBytes is the byte length at or above which
+// ForSinkEntity emits the leading rune as a preview. Keeping the
+// threshold at 10 means 6- to 9-byte secrets (short phone extensions,
+// truncated SSN fragments) don't leak their first character.
+const entityPrefixRevealMinBytes = 10
+
+// compactRuleIDMaxBytes is the maximum length of a "rule-ID-shaped"
+// token that contains no recognizable separator (`-`, `.`, `:`,
+// `/`, `_`). Real rule identifiers in the catalog are either short
+// all-caps words (UNKNOWN, ERROR, HIGH — all ≤11 bytes) or longer
+// tokens with separators (SEC-ANTHROPIC, PII-SSN-US, CODEGUARD-0-XSS).
+// Bare alphanumeric tokens longer than this are almost certainly
+// secrets or user-supplied data (AWS AKIA* access keys, bare
+// passphrases) and must be redacted.
+const compactRuleIDMaxBytes = 11
+
 // Reveal reports whether operator-facing log writers should emit raw
 // values in place of redacted placeholders. Defaults to false.
 //
@@ -127,6 +143,13 @@ func ForSinkString(s string) string {
 
 // isPlaceholder reports whether s is one of our own redaction
 // placeholder shapes. Used to make the ForSink* helpers idempotent.
+//
+// The recognizer is intentionally narrow: the longest placeholder we
+// emit is an Evidence one like
+// `<redacted-evidence len=1234567 match=[12:34] sha=abcdef12>` at
+// about 60 bytes, so a hard cap of 80 keeps attacker-controlled
+// strings that merely start with `<redacted` and end with `>` (with
+// arbitrary payload in between) from being treated as safe.
 func isPlaceholder(s string) bool {
 	if s == "<empty>" {
 		return true
@@ -134,10 +157,18 @@ func isPlaceholder(s string) bool {
 	if !strings.HasPrefix(s, "<redacted") || !strings.HasSuffix(s, ">") {
 		return false
 	}
-	if len(s) > 200 {
+	if len(s) > 80 {
 		return false
 	}
-	return !strings.ContainsAny(s, "\n\r")
+	if strings.ContainsAny(s, "\n\r\t") {
+		return false
+	}
+	// The body between the opening `<redacted` and the final `>`
+	// must not embed another `<` — that's a sign the caller
+	// concatenated a fresh literal onto an already-redacted
+	// placeholder and handed it back to us.
+	inner := s[len("<redacted") : len(s)-1]
+	return !strings.ContainsAny(inner, "<>")
 }
 
 // Entity redacts a PII entity (phone, SSN, email, token, etc.)
@@ -152,6 +183,13 @@ func Entity(value string) string {
 
 // ForSinkEntity is the Reveal-bypassing variant of Entity. Idempotent
 // over its own placeholder shape.
+//
+// The first-rune preview is only included for values long enough
+// that a single character cannot be a meaningful fraction of the
+// secret (≥ entityPrefixRevealMinBytes). Short values fall back to
+// the plain length+hash placeholder because, e.g., leaking the
+// leading `A` of a 6-byte value like `AB4FGH` narrows the search
+// space for an attacker who controls adjacent log rows.
 func ForSinkEntity(value string) string {
 	if value == "" {
 		return "<empty>"
@@ -162,6 +200,9 @@ func ForSinkEntity(value string) string {
 	n := len(value)
 	if n < shortValueByteThreshold {
 		return fmt.Sprintf("<redacted len=%d>", n)
+	}
+	if n < entityPrefixRevealMinBytes {
+		return fmt.Sprintf("<redacted len=%d sha=%s>", n, hashPrefix(value))
 	}
 	r, size := utf8.DecodeRuneInString(value)
 	if r == utf8.RuneError && size <= 1 {
@@ -298,7 +339,10 @@ func isRedactedToken(tok string) bool {
 //
 // Recognized shapes in priority order:
 //
-//  1. "<rule-id>: <description>"     — space-delimited; keep ID, scrub or keep desc
+//  1. "<rule-id>: <description>"     — space-delimited; keep ID and
+//     recurse into the description so nested rule-id:literal shapes
+//     (e.g. `matched: SEC-AWS-KEY:AWS access key`) preserve the
+//     inner rule ID while still scrubbing any literals
 //  2. "<rule-id>:<description>"      — colon-delimited (our standard finding
 //     format, e.g. "SEC-ANTHROPIC:API key ...") — keep ID,
 //     redact the description wholesale because it is free-form
@@ -308,9 +352,24 @@ func isRedactedToken(tok string) bool {
 //  5. Plain safe reason token        — rule-id characters only
 //  6. Fallback                       — whole-token redaction
 func redactReasonToken(t string) string {
+	return redactReasonTokenDepth(t, 0)
+}
+
+// redactReasonTokenDepth is the depth-bounded worker for
+// redactReasonToken. We recurse once when a `<wrapper>: <body>` shape
+// wraps a further rule-id:literal; anything deeper collapses to a
+// flat ForSinkString so pathological inputs cannot blow the stack.
+func redactReasonTokenDepth(t string, depth int) string {
 	t = strings.TrimSpace(t)
 	if t == "" {
 		return ""
+	}
+	const maxReasonDepth = 2
+	if depth >= maxReasonDepth {
+		if isSafeReasonToken(t) {
+			return t
+		}
+		return ForSinkString(t)
 	}
 	if idx := strings.Index(t, ": "); idx > 0 {
 		prefix := t[:idx]
@@ -319,7 +378,9 @@ func redactReasonToken(t string) string {
 			if isSafeReasonToken(rest) {
 				return prefix + ": " + rest
 			}
-			return prefix + ": " + ForSinkString(rest)
+			// Recurse so the inner clause keeps rule IDs that
+			// sit after the outer `wrapper: ` prefix.
+			return prefix + ": " + redactReasonTokenDepth(rest, depth+1)
 		}
 	}
 	// "<rule-id>:<description>" — colon-delimited without space.
@@ -328,14 +389,18 @@ func redactReasonToken(t string) string {
 	// after the colon is authored but can include matched
 	// literals verbatim (e.g. `SEC-ANTHROPIC:API key sk-ant-...`
 	// or the SSN-by-regex `PII-SSN:123-45-6789` shape emitted by
-	// some scanners). We keep the ID so operators still see what
-	// tripped, and scrub the rest so the literal never hits a
-	// persistent sink.
+	// some scanners, or the adversarial `SEC-OPENAI:sk-proj-…`
+	// where a scanner echoes the matched literal into the title).
+	//
+	// We keep the ID so operators still see what tripped, and
+	// ALWAYS scrub the rest — even when it happens to look
+	// rule-id-shaped — so a short all-alphanumeric-with-hyphens
+	// secret cannot ride through on the rule-id allow-list.
 	if idx := strings.IndexByte(t, ':'); idx > 0 && !strings.Contains(t[:idx], " ") {
 		prefix := t[:idx]
 		rest := t[idx+1:]
 		if len(prefix) <= 128 && isRuleIDChars(prefix) && rest != "" {
-			if isSafeReasonToken(rest) {
+			if isPlaceholder(rest) {
 				return prefix + ":" + rest
 			}
 			return prefix + ":" + ForSinkString(rest)
@@ -523,21 +588,25 @@ func hashPrefix(s string) string {
 	return hex.EncodeToString(sum[:])[:hashPrefixHex]
 }
 
-// isSafeReasonToken reports whether a substring of a verdict reason
-// can be emitted verbatim.
 // isSafeReasonToken is the allow-list for plain reason tokens
 // (i.e. no '=' pair). Rule IDs and canonical IDs are the only
 // hand-authored shapes we trust here; everything else must go
 // through the redactor.
 //
-// The 32-byte cap matches isSafeSingleKVValue so that a long
-// alphanumeric+dash literal (e.g. a leaked API key of the form
-// "sk-ant-api03-abcdefghij…") does NOT slip through merely
-// because it happens to share the rule-id character class.
-// Real rule IDs top out around 20 chars (SEC-ANTHROPIC,
-// PII-SSN-US, …) so 32 leaves headroom for canonical-id
-// extensions like SEC-GITHUB-APP-TOKEN without letting
-// genuine secrets pass.
+// Two independent caps apply:
+//
+//  1. Tokens with at least one separator (`-`, `.`, `:`, `/`, `_`)
+//     may be up to 32 bytes — this covers every real rule ID in
+//     the catalog (SEC-ANTHROPIC, PII-SSN-US, CODEGUARD-0-XSS …).
+//  2. Tokens with no separator at all are capped at
+//     compactRuleIDMaxBytes (11) so a bare high-entropy token
+//     like `AKIAIOSFODNN7EXAMPLE` (20 bytes, rule-id charset) or
+//     `MySecretP4ssword` (16 bytes) is routed through the
+//     redactor instead of passing verbatim.
+//
+// Real rule IDs top out around 20 bytes with separators; the
+// 32-byte cap leaves headroom for canonical-id extensions like
+// SEC-GITHUB-APP-TOKEN without letting genuine secrets pass.
 func isSafeReasonToken(t string) bool {
 	t = strings.TrimSpace(t)
 	if t == "" {
@@ -554,7 +623,27 @@ func isSafeReasonToken(t string) bool {
 	if len(t) > 32 {
 		return false
 	}
-	return isRuleIDChars(t)
+	if !isRuleIDChars(t) {
+		return false
+	}
+	if !hasRuleIDSeparator(t) && len(t) > compactRuleIDMaxBytes {
+		return false
+	}
+	return true
+}
+
+// hasRuleIDSeparator reports whether s contains at least one byte
+// from the rule-ID separator class. Used to distinguish hand-authored
+// multi-segment identifiers (SEC-AWS-KEY) from bare alphanumeric
+// runs that are almost always secrets or free-form user content.
+func hasRuleIDSeparator(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '-', '.', ':', '/', '_':
+			return true
+		}
+	}
+	return false
 }
 
 // isSafeKVValue is the value-side allow-list for "key=value" tokens.
@@ -589,11 +678,18 @@ func isSafeKVValue(v string) bool {
 }
 
 // isSafeSingleKVValue is the single-token form of isSafeKVValue.
+// The character class and length caps mirror isSafeReasonToken: a
+// letter-bearing value up to 32 bytes passes when it has at least
+// one separator, otherwise it must be ≤ compactRuleIDMaxBytes. This
+// keeps enumerable metadata (action=allow, mode=observe,
+// canonical=SEC-AWS-KEY) readable while forcing long bare tokens
+// (api_key=AKIAIOSFODNN7EXAMPLE) through the redactor.
 func isSafeSingleKVValue(v string) bool {
 	if v == "" {
 		return false
 	}
 	hasLetter := false
+	hasSeparator := false
 	for i := 0; i < len(v); i++ {
 		c := v[i]
 		switch {
@@ -603,12 +699,19 @@ func isSafeSingleKVValue(v string) bool {
 			hasLetter = true
 		case c >= '0' && c <= '9':
 		case c == '_' || c == '-' || c == '.' || c == ':' || c == '/':
+			hasSeparator = true
 		default:
 			return false
 		}
 	}
 	if hasLetter {
-		return len(v) <= 32
+		if len(v) > 32 {
+			return false
+		}
+		if !hasSeparator && len(v) > compactRuleIDMaxBytes {
+			return false
+		}
+		return true
 	}
 	return len(v) <= 6
 }

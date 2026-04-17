@@ -324,17 +324,23 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	a.emitCodeGuardOTel(&req, verdict, elapsed)
 
 	// Response-body redaction. By default every Evidence string in
-	// DetailedFindings is replaced with the ForSinkEvidence
-	// placeholder so a caller that simply GETs the verdict and
-	// logs it cannot accidentally echo user PII. Callers who need
-	// raw evidence for triage set X-DefenseClaw-Reveal-PII: 1;
-	// we record that fact in the audit store so every reveal is
-	// discoverable.
-	responseVerdict := verdict.sanitizeForResponse(wantsReveal(r))
-	if wantsReveal(r) {
+	// DetailedFindings and verdict.Reason are replaced with the
+	// ForSinkEvidence/ForSinkReason placeholders so a caller that
+	// simply GETs the verdict and logs it cannot accidentally echo
+	// user PII. Callers who need raw evidence for triage set
+	// X-DefenseClaw-Reveal-PII: 1; we record that fact in the
+	// audit store so every reveal is discoverable.
+	reveal := wantsReveal(r)
+	responseVerdict := verdict.sanitizeForResponse(reveal)
+	if reveal {
+		// Audit the reveal BEFORE exposing the raw reason. Even
+		// when the caller opts in to raw response PII, the
+		// audit-store row must still flow through the sink
+		// barrier so SQLite/Splunk never see the raw literal.
 		_ = a.logger.LogActionWithTrace("inspect-reveal", req.Tool,
 			fmt.Sprintf("severity=%s remote=%s reason=%s",
-				verdict.Severity, r.RemoteAddr, verdict.Reason),
+				verdict.Severity, r.RemoteAddr,
+				redaction.ForSinkReason(verdict.Reason)),
 			traceID)
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
@@ -343,16 +349,22 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 // sanitizeForResponse returns a copy of v suitable for the HTTP
 // response body. When reveal is false (the default) every Evidence
 // field in DetailedFindings is replaced with the
-// "<redacted-evidence len=... sha=...>" placeholder. Reason is
-// already PII-safe because it is built from static rule metadata.
+// "<redacted-evidence len=... sha=...>" placeholder AND Reason is
+// routed through ForSinkReason. The composed reason is normally
+// shaped as "matched: <rule-id>:<title>, …" — ForSinkReason is a
+// no-op on that metadata-only shape, but if a scanner ever embeds
+// a matched literal in f.Title the sink barrier scrubs it.
 //
 // The original verdict is left untouched so the audit log, OTel
-// spans, and any in-process observers still see the full data.
+// spans, and any in-process observers still see the full data
+// (which those paths then route through their own ForSink*
+// helpers before persistence).
 func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdict {
 	if reveal {
 		return v
 	}
 	cp := *v
+	cp.Reason = redaction.ForSinkReason(v.Reason)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}
