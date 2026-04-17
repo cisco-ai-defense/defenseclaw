@@ -49,34 +49,34 @@ type ClawConfig struct {
 const CurrentConfigVersion = 4
 
 type Config struct {
-	ConfigVersion     int                  `mapstructure:"config_version"        yaml:"config_version"`
-	DefaultLLMAPIKeyEnv string             `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
-	DefaultLLMModel   string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
-	DataDir           string               `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string               `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
-	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	ConfigVersion       int                  `mapstructure:"config_version"        yaml:"config_version"`
+	DefaultLLMAPIKeyEnv string               `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
+	DefaultLLMModel     string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
+	DataDir             string               `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB             string               `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir       string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir           string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir           string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment         string               `mapstructure:"environment"      yaml:"environment"`
+	Claw                ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	InspectLLM          InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
+	CiscoAIDefense      CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners            ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell           OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch               WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall            FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail           GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway             GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions        SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions          MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions       PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	OTel                OTelConfig           `mapstructure:"otel"             yaml:"otel"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks     []AuditSink          `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
+	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
 }
 
 // ResolvedDefaultLLMAPIKey returns the shared LLM API key from the configured
@@ -925,7 +925,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.debounce", 2)
 
 	viper.SetDefault("otel.enabled", false)
-	viper.SetDefault("otel.protocol", "grpc")
+	viper.SetDefault("otel.protocol", "")
 	viper.SetDefault("otel.endpoint", "")
 	viper.SetDefault("otel.tls.insecure", false)
 	viper.SetDefault("otel.tls.ca_cert", "")

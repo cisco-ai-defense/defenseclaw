@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -51,7 +52,6 @@ func sanitizeEvent(e Event) Event {
 	return e
 }
 
-
 type Logger struct {
 	store *Store
 	// sinks is the v4 generic fan-out manager. nil is a safe no-op
@@ -73,6 +73,23 @@ func (l *Logger) SetSinks(m *sinks.Manager) {
 
 func (l *Logger) SetOTelProvider(p *telemetry.Provider) {
 	l.otel = p
+}
+
+// ForwardGatewayEvent fans a structured gateway event out to configured
+// audit sinks. It does not persist to SQLite or emit OTel counters:
+// the gatewaylog pipeline already owns those concerns. This hook exists
+// solely to fulfill the "gateway events reach audit_sinks" contract.
+func (l *Logger) ForwardGatewayEvent(event gatewaylog.Event) {
+	if l == nil || l.sinks == nil {
+		return
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if event.Severity == "" {
+		event.Severity = gatewaylog.SeverityInfo
+	}
+	l.forwardSinkEvent(gatewayEventToSinkEvent(event))
 }
 
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
@@ -233,6 +250,9 @@ func (l *Logger) LogEvent(event Event) error {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
+	if event.Actor == "" {
+		event.Actor = "defenseclaw"
+	}
 	if event.RunID == "" {
 		event.RunID = currentRunID()
 	}
@@ -259,12 +279,7 @@ func (l *Logger) LogEvent(event Event) error {
 // hot path. Sinks that need longer-lived connections own their own
 // background goroutines.
 func (l *Logger) forwardToSinks(e Event) {
-	if l.sinks == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = l.sinks.Forward(ctx, sinks.Event{
+	l.forwardSinkEvent(sinks.Event{
 		ID:        e.ID,
 		Timestamp: e.Timestamp,
 		Action:    e.Action,
@@ -275,6 +290,15 @@ func (l *Logger) forwardToSinks(e Event) {
 		RunID:     e.RunID,
 		TraceID:   e.TraceID,
 	})
+}
+
+func (l *Logger) forwardSinkEvent(e sinks.Event) {
+	if l.sinks == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = l.sinks.Forward(ctx, e)
 }
 
 // Close flushes and closes every audit sink. Safe to call when no sinks
@@ -325,4 +349,101 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func gatewayEventToSinkEvent(event gatewaylog.Event) sinks.Event {
+	return sinks.Event{
+		ID:         uuid.New().String(),
+		Timestamp:  event.Timestamp,
+		Action:     gatewayAction(event.EventType),
+		Target:     gatewayTarget(event),
+		Actor:      "defenseclaw-gateway",
+		Details:    gatewayDetails(event),
+		Severity:   string(event.Severity),
+		RunID:      event.RunID,
+		Structured: gatewayStructured(event),
+	}
+}
+
+func gatewayAction(kind gatewaylog.EventType) string {
+	switch kind {
+	case gatewaylog.EventVerdict:
+		return "gateway-verdict"
+	case gatewaylog.EventJudge:
+		return "gateway-judge"
+	case gatewaylog.EventLifecycle:
+		return "gateway-lifecycle"
+	case gatewaylog.EventError:
+		return "gateway-error"
+	case gatewaylog.EventDiagnostic:
+		return "gateway-diagnostic"
+	default:
+		return "gateway-event"
+	}
+}
+
+func gatewayTarget(event gatewaylog.Event) string {
+	switch event.EventType {
+	case gatewaylog.EventVerdict, gatewaylog.EventJudge:
+		if event.Model != "" {
+			return event.Model
+		}
+	case gatewaylog.EventLifecycle:
+		if event.Lifecycle != nil {
+			return event.Lifecycle.Subsystem
+		}
+	case gatewaylog.EventError:
+		if event.Error != nil {
+			return event.Error.Subsystem
+		}
+	case gatewaylog.EventDiagnostic:
+		if event.Diagnostic != nil {
+			return event.Diagnostic.Component
+		}
+	}
+	return ""
+}
+
+func gatewayDetails(event gatewaylog.Event) string {
+	switch event.EventType {
+	case gatewaylog.EventVerdict:
+		if v := event.Verdict; v != nil {
+			return redaction.ForSinkReason(fmt.Sprintf("stage=%s action=%s reason=%s", v.Stage, v.Action, v.Reason))
+		}
+	case gatewaylog.EventJudge:
+		if j := event.Judge; j != nil {
+			return redaction.ForSinkReason(fmt.Sprintf("kind=%s action=%s latency_ms=%d", j.Kind, j.Action, j.LatencyMs))
+		}
+	case gatewaylog.EventLifecycle:
+		if l := event.Lifecycle; l != nil {
+			return fmt.Sprintf("subsystem=%s transition=%s", l.Subsystem, l.Transition)
+		}
+	case gatewaylog.EventError:
+		if e := event.Error; e != nil {
+			return redaction.ForSinkReason(fmt.Sprintf("subsystem=%s code=%s message=%s", e.Subsystem, e.Code, e.Message))
+		}
+	case gatewaylog.EventDiagnostic:
+		if d := event.Diagnostic; d != nil {
+			return fmt.Sprintf("component=%s message=%s", d.Component, d.Message)
+		}
+	}
+	return string(event.EventType)
+}
+
+func gatewayStructured(event gatewaylog.Event) map[string]any {
+	buf, err := json.Marshal(event)
+	if err != nil {
+		return map[string]any{
+			"event_type": string(event.EventType),
+			"severity":   string(event.Severity),
+		}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(buf, &out); err != nil {
+		return map[string]any{
+			"event_type": string(event.EventType),
+			"severity":   string(event.Severity),
+		}
+	}
+	return out
 }

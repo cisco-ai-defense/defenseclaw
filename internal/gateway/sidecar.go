@@ -148,6 +148,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if otel != nil && otel.Enabled() {
 		events.WithFanout(otel.EmitGatewayEvent)
 	}
+	if logger != nil {
+		events.WithFanout(logger.ForwardGatewayEvent)
+	}
 	SetEventWriter(events)
 	emitDiagnostic("observability", "gateway event pipeline initialised", map[string]string{
 		"jsonl": filepath.Join(cfg.DataDir, "gateway.jsonl"),

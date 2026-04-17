@@ -22,7 +22,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	otellog "go.opentelemetry.io/otel/log"
@@ -191,9 +193,21 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 
 	if cfg.Protocol == "http" {
 		opts := []loghttp.Option{
-			loghttp.WithEndpoint(cfg.Endpoint),
-			loghttp.WithHeaders(headers),
 			loghttp.WithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
+		}
+		if host, path, insecure, ok := splitEndpointURL(cfg.Endpoint); ok {
+			opts = append(opts, loghttp.WithEndpoint(host))
+			if insecure {
+				opts = append(opts, loghttp.WithInsecure())
+			}
+			if cfg.URLPath == "" && path != "" && path != "/" {
+				opts = append(opts, loghttp.WithURLPath(path))
+			}
+		} else {
+			opts = append(opts, loghttp.WithEndpoint(cfg.Endpoint))
+		}
+		if len(headers) > 0 {
+			opts = append(opts, loghttp.WithHeaders(headers))
 		}
 		if cfg.URLPath != "" {
 			opts = append(opts, loghttp.WithURLPath(cfg.URLPath))
@@ -212,9 +226,15 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 	}
 
 	opts := []loggrpc.Option{
-		loggrpc.WithEndpoint(cfg.Endpoint),
-		loggrpc.WithHeaders(headers),
 		loggrpc.WithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
+	}
+	if endpointLooksLikeURL(cfg.Endpoint) {
+		opts = append(opts, loggrpc.WithEndpointURL(cfg.Endpoint))
+	} else {
+		opts = append(opts, loggrpc.WithEndpoint(cfg.Endpoint))
+	}
+	if len(headers) > 0 {
+		opts = append(opts, loggrpc.WithHeaders(headers))
 	}
 	if cfg.Insecure {
 		opts = append(opts, loggrpc.WithInsecure())
@@ -238,6 +258,21 @@ func loadTLSConfig(caCertPath string) (*tls.Config, error) {
 		return nil, fmt.Errorf("otlp_logs: parse CA cert %s", caCertPath)
 	}
 	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+}
+
+func endpointLooksLikeURL(endpoint string) bool {
+	return strings.Contains(endpoint, "://")
+}
+
+func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
+	if !endpointLooksLikeURL(endpoint) {
+		return "", "", false, false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", "", false, false
+	}
+	return u.Host, u.Path, strings.EqualFold(u.Scheme, "http"), true
 }
 
 // severityToOTel maps DefenseClaw severity strings to OTel SeverityNumbers

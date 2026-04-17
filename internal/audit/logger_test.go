@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -47,8 +48,8 @@ func newCaptureSink() *captureSink {
 	return &captureSink{immediateFlushC: make(chan struct{}, 16)}
 }
 
-func (c *captureSink) Name() string                    { return "capture" }
-func (c *captureSink) Kind() string                    { return "capture" }
+func (c *captureSink) Name() string { return "capture" }
+func (c *captureSink) Kind() string { return "capture" }
 func (c *captureSink) Forward(_ context.Context, e sinks.Event) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,6 +227,96 @@ func TestLoggerSinkForwardingIncludesDefaultedFields(t *testing.T) {
 	}
 	if evt.Action != "skill-block" || evt.Target != "test-skill" {
 		t.Fatalf("forwarded event mismatch: %+v", evt)
+	}
+}
+
+func TestLoggerForwardGatewayEvent_ForwardsStructuredPayload(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	logger.ForwardGatewayEvent(gatewaylog.Event{
+		Timestamp: time.Now().UTC(),
+		EventType: gatewaylog.EventVerdict,
+		Severity:  gatewaylog.SeverityHigh,
+		Model:     "gpt-4",
+		RunID:     "run-123",
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+			Reason: "matched: SEC-AWS:<redacted-pii sha256:abc123>",
+		},
+	})
+	logger.Close()
+
+	got := cs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("forwarded event count=%d want 1", len(got))
+	}
+	evt := got[0]
+	if evt.Action != "gateway-verdict" {
+		t.Fatalf("action=%q want gateway-verdict", evt.Action)
+	}
+	if evt.Target != "gpt-4" {
+		t.Fatalf("target=%q want gpt-4", evt.Target)
+	}
+	if evt.Actor != "defenseclaw-gateway" {
+		t.Fatalf("actor=%q want defenseclaw-gateway", evt.Actor)
+	}
+	if evt.RunID != "run-123" {
+		t.Fatalf("run_id=%q want run-123", evt.RunID)
+	}
+	if evt.Structured["event_type"] != "verdict" {
+		t.Fatalf("structured event_type=%v want verdict", evt.Structured["event_type"])
+	}
+	verdict, ok := evt.Structured["verdict"].(map[string]any)
+	if !ok {
+		t.Fatalf("structured verdict payload missing: %#v", evt.Structured)
+	}
+	if verdict["action"] != "block" {
+		t.Fatalf("structured verdict action=%v want block", verdict["action"])
+	}
+	if !strings.Contains(evt.Details, "stage=final") {
+		t.Fatalf("details=%q missing stage summary", evt.Details)
+	}
+}
+
+func TestLoggerForwardGatewayEvent_ImmediateFlushForGatewayVerdict(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	logger.ForwardGatewayEvent(gatewaylog.Event{
+		Timestamp: time.Now().UTC(),
+		EventType: gatewaylog.EventVerdict,
+		Severity:  gatewaylog.SeverityHigh,
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+		},
+	})
+
+	deadline := time.After(2 * time.Second)
+	select {
+	case <-cs.immediateFlushC:
+	case <-deadline:
+		t.Fatal("expected gateway-verdict to trigger immediate sink flush")
 	}
 }
 

@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -139,8 +142,8 @@ func TestExpandHeaders(t *testing.T) {
 	t.Setenv("TEST_TOKEN", "abc123")
 
 	headers := map[string]string{
-		"X-SF-TOKEN":  "${TEST_TOKEN}",
-		"X-Static":    "static-value",
+		"X-SF-TOKEN": "${TEST_TOKEN}",
+		"X-Static":   "static-value",
 	}
 
 	expanded := expandHeaders(headers)
@@ -178,12 +181,81 @@ func TestExpandHeaders_NoAutoInjection(t *testing.T) {
 	}
 }
 
+func TestNewProvider_StandardOTLPEnvHTTPLogs(t *testing.T) {
+	type requestInfo struct {
+		path   string
+		header string
+	}
+	reqC := make(chan requestInfo, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqC <- requestInfo{
+			path:   r.URL.Path,
+			header: r.Header.Get("X-Test"),
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-test=env-header")
+
+	cfg := disabledCfg()
+	cfg.OTel = config.OTelConfig{
+		Enabled: true,
+		Logs: config.OTelLogsConfig{
+			Enabled: true,
+		},
+		Traces: config.OTelTracesConfig{
+			Enabled: false,
+		},
+		Metrics: config.OTelMetricsConfig{
+			Enabled: false,
+		},
+		Batch: config.OTelBatchConfig{
+			MaxExportBatchSize: 1,
+			ScheduledDelayMs:   10,
+			MaxQueueSize:       8,
+		},
+	}
+
+	p, err := NewProvider(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatalf("NewProvider err=%v", err)
+	}
+
+	p.EmitGatewayEvent(gatewaylog.Event{
+		Timestamp: time.Now().UTC(),
+		EventType: gatewaylog.EventDiagnostic,
+		Severity:  gatewaylog.SeverityInfo,
+		Diagnostic: &gatewaylog.DiagnosticPayload{
+			Component: "telemetry-test",
+			Message:   "env-path",
+		},
+	})
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown err=%v", err)
+	}
+
+	select {
+	case got := <-reqC:
+		if got.path != "/v1/logs" {
+			t.Fatalf("request path=%q want /v1/logs", got.path)
+		}
+		if got.header != "env-header" {
+			t.Fatalf("X-Test header=%q want env-header", got.header)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for OTLP logs request")
+	}
+}
+
 func TestResolveValue(t *testing.T) {
 	tests := []struct {
-		name    string
-		signal  string
-		global  string
-		want    string
+		name   string
+		signal string
+		global string
+		want   string
 	}{
 		{"signal set", "signal-endpoint", "global-endpoint", "signal-endpoint"},
 		{"signal empty", "", "global-endpoint", "global-endpoint"},
@@ -270,9 +342,9 @@ func TestBuildSampler(t *testing.T) {
 
 func TestActionMapping(t *testing.T) {
 	tests := []struct {
-		action         string
-		wantLifecycle  string
-		wantActor      string
+		action        string
+		wantLifecycle string
+		wantActor     string
 	}{
 		{"install-detected", "install", "watcher"},
 		{"install-rejected", "block", "watcher"},
@@ -327,7 +399,7 @@ func TestNonLifecycleActionsExcluded(t *testing.T) {
 
 func TestSeverityMapping(t *testing.T) {
 	tests := []struct {
-		input   string
+		input    string
 		wantText string
 		wantNum  int
 	}{
@@ -592,10 +664,10 @@ func TestAlertSeverityToOTel(t *testing.T) {
 
 func TestResolveServiceName(t *testing.T) {
 	tests := []struct {
-		name    string
-		envVal  string
-		attrs   map[string]string
-		want    string
+		name   string
+		envVal string
+		attrs  map[string]string
+		want   string
 	}{
 		{
 			"env var takes priority",
