@@ -523,6 +523,7 @@ make ts-test        # TypeScript plugin tests
 | [Quick Start](docs/QUICKSTART.md) | 5-minute walkthrough of every command |
 | [Architecture](docs/ARCHITECTURE.md) | System diagram, data flow, and component responsibilities |
 | [CLI Reference](docs/CLI.md) | All CLI commands and flags |
+| [TUI Reference](docs/TUI.md) | Bubbletea dashboard — panels, keybindings, CLI ↔ TUI parity model |
 | [API Reference](docs/API.md) | REST API endpoint documentation |
 | [LLM Guardrail](docs/GUARDRAIL.md) | Guardrail data flow and configuration |
 | [Guardrail Quick Start](docs/GUARDRAIL_QUICKSTART.md) | Set up and test the LLM guardrail |

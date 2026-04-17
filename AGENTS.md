@@ -63,6 +63,10 @@ test/                   E2E tests, unit tests, fixtures
 - `internal/enforce/policy.go` — Admission gate (block -> allow -> scan)
 - `internal/config/claw.go` — Claw mode resolver (skill dirs, MCP dirs per framework)
 - `internal/tui/app.go` — TUI root model
+- `internal/tui/command.go` — `BuildRegistry()` TUI→CLI command map (single source of truth for what the TUI can invoke)
+- `internal/tui/cli_parity_test.go` + `scripts/audit_parity.py` — parity gate that prevents TUI/CLI drift
+- `internal/tui/doctor_cache.go` + `cli/defenseclaw/commands/cmd_doctor.py::_write_doctor_cache` — cached doctor snapshot for the Overview panel
+- `docs/TUI.md` — panels, keybindings, parity model, files the TUI touches
 
 ## Claw Mode
 
@@ -120,6 +124,8 @@ All six paths must be tested.
   - `webhooks[]` (notifier): per-event chat/incident fan-out (Slack/PagerDuty/Webex/HMAC). Managed by `defenseclaw setup webhook` + TUI wizard; dispatched by `internal/gateway/webhook.go::WebhookDispatcher`.
   - `audit_sinks[].http_jsonl` (log forwarder): every-event JSONL POST. Managed by `defenseclaw setup observability add webhook`.
   `cooldown_seconds` on `WebhookConfig` is `*int` (tri-state): nil → `webhookDefaultCooldown` (300s), `0` → disabled, `>0` → explicit. Python `WebhookConfig.cooldown_seconds` is `int | None` and round-trips the same three states.
+- TUI mutations route through the Python CLI — never reimplement an action in Go. The mapping table is `internal/tui/command.go::BuildRegistry()` and it's gated by `internal/tui/cli_parity_test.go`, which uses `scripts/audit_parity.py` to introspect the live Click tree. If you add a TUI action you must add the matching Click subcommand first; the parity test will fail loudly otherwise.
+- `defenseclaw doctor` writes `~/.defenseclaw/doctor_cache.json` on every run (success or failure). The Go TUI's Overview panel reads it on startup + after each doctor invocation. Stale threshold is 15 min — see `internal/tui/doctor_cache.go`. Don't bypass this cache by running doctor's network probes from Go.
 
 ## Boundaries
 
