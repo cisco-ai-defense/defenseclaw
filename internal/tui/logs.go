@@ -17,6 +17,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,13 +30,30 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+// jsonUnmarshal is a thin alias that keeps the verdict parser site
+// readable and lets us swap in a streaming decoder later without
+// touching the call site.
+var jsonUnmarshal = json.Unmarshal
+
 const (
 	logSourceGateway = iota
+	logSourceVerdicts
 	logSourceWatchdog
 	logSourceCount
 )
 
-var logSourceNames = [logSourceCount]string{"Gateway", "Watchdog"}
+var logSourceNames = [logSourceCount]string{"Gateway", "Verdicts", "Watchdog"}
+
+// verdictActionFilters cycle the Verdicts source through structured
+// action filters. Matches the action field of gatewaylog.VerdictPayload.
+// Empty string means "show all actions".
+var verdictActionFilters = []string{"", "block", "alert", "allow"}
+var verdictActionLabels = map[string]string{
+	"":      "All actions",
+	"block": "Block",
+	"alert": "Alert",
+	"allow": "Allow",
+}
 
 // Pre-built noise filter patterns — lines containing any of these are hidden
 // when the corresponding filter is active.
@@ -92,7 +110,8 @@ var filterLabels = map[string]string{
 
 type logPollMsg struct{}
 
-// LogsPanel provides live log tailing for gateway.log and watchdog.log.
+// LogsPanel provides live log tailing for gateway.log, gateway.jsonl
+// (Verdicts tab), and watchdog.log.
 type LogsPanel struct {
 	theme      *Theme
 	dataDir    string
@@ -106,6 +125,30 @@ type LogsPanel struct {
 	filterMode string
 	searching  bool
 	searchText string
+
+	// Verdicts-only state: cached structured events and a chip-
+	// filter for action (block/alert/allow). Cardinalities other
+	// than action (severity, category, model) are queryable via
+	// the existing text-search field to keep the chip bar short.
+	verdicts      []verdictRow
+	verdictAction string // one of verdictActionFilters
+}
+
+// verdictRow is a pre-rendered Verdicts-tab entry. We keep the
+// structured fields alongside the rendered line so typed filters
+// run in O(n) over in-memory rows rather than re-parsing JSON per
+// keystroke.
+type verdictRow struct {
+	raw       string
+	timestamp time.Time
+	action    string
+	severity  string
+	stage     string
+	direction string
+	model     string
+	reason    string
+	kind      string // for Judge events: injection/pii
+	eventType string
 }
 
 // NewLogsPanel creates the logs panel.
@@ -133,6 +176,7 @@ func (p LogsPanel) Update(msg tea.Msg) (LogsPanel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case logPollMsg:
 		p.loadFile(logSourceGateway, filepath.Join(p.dataDir, "gateway.log"))
+		p.loadVerdicts(filepath.Join(p.dataDir, "gateway.jsonl"))
 		p.loadFile(logSourceWatchdog, filepath.Join(p.dataDir, "watchdog.log"))
 		if !p.paused {
 			totalLines := len(p.filteredLines())
@@ -199,6 +243,16 @@ func (p LogsPanel) handleKey(msg tea.KeyPressMsg) (LogsPanel, tea.Cmd) {
 			p.scroll = 0
 		} else {
 			p.searchText += "f"
+		}
+	// 'a' cycles the action-chip on the Verdicts tab only. Swallowed
+	// silently on other tabs (and while searching) so it doesn't
+	// shadow the more common "append to search" path.
+	case "a":
+		if !p.searching && p.source == logSourceVerdicts {
+			p.cycleVerdictAction()
+			p.scroll = 0
+		} else if p.searching {
+			p.searchText += "a"
 		}
 	case "1":
 		if !p.searching {
@@ -308,6 +362,53 @@ func (p *LogsPanel) cycleFilter() {
 		}
 	}
 	p.filterMode = filterNoNoise
+}
+
+// cycleVerdictAction advances the action-chip filter for the
+// Verdicts source. Not intended to be invoked on other sources —
+// handleKey gates that — so the action field on non-verdict rows
+// stays unused.
+func (p *LogsPanel) cycleVerdictAction() {
+	for i, action := range verdictActionFilters {
+		if action == p.verdictAction {
+			next := (i + 1) % len(verdictActionFilters)
+			p.verdictAction = verdictActionFilters[next]
+			return
+		}
+	}
+	p.verdictAction = verdictActionFilters[0]
+}
+
+// SelectedVerdict returns the structured event under the current
+// cursor in the Verdicts tab, or nil if the tab is not active or
+// the cursor is out of range. Used by the detail modal (Phase 3.2).
+func (p *LogsPanel) SelectedVerdict() *verdictRow {
+	if p.source != logSourceVerdicts {
+		return nil
+	}
+	filtered := p.filteredLines()
+	if len(filtered) == 0 {
+		return nil
+	}
+	// Convert scroll + visible position to the underlying row.
+	// scroll points at the first displayed row; cursor is the
+	// last visible line since the user typically "tails" the
+	// view — pressing Enter should open that most-recent event.
+	idx := p.scroll + p.visibleLines() - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(filtered) {
+		idx = len(filtered) - 1
+	}
+	// Map filtered rendered index back to p.verdicts. Because the
+	// filter is pure (same loop produced both), the indices line
+	// up as long as p.verdicts was built from the same pass.
+	if idx >= len(p.verdicts) {
+		return nil
+	}
+	row := p.verdicts[idx]
+	return &row
 }
 
 // TogglePause toggles the pause state (for mouse clicks).
@@ -426,6 +527,37 @@ func (p *LogsPanel) View() string {
 		b.WriteString("  " + p.theme.KeyHint.Render("search: "+p.searchText))
 	}
 	b.WriteString("\n")
+
+	// Row 2: Verdicts-only action-chip bar. The chip bar is only
+	// rendered on the Verdicts source — on Gateway/Watchdog the
+	// structured action dimension is meaningless and the space is
+	// better used for log content.
+	if p.source == logSourceVerdicts {
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("action:"))
+		b.WriteString("  ")
+		for _, action := range verdictActionFilters {
+			label := verdictActionLabels[action]
+			text := fmt.Sprintf(" %s ", label)
+			if action == p.verdictAction {
+				badge := lipgloss.NewStyle().
+					Background(lipgloss.Color("62")).
+					Foreground(lipgloss.Color("230")).
+					Bold(true).
+					Render(text)
+				b.WriteString(badge)
+			} else {
+				badge := lipgloss.NewStyle().
+					Background(lipgloss.Color("237")).
+					Foreground(lipgloss.Color("252")).
+					Render(text)
+				b.WriteString(badge)
+			}
+			b.WriteString(" ")
+		}
+		b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("(press 'a' to cycle)"))
+		b.WriteString("\n")
+	}
 
 	// Separator
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", p.width)))
@@ -623,4 +755,173 @@ func (p *LogsPanel) loadFile(source int, path string) {
 		lines = lines[len(lines)-maxLines:]
 	}
 	p.lines[source] = lines
+}
+
+// loadVerdicts tails gateway.jsonl and parses each structured
+// event into a typed verdictRow. Non-JSON lines (shouldn't happen
+// on the JSONL stream, but the writer may roll mid-line during
+// rotation) are silently dropped — the errMsgs slot would flap
+// for operators otherwise.
+//
+// Rendered lines go into p.lines[logSourceVerdicts] so the
+// existing scroll/search machinery works unchanged; verdictRow
+// keeps the parsed shape for the action-chip filter + future
+// detail pane.
+func (p *LogsPanel) loadVerdicts(path string) {
+	const maxBytes = 512 * 1024
+	f, err := os.Open(path)
+	if err != nil {
+		p.errMsgs[logSourceVerdicts] = fmt.Sprintf("Cannot open: %v", err)
+		p.lines[logSourceVerdicts] = nil
+		p.verdicts = nil
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		p.errMsgs[logSourceVerdicts] = fmt.Sprintf("Cannot stat: %v", err)
+		return
+	}
+	p.errMsgs[logSourceVerdicts] = ""
+	size := info.Size()
+	readSize := size
+	if readSize > maxBytes {
+		readSize = maxBytes
+	}
+	offset := size - readSize
+	buf := make([]byte, readSize)
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && n == 0 {
+		return
+	}
+	buf = buf[:n]
+
+	if offset > 0 {
+		if idx := strings.IndexByte(string(buf), '\n'); idx >= 0 {
+			buf = buf[idx+1:]
+		}
+	}
+
+	rawLines := strings.Split(string(buf), "\n")
+	const maxLines = 2000
+	if len(rawLines) > maxLines {
+		rawLines = rawLines[len(rawLines)-maxLines:]
+	}
+
+	rows := make([]verdictRow, 0, len(rawLines))
+	rendered := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		row, ok := parseVerdictRow(line)
+		if !ok {
+			continue
+		}
+		if p.verdictAction != "" && row.action != p.verdictAction && row.eventType == "verdict" {
+			continue
+		}
+		rows = append(rows, row)
+		rendered = append(rendered, renderVerdictLine(row))
+	}
+	p.verdicts = rows
+	p.lines[logSourceVerdicts] = rendered
+}
+
+// parseVerdictRow extracts the typed fields we care about from a
+// single gateway.jsonl line. Kept permissive — missing fields just
+// become empty strings so row rendering degrades gracefully
+// instead of dropping the record.
+func parseVerdictRow(line string) (verdictRow, bool) {
+	var raw struct {
+		Timestamp time.Time `json:"ts"`
+		EventType string    `json:"event_type"`
+		Severity  string    `json:"severity"`
+		Model     string    `json:"model"`
+		Direction string    `json:"direction"`
+		Verdict   *struct {
+			Stage  string `json:"stage"`
+			Action string `json:"action"`
+			Reason string `json:"reason"`
+		} `json:"verdict"`
+		Judge *struct {
+			Kind    string `json:"kind"`
+			Action  string `json:"action"`
+			Latency int64  `json:"latency_ms"`
+		} `json:"judge"`
+	}
+	if err := jsonUnmarshal([]byte(line), &raw); err != nil {
+		return verdictRow{}, false
+	}
+	row := verdictRow{
+		raw:       line,
+		timestamp: raw.Timestamp,
+		severity:  raw.Severity,
+		model:     raw.Model,
+		direction: raw.Direction,
+		eventType: raw.EventType,
+	}
+	if raw.Verdict != nil {
+		row.stage = raw.Verdict.Stage
+		row.action = raw.Verdict.Action
+		row.reason = raw.Verdict.Reason
+	}
+	if raw.Judge != nil {
+		row.kind = raw.Judge.Kind
+		if row.action == "" {
+			row.action = raw.Judge.Action
+		}
+	}
+	return row, true
+}
+
+// renderVerdictLine produces the compact single-line view of a
+// structured event. Kept intentionally close to the pretty writer
+// format in internal/gatewaylog/pretty.go so operators see the
+// same shape whether they're tailing stderr or the TUI.
+func renderVerdictLine(r verdictRow) string {
+	ts := r.timestamp.Format("15:04:05.000")
+	switch r.eventType {
+	case "verdict":
+		return fmt.Sprintf("%s VERDICT %-7s %-5s %-10s %s %s -- %s",
+			ts,
+			strings.ToUpper(nonEmpty(r.action, "none")),
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.stage, "-"),
+			nonEmpty(r.direction, "-"),
+			nonEmpty(r.model, "-"),
+			truncateVerdictReason(r.reason, 120),
+		)
+	case "judge":
+		return fmt.Sprintf("%s JUDGE   %-7s %-5s kind=%s dir=%s model=%s",
+			ts,
+			strings.ToUpper(nonEmpty(r.action, "none")),
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.kind, "-"),
+			nonEmpty(r.direction, "-"),
+			nonEmpty(r.model, "-"),
+		)
+	case "lifecycle":
+		return fmt.Sprintf("%s LIFECYCLE %s", ts, r.raw)
+	case "error":
+		return fmt.Sprintf("%s ERROR   %s", ts, r.raw)
+	default:
+		return fmt.Sprintf("%s %-9s %s", ts, strings.ToUpper(nonEmpty(r.eventType, "event")), r.raw)
+	}
+}
+
+func truncateVerdictReason(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
+}
+
+func nonEmpty(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -139,6 +140,72 @@ func TestDeriveSeverity(t *testing.T) {
 				t.Fatalf("deriveSeverity(%q) = %q; want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEmitEvent_RedactsVerdictReasonAndJudgeBody is the sink-barrier
+// guarantee for the JSONL pipeline. Callers may forget to scrub
+// their own strings, but emitEvent is the single chokepoint before
+// anything is persisted, fanned out to OTel, or flushed to Splunk —
+// so this test pins the invariant that literal secrets never leave
+// here. Rule IDs and canonical IDs must still pass through, because
+// they drive operator drill-down.
+func TestEmitEvent_RedactsVerdictReasonAndJudgeBody(t *testing.T) {
+	events := withCapturedEvents(t)
+
+	secret := "sk-ant-api03-abcdefghij1234567890abcdefghij"
+	emitVerdict(
+		"regex",
+		gatewaylog.Direction("inbound"),
+		"claude-3-5-sonnet",
+		"block",
+		"SEC-ANTHROPIC:"+secret,
+		gatewaylog.SeverityHigh,
+		[]string{"secret:anthropic"},
+		42,
+	)
+	emitJudge(
+		"injection",
+		"claude-3-5-sonnet",
+		gatewaylog.Direction("inbound"),
+		128,
+		17,
+		"block",
+		gatewaylog.SeverityHigh,
+		"",
+		"the model echoed "+secret+" back verbatim",
+	)
+
+	if len(*events) < 2 {
+		t.Fatalf("expected >=2 events, got %d: %+v", len(*events), *events)
+	}
+
+	var sawVerdict, sawJudge bool
+	for _, e := range *events {
+		switch e.EventType {
+		case gatewaylog.EventVerdict:
+			sawVerdict = true
+			if e.Verdict == nil {
+				t.Fatalf("verdict payload missing")
+			}
+			if strings.Contains(e.Verdict.Reason, secret) {
+				t.Fatalf("verdict leaked secret: %q", e.Verdict.Reason)
+			}
+			if !strings.Contains(e.Verdict.Reason, "SEC-ANTHROPIC") {
+				t.Fatalf("verdict dropped rule id: %q", e.Verdict.Reason)
+			}
+		case gatewaylog.EventJudge:
+			sawJudge = true
+			if e.Judge == nil {
+				t.Fatalf("judge payload missing")
+			}
+			if strings.Contains(e.Judge.RawResponse, secret) {
+				t.Fatalf("judge leaked secret: %q", e.Judge.RawResponse)
+			}
+		}
+	}
+	if !sawVerdict || !sawJudge {
+		t.Fatalf("expected both verdict+judge events (saw verdict=%v judge=%v)", sawVerdict, sawJudge)
 	}
 }
 

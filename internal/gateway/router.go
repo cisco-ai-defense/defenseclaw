@@ -29,7 +29,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -241,8 +243,11 @@ type sessionToolData struct {
 func (r *EventRouter) handleSessionTool(evt EventFrame) {
 	var payload SessionToolPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		// The raw payload is event JSON that failed to parse.
+		// It frequently carries verbatim user text, tool args,
+		// or tool results, so redact before printing.
 		readLoopLogf("[bifrost] session.tool parse error: %v (raw=%s)",
-			err, truncate(string(evt.Payload), 200))
+			err, redaction.MessageContent(truncate(string(evt.Payload), 200)))
 		return
 	}
 
@@ -388,14 +393,24 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				contentStr = string(msg.Content)
 			}
 		}
-		contentPreview := truncate(contentStr, 120)
+		// contentStr is a verbatim message body from an LLM
+		// session. The full length is preserved in the log
+		// metadata so operators can still tell at a glance
+		// whether the payload was truncated by the caller; only
+		// the preview is masked when Reveal is off.
+		contentPreview := truncate(redaction.MessageContent(contentStr), 120)
 
 		readLoopLogf("[bifrost] session.message: role=%s msgId=%s seq=%d session=%s content=(%d chars) %q",
 			msg.Role, envelope.MessageID, envelope.MessageSeq, envelope.SessionKey, len(contentStr), contentPreview)
 
 		if msg.StopReason == "error" || msg.ErrorMessage != "" {
+			// Provider error messages have repeatedly shipped
+			// echoed user prompts ("rate limit: request was
+			// ... <prompt fragment>") and upstream API keys
+			// in credential-invalid paths. Redact before
+			// hitting stderr.
 			readLoopLogf("[bifrost] session.message ERROR: stopReason=%s error=%q provider=%s model=%s",
-				msg.StopReason, msg.ErrorMessage, msg.Provider, msg.Model)
+				msg.StopReason, redaction.MessageContent(msg.ErrorMessage), msg.Provider, msg.Model)
 		}
 
 		// Emit LLM span for assistant messages with a known model.
@@ -450,6 +465,9 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")
+				emitVerdict("multi-turn", "prompt", "",
+					"alert", "repeated injection patterns across user turns",
+					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
 				if r.otel != nil {
 					r.otel.EmitRuntimeAlert(
 						telemetry.AlertToolCallFlagged, "HIGH", telemetry.SourceLocalPattern,
@@ -514,10 +532,21 @@ func (r *EventRouter) handleChatEvent(evt EventFrame, seqStr string) {
 	readLoopLogf("[bifrost] chat: state=%s session=%s runId=%s seq=%d",
 		ce.State, ce.SessionKey, ce.RunID, ce.Seq)
 	if ce.State == "error" {
+		// Chat error messages follow the same leak profile as
+		// session.message errors: upstream text frequently
+		// includes echoed prompt snippets. Scrub operator-
+		// facing stderr and the persistent audit detail.
+		// audit.Logger also scrubs again via sanitizeEvent so
+		// this is belt-and-braces defense in depth.
+		scrubbedErr := redaction.MessageContent(ce.ErrorMessage)
 		readLoopLogf("[bifrost] chat ERROR: %q session=%s runId=%s",
-			ce.ErrorMessage, ce.SessionKey, ce.RunID)
+			scrubbedErr, ce.SessionKey, ce.RunID)
 		_ = r.logger.LogAction("gateway-chat-error", ce.SessionKey,
-			fmt.Sprintf("runId=%s error=%s", ce.RunID, truncate(ce.ErrorMessage, 200)))
+			fmt.Sprintf("runId=%s error=%s", ce.RunID,
+				truncate(redaction.ForSinkString(ce.ErrorMessage), 200)))
+		emitError("chat", "chat-error",
+			fmt.Sprintf("runId=%s session=%s", ce.RunID, ce.SessionKey),
+			fmt.Errorf("%s", redaction.ForSinkString(ce.ErrorMessage)))
 	}
 }
 
@@ -690,9 +719,19 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 			}
 
 		case "error":
-			readLoopLogf("[bifrost] agent lifecycle ERROR runId=%s error=%q", se.RunID, data.Error)
+			// Agent lifecycle error messages are upstream LLM /
+			// framework errors. Same leak profile as chat
+			// errors — may quote user prompts or inner
+			// model-graph state. Scrub for stderr, audit, and
+			// the OTel span tag.
+			scrubbedErr := redaction.MessageContent(data.Error)
+			readLoopLogf("[bifrost] agent lifecycle ERROR runId=%s error=%q", se.RunID, scrubbedErr)
 			_ = r.logger.LogAction("gateway-agent-error", se.SessionKey,
-				fmt.Sprintf("runId=%s error=%s", se.RunID, truncate(data.Error, 200)))
+				fmt.Sprintf("runId=%s error=%s", se.RunID,
+					truncate(redaction.ForSinkString(data.Error), 200)))
+			emitError("agent", "agent-error",
+				fmt.Sprintf("runId=%s session=%s", se.RunID, se.SessionKey),
+				fmt.Errorf("%s", redaction.ForSinkString(data.Error)))
 
 			// End invoke_agent span with error.
 			if r.otel != nil && se.RunID != "" {
@@ -701,7 +740,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
 					delete(r.activeAgentSpans, se.RunID)
 					r.spanMu.Unlock()
-					r.otel.EndAgentSpan(aa.span, truncate(data.Error, 256))
+					r.otel.EndAgentSpan(aa.span, truncate(redaction.ForSinkString(data.Error), 256))
 				} else {
 					r.spanMu.Unlock()
 				}
@@ -769,6 +808,9 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
 			_ = r.logger.LogAction("gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
+			emitVerdict("policy", "tool_call", payload.Tool,
+				"block", "static block list",
+				gatewaylog.SeverityHigh, []string{"policy:block"}, 0)
 			if r.otel != nil {
 				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
 			}
@@ -812,11 +854,19 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			defer cancel()
 			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
 			if verdict.Severity != "NONE" {
+				// Judge verdict reasons are LLM-authored prose
+				// that frequently quote the offending argument
+				// back verbatim ("Tool call uses user email
+				// alice@example.com without consent"). Scrub
+				// the stderr emission and the audit detail
+				// so the quoted literal never reaches a
+				// persistent sink.
 				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
-					tool, verdict.Severity, verdict.Reason)
+					tool, verdict.Severity, redaction.Reason(verdict.Reason))
 				_ = r.logger.LogAction("gateway-tool-call-judge-flagged", tool,
 					fmt.Sprintf("severity=%s findings=%d reason=%s",
-						verdict.Severity, len(verdict.Findings), verdict.Reason))
+						verdict.Severity, len(verdict.Findings),
+						redaction.ForSinkReason(verdict.Reason)))
 				if r.otel != nil {
 					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
 				}
@@ -948,19 +998,33 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 		return
 	}
 
+	// verdict.Findings are finding strings minted from PII
+	// matches in the tool output (e.g. "email:alice@corp.com",
+	// "SSN:123-45-6789"). These absolutely cannot escape
+	// unredacted. verdict.Reason is LLM-judge prose and gets the
+	// same treatment.
+	scrubbedFindings := make([]string, len(verdict.Findings))
+	for i, f := range verdict.Findings {
+		scrubbedFindings[i] = redaction.Reason(f)
+	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
-		payload.Tool, verdict.Action, verdict.Severity, entityCount, verdict.Findings)
+		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
 	_ = r.logger.LogAction("tool-result-pii-alert", payload.Tool,
 		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
-			verdict.Severity, entityCount, len(verdict.Findings), verdict.Reason))
+			verdict.Severity, entityCount, len(verdict.Findings),
+			redaction.ForSinkReason(verdict.Reason)))
 	if r.notify != nil {
+		// SecurityNotification ultimately surfaces in the TUI
+		// and any webhook alert, both of which are operator-
+		// visible but must not leak literals. Scrub the Reason
+		// at the emit site. Findings count is already numeric.
 		r.notify.Push(SecurityNotification{
 			SubjectType: "tool-result",
 			SkillName:   payload.Tool,
 			Severity:    verdict.Severity,
 			Findings:    entityCount,
 			Actions:     []string{"alert"},
-			Reason:      verdict.Reason,
+			Reason:      redaction.ForSinkReason(verdict.Reason),
 		})
 	}
 }
@@ -1009,6 +1073,9 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	if dangerous {
 		_ = r.logger.LogAction("gateway-approval-denied", payload.ID,
 			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
+		emitVerdict("approval", "exec", cmdName,
+			"block", fmt.Sprintf("%s: %s", topFinding.RuleID, topFinding.Title),
+			deriveSeverity(topFinding.Severity), []string{"approval:denied"}, 0)
 		fmt.Fprintf(os.Stderr, "[sidecar] DENIED exec approval: %s (%s)\n", cmdName, topFinding.Title)
 
 		if r.otel != nil {

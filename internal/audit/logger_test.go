@@ -19,11 +19,13 @@ package audit
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // captureSink is an in-memory sinks.Sink that records every event
@@ -331,7 +333,201 @@ func TestLoggerLogEventSinkForwarding(t *testing.T) {
 	}
 }
 
-// NOTE: TestLoggerRedactsPIIBeforeSink and TestLoggerSinkBypassesRevealFlag
-// were removed alongside the internal/redaction scrubbing layer. PII
-// redaction will be reintroduced in a follow-up PR that lives in the
-// sink layer (see docs/OBSERVABILITY.md migration note).
+// TestLoggerRedactsPIIBeforeSink asserts the redaction invariant for
+// the audit fan-out path: free-form Details strings with phone
+// numbers, emails, or SSNs never reach the sink channel or SQLite in
+// plaintext, regardless of which Log* entrypoint the caller used.
+//
+// Any of these leaking to a persistent sink is an incident, so the
+// test brackets every Log* method rather than trusting transitive
+// coverage.
+func TestLoggerRedactsPIIBeforeSink(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	cases := []struct {
+		name   string
+		record func() error
+		pii    []string
+	}{
+		{
+			name: "LogAction phone in details",
+			record: func() error {
+				return logger.LogAction("tool-call", "sms-tool",
+					"args.recipient=4155551234")
+			},
+			pii: []string{"4155551234"},
+		},
+		{
+			name: "LogActionWithTrace email in details",
+			record: func() error {
+				return logger.LogActionWithTrace("skill-install", "contacts",
+					"user=alice@example.com", "trace-xyz")
+			},
+			pii: []string{"alice@example.com"},
+		},
+		{
+			name: "LogEvent SSN in details",
+			record: func() error {
+				return logger.LogEvent(Event{
+					Action:   "tool-call",
+					Target:   "ssn-lookup",
+					Details:  "args.ssn=123-45-6789",
+					Severity: "HIGH",
+				})
+			},
+			pii: []string{"123-45-6789"},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(cs.snapshot())
+			if err := tc.record(); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			snap := cs.snapshot()
+			if len(snap) <= before {
+				t.Fatalf("expected new sink event; got %d total", len(snap))
+			}
+			sinkEvt := snap[len(snap)-1]
+			for _, needle := range tc.pii {
+				if strings.Contains(sinkEvt.Details, needle) {
+					t.Fatalf("sink leaked PII %q in Details=%q",
+						needle, sinkEvt.Details)
+				}
+			}
+
+			// SQLite leg: ListEvents pulls the row we just inserted;
+			// its Details must also be redacted.
+			events, err := store.ListEvents(32)
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			// ListEvents returns newest first.
+			for _, needle := range tc.pii {
+				if strings.Contains(events[0].Details, needle) {
+					t.Fatalf("SQLite leaked PII %q in Details=%q",
+						needle, events[0].Details)
+				}
+			}
+		})
+	}
+}
+
+// TestLoggerSinkBypassesRevealFlag confirms that persistent sinks
+// remain fully redacted even when the operator has set
+// DEFENSECLAW_REVEAL_PII=1 on the host for triage. The reveal flag
+// is strictly scoped to stderr/TUI; the audit store, audit sinks,
+// and OTel exporters must never unmask.
+func TestLoggerSinkBypassesRevealFlag(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	if err := logger.LogAction("tool-call", "sms-tool",
+		"args.recipient=4155551234"); err != nil {
+		t.Fatalf("LogAction: %v", err)
+	}
+
+	snap := cs.snapshot()
+	if len(snap) == 0 {
+		t.Fatal("no sink event")
+	}
+	if strings.Contains(snap[0].Details, "4155551234") {
+		t.Fatalf("sink unmasked under reveal flag: %q", snap[0].Details)
+	}
+
+	events, _ := store.ListEvents(10)
+	if len(events) > 0 && strings.Contains(events[0].Details, "4155551234") {
+		t.Fatalf("SQLite unmasked under reveal flag: %q", events[0].Details)
+	}
+}
+
+// TestLoggerRedactsFindingFieldsBeforeSQLite covers the scan-result
+// path: a Finding whose Description/Location/Remediation contain PII
+// must reach SQLite only as "<redacted ...>" placeholders. The
+// finding title is authored from static rule metadata so it stays
+// verbatim.
+func TestLoggerRedactsFindingFieldsBeforeSQLite(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	result := &scanner.ScanResult{
+		Scanner:   "clawshield-pii",
+		Target:    "test-skill",
+		Timestamp: time.Now(),
+		Duration:  time.Millisecond,
+		Findings: []scanner.Finding{
+			{
+				Severity:    scanner.SeverityHigh,
+				Title:       "PII detected",
+				Description: "detected SSN 123-45-6789 in payload",
+				Location:    "/home/alice@example.com/skill.py:42",
+				Remediation: "contact 4155551234 before removing",
+				Scanner:     "clawshield-pii",
+			},
+		},
+	}
+	if err := logger.LogScan(result); err != nil {
+		t.Fatalf("LogScan: %v", err)
+	}
+
+	scans, err := store.ListScanResults(10)
+	if err != nil {
+		t.Fatalf("ListScanResults: %v", err)
+	}
+	if len(scans) == 0 {
+		t.Fatal("expected a scan row")
+	}
+	findings, err := store.ListFindingsByScan(scans[0].ID)
+	if err != nil {
+		t.Fatalf("ListFindingsByScan: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected a finding row")
+	}
+	f := findings[0]
+	for _, needle := range []string{"123-45-6789", "4155551234", "alice@example.com"} {
+		if strings.Contains(f.Description, needle) ||
+			strings.Contains(f.Location, needle) ||
+			strings.Contains(f.Remediation, needle) {
+			t.Fatalf("SQLite finding leaked %q: desc=%q loc=%q rem=%q",
+				needle, f.Description, f.Location, f.Remediation)
+		}
+	}
+	if f.Title != "PII detected" {
+		t.Fatalf("Title should be preserved verbatim; got %q", f.Title)
+	}
+}

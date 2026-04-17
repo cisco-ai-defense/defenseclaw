@@ -74,6 +74,17 @@ type metricsSet struct {
 	policyEvaluations metric.Int64Counter
 	policyLatency     metric.Float64Histogram
 	policyReloads     metric.Int64Counter
+
+	// Structured gateway event metrics (Phase 2.4). These derive
+	// entirely from gatewaylog.Event envelopes so the writer's
+	// fanout drives the whole pipeline — callers never touch the
+	// meter directly.
+	verdictsTotal     metric.Int64Counter
+	judgeInvocations  metric.Int64Counter
+	judgeLatency      metric.Float64Histogram
+	judgeErrors       metric.Int64Counter
+	gatewayErrors     metric.Int64Counter
+	sinkSendFailures  metric.Int64Counter
 }
 
 func newMetricsSet(m metric.Meter) (*metricsSet, error) {
@@ -276,6 +287,43 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.policyReloads, err = m.Int64Counter("defenseclaw.policy.reloads",
 		metric.WithUnit("{reload}"),
 		metric.WithDescription("Total OPA policy reload events"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.verdictsTotal, err = m.Int64Counter("defenseclaw.gateway.verdicts",
+		metric.WithUnit("{verdict}"),
+		metric.WithDescription("Guardrail verdicts emitted per stage/action/severity"))
+	if err != nil {
+		return nil, err
+	}
+	ms.judgeInvocations, err = m.Int64Counter("defenseclaw.gateway.judge.invocations",
+		metric.WithUnit("{invocation}"),
+		metric.WithDescription("LLM judge invocations by kind/action"))
+	if err != nil {
+		return nil, err
+	}
+	ms.judgeLatency, err = m.Float64Histogram("defenseclaw.gateway.judge.latency",
+		metric.WithUnit("ms"),
+		metric.WithDescription("LLM judge invocation latency"))
+	if err != nil {
+		return nil, err
+	}
+	ms.judgeErrors, err = m.Int64Counter("defenseclaw.gateway.judge.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("LLM judge errors (provider, parse, or empty response)"))
+	if err != nil {
+		return nil, err
+	}
+	ms.gatewayErrors, err = m.Int64Counter("defenseclaw.gateway.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Structured gateway errors by subsystem/code"))
+	if err != nil {
+		return nil, err
+	}
+	ms.sinkSendFailures, err = m.Int64Counter("defenseclaw.audit.sink.failures",
+		metric.WithUnit("{failure}"),
+		metric.WithDescription("Audit sink send failures by sink kind"))
 	if err != nil {
 		return nil, err
 	}
@@ -583,4 +631,20 @@ func (p *Provider) RecordPolicyReload(ctx context.Context, status string) {
 	p.metrics.policyReloads.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("policy.status", status),
 	))
+}
+
+// RecordSinkFailure is called by audit-sink implementations when a
+// send attempt fails permanently (after retries). Kept on Provider
+// so sinks can reuse the shared meter without each sink building
+// its own.
+func (p *Provider) RecordSinkFailure(sinkKind, sinkName, reason string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.sinkSendFailures.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("sink.kind", sinkKind),
+			attribute.String("sink.name", sinkName),
+			attribute.String("sink.reason", reason),
+		))
 }

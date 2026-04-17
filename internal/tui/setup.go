@@ -18,6 +18,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -247,9 +248,15 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled)},
 			{Label: "Protocol", Key: "otel.protocol", Kind: "string", Value: c.OTel.Protocol},
 			{Label: "Endpoint", Key: "otel.endpoint", Kind: "string", Value: c.OTel.Endpoint},
+			{Label: "TLS Insecure", Key: "otel.tls.insecure", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.TLS.Insecure)},
+			{Label: "TLS CA Cert", Key: "otel.tls.ca_cert", Kind: "string", Value: c.OTel.TLS.CACert},
 			{Label: "Traces Enabled", Key: "otel.traces.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Traces.Enabled)},
+			{Label: "Traces Endpoint", Key: "otel.traces.endpoint", Kind: "string", Value: c.OTel.Traces.Endpoint},
 			{Label: "Logs Enabled", Key: "otel.logs.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.Enabled)},
+			{Label: "Logs Endpoint", Key: "otel.logs.endpoint", Kind: "string", Value: c.OTel.Logs.Endpoint},
 			{Label: "Metrics Enabled", Key: "otel.metrics.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Metrics.Enabled)},
+			{Label: "Metrics Endpoint", Key: "otel.metrics.endpoint", Kind: "string", Value: c.OTel.Metrics.Endpoint},
+			{Label: "Headers (read-only)", Key: "otel.headers.summary", Kind: "header", Value: fmtOTelHeaders(c.OTel.Headers)},
 		}},
 		{Name: "Watch", Fields: []configField{
 			{Label: "Debounce MS", Key: "watch.debounce_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.DebounceMs)},
@@ -1483,20 +1490,48 @@ func (p *SetupPanel) renderConfigEditor() string {
 	return b.String()
 }
 
+// fmtOTelHeaders renders the OTel headers map as a single summary
+// line. Values are shown redacted — header values commonly carry
+// tenant/bearer tokens that must not be splatted across a TUI
+// snapshot that could end up in a screen recording or bug report.
+func fmtOTelHeaders(h map[string]string) string {
+	if len(h) == 0 {
+		return "(none)"
+	}
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ") + "  (values redacted)"
+}
+
 // auditSinkSummaryFields renders one read-only row per declared audit
 // sink. The single-key configField form cannot represent the
 // audit_sinks[] schema (per-sink kind, filter, kind-specific block),
 // so this view shows a summary and "no sinks configured" when empty.
 func auditSinkSummaryFields(c *config.Config) []configField {
-	if len(c.AuditSinks) == 0 {
-		return []configField{{
-			Label: "Status",
-			Key:   "audit_sinks.summary",
-			Kind:  "header",
-			Value: "no sinks configured",
-		}}
+	// Always end with an edit-hint pointing operators to the YAML
+	// path — in-TUI CRUD for nested list schemas is an explicit
+	// non-goal for v1 and documented in docs/OBSERVABILITY.md.
+	hint := configField{
+		Label: "How to edit",
+		Key:   "audit_sinks.hint",
+		Kind:  "header",
+		Value: "edit ~/.defenseclaw/config.yaml -> audit_sinks: (see docs/OBSERVABILITY.md)",
 	}
-	out := make([]configField, 0, len(c.AuditSinks))
+	if len(c.AuditSinks) == 0 {
+		return []configField{
+			{
+				Label: "Status",
+				Key:   "audit_sinks.summary",
+				Kind:  "header",
+				Value: "no sinks configured",
+			},
+			hint,
+		}
+	}
+	out := make([]configField, 0, len(c.AuditSinks)+1)
 	for _, s := range c.AuditSinks {
 		state := "enabled"
 		if !s.Enabled {
@@ -1524,5 +1559,6 @@ func auditSinkSummaryFields(c *config.Config) []configField {
 			Value: summary,
 		})
 	}
+	out = append(out, hint)
 	return out
 }

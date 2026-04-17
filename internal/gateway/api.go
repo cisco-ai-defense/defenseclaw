@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -1190,13 +1191,23 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
 
+	// Both Reason and Findings are composed upstream by the
+	// guardrail proxy and routinely embed the matched literal
+	// in RULE-ID:description form. Redact both for the
+	// operator-facing stderr lines (Reveal flag can unmask
+	// locally if needed); rule IDs survive intact.
+	redactedReason := redaction.Reason(req.Reason)
+	redactedFindings := make([]string, len(req.Findings))
+	for i, f := range req.Findings {
+		redactedFindings[i] = redaction.Reason(f)
+	}
 	switch req.Action {
 	case "block":
 		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s: model=%s severity=%s reason=%q findings=%v\n",
-			req.Direction, req.Model, req.Severity, req.Reason, req.Findings)
+			req.Direction, req.Model, req.Severity, redactedReason, redactedFindings)
 	case "alert":
 		fmt.Fprintf(os.Stderr, "[guardrail] ALERT %s: model=%s severity=%s reason=%q findings=%v\n",
-			req.Direction, req.Model, req.Severity, req.Reason, req.Findings)
+			req.Direction, req.Model, req.Severity, redactedReason, redactedFindings)
 	default:
 		fmt.Fprintf(os.Stderr, "[guardrail] OK %s: model=%s severity=%s elapsed=%.0fms\n",
 			req.Direction, req.Model, req.Severity, req.ElapsedMs)
@@ -1293,7 +1304,8 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] evaluate <<< action=%s severity=%s sources=%v reason=%q\n",
-		out.Action, out.Severity, out.ScannerSources, truncate(out.Reason, 120))
+		out.Action, out.Severity, out.ScannerSources,
+		redaction.Reason(truncate(out.Reason, 120)))
 
 	if a.logger != nil {
 		_ = a.logger.LogAction("guardrail-opa-verdict", req.Model, details)
@@ -1862,6 +1874,10 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	if a.logger != nil {
 		_ = a.logger.LogAction("policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
 	}
+	emitLifecycle("policy", "reload", map[string]string{
+		"policy_dir": a.scannerCfg.PolicyDir,
+		"source":     "api",
+	})
 
 	a.writeJSON(w, http.StatusOK, map[string]string{
 		"status":     "reloaded",

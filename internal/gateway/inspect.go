@@ -26,9 +26,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
+
+// revealHeader is the HTTP header callers set to opt into receiving
+// un-redacted finding evidence in the /inspect response body. Every
+// request that sets this header is audit-logged with the caller's
+// remote address so operators have a trail of who requested raw PII.
+//
+// Any value other than the exact string "1" is treated as not set;
+// this keeps operator fat-fingers (e.g. "true", "yes") from silently
+// flipping the switch — the header is an escape hatch, not a mode.
+const revealHeader = "X-DefenseClaw-Reveal-PII"
+
+// wantsReveal reports whether the caller has opted into raw PII in
+// the HTTP response. Returning true causes the handler to:
+//   - emit DetailedFindings with their original Evidence strings,
+//   - emit verdict.Reason with the original matched literals,
+//   - log an audit event tagged "inspect-reveal" so the choice is
+//     discoverable by compliance review.
+//
+// The persistent-sink invariant is unaffected: SQLite, OTel, and
+// webhook payloads still receive redacted content even when a
+// caller supplies the header, because those paths don't consult
+// this flag.
+func wantsReveal(r *http.Request) bool {
+	return r.Header.Get(revealHeader) == "1"
+}
 
 // ToolInspectRequest is the payload for POST /api/v1/inspect/tool.
 // A single endpoint handles both general tool policy checks and message
@@ -224,8 +250,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stderr is operator-facing: honor the Reveal flag via the
+	// Reveal-aware String/MessageContent helpers. Args are
+	// MessageContent-shaped (raw tool inputs, often containing the
+	// offending value), Content is exactly an LLM message body.
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
-		req.Tool, string(req.Args), len(req.Content), req.Direction)
+		req.Tool, redaction.MessageContent(string(req.Args)), len(req.Content), req.Direction)
 
 	t0 := time.Now()
 
@@ -248,16 +278,23 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(t0)
 
+	// verdict.Reason is composed as "matched: <rule-id>:<title>"
+	// which is PII-safe by construction (rule metadata only).
+	// redaction.Reason is a no-op on it because every token passes
+	// the rule-id allow-list — we still route through the helper
+	// so any future reason-building logic that embeds literals
+	// picks up the scrub automatically.
 	fmt.Fprintf(os.Stderr, "[inspect] <<< tool=%q action=%s severity=%s mode=%s confidence=%.2f elapsed=%s reason=%q findings=%v\n",
-		req.Tool, verdict.Action, verdict.Severity, verdict.Mode, verdict.Confidence, elapsed, verdict.Reason, verdict.Findings)
+		req.Tool, verdict.Action, verdict.Severity, verdict.Mode, verdict.Confidence, elapsed,
+		redaction.Reason(verdict.Reason), verdict.Findings)
 
 	switch verdict.Action {
 	case "block":
 		fmt.Fprintf(os.Stderr, "[inspect] BLOCKED tool=%q severity=%s reason=%q\n",
-			req.Tool, verdict.Severity, verdict.Reason)
+			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
 	case "alert":
 		fmt.Fprintf(os.Stderr, "[inspect] ALERT tool=%q severity=%s reason=%q\n",
-			req.Tool, verdict.Severity, verdict.Reason)
+			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
 	}
 
 	var auditAction string
@@ -286,7 +323,45 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 
 	a.emitCodeGuardOTel(&req, verdict, elapsed)
 
-	a.writeJSON(w, http.StatusOK, verdict)
+	// Response-body redaction. By default every Evidence string in
+	// DetailedFindings is replaced with the ForSinkEvidence
+	// placeholder so a caller that simply GETs the verdict and
+	// logs it cannot accidentally echo user PII. Callers who need
+	// raw evidence for triage set X-DefenseClaw-Reveal-PII: 1;
+	// we record that fact in the audit store so every reveal is
+	// discoverable.
+	responseVerdict := verdict.sanitizeForResponse(wantsReveal(r))
+	if wantsReveal(r) {
+		_ = a.logger.LogActionWithTrace("inspect-reveal", req.Tool,
+			fmt.Sprintf("severity=%s remote=%s reason=%s",
+				verdict.Severity, r.RemoteAddr, verdict.Reason),
+			traceID)
+	}
+	a.writeJSON(w, http.StatusOK, responseVerdict)
+}
+
+// sanitizeForResponse returns a copy of v suitable for the HTTP
+// response body. When reveal is false (the default) every Evidence
+// field in DetailedFindings is replaced with the
+// "<redacted-evidence len=... sha=...>" placeholder. Reason is
+// already PII-safe because it is built from static rule metadata.
+//
+// The original verdict is left untouched so the audit log, OTel
+// spans, and any in-process observers still see the full data.
+func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdict {
+	if reveal {
+		return v
+	}
+	cp := *v
+	if len(v.DetailedFindings) == 0 {
+		return &cp
+	}
+	cp.DetailedFindings = make([]RuleFinding, len(v.DetailedFindings))
+	for i, f := range v.DetailedFindings {
+		cp.DetailedFindings[i] = f
+		cp.DetailedFindings[i].Evidence = redaction.ForSinkEvidence(f.Evidence, -1, -1)
+	}
+	return &cp
 }
 
 // emitCodeGuardOTel sends OTel signals when CodeGuard findings are present.

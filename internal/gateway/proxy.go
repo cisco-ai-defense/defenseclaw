@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
@@ -151,6 +152,17 @@ func NewGuardrailProxy(
 		cfg.DetectionStrategyToolCall,
 		cfg.JudgeSweep,
 	)
+	// Wire OTel span emission when telemetry is enabled. The
+	// inspector only sees a closure, so the telemetry dep stays
+	// localized to the proxy wiring layer.
+	if otel != nil && otel.TracesEnabled() {
+		inspector.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
+			ctx, span := otel.StartGuardrailStageSpan(ctx, stage, direction, model)
+			return ctx, func(action, severity, reason string, latencyMs int64) {
+				otel.EndGuardrailStageSpan(span, action, severity, reason, latencyMs)
+			}
+		})
+	}
 
 	masterKey := deriveMasterKey(dataDir)
 	gatewayToken := ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
@@ -224,6 +236,12 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		addr, p.mode, p.cfg.ModelName)
 	_ = p.logger.LogAction("guardrail-start", "",
 		fmt.Sprintf("port=%d mode=%s model=%s", p.cfg.Port, p.mode, p.cfg.ModelName))
+	emitLifecycle("guardrail", "start", map[string]string{
+		"port":  fmt.Sprintf("%d", p.cfg.Port),
+		"mode":  p.mode,
+		"model": p.cfg.ModelName,
+		"addr":  addr,
+	})
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -243,6 +261,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
 		_ = p.logger.LogAction("guardrail-healthy", "", fmt.Sprintf("port=%d", p.cfg.Port))
+		emitLifecycle("guardrail", "ready", map[string]string{
+			"port": fmt.Sprintf("%d", p.cfg.Port),
+		})
 	}
 
 	select {
@@ -571,7 +592,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
 				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
-						initVerdict.Severity, initVerdict.Reason)
+						initVerdict.Severity, redaction.Reason(initVerdict.Reason))
 					p.recordTelemetry("completion", label, initVerdict, 0, nil, nil)
 					preblocked = true
 					return false
@@ -638,7 +659,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 							[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
 						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-								midVerdict.Severity, midVerdict.Reason, lastScanLen+len(chunk))
+								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
 							p.recordTelemetry("completion", label, midVerdict, 0, nil, nil)
 							break
 						}
@@ -993,7 +1014,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		truncateLog(r.Header.Get("Authorization"), 20),
 		truncateLog(r.Header.Get("api-key"), 20),
 		r.Header.Get("X-DC-Target-URL"))
-	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n", len(body), truncateLog(string(body), 2000))
+	// The raw LLM request body frequently contains user prompts
+	// (SSNs, emails, passwords, API keys). Stderr is operator-
+	// facing, so we honor DEFENSECLAW_REVEAL_PII via
+	// redaction.MessageContent: set DEFENSECLAW_REVEAL_PII=1 to
+	// get the raw body back for live debugging. Every persistent
+	// sink (audit store, webhooks, OTel) already redacts further
+	// downstream and never consults this flag.
+	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n",
+		len(body), truncateLog(redaction.MessageContent(string(body)), 2000))
 
 	var req ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -1394,7 +1423,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
-					midVerdict.Severity, midVerdict.Reason)
+					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
 				p.recordTelemetry("completion", aliasModel, midVerdict, 0, nil, nil)
 				streamBlocked = true
 				streamCancel()
@@ -1443,7 +1472,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
-					initVerdict.Severity, initVerdict.Reason)
+					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
 				p.recordTelemetry("completion", aliasModel, initVerdict, 0, nil, nil)
 				streamBlocked = true
 			}
@@ -2081,7 +2110,12 @@ func (p *GuardrailProxy) logPreCall(model string, messages []ChatMessage, verdic
 		ts, model, len(messages), float64(elapsed.Milliseconds()))
 
 	for i, msg := range messages {
-		preview := truncateLog(msg.Content, 500)
+		// Message bodies are verbatim user/assistant text. The
+		// original length is preserved in the log so operators
+		// can still see whether a payload was trimmed by the
+		// caller; only the preview itself is masked when
+		// Reveal is off.
+		preview := truncateLog(redaction.MessageContent(msg.Content), 500)
 		fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars): %s\n", i, msg.Role, len(msg.Content), preview)
 	}
 
@@ -2102,7 +2136,12 @@ func (p *GuardrailProxy) logPostCall(model, content string, verdict *ScanVerdict
 	}
 	fmt.Fprintf(os.Stderr, "\033[92m[%s]\033[0m \033[1mPOST-CALL\033[0m  model=%s%s  \033[2m%.0fms\033[0m\n",
 		ts, model, tokStr, float64(elapsed.Milliseconds()))
-	preview := truncateLog(content, 800)
+	// LLM responses can echo user PII (the model re-emits
+	// personal data verbatim in summaries, translations, etc.)
+	// or surface new secrets authored by the model itself. Both
+	// flows are operator-facing; the Reveal flag gates
+	// unredacted output for live debugging.
+	preview := truncateLog(redaction.MessageContent(content), 800)
 	fmt.Fprintf(os.Stderr, "  response (%d chars): %s\n", len(content), preview)
 
 	logVerdict(severity, action, verdict, elapsed)
@@ -2117,11 +2156,24 @@ func logVerdict(severity, action string, verdict *ScanVerdict, elapsed time.Dura
 	if severity == "NONE" {
 		fmt.Fprintf(os.Stderr, "  verdict: \033[92m%s\033[0m%s\n", severity, scannerStr)
 	} else {
-		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s%s  %s\n", severity, action, scannerStr, verdict.Reason)
+		// verdict.Reason and verdict.Findings originate from
+		// scanners that may include the matched literal
+		// ("detected SSN 123-45-6789", "ghp_abc..."). Run both
+		// through redaction.Reason so rule-IDs pass verbatim
+		// but raw literals are masked unless Reveal is set.
+		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s%s  %s\n",
+			severity, action, scannerStr, redaction.Reason(verdict.Reason))
 		if len(verdict.Findings) > 0 {
-			fmt.Fprintf(os.Stderr, "  findings: %s\n", strings.Join(verdict.Findings, ", "))
+			scrubbed := make([]string, len(verdict.Findings))
+			for i, f := range verdict.Findings {
+				scrubbed[i] = redaction.Reason(f)
+			}
+			fmt.Fprintf(os.Stderr, "  findings: %s\n", strings.Join(scrubbed, ", "))
 		}
 		if len(verdict.ScannerSources) > 0 {
+			// ScannerSources is a fixed enum
+			// (local-pattern, cisco-ai-defense, judge-gpt4,
+			// etc.) — authored metadata only, never PII.
 			fmt.Fprintf(os.Stderr, "  sources: %s\n", strings.Join(verdict.ScannerSources, ", "))
 		}
 	}

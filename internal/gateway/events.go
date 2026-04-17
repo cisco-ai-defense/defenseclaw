@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // gatewayEvents is the process-wide structured event writer. It is
@@ -52,12 +53,44 @@ func EventWriter() *gatewaylog.Writer {
 }
 
 // emitEvent is the low-level helper that all other emitters delegate
-// to. Keeping it in one place means we pick up timestamp defaulting,
-// sev normalization, and future redaction hooks for free.
+// to. It enforces the "gateway.jsonl (and every downstream OTel /
+// Splunk / webhook fan-out) never sees unredacted PII" invariant by
+// scrubbing caller-supplied free-form strings here. Rule IDs and
+// canonical IDs survive (ForSinkReason/ForSinkString preserve the
+// metadata token shape); matched literals are masked with a
+// deterministic hash prefix so operators can still correlate.
 func emitEvent(e gatewaylog.Event) {
 	w := EventWriter()
 	if w == nil {
 		return
+	}
+	if v := e.Verdict; v != nil {
+		v.Reason = redaction.ForSinkReason(v.Reason)
+	}
+	if j := e.Judge; j != nil {
+		// RawResponse routinely echoes the triggering
+		// prompt verbatim — sinks must only ever see the
+		// redacted form. ParseError is short caller-owned
+		// metadata but we redact it too in case a parser
+		// embeds a snippet of the offending body.
+		j.RawResponse = redaction.ForSinkString(j.RawResponse)
+		j.ParseError = redaction.ForSinkString(j.ParseError)
+	}
+	if er := e.Error; er != nil {
+		er.Message = redaction.ForSinkString(er.Message)
+		er.Cause = redaction.ForSinkString(er.Cause)
+	}
+	if d := e.Diagnostic; d != nil && len(d.Fields) > 0 {
+		for k, val := range d.Fields {
+			if s, ok := val.(string); ok {
+				d.Fields[k] = redaction.ForSinkString(s)
+			}
+		}
+	}
+	if l := e.Lifecycle; l != nil && len(l.Details) > 0 {
+		for k, v := range l.Details {
+			l.Details[k] = redaction.ForSinkString(v)
+		}
 	}
 	w.Emit(e)
 }
@@ -150,6 +183,33 @@ func emitError(subsystem, code, message string, cause error) {
 		EventType: gatewaylog.EventError,
 		Severity:  gatewaylog.SeverityHigh,
 		Error:     payload,
+	})
+}
+
+// emitDiagnostic records a structured debug-level event. Use this
+// for request-scoped state transitions that operators may want to
+// replay (e.g. "regex produced N signals, routing to judge") — not
+// for noisy per-byte traces.
+//
+// The gatewaylog.DiagnosticPayload schema uses {Component, Fields}
+// (Fields is an open typed bag). Callers pass a simple string map
+// for ergonomics; we widen it to interface{} here.
+func emitDiagnostic(component, message string, details map[string]string) {
+	var fields map[string]interface{}
+	if len(details) > 0 {
+		fields = make(map[string]interface{}, len(details))
+		for k, v := range details {
+			fields[k] = v
+		}
+	}
+	emitEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventDiagnostic,
+		Severity:  gatewaylog.SeverityInfo,
+		Diagnostic: &gatewaylog.DiagnosticPayload{
+			Component: component,
+			Message:   message,
+			Fields:    fields,
+		},
 	})
 }
 

@@ -43,6 +43,51 @@ func (p *Provider) EmitStartupSpan(ctx context.Context) {
 	span.End()
 }
 
+// StartGuardrailStageSpan begins a span covering one guardrail
+// pipeline stage (regex_only, regex_judge, judge_first, etc.).
+// Callers must End the returned span via EndGuardrailStageSpan —
+// Start/End are split so the inspector can attach the final verdict
+// action/severity/latency once scan+judge+OPA have all resolved.
+//
+// Nil span is safely returned when traces are disabled; consumers
+// can call End on nil spans per the OTel SDK contract.
+func (p *Provider) StartGuardrailStageSpan(ctx context.Context, stage, direction, model string) (context.Context, trace.Span) {
+	if !p.TracesEnabled() {
+		return ctx, nil
+	}
+	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail/%s", stage),
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.guardrail.stage", stage),
+		attribute.String("defenseclaw.guardrail.direction", direction),
+		attribute.String("defenseclaw.guardrail.model", model),
+	)
+	return ctx, span
+}
+
+// EndGuardrailStageSpan attaches the final verdict attributes and
+// closes the span. action=block maps to OTel Error status; anything
+// else is Ok so block-rate can be queried directly from span status
+// in Tempo/Jaeger without a custom filter expression.
+func (p *Provider) EndGuardrailStageSpan(span trace.Span, action, severity, reason string, latencyMs int64) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("defenseclaw.guardrail.action", action),
+		attribute.String("defenseclaw.guardrail.severity", severity),
+		attribute.String("defenseclaw.guardrail.reason", truncateStr(reason, 256)),
+		attribute.Int64("defenseclaw.guardrail.latency_ms", latencyMs),
+	)
+	if action == "block" {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
 // EmitInspectSpan creates a span for a tool/message inspection evaluation.
 func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity string, durationMs float64) string {
 	if !p.TracesEnabled() {

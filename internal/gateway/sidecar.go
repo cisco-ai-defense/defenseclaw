@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -68,6 +69,11 @@ type Sidecar struct {
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, otel *telemetry.Provider) (*Sidecar, error) {
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+
+	// Persist the retention flag before any goroutines start so the
+	// very first judge invocation sees the operator-configured value
+	// (otherwise the default-off atomic would race with early traffic).
+	SetRetainJudgeBodies(cfg.Guardrail.RetainJudgeBodies)
 
 	// In standalone sandbox mode the veth link is point-to-point;
 	// TLS is not needed and OpenClaw serves plain WS.
@@ -136,6 +142,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		alertCancel()
 		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
 	}
+	// Mirror every structured event onto the OTel pipeline so
+	// operators with an OTLP collector already deployed pick up
+	// verdicts / judge latency / errors for free — no extra
+	// config required when telemetry.enabled is true.
+	if otel != nil && otel.Enabled() {
+		events.WithFanout(otel.EmitGatewayEvent)
+	}
 	SetEventWriter(events)
 	emitLifecycle("gateway", "init", map[string]string{
 		"host":         cfg.Gateway.Host,
@@ -167,6 +180,13 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	runID := os.Getenv("DEFENSECLAW_RUN_ID")
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
+	emitLifecycle("sidecar", "start", map[string]string{
+		"run_id":       runID,
+		"auto_approve": fmt.Sprintf("%v", s.cfg.Gateway.AutoApprove),
+		"watcher":      fmt.Sprintf("%v", s.cfg.Gateway.Watcher.Enabled),
+		"api_port":     fmt.Sprintf("%d", s.cfg.Gateway.APIPort),
+		"guardrail":    fmt.Sprintf("%v", s.cfg.Guardrail.Enabled),
+	})
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
 	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" {
@@ -186,11 +206,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.cfg.PolicyDir)
+				emitLifecycle("opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
+				emitError("opa", "compile-failed", "falling back to built-in policies", compileErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
+			emitError("opa", "init-failed", "falling back to built-in policies", err)
 		}
 	}
 
@@ -476,14 +499,27 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
-	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, reason)
+	// The watcher builds `reason` from admission findings; it
+	// can embed the matched literal (e.g. the actual secret
+	// that tripped the scanner). All three downstream
+	// consumers below are externally visible:
+	//   * the enforcement message is injected into the LLM
+	//     system prompt, so leaking the raw literal there
+	//     sends PII straight to the model provider,
+	//   * the in-process NotificationQueue is later
+	//     rendered back into the LLM conversation,
+	//   * the webhook event flows to third-party sinks.
+	// We redact once at the boundary (ForSinkReason keeps
+	// rule IDs, scrubs literals) so every path is safe.
+	safeReason := redaction.ForSinkReason(reason)
+	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, safeReason)
 	notification := SecurityNotification{
 		SubjectType: subjectType,
 		SkillName:   subjectName,
 		Severity:    severity,
 		Findings:    findings,
 		Actions:     actions,
-		Reason:      reason,
+		Reason:      safeReason,
 	}
 	if s.notify != nil {
 		s.notify.Push(notification)
@@ -496,7 +532,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 			Action:    "block",
 			Target:    subjectName,
 			Actor:     "defenseclaw-watcher",
-			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), reason),
+			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), safeReason),
 			Severity:  severity,
 		}
 		s.webhooks.Dispatch(event)

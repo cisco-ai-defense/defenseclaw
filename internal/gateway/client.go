@@ -34,6 +34,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // Client connects to the OpenClaw gateway WebSocket and provides RPC methods
@@ -210,7 +211,12 @@ func (c *Client) waitForChallenge(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("read challenge: %w", err)
 	}
 	if c.debug {
-		fmt.Fprintf(os.Stderr, "[gateway] received frame (%d bytes): %s\n", len(raw), truncateBytes(raw, 300))
+		// Raw frame bytes can echo untrusted content when
+		// the server surfaces errors that include request
+		// bodies. Run the truncated preview through the
+		// message-content redactor before emitting.
+		fmt.Fprintf(os.Stderr, "[gateway] received frame (%d bytes): %s\n",
+			len(raw), redaction.MessageContent(string(truncateBytes(raw, 300))))
 	}
 
 	var frame RawFrame
@@ -291,7 +297,7 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 
 	if c.debug {
 		fmt.Fprintf(os.Stderr, "[gateway] connect response: ok=%v payload=%s\n",
-			resp.OK, truncateBytes(resp.Payload, 500))
+			resp.OK, redaction.MessageContent(string(truncateBytes(resp.Payload, 500))))
 	} else {
 		fmt.Fprintf(os.Stderr, "[gateway] connect response: ok=%v payload_len=%d\n",
 			resp.OK, len(resp.Payload))
@@ -369,8 +375,17 @@ func (c *Client) readLoop() {
 				seqStr = fmt.Sprintf("%d", *evt.Seq)
 			}
 			if c.debug {
+				// Event payloads frequently carry chat
+				// message text, tool args, and agent
+				// errors verbatim. DEFENSECLAW_DEBUG is
+				// an operator opt-in, but the redactor
+				// still scrubs obvious secrets/PII so
+				// accidental capture of these logs
+				// (e.g. tee'd to a shared session) is
+				// safe.
 				readLoopLogf("[gateway] ← event %s seq=%s payload=%s",
-					evt.Event, seqStr, truncateBytes(evt.Payload, 200))
+					evt.Event, seqStr,
+					redaction.MessageContent(string(truncateBytes(evt.Payload, 200))))
 			} else {
 				readLoopLogf("[gateway] ← event %s seq=%s payload_len=%d",
 					evt.Event, seqStr, len(evt.Payload))

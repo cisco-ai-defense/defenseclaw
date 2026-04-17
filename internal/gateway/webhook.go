@@ -37,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/google/uuid"
 )
 
@@ -134,10 +135,20 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 
 // Dispatch sends the event to all matching endpoints asynchronously.
 // Events dispatched after Close are silently dropped.
+//
+// The Details field is redacted here as a last-mile belt-and-braces
+// guarantee: while audit.Logger.forwardToSinks already redacts,
+// several callers (proxy.sendEnforcementAlert, sidecar health alerts,
+// watchdog recovery alerts) build events directly and call Dispatch
+// without going through audit.Logger. Redacting at the webhook
+// boundary makes the PII-safety property hold regardless of the
+// caller's discipline. ForSinkReason is idempotent so the double-
+// redaction case is a no-op.
 func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 	if d == nil || d.closing() {
 		return
 	}
+	event.Details = redaction.ForSinkReason(event.Details)
 	if event.ID == "" {
 		event.ID = uuid.New().String()
 	}

@@ -378,7 +378,7 @@ def _poll_health(cfg, timeout_seconds: int = 60) -> None:
         time.sleep(2)
 
     click.echo(f"  ⚠ Gateway did not become healthy within {timeout_seconds}s", err=True)
-    click.echo("    Check logs: ~/.defenseclaw/gateway.log")
+    click.echo("    Check logs: ~/.defenseclaw/gateway.log (pretty) / ~/.defenseclaw/gateway.jsonl (structured)")
     click.echo("    Run:  defenseclaw-gateway status")
 
 

@@ -26,9 +26,30 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
+
+// sanitizeEvent rewrites free-form, PII-bearing fields on a copy of the
+// supplied event so the version that reaches SQLite, audit sinks, and
+// OTel exporters never carries raw user content.
+//
+// Intentionally applied once at the Logger choke point rather than at
+// every call site: a single invariant ("persistent sinks get
+// redacted events") is easier to audit and impossible to bypass by
+// forgetting a helper. The Reveal flag is not honored here — persistent
+// storage must never unmask.
+//
+// Target (the resource identifier) is preserved because it is usually
+// a stable, non-PII id (skill name, model name, package coordinates).
+// If a caller puts PII there (a user email as the actor, say) it
+// flows through unchanged; the action/details/reason surfaces are
+// where free-form user content historically leaks.
+func sanitizeEvent(e Event) Event {
+	e.Details = redaction.ForSinkReason(e.Details)
+	return e
+}
 
 
 type Logger struct {
@@ -79,9 +100,18 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	for _, f := range result.Findings {
 		tagsJSON, _ := json.Marshal(f.Tags)
 		findingID := uuid.New().String()
+		// Redact free-form finding text before it lands in SQLite.
+		// Description frequently contains the matched literal
+		// (e.g. "detected SSN 123-45-6789"); Location is a file
+		// path that can include usernames; Remediation text is
+		// sometimes templated with the offending value. Title is
+		// authored from static rule metadata and is safe.
+		safeDescription := redaction.ForSinkString(f.Description)
+		safeLocation := redaction.ForSinkString(f.Location)
+		safeRemediation := redaction.ForSinkString(f.Remediation)
 		if err := l.store.InsertFinding(
 			findingID, scanID, string(f.Severity), f.Title,
-			f.Description, f.Location, f.Remediation, f.Scanner,
+			safeDescription, safeLocation, safeRemediation, f.Scanner,
 			string(tagsJSON),
 		); err != nil {
 			if l.otel != nil {
@@ -91,7 +121,7 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 		}
 	}
 
-	event := Event{
+	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    "scan",
@@ -101,7 +131,7 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
 		Severity: string(result.MaxSeverity()),
 		RunID:    currentRunID(),
-	}
+	})
 
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {
@@ -130,7 +160,7 @@ func (l *Logger) LogAction(action, target, details string) error {
 // LogActionWithTrace persists an action event with an OTel trace ID for
 // cross-system correlation between Splunk O11y and Splunk local.
 func (l *Logger) LogActionWithTrace(action, target, details, traceID string) error {
-	event := Event{
+	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
@@ -140,7 +170,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 		Severity:  "INFO",
 		RunID:     currentRunID(),
 		TraceID:   traceID,
-	}
+	})
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {
 			l.otel.RecordAuditDBError(context.Background(), "insert_event")
@@ -164,7 +194,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 // for OTel lifecycle signals. The enforcement map may contain keys:
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
-	event := Event{
+	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
 		Action:    action,
@@ -173,7 +203,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Details:   details,
 		Severity:  "INFO",
 		RunID:     currentRunID(),
-	}
+	})
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {
 			l.otel.RecordAuditDBError(context.Background(), "insert_event")
@@ -206,6 +236,7 @@ func (l *Logger) LogEvent(event Event) error {
 	if event.RunID == "" {
 		event.RunID = currentRunID()
 	}
+	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {
 			l.otel.RecordAuditDBError(context.Background(), "insert_event")

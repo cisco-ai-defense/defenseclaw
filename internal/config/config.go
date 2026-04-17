@@ -372,6 +372,15 @@ type GuardrailConfig struct {
 	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
 	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
 	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+
+	// RetainJudgeBodies controls whether raw LLM-judge responses are
+	// persisted to the structured gateway log and forwarded to audit
+	// sinks. Default off — judge responses can carry fragments of the
+	// original prompt/completion, so retention must be an explicit
+	// opt-in. When enabled, judge events include the raw body only
+	// when DEFENSECLAW_JUDGE_TRACE is also set, giving operators a
+	// two-gate path to full-fidelity capture.
+	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,

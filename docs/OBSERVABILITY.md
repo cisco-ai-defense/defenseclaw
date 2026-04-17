@@ -193,6 +193,31 @@ config is empty.
 Sinks that support a native event envelope (Splunk HEC, OTLP Logs) map
 these fields onto the native shape; `http_jsonl` posts the raw JSON.
 
+### PII redaction in the event pipeline
+
+Every audit event is run through `internal/redaction` before it reaches
+the SQLite store or any remote sink. The pipeline preserves safe
+metadata (rule IDs like `SEC-ANTHROPIC`, severity, target names,
+finding titles) while masking literal values:
+
+- Anthropic / OpenAI / Stripe / GitHub / AWS secrets
+- Credit cards, SSNs, phone numbers, email addresses
+- Matched message bodies and tool arguments
+
+Redaction is **unconditional** for persistent sinks. `DEFENSECLAW_REVEAL_PII=1`
+only affects operator-facing stderr logs (for local incident triage); it
+has no effect on SQLite, webhooks, Splunk HEC, or OTLP logs — those
+always receive the scrubbed copy.
+
+Masked placeholders are deterministic (they include a SHA-256 prefix of
+the literal), so SIEM/observability workflows can still correlate on
+identifier hash across events without handling the raw secret.
+
+To opt back into raw evidence for a single `/inspect` HTTP response, use
+the `X-DefenseClaw-Reveal-PII: 1` header documented in `docs/API.md`.
+That path audit-logs the reveal and still writes the redacted copy to
+the store.
+
 ---
 
 ## 6. Health

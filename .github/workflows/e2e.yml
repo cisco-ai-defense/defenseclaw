@@ -288,10 +288,20 @@ jobs:
           defenseclaw-gateway status || {
             echo "--- gateway.log (tail) ---"
             tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            echo "--- gateway.jsonl (tail) ---"
+            tail -n 200 ~/.defenseclaw/gateway.jsonl 2>/dev/null || true
             echo "--- watchdog.log (tail) ---"
             tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
             exit 1
           }
+
+      - name: Validate gateway.jsonl schema
+        run: |
+          if [ -f ~/.defenseclaw/gateway.jsonl ]; then
+            python3 scripts/assert-gateway-jsonl.py ~/.defenseclaw/gateway.jsonl --min-events 1
+          else
+            echo "gateway.jsonl not yet populated — skipping schema check"
+          fi
 
       - name: Unit tests
         run: make test
@@ -906,10 +916,20 @@ jobs:
           defenseclaw-gateway status || {
             echo "--- gateway.log (tail) ---"
             tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            echo "--- gateway.jsonl (tail) ---"
+            tail -n 200 ~/.defenseclaw/gateway.jsonl 2>/dev/null || true
             echo "--- watchdog.log (tail) ---"
             tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
             exit 1
           }
+
+      - name: Validate gateway.jsonl schema
+        run: |
+          if [ -f ~/.defenseclaw/gateway.jsonl ]; then
+            python3 scripts/assert-gateway-jsonl.py ~/.defenseclaw/gateway.jsonl --min-events 1
+          else
+            echo "gateway.jsonl not yet populated — skipping schema check"
+          fi
 
       - name: Unit tests
         run: make test

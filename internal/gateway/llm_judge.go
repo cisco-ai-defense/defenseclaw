@@ -25,12 +25,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // judgeCtxKey is a private context key used to mark an inspection path as
@@ -307,7 +309,13 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 
 	rawResponse := resp.Choices[0].Message.Content
 	if judgeLogTrace() {
-		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection raw response: %s\n", truncateJudgeLog(rawResponse, 500))
+		// The injection-judge response regularly echoes
+		// excerpts of the triggering prompt. Even when the
+		// operator opted into trace mode, run the preview
+		// through the redactor so accidentally-shared
+		// logs never leak the raw literal.
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection raw response: %s\n",
+			redaction.MessageContent(truncateJudgeLog(rawResponse, 500)))
 	}
 
 	parsed := parseJudgeJSON(rawResponse)
@@ -332,16 +340,30 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	return verdict
 }
 
-// judgeRawForEmit returns the raw judge body only when the trace
-// flag is on. This mirrors the stderr gate (judgeLogTrace) so the
-// JSONL stream never surfaces PII-heavy bodies unless an operator
-// has explicitly opted in. When retain_judge_bodies ships in
-// config (Phase 2.3), that flag will OR into this check.
+// judgeRawForEmit returns the raw judge body only when the operator
+// has explicitly opted in to retention via either the env trace
+// switch (DEFENSECLAW_JUDGE_TRACE=1) or the durable config flag
+// guardrail.retain_judge_bodies. Default-off protects operators
+// from accidentally persisting fragments of user prompts and PII
+// into the JSONL + sink pipeline.
 func judgeRawForEmit(raw string) string {
-	if judgeLogTrace() {
+	if judgeLogTrace() || retainJudgeBodies.Load() {
 		return truncateJudgeLog(raw, 500)
 	}
 	return ""
+}
+
+// retainJudgeBodies is the durable-config counterpart to the
+// DEFENSECLAW_JUDGE_TRACE env flag. Wired from
+// config.GuardrailConfig.RetainJudgeBodies at sidecar startup via
+// SetRetainJudgeBodies. Kept package-level + atomic so the check
+// costs a single load on the hot path.
+var retainJudgeBodies atomic.Bool
+
+// SetRetainJudgeBodies is called from sidecar wiring after config
+// is loaded. Safe to call multiple times (e.g. on config reload).
+func SetRetainJudgeBodies(v bool) {
+	retainJudgeBodies.Store(v)
 }
 
 var injectionCategories = map[string]string{
@@ -495,7 +517,13 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	// prompt is structured). Never log it at info — operators can enable
 	// DEFENSECLAW_JUDGE_TRACE=1 in non-production if they need the payload.
 	if judgeLogTrace() {
-		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii raw response (dir=%s): %s\n", direction, truncateJudgeLog(rawResponse, 500))
+		// PII judge prompts are constructed by asking the
+		// model to echo back matched tokens; the raw
+		// response will contain those tokens verbatim.
+		// Always run it through the message-content
+		// redactor before printing, even under trace.
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii raw response (dir=%s): %s\n",
+			direction, redaction.MessageContent(truncateJudgeLog(rawResponse, 500)))
 	}
 
 	parsed := parseJudgeJSON(rawResponse)
@@ -621,13 +649,17 @@ func (j *LLMJudge) piiToVerdict(data map[string]interface{}, direction, toolName
 		for _, s := range suppressed {
 			// Never log the raw entity value at info level — it's PII
 			// by definition here. Operators can enable trace logging
-			// (DEFENSECLAW_JUDGE_TRACE=1) when debugging false positives.
+			// (DEFENSECLAW_JUDGE_TRACE=1) when debugging false positives,
+			// but even under trace we run the value through the
+			// redactor so leaked log shares don't expose matched
+			// tokens. Reason strings routinely include the matched
+			// literal too, so they go through redaction.Reason.
 			entityField := redactEntity(s.Entity)
 			if judgeLogTrace() {
-				entityField = fmt.Sprintf("%q", s.Entity)
+				entityField = fmt.Sprintf("%q", redaction.Entity(s.Entity))
 			}
 			fmt.Fprintf(defaultLogWriter, "  [llm-judge] suppressed %s entity=%s rule=%s reason=%s\n",
-				s.FindingID, entityField, s.SuppressionID, s.Reason)
+				s.FindingID, entityField, s.SuppressionID, redaction.Reason(s.Reason))
 		}
 	}
 
@@ -708,11 +740,24 @@ func parseJudgeJSON(raw string) map[string]interface{} {
 
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		preview := raw
-		if len(preview) > 120 {
-			preview = preview[:120] + "..."
+		// The raw response is untrusted model output that
+		// may echo back PII / secrets from the triggering
+		// prompt. Only surface a preview when the judge
+		// trace flag is explicitly enabled, and even then
+		// run it through the redaction pipeline first.
+		if judgeLogTrace() {
+			preview := raw
+			if len(preview) > 120 {
+				preview = preview[:120] + "..."
+			}
+			fmt.Fprintf(defaultLogWriter,
+				"  [llm-judge] parseJudgeJSON: failed to parse response: %s\n",
+				redaction.MessageContent(preview))
+		} else {
+			fmt.Fprintf(defaultLogWriter,
+				"  [llm-judge] parseJudgeJSON: failed to parse response (%d bytes; set DEFENSECLAW_JUDGE_TRACE=1 for redacted preview)\n",
+				len(raw))
 		}
-		fmt.Fprintf(defaultLogWriter, "  [llm-judge] parseJudgeJSON: failed to parse response: %s\n", preview)
 		return nil
 	}
 	return result

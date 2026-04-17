@@ -167,12 +167,22 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OTel.Protocol = val
 	case "otel.endpoint":
 		c.OTel.Endpoint = val
+	case "otel.tls.insecure":
+		c.OTel.TLS.Insecure = boolVal
+	case "otel.tls.ca_cert":
+		c.OTel.TLS.CACert = val
 	case "otel.traces.enabled":
 		c.OTel.Traces.Enabled = boolVal
+	case "otel.traces.endpoint":
+		c.OTel.Traces.Endpoint = val
 	case "otel.logs.enabled":
 		c.OTel.Logs.Enabled = boolVal
+	case "otel.logs.endpoint":
+		c.OTel.Logs.Endpoint = val
 	case "otel.metrics.enabled":
 		c.OTel.Metrics.Enabled = boolVal
+	case "otel.metrics.endpoint":
+		c.OTel.Metrics.Endpoint = val
 
 	// Watch
 	case "watch.debounce_ms":

@@ -966,6 +966,8 @@ dump_artifacts() {
     defenseclaw-gateway status 2>/dev/null || echo "  (not running)"
     echo "--- gateway.log (last 60 lines) ---"
     tail -60 ~/.defenseclaw/gateway.log 2>/dev/null || echo "  (not found)"
+    echo "--- gateway.jsonl (last 60 lines) ---"
+    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null || echo "  (not found)"
     echo "--- SQLite direct event count (via Python) ---"
     python3 -c "
 import sqlite3, os
@@ -1147,6 +1149,8 @@ phase_start() {
         fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
         echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
         tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.jsonl ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
         echo "  --- last 40 lines of ~/.defenseclaw/watchdog.log ---" >&2
         tail -n 40 "$HOME/.defenseclaw/watchdog.log" 2>&1 | sed 's/^/    /' >&2 || true
         echo "  --- defenseclaw / openclaw processes ---" >&2
@@ -3010,6 +3014,8 @@ phase_recovery() {
         fail "recovery: sidecar restarted after stop" "sidecar health endpoint did not recover"
         echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
         tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.jsonl ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 7C"
         return
     fi

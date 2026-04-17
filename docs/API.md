@@ -184,6 +184,23 @@ In **observe** mode the plugin logs the verdict but never cancels the
 tool call. In **action** mode the plugin calls `event.cancel()` when
 `action` is `"block"`.
 
+#### PII Redaction & `X-DefenseClaw-Reveal-PII`
+
+By default the response body redacts PII / secret material from every
+`detailed_findings[].evidence` field (masked to a shape-preserving
+placeholder such as `<redacted-api-key hash=a1b2...>`), so operator
+dashboards and debug traces can safely store `/inspect` responses.
+
+For interactive debugging where the caller needs the raw matched bytes,
+send `X-DefenseClaw-Reveal-PII: 1`. The handler audit-logs an
+`inspect-reveal` event with the caller identity and only then returns
+the unmasked evidence. The header is strict: any value other than the
+literal string `"1"` is ignored and evidence stays redacted.
+
+The reveal flag is scoped to the HTTP response only. Persistent sinks
+(SQLite audit, webhooks, OpenTelemetry logs, Splunk HEC) always use the
+redacted copy regardless of the header.
+
 Source: `internal/gateway/inspect.go`
 
 ---
