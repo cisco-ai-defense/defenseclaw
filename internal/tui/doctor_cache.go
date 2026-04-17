@@ -294,6 +294,43 @@ func SortChecksByStatus(in []DoctorCheck) []DoctorCheck {
 	return out
 }
 
+// credentialCheckPrefix matches the label the Python CLI emits for
+// any required credential that the registry sweep
+// (“_check_registry_credentials“ in “cmd_doctor.py“) flags as
+// missing: “credential <ENV_NAME>“. Kept as a package-level
+// constant so tests and the Overview renderer agree on the exact
+// string; changing this requires a coordinated CLI update.
+const credentialCheckPrefix = "credential "
+
+// MissingRequiredCredentials returns the env-var names of REQUIRED
+// credentials the CLI's doctor sweep flagged as unset in the last
+// cached run. Only “fail“ entries produced by the registry sweep
+// are included — OPTIONAL / NOT_USED credentials do not surface
+// through this helper because they never emit a fail check.
+//
+// The list preserves the order the CLI emitted the checks in so
+// deterministic UIs (notices, e2e snapshots) stay stable across
+// runs. A nil or empty cache returns nil.
+func (c *DoctorCache) MissingRequiredCredentials() []string {
+	if c == nil || len(c.Checks) == 0 {
+		return nil
+	}
+	var out []string
+	for _, ck := range c.Checks {
+		if ck.Status != "fail" {
+			continue
+		}
+		if !strings.HasPrefix(ck.Label, credentialCheckPrefix) {
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(ck.Label, credentialCheckPrefix))
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // SummaryLine returns a one-line "3 pass, 2 fail, 1 warn, 1 skip"
 // breakdown. Strings are plain (no lipgloss styling) so this helper
 // stays usable from tests and non-TTY callers (e.g. the fail

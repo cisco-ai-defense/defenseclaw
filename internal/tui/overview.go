@@ -155,7 +155,36 @@ func (p *OverviewPanel) buildNotices() {
 				"Doctor cache is stale — press [d] on Overview to re-probe",
 			})
 		}
+
+		// Call out missing required API keys explicitly so they
+		// don't get buried inside the generic "N failure(s)"
+		// count. This is the single most common reason a fresh
+		// install can't reach an upstream provider, and the
+		// remediation is a one-liner — surface it right at the
+		// top with the exact CLI to run.
+		if missing := p.doctor.MissingRequiredCredentials(); len(missing) > 0 {
+			preview := missing
+			if len(preview) > 2 {
+				preview = preview[:2]
+			}
+			msg := fmt.Sprintf(
+				"Missing required API key(s): %s%s — run: defenseclaw keys fill-missing",
+				strings.Join(preview, ", "),
+				keysOverflowSuffix(len(missing), len(preview)),
+			)
+			p.notices = append(p.notices, notice{"error", msg})
+		}
 	}
+}
+
+// keysOverflowSuffix renders a compact " (+N more)" tail when the
+// missing-keys list is longer than what we chose to preview. Split
+// out of buildNotices so the conditional is readable and testable.
+func keysOverflowSuffix(total, shown int) string {
+	if total <= shown {
+		return ""
+	}
+	return fmt.Sprintf(" (+%d more)", total-shown)
 }
 
 func (p *OverviewPanel) View(width, height int) string {
@@ -419,6 +448,37 @@ func (p *OverviewPanel) renderScannersBox(w int) string {
 			fmt.Fprintf(&content, " %s %-16s %s\n",
 				p.theme.DotRunning, "guardrail",
 				lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(mode+"/"+model))
+		}
+	}
+
+	// API-key status row — derived entirely from the cached
+	// doctor snapshot so we don't re-probe the registry on
+	// every repaint. Two states only: green "all required set"
+	// (including when no required credentials exist for the
+	// current config) and red "N missing: FOO, BAR". The full
+	// roster of OPTIONAL/NOT_USED entries lives behind
+	// ``defenseclaw keys`` — this line is a smoke signal.
+	if p.doctor != nil && !p.doctor.IsEmpty() {
+		missing := p.doctor.MissingRequiredCredentials()
+		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		if len(missing) == 0 {
+			fmt.Fprintf(&content, " %s %-16s %s\n",
+				p.theme.DotRunning, "keys",
+				dim.Render("all required set"))
+		} else {
+			preview := missing
+			if len(preview) > 2 {
+				preview = preview[:2]
+			}
+			tail := keysOverflowSuffix(len(missing), len(preview))
+			fmt.Fprintf(&content, " %s %-16s %s\n",
+				p.theme.DotError, "keys",
+				p.theme.Critical.Render(fmt.Sprintf(
+					"%d missing: %s%s",
+					len(missing),
+					strings.Join(preview, ", "),
+					tail,
+				)))
 		}
 	}
 
