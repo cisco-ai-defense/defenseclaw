@@ -41,13 +41,20 @@ const (
 	PanelLogs
 	PanelAudit
 	PanelActivity
+	// PanelTools is inserted immediately before PanelSetup so the
+	// existing numeric key bindings (1–9 for the first nine
+	// panels, 0 for Setup) all remain stable. Tools is reached
+	// via the dedicated 'T' keybinding, the command palette, or
+	// tab navigation. Re-ordering would silently change muscle
+	// memory for every operator — don't do it without a migration.
+	PanelTools
 	PanelSetup
 	panelCount
 )
 
 var panelNames = [panelCount]string{
 	"Overview", "Alerts", "Skills", "MCPs", "Plugins",
-	"Inventory", "Policy", "Logs", "Audit", "Activity", "Setup",
+	"Inventory", "Policy", "Logs", "Audit", "Activity", "Tools", "Setup",
 }
 
 const refreshInterval = 5 * time.Second
@@ -102,6 +109,7 @@ type Model struct {
 	logs      LogsPanel
 	auditHist AuditPanel
 	activity  ActivityPanel
+	tools     ToolsPanel
 	setup     SetupPanel
 
 	// Overlays
@@ -180,6 +188,7 @@ func New(deps Deps) Model {
 		logs:       NewLogsPanel(theme, deps.Config),
 		auditHist:  NewAuditPanel(theme, deps.Store),
 		activity:   NewActivityPanel(theme),
+		tools:      NewToolsPanel(deps.Store),
 		setup:      NewSetupPanel(theme, deps.Config, executor),
 		detail:     NewDetailModal(),
 		palette:    NewPaletteModel(theme, registry, executor),
@@ -802,6 +811,8 @@ func (m Model) handlePanelScroll(delta int) (tea.Model, tea.Cmd) {
 		m.auditHist.ScrollBy(delta)
 	case PanelActivity:
 		m.activity.ScrollBy(delta)
+	case PanelTools:
+		m.tools.ScrollBy(delta)
 	case PanelSetup:
 		m.setup.ScrollBy(delta)
 	}
@@ -911,6 +922,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.activePanel = PanelAudit
 	case "0":
 		m.activePanel = PanelSetup
+	case "T":
+		// Tools panel has no numeric shortcut (see PanelTools
+		// comment in the enum). 'T' is uppercase to avoid clashing
+		// with the lowercase 't' most panels use for in-panel
+		// actions; it's mnemonic for the panel name.
+		if cmd := m.switchPanel(PanelTools); cmd != nil {
+			return m, cmd
+		}
 
 	case "tab":
 		if m.activePanel == PanelPolicy {
@@ -1149,6 +1168,32 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		case "x":
 			return m.executor.Execute("defenseclaw", []string{"plugin", "remove", name}, "remove plugin "+name)
 		}
+	case PanelTools:
+		// Tools mutations route through `defenseclaw tool` so the
+		// admission gate, scoped-policy resolution, and audit
+		// emission are handled by a single authoritative code
+		// path. Scope-qualified targets (e.g. `write_file@filesystem`)
+		// are preserved by passing `TargetName` verbatim — do not
+		// strip the scope or we'll end up editing the global row.
+		sel := m.tools.Selected()
+		if sel == nil {
+			return nil
+		}
+		target := sel.TargetName
+		if target == "" {
+			target = sel.Name
+		}
+		display := target
+		switch key {
+		case "i":
+			return m.executor.Execute("defenseclaw", []string{"tool", "status", target}, "info tool "+display)
+		case "b":
+			return m.executor.Execute("defenseclaw", []string{"tool", "block", target}, "block tool "+display)
+		case "a":
+			return m.executor.Execute("defenseclaw", []string{"tool", "allow", target}, "allow tool "+display)
+		case "u":
+			return m.executor.Execute("defenseclaw", []string{"tool", "unblock", target}, "unblock tool "+display)
+		}
 	}
 	return nil
 }
@@ -1267,6 +1312,8 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleAuditKey(msg)
 	case PanelActivity:
 		return m.handleActivityKey(msg)
+	case PanelTools:
+		return m.handleToolsKey(msg)
 	case PanelSetup:
 		return m.handleSetupKey(msg)
 	}
@@ -1634,6 +1681,47 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.actionMenu.SetSize(m.width, m.height)
 			m.actionMenu.Show(name, sel.Status, info, PluginActions(sel.Verdict, sel.Status, sel.Enabled))
+		}
+	}
+	return m, nil
+}
+
+// handleToolsKey handles key input while the Tools panel is active.
+// Keybindings mirror Skills/MCPs (j/k nav, enter for detail, o for
+// the action menu, r to refresh) so operators get the same ergonomics
+// across block-list panels. No filter support yet — the tool list is
+// typically short (rules, not inventory), so a dedicated filter UI
+// doesn't earn its keep until operator feedback tells us otherwise.
+func (m Model) handleToolsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.tools.CursorDown()
+	case "k", "up":
+		m.tools.CursorUp()
+	case "esc":
+		if m.tools.IsDetailOpen() {
+			m.tools.ToggleDetail()
+		}
+	case "enter":
+		m.tools.ToggleDetail()
+	case "r":
+		m.tools.Refresh()
+	case "o":
+		if sel := m.tools.Selected(); sel != nil {
+			scope := sel.Scope
+			if scope == "" {
+				scope = "(global)"
+			}
+			info := [][2]string{
+				{"Scope", scope},
+				{"Status", sel.Status},
+				{"Since", sel.Time},
+			}
+			if sel.Reason != "" {
+				info = append(info, [2]string{"Reason", sel.Reason})
+			}
+			m.actionMenu.SetSize(m.width, m.height)
+			m.actionMenu.Show(sel.Name, sel.Status, info, ToolActions(sel.Status))
 		}
 	}
 	return m, nil
@@ -2079,6 +2167,7 @@ func (m *Model) refresh() {
 	m.alerts.Refresh()
 	m.skills.Refresh()
 	m.mcps.Refresh()
+	m.tools.Refresh()
 	m.auditHist.Refresh()
 	if m.store != nil {
 		if err := m.overview.SetEnforcementCounts(m.store); err != nil {
@@ -2107,6 +2196,12 @@ func (m *Model) switchPanel(panel int) tea.Cmd {
 		if !m.plugins.loaded && !m.plugins.loading {
 			return m.plugins.LoadCmd()
 		}
+	case PanelTools:
+		// Tools loads synchronously off the audit store — no
+		// async load command needed. Refresh here so an operator
+		// jumping in via 'T' sees fresh rows even if the periodic
+		// refresh hasn't fired yet.
+		m.tools.Refresh()
 	}
 	return nil
 }
@@ -2119,6 +2214,7 @@ func (m *Model) resizePanels() {
 	m.alerts.SetSize(m.width, panelH)
 	m.skills.SetSize(m.width, panelH)
 	m.mcps.SetSize(m.width, panelH)
+	m.tools.SetSize(m.width, panelH)
 	m.detail.SetSize(m.width, m.height)
 	m.actionMenu.SetSize(m.width, m.height)
 	m.logs.SetSize(m.width, panelH)
@@ -2317,6 +2413,8 @@ func (m Model) renderActivePanel() string {
 		return m.auditHist.View(m.width, m.height-5)
 	case PanelActivity:
 		return m.activity.View()
+	case PanelTools:
+		return m.tools.View()
 	case PanelSetup:
 		return m.setup.View(m.width, m.height-5)
 	default:

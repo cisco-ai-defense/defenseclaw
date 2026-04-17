@@ -256,6 +256,41 @@ func PluginActions(verdict, status string, enabled bool) []ActionItem {
 	return actions
 }
 
+// ToolActions returns the action items for a tool-policy row (a
+// `tool.<name>` or `tool.<name>@<scope>` action entry) based on the
+// current Install decision recorded by the admission gate.
+//
+// The surface is deliberately narrower than Skills/MCPs/Plugins:
+// tools don't have a scanner of their own — their provenance is the
+// owning skill or MCP server, so "scan" would be a no-op. Tools also
+// don't have a runtime enable/disable toggle (that's modelled at the
+// skill/MCP layer). What remains is the install-gate outcome:
+// block / allow / unblock. The key map intentionally matches
+// SkillActions/PluginActions (b/a/u + i) so muscle memory carries over.
+func ToolActions(status string) []ActionItem {
+	actions := []ActionItem{
+		{Key: "i", Label: "Info", Description: "Show full details"},
+	}
+	switch status {
+	case "blocked":
+		actions = append(actions,
+			ActionItem{Key: "u", Label: "Unblock", Description: "Remove from block/allow list"},
+			ActionItem{Key: "a", Label: "Allow", Description: "Pin as allow-listed"},
+		)
+	case "allowed":
+		actions = append(actions,
+			ActionItem{Key: "u", Label: "Unblock", Description: "Remove from block/allow list"},
+			ActionItem{Key: "b", Label: "Block", Description: "Add to tool block list"},
+		)
+	default:
+		actions = append(actions,
+			ActionItem{Key: "b", Label: "Block", Description: "Add to tool block list"},
+			ActionItem{Key: "a", Label: "Allow", Description: "Pin as allow-listed"},
+		)
+	}
+	return actions
+}
+
 // MCPActions returns the action items for an MCP server based on its current status.
 func MCPActions(status string) []ActionItem {
 	actions := []ActionItem{

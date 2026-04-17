@@ -81,6 +81,8 @@ func (h *HintEngine) HintForPanel(panel int, state SystemState) string {
 		return h.auditHint(state)
 	case PanelActivity:
 		return h.activityHint(state)
+	case PanelTools:
+		return h.toolsHint(state)
 	default:
 		return "Press : or Ctrl+K to open the command palette. Press ? for help."
 	}
@@ -134,6 +136,13 @@ func (h *HintEngine) mcpsHint(_ SystemState) string {
 
 func (h *HintEngine) pluginsHint(_ SystemState) string {
 	return "j/k nav · o actions (scan/block/allow/disable/enable/quarantine/restore/remove) · s scan · r refresh · Enter details."
+}
+
+// toolsHint is the one-line guide at the bottom of the Tools panel.
+// Keep it action-first: tools are a policy-mutation surface, so the
+// hint tells operators what keys exist rather than what a tool is.
+func (h *HintEngine) toolsHint(_ SystemState) string {
+	return "j/k nav · o actions (block/allow/unblock) · r refresh · Enter detail · : tool block <name>."
 }
 
 func (h *HintEngine) inventoryHint(_ SystemState) string {
