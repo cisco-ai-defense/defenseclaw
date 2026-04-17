@@ -115,6 +115,39 @@ func TestWriter_FanoutInvoked(t *testing.T) {
 	}
 }
 
+func TestWriter_FanoutPanicDoesNotUnwind(t *testing.T) {
+	// Regression guard: a panicking fanout callback (e.g. a broken
+	// OTel exporter) must not unwind into Emit's caller. The panic
+	// must be recovered, surfaced via the pretty sink, and the
+	// remaining fanout callbacks must still receive the event.
+	var pretty bytes.Buffer
+	w, err := New(Config{Pretty: &pretty})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	w.WithFanout(func(_ Event) { panic("explosive exporter") })
+	var followUpCalls int
+	w.WithFanout(func(_ Event) { followUpCalls++ })
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Emit leaked a panic: %v", r)
+			}
+		}()
+		w.Emit(Event{EventType: EventLifecycle,
+			Lifecycle: &LifecyclePayload{Subsystem: "gateway", Transition: "start"}})
+	}()
+
+	if followUpCalls != 1 {
+		t.Fatalf("subsequent fanout starved by panic: calls=%d want 1", followUpCalls)
+	}
+	if !strings.Contains(pretty.String(), "fanout panic") {
+		t.Fatalf("panic not surfaced on pretty sink: %q", pretty.String())
+	}
+}
+
 func TestWriter_EmitAfterCloseIsNoop(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gateway.jsonl")

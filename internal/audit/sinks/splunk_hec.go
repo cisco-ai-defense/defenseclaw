@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -135,6 +136,19 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		s.ticker = time.NewTicker(time.Duration(cfg.FlushIntervalS) * time.Second)
 		go s.flushLoop()
 	}
+
+	// Production HEC endpoints sit behind a real certificate. Warn
+	// when verify_tls is off while the endpoint scheme is https —
+	// the dev-self-signed default is kept but operators should see
+	// it in the boot logs so silent downgrades don't slip through
+	// review.
+	if !cfg.VerifyTLS && len(cfg.Endpoint) >= 8 &&
+		(cfg.Endpoint[:8] == "https://" || cfg.Endpoint[:8] == "HTTPS://") {
+		fmt.Fprintf(os.Stderr,
+			"warning: audit sink %q (splunk_hec): TLS certificate verification disabled for %s — set verify_tls=true for production\n",
+			cfg.Name, cfg.Endpoint)
+	}
+
 	return s, nil
 }
 
@@ -207,14 +221,43 @@ func (s *SplunkHECSink) Flush(ctx context.Context) error {
 	}
 
 	if err := s.sendHEC(ctx, buf.Bytes()); err != nil {
-		// Re-queue for retry on the next flush — bounded by Manager's
-		// supervision and the operator's batch size.
+		// Bounded retry. Re-queue the failed batch so the next
+		// flush retries delivery, but cap the queue so an offline
+		// HEC collector cannot grow unbounded RSS. Without this
+		// cap a weekend outage ends in OOM-kill.
 		s.mu.Lock()
-		s.batch = append(pending, s.batch...)
+		maxQueue := maxHECQueue(s.cfg.BatchSize)
+		combined := append(pending, s.batch...)
+		if len(combined) > maxQueue {
+			dropped := len(combined) - maxQueue
+			fmt.Fprintf(os.Stderr,
+				"warning: audit sink %q (splunk_hec): backlog cap %d reached, dropping %d oldest events\n",
+				s.cfg.Name, maxQueue, dropped)
+			// Keep the newest events — a recovering HEC usually
+			// wants the most recent signal first.
+			combined = combined[len(combined)-maxQueue:]
+		}
+		s.batch = combined
 		s.mu.Unlock()
 		return err
 	}
 	return nil
+}
+
+// maxHECQueue returns the upper bound on the in-memory retry
+// backlog for Splunk HEC. Scaled off the operator's configured
+// batch size, with a floor that keeps steady-state deployments
+// safe even when a small BatchSize is chosen intentionally.
+func maxHECQueue(batchSize int) int {
+	const (
+		multiplier = 100
+		floor      = 10_000
+	)
+	v := batchSize * multiplier
+	if v < floor {
+		v = floor
+	}
+	return v
 }
 
 func (s *SplunkHECSink) sendHEC(ctx context.Context, payload []byte) error {

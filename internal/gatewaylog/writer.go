@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -130,8 +131,15 @@ func (w *Writer) Emit(e Event) {
 	}
 	if w.encoder != nil {
 		// encoder writes a trailing newline, giving us JSONL natively.
-		if err := w.encoder.Encode(e); err != nil && w.pretty != nil {
-			fmt.Fprintf(w.pretty, "[gatewaylog] write failed: %v\n", err)
+		// Encode failures are visible to the operator via the pretty
+		// sink when available; otherwise we fall back to stderr so
+		// the error never vanishes silently in a daemonised sidecar.
+		if err := w.encoder.Encode(e); err != nil {
+			if w.pretty != nil {
+				fmt.Fprintf(w.pretty, "[gatewaylog] write failed: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[gatewaylog] write failed: %v\n", err)
+			}
 		}
 	}
 	if w.pretty != nil {
@@ -147,9 +155,32 @@ func (w *Writer) Emit(e Event) {
 	}
 	w.mu.Unlock()
 
+	// Fanout callbacks run outside the writer mutex so a slow or
+	// misbehaving OTel exporter cannot stall other Emit calls.
+	// We also guard each callback with recover() — a panic inside
+	// a third-party exporter must not take down the gateway hot
+	// path. The recovered error is surfaced on the pretty sink
+	// (or stderr) so operators can triage the offending callback.
+	pretty := w.pretty
 	for _, fn := range fanout {
-		fn(e)
+		safeFanout(fn, e, pretty)
 	}
+}
+
+// safeFanout invokes fn(e) with a recover() guard so a panic in
+// any downstream fanout target cannot unwind into Emit's caller
+// (which is always the guardrail hot path).
+func safeFanout(fn func(Event), e Event, pretty io.Writer) {
+	defer func() {
+		if r := recover(); r != nil {
+			w := pretty
+			if w == nil {
+				w = os.Stderr
+			}
+			fmt.Fprintf(w, "[gatewaylog] fanout panic: %v\n", r)
+		}
+	}()
+	fn(e)
 }
 
 // Close flushes and releases the underlying file handles. Safe to

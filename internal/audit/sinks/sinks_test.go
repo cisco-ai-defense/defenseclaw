@@ -300,3 +300,87 @@ func TestManager_Close_FlushesAndCloses_AndMakesForwardNoop(t *testing.T) {
 		t.Fatalf("sink received %d events after Close, want 0", got)
 	}
 }
+
+// panicSink deliberately panics inside Forward so we can verify the
+// Manager's recover() guard. Without the guard, a panicking third-
+// party sink would unwind through audit.Logger into the guardrail
+// hot path.
+type panicSink struct {
+	name string
+}
+
+func (p *panicSink) Name() string                            { return p.name }
+func (p *panicSink) Kind() string                            { return "panic" }
+func (p *panicSink) Forward(_ context.Context, _ Event) error { panic("sink boom") }
+func (p *panicSink) Flush(_ context.Context) error           { return nil }
+func (p *panicSink) Close() error                            { return nil }
+
+func TestManager_Forward_RecoversFromSinkPanic(t *testing.T) {
+	m := NewManager()
+	devnull, _ := os.Open(os.DevNull)
+	m.stderr = devnull
+	defer devnull.Close()
+
+	healthy := newFakeSink("healthy")
+	m.Register(&panicSink{name: "explosive"})
+	m.Register(healthy)
+
+	// A panicking sink must not unwind into the caller; the panic
+	// is converted into a forward error and the healthy peer still
+	// receives the event.
+	err := m.Forward(context.Background(), Event{ID: "e", Action: "scan"})
+	if err == nil {
+		t.Fatalf("expected aggregated error from panicking sink")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("panic not surfaced in aggregated error: %v", err)
+	}
+	if got := len(healthy.snapshot()); got != 1 {
+		t.Fatalf("healthy peer starved by panicking sink: got %d events", got)
+	}
+}
+
+func TestManager_Forward_CoalescesImmediateFlushes(t *testing.T) {
+	// Burst many immediate-flush actions and verify we do NOT spawn
+	// one goroutine per call — the single-flight atomic should
+	// collapse concurrent immediate flushes into at most one
+	// in-flight flush at a time. This is the regression guard for
+	// the "guardrail-verdict goroutine explosion" bug.
+	m := NewManager()
+	devnull, _ := os.Open(os.DevNull)
+	m.stderr = devnull
+	defer devnull.Close()
+
+	s := newFakeSink("s")
+	m.Register(s)
+
+	for i := 0; i < 1000; i++ {
+		_ = m.Forward(context.Background(),
+			Event{Action: "guardrail-verdict", Severity: "HIGH"})
+	}
+
+	// Let any scheduled flush fan-out drain.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		n := s.flushes
+		s.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	s.mu.Lock()
+	flushes := s.flushes
+	s.mu.Unlock()
+	// The exact number is timing-dependent (CompareAndSwap lets
+	// subsequent bursts re-fire once the goroutine completes) but
+	// must be *far* below the 1000 Forward calls.
+	if flushes == 0 {
+		t.Fatal("coalesced flush never fired")
+	}
+	if flushes >= 100 {
+		t.Fatalf("flush coalescing failed: 1000 Forwards produced %d flushes", flushes)
+	}
+}

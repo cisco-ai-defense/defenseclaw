@@ -820,8 +820,19 @@ func (p *LogsPanel) loadVerdicts(path string) {
 		if !ok {
 			continue
 		}
-		if p.verdictAction != "" && row.action != p.verdictAction && row.eventType == "verdict" {
-			continue
+		if p.verdictAction != "" {
+			// The action-chip applies to anything that advertises an
+			// action: verdict rows (stage decisions) and judge rows
+			// (which carry the judge's own allow/alert/block).
+			// Lifecycle / error / diagnostic rows have no action; we
+			// hide them entirely while a specific action filter is
+			// active so operators see a clean "only block decisions"
+			// stream. The prior gate keyed only on eventType ==
+			// "verdict", which left every judge row visible even when
+			// the chip was set to "allow" — confusing UX.
+			if row.action == "" || !strings.EqualFold(row.action, p.verdictAction) {
+				continue
+			}
 		}
 		rows = append(rows, row)
 		rendered = append(rendered, renderVerdictLine(row))
@@ -912,11 +923,23 @@ func renderVerdictLine(r verdictRow) string {
 	}
 }
 
+// truncateVerdictReason clips s to n runes (not bytes) so multi-byte
+// UTF-8 sequences are never sliced mid-codepoint. The prior
+// byte-indexed implementation could emit invalid UTF-8 whenever a
+// redacted token or user-supplied snippet contained non-ASCII text,
+// which shows up as mojibake in the TUI.
 func truncateVerdictReason(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	if n == 1 {
+		return "…"
+	}
+	return string(runes[:n-1]) + "…"
 }
 
 func nonEmpty(s, fallback string) string {

@@ -470,9 +470,23 @@ type JudgeResponse struct {
 	Raw        string
 }
 
+// MaxJudgeRawBytes is the upper bound on the raw_response body
+// stored in SQLite. Judge models occasionally echo entire
+// conversation histories (we've seen >1MB); without a cap, a
+// runaway response can bloat the audit DB by gigabytes and
+// degrade query performance. 64KiB keeps every realistic
+// detection trace intact while preventing pathological blowup.
+const MaxJudgeRawBytes = 64 * 1024
+
 // InsertJudgeResponse persists a single judge body. The caller is
 // expected to supply a non-empty Raw; an empty body is treated as a
 // no-op so the "retain off" path does not waste a row per request.
+//
+// Large raw_response payloads are truncated to MaxJudgeRawBytes with
+// a terminal "…[truncated N bytes]" marker preserved so operators
+// can see exactly how much was clipped. Truncation is UTF-8 safe —
+// we rewind to the last codepoint boundary before appending the
+// marker so downstream JSON decoders don't trip on partial runes.
 func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 	if e.Raw == "" {
 		return nil
@@ -483,6 +497,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}
+	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
 	_, err := s.db.Exec(
 		`INSERT INTO judge_responses
 			(id, timestamp, kind, direction, model, action, severity, latency_ms, parse_error, raw_response)
@@ -496,12 +511,30 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		nullStr(e.Severity),
 		e.LatencyMs,
 		nullStr(e.ParseError),
-		e.Raw,
+		raw,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert judge response: %w", err)
 	}
 	return nil
+}
+
+// truncateJudgeRaw clips raw at maxBytes codepoint-safely and
+// appends a marker so operators can see how much was dropped.
+// Exported via test-internal access; kept lowercase to discourage
+// callers outside the audit store.
+func truncateJudgeRaw(raw string, maxBytes int) string {
+	if maxBytes <= 0 || len(raw) <= maxBytes {
+		return raw
+	}
+	// Walk back to the start of the last complete UTF-8 rune so
+	// we do not slice inside a multi-byte codepoint.
+	cut := maxBytes
+	for cut > 0 && raw[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	dropped := len(raw) - cut
+	return raw[:cut] + fmt.Sprintf("…[truncated %d bytes]", dropped)
 }
 
 // ListJudgeResponses returns the most recent N persisted judge bodies,

@@ -156,10 +156,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// behaviour after the fact. Only installed under the flag — the
 	// default remains "nothing persisted, nothing leaked".
 	if cfg.Guardrail.RetainJudgeBodies && store != nil {
-		SetJudgePersistor(func(p gatewaylog.JudgePayload) {
+		SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
 			if err := store.InsertJudgeResponse(audit.JudgeResponse{
 				Kind:       p.Kind,
-				Direction:  "",
+				Direction:  string(dir),
 				Model:      p.Model,
 				Action:     p.Action,
 				Severity:   string(p.Severity),

@@ -39,20 +39,29 @@ var (
 	// event when guardrail.retain_judge_bodies is on and the
 	// sidecar wired up a persistence callback. Left nil in unit
 	// tests and in the "retention off" path.
-	judgePersistor func(gatewaylog.JudgePayload)
+	//
+	// Signature carries Direction alongside the payload because the
+	// JudgePayload envelope intentionally does NOT — direction
+	// belongs to the surrounding Event. A prior revision dropped
+	// this data when persisting, so every SQLite row wrote an empty
+	// direction regardless of inbound/outbound.
+	judgePersistor func(gatewaylog.JudgePayload, gatewaylog.Direction)
 )
 
 // SetJudgePersistor installs the optional SQLite persistence hook
 // invoked from emitJudge when retention is enabled. Passing nil
-// disables persistence (safe default).
-func SetJudgePersistor(fn func(gatewaylog.JudgePayload)) {
+// disables persistence (safe default). The callback receives the
+// raw payload plus the request direction so downstream storage
+// can tag whether the judge fired on an inbound prompt or an
+// outbound completion.
+func SetJudgePersistor(fn func(gatewaylog.JudgePayload, gatewaylog.Direction)) {
 	gatewayEventsMu.Lock()
 	defer gatewayEventsMu.Unlock()
 	judgePersistor = fn
 }
 
 // judgePersist returns the currently installed persistor (may be nil).
-func judgePersist() func(gatewaylog.JudgePayload) {
+func judgePersist() func(gatewaylog.JudgePayload, gatewaylog.Direction) {
 	gatewayEventsMu.RLock()
 	defer gatewayEventsMu.RUnlock()
 	return judgePersistor
@@ -185,7 +194,7 @@ func emitJudge(
 	// file is already covered by the same filesystem ACLs as the rest
 	// of ~/.defenseclaw.
 	if persist := judgePersist(); persist != nil && raw != "" {
-		persist(payload)
+		persist(payload, direction)
 	}
 
 	emitEvent(gatewaylog.Event{

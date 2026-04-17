@@ -106,6 +106,18 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		s.ticker = time.NewTicker(time.Duration(cfg.FlushIntervalS) * time.Second)
 		go s.flushLoop()
 	}
+
+	// Surface an explicit warning when operators point an HTTPS sink
+	// at an unvalidated endpoint. The insecure default is intentional
+	// (self-signed log shippers are common in dev), but silent
+	// downgrade in production is a security risk — print once at boot
+	// so ops sees it in the sidecar logs.
+	if !cfg.VerifyTLS && strings.HasPrefix(strings.ToLower(cfg.URL), "https://") {
+		fmt.Fprintf(os.Stderr,
+			"warning: audit sink %q (http_jsonl): TLS certificate verification disabled for %s — set verify_tls=true for production\n",
+			cfg.Name, cfg.URL)
+	}
+
 	return s, nil
 }
 
@@ -156,12 +168,45 @@ func (s *HTTPJSONLSink) Flush(ctx context.Context) error {
 	s.mu.Unlock()
 
 	if err := s.send(ctx, pending); err != nil {
+		// Bounded retry: re-queue the failed batch so the next
+		// flush attempts redelivery, but cap the queue at a
+		// multiple of BatchSize so a persistently-unavailable
+		// endpoint cannot grow unbounded memory. Without this cap,
+		// an offline HEC/webhook collector leaks RSS until OOM.
 		s.mu.Lock()
-		s.batch = append(pending, s.batch...)
+		maxQueue := maxHTTPJSONLQueue(s.cfg.BatchSize)
+		combined := append(pending, s.batch...)
+		if len(combined) > maxQueue {
+			dropped := len(combined) - maxQueue
+			fmt.Fprintf(os.Stderr,
+				"warning: audit sink %q (http_jsonl): backlog cap %d reached, dropping %d oldest events\n",
+				s.cfg.Name, maxQueue, dropped)
+			// Keep the newest events — they are the most likely
+			// to still be relevant once the endpoint recovers.
+			combined = combined[len(combined)-maxQueue:]
+		}
+		s.batch = combined
 		s.mu.Unlock()
 		return err
 	}
 	return nil
+}
+
+// maxHTTPJSONLQueue returns the upper bound on the in-memory
+// retry backlog for the webhook sink. Scaled off BatchSize so
+// operators who intentionally configure small batches get a
+// proportionally smaller ceiling. Minimum floor keeps the cap
+// sane even for BatchSize=1.
+func maxHTTPJSONLQueue(batchSize int) int {
+	const (
+		multiplier = 100
+		floor      = 10_000
+	)
+	v := batchSize * multiplier
+	if v < floor {
+		v = floor
+	}
+	return v
 }
 
 func (s *HTTPJSONLSink) send(ctx context.Context, events []Event) error {

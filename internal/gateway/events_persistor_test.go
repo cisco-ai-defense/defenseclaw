@@ -26,14 +26,16 @@ func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
 	// sink receives the un-redacted body while the fanout / JSONL
 	// sees the scrubbed form.
 	var (
-		persistedMu      sync.Mutex
-		persistedRaw     string
-		persistedInvoked int
+		persistedMu        sync.Mutex
+		persistedRaw       string
+		persistedDirection gatewaylog.Direction
+		persistedInvoked   int
 	)
-	SetJudgePersistor(func(p gatewaylog.JudgePayload) {
+	SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
 		persistedMu.Lock()
 		defer persistedMu.Unlock()
 		persistedRaw = p.RawResponse
+		persistedDirection = dir
 		persistedInvoked++
 	})
 	t.Cleanup(func() { SetJudgePersistor(nil) })
@@ -45,12 +47,19 @@ func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
 	persistedMu.Lock()
 	gotRaw := persistedRaw
 	gotCalls := persistedInvoked
+	gotDir := persistedDirection
 	persistedMu.Unlock()
 	if gotCalls != 1 {
 		t.Fatalf("persistor called %d times want 1", gotCalls)
 	}
 	if gotRaw != raw {
 		t.Fatalf("persistor got redacted raw=%q want unredacted=%q", gotRaw, raw)
+	}
+	// Regression: direction must flow through the persistor; a
+	// prior revision wrote empty strings to SQLite because the
+	// hook signature dropped this field.
+	if gotDir != gatewaylog.DirectionPrompt {
+		t.Fatalf("persistor got direction=%q want %q", gotDir, gatewaylog.DirectionPrompt)
 	}
 
 	// Sink-side payload must have been scrubbed by emitEvent.
@@ -70,7 +79,7 @@ func TestEmitJudge_EmptyRawDoesNotCallPersistor(t *testing.T) {
 	_ = withCapturedEvents(t)
 
 	var called int
-	SetJudgePersistor(func(p gatewaylog.JudgePayload) { called++ })
+	SetJudgePersistor(func(p gatewaylog.JudgePayload, _ gatewaylog.Direction) { called++ })
 	t.Cleanup(func() { SetJudgePersistor(nil) })
 
 	emitJudge("injection", "gpt-4", gatewaylog.DirectionPrompt, 0, 1, "allow",

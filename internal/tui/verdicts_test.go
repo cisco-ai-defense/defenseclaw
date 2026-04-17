@@ -103,24 +103,47 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 		t.Fatalf("no-filter verdicts=%d want 4: %+v", got, p.verdicts)
 	}
 
-	// block filter: drop non-block verdicts. Judge events are not
-	// action-filtered (loadVerdicts only filters when eventType=="verdict").
+	// block filter: keep only rows whose .action == "block". Both
+	// verdict and judge rows carry an action; lifecycle/error rows
+	// don't, so they get hidden. The previous semantics let judge
+	// rows through regardless of the chip — users complained that
+	// filtering for "block" still showed "alert" judge rows.
 	p.verdictAction = "block"
 	p.loadVerdicts(path)
-	var verdictCount, judgeCount int
 	for _, r := range p.verdicts {
-		switch r.eventType {
-		case "verdict":
-			verdictCount++
-			if r.action != "block" {
-				t.Errorf("block filter leaked action=%q", r.action)
-			}
-		case "judge":
-			judgeCount++
+		if r.action != "block" {
+			t.Errorf("block filter leaked action=%q type=%q",
+				r.action, r.eventType)
 		}
 	}
-	if verdictCount != 1 || judgeCount != 1 {
-		t.Fatalf("filtered verdicts=%d judges=%d want 1/1", verdictCount, judgeCount)
+	if got := len(p.verdicts); got != 1 {
+		t.Fatalf("filtered row count=%d want 1 (only the block verdict)", got)
+	}
+}
+
+func TestLoadVerdicts_ActionFilterKeepsMatchingJudgeRows(t *testing.T) {
+	// The action chip is case-insensitive against the row's action
+	// field, and a judge row whose .action matches must survive.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.jsonl")
+	content := strings.Join([]string{
+		`{"ts":"2026-04-16T12:00:00Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"block","reason":"pii"}}`,
+		`{"ts":"2026-04-16T12:00:01Z","event_type":"judge","severity":"HIGH","judge":{"kind":"pii","action":"block"}}`,
+		`{"ts":"2026-04-16T12:00:02Z","event_type":"judge","severity":"LOW","judge":{"kind":"injection","action":"allow"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	p := &LogsPanel{source: logSourceVerdicts, verdictAction: "block"}
+	p.loadVerdicts(path)
+	if got := len(p.verdicts); got != 2 {
+		t.Fatalf("rows=%d want 2 (verdict+judge, both action=block)", got)
+	}
+	for _, r := range p.verdicts {
+		if r.action != "block" {
+			t.Errorf("leaked action=%q type=%q", r.action, r.eventType)
+		}
 	}
 }
 
@@ -243,11 +266,31 @@ func TestTruncateVerdictReason(t *testing.T) {
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("missing ellipsis: %q", got)
 	}
-	// One byte for '…' is 3 bytes UTF-8 — byte length is n-1 + len("…")
-	// which rendering-wise still fits "about" n chars. Just assert it
-	// did truncate.
 	if strings.HasPrefix(got, "abcdefghij") {
 		t.Fatalf("did not truncate: %q", got)
+	}
+}
+
+func TestTruncateVerdictReason_UTF8Safe(t *testing.T) {
+	// Regression guard: the previous byte-indexed truncate could
+	// slice inside a multi-byte codepoint and emit invalid UTF-8.
+	// With rune-aware truncation, the result must always be valid
+	// UTF-8 even when the cut point falls mid-codepoint.
+	in := "héllo wörld ☃☃☃☃☃☃☃☃"
+	got := truncateVerdictReason(in, 5)
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("missing ellipsis: %q", got)
+	}
+	// 4 runes + 1 ellipsis rune — every rune must round-trip.
+	runes := []rune(got)
+	if len(runes) != 5 {
+		t.Fatalf("rune count=%d want 5: %q", len(runes), got)
+	}
+	// No replacement character means no invalid byte sequences.
+	for _, r := range got {
+		if r == '\uFFFD' {
+			t.Fatalf("replacement rune leaked — byte slice mid-codepoint: %q", got)
+		}
 	}
 }
 

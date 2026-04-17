@@ -157,10 +157,17 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 	switch e.EventType {
 	case gatewaylog.EventVerdict:
 		if v := e.Verdict; v != nil {
+			// v.Reason is already redacted upstream, but the
+			// redacted form still contains per-match hash suffixes
+			// (e.g. `pii:email:<hash>`). Emitting it verbatim as an
+			// indexed attribute blows up cardinality on OTel backends
+			// that key on attribute values. We truncate to a short
+			// prefix here — the full reason lives in the log body
+			// (renderGatewayBody) for operators who need it.
 			attrs = append(attrs,
 				log.String("defenseclaw.verdict.stage", string(v.Stage)),
 				log.String("defenseclaw.verdict.action", v.Action),
-				log.String("defenseclaw.verdict.reason", v.Reason),
+				log.String("defenseclaw.verdict.reason", truncateReasonAttr(v.Reason)),
 				log.Int64("defenseclaw.verdict.latency_ms", v.LatencyMs),
 			)
 			if len(v.Categories) > 0 {
@@ -238,4 +245,27 @@ func renderGatewayBody(e gatewaylog.Event) string {
 			e.EventType, e.Severity, err)
 	}
 	return string(buf)
+}
+
+// maxReasonAttrBytes caps the size of the indexed verdict.reason
+// attribute. Chosen to keep the attribute human-readable in backend
+// search UIs while bounding cardinality — long reasons still ship in
+// full inside the log body.
+const maxReasonAttrBytes = 200
+
+// truncateReasonAttr clips a verdict reason for use as an OTel
+// attribute. It only truncates on byte length; the reason is
+// already ASCII-ish after redaction, and callers that need the full
+// string should read the log body via renderGatewayBody.
+func truncateReasonAttr(s string) string {
+	if len(s) <= maxReasonAttrBytes {
+		return s
+	}
+	// Rewind to the last UTF-8 codepoint boundary so backends that
+	// are strict about valid UTF-8 do not reject the record.
+	cut := maxReasonAttrBytes
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut] + "…"
 }

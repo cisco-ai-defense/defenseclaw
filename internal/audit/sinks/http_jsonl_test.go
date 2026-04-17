@@ -254,6 +254,66 @@ func TestHTTPJSONLSink_FilterGatesDelivery(t *testing.T) {
 	}
 }
 
+func TestHTTPJSONLSink_BoundedBacklogOnPersistentFailure(t *testing.T) {
+	// Regression guard: a dead endpoint used to cause unbounded
+	// memory growth because every failed Flush re-queued its batch
+	// without a ceiling. We now cap the in-memory backlog at
+	// maxHTTPJSONLQueue(batchSize). This test pre-seeds an oversized
+	// batch and drives a single failing Flush to exercise the cap
+	// path without thrashing the echo server 30k times.
+	srv, _, _, status := httpEchoServer(t, http.StatusOK)
+	defer srv.Close()
+	atomic.StoreInt32(status, http.StatusServiceUnavailable)
+
+	sink, err := NewHTTPJSONLSink(HTTPJSONLConfig{
+		Name:      "capped",
+		URL:       srv.URL,
+		BatchSize: 10,
+		TimeoutS:  1,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer sink.Close()
+
+	cap := maxHTTPJSONLQueue(10)
+
+	// Seed the in-memory batch with cap*3 events, then Flush once.
+	// The re-queue path must clip the backlog down to cap.
+	sink.mu.Lock()
+	for i := 0; i < cap*3; i++ {
+		sink.batch = append(sink.batch, Event{ID: "e", Severity: "HIGH"})
+	}
+	sink.mu.Unlock()
+
+	if err := sink.Flush(context.Background()); err == nil {
+		t.Fatalf("expected flush error from 503 endpoint")
+	}
+
+	sink.mu.Lock()
+	queued := len(sink.batch)
+	sink.mu.Unlock()
+
+	if queued > cap {
+		t.Fatalf("backlog=%d exceeds cap=%d — retry queue not bounded", queued, cap)
+	}
+	if queued == 0 {
+		t.Fatal("backlog=0 but endpoint has been failing — something dropped silently")
+	}
+}
+
+func TestMaxHTTPJSONLQueue_HasFloor(t *testing.T) {
+	// Tiny batches (e.g. BatchSize=1 synchronous) would otherwise
+	// get a ceiling of 100, which is too low to absorb even a minor
+	// outage. Floor keeps the cap sane for every operator config.
+	if got := maxHTTPJSONLQueue(1); got < 10_000 {
+		t.Fatalf("floor not applied for BatchSize=1: %d", got)
+	}
+	if got := maxHTTPJSONLQueue(500); got != 50_000 {
+		t.Fatalf("scaled cap wrong for BatchSize=500: got %d want 50000", got)
+	}
+}
+
 func TestExpandEnv(t *testing.T) {
 	t.Setenv("DC_TEST_TOKEN", "abc123")
 	t.Setenv("DC_TEST_EMPTY", "")

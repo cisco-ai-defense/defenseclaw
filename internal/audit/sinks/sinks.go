@@ -32,6 +32,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -158,6 +159,20 @@ type Manager struct {
 	// without batching latency).
 	flushImmediateActions map[string]struct{}
 
+	// immediateFlushInFlight coalesces the async flush fan-out that fires
+	// on every "immediate" action. Without this, a burst of guardrail
+	// verdicts would spawn one goroutine per Forward call, all contending
+	// for the same RLock and hammering the downstream sinks' Flush
+	// implementations. The single-flight flag keeps exactly one async
+	// flush in flight; subsequent immediate events within that window
+	// collapse into the already-scheduled flush.
+	immediateFlushInFlight atomic.Bool
+
+	// closed is set once Close() completes so Forward short-circuits
+	// even if a concurrent caller captured an older RLock-protected
+	// snapshot before we cleared m.sinks.
+	closed atomic.Bool
+
 	stderr *os.File // injected for tests; defaults to os.Stderr in production
 }
 
@@ -206,7 +221,7 @@ func (m *Manager) Len() int {
 // to stderr and returned aggregated; one failing sink does not stop
 // delivery to the others.
 func (m *Manager) Forward(ctx context.Context, e Event) error {
-	if m == nil {
+	if m == nil || m.closed.Load() {
 		return nil
 	}
 	m.mu.RLock()
@@ -221,7 +236,7 @@ func (m *Manager) Forward(ctx context.Context, e Event) error {
 
 	var errs []error
 	for _, s := range snap {
-		if err := s.Forward(ctx, e); err != nil {
+		if err := m.safeForward(ctx, s, e); err != nil {
 			fmt.Fprintf(m.stderr, "warning: audit sink %q (%s): forward: %v\n",
 				s.Name(), s.Kind(), err)
 			errs = append(errs, fmt.Errorf("%s: %w", s.Name(), err))
@@ -229,15 +244,37 @@ func (m *Manager) Forward(ctx context.Context, e Event) error {
 	}
 
 	if immediate {
-		// Best effort — fire flushes asynchronously so a slow sink does not
-		// stall the proxy hot-path.
-		go m.FlushAll(context.Background())
+		// Coalesce: only the first immediate-flush request within a
+		// window spawns a goroutine. High-frequency actions
+		// (guardrail-verdict fires on every block decision) would
+		// otherwise leak goroutines and thrash the downstream
+		// sinks' Flush paths.
+		if m.immediateFlushInFlight.CompareAndSwap(false, true) {
+			go func() {
+				defer m.immediateFlushInFlight.Store(false)
+				_ = m.FlushAll(context.Background())
+			}()
+		}
 	}
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// safeForward wraps a single sink's Forward with recover() so a
+// panic inside a third-party sink cannot unwind into the audit
+// logger (and from there into the guardrail hot path). The
+// recovered error is surfaced as a regular forward error so the
+// caller's stderr warning path fires.
+func (m *Manager) safeForward(ctx context.Context, s Sink, e Event) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sink %q (%s): panic: %v", s.Name(), s.Kind(), r)
+		}
+	}()
+	return s.Forward(ctx, e)
 }
 
 // FlushAll requests every sink drain its buffer. Errors are aggregated.
@@ -272,6 +309,10 @@ func (m *Manager) Close() error {
 	if m == nil {
 		return nil
 	}
+	// Mark closed BEFORE draining so any Forward caller that races
+	// with Close short-circuits via the closed.Load() check above,
+	// even if they already captured an RLock-protected snapshot.
+	m.closed.Store(true)
 	m.mu.Lock()
 	snap := m.sinks
 	m.sinks = nil

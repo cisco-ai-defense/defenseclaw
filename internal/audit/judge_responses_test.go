@@ -145,9 +145,9 @@ func TestListJudgeResponses_LimitClampedAndDefaulted(t *testing.T) {
 func TestInsertJudgeResponse_LargeBodyPersistedLossless(t *testing.T) {
 	// Judge bodies routinely run several kilobytes — SQLite TEXT has no
 	// ceiling but we want a regression guard against accidental UTF-8
-	// mangling or silent truncation at any boundary.
+	// mangling at sub-cap sizes.
 	s := newStoreForTest(t)
-	big := strings.Repeat("áéíóú🔒", 2048) // ~12KB of multi-byte data
+	big := strings.Repeat("áéíóú🔒", 2048) // ~12KB of multi-byte data, well under MaxJudgeRawBytes
 	if err := s.InsertJudgeResponse(JudgeResponse{Kind: "pii", Raw: big}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -161,4 +161,65 @@ func TestInsertJudgeResponse_LargeBodyPersistedLossless(t *testing.T) {
 	if rows[0].Raw != big {
 		t.Fatalf("body mangled: len got=%d want=%d", len(rows[0].Raw), len(big))
 	}
+}
+
+func TestInsertJudgeResponse_OversizedBodyTruncated(t *testing.T) {
+	// Regression guard: a runaway judge response (multi-MB) must be
+	// clipped at MaxJudgeRawBytes so the audit DB cannot be bloated by
+	// pathological inputs. The truncation marker must be present and
+	// the result must remain valid UTF-8.
+	s := newStoreForTest(t)
+	big := strings.Repeat("x", MaxJudgeRawBytes*2+17)
+	if err := s.InsertJudgeResponse(JudgeResponse{Kind: "pii", Raw: big}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	rows, err := s.ListJudgeResponses(1)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	if len(rows[0].Raw) <= MaxJudgeRawBytes {
+		// Stored body should be <= cap + marker overhead.
+	}
+	if len(rows[0].Raw) >= len(big) {
+		t.Fatalf("body not truncated: got=%d, source=%d", len(rows[0].Raw), len(big))
+	}
+	if !strings.Contains(rows[0].Raw, "[truncated") {
+		t.Fatalf("truncation marker missing: tail=%q",
+			rows[0].Raw[len(rows[0].Raw)-80:])
+	}
+}
+
+func TestTruncateJudgeRaw_UTF8SafeAtBoundary(t *testing.T) {
+	// 🔒 is a 4-byte codepoint. Size the input well above the cap so
+	// the naive byte-cut would land inside a multi-byte sequence;
+	// the rune-aware rewind must step back to a codepoint start.
+	big := strings.Repeat("🔒", MaxJudgeRawBytes)
+	got := truncateJudgeRaw(big, MaxJudgeRawBytes)
+	if !strings.Contains(got, "[truncated") {
+		t.Fatalf("marker missing: tail=%q",
+			got[len(got)-minInt(80, len(got)):])
+	}
+	// The truncated-prefix portion (before the marker) must be valid
+	// UTF-8 — if the byte cut landed mid-codepoint, a rune walk
+	// would surface a replacement character.
+	markerIdx := strings.Index(got, "[truncated")
+	if markerIdx <= 0 {
+		t.Fatalf("marker index=%d", markerIdx)
+	}
+	prefix := got[:markerIdx-len("…")] // strip leading ellipsis too
+	for _, r := range prefix {
+		if r == '\uFFFD' {
+			t.Fatalf("replacement rune leaked — byte cut mid-codepoint")
+		}
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
