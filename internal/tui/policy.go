@@ -32,7 +32,8 @@ import (
 
 // Sub-tab indices for the Policy panel.
 const (
-	policyTabRulePacks = iota
+	policyTabPolicies = iota
+	policyTabRulePacks
 	policyTabJudge
 	policyTabSuppressions
 	policyTabOPA
@@ -40,7 +41,7 @@ const (
 )
 
 var policyTabNames = [policyTabCount]string{
-	"Rule Packs", "Judge Prompts", "Suppressions", "OPA / Rego",
+	"Policies", "Rule Packs", "Judge Prompts", "Suppressions", "OPA / Rego",
 }
 
 // PolicyPanel provides full browsing, editing, and testing of guardrail
@@ -80,6 +81,17 @@ type PolicyPanel struct {
 	regoScroll  int
 	showTests   bool
 	regoOutput  string
+
+	// Policies sub-tab — admission-gate YAML policies managed via
+	// `defenseclaw policy <verb>`. We intentionally keep this
+	// distinct from rule packs (which are a guardrail concept) so
+	// the help text and verbs don't collide.
+	policies       []string // policy names (basename w/o .yaml)
+	activePolicy   string   // name of the currently-activated policy
+	policyCursor   int
+	policyScroll   int
+	policiesLoaded bool // lazy-loaded so tests don't need a real ~/.defenseclaw
+	policyForm     PolicyCreateForm
 }
 
 // NewPolicyPanel creates a PolicyPanel.
@@ -88,6 +100,7 @@ func NewPolicyPanel(theme *Theme, cfg *config.Config) PolicyPanel {
 		theme:      theme,
 		cfg:        cfg,
 		judgeYAMLs: make(map[string]*guardrail.JudgeYAML),
+		policyForm: NewPolicyCreateForm(),
 	}
 }
 
@@ -191,6 +204,18 @@ func (p *PolicyPanel) HandleKey(key string) (runBin string, runArgs []string, ru
 		p.load()
 	}
 
+	// The create-form overlay owns the keyboard while open. If we
+	// routed tab/right through here we'd lose field navigation
+	// inside the form — check before the tab/right fallthrough.
+	if p.policyForm.IsActive() {
+		submit, bin, args, name := p.policyForm.HandleKey(key)
+		if submit {
+			p.policyForm.Close()
+			return bin, args, name
+		}
+		return
+	}
+
 	switch key {
 	case "tab", "right":
 		p.activeTab = (p.activeTab + 1) % policyTabCount
@@ -203,6 +228,8 @@ func (p *PolicyPanel) HandleKey(key string) (runBin string, runArgs []string, ru
 	}
 
 	switch p.activeTab {
+	case policyTabPolicies:
+		return p.handlePoliciesKey(key)
 	case policyTabRulePacks:
 		return p.handleRulePackKey(key)
 	case policyTabJudge:
@@ -226,6 +253,11 @@ func (p *PolicyPanel) resetCursors() {
 // ScrollBy scrolls the active sub-tab.
 func (p *PolicyPanel) ScrollBy(delta int) {
 	switch p.activeTab {
+	case policyTabPolicies:
+		p.policyScroll += delta
+		if p.policyScroll < 0 {
+			p.policyScroll = 0
+		}
 	case policyTabRulePacks:
 		p.ruleScroll += delta
 		if p.ruleScroll < 0 {
@@ -247,6 +279,187 @@ func (p *PolicyPanel) ScrollBy(delta int) {
 			p.regoScroll = 0
 		}
 	}
+}
+
+// ----------------------------------------------------------------
+// Policies sub-tab — admission-gate YAML policies
+// ----------------------------------------------------------------
+
+// loadPolicies populates p.policies / p.activePolicy by reading the
+// on-disk policies directory. Kept cheap (filesystem-only, no YAML
+// parse) so we can call it on every tab activation without a
+// noticeable delay — the admission policy list is typically <10
+// entries.
+func (p *PolicyPanel) loadPolicies() {
+	p.policiesLoaded = true
+	p.policies = nil
+	p.activePolicy = ""
+	if p.cfg == nil || p.cfg.PolicyDir == "" {
+		return
+	}
+
+	entries, err := os.ReadDir(p.cfg.PolicyDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		base := strings.TrimSuffix(strings.TrimSuffix(name, ".yaml"), ".yml")
+		if base == "active" {
+			// `active.yaml` is a symlink / copy marker written by
+			// `policy activate`, not a selectable policy. Skip it
+			// from the list but keep a record so we can highlight
+			// the active entry.
+			if target, err := os.Readlink(filepath.Join(p.cfg.PolicyDir, name)); err == nil {
+				p.activePolicy = strings.TrimSuffix(strings.TrimSuffix(filepath.Base(target), ".yaml"), ".yml")
+			}
+			continue
+		}
+		p.policies = append(p.policies, base)
+	}
+	sort.Strings(p.policies)
+
+	// Clamp cursor — lists can shrink if a policy was just deleted
+	// from the CLI while the TUI was open.
+	if p.policyCursor >= len(p.policies) {
+		if len(p.policies) == 0 {
+			p.policyCursor = 0
+		} else {
+			p.policyCursor = len(p.policies) - 1
+		}
+	}
+}
+
+// selectedPolicyName returns the policy name under the cursor, or
+// "" if the list is empty.
+func (p *PolicyPanel) selectedPolicyName() string {
+	if p.policyCursor < 0 || p.policyCursor >= len(p.policies) {
+		return ""
+	}
+	return p.policies[p.policyCursor]
+}
+
+// handlePoliciesKey dispatches admission-policy verbs. Everything
+// that mutates state routes through the CLI for audit-event parity
+// (same rationale as skills/mcps). Only list navigation and the
+// create-form overlay are handled locally.
+func (p *PolicyPanel) handlePoliciesKey(key string) (string, []string, string) {
+	if !p.policiesLoaded {
+		p.loadPolicies()
+	}
+
+	switch key {
+	case "up", "k":
+		if p.policyCursor > 0 {
+			p.policyCursor--
+		}
+	case "down", "j":
+		if p.policyCursor < len(p.policies)-1 {
+			p.policyCursor++
+		}
+	case "r":
+		// Refresh the list from disk. Intentionally a local action
+		// rather than a CLI dispatch — `policy list` is a
+		// read-only verb and would just print to the activity
+		// panel while we'd still need to re-scan locally anyway.
+		p.loadPolicies()
+	case "l":
+		// `policy list` in the activity panel is useful for the
+		// operator who wants the nicely-formatted table + active
+		// marker. Separate from 'r' (which refreshes our view).
+		return "defenseclaw", []string{"policy", "list"}, "policy list"
+	case "s":
+		if name := p.selectedPolicyName(); name != "" {
+			return "defenseclaw", []string{"policy", "show", name}, "policy show " + name
+		}
+	case "enter", "a":
+		if name := p.selectedPolicyName(); name != "" {
+			return "defenseclaw", []string{"policy", "activate", name}, "policy activate " + name
+		}
+	case "d":
+		if name := p.selectedPolicyName(); name != "" {
+			return "defenseclaw", []string{"policy", "delete", name}, "policy delete " + name
+		}
+	case "v":
+		return "defenseclaw", []string{"policy", "validate"}, "policy validate"
+	case "n", "+":
+		p.policyForm.Open()
+	}
+	return "", nil, ""
+}
+
+// viewPolicies renders the admission-policy list. The create-form
+// overlay, when active, replaces the list entirely so it gets the
+// full available height for its 7 rows + status line.
+func (p *PolicyPanel) viewPolicies(w, h int) string {
+	if p.policyForm.IsActive() {
+		p.policyForm.SetSize(w, h)
+		return p.policyForm.View()
+	}
+	if !p.policiesLoaded {
+		p.loadPolicies()
+	}
+
+	var b strings.Builder
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	bold := lipgloss.NewStyle().Bold(true)
+	active := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+	cursor := lipgloss.NewStyle().Background(lipgloss.Color("237"))
+
+	b.WriteString(bold.Render("Admission Policies"))
+	b.WriteString("\n")
+	b.WriteString(dim.Render(fmt.Sprintf("  %d polic", len(p.policies))))
+	if len(p.policies) == 1 {
+		b.WriteString(dim.Render("y"))
+	} else {
+		b.WriteString(dim.Render("ies"))
+	}
+	if p.activePolicy != "" {
+		b.WriteString(dim.Render("  ·  active: "))
+		b.WriteString(active.Render(p.activePolicy))
+	}
+	b.WriteString("\n\n")
+
+	if len(p.policies) == 0 {
+		b.WriteString(dim.Render("  (no policies yet — press 'n' to create one)"))
+		return b.String()
+	}
+
+	// We render a simple "name  [ACTIVE]" list. The scroll window is
+	// sized to the content region; we don't page because 10 policies
+	// almost never won't fit.
+	start := p.policyScroll
+	if start < 0 {
+		start = 0
+	}
+	maxRows := h - 5
+	if maxRows < 3 {
+		maxRows = 3
+	}
+	end := start + maxRows
+	if end > len(p.policies) {
+		end = len(p.policies)
+	}
+
+	for i := start; i < end; i++ {
+		name := p.policies[i]
+		line := "  " + name
+		if name == p.activePolicy {
+			line += "  " + active.Render("[active]")
+		}
+		if i == p.policyCursor {
+			line = cursor.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // ----------------------------------------------------------------
@@ -429,6 +642,13 @@ func (p *PolicyPanel) handleOPAKey(key string) (string, []string, string) {
 		return "defenseclaw", []string{"policy", "validate"}, "policy validate"
 	case "r":
 		return "defenseclaw", []string{"policy", "reload"}, "policy reload"
+	case "T":
+		// Capital-T runs the rego test suite (`policy test`), which
+		// is a distinct CLI verb from lowercase t (toggle
+		// show-tests). Matching casing here (unlike the rest of
+		// the panel) because lowercase t already has a UX meaning
+		// in this tab and we don't want to reshuffle muscle memory.
+		return "defenseclaw", []string{"policy", "test"}, "policy test"
 	}
 	return "", nil, ""
 }
@@ -459,6 +679,8 @@ func (p *PolicyPanel) View(w, h int) string {
 	contentH := h - 3
 
 	switch p.activeTab {
+	case policyTabPolicies:
+		b.WriteString(p.viewPolicies(w, contentH))
 	case policyTabRulePacks:
 		b.WriteString(p.viewRulePacks(w, contentH))
 	case policyTabJudge:
@@ -479,6 +701,11 @@ func (p *PolicyPanel) View(w, h int) string {
 
 func (p *PolicyPanel) helpText() string {
 	switch p.activeTab {
+	case policyTabPolicies:
+		if p.policyForm.IsActive() {
+			return "tab/↓ next  shift+tab/↑ prev  enter submit  esc cancel"
+		}
+		return "↑/↓ nav · enter/a activate · s show · n create · d delete · l list · v validate · r refresh"
 	case policyTabRulePacks:
 		if p.packDetail {
 			return "↑/↓ browse rules  esc back"
@@ -489,7 +716,7 @@ func (p *PolicyPanel) helpText() string {
 	case policyTabSuppressions:
 		return "↑/↓ select  tab section  d delete  tab next section"
 	case policyTabOPA:
-		return "↑/↓ select module  v validate  r reload  t toggle tests"
+		return "↑/↓ select module · v validate · r reload · t toggle tests · T run tests"
 	}
 	return ""
 }
@@ -888,6 +1115,21 @@ func (p *PolicyPanel) HandleMouseClick(x, relY int) (runBin string, runArgs []st
 	contentY := relY - 2 // account for sub-tab bar + blank line
 
 	switch p.activeTab {
+	case policyTabPolicies:
+		// The create form swallows mouse interactions — text entry
+		// panes don't expose hit-testable regions and clicking
+		// elsewhere would feel like a dead click.
+		if p.policyForm.IsActive() {
+			return
+		}
+		// List rows start at line 4 after header + count + blank.
+		if contentY >= 4 {
+			idx := contentY - 4 + p.policyScroll
+			if idx >= 0 && idx < len(p.policies) {
+				p.policyCursor = idx
+			}
+		}
+
 	case policyTabRulePacks:
 		if p.packDetail {
 			if contentY >= 2 { // header lines
