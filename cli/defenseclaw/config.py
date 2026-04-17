@@ -790,6 +790,13 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
+    # v4: the legacy top-level `splunk:` block is rejected by the Go
+    # gateway at startup (see internal/config/config.go::detectLegacySplunk).
+    # The Python dataclass retains a SplunkConfig for backwards-compatible
+    # reads, but we must never *write* the key to disk — even with
+    # default values — or the sidecar will refuse to start with a v4
+    # migration error. Splunk forwarding lives under audit_sinks now.
+    d.pop("splunk", None)
     return d
 
 

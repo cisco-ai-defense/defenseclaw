@@ -58,6 +58,15 @@ and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		// Load the data-dir .env BEFORE config.Load() so that
+		// token_env-style references in audit_sinks (e.g.
+		// SplunkHECSinkConfig.TokenEnv → os.Getenv) can resolve against
+		// secrets persisted by `defenseclaw setup` / `defenseclaw init`.
+		// config.Load() validates each sink at startup, and the sidecar
+		// daemon runs without the user's interactive shell environment,
+		// so reading .env first is what makes token_env usable at all.
+		loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+
 		var err error
 		cfg, err = config.Load()
 		if err != nil {
@@ -73,7 +82,11 @@ Run without arguments to start the sidecar daemon.`,
 		}
 
 		auditLog = audit.NewLogger(auditStore)
-		loadDotEnvIntoOS(filepath.Join(cfg.DataDir, ".env"))
+		// Re-run with the resolved data dir in case DEFENSECLAW_HOME
+		// redirected it; second call is a no-op when paths match.
+		if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+			loadDotEnvIntoOS(resolved)
+		}
 		initAuditSinks()
 		initOTelProvider()
 		return nil
