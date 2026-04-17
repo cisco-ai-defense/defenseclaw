@@ -744,12 +744,20 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 
 @click.command()
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
+@click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
+@click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
 @pass_ctx
-def doctor(app: AppContext, json_out: bool) -> None:
+def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> None:
     """Verify credentials, endpoints, and connectivity.
 
     Runs a series of checks against every configured service and API key
     to catch problems before they surface at runtime.
+
+    Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
+    OpenClaw gateway token drift, missing .env file, and unpatched
+    openclaw.json when the guardrail is enabled). Destructive or
+    ambiguous fixes still require the operator to run the relevant
+    setup command explicitly.
 
     Exit codes: 0 = all pass, 1 = any failure.
     """
@@ -782,6 +790,7 @@ def doctor(app: AppContext, json_out: bool) -> None:
     _check_llm_api_key(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
+    _check_registry_credentials(cfg, r)
     if not json_out:
         click.echo()
         click.echo("  ── Observability ──")
@@ -790,6 +799,12 @@ def doctor(app: AppContext, json_out: bool) -> None:
         click.echo()
         click.echo("  ── Webhooks ──")
     _check_webhooks(cfg, r)
+
+    if do_fix:
+        if not json_out:
+            click.echo()
+            click.echo("  ── Auto-fix ──")
+        _run_fixers(cfg, r, assume_yes=assume_yes, json_out=json_out)
 
     # Persist the cached snapshot before exit so the Go TUI (and any
     # other cron-style caller) can pick it up without re-probing. We
@@ -834,3 +849,182 @@ def doctor(app: AppContext, json_out: bool) -> None:
 # helper also wrote a partial cache that would clobber a full-coverage
 # ``doctor_cache.json``. It has been removed to prevent the Overview
 # panel from silently reporting "3 pass" after a partial verify.
+
+
+# ---------------------------------------------------------------------------
+# Registry-driven credentials check
+# ---------------------------------------------------------------------------
+
+def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
+    """Report any REQUIRED credential the current config needs but is unset.
+
+    The per-feature ``_check_*`` helpers above do *connectivity* checks
+    against specific APIs (Cisco AI Defense, VirusTotal, etc.). This
+    extra pass is a belt-and-braces sweep using the credentials
+    registry: any REQUIRED entry that isn't set is flagged here so new
+    features automatically get coverage the moment they're added to
+    ``defenseclaw.credentials.CREDENTIALS``.
+    """
+    from defenseclaw.credentials import Requirement, classify
+
+    for status in classify(cfg):
+        if status.requirement is Requirement.REQUIRED and not status.resolution.is_set:
+            _emit(
+                "fail",
+                f"credential {status.resolution.env_name}",
+                detail=f"required by {status.spec.feature} — "
+                       f"set with 'defenseclaw keys set {status.resolution.env_name}'",
+                r=r,
+            )
+
+
+# ---------------------------------------------------------------------------
+# --fix auto-repair
+# ---------------------------------------------------------------------------
+
+def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> None:
+    """Run each fixer in sequence, narrating what changed.
+
+    Fixers are intentionally *small* and independent — none of them
+    restart the sidecar or mutate openclaw.json beyond what setup
+    already would. Anything that needs a full re-patch is deferred to
+    the human.
+    """
+    fixers = [
+        ("stale gateway PID file",   _fix_stale_pid),
+        ("OpenClaw gateway token",   _fix_openclaw_token),
+        ("defenseclaw dotenv perms", _fix_dotenv_perms),
+        ("pristine openclaw.json backup", _fix_pristine_backup),
+    ]
+
+    for title, fn in fixers:
+        try:
+            outcome = fn(cfg, assume_yes=assume_yes)
+        except Exception as exc:  # defensive — one fixer shouldn't abort the rest
+            outcome = ("error", f"{type(exc).__name__}: {exc}")
+
+        tag, detail = outcome
+        if json_out:
+            r.record(tag, f"fix: {title}", detail)
+        else:
+            _emit(tag, f"fix: {title}", detail=detail, r=r)
+
+
+def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Remove a ``gateway.pid`` file whose recorded PID is no longer alive."""
+    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    if not os.path.isfile(pid_file):
+        return ("skip", "no pid file")
+
+    try:
+        with open(pid_file, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError as exc:
+        return ("warn", f"unreadable: {exc}")
+
+    try:
+        pid = int(raw)
+    except ValueError:
+        try:
+            pid = int(json.loads(raw).get("pid", 0))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pid = 0
+    if pid <= 0:
+        return ("warn", "malformed pid file — leaving in place")
+
+    try:
+        os.kill(pid, 0)
+        return ("skip", f"pid {pid} still alive")
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    if not assume_yes and not click.confirm(
+        f"    Remove stale pid file {pid_file}?", default=True
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        os.unlink(pid_file)
+        return ("pass", f"removed {pid_file}")
+    except OSError as exc:
+        return ("fail", f"could not remove {pid_file}: {exc}")
+
+
+def _fix_openclaw_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Re-sync OPENCLAW_GATEWAY_TOKEN from openclaw.json."""
+    from defenseclaw.commands.cmd_setup import (
+        _detect_openclaw_gateway_token,
+        _save_secret_to_dotenv,
+    )
+
+    token = _detect_openclaw_gateway_token(cfg.claw.config_file)
+    if not token:
+        return ("skip", "no token in openclaw.json")
+
+    current = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    if current == token:
+        return ("skip", "token already in sync")
+
+    if not assume_yes and not click.confirm(
+        "    Update OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env from OpenClaw?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
+    return ("pass", "OPENCLAW_GATEWAY_TOKEN updated from openclaw.json")
+
+
+def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Ensure the dotenv file (which holds secrets) is not world-readable."""
+    path = os.path.join(cfg.data_dir, ".env")
+    if not os.path.isfile(path):
+        return ("skip", "no dotenv file")
+
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError as exc:
+        return ("warn", f"stat failed: {exc}")
+
+    if mode == 0o600:
+        return ("skip", "permissions already 0600")
+
+    if not assume_yes and not click.confirm(
+        f"    Tighten {path} permissions from {mode:04o} to 0600?", default=True
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        os.chmod(path, 0o600)
+        return ("pass", f"set {path} to 0600")
+    except OSError as exc:
+        return ("fail", f"chmod failed: {exc}")
+
+
+def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Capture a pristine backup of openclaw.json if one isn't recorded yet.
+
+    This runs on every ``doctor --fix`` so operators who installed
+    DefenseClaw before the backup index existed can retroactively
+    create one. It never *overwrites* an existing entry.
+    """
+    del assume_yes  # unused: capturing a snapshot is always safe
+    from defenseclaw.guardrail import (
+        pristine_backup_path,
+        record_pristine_backup,
+    )
+
+    oc_path = cfg.claw.config_file
+    if not oc_path:
+        return ("skip", "no openclaw.json configured")
+    if not os.path.isfile(os.path.expanduser(oc_path)):
+        return ("skip", "openclaw.json not present")
+
+    existing = pristine_backup_path(oc_path, cfg.data_dir)
+    if existing:
+        return ("skip", f"already captured at {existing}")
+
+    created = record_pristine_backup(oc_path, cfg.data_dir)
+    if created:
+        return ("pass", f"captured pristine backup at {created}")
+    return ("warn", "could not capture backup (permissions?)")

@@ -277,11 +277,24 @@ def _load_dotenv(path: str) -> dict[str, str]:
 
 
 def _write_dotenv(path: str, entries: dict[str, str]) -> None:
-    """Write entries to a .env file with mode 0600."""
+    """Write entries to a .env file with mode 0600.
+
+    Note: ``O_CREAT`` only applies the ``0o600`` mode on *initial*
+    creation. When the file already exists (common on repeat runs),
+    the previous permission bits survive. We chmod() after the write
+    so that repeated invocations keep converging on 0600, even if a
+    stray ``chmod 644`` happened out-of-band.
+    """
     lines = [f"{k}={v}\n" for k, v in sorted(entries.items())]
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.writelines(lines)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Best-effort: on some filesystems chmod is a no-op. We've
+        # already written the data, so don't fail the caller here.
+        pass
 
 
 def _print_summary(sc, llm, aid) -> None:
@@ -914,6 +927,7 @@ def execute_guardrail_setup(
             master_key=master_key,
             original_model=gc.original_model,
             guardrail_host=gc.host or "localhost",
+            data_dir=app.cfg.data_dir,
         )
         if prev_model is not None:
             click.echo(f"  ✓ OpenClaw config patched: {app.cfg.claw.config_file}")
