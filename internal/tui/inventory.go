@@ -385,7 +385,6 @@ func (p *InventoryPanel) renderCategoryChips(width int) string {
 	b.WriteString("  ")
 	active := map[string]bool{}
 	if len(p.categoryScope) == 0 {
-		// nil scope = "all on" for display purposes.
 		for _, c := range InventoryCategories {
 			active[c] = true
 		}
@@ -412,7 +411,13 @@ func (p *InventoryPanel) renderCategoryChips(width int) string {
 			b.WriteString(" ")
 		}
 	}
-	b.WriteString(p.theme.Dimmed.Render("  (o toggles fast, r reloads)"))
+	// Only render the key-hint suffix when the terminal has room for
+	// it. Below ~80 columns the hint wraps over the chips and makes
+	// the row unreadable, so we drop it on narrow displays.
+	const hintBudget = 30
+	if width <= 0 || lipgloss.Width(b.String())+hintBudget <= width {
+		b.WriteString(p.theme.Dimmed.Render("  (o toggles fast, r reloads)"))
+	}
 	b.WriteString("\n")
 	return b.String()
 }
@@ -1604,11 +1609,26 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-vw)
 }
 
+// truncate shortens s to at most max *runes*, appending an ellipsis
+// when truncation occurs. Works correctly on multi-byte UTF-8 input
+// (we operate on runes, not bytes) and never slices below zero when
+// the budget is pathologically small — a common hazard in narrow
+// terminal panels.
 func truncate(s string, max int) string {
-	if len(s) > max {
-		return s[:max-3] + "…"
+	if max <= 0 {
+		return ""
 	}
-	return s
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	// If the budget is so small that even the ellipsis doesn't fit,
+	// hard-cut without the ellipsis rather than panicking on a
+	// negative slice index.
+	if max <= 1 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 // Style alias for lipgloss.Style.

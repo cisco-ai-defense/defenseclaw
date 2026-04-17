@@ -565,7 +565,14 @@ func (p *LogsPanel) SelectedVerdict() *verdictRow {
 	if p.source != logSourceVerdicts {
 		return nil
 	}
-	filtered := p.filteredLines()
+	// filteredVerdicts walks p.verdicts in lockstep with the
+	// rendered-line filter, so indexing into its output is
+	// always safe even with text/preset filters active. Prior
+	// implementations keyed off filteredLines()'s index but then
+	// looked the row up in the *unfiltered* p.verdicts, which
+	// opened the wrong detail modal whenever a filter shrank
+	// the view (M1).
+	filtered := p.filteredVerdicts()
 	if len(filtered) == 0 {
 		return nil
 	}
@@ -580,13 +587,7 @@ func (p *LogsPanel) SelectedVerdict() *verdictRow {
 	if idx >= len(filtered) {
 		idx = len(filtered) - 1
 	}
-	// Map filtered rendered index back to p.verdicts. Because the
-	// filter is pure (same loop produced both), the indices line
-	// up as long as p.verdicts was built from the same pass.
-	if idx >= len(p.verdicts) {
-		return nil
-	}
-	row := p.verdicts[idx]
+	row := filtered[idx]
 	return &row
 }
 
@@ -882,51 +883,97 @@ func (p *LogsPanel) filteredLines() []string {
 
 	var result []string
 	for _, line := range all {
-		lower := strings.ToLower(line)
-
-		// Apply search filter
-		if p.searchText != "" {
-			if !strings.Contains(lower, strings.ToLower(p.searchText)) {
-				continue
-			}
+		if p.lineMatchesCurrentFilter(strings.ToLower(line)) {
+			result = append(result, line)
 		}
-
-		// Apply preset filter
-		switch p.filterMode {
-		case filterNoNoise:
-			if p.isNoise(lower) {
-				continue
-			}
-		case filterImportant:
-			if !p.isImportant(lower) {
-				continue
-			}
-		case filterErrors:
-			if !strings.Contains(lower, "error") && !strings.Contains(lower, "fatal") && !strings.Contains(lower, "panic") {
-				continue
-			}
-		case filterWarnings:
-			if !strings.Contains(lower, "error") && !strings.Contains(lower, "fatal") &&
-				!strings.Contains(lower, "panic") && !strings.Contains(lower, "warn") {
-				continue
-			}
-		case filterScan:
-			if !strings.Contains(lower, "scan") && !strings.Contains(lower, "finding") {
-				continue
-			}
-		case filterDrift:
-			if !strings.Contains(lower, "drift") && !strings.Contains(lower, "rescan") {
-				continue
-			}
-		case filterGuardrail:
-			if !strings.Contains(lower, "guardrail") && !strings.Contains(lower, "guard") {
-				continue
-			}
-		}
-
-		result = append(result, line)
 	}
 	return result
+}
+
+// lineMatchesCurrentFilter returns true when a rendered log line
+// (already lowercased by the caller) passes both the free-text
+// search and the active preset filter. Factored out so
+// filteredLines and filteredVerdicts stay in lockstep — if either
+// diverged, the detail-modal selection would quietly pick the wrong
+// row (M1 regression). Caller passes `lower` as a small
+// optimisation so we do not re-lowercase once per predicate branch.
+func (p *LogsPanel) lineMatchesCurrentFilter(lower string) bool {
+	if p.searchText != "" {
+		if !strings.Contains(lower, strings.ToLower(p.searchText)) {
+			return false
+		}
+	}
+	switch p.filterMode {
+	case filterNone:
+		// No preset — search-only path already handled above.
+	case filterNoNoise:
+		if p.isNoise(lower) {
+			return false
+		}
+	case filterImportant:
+		if !p.isImportant(lower) {
+			return false
+		}
+	case filterErrors:
+		if !strings.Contains(lower, "error") && !strings.Contains(lower, "fatal") &&
+			!strings.Contains(lower, "panic") {
+			return false
+		}
+	case filterWarnings:
+		if !strings.Contains(lower, "error") && !strings.Contains(lower, "fatal") &&
+			!strings.Contains(lower, "panic") && !strings.Contains(lower, "warn") {
+			return false
+		}
+	case filterScan:
+		if !strings.Contains(lower, "scan") && !strings.Contains(lower, "finding") {
+			return false
+		}
+	case filterDrift:
+		if !strings.Contains(lower, "drift") && !strings.Contains(lower, "rescan") {
+			return false
+		}
+	case filterGuardrail:
+		if !strings.Contains(lower, "guardrail") && !strings.Contains(lower, "guard") {
+			return false
+		}
+	}
+	return true
+}
+
+// filteredVerdicts returns the subset of p.verdicts whose rendered
+// counterpart in p.lines[logSourceVerdicts] survives the same
+// text/preset filter applied by filteredLines. The two slices are
+// populated in lockstep by loadVerdicts so index i in p.verdicts
+// always corresponds to index i in p.lines[logSourceVerdicts]; this
+// helper preserves that invariant under filtering so SelectedVerdict
+// can cross-reference the displayed index back to the typed row.
+//
+// Returns nil when we are not on the Verdicts source or the two
+// slices have drifted (defensive: a slice-length mismatch means the
+// render path is mid-rebuild and selection must be a no-op rather
+// than open the wrong detail modal).
+func (p *LogsPanel) filteredVerdicts() []verdictRow {
+	if p.source != logSourceVerdicts {
+		return nil
+	}
+	all := p.lines[logSourceVerdicts]
+	if len(all) != len(p.verdicts) {
+		return nil
+	}
+	if p.filterMode == filterNone && p.searchText == "" {
+		// Copy so callers can safely retain the slice without
+		// aliasing our live buffer.
+		out := make([]verdictRow, len(p.verdicts))
+		copy(out, p.verdicts)
+		return out
+	}
+	out := make([]verdictRow, 0, len(all))
+	for i, line := range all {
+		if p.lineMatchesCurrentFilter(strings.ToLower(line)) {
+			out = append(out, p.verdicts[i])
+		}
+	}
+	return out
 }
 
 func (p *LogsPanel) isNoise(lower string) bool {

@@ -50,9 +50,11 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -81,11 +83,9 @@ func projectRoot(t *testing.T) string {
 		t.Fatal("runtime.Caller failed — cannot locate project root")
 	}
 	dir := filepath.Dir(file)
-	for i := 0; i < 6; i++ {
-		if _, err := exec.LookPath("go"); err == nil {
-			if _, statErr := execStat(filepath.Join(dir, "go.mod")); statErr == nil {
-				return dir
-			}
+	for i := 0; i < 8; i++ {
+		if info, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !info.IsDir() {
+			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -95,17 +95,6 @@ func projectRoot(t *testing.T) string {
 	}
 	t.Fatalf("could not locate go.mod walking up from %s", file)
 	return ""
-}
-
-// execStat is a tiny wrapper so we can assert on filesystem state
-// without leaking os.Stat noise into the test body. Returns nil if
-// the path exists.
-func execStat(path string) (struct{}, error) {
-	cmd := exec.Command("test", "-f", path)
-	if err := cmd.Run(); err != nil {
-		return struct{}{}, err
-	}
-	return struct{}{}, nil
 }
 
 // findPythonRunner picks the highest-fidelity way to run a script
@@ -299,14 +288,7 @@ func sortedKeys(m map[string]struct{}) []string {
 	for k := range m {
 		out = append(out, k)
 	}
-	// stdlib sort would be cleaner but adding the import here
-	// would only buy us six chars; an inline insertion sort is
-	// fine for small option lists.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
+	sort.Strings(out)
 	return out
 }
 

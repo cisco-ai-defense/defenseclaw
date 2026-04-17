@@ -294,6 +294,150 @@ func TestSelectedVerdict_ReturnsLastWhenCursorAtBottom(t *testing.T) {
 	}
 }
 
+// TestSelectedVerdict_RespectsSearchFilter pins the M1 regression:
+// when a free-text search shrinks the visible list, pressing Enter
+// must open the detail modal for the matching row, not for whatever
+// row happens to live at the same index in the unfiltered
+// p.verdicts slice. Before the fix, SelectedVerdict used the
+// filtered index to look up an unfiltered slice, so with
+// searchText="alert" the user saw the allow row's modal.
+func TestSelectedVerdict_RespectsSearchFilter(t *testing.T) {
+	p := &LogsPanel{source: logSourceVerdicts, height: 24, width: 80}
+	p.verdicts = []verdictRow{
+		{eventType: "verdict", action: "allow", reason: "clean"},
+		{eventType: "verdict", action: "alert", reason: "suspicious"},
+		{eventType: "verdict", action: "block", reason: "injection"},
+	}
+	p.lines[logSourceVerdicts] = []string{
+		"VERDICT ALLOW clean",
+		"VERDICT ALERT suspicious",
+		"VERDICT BLOCK injection",
+	}
+	p.searchText = "suspicious"
+
+	got := p.SelectedVerdict()
+	if got == nil {
+		t.Fatal("SelectedVerdict returned nil with a matching row")
+	}
+	if got.action != "alert" {
+		t.Fatalf("search filter selected action=%q want alert (the "+
+			"only row matching 'suspicious')", got.action)
+	}
+	if got.reason != "suspicious" {
+		t.Fatalf("search filter selected reason=%q want suspicious",
+			got.reason)
+	}
+}
+
+// TestSelectedVerdict_RespectsPresetFilter ensures the fix holds
+// across the preset filter path too — e.g. "errors only" on the
+// Verdicts tab. The filter keeps only the block row, so Enter must
+// produce block even though block is at index 2 in the unfiltered
+// p.verdicts slice.
+func TestSelectedVerdict_RespectsPresetFilter(t *testing.T) {
+	p := &LogsPanel{source: logSourceVerdicts, height: 24, width: 80}
+	p.verdicts = []verdictRow{
+		{eventType: "verdict", action: "allow", reason: "clean"},
+		{eventType: "verdict", action: "alert", reason: "warn"},
+		{eventType: "verdict", action: "block", reason: "error injection"},
+	}
+	p.lines[logSourceVerdicts] = []string{
+		"VERDICT ALLOW clean",
+		"VERDICT ALERT warn",
+		"VERDICT BLOCK error injection",
+	}
+	p.filterMode = filterErrors
+
+	got := p.SelectedVerdict()
+	if got == nil {
+		t.Fatal("SelectedVerdict returned nil under errors filter")
+	}
+	if got.action != "block" {
+		t.Fatalf("errors filter selected action=%q want block", got.action)
+	}
+}
+
+// TestSelectedVerdict_ReturnsNilWhenFilterHidesAll pins the UX
+// contract that pressing Enter on an empty filtered list opens
+// nothing — the detail modal must not fall back to a stale
+// selection from the unfiltered slice.
+func TestSelectedVerdict_ReturnsNilWhenFilterHidesAll(t *testing.T) {
+	p := &LogsPanel{source: logSourceVerdicts, height: 24, width: 80}
+	p.verdicts = []verdictRow{
+		{eventType: "verdict", action: "allow", reason: "ok"},
+	}
+	p.lines[logSourceVerdicts] = []string{"VERDICT ALLOW ok"}
+	p.searchText = "zzz-no-match"
+
+	if got := p.SelectedVerdict(); got != nil {
+		t.Fatalf("filter hid everything, SelectedVerdict should be "+
+			"nil; got %+v", got)
+	}
+}
+
+// TestFilteredVerdicts_LockstepWithFilteredLines is the tight-loop
+// invariant we rely on everywhere in the Verdicts UI: the typed
+// rows returned by filteredVerdicts must match the rendered lines
+// returned by filteredLines position-for-position. A divergence
+// means SelectedVerdict could quietly open the wrong modal even
+// after the M1 fix.
+func TestFilteredVerdicts_LockstepWithFilteredLines(t *testing.T) {
+	p := &LogsPanel{source: logSourceVerdicts}
+	p.verdicts = []verdictRow{
+		{eventType: "verdict", action: "allow", reason: "clean"},
+		{eventType: "verdict", action: "alert", reason: "PII suspected"},
+		{eventType: "verdict", action: "block", reason: "injection"},
+		{eventType: "judge", action: "alert", reason: "PII confirmed"},
+	}
+	p.lines[logSourceVerdicts] = []string{
+		"verdict allow clean",
+		"verdict alert pii suspected",
+		"verdict block injection",
+		"judge alert pii confirmed",
+	}
+
+	cases := []struct {
+		name       string
+		searchText string
+		filterMode string
+		wantRows   int
+	}{
+		{"no_filter", "", filterNone, 4},
+		{"text_only", "pii", filterNone, 2},
+		{"preset_only", "", filterErrors, 0},
+		{"text_and_preset", "pii", filterWarnings, 0},
+		{"drift_in_miss", "no-such-token", filterNone, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p.searchText = tc.searchText
+			p.filterMode = tc.filterMode
+
+			lines := p.filteredLines()
+			rows := p.filteredVerdicts()
+
+			if len(lines) != len(rows) {
+				t.Fatalf("lockstep broken: filteredLines=%d "+
+					"filteredVerdicts=%d", len(lines), len(rows))
+			}
+			if len(rows) != tc.wantRows {
+				t.Fatalf("got %d rows, want %d (lines=%v)",
+					len(rows), tc.wantRows, lines)
+			}
+			for i := range rows {
+				// Every rendered line must contain the row's action
+				// token — the cheapest way to pin that lines[i] was
+				// actually produced from rows[i].
+				if rows[i].action != "" && !strings.Contains(
+					strings.ToLower(lines[i]), rows[i].action) {
+					t.Fatalf("row %d: rendered line %q does not "+
+						"match row action %q", i, lines[i], rows[i].action)
+				}
+			}
+		})
+	}
+}
+
 func TestRenderVerdictLine_Verdict(t *testing.T) {
 	r := verdictRow{
 		eventType: "verdict",
