@@ -428,7 +428,7 @@ func adjustConfidence(toolName string, f RuleFinding) RuleFinding {
 			f.Confidence = clampConfidence(f.Confidence * 1.10)
 		} else if knownReadTools[tool] {
 			f.Confidence = clampConfidence(f.Confidence * 0.65)
-		switch f.Severity {
+			switch f.Severity {
 			case "CRITICAL":
 				f.Severity = "HIGH"
 			case "HIGH":
@@ -436,8 +436,8 @@ func adjustConfidence(toolName string, f RuleFinding) RuleFinding {
 			}
 		}
 
-	// Credential patterns always stay high regardless of tool.
-	// C2 and trust-exploit are tool-agnostic; cognitive rules are adjusted above.
+		// Credential patterns always stay high regardless of tool.
+		// C2 and trust-exploit are tool-agnostic; cognitive rules are adjusted above.
 	}
 
 	return f
@@ -524,9 +524,9 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 //   - Single-char globs: shad?w → shadXw (replaced with wildcard char)
 //   - Variable-like patterns: ${VAR}/path → /path
 var shellNormalizeReplacer = strings.NewReplacer(
-	`""`, "",   // empty double-quote pairs
-	`''`, "",   // empty single-quote pairs
-	`\`, "",    // stray backslashes
+	`""`, "", // empty double-quote pairs
+	`''`, "", // empty single-quote pairs
+	`\`, "", // stray backslashes
 )
 
 var shellVarPattern = regexp.MustCompile(`\$\{?\w+\}?`)

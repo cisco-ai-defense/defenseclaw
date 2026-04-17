@@ -32,12 +32,12 @@ import (
 // human-readable stderr pretty-printer. Additional fanout targets
 // (OTel logs, sinks.Manager) are installed via WithFanout.
 type Writer struct {
-	mu       sync.Mutex
-	jsonl    io.WriteCloser
-	pretty   io.Writer
-	fanout   []func(Event)
-	encoder  *json.Encoder
-	closed   bool
+	mu      sync.Mutex
+	jsonl   io.WriteCloser
+	pretty  io.Writer
+	fanout  []func(Event)
+	encoder *json.Encoder
+	closed  bool
 }
 
 // Config controls writer construction. JSONLPath is required; when

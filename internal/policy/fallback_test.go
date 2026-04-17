@@ -278,7 +278,7 @@ func TestLoadFallbackProfile_FromDataJSON(t *testing.T) {
 	data := map[string]interface{}{
 		"config": map[string]interface{}{
 			"allow_list_bypass_scan": false,
-			"scan_on_install":       false,
+			"scan_on_install":        false,
 		},
 		"actions": map[string]interface{}{
 			"MEDIUM": map[string]string{"runtime": "block", "file": "quarantine", "install": "block"},
@@ -286,8 +286,8 @@ func TestLoadFallbackProfile_FromDataJSON(t *testing.T) {
 		"first_party_allow_list": []map[string]interface{}{
 			{
 				"target_type":          "skill",
-				"target_name":         "codeguard",
-				"reason":              "first-party",
+				"target_name":          "codeguard",
+				"reason":               "first-party",
 				"source_path_contains": []string{".defenseclaw", ".openclaw/skills"},
 			},
 		},

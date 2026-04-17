@@ -105,27 +105,27 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 // Everything else is pass-through. RawBody carries the original JSON so
 // the OpenAI provider can forward unknown fields verbatim.
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ChatMessage   `json:"messages"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Stop        json.RawMessage `json:"stop,omitempty"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	Fallbacks   []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
-	RawBody     json.RawMessage `json:"-"`
-	TargetURL   string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor
-	TargetAPIKey string         `json:"-"` // from Authorization header, forwarded to upstream
+	Model        string          `json:"model"`
+	Messages     []ChatMessage   `json:"messages"`
+	MaxTokens    *int            `json:"max_tokens,omitempty"`
+	Temperature  *float64        `json:"temperature,omitempty"`
+	TopP         *float64        `json:"top_p,omitempty"`
+	Stream       bool            `json:"stream,omitempty"`
+	Stop         json.RawMessage `json:"stop,omitempty"`
+	Tools        json.RawMessage `json:"tools,omitempty"`
+	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
+	Fallbacks    []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	RawBody      json.RawMessage `json:"-"`
+	TargetURL    string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor
+	TargetAPIKey string          `json:"-"` // from Authorization header, forwarded to upstream
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
 type ChatChoice struct {
-	Index        int             `json:"index"`
-	Message      *ChatMessage    `json:"message,omitempty"`
-	Delta        *ChatMessage    `json:"delta,omitempty"`
-	FinishReason *string         `json:"finish_reason"`
+	Index        int          `json:"index"`
+	Message      *ChatMessage `json:"message,omitempty"`
+	Delta        *ChatMessage `json:"delta,omitempty"`
+	FinishReason *string      `json:"finish_reason"`
 }
 
 // ChatUsage tracks token counts.
@@ -139,27 +139,27 @@ type ChatUsage struct {
 // RawResponse carries the original upstream bytes so the proxy can
 // forward unknown fields (system_fingerprint, service_tier, etc.) verbatim.
 type ChatResponse struct {
-	ID                  string          `json:"id"`
-	Object              string          `json:"object"`
-	Created             int64           `json:"created"`
-	Model               string          `json:"model"`
-	Choices             []ChatChoice    `json:"choices"`
-	Usage               *ChatUsage      `json:"usage,omitempty"`
-	DefenseClawBlocked  *bool           `json:"defenseclaw_blocked,omitempty"`
-	DefenseClawReason   string          `json:"defenseclaw_reason,omitempty"`
-	RawResponse         json.RawMessage `json:"-"`
+	ID                 string          `json:"id"`
+	Object             string          `json:"object"`
+	Created            int64           `json:"created"`
+	Model              string          `json:"model"`
+	Choices            []ChatChoice    `json:"choices"`
+	Usage              *ChatUsage      `json:"usage,omitempty"`
+	DefenseClawBlocked *bool           `json:"defenseclaw_blocked,omitempty"`
+	DefenseClawReason  string          `json:"defenseclaw_reason,omitempty"`
+	RawResponse        json.RawMessage `json:"-"`
 }
 
 // StreamChunk is one SSE chunk in OpenAI format.
 type StreamChunk struct {
-	ID                  string       `json:"id"`
-	Object              string       `json:"object"`
-	Created             int64        `json:"created"`
-	Model               string       `json:"model"`
-	Choices             []ChatChoice `json:"choices"`
-	Usage               *ChatUsage   `json:"usage,omitempty"`
-	DefenseClawBlocked  *bool        `json:"defenseclaw_blocked,omitempty"`
-	DefenseClawReason   string       `json:"defenseclaw_reason,omitempty"`
+	ID                 string       `json:"id"`
+	Object             string       `json:"object"`
+	Created            int64        `json:"created"`
+	Model              string       `json:"model"`
+	Choices            []ChatChoice `json:"choices"`
+	Usage              *ChatUsage   `json:"usage,omitempty"`
+	DefenseClawBlocked *bool        `json:"defenseclaw_blocked,omitempty"`
+	DefenseClawReason  string       `json:"defenseclaw_reason,omitempty"`
 }
 
 // LLMProvider abstracts the upstream LLM API.
@@ -238,29 +238,29 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvid
 
 // knownProviders lists provider prefixes recognized in "provider/model" strings.
 var knownProviders = map[string]bool{
-	"openai":      true,
-	"anthropic":   true,
-	"openrouter":  true,
-	"azure":       true,
-	"gemini":      true,
+	"openai":        true,
+	"anthropic":     true,
+	"openrouter":    true,
+	"azure":         true,
+	"gemini":        true,
 	"gemini-openai": true,
-	"bedrock":     true,
+	"bedrock":       true,
 	// amazon-bedrock is OpenClaw's stock provider name for AWS Bedrock; see
 	// https://docs.openclaw.ai/providers/bedrock. Both prefixes are accepted
 	// and routed to the same Bifrost Bedrock backend via mapProviderKey.
 	"amazon-bedrock": true,
-	"groq":        true,
-	"mistral":     true,
-	"ollama":      true,
-	"vertex":      true,
-	"cohere":      true,
-	"perplexity":  true,
-	"cerebras":    true,
-	"fireworks":   true,
-	"xai":         true,
-	"huggingface": true,
-	"replicate":   true,
-	"vllm":        true,
+	"groq":           true,
+	"mistral":        true,
+	"ollama":         true,
+	"vertex":         true,
+	"cohere":         true,
+	"perplexity":     true,
+	"cerebras":       true,
+	"fireworks":      true,
+	"xai":            true,
+	"huggingface":    true,
+	"replicate":      true,
+	"vllm":           true,
 }
 
 func splitModel(model string) (provider, modelID string) {

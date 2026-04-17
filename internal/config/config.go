@@ -166,16 +166,16 @@ type FirewallConfig struct {
 	AnchorName string `mapstructure:"anchor_name" yaml:"anchor_name"`
 }
 
-// WebhookConfig is one entry in the top-level ``webhooks[]`` list. These
+// WebhookConfig is one entry in the top-level “webhooks[]“ list. These
 // are notifier webhooks (chat/incident), NOT audit sinks — audit
-// forwarding lives in ``audit_sinks[]``. See docs/OBSERVABILITY.md §7.
+// forwarding lives in “audit_sinks[]“. See docs/OBSERVABILITY.md §7.
 //
 // CooldownSeconds is a tri-state on purpose (see webhook.go
-// ``webhookDefaultCooldown = 300s``):
+// “webhookDefaultCooldown = 300s“):
 //
 //   - nil (YAML key absent / null): "use the dispatcher default"
-//     (``webhookDefaultCooldown``, currently 300s). This is what
-//     ``setup webhook add`` writes when the operator omits --cooldown.
+//     (“webhookDefaultCooldown“, currently 300s). This is what
+//     “setup webhook add“ writes when the operator omits --cooldown.
 //   - *v == 0: explicit "dispatch every event" (debounce disabled).
 //     Stored so round-tripping the YAML doesn't silently re-introduce
 //     the 300s default.
@@ -186,12 +186,12 @@ type FirewallConfig struct {
 // The Python writer (cli/defenseclaw/webhooks/writer.py) preserves the
 // same nil-vs-zero distinction end-to-end.
 //
-// Name is the CLI-visible identifier (``defenseclaw setup webhook
-// enable <name>`` etc.). The runtime dispatcher itself identifies
+// Name is the CLI-visible identifier (“defenseclaw setup webhook
+// enable <name>“ etc.). The runtime dispatcher itself identifies
 // webhooks by URL, but Name is round-tripped through Load/Save so
 // saving the config via Config.Save() or the TUI doesn't silently
-// strip the operator's chosen name. ``omitempty`` keeps legacy files
-// that never set ``name:`` identical after load-save.
+// strip the operator's chosen name. “omitempty“ keeps legacy files
+// that never set “name:“ identical after load-save.
 type WebhookConfig struct {
 	Name            string   `mapstructure:"name"             yaml:"name,omitempty"`
 	URL             string   `mapstructure:"url"              yaml:"url"`

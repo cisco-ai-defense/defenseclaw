@@ -44,14 +44,14 @@ type Client struct {
 	device *DeviceIdentity
 	debug  bool
 
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	closed     bool
-	seqMu      sync.Mutex
-	lastSeq    int
-	pending    map[string]chan *ResponseFrame
-	hello      *HelloOK
-	disconnCh  chan struct{}
+	conn        *websocket.Conn
+	mu          sync.Mutex
+	closed      bool
+	seqMu       sync.Mutex
+	lastSeq     int
+	pending     map[string]chan *ResponseFrame
+	hello       *HelloOK
+	disconnCh   chan struct{}
 	disconnOnce sync.Once
 
 	// While the connect RPC is in flight, inbound events are queued here so

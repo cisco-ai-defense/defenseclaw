@@ -25,12 +25,12 @@ import (
 // formats; normalization ensures consistent IDs, severities, and
 // categories for downstream consumers (audit, telemetry, policy).
 type NormalizedFinding struct {
-	CanonicalID string `json:"canonical_id"`
-	Source      string `json:"source"`
-	OriginalID  string `json:"original_id"`
-	Category    string `json:"category"`
-	Severity    string `json:"severity"`
-	Title       string `json:"title"`
+	CanonicalID string  `json:"canonical_id"`
+	Source      string  `json:"source"`
+	OriginalID  string  `json:"original_id"`
+	Category    string  `json:"category"`
+	Severity    string  `json:"severity"`
+	Title       string  `json:"title"`
 	Confidence  float64 `json:"confidence,omitempty"`
 }
 

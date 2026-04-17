@@ -254,13 +254,13 @@ func NewSetupPanel(theme *Theme, cfg *config.Config, executor *CommandExecutor) 
 	ei.SetWidth(40)
 
 	p := SetupPanel{
-		theme:       theme,
-		cfg:         cfg,
-		executor:    executor,
-		editInput:   ei,
-		wizardHover: -1,
-		configHover: -1,
-		wizRunIdx:   -1,
+		theme:         theme,
+		cfg:           cfg,
+		executor:      executor,
+		editInput:     ei,
+		wizardHover:   -1,
+		configHover:   -1,
+		wizRunIdx:     -1,
 		sinkEditor:    NewSinkEditorModel(),
 		webhookEditor: NewWebhookEditorModel(),
 	}
@@ -510,7 +510,7 @@ func (p *SetupPanel) loadSections() {
 		// separate section so operators can scroll to "just the
 		// watcher" without wading past reconnect timers etc.
 		{
-			Name: "Gateway Watcher",
+			Name:    "Gateway Watcher",
 			Summary: "Filesystem watcher that auto-scans new skills/plugins/MCPs as they appear.",
 			Help: "take_action=true re-runs the admission gate when a file changes (may block an already-running agent). " +
 				"Dirs: CSV of extra paths to watch beyond the claw-mode defaults.",
@@ -633,7 +633,7 @@ func (p *SetupPanel) loadSections() {
 		// would collapse those states and flip the default silently
 		// the next time someone opens the form.
 		{
-			Name: "OpenShell",
+			Name:    "OpenShell",
 			Summary: "NVIDIA OpenShell sandbox integration (Linux only — macOS degrades gracefully).",
 			Help: "mode=docker uses Docker-backed sandboxes; standalone uses native namespaces. " +
 				"Tristates (auto_pair, host_networking) keep 'unset' distinct from explicit false — " +
@@ -662,7 +662,7 @@ func (p *SetupPanel) loadSections() {
 		// api_key_env keeps the secret in keychain-backed env vars and
 		// out of the YAML on disk.
 		{
-			Name: "Inspect LLM",
+			Name:    "Inspect LLM",
 			Summary: "Model used by `defenseclaw inspect` (manual triage) and legacy judge fallback.",
 			Help: "Prefer api_key_env over api_key to keep secrets out of config.yaml. " +
 				"The redacted api_key field lets you paste a value in-TUI — it's stored but never shown.",
@@ -707,7 +707,7 @@ func (p *SetupPanel) loadSections() {
 		// rules. Operators should edit ~/.defenseclaw/config.yaml
 		// directly when migrating between hosts.
 		{
-			Name: "Firewall",
+			Name:    "Firewall",
 			Summary: "Host firewall anchor paths (pf on macOS, nft on Linux). Read-only in the TUI.",
 			Help: "Paths reference system-owned files DefenseClaw doesn't create — editing them here " +
 				"would orphan active rules. Edit ~/.defenseclaw/config.yaml directly if you need to migrate hosts.",
@@ -1661,7 +1661,7 @@ func observabilityWizardFields(presetID string) []wizardFormField {
 
 // webhookTypes mirrors cli/defenseclaw/webhooks/writer.py::VALID_TYPES.
 // Ordering drives the default cursor position in the wizard picker and
-// matches the CLI's ``add <type>`` argument choices so both front-ends
+// matches the CLI's “add <type>“ argument choices so both front-ends
 // feel identical.
 var webhookTypes = [][2]string{
 	{"slack", "Slack (incoming webhook)"},
@@ -1675,8 +1675,8 @@ var webhookTypes = [][2]string{
 // it rebuilds the form below via handleFormKey's rebuild branch.
 //
 // Required=true is reserved for inputs the writer cannot synthesize:
-// the URL is always required; PagerDuty/Webex demand ``secret-env``;
-// Webex additionally requires ``room-id``. These line up with
+// the URL is always required; PagerDuty/Webex demand “secret-env“;
+// Webex additionally requires “room-id“. These line up with
 // webhooks/writer.py::apply_webhook's server-side validation so the
 // TUI catches missing fields before the CLI ever runs.
 func webhookWizardFields(channelType string) []wizardFormField {
@@ -2871,9 +2871,9 @@ func auditSinkSummaryFields(c *config.Config) []configField {
 }
 
 // webhookSummaryFields renders one read-only row per notifier webhook
-// (``webhooks[]``). Like audit sinks, the list-of-structs schema can't
+// (“webhooks[]“). Like audit sinks, the list-of-structs schema can't
 // be represented as single-key configFields, and re-hydrating secrets
-// (``secret_env``) inside a TUI form is out of scope for v1, so we
+// (“secret_env“) inside a TUI form is out of scope for v1, so we
 // show a summary and point at the wizard / CLI. See
 // docs/OBSERVABILITY.md for the webhook vs audit-sink disambiguation.
 func webhookSummaryFields(c *config.Config) []configField {

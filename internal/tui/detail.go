@@ -126,7 +126,7 @@ func (d *DetailModal) View() string {
 		if f.label == "Status" {
 			val = StatusStyle(val).Render(strings.ToUpper(val))
 		}
-		b.WriteString(ModalLabelStyle.Render(f.label+":"))
+		b.WriteString(ModalLabelStyle.Render(f.label + ":"))
 		b.WriteString(" ")
 		b.WriteString(val)
 		b.WriteString("\n")

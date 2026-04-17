@@ -139,8 +139,8 @@ func TestExpandHeaders(t *testing.T) {
 	t.Setenv("TEST_TOKEN", "abc123")
 
 	headers := map[string]string{
-		"X-SF-TOKEN":  "${TEST_TOKEN}",
-		"X-Static":    "static-value",
+		"X-SF-TOKEN": "${TEST_TOKEN}",
+		"X-Static":   "static-value",
 	}
 
 	expanded := expandHeaders(headers)
@@ -180,10 +180,10 @@ func TestExpandHeaders_NoAutoInjection(t *testing.T) {
 
 func TestResolveValue(t *testing.T) {
 	tests := []struct {
-		name    string
-		signal  string
-		global  string
-		want    string
+		name   string
+		signal string
+		global string
+		want   string
 	}{
 		{"signal set", "signal-endpoint", "global-endpoint", "signal-endpoint"},
 		{"signal empty", "", "global-endpoint", "global-endpoint"},
@@ -270,9 +270,9 @@ func TestBuildSampler(t *testing.T) {
 
 func TestActionMapping(t *testing.T) {
 	tests := []struct {
-		action         string
-		wantLifecycle  string
-		wantActor      string
+		action        string
+		wantLifecycle string
+		wantActor     string
 	}{
 		{"install-detected", "install", "watcher"},
 		{"install-rejected", "block", "watcher"},
@@ -327,7 +327,7 @@ func TestNonLifecycleActionsExcluded(t *testing.T) {
 
 func TestSeverityMapping(t *testing.T) {
 	tests := []struct {
-		input   string
+		input    string
 		wantText string
 		wantNum  int
 	}{
@@ -592,10 +592,10 @@ func TestAlertSeverityToOTel(t *testing.T) {
 
 func TestResolveServiceName(t *testing.T) {
 	tests := []struct {
-		name    string
-		envVal  string
-		attrs   map[string]string
-		want    string
+		name   string
+		envVal string
+		attrs  map[string]string
+		want   string
 	}{
 		{
 			"env var takes priority",

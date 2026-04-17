@@ -73,4 +73,3 @@ func modelMaxTokens(model string) int {
 		return defaultMaxTokensFallback
 	}
 }
-

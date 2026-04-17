@@ -24,8 +24,8 @@ type Provider struct {
 
 // ProvidersConfig is the top-level structure of providers.json.
 type ProvidersConfig struct {
-	Providers  []Provider `json:"providers"`
-	OllamaPorts []int     `json:"ollama_ports"`
+	Providers   []Provider `json:"providers"`
+	OllamaPorts []int      `json:"ollama_ports"`
 }
 
 // LoadProviders parses the embedded providers.json.

@@ -28,9 +28,9 @@ import (
 
 func TestSecretRules_TruePositives(t *testing.T) {
 	cases := []struct {
-		name    string
-		input   string
-		wantID  string
+		name   string
+		input  string
+		wantID string
 	}{
 		{"AWS access key", `{"key": "AKIAIOSFODNN7EXAMPLE"}`, "SEC-AWS-KEY"},
 		{"AWS secret key assignment", `aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, "SEC-AWS-SECRET"},

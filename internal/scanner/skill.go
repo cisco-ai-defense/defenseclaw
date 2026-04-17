@@ -89,7 +89,7 @@ func NewSkillScanner(cfg config.SkillScannerConfig, llm config.InspectLLMConfig,
 	return &SkillScanner{Config: cfg, InspectLLM: llm, CiscoAIDefense: aid}
 }
 
-func (s *SkillScanner) Name() string              { return "skill-scanner" }
+func (s *SkillScanner) Name() string               { return "skill-scanner" }
 func (s *SkillScanner) Version() string            { return "1.0.0" }
 func (s *SkillScanner) SupportedTargets() []string { return []string{"skill"} }
 

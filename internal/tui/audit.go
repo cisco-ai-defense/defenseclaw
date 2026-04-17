@@ -104,8 +104,16 @@ func (p *AuditPanel) ClearFilter() {
 }
 func (p *AuditPanel) FilterText() string { return p.filter }
 
-func (p *AuditPanel) CursorUp()   { if p.cursor > 0 { p.cursor-- } }
-func (p *AuditPanel) CursorDown() { if p.cursor < len(p.filtered)-1 { p.cursor++ } }
+func (p *AuditPanel) CursorUp() {
+	if p.cursor > 0 {
+		p.cursor--
+	}
+}
+func (p *AuditPanel) CursorDown() {
+	if p.cursor < len(p.filtered)-1 {
+		p.cursor++
+	}
+}
 
 func (p *AuditPanel) Selected() *audit.Event {
 	if p.cursor >= 0 && p.cursor < len(p.filtered) {
@@ -115,7 +123,7 @@ func (p *AuditPanel) Selected() *audit.Event {
 }
 
 func (p *AuditPanel) Count() int         { return len(p.items) }
-func (p *AuditPanel) FilteredCount() int  { return len(p.filtered) }
+func (p *AuditPanel) FilteredCount() int { return len(p.filtered) }
 func (p *AuditPanel) CursorAt() int      { return p.cursor }
 
 func (p *AuditPanel) ScrollOffset() int {

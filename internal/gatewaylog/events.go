@@ -162,9 +162,9 @@ type JudgePayload struct {
 // LifecyclePayload covers sidecar start/stop and config-reload
 // transitions. Details is free-form and always redacted.
 type LifecyclePayload struct {
-	Subsystem string            `json:"subsystem"` // gateway | watcher | sinks | telemetry | api
-	Transition string           `json:"transition"` // start | stop | ready | degraded | restored
-	Details   map[string]string `json:"details,omitempty"`
+	Subsystem  string            `json:"subsystem"`  // gateway | watcher | sinks | telemetry | api
+	Transition string            `json:"transition"` // start | stop | ready | degraded | restored
+	Details    map[string]string `json:"details,omitempty"`
 }
 
 // ErrorPayload is the structured shape of every recoverable error we

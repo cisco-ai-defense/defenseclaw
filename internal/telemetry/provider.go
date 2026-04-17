@@ -28,8 +28,8 @@ import (
 
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
-	logNoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/log/global"
+	logNoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/metric"
 	metricNoop "go.opentelemetry.io/otel/metric/noop"
 	sdklog "go.opentelemetry.io/otel/sdk/log"

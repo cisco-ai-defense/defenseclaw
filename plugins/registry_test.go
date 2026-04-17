@@ -29,9 +29,9 @@ type stubScanner struct {
 	version string
 }
 
-func (s *stubScanner) Name() string                { return s.name }
-func (s *stubScanner) Version() string             { return s.version }
-func (s *stubScanner) SupportedTargets() []string  { return []string{"skill", "mcp"} }
+func (s *stubScanner) Name() string               { return s.name }
+func (s *stubScanner) Version() string            { return s.version }
+func (s *stubScanner) SupportedTargets() []string { return []string{"skill", "mcp"} }
 func (s *stubScanner) Scan(_ context.Context, target string) (*ScanResult, error) {
 	return &ScanResult{
 		Scanner:   s.name,

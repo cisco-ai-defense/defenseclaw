@@ -40,13 +40,13 @@ type SubsystemHealth struct {
 }
 
 type HealthSnapshot struct {
-	StartedAt time.Time        `json:"started_at"`
-	UptimeMs  int64            `json:"uptime_ms"`
-	Gateway   SubsystemHealth  `json:"gateway"`
-	Watcher   SubsystemHealth  `json:"watcher"`
-	API       SubsystemHealth  `json:"api"`
-	Guardrail SubsystemHealth  `json:"guardrail"`
-	Telemetry SubsystemHealth  `json:"telemetry"`
+	StartedAt time.Time       `json:"started_at"`
+	UptimeMs  int64           `json:"uptime_ms"`
+	Gateway   SubsystemHealth `json:"gateway"`
+	Watcher   SubsystemHealth `json:"watcher"`
+	API       SubsystemHealth `json:"api"`
+	Guardrail SubsystemHealth `json:"guardrail"`
+	Telemetry SubsystemHealth `json:"telemetry"`
 	// Sinks reports the aggregate health of all configured audit sinks
 	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
 	// per-sink state for the TUI/CLI to render individual rows.

@@ -256,10 +256,10 @@ func TestTruncateEvidence_Long(t *testing.T) {
 
 func newMockJudge(provider *mockLLMProvider) *LLMJudge {
 	cfg := &config.JudgeConfig{
-		Enabled:              true,
-		Model:                "test/model",
-		Fallbacks:            []string{"fallback/model"},
-		AdjudicationTimeout:  5.0,
+		Enabled:             true,
+		Model:               "test/model",
+		Fallbacks:           []string{"fallback/model"},
+		AdjudicationTimeout: 5.0,
 	}
 	return &LLMJudge{
 		cfg:      cfg,

@@ -54,13 +54,13 @@ type PolicyPanel struct {
 	loaded    bool
 
 	// Rule Packs sub-tab
-	packs       []string
-	activePack  string
-	packCursor  int
-	packRules   []*guardrail.RulesFileYAML
-	packDetail  bool
-	ruleCursor  int
-	ruleScroll  int
+	packs      []string
+	activePack string
+	packCursor int
+	packRules  []*guardrail.RulesFileYAML
+	packDetail bool
+	ruleCursor int
+	ruleScroll int
 
 	// Judge Prompts sub-tab
 	judgeNames  []string
@@ -75,12 +75,12 @@ type PolicyPanel struct {
 	suppScroll   int
 
 	// OPA sub-tab
-	regoFiles   []string
-	regoCursor  int
-	regoSource  string
-	regoScroll  int
-	showTests   bool
-	regoOutput  string
+	regoFiles  []string
+	regoCursor int
+	regoSource string
+	regoScroll int
+	showTests  bool
+	regoOutput string
 
 	// Policies sub-tab — admission-gate YAML policies managed via
 	// `defenseclaw policy <verb>`. We intentionally keep this

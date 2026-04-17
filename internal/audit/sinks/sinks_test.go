@@ -309,11 +309,11 @@ type panicSink struct {
 	name string
 }
 
-func (p *panicSink) Name() string                            { return p.name }
-func (p *panicSink) Kind() string                            { return "panic" }
+func (p *panicSink) Name() string                             { return p.name }
+func (p *panicSink) Kind() string                             { return "panic" }
 func (p *panicSink) Forward(_ context.Context, _ Event) error { panic("sink boom") }
-func (p *panicSink) Flush(_ context.Context) error           { return nil }
-func (p *panicSink) Close() error                            { return nil }
+func (p *panicSink) Flush(_ context.Context) error            { return nil }
+func (p *panicSink) Close() error                             { return nil }
 
 func TestManager_Forward_RecoversFromSinkPanic(t *testing.T) {
 	m := NewManager()

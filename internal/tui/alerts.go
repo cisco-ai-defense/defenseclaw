@@ -203,12 +203,12 @@ func (p *AlertsPanel) SetSevFilter(sev string) {
 	p.applyFilter()
 }
 
-func (p *AlertsPanel) SevFilter() string     { return p.sevFilter }
-func (p *AlertsPanel) IsFiltering() bool      { return p.filtering }
-func (p *AlertsPanel) StartFilter()           { p.filtering = true }
-func (p *AlertsPanel) StopFilter()            { p.filtering = false }
-func (p *AlertsPanel) FilterText() string     { return p.filter }
-func (p *AlertsPanel) IsDetailOpen() bool     { return p.detailOpen }
+func (p *AlertsPanel) SevFilter() string  { return p.sevFilter }
+func (p *AlertsPanel) IsFiltering() bool  { return p.filtering }
+func (p *AlertsPanel) StartFilter()       { p.filtering = true }
+func (p *AlertsPanel) StopFilter()        { p.filtering = false }
+func (p *AlertsPanel) FilterText() string { return p.filter }
+func (p *AlertsPanel) IsDetailOpen() bool { return p.detailOpen }
 
 func (p *AlertsPanel) ClearFilter() {
 	p.filter = ""
@@ -309,9 +309,9 @@ func (p *AlertsPanel) Dismiss() string {
 
 // ---------- Counts and navigation ----------
 
-func (p *AlertsPanel) Count() int        { return len(p.items) }
+func (p *AlertsPanel) Count() int         { return len(p.items) }
 func (p *AlertsPanel) FilteredCount() int { return len(p.filtered) }
-func (p *AlertsPanel) CursorAt() int     { return p.cursor }
+func (p *AlertsPanel) CursorAt() int      { return p.cursor }
 
 func (p *AlertsPanel) CriticalCount() int {
 	n := 0

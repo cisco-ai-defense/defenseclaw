@@ -42,7 +42,7 @@ func NewMCPScanner(cfg config.MCPScannerConfig, llm config.InspectLLMConfig, aid
 	return &MCPScanner{Config: cfg, InspectLLM: llm, CiscoAIDefense: aid}
 }
 
-func (s *MCPScanner) Name() string              { return "mcp-scanner" }
+func (s *MCPScanner) Name() string               { return "mcp-scanner" }
 func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
