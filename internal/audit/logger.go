@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,8 +65,26 @@ type StructuredEmitter interface {
 	EmitAudit(event Event)
 }
 
+// Logger is the audit choke point: every caller routes through
+// LogEvent / LogAction* / LogScan*, which persist to SQLite and then
+// fan out to OTel, audit sinks, and the structured gateway.jsonl
+// bridge. The downstream collaborators (sinks.Manager,
+// telemetry.Provider, StructuredEmitter) are installed via setters
+// so sidecar startup can wire everything up after NewLogger without
+// refactoring call sites every time a new sink is added.
+//
+// mu guards those three collaborator fields. Before it existed, a
+// goroutine calling LogEvent while the shutdown path called
+// SetStructuredEmitter(nil) had a classic data race on an interface
+// value — interface writes are two-word stores on most
+// architectures and are not atomic. The lock is acquired only to
+// snapshot the current collaborator pointers into local variables;
+// the fan-out itself runs *without* the lock held so a slow sink
+// cannot block an unrelated setter from swapping.
 type Logger struct {
 	store *Store
+
+	mu sync.RWMutex
 	// sinks is the v4 generic fan-out manager. nil is a safe no-op
 	// (matches the legacy nil-splunk behavior).
 	sinks      *sinks.Manager
@@ -81,30 +100,47 @@ func NewLogger(store *Store) *Logger {
 // downstream forwarding (events still hit SQLite + OTel when those are
 // configured).
 func (l *Logger) SetSinks(m *sinks.Manager) {
+	l.mu.Lock()
 	l.sinks = m
+	l.mu.Unlock()
 }
 
 func (l *Logger) SetOTelProvider(p *telemetry.Provider) {
+	l.mu.Lock()
 	l.otel = p
+	l.mu.Unlock()
 }
 
 // SetStructuredEmitter installs a bridge that forwards sanitized audit
 // Events to the structured gateway.jsonl writer (or any other
 // structured sink). Pass nil to detach.
 func (l *Logger) SetStructuredEmitter(e StructuredEmitter) {
+	l.mu.Lock()
 	l.structured = e
+	l.mu.Unlock()
 }
 
-// emitStructured fans the event out to the structured emitter. Kept
-// separate from forwardToSinks because the gatewaylog bridge is
-// intentionally local-only (file on disk + OTel/Splunk fanout happens
-// at the writer level, not here) while sinks.Manager is for remote
-// adapters with retry/batching semantics.
-func (l *Logger) emitStructured(e Event) {
-	if l.structured == nil {
+// snapshot returns a consistent view of the collaborator pointers
+// at a single instant. The caller uses these snapshots to drive the
+// fan-out without holding the lock — so a misbehaving sink cannot
+// stall setters, and a concurrent Set* swap does not tear an
+// in-flight interface field read.
+func (l *Logger) snapshot() (*sinks.Manager, *telemetry.Provider, StructuredEmitter) {
+	l.mu.RLock()
+	s, o, e := l.sinks, l.otel, l.structured
+	l.mu.RUnlock()
+	return s, o, e
+}
+
+// emitStructuredSnapshot fans the event out to an explicit snapshot
+// of the structured emitter. Used by code paths that have already
+// taken a single snapshot() for the whole fan-out so concurrent
+// Set*/Close calls can't observe a torn interface field mid-pipe.
+func (l *Logger) emitStructuredSnapshot(emitter StructuredEmitter, e Event) {
+	if emitter == nil {
 		return
 	}
-	l.structured.EmitAudit(e)
+	emitter.EmitAudit(e)
 }
 
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
@@ -115,6 +151,8 @@ func (l *Logger) LogScan(result *scanner.ScanResult) error {
 
 // LogScanWithVerdict persists a scan result with an explicit admission verdict.
 func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) error {
+	sinksMgr, otel, structured := l.snapshot()
+
 	scanID := uuid.New().String()
 	raw, _ := result.JSON()
 
@@ -123,8 +161,8 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 		result.Duration.Milliseconds(), len(result.Findings),
 		string(result.MaxSeverity()), string(raw),
 	); err != nil {
-		if l.otel != nil {
-			l.otel.RecordAuditDBError(context.Background(), "insert_scan_result")
+		if otel != nil {
+			otel.RecordAuditDBError(context.Background(), "insert_scan_result")
 		}
 		return err
 	}
@@ -146,8 +184,8 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 			safeDescription, safeLocation, safeRemediation, f.Scanner,
 			string(tagsJSON),
 		); err != nil {
-			if l.otel != nil {
-				l.otel.RecordAuditDBError(context.Background(), "insert_finding")
+			if otel != nil {
+				otel.RecordAuditDBError(context.Background(), "insert_finding")
 			}
 			return err
 		}
@@ -166,20 +204,20 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	})
 
 	if err := l.store.LogEvent(event); err != nil {
-		if l.otel != nil {
-			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		if otel != nil {
+			otel.RecordAuditDBError(context.Background(), "insert_event")
 		}
 		return err
 	}
-	if l.otel != nil {
-		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+	if otel != nil {
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSinks(event)
-	l.emitStructured(event)
+	l.forwardToSinksSnapshot(sinksMgr, event)
+	l.emitStructuredSnapshot(structured, event)
 
-	if l.otel != nil {
+	if otel != nil {
 		targetType := inferTargetType(result.Scanner)
-		l.otel.EmitScanResult(result, scanID, targetType, verdict)
+		otel.EmitScanResult(result, scanID, targetType, verdict)
 	}
 
 	return nil
@@ -206,6 +244,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 // have no HTTP correlation context); the SQLite column is nullable
 // and downstream sinks strip the attribute when unset.
 func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requestID string) error {
+	sinksMgr, otel, structured := l.snapshot()
 	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -219,20 +258,20 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 		RequestID: requestID,
 	})
 	if err := l.store.LogEvent(event); err != nil {
-		if l.otel != nil {
-			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		if otel != nil {
+			otel.RecordAuditDBError(context.Background(), "insert_event")
 		}
 		return err
 	}
-	if l.otel != nil {
-		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+	if otel != nil {
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSinks(event)
-	l.emitStructured(event)
+	l.forwardToSinksSnapshot(sinksMgr, event)
+	l.emitStructuredSnapshot(structured, event)
 
-	if l.otel != nil {
+	if otel != nil {
 		assetType := inferAssetTypeFromAction(action, details)
-		l.otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, nil)
+		otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, nil)
 	}
 
 	return nil
@@ -242,6 +281,7 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 // for OTel lifecycle signals. The enforcement map may contain keys:
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
+	sinksMgr, otel, structured := l.snapshot()
 	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -253,20 +293,20 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		RunID:     currentRunID(),
 	})
 	if err := l.store.LogEvent(event); err != nil {
-		if l.otel != nil {
-			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		if otel != nil {
+			otel.RecordAuditDBError(context.Background(), "insert_event")
 		}
 		return err
 	}
-	if l.otel != nil {
-		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+	if otel != nil {
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSinks(event)
-	l.emitStructured(event)
+	l.forwardToSinksSnapshot(sinksMgr, event)
+	l.emitStructuredSnapshot(structured, event)
 
-	if l.otel != nil {
+	if otel != nil {
 		assetType := inferAssetTypeFromAction(action, details)
-		l.otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, enforcement)
+		otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, enforcement)
 	}
 
 	return nil
@@ -276,6 +316,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 // (SQLite + audit sinks + OTel). Use this when the caller needs to
 // control severity or other fields that LogAction hardcodes.
 func (l *Logger) LogEvent(event Event) error {
+	sinksMgr, otel, structured := l.snapshot()
 	if event.ID == "" {
 		event.ID = uuid.New().String()
 	}
@@ -287,34 +328,36 @@ func (l *Logger) LogEvent(event Event) error {
 	}
 	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
-		if l.otel != nil {
-			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		if otel != nil {
+			otel.RecordAuditDBError(context.Background(), "insert_event")
 		}
 		return err
 	}
-	if l.otel != nil {
-		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+	if otel != nil {
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
-	l.forwardToSinks(event)
-	l.emitStructured(event)
+	l.forwardToSinksSnapshot(sinksMgr, event)
+	l.emitStructuredSnapshot(structured, event)
 	return nil
 }
 
-// forwardToSinks fans the event out to every configured audit sink. The
-// Manager handles per-sink filtering, immediate-flush actions, and
-// per-sink error logging — we only translate from the audit Event type.
+// forwardToSinksSnapshot fans the event out to the provided sink
+// manager snapshot. Kept separate from the field reader so a single
+// Log* call observes exactly one snapshot of the collaborator graph
+// — a concurrent SetSinks/SetStructuredEmitter cannot tear
+// mid-pipeline.
 //
 // We use a short context here because the sinks are best-effort
 // downstream forwarders; a stalled remote endpoint must not block the
 // hot path. Sinks that need longer-lived connections own their own
 // background goroutines.
-func (l *Logger) forwardToSinks(e Event) {
-	if l.sinks == nil {
+func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
+	if mgr == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = l.sinks.Forward(ctx, sinks.Event{
+	_ = mgr.Forward(ctx, sinks.Event{
 		ID:        e.ID,
 		Timestamp: e.Timestamp,
 		Action:    e.Action,
@@ -328,11 +371,20 @@ func (l *Logger) forwardToSinks(e Event) {
 	})
 }
 
-// Close flushes and closes every audit sink. Safe to call when no sinks
-// are configured.
+// Close flushes and closes every audit sink. Safe to call when no
+// sinks are configured. Reads l.sinks under the same lock used by
+// setters so Close does not race against SetSinks on a late-stage
+// reload. Callers MUST ensure the Logger is drained of in-flight
+// LogEvent goroutines before calling Close — this function closes
+// the underlying sink manager, which may make subsequent Forward
+// calls return errors. That ordering is enforced by sidecar
+// shutdown (HTTP listener drained first, then Close).
 func (l *Logger) Close() {
-	if l.sinks != nil {
-		if err := l.sinks.Close(); err != nil {
+	l.mu.RLock()
+	mgr := l.sinks
+	l.mu.RUnlock()
+	if mgr != nil {
+		if err := mgr.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: audit sinks close: %v\n", err)
 		}
 	}

@@ -182,3 +182,80 @@ func containsLiteralSSN(s string) bool {
 }
 
 func isDigit(r rune) bool { return r >= '0' && r <= '9' }
+
+// TestLogger_ConcurrentSetAndLogRaceFree is the L1 regression guard.
+// Before the mutex-protected setters landed, a goroutine calling
+// LogEvent/LogAction while the shutdown path flipped
+// SetStructuredEmitter(nil) or SetSinks(nil) had a data race on
+// interface-typed fields — interface writes are two-word stores and
+// tearing produced use-after-free crashes.
+//
+// The test hammers the Logger with concurrent LogEvent calls while
+// another goroutine toggles every setter in a tight loop. Running
+// with `-race` must stay silent.
+func TestLogger_ConcurrentSetAndLogRaceFree(t *testing.T) {
+	l := newLoggerForTest(t)
+
+	// We don't care what the emitter does — it just has to be
+	// something swappable under the lock.
+	emitter1 := &captureEmitter{}
+	emitter2 := &captureEmitter{}
+
+	const workers = 8
+	const perWorker = 128
+	done := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < perWorker; j++ {
+				_ = l.LogEvent(Event{
+					Action:   "race-test",
+					Target:   "t",
+					Actor:    "a",
+					Severity: "INFO",
+				})
+			}
+		}(i)
+	}
+
+	// Setter thrasher: toggles every field under test until the
+	// workers finish. Close(done) signals it to stop.
+	setterWG := sync.WaitGroup{}
+	setterWG.Add(1)
+	go func() {
+		defer setterWG.Done()
+		toggle := 0
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			switch toggle % 4 {
+			case 0:
+				l.SetStructuredEmitter(emitter1)
+			case 1:
+				l.SetStructuredEmitter(emitter2)
+			case 2:
+				l.SetStructuredEmitter(nil)
+			case 3:
+				l.SetSinks(nil)
+			}
+			toggle++
+		}
+	}()
+
+	wg.Wait()
+	close(done)
+	setterWG.Wait()
+
+	// Final sanity: the logger is still usable after the thrashing.
+	// A goroutine mid-SetStructuredEmitter can't have poisoned state.
+	l.SetStructuredEmitter(nil)
+	if err := l.LogEvent(Event{Action: "post-race", Severity: "INFO"}); err != nil {
+		t.Fatalf("post-race LogEvent: %v", err)
+	}
+}

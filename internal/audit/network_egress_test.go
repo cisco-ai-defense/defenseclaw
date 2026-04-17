@@ -436,3 +436,53 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 		}
 	})
 }
+
+func TestLogger_LogNetworkEgress_BlockedAlertFansOutWithCorrelationDefaults(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "network-egress-run")
+
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	logger := NewLogger(store)
+	sink := installCaptureSink(t, logger)
+	emitter := &captureEmitter{}
+	logger.SetStructuredEmitter(emitter)
+
+	err := logger.LogNetworkEgress(context.Background(), NetworkEgressEvent{
+		Hostname:      "blocked.example",
+		URL:           "https://blocked.example/upload",
+		HTTPMethod:    "POST",
+		Protocol:      "https",
+		PolicyOutcome: "Denied: hostname on deny list",
+		DecisionCode:  "NETWORK_DENY_PATTERN",
+		Blocked:       true,
+	})
+	if err != nil {
+		t.Fatalf("LogNetworkEgress: %v", err)
+	}
+
+	sinkEvents := sink.snapshot()
+	if len(sinkEvents) != 1 {
+		t.Fatalf("sink events = %d, want 1", len(sinkEvents))
+	}
+	if sinkEvents[0].Action != "network-egress-blocked" {
+		t.Fatalf("sink action = %q, want network-egress-blocked", sinkEvents[0].Action)
+	}
+	if sinkEvents[0].Target != "blocked.example" {
+		t.Fatalf("sink target = %q, want blocked.example", sinkEvents[0].Target)
+	}
+	if sinkEvents[0].ID == "" || sinkEvents[0].RunID == "" || sinkEvents[0].Actor == "" {
+		t.Fatalf("sink event missing defaults: %+v", sinkEvents[0])
+	}
+
+	emitted := emitter.snapshot()
+	if len(emitted) != 1 {
+		t.Fatalf("structured events = %d, want 1", len(emitted))
+	}
+	if emitted[0].Action != "network-egress-blocked" {
+		t.Fatalf("structured action = %q, want network-egress-blocked", emitted[0].Action)
+	}
+	if emitted[0].ID == "" || emitted[0].RunID == "" || emitted[0].Actor == "" {
+		t.Fatalf("structured event missing defaults: %+v", emitted[0])
+	}
+}
