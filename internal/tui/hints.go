@@ -127,7 +127,7 @@ func (h *HintEngine) skillsHint(state SystemState) string {
 	if state.UnscannedSkills > 0 {
 		return fmt.Sprintf("%d skills unscanned. Press \"s\" on a skill to scan, or : then \"scan skill --all\".", state.UnscannedSkills)
 	}
-	return "j/k to navigate, Enter for actions menu, \"s\" to scan, \"b\" to block, \"a\" to allow."
+	return "j/k nav · o actions (block/allow/disable/enable/quarantine/restore/install) · s scan · r refresh · Enter detail."
 }
 
 func (h *HintEngine) mcpsHint(_ SystemState) string {

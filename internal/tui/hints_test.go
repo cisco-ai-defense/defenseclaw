@@ -103,8 +103,13 @@ func TestHintEngine(t *testing.T) {
 
 	t.Run("skills_normal", func(t *testing.T) {
 		hint := engine.HintForPanel(PanelSkills, SystemState{})
-		if !strings.Contains(hint, "navigate") {
-			t.Errorf("expected navigation hint, got: %s", hint)
+		// Post-P0-#4 the skills hint switched to the same
+		// nav/actions/scan shape as plugins. Assert the shape
+		// (nav · actions · scan) rather than a literal word so
+		// later wording tweaks don't force a test churn — but do
+		// pin "actions" so accidental truncation fails loudly.
+		if !strings.Contains(hint, "actions") || !strings.Contains(hint, "scan") {
+			t.Errorf("expected skills hint to mention actions+scan, got: %s", hint)
 		}
 	})
 

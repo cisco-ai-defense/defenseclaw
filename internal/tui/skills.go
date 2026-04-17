@@ -73,11 +73,24 @@ func (p *SkillsPanel) Refresh() {
 		return
 	}
 	for _, e := range entries {
+		// Status resolution order mirrors the Python CLI's
+		// _skill_status_display (cli/defenseclaw/commands/cmd_skill.py)
+		// so the TUI and `defenseclaw skill list` never disagree:
+		// quarantine wins over install-block, which wins over
+		// runtime-disable, which wins over install-allow, and
+		// anything else is "active". Keeping the order in lock-step
+		// with the CLI means SkillActions' branches stay valid —
+		// e.g. the "quarantined" branch (restore) is only reachable
+		// when file=quarantine is set, not just when install=block.
 		var status string
-		switch e.Actions.Install {
-		case "block":
+		switch {
+		case e.Actions.File == "quarantine":
+			status = "quarantined"
+		case e.Actions.Install == "block":
 			status = "blocked"
-		case "allow":
+		case e.Actions.Runtime == "disable":
+			status = "disabled"
+		case e.Actions.Install == "allow":
 			status = "allowed"
 		default:
 			status = "active"

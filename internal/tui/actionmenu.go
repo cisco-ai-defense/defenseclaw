@@ -147,7 +147,22 @@ func (m *ActionMenu) View() string {
 	return modal
 }
 
-// SkillActions returns the action items for a skill based on its current status.
+// SkillActions returns the action items for a skill based on its
+// current status. Every key here must map to a real CLI verb in
+// executeActionMenuItem's PanelSkills case or the menu silently
+// no-ops on the operator (see TestExecuteActionMenuItem_SkillDispatch).
+//
+// Branch rules:
+//   - "blocked":     unblock / allow to move out of the block list.
+//   - "allowed":     block / disable. Quarantine doesn't belong here
+//                    because an allow-listed skill is intentionally
+//                    kept around; quarantine implies "make it go away".
+//   - "quarantined": restore (only valid CLI path out of quarantine).
+//   - "disabled":    enable to re-arm at runtime.
+//   - default:       block / allow / disable / quarantine / install.
+//     Install is offered to cover the case where `skill list` shows
+//     a known-but-not-installed row so operators can pull it in from
+//     ClawHub without dropping to the shell.
 func SkillActions(status string) []ActionItem {
 	actions := []ActionItem{
 		{Key: "s", Label: "Scan", Description: "Run security scan"},
@@ -158,10 +173,20 @@ func SkillActions(status string) []ActionItem {
 	case "blocked":
 		actions = append(actions,
 			ActionItem{Key: "u", Label: "Unblock", Description: "Remove from block list"},
-			ActionItem{Key: "r", Label: "Restore", Description: "Restore if quarantined"},
+			ActionItem{Key: "a", Label: "Allow", Description: "Pin as allow-listed"},
 		)
 	case "allowed":
 		actions = append(actions,
+			ActionItem{Key: "b", Label: "Block", Description: "Add to block list"},
+			ActionItem{Key: "d", Label: "Disable", Description: "Disable at runtime"},
+		)
+	case "quarantined":
+		actions = append(actions,
+			ActionItem{Key: "r", Label: "Restore", Description: "Restore from quarantine"},
+		)
+	case "disabled":
+		actions = append(actions,
+			ActionItem{Key: "e", Label: "Enable", Description: "Enable at runtime"},
 			ActionItem{Key: "b", Label: "Block", Description: "Add to block list"},
 		)
 	default:
@@ -170,6 +195,7 @@ func SkillActions(status string) []ActionItem {
 			ActionItem{Key: "a", Label: "Allow", Description: "Add to allow list"},
 			ActionItem{Key: "d", Label: "Disable", Description: "Disable at runtime"},
 			ActionItem{Key: "q", Label: "Quarantine", Description: "Move to quarantine"},
+			ActionItem{Key: "n", Label: "Install", Description: "Install via ClawHub"},
 		)
 	}
 

@@ -1084,6 +1084,11 @@ func (m Model) handleActionMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) executeActionMenuItem(key string) tea.Cmd {
 	switch m.activePanel {
 	case PanelSkills:
+		// All skill mutations route through `defenseclaw skill <verb>
+		// <name>` — the Python CLI owns admission, audit emission,
+		// and gateway RPC. Duplicating any of that in Go would give
+		// us a second source of truth that silently drifts (see the
+		// pre-P0-#4 ToggleBlock path that bypassed the CLI entirely).
 		sel := m.skills.Selected()
 		if sel == nil {
 			return nil
@@ -1101,10 +1106,18 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 			return m.executor.Execute("defenseclaw", []string{"skill", "unblock", sel.Name}, "unblock skill "+sel.Name)
 		case "d":
 			return m.executor.Execute("defenseclaw", []string{"skill", "disable", sel.Name}, "disable skill "+sel.Name)
+		case "e":
+			return m.executor.Execute("defenseclaw", []string{"skill", "enable", sel.Name}, "enable skill "+sel.Name)
 		case "q":
 			return m.executor.Execute("defenseclaw", []string{"skill", "quarantine", sel.Name}, "quarantine skill "+sel.Name)
 		case "r":
 			return m.executor.Execute("defenseclaw", []string{"skill", "restore", sel.Name}, "restore skill "+sel.Name)
+		case "n":
+			// `skill install` fetches from ClawHub (or local path if
+			// the CLI resolves it there). The TUI side doesn't need
+			// to care — we just pass the name and let cmd_skill.py
+			// decide.
+			return m.executor.Execute("defenseclaw", []string{"skill", "install", sel.Name}, "install skill "+sel.Name)
 		}
 	case PanelMCPs:
 		sel := m.mcps.Selected()
@@ -1575,11 +1588,24 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.actionMenu.Show(sel.Name, sel.Status, info, SkillActions(sel.Status))
 		}
 	case "b":
-		m.skills.ToggleBlock()
+		// Route through the CLI so block emits an audit event, runs
+		// the admission gate, and updates policy the same way a
+		// shell user would. Prior to P0-#4 this called
+		// m.skills.ToggleBlock() which bypassed all three.
+		if sel := m.skills.Selected(); sel != nil {
+			cmd := m.executor.Execute("defenseclaw", []string{"skill", "block", sel.Name}, "block skill "+sel.Name)
+			m.activePanel = PanelActivity
+			return m, cmd
+		}
 	case "a":
-		sel := m.skills.Selected()
-		if sel != nil && sel.Status == "blocked" {
-			m.skills.ToggleBlock()
+		// 'a' is always "allow" (block-list → allow-list → active is
+		// a one-way transition handled by `skill allow`). If the
+		// operator wants to unblock without allow-listing they can
+		// use 'u' from the action menu.
+		if sel := m.skills.Selected(); sel != nil {
+			cmd := m.executor.Execute("defenseclaw", []string{"skill", "allow", sel.Name}, "allow skill "+sel.Name)
+			m.activePanel = PanelActivity
+			return m, cmd
 		}
 	case "s":
 		if sel := m.skills.Selected(); sel != nil {
