@@ -11,10 +11,92 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
 
-.PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
+.PHONY: all path doctor uninstall quickstart \
+        build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+
+# ---------------------------------------------------------------------------
+# `make all` — one-shot build → install → PATH → quickstart
+# ---------------------------------------------------------------------------
+# Designed so a fresh clone only needs:
+#
+#   make all
+#
+# to reach a working guardrail. Everything downstream (install.sh,
+# install-dev.sh, `defenseclaw quickstart`) is wired to behave the
+# same way non-interactively, so CI and local dev share one codepath.
+#
+# Order matters:
+#   1. install — produces every binary and links into $(INSTALL_DIR)
+#   2. path    — ensures $(INSTALL_DIR) is on the user's shell PATH so
+#                `defenseclaw` resolves in *new* shells; current shell
+#                gets a reminder to source the rc file.
+#   3. quickstart — runs the CLI binary we just built, so even a stale
+#                shell PATH does not block the handoff.
+#
+# We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
+# CI jobs that only want the binaries.
+all: install path quickstart
+	@echo ""
+	@echo "╭────────────────────────────────────────────────────────────╮"
+	@echo "│  DefenseClaw is installed and ready.                       │"
+	@echo "╰────────────────────────────────────────────────────────────╯"
+	@echo ""
+	@echo "Try it out:"
+	@echo "  defenseclaw            # launch the TUI"
+	@echo "  defenseclaw doctor     # health check"
+	@echo "  defenseclaw version    # CLI / gateway / plugin versions"
+	@echo ""
+
+path:
+	@if [ "$${NO_PATH:-0}" = "1" ]; then \
+		echo "NO_PATH=1 set — skipping PATH update"; \
+	else \
+		./scripts/add-to-path.sh "$(INSTALL_DIR)" $${YES:+--yes} || { \
+			echo "  PATH update skipped. Add manually:"; \
+			echo "    export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
+		}; \
+	fi
+
+# Run the freshly-installed CLI binary directly so a stale shell PATH
+# doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
+# The CLI handles its own idempotence, so repeated `make all` is safe.
+quickstart:
+	@if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
+		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
+	elif [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+		"$(INSTALL_DIR)/defenseclaw" quickstart --non-interactive --yes \
+			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+		"$(VENV)/bin/defenseclaw" quickstart --non-interactive --yes \
+			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+	else \
+		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
+		exit 1; \
+	fi
+
+# Thin wrappers over the CLI so operators never need to remember whether
+# the binary is on PATH yet. Both fall through to the venv binary when
+# the installed symlink is missing (e.g. after `make clean`).
+doctor:
+	@if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+		"$(INSTALL_DIR)/defenseclaw" doctor $(ARGS); \
+	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+		"$(VENV)/bin/defenseclaw" doctor $(ARGS); \
+	else \
+		echo "defenseclaw not installed — run 'make all' first"; exit 1; \
+	fi
+
+uninstall:
+	@if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+		"$(INSTALL_DIR)/defenseclaw" uninstall $(ARGS); \
+	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+		"$(VENV)/bin/defenseclaw" uninstall $(ARGS); \
+	else \
+		echo "defenseclaw not installed — nothing to uninstall"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # Aggregate targets
@@ -199,6 +281,15 @@ py-lint:
 	$(VENV)/bin/ruff check cli/defenseclaw/
 
 go-lint:
+	@# gofmt drift is the #1 review comment on every PR, so fail fast
+	@# on it before running the heavier analyzers.
+	@unformatted=$$(gofmt -l . 2>/dev/null); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt: the following files are not formatted:"; \
+		echo "$$unformatted" | sed 's/^/  /'; \
+		echo "Run 'gofmt -w .' to fix."; \
+		exit 1; \
+	fi
 	@tmp=$$(mktemp); \
 	status=0; \
 	if PATH="$(GOBIN):$(PATH)" golangci-lint run >"$$tmp" 2>&1; then \
@@ -207,7 +298,7 @@ go-lint:
 		exit 0; \
 	fi; \
 	status=$$?; \
-	if [ $$status -eq 127 ] || grep -q "used to build golangci-lint is lower than the targeted Go version" "$$tmp"; then \
+	if [ $$status -eq 127 ] || grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
 		cat "$$tmp"; \
 		echo "golangci-lint is unavailable or does not yet support this repo's Go toolchain; falling back to 'go vet ./...'"; \
 		rm -f "$$tmp"; \
