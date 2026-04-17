@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,6 +54,47 @@ var verdictActionLabels = map[string]string{
 	"block": "Block",
 	"alert": "Alert",
 	"allow": "Allow",
+}
+
+// verdictEventTypeFilters cycle the Verdicts source through
+// event-type chips. Phase 4: operators wanted to see "just judge
+// responses" or "just lifecycle" separately from the action chip,
+// which only keys on block/alert/allow. Empty string means "show
+// all event types".
+//
+// Kept in lockstep with the discriminants on gatewaylog.EventType —
+// every schema-level type gets its own chip so "diagnostic" noise
+// is filterable just like "error" is. Renaming or adding an event
+// type in the schema must also update this list;
+// TestVerdictEventTypeFiltersMatchSchema catches drift at test time.
+var verdictEventTypeFilters = []string{"", "verdict", "judge", "lifecycle", "error", "diagnostic"}
+var verdictEventTypeLabels = map[string]string{
+	"":           "All events",
+	"verdict":    "Verdict",
+	"judge":      "Judge",
+	"lifecycle":  "Lifecycle",
+	"error":      "Error",
+	"diagnostic": "Diagnostic",
+}
+
+// verdictSeverityFilters cycles the Verdicts source through
+// severity chips. Incident-response playbooks almost always lead
+// with "show me every HIGH and CRITICAL since $timestamp", so the
+// chip sits on its own row rather than being crammed into the
+// event-type chip. Empty string means "all severities".
+//
+// The vocabulary mirrors gatewaylog.Severity exactly — HIGH+ is a
+// common ask ("just show me the stuff worth paging on") so we
+// expose it as a meta-chip that matches HIGH or CRITICAL.
+var verdictSeverityFilters = []string{"", "CRITICAL", "HIGH", "HIGH+", "MEDIUM", "LOW", "INFO"}
+var verdictSeverityLabels = map[string]string{
+	"":         "All severities",
+	"CRITICAL": "Critical",
+	"HIGH":     "High",
+	"HIGH+":    "High+",
+	"MEDIUM":   "Medium",
+	"LOW":      "Low",
+	"INFO":     "Info",
 }
 
 // Pre-built noise filter patterns — lines containing any of these are hidden
@@ -128,16 +170,29 @@ type LogsPanel struct {
 
 	// Verdicts-only state: cached structured events and a chip-
 	// filter for action (block/alert/allow). Cardinalities other
-	// than action (severity, category, model) are queryable via
-	// the existing text-search field to keep the chip bar short.
-	verdicts      []verdictRow
-	verdictAction string // one of verdictActionFilters
+	// than action (category, model) are still queryable via the
+	// existing text-search field to keep the chip bar short. The
+	// three chips we surface as first-class (action, event type,
+	// severity) are the ones operators name when describing an
+	// incident — "show me HIGH judge blocks" — so putting them
+	// one keystroke away materially speeds up triage.
+	verdicts         []verdictRow
+	verdictAction    string // one of verdictActionFilters
+	verdictEventType string // one of verdictEventTypeFilters
+	verdictSeverity  string // one of verdictSeverityFilters
 }
 
 // verdictRow is a pre-rendered Verdicts-tab entry. We keep the
 // structured fields alongside the rendered line so typed filters
 // run in O(n) over in-memory rows rather than re-parsing JSON per
 // keystroke.
+//
+// Every field on the gatewaylog.Event schema that's useful for
+// operator triage lands here. The extra cost is a handful of
+// unused strings per record; the win is that the detail modal
+// can surface request_id / run_id / categories / findings without
+// a second JSON parse pass and the search filter can key on any
+// of them via the existing text-search field.
 type verdictRow struct {
 	raw       string
 	timestamp time.Time
@@ -149,6 +204,55 @@ type verdictRow struct {
 	reason    string
 	kind      string // for Judge events: injection/pii
 	eventType string
+
+	// Envelope correlation identifiers — surfaced in the detail
+	// modal so operators can pivot from a TUI event into the
+	// SQLite audit store or a Splunk search without hand-copying
+	// IDs out of the raw JSON blob.
+	requestID string
+	runID     string
+	sessionID string
+	provider  string
+
+	// Verdict-payload extras.
+	categories []string
+	latencyMs  int64
+
+	// Judge-payload extras. judgeRaw is the (possibly truncated)
+	// model response, populated only when guardrail.retain_judge_bodies
+	// is true. judgeParseError flags bodies we could not decode.
+	judgeInputBytes int
+	judgeSeverity   string
+	judgeRaw        string
+	judgeParseError string
+	judgeFindings   []judgeFinding
+
+	// Lifecycle-payload extras.
+	lifecycleSubsystem  string
+	lifecycleTransition string
+	lifecycleDetails    map[string]string
+
+	// Error-payload extras.
+	errorSubsystem string
+	errorCode      string
+	errorMessage   string
+	errorCause     string
+
+	// Diagnostic-payload extras.
+	diagnosticComponent string
+	diagnosticMessage   string
+}
+
+// judgeFinding mirrors gatewaylog.Finding on the TUI side. We keep
+// only the fields the detail modal renders — evidence is already
+// redacted by the writer, but we don't expose it here because the
+// modal is a compact kv list, not a structured table.
+type judgeFinding struct {
+	Category string  `json:"category"`
+	Severity string  `json:"severity"`
+	Rule     string  `json:"rule,omitempty"`
+	Source   string  `json:"source,omitempty"`
+	Conf     float64 `json:"confidence,omitempty"`
 }
 
 // NewLogsPanel creates the logs panel.
@@ -253,6 +357,29 @@ func (p LogsPanel) handleKey(msg tea.KeyPressMsg) (LogsPanel, tea.Cmd) {
 			p.scroll = 0
 		} else if p.searching {
 			p.searchText += "a"
+		}
+	// 't' cycles the event-type chip on the Verdicts tab only.
+	// Same gating logic as 'a': silently pass through while
+	// searching so typing "type" into the search field still
+	// works.
+	case "t":
+		if !p.searching && p.source == logSourceVerdicts {
+			p.cycleVerdictEventType()
+			p.scroll = 0
+		} else if p.searching {
+			p.searchText += "t"
+		}
+	// 's' cycles the severity chip on the Verdicts tab only.
+	// Lowercase 's' is otherwise unused by the panel (uppercase
+	// 'S' is not bound either), and while searching the letter
+	// must still append to the search query so grepping for
+	// "severity" works.
+	case "s":
+		if !p.searching && p.source == logSourceVerdicts {
+			p.cycleVerdictSeverity()
+			p.scroll = 0
+		} else if p.searching {
+			p.searchText += "s"
 		}
 	case "1":
 		if !p.searching {
@@ -377,6 +504,58 @@ func (p *LogsPanel) cycleVerdictAction() {
 		}
 	}
 	p.verdictAction = verdictActionFilters[0]
+}
+
+// cycleVerdictEventType advances the event-type chip on the
+// Verdicts tab. Independent of cycleVerdictAction: both filters
+// AND together, so operators can drill into "judge rows that
+// blocked" with two chip presses.
+func (p *LogsPanel) cycleVerdictEventType() {
+	for i, t := range verdictEventTypeFilters {
+		if t == p.verdictEventType {
+			next := (i + 1) % len(verdictEventTypeFilters)
+			p.verdictEventType = verdictEventTypeFilters[next]
+			return
+		}
+	}
+	p.verdictEventType = verdictEventTypeFilters[0]
+}
+
+// cycleVerdictSeverity advances the severity chip. Orthogonal to
+// cycleVerdictAction and cycleVerdictEventType — all three filters
+// AND together, so "severity=HIGH+ × type=judge × action=block"
+// is three chip presses.
+func (p *LogsPanel) cycleVerdictSeverity() {
+	for i, s := range verdictSeverityFilters {
+		if s == p.verdictSeverity {
+			next := (i + 1) % len(verdictSeverityFilters)
+			p.verdictSeverity = verdictSeverityFilters[next]
+			return
+		}
+	}
+	p.verdictSeverity = verdictSeverityFilters[0]
+}
+
+// severityRank assigns a total order to our severity vocabulary so
+// the HIGH+ meta-filter can compare "row severity >= HIGH" cheaply.
+// Unknown values rank below INFO on purpose: surfacing them with an
+// active severity filter would be misleading ("I asked for HIGH+
+// and got garbage"), so we drop them.
+func severityRank(s string) int {
+	switch strings.ToUpper(s) {
+	case "CRITICAL":
+		return 5
+	case "HIGH":
+		return 4
+	case "MEDIUM":
+		return 3
+	case "LOW":
+		return 2
+	case "INFO":
+		return 1
+	default:
+		return 0
+	}
 }
 
 // SelectedVerdict returns the structured event under the current
@@ -557,6 +736,63 @@ func (p *LogsPanel) View() string {
 		}
 		b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("(press 'a' to cycle)"))
 		b.WriteString("\n")
+
+		// Second chip bar: event type. Renders under the action
+		// chip bar so the two filters read like "action × type" in
+		// the UI, matching how operators actually think about
+		// guardrail decisions.
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("type:  "))
+		b.WriteString("  ")
+		for _, t := range verdictEventTypeFilters {
+			label := verdictEventTypeLabels[t]
+			text := fmt.Sprintf(" %s ", label)
+			if t == p.verdictEventType {
+				badge := lipgloss.NewStyle().
+					Background(lipgloss.Color("62")).
+					Foreground(lipgloss.Color("230")).
+					Bold(true).
+					Render(text)
+				b.WriteString(badge)
+			} else {
+				badge := lipgloss.NewStyle().
+					Background(lipgloss.Color("237")).
+					Foreground(lipgloss.Color("252")).
+					Render(text)
+				b.WriteString(badge)
+			}
+			b.WriteString(" ")
+		}
+		b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("(press 't' to cycle, 'J' for SQLite judge)"))
+		b.WriteString("\n")
+
+		// Third chip row: severity. Sits under type so the three
+		// chips read top-to-bottom as operators naturally describe
+		// an incident — "action × type × severity".
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("sev:   "))
+		b.WriteString("  ")
+		for _, s := range verdictSeverityFilters {
+			label := verdictSeverityLabels[s]
+			text := fmt.Sprintf(" %s ", label)
+			if s == p.verdictSeverity {
+				badge := lipgloss.NewStyle().
+					Background(lipgloss.Color("62")).
+					Foreground(lipgloss.Color("230")).
+					Bold(true).
+					Render(text)
+				b.WriteString(badge)
+			} else {
+				badge := lipgloss.NewStyle().
+					Background(lipgloss.Color("237")).
+					Foreground(lipgloss.Color("252")).
+					Render(text)
+				b.WriteString(badge)
+			}
+			b.WriteString(" ")
+		}
+		b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("(press 's' to cycle)"))
+		b.WriteString("\n")
 	}
 
 	// Separator
@@ -598,17 +834,36 @@ func (p *LogsPanel) View() string {
 		b.WriteString(p.theme.Dimmed.Render("  Log file is empty or not yet created. Start the gateway with : then start."))
 	}
 
-	// Hint bar
+	// Hint bar — on the Verdicts tab we advertise the chip
+	// shortcuts ('a' action, 't' type, 's' severity) so operators
+	// learning the TUI don't have to skim docs. Gateway/Watchdog
+	// keep the shorter hint because the chip bar isn't rendered
+	// there.
 	b.WriteString("\n")
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Italic(true)
-	b.WriteString(hint.Render(fmt.Sprintf("  Streaming %s. Space to pause, / to search, e for errors, w for warnings.",
-		logSourceNames[p.source])))
+	if p.source == logSourceVerdicts {
+		b.WriteString(hint.Render(fmt.Sprintf(
+			"  Streaming %s. Space pause, / search, a action, t type, s severity, Enter detail, J judge history.",
+			logSourceNames[p.source])))
+	} else {
+		b.WriteString(hint.Render(fmt.Sprintf("  Streaming %s. Space to pause, / to search, e for errors, w for warnings.",
+			logSourceNames[p.source])))
+	}
 
 	return b.String()
 }
 
 func (p *LogsPanel) visibleLines() int {
 	v := p.height - 7 // tabs + filters + separator + hint + padding
+	if p.source == logSourceVerdicts {
+		// Verdicts tab renders three extra chip rows (action +
+		// type + severity) above the log body. Without accounting
+		// for this the cursor math in SelectedVerdict drifts by
+		// the same number of lines — historically this bug
+		// showed up as "the detail modal doesn't match the row
+		// I selected" after a chip was added.
+		v -= 3
+	}
 	if p.searching {
 		v--
 	}
@@ -820,6 +1075,29 @@ func (p *LogsPanel) loadVerdicts(path string) {
 		if !ok {
 			continue
 		}
+		if p.verdictEventType != "" {
+			// Event-type chip is case-insensitive; an empty
+			// event_type on a malformed row should be hidden while
+			// a filter is active — otherwise "Judge only" would
+			// include uncategorised noise.
+			if !strings.EqualFold(row.eventType, p.verdictEventType) {
+				continue
+			}
+		}
+		if p.verdictSeverity != "" {
+			// Severity chip supports the HIGH+ meta-filter
+			// explicitly; plain names match case-insensitively.
+			// Rows whose severity does not clear the bar are
+			// dropped — matching operator expectation of "show me
+			// HIGH or worse, nothing else".
+			if p.verdictSeverity == "HIGH+" {
+				if severityRank(row.severity) < severityRank("HIGH") {
+					continue
+				}
+			} else if !strings.EqualFold(row.severity, p.verdictSeverity) {
+				continue
+			}
+		}
 		if p.verdictAction != "" {
 			// The action-chip applies to anything that advertises an
 			// action: verdict rows (stage decisions) and judge rows
@@ -845,6 +1123,11 @@ func (p *LogsPanel) loadVerdicts(path string) {
 // single gateway.jsonl line. Kept permissive — missing fields just
 // become empty strings so row rendering degrades gracefully
 // instead of dropping the record.
+//
+// The parse target mirrors gatewaylog.Event end-to-end. We pay the
+// extra few dozen unused strings per record in exchange for a
+// detail modal that does not need a second JSON pass, and a
+// search/filter experience that can key on any documented field.
 func parseVerdictRow(line string) (verdictRow, bool) {
 	var raw struct {
 		Timestamp time.Time `json:"ts"`
@@ -852,16 +1135,42 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 		Severity  string    `json:"severity"`
 		Model     string    `json:"model"`
 		Direction string    `json:"direction"`
+		RequestID string    `json:"request_id"`
+		RunID     string    `json:"run_id"`
+		SessionID string    `json:"session_id"`
+		Provider  string    `json:"provider"`
 		Verdict   *struct {
-			Stage  string `json:"stage"`
-			Action string `json:"action"`
-			Reason string `json:"reason"`
+			Stage      string   `json:"stage"`
+			Action     string   `json:"action"`
+			Reason     string   `json:"reason"`
+			Categories []string `json:"categories"`
+			Latency    int64    `json:"latency_ms"`
 		} `json:"verdict"`
 		Judge *struct {
-			Kind    string `json:"kind"`
-			Action  string `json:"action"`
-			Latency int64  `json:"latency_ms"`
+			Kind        string         `json:"kind"`
+			Action      string         `json:"action"`
+			Severity    string         `json:"severity"`
+			Latency     int64          `json:"latency_ms"`
+			InputBytes  int            `json:"input_bytes"`
+			Findings    []judgeFinding `json:"findings"`
+			RawResponse string         `json:"raw_response"`
+			ParseError  string         `json:"parse_error"`
 		} `json:"judge"`
+		Lifecycle *struct {
+			Subsystem  string            `json:"subsystem"`
+			Transition string            `json:"transition"`
+			Details    map[string]string `json:"details"`
+		} `json:"lifecycle"`
+		Error *struct {
+			Subsystem string `json:"subsystem"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Cause     string `json:"cause"`
+		} `json:"error"`
+		Diagnostic *struct {
+			Component string `json:"component"`
+			Message   string `json:"message"`
+		} `json:"diagnostic"`
 	}
 	if err := jsonUnmarshal([]byte(line), &raw); err != nil {
 		return verdictRow{}, false
@@ -873,17 +1182,52 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 		model:     raw.Model,
 		direction: raw.Direction,
 		eventType: raw.EventType,
+		requestID: raw.RequestID,
+		runID:     raw.RunID,
+		sessionID: raw.SessionID,
+		provider:  raw.Provider,
 	}
 	if raw.Verdict != nil {
 		row.stage = raw.Verdict.Stage
 		row.action = raw.Verdict.Action
 		row.reason = raw.Verdict.Reason
+		row.categories = raw.Verdict.Categories
+		row.latencyMs = raw.Verdict.Latency
 	}
 	if raw.Judge != nil {
 		row.kind = raw.Judge.Kind
 		if row.action == "" {
 			row.action = raw.Judge.Action
 		}
+		// Judge events carry an envelope severity AND a judge-layer
+		// severity; the former is what the sink pipeline uses for
+		// its own routing, the latter is what the judge itself
+		// decided. Envelope wins in the rendered row (row.severity)
+		// but we keep the judge-layer value so the detail modal
+		// can show both without re-parsing JSON.
+		row.judgeSeverity = raw.Judge.Severity
+		row.judgeInputBytes = raw.Judge.InputBytes
+		row.judgeRaw = raw.Judge.RawResponse
+		row.judgeParseError = raw.Judge.ParseError
+		row.judgeFindings = raw.Judge.Findings
+		if row.latencyMs == 0 {
+			row.latencyMs = raw.Judge.Latency
+		}
+	}
+	if raw.Lifecycle != nil {
+		row.lifecycleSubsystem = raw.Lifecycle.Subsystem
+		row.lifecycleTransition = raw.Lifecycle.Transition
+		row.lifecycleDetails = raw.Lifecycle.Details
+	}
+	if raw.Error != nil {
+		row.errorSubsystem = raw.Error.Subsystem
+		row.errorCode = raw.Error.Code
+		row.errorMessage = raw.Error.Message
+		row.errorCause = raw.Error.Cause
+	}
+	if raw.Diagnostic != nil {
+		row.diagnosticComponent = raw.Diagnostic.Component
+		row.diagnosticMessage = raw.Diagnostic.Message
 	}
 	return row, true
 }
@@ -892,35 +1236,140 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 // structured event. Kept intentionally close to the pretty writer
 // format in internal/gatewaylog/pretty.go so operators see the
 // same shape whether they're tailing stderr or the TUI.
+//
+// Every branch has a deterministic column layout so eyeballing
+// columns at scroll speed works; operator feedback on the original
+// prose rendering was that lifecycle/error rows dumped a whole
+// JSON blob and made it hard to see just a transition or a code.
 func renderVerdictLine(r verdictRow) string {
 	ts := r.timestamp.Format("15:04:05.000")
 	switch r.eventType {
 	case "verdict":
-		return fmt.Sprintf("%s VERDICT %-7s %-5s %-10s %s %s -- %s",
+		// Suffix with categories + latency when present so operators
+		// can eyeball "who decided, why, and how fast" without
+		// opening the detail modal. Categories are capped at the
+		// first two to keep the line from wrapping; the full list
+		// stays one Enter away in verdictDetailPairs.
+		suffix := truncateVerdictReason(r.reason, 100)
+		if len(r.categories) > 0 {
+			suffix += " [" + strings.Join(trimCategories(r.categories, 2), ",") + "]"
+		}
+		if r.latencyMs > 0 {
+			suffix += fmt.Sprintf(" (%dms)", r.latencyMs)
+		}
+		return fmt.Sprintf("%s VERDICT %-7s %-8s %-10s %s %s -- %s",
 			ts,
 			strings.ToUpper(nonEmpty(r.action, "none")),
 			strings.ToUpper(nonEmpty(r.severity, "info")),
 			nonEmpty(r.stage, "-"),
 			nonEmpty(r.direction, "-"),
 			nonEmpty(r.model, "-"),
-			truncateVerdictReason(r.reason, 120),
+			suffix,
 		)
 	case "judge":
-		return fmt.Sprintf("%s JUDGE   %-7s %-5s kind=%s dir=%s model=%s",
+		// Include latency + input_bytes so pathological judge calls
+		// (slow model, oversized prompt) are visible at a glance.
+		suffix := ""
+		if r.judgeInputBytes > 0 {
+			suffix += fmt.Sprintf(" in=%dB", r.judgeInputBytes)
+		}
+		if r.latencyMs > 0 {
+			suffix += fmt.Sprintf(" %dms", r.latencyMs)
+		}
+		if r.judgeParseError != "" {
+			suffix += " parse=error"
+		}
+		return fmt.Sprintf("%s JUDGE   %-7s %-8s kind=%-10s dir=%s model=%s%s",
 			ts,
 			strings.ToUpper(nonEmpty(r.action, "none")),
 			strings.ToUpper(nonEmpty(r.severity, "info")),
 			nonEmpty(r.kind, "-"),
 			nonEmpty(r.direction, "-"),
 			nonEmpty(r.model, "-"),
+			suffix,
 		)
 	case "lifecycle":
+		// Human-readable shape: "SUBSYSTEM TRANSITION optional=key=value".
+		// Falls back to raw JSON when the payload is empty so we
+		// never lose information, but the structured case is the
+		// 99% path and worth rendering compactly.
+		if r.lifecycleSubsystem != "" || r.lifecycleTransition != "" {
+			details := renderDetailsInline(r.lifecycleDetails, 3)
+			return fmt.Sprintf("%s LIFECYCLE %-10s %-10s %s",
+				ts,
+				strings.ToUpper(nonEmpty(r.lifecycleSubsystem, "-")),
+				strings.ToUpper(nonEmpty(r.lifecycleTransition, "-")),
+				details)
+		}
 		return fmt.Sprintf("%s LIFECYCLE %s", ts, r.raw)
 	case "error":
+		if r.errorCode != "" || r.errorMessage != "" {
+			return fmt.Sprintf("%s ERROR     %-10s code=%s msg=%s",
+				ts,
+				strings.ToUpper(nonEmpty(r.errorSubsystem, "-")),
+				nonEmpty(r.errorCode, "-"),
+				truncateVerdictReason(r.errorMessage, 120))
+		}
 		return fmt.Sprintf("%s ERROR   %s", ts, r.raw)
+	case "diagnostic":
+		if r.diagnosticComponent != "" || r.diagnosticMessage != "" {
+			return fmt.Sprintf("%s DIAG      %-10s %s",
+				ts,
+				strings.ToUpper(nonEmpty(r.diagnosticComponent, "-")),
+				truncateVerdictReason(r.diagnosticMessage, 120))
+		}
+		return fmt.Sprintf("%s DIAG    %s", ts, r.raw)
 	default:
 		return fmt.Sprintf("%s %-9s %s", ts, strings.ToUpper(nonEmpty(r.eventType, "event")), r.raw)
 	}
+}
+
+// trimCategories caps cats at n entries for compact rendering.
+// When cats is short enough to fit, it is returned verbatim. On
+// overflow the result is n real entries plus a single synthetic
+// "+Kmore" marker (so length is n+1) — this is intentional: the
+// marker preserves operator signal that more categories exist
+// without eating one of the first-n slots.
+//
+// The overflow branch uses a 3-index slice to cap capacity and
+// force append into a fresh backing array, so the caller's slice
+// is never mutated.
+func trimCategories(cats []string, n int) []string {
+	if n <= 0 || len(cats) == 0 {
+		return nil
+	}
+	if len(cats) <= n {
+		return cats
+	}
+	return append(cats[:n:n], "+"+fmt.Sprint(len(cats)-n)+"more")
+}
+
+// renderDetailsInline compacts a lifecycle details map into a
+// deterministic "k=v k=v" suffix. Ordering is alphabetical so the
+// line is stable across runs (map iteration would otherwise shuffle
+// keys and hurt eyeballing). n caps how many key/value pairs we
+// show inline; the full map stays available in the detail modal.
+//
+// n <= 0 returns an empty string — matches the trimCategories
+// contract and guards against a keys[:n] panic if a caller ever
+// threads a dynamic cap through here.
+func renderDetailsInline(m map[string]string, n int) string {
+	if n <= 0 || len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) > n {
+		keys = keys[:n]
+	}
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, m[k]))
+	}
+	return strings.Join(parts, " ")
 }
 
 // truncateVerdictReason clips s to n runes (not bytes) so multi-byte

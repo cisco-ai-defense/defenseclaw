@@ -911,8 +911,30 @@ class TestWebhookConfig(unittest.TestCase):
         self.assertEqual(wh.type, "generic")
         self.assertEqual(wh.min_severity, "HIGH")
         self.assertEqual(wh.timeout_seconds, 10)
-        self.assertEqual(wh.cooldown_seconds, 300)
+        # cooldown_seconds is tri-state: absent key -> None (dispatcher
+        # default). Previously this field defaulted to 300 client-side,
+        # which silently re-introduced the default on every YAML round
+        # trip even when the YAML explicitly said ``0`` (disabled).
+        self.assertIsNone(wh.cooldown_seconds)
         self.assertFalse(wh.enabled)
+
+    def test_merge_preserves_cooldown_tristate(self):
+        """nil / 0 / >0 for cooldown_seconds must survive round-trip."""
+        result = _merge_webhooks([
+            {},                              # key absent -> None
+            {"cooldown_seconds": 0},         # explicit zero -> 0
+            {"cooldown_seconds": 45},        # explicit positive -> 45
+            {"cooldown_seconds": None},      # explicit null -> None
+            {"cooldown_seconds": "bad"},     # invalid -> None
+            {"cooldown_seconds": -1},        # negative -> None (rejected)
+        ])
+        self.assertEqual(len(result), 6)
+        self.assertIsNone(result[0].cooldown_seconds)
+        self.assertEqual(result[1].cooldown_seconds, 0)
+        self.assertEqual(result[2].cooldown_seconds, 45)
+        self.assertIsNone(result[3].cooldown_seconds)
+        self.assertIsNone(result[4].cooldown_seconds)
+        self.assertIsNone(result[5].cooldown_seconds)
 
     def test_resolved_secret_from_env(self):
         wh = WebhookConfig(secret_env="TEST_WH_SECRET_42")

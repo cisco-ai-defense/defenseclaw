@@ -49,34 +49,34 @@ type ClawConfig struct {
 const CurrentConfigVersion = 4
 
 type Config struct {
-	ConfigVersion     int                  `mapstructure:"config_version"        yaml:"config_version"`
-	DefaultLLMAPIKeyEnv string             `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
-	DefaultLLMModel   string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
-	DataDir           string               `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string               `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
-	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	ConfigVersion       int                  `mapstructure:"config_version"        yaml:"config_version"`
+	DefaultLLMAPIKeyEnv string               `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
+	DefaultLLMModel     string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
+	DataDir             string               `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB             string               `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir       string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir           string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir           string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment         string               `mapstructure:"environment"      yaml:"environment"`
+	Claw                ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	InspectLLM          InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
+	CiscoAIDefense      CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners            ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell           OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch               WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall            FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail           GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway             GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions        SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions          MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions       PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	OTel                OTelConfig           `mapstructure:"otel"             yaml:"otel"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks     []AuditSink          `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
+	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
 }
 
 // ResolvedDefaultLLMAPIKey returns the shared LLM API key from the configured
@@ -166,7 +166,34 @@ type FirewallConfig struct {
 	AnchorName string `mapstructure:"anchor_name" yaml:"anchor_name"`
 }
 
+// WebhookConfig is one entry in the top-level ``webhooks[]`` list. These
+// are notifier webhooks (chat/incident), NOT audit sinks — audit
+// forwarding lives in ``audit_sinks[]``. See docs/OBSERVABILITY.md §7.
+//
+// CooldownSeconds is a tri-state on purpose (see webhook.go
+// ``webhookDefaultCooldown = 300s``):
+//
+//   - nil (YAML key absent / null): "use the dispatcher default"
+//     (``webhookDefaultCooldown``, currently 300s). This is what
+//     ``setup webhook add`` writes when the operator omits --cooldown.
+//   - *v == 0: explicit "dispatch every event" (debounce disabled).
+//     Stored so round-tripping the YAML doesn't silently re-introduce
+//     the 300s default.
+//   - *v > 0: minimum seconds between dispatches per
+//     (webhook, event_category) pair. Enforced by the gateway
+//     WebhookDispatcher.
+//
+// The Python writer (cli/defenseclaw/webhooks/writer.py) preserves the
+// same nil-vs-zero distinction end-to-end.
+//
+// Name is the CLI-visible identifier (``defenseclaw setup webhook
+// enable <name>`` etc.). The runtime dispatcher itself identifies
+// webhooks by URL, but Name is round-tripped through Load/Save so
+// saving the config via Config.Save() or the TUI doesn't silently
+// strip the operator's chosen name. ``omitempty`` keeps legacy files
+// that never set ``name:`` identical after load-save.
 type WebhookConfig struct {
+	Name            string   `mapstructure:"name"             yaml:"name,omitempty"`
 	URL             string   `mapstructure:"url"              yaml:"url"`
 	Type            string   `mapstructure:"type"             yaml:"type"`
 	SecretEnv       string   `mapstructure:"secret_env"       yaml:"secret_env"`
@@ -374,12 +401,17 @@ type GuardrailConfig struct {
 	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
-	// persisted to the structured gateway log and forwarded to audit
-	// sinks. Default off — judge responses can carry fragments of the
-	// original prompt/completion, so retention must be an explicit
-	// opt-in. When enabled, judge events include the raw body only
-	// when DEFENSECLAW_JUDGE_TRACE is also set, giving operators a
-	// two-gate path to full-fidelity capture.
+	// persisted to the local SQLite audit store for later forensics.
+	// The default is ON (see viper.SetDefault in defaultsFor) so every
+	// operator gets judge-response history out of the box. The raw body
+	// only ever lands on the local disk; the sink-forwarded copy (Splunk,
+	// OTLP) is redacted by emitJudge before it leaves the process.
+	//
+	// Operators who prefer not to store judge bodies can opt out via
+	// `guardrail.retain_judge_bodies: false` in config.yaml or the
+	// DEFENSECLAW_PERSIST_JUDGE=0 environment override. Redaction is
+	// the safety mechanism for downstream sinks; retention is a
+	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
 }
 
@@ -625,7 +657,8 @@ func Load() (*Config, error) {
 	if legacy := detectLegacySplunk(); legacy != "" {
 		return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
 			"DefenseClaw v4 replaced it with `audit_sinks:`. "+
-			"Run `defenseclaw config migrate` or see docs/OBSERVABILITY.md for the new schema",
+			"Run `defenseclaw setup observability migrate-splunk --apply` "+
+			"or see docs/OBSERVABILITY.md for the new schema",
 			configFile, legacy)
 	}
 
@@ -901,6 +934,15 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	// Phase 3: retention defaults ON so every operator gets local
+	// judge-response forensics without explicit opt-in. The raw body
+	// is redacted by emitJudge before it leaves the process (Splunk /
+	// OTel see the masked payload); the un-redacted copy lives only
+	// in ~/.defenseclaw/audit.db, which is already covered by the
+	// same filesystem ACLs as the rest of the data directory. Operators
+	// with strict storage or privacy constraints can still opt out with
+	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
+	viper.SetDefault("guardrail.retain_judge_bodies", true)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)

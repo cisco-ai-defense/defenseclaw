@@ -189,21 +189,61 @@ standalone mode (Linux supervisor with Landlock, seccomp, network namespace).
 
 ## Webhook Notification Config
 
+> **Not an audit sink.** `webhooks[]` delivers low-volume, per-event
+> chat/incident notifications (Slack, PagerDuty, Webex, HMAC-signed
+> generic JSON). High-volume every-event forwarding lives under
+> `audit_sinks[]` and is managed with `defenseclaw setup observability`
+> — see [docs/OBSERVABILITY.md](OBSERVABILITY.md) §3.4 (`http_jsonl`)
+> and §7 (notifier webhooks) for the full split.
+
 The `webhooks` section in `config.yaml` configures outbound HTTP notifications
 for enforcement events. Each entry defines a webhook endpoint. Disabled by
 default in all policy presets.
 
+### CLI
+
+Use `defenseclaw setup webhook` — do not hand-edit `config.yaml` unless you
+have to. The CLI validates URLs (SSRF guard), resolves `secret_env` so you
+catch missing env vars at write time, and writes atomically:
+
+```bash
+# Add
+defenseclaw setup webhook add slack      --url https://hooks.slack.com/services/... --enabled
+defenseclaw setup webhook add pagerduty  --url https://events.pagerduty.com/v2/enqueue --secret-env PD_KEY --enabled
+defenseclaw setup webhook add webex      --url https://webexapis.com/v1/messages --secret-env WEBEX_TOKEN --room-id ROOM_ID --enabled
+defenseclaw setup webhook add generic    --url https://ops.example.com/hooks --secret-env HMAC_SECRET --enabled
+
+# Inspect / manage
+defenseclaw setup webhook list
+defenseclaw setup webhook show <name>
+defenseclaw setup webhook enable  <name>
+defenseclaw setup webhook disable <name>
+defenseclaw setup webhook remove  <name>
+
+# Smoke-test without touching production (does not write to config.yaml)
+defenseclaw setup webhook test slack --url https://hooks.slack.com/services/... --preview-only
+```
+
+The same wizard is available in the TUI under Setup → Webhooks; it collects
+all inputs and then shells out to the non-interactive CLI to write the YAML.
+`defenseclaw doctor` probes every entry (SSRF, required env vars, reachability)
+without dispatching a synthetic event.
+
+### YAML
+
 ```yaml
 webhooks:
   - url: "https://hooks.slack.com/services/T00/B00/xxx"
-    type: slack              # slack | pagerduty | generic
-    secret_env: ""           # env var name holding the auth secret/token
-    min_severity: HIGH       # minimum severity to dispatch (CRITICAL, HIGH, MEDIUM, LOW, INFO)
-    events:                  # event categories to dispatch (empty = all)
+    type: slack              # slack | pagerduty | webex | generic
+    secret_env: ""           # env var NAME holding the auth secret/token
+    room_id: ""              # webex only
+    min_severity: HIGH       # CRITICAL | HIGH | MEDIUM | LOW | INFO
+    events:                  # empty = all event categories
       - block
       - drift
       - guardrail
     timeout_seconds: 10      # per-request HTTP timeout
+    cooldown_seconds: 60     # optional; omit/null = use 300s default; 0 = disabled
     enabled: true            # set false to disable without removing the entry
 ```
 
@@ -214,12 +254,13 @@ webhooks:
 | `secret_env` | string | `""` | Name of an environment variable holding the secret. For `pagerduty`, this is the routing key. For `webex` with the Messages API, this is the bot access token (sent as `Authorization: Bearer`). Not needed for Webex Incoming Webhooks. For `generic`, the value is used for HMAC-SHA256 signing (`X-Hub-Signature-256`). Not used for `slack`. |
 | `room_id` | string | `""` | Webex room ID to post messages to. Required when `type` is `webex` with the Messages API. Omit for Webex Incoming Webhooks (room is embedded in the URL). |
 | `min_severity` | string | `"HIGH"` | Minimum event severity to dispatch. Events below this threshold are silently dropped. |
-| `events` | list | `[]` | Event categories to include. Empty means all categories. Valid values: `block`, `drift`, `guardrail`, `scan`. |
+| `events` | list | `[]` | Event categories to include. Empty means all categories. Valid values: `block`, `drift`, `guardrail`, `scan`, `health`. |
 | `timeout_seconds` | int | `10` | HTTP timeout per webhook request. |
+| `cooldown_seconds` | int? | *nil* → 300s | Tri-state: omit / null → runtime default (`webhookDefaultCooldown = 300s`); `0` → debounce disabled (dispatch every event); `>0` → explicit minimum seconds between dispatches per (webhook, event-category) pair. |
 | `enabled` | bool | `false` | Whether this endpoint is active. |
 
 | | |
 |---|---|
-| **Set by** | Operator, manually in `config.yaml`. |
-| **Read by** | **Go sidecar** at startup via `config.Load()`. **Python CLI** via `config.load()` (read-only, for display). |
-| **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors). |
+| **Set by** | `defenseclaw setup webhook` (preferred) or operator via `config.yaml`. |
+| **Read by** | **Go sidecar** at startup via `config.Load()`. **Python CLI** via `config.load()` (round-trips the cooldown tri-state, read-only for display). |
+| **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block, …) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors); 4xx are treated as permanent. |

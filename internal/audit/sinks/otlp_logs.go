@@ -155,6 +155,7 @@ func (s *OTLPLogsSink) Forward(ctx context.Context, e Event) error {
 		otellog.String("audit.severity", e.Severity),
 		otellog.String("audit.run_id", e.RunID),
 		otellog.String("audit.trace_id", e.TraceID),
+		otellog.String("audit.request_id", e.RequestID),
 	)
 	if e.Details != "" {
 		record.AddAttributes(otellog.String("audit.details", e.Details))

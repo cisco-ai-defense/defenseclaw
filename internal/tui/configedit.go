@@ -140,19 +140,76 @@ func applyConfigField(c *config.Config, key, val string) {
 			c.Guardrail.Judge.Fallbacks = strings.Split(val, ",")
 		}
 
-	// Scanners
+	// Scanners — expanded for P2-#9 to cover every SkillScanner /
+	// MCPScanner / Plugin / CodeGuard field the YAML schema
+	// exposes. If the struct ever grows a new knob, add a case here
+	// too; the fallback silently drops unknown keys, which would
+	// feel like a bug at the UI level.
 	case "scanners.skill_scanner.binary":
 		c.Scanners.SkillScanner.Binary = val
+	case "scanners.skill_scanner.policy":
+		c.Scanners.SkillScanner.Policy = val
+	case "scanners.skill_scanner.lenient":
+		c.Scanners.SkillScanner.Lenient = boolVal
 	case "scanners.skill_scanner.use_llm":
 		c.Scanners.SkillScanner.UseLLM = boolVal
+	case "scanners.skill_scanner.llm_consensus_runs":
+		c.Scanners.SkillScanner.LLMConsensus = intVal
 	case "scanners.skill_scanner.use_behavioral":
 		c.Scanners.SkillScanner.UseBehavioral = boolVal
+	case "scanners.skill_scanner.enable_meta":
+		c.Scanners.SkillScanner.EnableMeta = boolVal
+	case "scanners.skill_scanner.use_trigger":
+		c.Scanners.SkillScanner.UseTrigger = boolVal
+	case "scanners.skill_scanner.use_virustotal":
+		c.Scanners.SkillScanner.UseVirusTotal = boolVal
+	case "scanners.skill_scanner.virustotal_api_key_env":
+		c.Scanners.SkillScanner.VirusTotalKeyEnv = val
+	case "scanners.skill_scanner.use_aidefense":
+		c.Scanners.SkillScanner.UseAIDefense = boolVal
 	case "scanners.mcp_scanner.binary":
 		c.Scanners.MCPScanner.Binary = val
 	case "scanners.mcp_scanner.analyzers":
 		c.Scanners.MCPScanner.Analyzers = val
+	case "scanners.mcp_scanner.scan_prompts":
+		c.Scanners.MCPScanner.ScanPrompts = boolVal
+	case "scanners.mcp_scanner.scan_resources":
+		c.Scanners.MCPScanner.ScanResources = boolVal
+	case "scanners.mcp_scanner.scan_instructions":
+		c.Scanners.MCPScanner.ScanInstructions = boolVal
+	case "scanners.plugin_scanner":
+		c.Scanners.PluginScanner = val
 	case "scanners.codeguard":
 		c.Scanners.CodeGuard = val
+
+	// Gateway inline watcher (P2-#9). The watcher runs inside the
+	// gateway process; its config governs directory watch / auto-
+	// quarantine behaviour per resource type. Dirs are CSV on the
+	// wire — we split here so a blank entry clears the list.
+	case "gateway.watcher.enabled":
+		c.Gateway.Watcher.Enabled = boolVal
+	case "gateway.watcher.skill.enabled":
+		c.Gateway.Watcher.Skill.Enabled = boolVal
+	case "gateway.watcher.skill.take_action":
+		c.Gateway.Watcher.Skill.TakeAction = boolVal
+	case "gateway.watcher.skill.dirs":
+		c.Gateway.Watcher.Skill.Dirs = splitCSV(val)
+	case "gateway.watcher.plugin.enabled":
+		c.Gateway.Watcher.Plugin.Enabled = boolVal
+	case "gateway.watcher.plugin.take_action":
+		c.Gateway.Watcher.Plugin.TakeAction = boolVal
+	case "gateway.watcher.plugin.dirs":
+		c.Gateway.Watcher.Plugin.Dirs = splitCSV(val)
+	case "gateway.watcher.mcp.take_action":
+		c.Gateway.Watcher.MCP.TakeAction = boolVal
+
+	// Gateway watchdog (P2-#9).
+	case "gateway.watchdog.enabled":
+		c.Gateway.Watchdog.Enabled = boolVal
+	case "gateway.watchdog.interval":
+		c.Gateway.Watchdog.Interval = intVal
+	case "gateway.watchdog.debounce":
+		c.Gateway.Watchdog.Debounce = intVal
 
 	// Audit sinks: declarative list-based config (audit_sinks[]).
 	// Inline single-key edits don't make sense for the new schema —
@@ -255,6 +312,29 @@ func applyActionsField(c *config.Config, key, val string) {
 	case "install":
 		target.Install = config.InstallAction(val)
 	}
+}
+
+// splitCSV splits "a, b , c" into ["a","b","c"]. Empty input
+// returns nil (rather than [""]) so the resulting YAML stays clean
+// when the operator clears the field — an empty string slice is
+// omitted by go-yaml whereas [""] would serialise as `["" ]` and
+// fail schema checks on the next reload.
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // severityPtr picks the *SeverityAction that matches the severity

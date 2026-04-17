@@ -539,6 +539,26 @@ class JudgeConfig:
 
 @dataclass
 class WebhookConfig:
+    # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
+    # audit sink — see docs/OBSERVABILITY.md §7).
+    #
+    # ``name`` is the CLI-visible identifier used by
+    # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
+    # It is round-tripped through load/save so that ``config.save()``
+    # doesn't silently drop the operator's chosen name. Empty values
+    # are stripped in ``_config_to_dict`` to mirror Go's ``omitempty``.
+    #
+    # ``cooldown_seconds`` is tri-state to match the Go pointer
+    # (``*int``) — see ``internal/gateway/webhook.go``
+    # ``webhookDefaultCooldown = 300s``:
+    #   * ``None``  → YAML key absent / null; dispatcher applies its
+    #                 default cooldown (currently 300s).
+    #   * ``0``     → explicit "dispatch every matching event"; kept
+    #                 verbatim on round-trip so the YAML ``0`` doesn't
+    #                 silently collapse back to "default 300s".
+    #   * ``> 0``   → explicit minimum seconds between dispatches per
+    #                 (webhook, event_category) pair.
+    name: str = ""
     url: str = ""
     type: str = "generic"
     secret_env: str = ""
@@ -546,7 +566,7 @@ class WebhookConfig:
     min_severity: str = "HIGH"
     events: list[str] = field(default_factory=list)
     timeout_seconds: int = 10
-    cooldown_seconds: int = 300
+    cooldown_seconds: int | None = None
     enabled: bool = False
 
     def resolved_secret(self) -> str:
@@ -797,6 +817,21 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # default values — or the sidecar will refuse to start with a v4
     # migration error. Splunk forwarding lives under audit_sinks now.
     d.pop("splunk", None)
+    # Mirror the Go `yaml:"cooldown_seconds,omitempty"` tag: when the
+    # operator hasn't set a cooldown (tri-state None), drop the key so
+    # the YAML stays minimal and the gateway falls back to
+    # ``webhookDefaultCooldown``. An explicit ``0`` or positive int is
+    # kept verbatim.
+    for wh in d.get("webhooks") or []:
+        if not isinstance(wh, dict):
+            continue
+        if wh.get("cooldown_seconds", None) is None:
+            wh.pop("cooldown_seconds", None)
+        # Mirror Go's ``yaml:"name,omitempty"`` — drop empty-string names
+        # so legacy files that never set ``name:`` stay byte-identical
+        # after a load/save cycle.
+        if wh.get("name", "") == "":
+            wh.pop("name", None)
     return d
 
 
@@ -994,7 +1029,21 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
     for entry in raw:
         if not isinstance(entry, dict):
             continue
+        # Preserve nil-vs-zero for cooldown_seconds so round-tripping the
+        # YAML matches Go's ``*int`` semantics (see WebhookConfig
+        # docstring above).
+        cd_raw = entry.get("cooldown_seconds", None)
+        if cd_raw is None:
+            cooldown: int | None = None
+        else:
+            try:
+                cooldown = int(cd_raw)
+            except (TypeError, ValueError):
+                cooldown = None
+            if cooldown is not None and cooldown < 0:
+                cooldown = None
         webhooks.append(WebhookConfig(
+            name=str(entry.get("name", "") or ""),
             url=entry.get("url", ""),
             type=entry.get("type", "generic"),
             secret_env=entry.get("secret_env", ""),
@@ -1002,7 +1051,7 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
             min_severity=entry.get("min_severity", "HIGH"),
             events=entry.get("events", []),
             timeout_seconds=entry.get("timeout_seconds", 10),
-            cooldown_seconds=entry.get("cooldown_seconds", 300),
+            cooldown_seconds=cooldown,
             enabled=entry.get("enabled", False),
         ))
     return webhooks

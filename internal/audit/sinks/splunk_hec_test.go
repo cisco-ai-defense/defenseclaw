@@ -53,8 +53,10 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 
 	// Forward + manual Flush because batch=1 still routes through the
 	// batch buffer (sink only sends on Flush or on batch-full).
+	// Use a plain audit action so the per-event sourcetype override
+	// does not kick in — that behaviour has its own dedicated test.
 	_ = sink.Forward(context.Background(),
-		Event{ID: "verdict-1", Action: "guardrail-verdict",
+		Event{ID: "verdict-1", Action: "skill-scan",
 			Severity: "HIGH", Timestamp: time.Unix(1700000000, 0).UTC(),
 			Structured: map[string]any{"stage": "guardrail", "action": "block"}})
 
@@ -93,7 +95,7 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	if envelope.SourceType != "_json" {
 		t.Fatalf("SourceType=%q (default must be _json)", envelope.SourceType)
 	}
-	if envelope.Event.ID != "verdict-1" || envelope.Event.Action != "guardrail-verdict" {
+	if envelope.Event.ID != "verdict-1" || envelope.Event.Action != "skill-scan" {
 		t.Fatalf("inner event wrong: %+v", envelope.Event)
 	}
 	if envelope.Event.Structured["stage"] != "guardrail" {
@@ -156,6 +158,140 @@ func TestSplunkHECSink_FilterSuppressesLowSeverity(t *testing.T) {
 	defer mu.Unlock()
 	if len(*records) != 1 {
 		t.Fatalf("got %d requests; filter must drop LOW", len(*records))
+	}
+}
+
+// TestSplunkHECSink_SourceTypeOverride_Defaults verifies that every
+// sink — even one built without SourceTypeOverrides — routes judge
+// and verdict actions to their Phase 3 canonical sourcetypes. This is
+// the load-bearing invariant for the Splunk dashboard split and for
+// the E2E observability assertions (which grep for defenseclaw:judge).
+func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
+	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
+	sink, err := NewSplunkHECSink(SplunkHECConfig{
+		Endpoint:       srv.URL,
+		Token:          "t",
+		BatchSize:      1,
+		FlushIntervalS: 60,
+	})
+	if err != nil {
+		t.Fatalf("NewSplunkHECSink err=%v", err)
+	}
+	defer sink.Close()
+
+	cases := []struct {
+		name           string
+		action         string
+		wantSourceType string
+	}{
+		{"judge routes to defenseclaw:judge", "llm-judge-response", "defenseclaw:judge"},
+		{"verdict routes to defenseclaw:verdict", "guardrail-verdict", "defenseclaw:verdict"},
+		{"generic audit keeps _json", "skill-scan", "_json"},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = sink.Forward(context.Background(), Event{
+				ID:        tc.name,
+				Action:    tc.action,
+				Severity:  "HIGH",
+				Timestamp: time.Unix(1700000000+int64(i), 0).UTC(),
+			})
+			mu.Lock()
+			if len(*records) == 0 {
+				mu.Unlock()
+				t.Fatalf("no request captured for action=%s", tc.action)
+			}
+			body := (*records)[len(*records)-1].body
+			mu.Unlock()
+
+			var envelope struct {
+				SourceType string `json:"sourcetype"`
+				Event      struct {
+					Action string `json:"action"`
+				} `json:"event"`
+			}
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("envelope JSON: %v (%s)", err, body)
+			}
+			if envelope.SourceType != tc.wantSourceType {
+				t.Fatalf("sourcetype=%q want %q (action=%s)",
+					envelope.SourceType, tc.wantSourceType, tc.action)
+			}
+			if envelope.Event.Action != tc.action {
+				t.Fatalf("inner action=%q want %q",
+					envelope.Event.Action, tc.action)
+			}
+		})
+	}
+}
+
+// TestSplunkHECSink_SourceTypeOverride_OperatorWins confirms that an
+// operator-supplied override map overrides the defaults rather than
+// being replaced by them. A customer who already standardised on
+// `corp:llm:judge` must not be silently demoted back to
+// `defenseclaw:judge`.
+func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
+	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
+	sink, err := NewSplunkHECSink(SplunkHECConfig{
+		Endpoint:       srv.URL,
+		Token:          "t",
+		BatchSize:      1,
+		FlushIntervalS: 60,
+		SourceTypeOverrides: map[string]string{
+			"llm-judge-response": "corp:llm:judge",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSplunkHECSink err=%v", err)
+	}
+	defer sink.Close()
+
+	_ = sink.Forward(context.Background(), Event{
+		ID: "j1", Action: "llm-judge-response", Severity: "HIGH",
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+	})
+
+	// The defaults that the operator didn't override must still apply
+	// (Phase 3 plan: defaults win unless explicitly overridden).
+	_ = sink.Forward(context.Background(), Event{
+		ID: "v1", Action: "guardrail-verdict", Severity: "HIGH",
+		Timestamp: time.Unix(1700000001, 0).UTC(),
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*records) != 2 {
+		t.Fatalf("records=%d want 2", len(*records))
+	}
+	var first, second struct {
+		SourceType string `json:"sourcetype"`
+	}
+	if err := json.Unmarshal((*records)[0].body, &first); err != nil {
+		t.Fatalf("first envelope: %v", err)
+	}
+	if err := json.Unmarshal((*records)[1].body, &second); err != nil {
+		t.Fatalf("second envelope: %v", err)
+	}
+	if first.SourceType != "corp:llm:judge" {
+		t.Fatalf("operator override lost: got %q", first.SourceType)
+	}
+	if second.SourceType != "defenseclaw:verdict" {
+		t.Fatalf("default dropped when operator override set: got %q", second.SourceType)
+	}
+}
+
+// TestDefaultSourceTypeOverrides_IsIsolated guards against a subtle
+// shared-map regression: callers must be able to mutate the returned
+// map without leaking into other sinks. This is load-bearing when
+// two sinks are constructed in sequence with different override
+// policies (e.g., prod + staging in the same process).
+func TestDefaultSourceTypeOverrides_IsIsolated(t *testing.T) {
+	a := DefaultSourceTypeOverrides()
+	b := DefaultSourceTypeOverrides()
+	a["llm-judge-response"] = "mutated"
+	if b["llm-judge-response"] != "defenseclaw:judge" {
+		t.Fatalf("mutation leaked across callers: %q", b["llm-judge-response"])
 	}
 }
 

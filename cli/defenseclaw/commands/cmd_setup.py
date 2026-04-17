@@ -38,6 +38,22 @@ def setup() -> None:
     """Configure DefenseClaw components."""
 
 
+# Register `defenseclaw setup observability` (unified OTel + audit sinks).
+# Imported here rather than at module top so the subcommand surface can
+# grow without cluttering cmd_setup.py.
+from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
+
+setup.add_command(observability)
+
+# Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
+# notifiers). Distinct from `setup observability add webhook` (generic
+# HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
+# disambiguation.
+from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
+
+setup.add_command(webhook)
+
+
 @setup.command("skill-scanner")
 @click.option("--use-llm", is_flag=True, default=None, help="Enable LLM analyzer")
 @click.option("--use-behavioral", is_flag=True, default=None, help="Enable behavioral analyzer")
@@ -1579,7 +1595,11 @@ def setup_splunk(
     if not did_o11y and not did_logs:
         return
 
-    app.cfg.save()
+    # Note: no app.cfg.save() here — the observability writer invoked
+    # from _apply_o11y_config / _apply_logs_config already persists to
+    # config.yaml atomically while preserving unmodeled sections
+    # (audit_sinks, otel.resource.attributes). Calling cfg.save() again
+    # would serialize the dataclass only and drop those sections.
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
@@ -1636,7 +1656,9 @@ def _interactive_splunk_setup(
         click.echo("  No Splunk pipelines enabled. Run again to configure.")
         return
 
-    app.cfg.save()
+    # observability.apply_preset() already persisted to config.yaml;
+    # calling cfg.save() here would drop audit_sinks (see note in
+    # setup_splunk()).
     click.echo()
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -1835,32 +1857,42 @@ def _apply_o11y_config(
     enable_metrics: bool,
     enable_logs: bool,
 ) -> None:
-    ingest = _SPLUNK_O11Y_INGEST_TEMPLATE.format(realm=realm)
-    otel = app.cfg.otel
+    """Thin alias over ``observability.apply_preset("splunk-o11y", ...)``.
 
-    otel.enabled = True
-    otel.headers["X-SF-Token"] = "${SPLUNK_ACCESS_TOKEN}"
+    Kept for flag-level back-compat with ``setup splunk --o11y``. The
+    single writer lives in ``defenseclaw.observability.writer``.
+    """
+    from defenseclaw.observability import apply_preset
 
-    otel.traces.enabled = enable_traces
-    if enable_traces:
-        otel.traces.endpoint = ingest
-        otel.traces.protocol = "http"
-        otel.traces.url_path = "/v2/trace/otlp"
-
-    otel.metrics.enabled = enable_metrics
-    if enable_metrics:
-        otel.metrics.endpoint = ingest
-        otel.metrics.protocol = "http"
-        otel.metrics.url_path = "/v2/datapoint/otlp"
-
-    otel.logs.enabled = enable_logs
-    if enable_logs:
-        otel.logs.endpoint = ingest
-        otel.logs.protocol = "http"
-        otel.logs.url_path = "/v1/log/otlp"
-
-    _save_secret_to_dotenv("SPLUNK_ACCESS_TOKEN", access_token, app.cfg.data_dir)
+    signals = tuple(
+        s for s, on in (
+            ("traces", enable_traces),
+            ("metrics", enable_metrics),
+            ("logs", enable_logs),
+        ) if on
+    )
+    apply_preset(
+        "splunk-o11y",
+        {"realm": realm},
+        app.cfg.data_dir,
+        # Use app_name for service.name in otel.resource.attributes so
+        # operators see the expected name in Splunk O11y UI. The writer
+        # also stamps preset_id / preset_name alongside.
+        name=app_name,
+        enabled=True,
+        signals=signals or ("traces",),
+        secret_value=access_token or None,
+    )
+    # OTEL_SERVICE_NAME stays a sibling env var: the OTel SDK env takes
+    # precedence over resource.attributes.service.name, so this keeps the
+    # effective service name even if the user later edits the YAML.
     _save_secret_to_dotenv("OTEL_SERVICE_NAME", app_name, app.cfg.data_dir)
+    # Reload config so cfg.otel reflects the YAML we just wrote. Pin the
+    # reload to app.cfg.data_dir (not the default ~/.defenseclaw) so
+    # unit tests that point at a temp dir see their own writes — the
+    # CLI path always matches because production callers set
+    # DEFENSECLAW_HOME to the same dir.
+    _reload_cfg_from_data_dir(app)
 
 
 def _apply_logs_config(
@@ -1871,27 +1903,79 @@ def _apply_logs_config(
     sourcetype: str,
     bootstrap_bridge: bool,
 ) -> None:
+    """Thin alias over ``observability.apply_preset("splunk-hec", ...)``.
+
+    For local-Splunk the bridge is still launched here because it's a
+    *deploy* step (docker-compose up) not a config write. The returned
+    contract (HEC URL + token) is then funneled into the observability
+    writer so it lands in ``audit_sinks[]`` in the same shape as any
+    other HEC destination.
+    """
     contract: dict[str, str] | None = None
     if bootstrap_bridge:
         contract = _bootstrap_bridge(app.cfg.data_dir)
         if not contract:
             raise SystemExit(1)
 
-    sc = app.cfg.splunk
-    sc.enabled = True
-    sc.hec_endpoint = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
-    sc.index = index
-    sc.source = source
-    sc.sourcetype = sourcetype
-    sc.verify_tls = False
-    sc.batch_size = 50
-    sc.flush_interval_s = 5
-
+    hec_url = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = (contract or {}).get("hec_token", "")
-    if hec_token:
-        _save_secret_to_dotenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", hec_token, app.cfg.data_dir)
-        sc.hec_token = ""
-        sc.hec_token_env = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+
+    # Pull host/port from the contract URL so the preset writer derives a
+    # stable name ("splunk-hec-127-0-0-1") and the endpoint matches exactly.
+    from urllib.parse import urlparse
+
+    parsed = urlparse(hec_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = str(parsed.port or 8088)
+
+    from defenseclaw.observability import apply_preset
+
+    apply_preset(
+        "splunk-hec",
+        {
+            "host": host,
+            "port": port,
+            # Pass the bootstrap URL verbatim so the bridge's chosen
+            # scheme (http for local docker-compose free-mode, https
+            # otherwise) survives into config.yaml unchanged.
+            "endpoint": hec_url,
+            "index": index,
+            "source": source,
+            "sourcetype": sourcetype,
+            "verify_tls": "false",
+        },
+        app.cfg.data_dir,
+        enabled=True,
+        secret_value=hec_token or None,
+    )
+    _reload_cfg_from_data_dir(app)
+
+
+def _reload_cfg_from_data_dir(app: AppContext) -> None:
+    """Reload ``app.cfg`` from ``app.cfg.data_dir``.
+
+    ``config.load()`` only reads from ``DEFENSECLAW_HOME`` (or the
+    default ``~/.defenseclaw``). Tests build the ``Config`` directly
+    with a temp ``data_dir`` and never set the env var, so a bare
+    ``config.load()`` call would read the user's real home and
+    overwrite the test's in-memory state. We temporarily pin
+    ``DEFENSECLAW_HOME`` to ``app.cfg.data_dir`` across the reload so
+    the writer's atomic YAML update is the only input. Production
+    callers already set ``DEFENSECLAW_HOME`` to ``data_dir`` so this
+    is a no-op there.
+    """
+    from defenseclaw import config as cfg_mod
+
+    data_dir = app.cfg.data_dir
+    previous = os.environ.get("DEFENSECLAW_HOME")
+    os.environ["DEFENSECLAW_HOME"] = data_dir
+    try:
+        app.cfg = cfg_mod.load()
+    finally:
+        if previous is None:
+            os.environ.pop("DEFENSECLAW_HOME", None)
+        else:
+            os.environ["DEFENSECLAW_HOME"] = previous
 
 
 # ---------------------------------------------------------------------------
@@ -2003,16 +2087,44 @@ def _disable_splunk(
     click.echo()
     click.echo("  Disabling Splunk integration...")
 
+    from defenseclaw.observability import list_destinations, set_destination_enabled
+
     if disable_both or o11y_only:
-        app.cfg.otel.enabled = False
+        # Flip otel.enabled via the observability writer so unmodeled
+        # fields (resource.attributes, etc.) are preserved.
+        try:
+            set_destination_enabled("otel", False, app.cfg.data_dir)
+        except ValueError:
+            # No otel: block — nothing to disable.
+            pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
     if disable_both or logs_only:
-        app.cfg.splunk.enabled = False
-        click.echo("    Splunk Enterprise (HEC): disabled")
+        # Find every splunk_hec audit sink and flip enabled=false. The
+        # legacy Config.splunk dataclass hydrates from the first enabled
+        # one, so the gateway will see it as disabled on next load.
+        dests = list_destinations(app.cfg.data_dir)
+        disabled_any = False
+        for d in dests:
+            if d.kind == "splunk_hec" and d.enabled:
+                try:
+                    set_destination_enabled(d.name, False, app.cfg.data_dir)
+                    disabled_any = True
+                except ValueError:
+                    continue
+        if disabled_any:
+            click.echo("    Splunk Enterprise (HEC): disabled")
+        else:
+            # Still report a "disabled" status so operators (and CI
+            # smoke-tests) can grep for it; the parenthetical clarifies
+            # there was nothing to flip.
+            click.echo("    Splunk Enterprise (HEC): disabled (no active sinks found)")
         _stop_bridge(app.cfg.data_dir)
 
-    app.cfg.save()
+    # Refresh in-memory cfg so callers (and tests) see the YAML state
+    # the writer just produced.
+    _reload_cfg_from_data_dir(app)
+
     click.echo("  Config saved")
     click.echo()
 

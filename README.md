@@ -348,6 +348,12 @@ For full setup, architecture, monitoring, and debugging details, see [docs/SANDB
 
 DefenseClaw can push enforcement events to external systems in real time. When a skill is blocked, drift is detected, or a guardrail fires, the webhook dispatcher sends structured payloads to configured endpoints.
 
+> **Two webhook surfaces — don't mix them up.** `webhooks[]` (below) is for
+> low-volume, per-event chat/incident notifications. For high-volume
+> every-event log forwarding to a JSON-line HTTP endpoint, use
+> `audit_sinks[]` with `kind: http_jsonl` via `defenseclaw setup
+> observability add webhook` — see [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) §3.4 & §7.
+
 Supported channel types:
 
 | Type | Payload format | Authentication |
@@ -355,9 +361,21 @@ Supported channel types:
 | **Slack** | Block Kit attachments with color-coded severity | URL token (Slack incoming webhook URL) |
 | **PagerDuty** | Events API v2 trigger with dedup key | `routing_key` via `secret_env` |
 | **Webex** | Markdown message via Webex Messages API | Bot Bearer token via `secret_env` |
-| **Generic** | Flat JSON with full event metadata | `X-Webhook-Secret` header via `secret_env` |
+| **Generic** | Flat JSON with full event metadata | HMAC-SHA256 (`X-Hub-Signature-256`) via `secret_env` |
 
-Configure in `~/.defenseclaw/config.yaml`:
+Add with the CLI (preferred — validates URLs, catches missing env vars,
+writes atomically):
+
+```bash
+defenseclaw setup webhook add slack     --url https://hooks.slack.com/services/T00/B00/xxx --enabled
+defenseclaw setup webhook add pagerduty --url https://events.pagerduty.com/v2/enqueue --secret-env PAGERDUTY_ROUTING_KEY --min-severity CRITICAL --events block --enabled
+defenseclaw setup webhook add webex     --url https://webexapis.com/v1/messages --secret-env WEBEX_BOT_TOKEN --room-id ROOM_ID --enabled
+defenseclaw setup webhook list
+defenseclaw setup webhook test slack    --url https://hooks.slack.com/services/T00/B00/xxx --preview-only
+```
+
+The same wizard is available in the TUI (Setup → Webhooks). Or edit
+`~/.defenseclaw/config.yaml` directly:
 
 ```yaml
 webhooks:
@@ -381,7 +399,12 @@ webhooks:
     enabled: true
 ```
 
-Events are dispatched asynchronously with automatic retry (up to 3 retries with exponential backoff). Each endpoint can filter by minimum severity and event category (`block`, `drift`, `guardrail`, `scan`).
+Events are dispatched asynchronously with automatic retry (up to 3 retries
+with exponential backoff; 4xx are permanent). Each endpoint filters by
+minimum severity and event category (`block`, `drift`, `guardrail`, `scan`,
+`health`). `cooldown_seconds` is a tri-state: omit (or null) uses the
+runtime default of 300s, `0` disables debounce, `>0` sets an explicit
+minimum gap per (webhook, event-category) pair.
 
 ---
 

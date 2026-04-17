@@ -51,13 +51,26 @@ func sanitizeEvent(e Event) Event {
 	return e
 }
 
+// StructuredEmitter receives every audit Event that flows through the
+// Logger *after* it has been sanitized and persisted. It is intended for
+// translating audit events into the structured gateway.jsonl envelope
+// (see internal/gatewaylog) so non-gateway lifecycle signals (scans,
+// watcher start/stop, enforcement actions) land alongside guardrail
+// verdicts in a single correlated stream.
+//
+// Implementations must be safe for concurrent use and non-blocking; the
+// Logger invokes Emit on the hot path and will not retry on failure.
+type StructuredEmitter interface {
+	EmitAudit(event Event)
+}
 
 type Logger struct {
 	store *Store
 	// sinks is the v4 generic fan-out manager. nil is a safe no-op
 	// (matches the legacy nil-splunk behavior).
-	sinks *sinks.Manager
-	otel  *telemetry.Provider
+	sinks      *sinks.Manager
+	otel       *telemetry.Provider
+	structured StructuredEmitter
 }
 
 func NewLogger(store *Store) *Logger {
@@ -73,6 +86,25 @@ func (l *Logger) SetSinks(m *sinks.Manager) {
 
 func (l *Logger) SetOTelProvider(p *telemetry.Provider) {
 	l.otel = p
+}
+
+// SetStructuredEmitter installs a bridge that forwards sanitized audit
+// Events to the structured gateway.jsonl writer (or any other
+// structured sink). Pass nil to detach.
+func (l *Logger) SetStructuredEmitter(e StructuredEmitter) {
+	l.structured = e
+}
+
+// emitStructured fans the event out to the structured emitter. Kept
+// separate from forwardToSinks because the gatewaylog bridge is
+// intentionally local-only (file on disk + OTel/Splunk fanout happens
+// at the writer level, not here) while sinks.Manager is for remote
+// adapters with retry/batching semantics.
+func (l *Logger) emitStructured(e Event) {
+	if l.structured == nil {
+		return
+	}
+	l.structured.EmitAudit(e)
 }
 
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
@@ -143,6 +175,7 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
 	l.forwardToSinks(event)
+	l.emitStructured(event)
 
 	if l.otel != nil {
 		targetType := inferTargetType(result.Scanner)
@@ -160,6 +193,19 @@ func (l *Logger) LogAction(action, target, details string) error {
 // LogActionWithTrace persists an action event with an OTel trace ID for
 // cross-system correlation between Splunk O11y and Splunk local.
 func (l *Logger) LogActionWithTrace(action, target, details, traceID string) error {
+	return l.LogActionWithCorrelation(action, target, details, traceID, "")
+}
+
+// LogActionWithCorrelation persists an action event with both an OTel
+// trace ID and a gateway request ID. This is the single code path all
+// new call sites should use once Phase 5 threading is live; the older
+// LogAction / LogActionWithTrace helpers delegate here with the
+// request_id left empty.
+//
+// An empty requestID is legal (pre-proxy subsystems like the watcher
+// have no HTTP correlation context); the SQLite column is nullable
+// and downstream sinks strip the attribute when unset.
+func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requestID string) error {
 	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -170,6 +216,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 		Severity:  "INFO",
 		RunID:     currentRunID(),
 		TraceID:   traceID,
+		RequestID: requestID,
 	})
 	if err := l.store.LogEvent(event); err != nil {
 		if l.otel != nil {
@@ -181,6 +228,7 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
 	l.forwardToSinks(event)
+	l.emitStructured(event)
 
 	if l.otel != nil {
 		assetType := inferAssetTypeFromAction(action, details)
@@ -214,6 +262,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
 	l.forwardToSinks(event)
+	l.emitStructured(event)
 
 	if l.otel != nil {
 		assetType := inferAssetTypeFromAction(action, details)
@@ -247,6 +296,7 @@ func (l *Logger) LogEvent(event Event) error {
 		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
 	l.forwardToSinks(event)
+	l.emitStructured(event)
 	return nil
 }
 
@@ -274,6 +324,7 @@ func (l *Logger) forwardToSinks(e Event) {
 		Severity:  e.Severity,
 		RunID:     e.RunID,
 		TraceID:   e.TraceID,
+		RequestID: e.RequestID,
 	})
 }
 

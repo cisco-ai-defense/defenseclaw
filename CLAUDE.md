@@ -116,6 +116,10 @@ All six paths must be tested.
 - Allow-listed items skip scan gate but are still logged and inventoried
 - TUI refreshes within 5 seconds — subscribe to audit store changes
 - macOS has no OpenShell — degrade gracefully: scan + lists + audit work, sandbox enforcement skipped
+- Two webhook surfaces exist and are NOT interchangeable:
+  - `webhooks[]` (notifier): per-event chat/incident fan-out (Slack/PagerDuty/Webex/HMAC). Managed by `defenseclaw setup webhook` + TUI wizard; dispatched by `internal/gateway/webhook.go::WebhookDispatcher`.
+  - `audit_sinks[].http_jsonl` (log forwarder): every-event JSONL POST. Managed by `defenseclaw setup observability add webhook`.
+  `cooldown_seconds` on `WebhookConfig` is `*int` (tri-state): nil → `webhookDefaultCooldown` (300s), `0` → disabled, `>0` → explicit. Python `WebhookConfig.cooldown_seconds` is `int | None` and round-trips the same three states.
 
 ## Boundaries
 

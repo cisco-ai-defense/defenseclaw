@@ -72,6 +72,17 @@ DefenseClaw will **fail fast** on startup if any legacy `splunk.*` key
 is still set — this is intentional so you cannot silently lose
 forwarding after an upgrade.
 
+### 2.1 Automated migration
+
+Instead of rewriting the YAML by hand, run:
+
+```bash
+defenseclaw setup observability migrate-splunk --apply
+```
+
+The command is idempotent — re-running it on a config that has already
+been migrated is a no-op. Omit `--apply` for a dry-run preview.
+
 ---
 
 ## 3. Sink reference
@@ -127,10 +138,16 @@ audit_sinks:
     ca_cert:     ""
 ```
 
-### 3.4 `http_jsonl`
+### 3.4 `http_jsonl` (Generic HTTP JSONL audit sink)
+
+> **Not a notifier webhook.** This sink forwards *every* audit event to
+> a single URL as newline-delimited JSON. Chat/incident notifications
+> (Slack, PagerDuty, Webex, HMAC-signed) are a separate system —
+> `webhooks[]` — configured with `defenseclaw setup webhook`. See §7
+> below.
 
 ```yaml
-- name: webhook-jsonl
+- name: events-jsonl
   kind: http_jsonl
   enabled: true
   http_jsonl:
@@ -241,3 +258,87 @@ Sinks:   running — 2 sinks (splunk_hec, otlp_logs)
 
 Per-sink health and failure counters are exposed on the gateway
 `/health` endpoint under `sinks.details.sinks[]`.
+
+---
+
+## 7. Notifier webhooks (`webhooks[]`)
+
+Notifier webhooks are **not** audit sinks. They deliver low-volume,
+human-facing notifications — Slack messages, PagerDuty incidents,
+Webex rooms, or generic HMAC-signed JSON — filtered by severity and
+event category.
+
+| Surface                        | Schema key                  | What it does                                    | Example preset          |
+|--------------------------------|-----------------------------|-------------------------------------------------|-------------------------|
+| `setup observability add`      | `audit_sinks[]`             | High-volume, every-event forwarding             | `webhook` → `http_jsonl`|
+| `setup webhook add`            | `webhooks[]`                | Per-event chat / incident notifications         | `slack`, `pagerduty`    |
+
+### 7.1 CLI
+
+```bash
+defenseclaw setup webhook add slack \
+    --url https://hooks.slack.com/services/T000/B000/XXXX \
+    --events scan.failed,block \
+    --min-severity high
+
+defenseclaw setup webhook add pagerduty \
+    --routing-key-env PAGERDUTY_ROUTING_KEY \
+    --min-severity critical
+
+defenseclaw setup webhook add webex \
+    --room-id Y2lzY29zcGFyazovL3VzL1JPT00v… \
+    --secret-env WEBEX_BOT_TOKEN
+
+defenseclaw setup webhook add generic \
+    --url https://ops.example.com/alerts \
+    --secret-env OPS_WEBHOOK_HMAC_KEY \
+    --min-severity high
+
+defenseclaw setup webhook list
+defenseclaw setup webhook show <name>
+defenseclaw setup webhook enable  <name>
+defenseclaw setup webhook disable <name>
+defenseclaw setup webhook remove  <name>
+defenseclaw setup webhook test    <name>   # dispatches a synthetic event
+```
+
+All secrets are resolved from env vars (never written in `config.yaml`).
+URLs are validated against SSRF (private ranges, localhost, cloud
+metadata endpoints are rejected by default).
+
+### 7.2 YAML schema
+
+```yaml
+webhooks:
+  - type:             slack            # slack | pagerduty | webex | generic
+    url:              https://hooks.slack.com/services/T000/B000/XXXX
+    secret_env:       ""               # unused for slack (URL carries the secret)
+    room_id:          ""               # webex only
+    min_severity:     high             # info | low | medium | high | critical
+    events: [scan.failed, block]
+    timeout_seconds:  10
+    cooldown_seconds: 60               # optional; omit (null) to disable debounce
+    enabled:          true
+```
+
+`cooldown_seconds` is a tri-state: *omitted / null* → use the
+dispatcher default (`webhookDefaultCooldown`, currently 300s);
+`0` → dispatch every matching event; `>0` → explicit minimum seconds
+between dispatches per (webhook, event-category) pair.
+
+### 7.3 TUI
+
+The Setup wizard exposes a **Webhooks** step that runs through the
+same `setup webhook add` path non-interactively. The Config Editor
+surfaces a read-only `Webhooks` section (CRUD lives in the wizard or
+CLI because list-of-structs + per-entry secrets aren't safely editable
+via single-key form fields).
+
+### 7.4 Doctor
+
+`defenseclaw doctor` runs a `Webhooks` probe per entry:
+
+- SSRF guard (same rules as the gateway dispatcher)
+- `secret_env` / room_id presence for types that need it
+- reachability (HEAD/OPTIONS) — **never** dispatches live events; use
+  `setup webhook test` for an end-to-end synthetic dispatch.

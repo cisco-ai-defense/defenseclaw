@@ -38,6 +38,11 @@ type Event struct {
 	Severity  string    `json:"severity"`
 	RunID     string    `json:"run_id,omitempty"`
 	TraceID   string    `json:"trace_id,omitempty"`
+	// RequestID is the per-request correlation key minted at the
+	// top of every proxy path. Populated in Phase 5 via the
+	// gateway context threading; older call sites may leave it
+	// empty, in which case the column stays NULL in SQLite.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.
@@ -295,6 +300,58 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		// Phase 3 of the observability refactor: land correlation
+		// identifiers (request_id + trace_id) on audit_events so
+		// operators can pivot between gateway.jsonl, SQLite, Splunk,
+		// and OTel without a separate join table. request_id is
+		// minted at the top of every proxy request in Phase 5;
+		// trace_id mirrors the OTel span id the audit.Logger
+		// already stamps onto emitted spans.
+		//
+		// The same correlation keys are mirrored onto judge_responses
+		// so a single request_id lookup reveals every verdict and
+		// every judge response tied to that request.
+		description: "add trace_id/request_id columns for end-to-end correlation",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "trace_id", `ALTER TABLE audit_events ADD COLUMN trace_id TEXT`},
+				{"audit_events", "request_id", `ALTER TABLE audit_events ADD COLUMN request_id TEXT`},
+				{"judge_responses", "request_id", `ALTER TABLE judge_responses ADD COLUMN request_id TEXT`},
+				{"judge_responses", "trace_id", `ALTER TABLE judge_responses ADD COLUMN trace_id TEXT`},
+				{"judge_responses", "run_id", `ALTER TABLE judge_responses ADD COLUMN run_id TEXT`},
+				{"judge_responses", "input_hash", `ALTER TABLE judge_responses ADD COLUMN input_hash TEXT`},
+				{"judge_responses", "confidence", `ALTER TABLE judge_responses ADD COLUMN confidence REAL`},
+				{"judge_responses", "fail_closed_applied", `ALTER TABLE judge_responses ADD COLUMN fail_closed_applied INTEGER NOT NULL DEFAULT 0`},
+				{"judge_responses", "inspected_model", `ALTER TABLE judge_responses ADD COLUMN inspected_model TEXT`},
+				{"judge_responses", "prompt_template_id", `ALTER TABLE judge_responses ADD COLUMN prompt_template_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			for _, idx := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_events(request_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_judge_request_id ON judge_responses(request_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_judge_trace_id ON judge_responses(trace_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_judge_run_id ON judge_responses(run_id)`,
+			} {
+				if _, err := ex.Exec(idx); err != nil {
+					return fmt.Errorf("create correlation index: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 func (s *Store) Init() error {
@@ -442,9 +499,10 @@ func (s *Store) LogEvent(e Event) error {
 
 	ts := e.Timestamp.Format(time.RFC3339Nano)
 	_, err := s.db.Exec(
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity, nullStr(e.RunID),
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity,
+		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -468,6 +526,19 @@ type JudgeResponse struct {
 	LatencyMs  int64
 	ParseError string
 	Raw        string
+
+	// Correlation + forensics fields (Phase 3/5). All are optional
+	// at the call site — empty values persist as NULL so the audit
+	// store stays usable for older callers (migration tests, ad-hoc
+	// scripts) that haven't been updated yet.
+	RequestID         string
+	TraceID           string
+	RunID             string
+	InputHash         string  // sha256 of the judge input, never the raw input
+	Confidence        float64 // 0–1 score, 0 when the judge did not return one
+	FailClosedApplied bool    // set when a judge parse/timeout error forced a block
+	InspectedModel    string  // the upstream model whose traffic we judged
+	PromptTemplateID  string  // optional template identifier for drift diagnosis
 }
 
 // MaxJudgeRawBytes is the upper bound on the raw_response body
@@ -497,11 +568,20 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
 	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
+	failClosed := 0
+	if e.FailClosedApplied {
+		failClosed = 1
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO judge_responses
-			(id, timestamp, kind, direction, model, action, severity, latency_ms, parse_error, raw_response)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			 parse_error, raw_response, request_id, trace_id, run_id, input_hash,
+			 confidence, fail_closed_applied, inspected_model, prompt_template_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID,
 		e.Timestamp.Format(time.RFC3339Nano),
 		e.Kind,
@@ -512,6 +592,14 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		e.LatencyMs,
 		nullStr(e.ParseError),
 		raw,
+		nullStr(e.RequestID),
+		nullStr(e.TraceID),
+		nullStr(e.RunID),
+		nullStr(e.InputHash),
+		e.Confidence,
+		failClosed,
+		nullStr(e.InspectedModel),
+		nullStr(e.PromptTemplateID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert judge response: %w", err)
@@ -547,7 +635,11 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 	rows, err := s.db.Query(`
 		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
-			COALESCE(parse_error,''), raw_response
+			COALESCE(parse_error,''), raw_response,
+			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
+			COALESCE(input_hash,''), COALESCE(confidence,0),
+			COALESCE(fail_closed_applied,0),
+			COALESCE(inspected_model,''), COALESCE(prompt_template_id,'')
 		FROM judge_responses ORDER BY timestamp DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list judge responses: %w", err)
@@ -558,10 +650,14 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 	for rows.Next() {
 		var r JudgeResponse
 		var ts string
+		var failClosed int
 		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
-			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw); err != nil {
+			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
+			&r.RequestID, &r.TraceID, &r.RunID, &r.InputHash, &r.Confidence,
+			&failClosed, &r.InspectedModel, &r.PromptTemplateID); err != nil {
 			return nil, fmt.Errorf("audit: scan judge response: %w", err)
 		}
+		r.FailClosedApplied = failClosed != 0
 		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 			r.Timestamp = t
 		}
@@ -571,6 +667,48 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 		return nil, fmt.Errorf("audit: iterate judge responses: %w", err)
 	}
 	return out, nil
+}
+
+// GetJudgeResponsesByRequestID returns every judge row tied to the
+// supplied correlation ID, newest first. Used by the TUI Judge panel
+// (Phase 4) to pivot from a verdict row into all the judge calls
+// that contributed to it.
+func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse, error) {
+	if requestID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
+			COALESCE(parse_error,''), raw_response,
+			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
+			COALESCE(input_hash,''), COALESCE(confidence,0),
+			COALESCE(fail_closed_applied,0),
+			COALESCE(inspected_model,''), COALESCE(prompt_template_id,'')
+		FROM judge_responses WHERE request_id = ? ORDER BY timestamp DESC`, requestID)
+	if err != nil {
+		return nil, fmt.Errorf("audit: judge by request_id: %w", err)
+	}
+	defer rows.Close()
+
+	var out []JudgeResponse
+	for rows.Next() {
+		var r JudgeResponse
+		var ts string
+		var failClosed int
+		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
+			&r.RequestID, &r.TraceID, &r.RunID, &r.InputHash, &r.Confidence,
+			&failClosed, &r.InspectedModel, &r.PromptTemplateID); err != nil {
+			return nil, fmt.Errorf("audit: scan judge row: %w", err)
+		}
+		r.FailClosedApplied = failClosed != 0
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			r.Timestamp = t
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) InsertScanResult(id, scannerName, target string, ts time.Time, durationMs int64, findingCount int, maxSeverity, rawJSON string) error {
@@ -604,7 +742,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -615,14 +753,16 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
+		var target, details, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
 		e.RunID = runID.String
+		e.TraceID = traceID.String
+		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -896,7 +1036,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
 		 FROM audit_events
 		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
 		   AND action NOT LIKE 'dismiss%'
@@ -910,14 +1050,16 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
+		var target, details, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
 		e.RunID = runID.String
+		e.TraceID = traceID.String
+		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -987,7 +1129,7 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
 		 FROM audit_events
 		 WHERE target = ?
 		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
@@ -1000,14 +1142,16 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var tgt, details, severity, runID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &tgt, &e.Actor, &details, &severity, &runID); err != nil {
+		var tgt, details, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &tgt, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan event row: %w", err)
 		}
 		e.Target = tgt.String
 		e.Details = details.String
 		e.Severity = severity.String
 		e.RunID = runID.String
+		e.TraceID = traceID.String
+		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()

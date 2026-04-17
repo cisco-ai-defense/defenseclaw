@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,6 +46,39 @@ type SplunkHECConfig struct {
 	FlushIntervalS int
 	TimeoutS       int
 	Filter         SinkFilter
+
+	// SourceTypeOverrides maps a canonical audit action (e.g.
+	// "llm-judge-response") to a dedicated Splunk sourcetype
+	// (e.g. "defenseclaw:judge"). When an event's Action matches
+	// a key, the per-event payload is emitted with the override
+	// sourcetype so Splunk dashboards can segment judge/verdict
+	// streams from the generic `_json` audit stream without a
+	// free-form grep on the `action` field. Zero-value map means
+	// "use SourceType for every event" (legacy behaviour).
+	SourceTypeOverrides map[string]string
+}
+
+// DefaultSourceTypeOverrides is the canonical per-event sourcetype map
+// the Phase 3 plan calls for. Operators constructing a SplunkHECConfig
+// programmatically can merge this in with their own overrides; the
+// config loader wires it in when the YAML block omits the explicit
+// `sourcetype_overrides` map so existing installs get the judge
+// split automatically without a config edit.
+//
+// Keeping this as a function (not a var) makes the returned map
+// safe to mutate per-call without leaking into other sinks.
+func DefaultSourceTypeOverrides() map[string]string {
+	return map[string]string{
+		// Judge events go to their own sourcetype so the Splunk
+		// dashboards can pivot on model + verdict + confidence
+		// without colliding with regular audit lines.
+		"llm-judge-response": "defenseclaw:judge",
+		// Guardrail verdicts are the single highest-value audit
+		// signal for SOC teams; giving them a dedicated
+		// sourcetype lets search-head admins pin retention
+		// independently of the generic audit stream.
+		"guardrail-verdict": "defenseclaw:verdict",
+	}
 }
 
 // SplunkHECSink is the refactored Splunk HEC client extracted from the
@@ -83,6 +117,7 @@ type splunkAuditEvent struct {
 	RunID      string         `json:"run_id,omitempty"`
 	Source     string         `json:"source"`
 	TraceID    string         `json:"trace_id,omitempty"`
+	RequestID  string         `json:"request_id,omitempty"`
 	Structured map[string]any `json:"structured,omitempty"`
 }
 
@@ -109,6 +144,21 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 	}
 	if cfg.SourceType == "" {
 		cfg.SourceType = "_json"
+	}
+
+	// Phase 3: every sink gets the canonical per-event
+	// sourcetype split unless the operator has already supplied
+	// their own map (which wins so customer Splunk naming
+	// conventions are never overwritten). The map is cloned so
+	// callers can't mutate our default after construction.
+	if cfg.SourceTypeOverrides == nil {
+		cfg.SourceTypeOverrides = DefaultSourceTypeOverrides()
+	} else {
+		merged := DefaultSourceTypeOverrides()
+		for k, v := range cfg.SourceTypeOverrides {
+			merged[k] = v
+		}
+		cfg.SourceTypeOverrides = merged
 	}
 
 	transport := &http.Transport{
@@ -141,9 +191,10 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 	// when verify_tls is off while the endpoint scheme is https —
 	// the dev-self-signed default is kept but operators should see
 	// it in the boot logs so silent downgrades don't slip through
-	// review.
-	if !cfg.VerifyTLS && len(cfg.Endpoint) >= 8 &&
-		(cfg.Endpoint[:8] == "https://" || cfg.Endpoint[:8] == "HTTPS://") {
+	// review. URL schemes are case-insensitive per RFC 3986 §3.1,
+	// so we normalize the prefix before comparing to avoid silent
+	// misses on e.g. "Https://" or "HTTPS://".
+	if !cfg.VerifyTLS && strings.HasPrefix(strings.ToLower(cfg.Endpoint), "https://") {
 		fmt.Fprintf(os.Stderr,
 			"warning: audit sink %q (splunk_hec): TLS certificate verification disabled for %s — set verify_tls=true for production\n",
 			cfg.Name, cfg.Endpoint)
@@ -155,6 +206,23 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 func (s *SplunkHECSink) Name() string { return s.cfg.Name }
 func (s *SplunkHECSink) Kind() string { return "splunk_hec" }
 
+// sourceTypeFor picks the wire sourcetype for an event. Per-action
+// overrides win over the sink-wide default so operators can keep a
+// single HEC endpoint configured while still getting segmented
+// streams on the Splunk side. An empty override falls through to the
+// sink-wide SourceType (which itself defaults to `_json` in
+// NewSplunkHECSink) — we never emit a missing/empty sourcetype on the
+// wire because the HEC event format treats that as "use the HEC
+// token's default", which is operator-specific and hard to audit.
+func (s *SplunkHECSink) sourceTypeFor(action string) string {
+	if action != "" && s.cfg.SourceTypeOverrides != nil {
+		if v, ok := s.cfg.SourceTypeOverrides[action]; ok && v != "" {
+			return v
+		}
+	}
+	return s.cfg.SourceType
+}
+
 func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 	if !s.cfg.Filter.Matches(e) {
 		return nil
@@ -162,7 +230,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 	se := splunkEvent{
 		Time:       float64(e.Timestamp.Unix()) + float64(e.Timestamp.Nanosecond())/1e9,
 		Source:     s.cfg.Source,
-		SourceType: s.cfg.SourceType,
+		SourceType: s.sourceTypeFor(e.Action),
 		Index:      s.cfg.Index,
 		Event: splunkAuditEvent{
 			ID:         e.ID,
@@ -175,6 +243,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			RunID:      e.RunID,
 			Source:     "defenseclaw",
 			TraceID:    e.TraceID,
+			RequestID:  e.RequestID,
 			Structured: e.Structured,
 		},
 	}

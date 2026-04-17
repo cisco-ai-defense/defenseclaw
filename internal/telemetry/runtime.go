@@ -88,6 +88,54 @@ func (p *Provider) EndGuardrailStageSpan(span trace.Span, action, severity, reas
 	span.End()
 }
 
+// StartGuardrailPhaseSpan opens a child span for one sub-stage of a
+// guardrail inspection — e.g. "regex", "cisco_ai_defense", "judge.pii",
+// "judge.prompt_injection", "opa", "finalize". Phase spans nest under
+// the Stage span opened by StartGuardrailStageSpan so operators can
+// pivot on stage (regex_only vs regex_judge vs judge_first) AND drill
+// into phase-level latency (which phase ate the P99 budget) in a
+// single trace waterfall.
+//
+// Nil span is returned when traces are disabled; End is a safe no-op
+// per the OTel SDK contract.
+func (p *Provider) StartGuardrailPhaseSpan(ctx context.Context, phase string) (context.Context, trace.Span) {
+	if p == nil || !p.TracesEnabled() {
+		return ctx, nil
+	}
+	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail.%s", phase),
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.guardrail.phase", phase),
+	)
+	return ctx, span
+}
+
+// EndGuardrailPhaseSpan attaches the phase outcome (action + severity
+// + latency) and closes the span. Action may be empty for phases that
+// don't produce a verdict directly (e.g. "regex" when there are no
+// matches); we still record latency so phase timing is always queryable.
+func (p *Provider) EndGuardrailPhaseSpan(span trace.Span, action, severity string, latencyMs int64) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.Int64("defenseclaw.guardrail.latency_ms", latencyMs),
+	)
+	if action != "" {
+		span.SetAttributes(attribute.String("defenseclaw.guardrail.action", action))
+	}
+	if severity != "" {
+		span.SetAttributes(attribute.String("defenseclaw.guardrail.severity", severity))
+	}
+	if action == "block" {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
 // EmitInspectSpan creates a span for a tool/message inspection evaluation.
 func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity string, durationMs float64) string {
 	if !p.TracesEnabled() {

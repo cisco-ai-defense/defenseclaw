@@ -82,17 +82,18 @@ func buildOneSink(ctx context.Context, decl config.AuditSink, res *resource.Reso
 			return nil, fmt.Errorf("splunk_hec token unresolved (set token_env=%q)", c.TokenEnv)
 		}
 		return sinks.NewSplunkHECSink(sinks.SplunkHECConfig{
-			Name:           decl.Name,
-			Endpoint:       c.Endpoint,
-			Token:          token,
-			Index:          c.Index,
-			Source:         c.Source,
-			SourceType:     c.SourceType,
-			VerifyTLS:      c.VerifyTLS,
-			BatchSize:      decl.BatchSize,
-			FlushIntervalS: decl.FlushIntervalS,
-			TimeoutS:       decl.TimeoutS,
-			Filter:         filter,
+			Name:                decl.Name,
+			Endpoint:            c.Endpoint,
+			Token:               token,
+			Index:               c.Index,
+			Source:              c.Source,
+			SourceType:          c.SourceType,
+			VerifyTLS:           c.VerifyTLS,
+			BatchSize:           decl.BatchSize,
+			FlushIntervalS:      decl.FlushIntervalS,
+			TimeoutS:            decl.TimeoutS,
+			Filter:              filter,
+			SourceTypeOverrides: c.SourceTypeOverrides,
 		})
 
 	case config.SinkKindHTTPJSONL:

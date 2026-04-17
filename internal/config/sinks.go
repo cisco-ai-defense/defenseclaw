@@ -106,6 +106,19 @@ type SplunkHECSinkConfig struct {
 	Source     string `mapstructure:"source"      yaml:"source,omitempty"`
 	SourceType string `mapstructure:"sourcetype"  yaml:"sourcetype,omitempty"`
 	VerifyTLS  bool   `mapstructure:"verify_tls"  yaml:"verify_tls,omitempty"`
+
+	// SourceTypeOverrides lets operators map a canonical audit
+	// action onto a dedicated Splunk sourcetype, e.g.:
+	//
+	//   sourcetype_overrides:
+	//     llm-judge-response: defenseclaw:judge
+	//     guardrail-verdict:  defenseclaw:verdict
+	//
+	// When omitted, the sink still emits Phase 3 defaults
+	// (defenseclaw:judge for judge events, defenseclaw:verdict
+	// for guardrail verdicts) so out-of-the-box Splunk
+	// dashboards work without any operator wiring.
+	SourceTypeOverrides map[string]string `mapstructure:"sourcetype_overrides" yaml:"sourcetype_overrides,omitempty"`
 }
 
 // ResolvedToken returns the env-resolved HEC token, falling back to the

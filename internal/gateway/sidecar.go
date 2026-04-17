@@ -72,8 +72,19 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	// Persist the retention flag before any goroutines start so the
 	// very first judge invocation sees the operator-configured value
-	// (otherwise the default-off atomic would race with early traffic).
-	SetRetainJudgeBodies(cfg.Guardrail.RetainJudgeBodies)
+	// (otherwise the default atomic would race with early traffic).
+	//
+	// Phase 3 flips the default to on. DEFENSECLAW_PERSIST_JUDGE is an
+	// operator-facing kill-switch for environments with strict storage
+	// or privacy constraints: setting it to 0/false/no forces retention
+	// off regardless of config.yaml. Any other value (or leaving it
+	// unset) respects the config/default.
+	retainJudge := cfg.Guardrail.RetainJudgeBodies
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_PERSIST_JUDGE"))) {
+	case "0", "false", "no", "off":
+		retainJudge = false
+	}
+	SetRetainJudgeBodies(retainJudge)
 
 	// In standalone sandbox mode the veth link is point-to-point;
 	// TLS is not needed and OpenClaw serves plain WS.
@@ -117,7 +128,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		}
 	}
 
-
 	client.OnEvent = router.Route
 
 	alertCtx, alertCancel := context.WithCancel(context.Background())
@@ -130,8 +140,21 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		}
 	}
 
+	// DEFENSECLAW_JSONL_DISABLE lets operators opt the structured
+	// JSONL tier out at process start without editing config.yaml —
+	// useful for noisy dev loops, ephemeral CI debug shells, and
+	// privacy-sensitive environments where the pretty stderr stream
+	// is enough. An empty JSONLPath disables the file tier cleanly;
+	// pretty logging to stderr and OTel fan-out continue unchanged.
+	// See docs/OBSERVABILITY.md#kill-switch for runbook guidance.
+	jsonlPath := filepath.Join(cfg.DataDir, "gateway.jsonl")
+	if jsonlKillSwitchEnabled(os.Getenv("DEFENSECLAW_JSONL_DISABLE")) {
+		fmt.Fprintln(os.Stderr,
+			"[sidecar] DEFENSECLAW_JSONL_DISABLE set — gateway.jsonl tier disabled (pretty + OTel still active)")
+		jsonlPath = ""
+	}
 	events, err := gatewaylog.New(gatewaylog.Config{
-		JSONLPath: filepath.Join(cfg.DataDir, "gateway.jsonl"),
+		JSONLPath: jsonlPath,
 		Pretty:    os.Stderr,
 		Compress:  true,
 	})
@@ -151,11 +174,27 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	}
 	SetEventWriter(events)
 
-	// Phase 2.3: when retention is enabled, persist judge bodies to
-	// the local SQLite audit store so operators can triage judge
-	// behaviour after the fact. Only installed under the flag — the
-	// default remains "nothing persisted, nothing leaked".
-	if cfg.Guardrail.RetainJudgeBodies && store != nil {
+	// Phase 1: bridge audit.Logger events into gateway.jsonl so every
+	// scan result, watcher transition, and enforcement action lands
+	// in the single structured stream the TUI/SIEM consume. We install
+	// the bridge unconditionally — it is a cheap fanout and the
+	// writer itself is the single choke point for JSONL retention.
+	if logger != nil {
+		logger.SetStructuredEmitter(newAuditBridge(events))
+	}
+
+	// Phase 3: persist judge bodies to the local SQLite audit store
+	// AND emit a structured audit event so every configured sink
+	// (Splunk HEC, OTLP logs, webhook JSONL) sees a redacted summary.
+	//
+	// Retention defaults to on (see viper.SetDefault); operators who
+	// opt out via config or DEFENSECLAW_PERSIST_JUDGE=0 get neither the
+	// SQLite row nor the audit fan-out. The raw body is only touched
+	// inside this process — emitJudge redacts RawResponse before it
+	// flows into gateway.jsonl / sinks, and the InsertJudgeResponse
+	// body stays on disk under the same ACLs as the rest of the data
+	// directory.
+	if retainJudge && store != nil {
 		SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
 			if err := store.InsertJudgeResponse(audit.JudgeResponse{
 				Kind:       p.Kind,
@@ -168,6 +207,27 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 				Raw:        p.RawResponse,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
+			}
+
+			// Fan out a redacted summary through the audit pipeline.
+			// Using logger.LogEvent keeps the sink filters, run_id
+			// stamping, and OTel emission consistent with every
+			// other audit event — no bespoke Splunk/OTLP wiring here.
+			// RawResponse is intentionally NOT included in Details;
+			// the sinks see only the structured metadata (kind,
+			// model, latency, verdict, parse error). The full body
+			// lives only in SQLite for local forensics.
+			if logger != nil {
+				_ = logger.LogEvent(audit.Event{
+					Action:   "llm-judge-response",
+					Target:   p.Model,
+					Actor:    "defenseclaw-gateway",
+					Severity: string(p.Severity),
+					Details: fmt.Sprintf(
+						"kind=%s direction=%s action=%s latency_ms=%d input_bytes=%d parse_error=%q",
+						p.Kind, dir, p.Action, p.LatencyMs, p.InputBytes, p.ParseError,
+					),
+				})
 			}
 		})
 	}
@@ -310,6 +370,13 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.logger.Close()
 	_ = s.client.Close()
 	if s.events != nil {
+		// Detach the audit bridge BEFORE closing the writer so any
+		// final audit.Logger emission during shutdown either goes
+		// through cleanly or is dropped — never writes into a closed
+		// lumberjack handle.
+		if s.logger != nil {
+			s.logger.SetStructuredEmitter(nil)
+		}
 		_ = s.events.Close()
 		SetEventWriter(nil)
 		SetJudgePersistor(nil)

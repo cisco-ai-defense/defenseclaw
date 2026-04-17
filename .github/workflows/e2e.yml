@@ -36,6 +36,15 @@ jobs:
       E2E_REQUIRE_PLUGIN_LIFECYCLE: "false"
       E2E_ENABLE_RECOVERY: "false"
       E2E_REQUIRE_RECOVERY: "false"
+      # Phase 6 observability: SPLUNK_MOCK_PORT is the in-process
+      # Python HEC mock that captures envelope bodies to SPLUNK_MOCK_LOG
+      # so observability_assertions.sh can grep for sourcetypes (e.g.
+      # defenseclaw:judge) deterministically. The real Splunk container
+      # started above is the primary sink; the mock runs alongside as a
+      # second sink on a different port.
+      SPLUNK_MOCK_PORT: "18088"
+      SPLUNK_MOCK_LOG: /tmp/splunk-mock-core.log
+      SPLUNK_MOCK_PID_FILE: /tmp/splunk-mock-core.pid
     defaults:
       run:
         shell: bash
@@ -46,6 +55,12 @@ jobs:
         run: |
           defenseclaw-gateway stop 2>/dev/null || true
           openclaw gateway stop 2>/dev/null || true
+          if [ -f "${SPLUNK_MOCK_PID_FILE}" ]; then
+            kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
+            rm -f "${SPLUNK_MOCK_PID_FILE}"
+          fi
+          pkill -f splunk_hec_mock.py 2>/dev/null || true
+          rm -f "${SPLUNK_MOCK_LOG}"
 
           echo "--- Disk before cleanup ---"
           df -h / | tail -1
@@ -173,6 +188,38 @@ jobs:
             sleep 5
           done
 
+      # Phase 6: lightweight HEC mock so observability_assertions.sh
+      # can grep envelopes by sourcetype without scraping Splunk's
+      # indexed storage. Runs as a second audit sink alongside the
+      # real Splunk container (configured below).
+      - name: Start Splunk HEC mock
+        run: |
+          mkdir -p "$(dirname "${SPLUNK_MOCK_LOG}")"
+          : >"${SPLUNK_MOCK_LOG}"
+          nohup python3 test/e2e/splunk_hec_mock.py \
+              --port "${SPLUNK_MOCK_PORT}" \
+              --log "${SPLUNK_MOCK_LOG}" \
+              >/tmp/splunk-mock.stdout 2>&1 &
+          echo $! > "${SPLUNK_MOCK_PID_FILE}"
+          # Wait up to ~5s for the listener to bind before the sidecar
+          # starts POSTing; we intentionally hit a bogus path since the
+          # mock accepts any path and replies 401 without Auth, which
+          # proves the socket is up.
+          for i in $(seq 1 10); do
+            if curl -sf -o /dev/null -w '%{http_code}' \
+                  -X POST http://127.0.0.1:${SPLUNK_MOCK_PORT}/services/collector \
+                  | grep -q '401'; then
+              echo "splunk-hec-mock up on :${SPLUNK_MOCK_PORT}"
+              break
+            fi
+            sleep 0.5
+          done
+          ps -p "$(cat "${SPLUNK_MOCK_PID_FILE}")" -o pid,cmd || {
+              echo "FAIL: splunk-hec-mock did not start"
+              cat /tmp/splunk-mock.stdout || true
+              exit 1
+          }
+
       - name: Install DefenseClaw
         run: make install
 
@@ -260,19 +307,39 @@ jobs:
           # Point the local Splunk container (brought up by the "Start
           # Splunk" step above) at the new generic sinks framework.
           cfg.pop('splunk', None)
-          cfg['audit_sinks'] = [{
-              'name':    'splunk-local',
-              'kind':    'splunk_hec',
-              'enabled': True,
-              'splunk_hec': {
-                  'endpoint':   'http://127.0.0.1:8088/services/collector/event',
-                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                  'index':      'defenseclaw_local',
-                  'source':     'defenseclaw',
-                  'sourcetype': 'defenseclaw:json',
-                  'verify_tls': False,
+          mock_port = os.environ.get('SPLUNK_MOCK_PORT', '18088')
+          cfg['audit_sinks'] = [
+              {
+                  'name':    'splunk-local',
+                  'kind':    'splunk_hec',
+                  'enabled': True,
+                  'splunk_hec': {
+                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                      'index':      'defenseclaw_local',
+                      'source':     'defenseclaw',
+                      'sourcetype': 'defenseclaw:json',
+                      'verify_tls': False,
+                  },
               },
-          }]
+              # Phase 6 mock HEC collector — observability_assertions.sh
+              # greps this file for sourcetypes like defenseclaw:judge.
+              # Runs on a different port than the real Splunk container
+              # so both sinks receive every event in parallel.
+              {
+                  'name':    'splunk-mock',
+                  'kind':    'splunk_hec',
+                  'enabled': True,
+                  'splunk_hec': {
+                      'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
+                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                      'index':      'defenseclaw_mock',
+                      'source':     'defenseclaw-mock',
+                      'sourcetype': 'defenseclaw:json',
+                      'verify_tls': False,
+                  },
+              },
+          ]
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -322,6 +389,33 @@ jobs:
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
 
+      # Phase 6 observability invariants: timestamp sanity, UUID
+      # request_id format, and audit.db correlation after E2E
+      # traffic has been driven through the sidecar.
+      - name: Observability assertions
+        if: always()
+        run: |
+          if [ ! -f ~/.defenseclaw/gateway.jsonl ]; then
+            echo "gateway.jsonl not populated — skipping observability assertions"
+            exit 0
+          fi
+          MOCK_ARGS=()
+          # Core profile runs with guardrail disabled, so there will
+          # never be a defenseclaw:judge envelope — passing
+          # --splunk-mock-log would hard-fail. We still start the mock
+          # so the sidecar's sink health stays green, but we only feed
+          # the mock log into the assertion script when we actually
+          # expect judge traffic (full-live job; see below).
+          if [ -s "${SPLUNK_MOCK_LOG:-}" ]; then
+            echo "[assertions] splunk-mock log captured $(wc -l <"${SPLUNK_MOCK_LOG}" | tr -d ' ') envelope(s)"
+          fi
+          bash test/e2e/observability_assertions.sh \
+              --jsonl ~/.defenseclaw/gateway.jsonl \
+              --db ~/.defenseclaw/audit.db \
+              --ts-window-seconds 3600 \
+              --no-require-verdict \
+              "${MOCK_ARGS[@]}"
+
       - name: Upload DefenseClaw logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -331,6 +425,8 @@ jobs:
             ~/.defenseclaw/*.log
             ~/.defenseclaw/*.jsonl
             ~/.defenseclaw/config.yaml
+            /tmp/splunk-mock-core.log
+            /tmp/splunk-mock.stdout
           if-no-files-found: ignore
           retention-days: 7
 
@@ -341,6 +437,14 @@ jobs:
           df -h / | tail -1
 
           defenseclaw-gateway stop 2>/dev/null || true
+
+          # Stop the Splunk HEC mock first so residual POSTs from the
+          # sidecar don't keep its socket open and block the runner.
+          if [ -f "${SPLUNK_MOCK_PID_FILE:-}" ]; then
+            kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
+            rm -f "${SPLUNK_MOCK_PID_FILE}"
+          fi
+          pkill -f splunk_hec_mock.py 2>/dev/null || true
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
             export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
@@ -410,6 +514,12 @@ jobs:
       OPENCLAW_AUTH_BACKUP_MISSING_PATH: /tmp/defenseclaw-openclaw.full-live.auth-profiles.missing
       OPENCLAW_SERVICE_ENV_PATH: /home/ubuntu/.openclaw/openclaw-service.env
       OPENCLAW_SERVICE_DROPIN_PATH: /home/ubuntu/.config/systemd/user/openclaw-gateway.service.d/defenseclaw-e2e.conf
+      # Phase 6 observability mock (see core job for rationale). The
+      # full-live job uses a distinct log path so it can run
+      # concurrently with core on a shared self-hosted runner.
+      SPLUNK_MOCK_PORT: "18088"
+      SPLUNK_MOCK_LOG: /tmp/splunk-mock-full-live.log
+      SPLUNK_MOCK_PID_FILE: /tmp/splunk-mock-full-live.pid
     defaults:
       run:
         shell: bash
@@ -418,6 +528,13 @@ jobs:
 
       - name: Clean DefenseClaw
         run: |
+          if [ -f "${SPLUNK_MOCK_PID_FILE}" ]; then
+            kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
+            rm -f "${SPLUNK_MOCK_PID_FILE}"
+          fi
+          pkill -f splunk_hec_mock.py 2>/dev/null || true
+          rm -f "${SPLUNK_MOCK_LOG}"
+
           if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
             mkdir -p ~/.openclaw
             cp "${OPENCLAW_MODEL_BACKUP_PATH}" ~/.openclaw/openclaw.json
@@ -559,6 +676,34 @@ jobs:
             curl -sf http://127.0.0.1:8088/services/collector/health && break
             sleep 5
           done
+
+      # Phase 6 mock HEC collector — captures envelopes to
+      # $SPLUNK_MOCK_LOG so observability_assertions.sh can grep for
+      # the defenseclaw:judge sourcetype end-to-end. Runs on a
+      # separate port alongside the real Splunk container.
+      - name: Start Splunk HEC mock
+        run: |
+          mkdir -p "$(dirname "${SPLUNK_MOCK_LOG}")"
+          : >"${SPLUNK_MOCK_LOG}"
+          nohup python3 test/e2e/splunk_hec_mock.py \
+              --port "${SPLUNK_MOCK_PORT}" \
+              --log "${SPLUNK_MOCK_LOG}" \
+              >/tmp/splunk-mock.stdout 2>&1 &
+          echo $! > "${SPLUNK_MOCK_PID_FILE}"
+          for i in $(seq 1 10); do
+            if curl -sf -o /dev/null -w '%{http_code}' \
+                  -X POST http://127.0.0.1:${SPLUNK_MOCK_PORT}/services/collector \
+                  | grep -q '401'; then
+              echo "splunk-hec-mock up on :${SPLUNK_MOCK_PORT}"
+              break
+            fi
+            sleep 0.5
+          done
+          ps -p "$(cat "${SPLUNK_MOCK_PID_FILE}")" -o pid,cmd || {
+              echo "FAIL: splunk-hec-mock did not start"
+              cat /tmp/splunk-mock.stdout || true
+              exit 1
+          }
 
       - name: Install DefenseClaw
         run: make install
@@ -866,19 +1011,36 @@ jobs:
           # Point the local Splunk container (brought up by the "Start
           # Splunk" step above) at the new generic sinks framework.
           cfg.pop('splunk', None)
-          cfg['audit_sinks'] = [{
-              'name':    'splunk-local',
-              'kind':    'splunk_hec',
-              'enabled': True,
-              'splunk_hec': {
-                  'endpoint':   'http://127.0.0.1:8088/services/collector/event',
-                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                  'index':      'defenseclaw_local',
-                  'source':     'defenseclaw',
-                  'sourcetype': 'defenseclaw:json',
-                  'verify_tls': False,
+          mock_port = os.environ.get('SPLUNK_MOCK_PORT', '18088')
+          cfg['audit_sinks'] = [
+              {
+                  'name':    'splunk-local',
+                  'kind':    'splunk_hec',
+                  'enabled': True,
+                  'splunk_hec': {
+                      'endpoint':   'http://127.0.0.1:8088/services/collector/event',
+                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                      'index':      'defenseclaw_local',
+                      'source':     'defenseclaw',
+                      'sourcetype': 'defenseclaw:json',
+                      'verify_tls': False,
+                  },
               },
-          }]
+              # Phase 6 mock HEC collector (see core job for rationale).
+              {
+                  'name':    'splunk-mock',
+                  'kind':    'splunk_hec',
+                  'enabled': True,
+                  'splunk_hec': {
+                      'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
+                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                      'index':      'defenseclaw_mock',
+                      'source':     'defenseclaw-mock',
+                      'sourcetype': 'defenseclaw:json',
+                      'verify_tls': False,
+                  },
+              },
+          ]
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -958,6 +1120,46 @@ jobs:
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
 
+      # Phase 6 observability invariants: timestamp sanity, UUID
+      # request_id format, and audit.db correlation after E2E
+      # traffic has been driven through the sidecar.
+      - name: Observability assertions
+        if: always()
+        run: |
+          if [ ! -f ~/.defenseclaw/gateway.jsonl ]; then
+            echo "gateway.jsonl not populated — skipping observability assertions"
+            exit 0
+          fi
+          MOCK_ARGS=()
+          # Full-live only expects a defenseclaw:judge envelope when
+          # the live guardrail was actually enabled — otherwise the
+          # judge never fires and grep would fail. The "Init
+          # DefenseClaw" step above wrote the resolved guardrail state
+          # into the generated config, so we read it back here.
+          GUARDRAIL_ENABLED=$(python3 -c '
+          import yaml, os
+          try:
+              with open(os.path.expanduser("~/.defenseclaw/config.yaml")) as f:
+                  cfg = yaml.safe_load(f) or {}
+              print(str(cfg.get("guardrail", {}).get("enabled", False)).lower())
+          except Exception:
+              print("false")
+          ')
+          if [ -s "${SPLUNK_MOCK_LOG:-}" ]; then
+            echo "[assertions] splunk-mock log captured $(wc -l <"${SPLUNK_MOCK_LOG}" | tr -d ' ') envelope(s)"
+          fi
+          if [ "$GUARDRAIL_ENABLED" = "true" ] && [ -f "${SPLUNK_MOCK_LOG:-}" ]; then
+              MOCK_ARGS+=(--splunk-mock-log "${SPLUNK_MOCK_LOG}")
+          else
+              echo "[assertions] guardrail_enabled=${GUARDRAIL_ENABLED} — skipping splunk-mock sourcetype assertion"
+          fi
+          bash test/e2e/observability_assertions.sh \
+              --jsonl ~/.defenseclaw/gateway.jsonl \
+              --db ~/.defenseclaw/audit.db \
+              --ts-window-seconds 3600 \
+              --no-require-verdict \
+              "${MOCK_ARGS[@]}"
+
       - name: Upload DefenseClaw logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -967,6 +1169,8 @@ jobs:
             ~/.defenseclaw/*.log
             ~/.defenseclaw/*.jsonl
             ~/.defenseclaw/config.yaml
+            /tmp/splunk-mock-full-live.log
+            /tmp/splunk-mock.stdout
           if-no-files-found: ignore
           retention-days: 7
 
@@ -997,6 +1201,12 @@ jobs:
           df -h / | tail -1
 
           defenseclaw-gateway stop 2>/dev/null || true
+
+          if [ -f "${SPLUNK_MOCK_PID_FILE:-}" ]; then
+            kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
+            rm -f "${SPLUNK_MOCK_PID_FILE}"
+          fi
+          pkill -f splunk_hec_mock.py 2>/dev/null || true
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
             export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0

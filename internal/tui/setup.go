@@ -277,13 +277,61 @@ func (p *SetupPanel) loadSections() {
 			{Label: "PII (Completion)", Key: "guardrail.judge.pii_completion", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIICompletion)},
 			{Label: "Tool Injection", Key: "guardrail.judge.tool_injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.ToolInjection)},
 		}},
+		// P2-#9: Scanner section now surfaces every field the CLI and
+		// the Python scanners know about. Previous version hid 12 of
+		// the 17 knobs (use_trigger / use_virustotal / use_aidefense /
+		// llm_consensus_runs / policy / lenient / virustotal key pair
+		// / enable_meta / mcp_scanner scan_prompts+resources+
+		// instructions / plugin_scanner binary), which meant operators
+		// had to `vim ~/.defenseclaw/config.yaml` for common tuning.
+		// Sub-headers split the view into Skill / MCP / Plugin
+		// families so a long scroll doesn't blur the scanner
+		// ownership.
 		{Name: "Scanners", Fields: []configField{
-			{Label: "Skill Binary", Key: "scanners.skill_scanner.binary", Kind: "string", Value: c.Scanners.SkillScanner.Binary},
+			{Label: "── Skill Scanner ──", Kind: "header"},
+			{Label: "Binary", Key: "scanners.skill_scanner.binary", Kind: "string", Value: c.Scanners.SkillScanner.Binary},
+			{Label: "Policy", Key: "scanners.skill_scanner.policy", Kind: "choice", Value: c.Scanners.SkillScanner.Policy, Options: []string{"permissive", "strict", "observe"}},
+			{Label: "Lenient", Key: "scanners.skill_scanner.lenient", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.Lenient)},
 			{Label: "Use LLM", Key: "scanners.skill_scanner.use_llm", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseLLM)},
+			{Label: "LLM Consensus Runs", Key: "scanners.skill_scanner.llm_consensus_runs", Kind: "int", Value: fmt.Sprintf("%d", c.Scanners.SkillScanner.LLMConsensus)},
 			{Label: "Use Behavioral", Key: "scanners.skill_scanner.use_behavioral", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseBehavioral)},
-			{Label: "MCP Binary", Key: "scanners.mcp_scanner.binary", Kind: "string", Value: c.Scanners.MCPScanner.Binary},
-			{Label: "MCP Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers},
+			{Label: "Enable Meta", Key: "scanners.skill_scanner.enable_meta", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.EnableMeta)},
+			{Label: "Use Trigger", Key: "scanners.skill_scanner.use_trigger", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseTrigger)},
+			{Label: "Use VirusTotal", Key: "scanners.skill_scanner.use_virustotal", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseVirusTotal)},
+			{Label: "VirusTotal Key Env", Key: "scanners.skill_scanner.virustotal_api_key_env", Kind: "password", Value: c.Scanners.SkillScanner.VirusTotalKeyEnv},
+			{Label: "Use AI Defense", Key: "scanners.skill_scanner.use_aidefense", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseAIDefense)},
+			{Label: "── MCP Scanner ──", Kind: "header"},
+			{Label: "Binary", Key: "scanners.mcp_scanner.binary", Kind: "string", Value: c.Scanners.MCPScanner.Binary},
+			{Label: "Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers},
+			{Label: "Scan Prompts", Key: "scanners.mcp_scanner.scan_prompts", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanPrompts)},
+			{Label: "Scan Resources", Key: "scanners.mcp_scanner.scan_resources", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanResources)},
+			{Label: "Scan Instructions", Key: "scanners.mcp_scanner.scan_instructions", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanInstructions)},
+			{Label: "── Plugin / CodeGuard ──", Kind: "header"},
+			{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner},
 			{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard},
+		}},
+		// P2-#9: Gateway inline watcher/watchdog live alongside the
+		// gateway address settings — they're part of the same
+		// process but logically distinct sub-concerns. Kept as a
+		// separate section so operators can scroll to "just the
+		// watcher" without wading past reconnect timers etc.
+		{Name: "Gateway Watcher", Fields: []configField{
+			{Label: "Enabled", Key: "gateway.watcher.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Enabled)},
+			{Label: "── Skill ──", Kind: "header"},
+			{Label: "Enabled", Key: "gateway.watcher.skill.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.Enabled)},
+			{Label: "Take Action", Key: "gateway.watcher.skill.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.TakeAction)},
+			{Label: "Dirs", Key: "gateway.watcher.skill.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Skill.Dirs, ",")},
+			{Label: "── Plugin ──", Kind: "header"},
+			{Label: "Enabled", Key: "gateway.watcher.plugin.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Plugin.Enabled)},
+			{Label: "Take Action", Key: "gateway.watcher.plugin.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Plugin.TakeAction)},
+			{Label: "Dirs", Key: "gateway.watcher.plugin.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Plugin.Dirs, ",")},
+			{Label: "── MCP ──", Kind: "header"},
+			{Label: "Take Action", Key: "gateway.watcher.mcp.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.MCP.TakeAction)},
+		}},
+		{Name: "Gateway Watchdog", Fields: []configField{
+			{Label: "Enabled", Key: "gateway.watchdog.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watchdog.Enabled)},
+			{Label: "Interval (s)", Key: "gateway.watchdog.interval", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Watchdog.Interval)},
+			{Label: "Debounce (failures)", Key: "gateway.watchdog.debounce", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Watchdog.Debounce)},
 		}},
 		// Audit sinks live in their own list-based section editor (Phase
 		// 3.3). The single-key-per-row form below cannot represent the

@@ -31,6 +31,7 @@ import urllib.request
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 _PASS = click.style("PASS", fg="green", bold=True)
 _FAIL = click.style("FAIL", fg="red", bold=True)
@@ -380,35 +381,271 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit("warn", "Cisco AI Defense", f"HTTP {code} (endpoint may not support /health)", r=r)
 
 
-def _check_splunk(cfg, r: _DoctorResult) -> None:
-    if not cfg.splunk.enabled:
-        _emit("skip", "Splunk HEC", "disabled", r=r)
+def _check_observability(cfg, r: _DoctorResult) -> None:
+    """Walk every observability destination (gateway OTel + audit_sinks)
+    and probe each one according to its kind.
+
+    This replaces the old Splunk-only check. Destinations are discovered
+    via the observability writer so any preset wired up through
+    ``setup observability add`` is exercised here without extra
+    branching. Disabled destinations are skipped, not failed — users
+    often keep e.g. a dev Datadog sink disabled in prod configs.
+    """
+    from defenseclaw.observability import list_destinations
+    from defenseclaw.observability.presets import PRESETS
+
+    try:
+        destinations = list_destinations(cfg.data_dir)
+    except Exception as exc:
+        _emit("warn", "Observability", f"could not enumerate destinations: {exc}", r=r)
         return
 
-    hec_token = cfg.splunk.resolved_hec_token()
-    if not cfg.splunk.hec_endpoint or not hec_token:
-        _emit("fail", "Splunk HEC", "endpoint or token missing", r=r)
+    if not destinations:
+        _emit("skip", "Observability", "no destinations configured", r=r)
+        return
+
+    for d in destinations:
+        label_kind = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
+        label = f"{d.name} ({label_kind})"
+
+        if not d.enabled:
+            _emit("skip", label, "disabled", r=r)
+            continue
+
+        # Route the probe by destination target/kind. The keys here are
+        # the same ones used by `observability.presets.Preset.kind` and
+        # `internal/config/sinks.go`, so adding a new preset means
+        # adding one branch here, at most.
+        if d.target == "otel":
+            _probe_otel_destination(cfg, d, r)
+        elif d.kind == "splunk_hec":
+            _probe_splunk_hec(cfg, d, r)
+        elif d.kind == "otlp_logs":
+            _probe_otlp_logs(cfg, d, r)
+        elif d.kind == "http_jsonl":
+            _probe_http_jsonl(cfg, d, r)
+        else:
+            _emit("warn", label, f"no probe for kind '{d.kind}'", r=r)
+
+
+def _probe_otel_destination(cfg, d, r: _DoctorResult) -> None:
+    """Lightweight reachability check for the gateway OTel exporter.
+
+    Probing OTLP properly (gRPC health + TLS + auth) is non-trivial, so
+    we do a best-effort TCP/HTTP check against the endpoint. A full
+    semantic probe lives in `setup observability test` — doctor is for
+    connectivity smoke checks only.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    label = f"{d.name} (OTLP)"
+    endpoint = d.endpoint
+    if not endpoint:
+        _emit("fail", label, "no endpoint configured", r=r)
+        return
+
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not host:
+        _emit("fail", label, f"unparseable endpoint: {endpoint}", r=r)
+        return
+
+    try:
+        with socket.create_connection((host, port), timeout=5.0):
+            _emit("pass", label, f"{host}:{port} reachable", r=r)
+    except (TimeoutError, OSError) as exc:
+        _emit("warn", label, f"{host}:{port} not reachable: {exc}", r=r)
+
+
+def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
+    """HEC probe: POST a single test event with the resolved token."""
+    endpoint, token = _resolve_audit_sink_endpoint_and_token(cfg, d)
+    if not endpoint or not token:
+        _emit("fail", f"{d.name} (Splunk HEC)", "endpoint or token missing", r=r)
         return
 
     code, body = _http_probe(
-        cfg.splunk.hec_endpoint,
+        endpoint,
         method="POST",
         headers={
-            "Authorization": f"Splunk {hec_token}",
+            "Authorization": f"Splunk {token}",
             "Content-Type": "application/json",
         },
         body=json.dumps({"event": "defenseclaw-doctor-probe", "sourcetype": "_json"}).encode(),
         timeout=10.0,
     )
 
+    label = f"{d.name} (Splunk HEC)"
     if code == 200:
-        _emit("pass", "Splunk HEC", cfg.splunk.hec_endpoint, r=r)
-    elif code == 401 or code == 403:
-        _emit("fail", "Splunk HEC", f"authentication failed (HTTP {code})", r=r)
+        _emit("pass", label, endpoint, r=r)
+    elif code in (401, 403):
+        _emit("fail", label, f"authentication failed (HTTP {code})", r=r)
     elif code == 0:
-        _emit("warn", "Splunk HEC", f"unreachable: {body[:100]}", r=r)
+        _emit("warn", label, f"unreachable: {body[:100]}", r=r)
     else:
-        _emit("warn", "Splunk HEC", f"HTTP {code}", r=r)
+        _emit("warn", label, f"HTTP {code}", r=r)
+
+
+def _probe_otlp_logs(cfg, d, r: _DoctorResult) -> None:
+    """OTLP-logs sink: connectivity check only (no valid empty payload)."""
+    import socket
+    from urllib.parse import urlparse
+
+    label = f"{d.name} (OTLP logs)"
+    endpoint = d.endpoint
+    if not endpoint:
+        _emit("fail", label, "no endpoint configured", r=r)
+        return
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not host:
+        _emit("fail", label, f"unparseable endpoint: {endpoint}", r=r)
+        return
+    try:
+        with socket.create_connection((host, port), timeout=5.0):
+            _emit("pass", label, f"{host}:{port} reachable", r=r)
+    except (TimeoutError, OSError) as exc:
+        _emit("warn", label, f"{host}:{port} not reachable: {exc}", r=r)
+
+
+def _probe_http_jsonl(cfg, d, r: _DoctorResult) -> None:
+    """Generic HTTP JSONL audit sink: do a HEAD/OPTIONS request —
+    probing an unknown endpoint with POST could fire real events.
+    (Distinct from notifier webhooks[]; see _check_webhooks below.)"""
+    label = f"{d.name} (http_jsonl)"
+    endpoint = d.endpoint
+    if not endpoint:
+        _emit("fail", label, "no URL configured", r=r)
+        return
+    # OPTIONS is the safest — many webhooks reject HEAD.
+    code, body = _http_probe(endpoint, method="OPTIONS", timeout=5.0)
+    # 200-499 all count as "reachable" for a webhook; only 5xx / 0
+    # indicate a real connectivity problem.
+    if code == 0:
+        _emit("warn", label, f"unreachable: {body[:100]}", r=r)
+    elif 500 <= code < 600:
+        _emit("warn", label, f"server error (HTTP {code})", r=r)
+    else:
+        _emit("pass", label, f"{endpoint} reachable (HTTP {code})", r=r)
+
+
+def _resolve_audit_sink_endpoint_and_token(cfg, d) -> tuple[str, str]:
+    """Read the raw audit_sinks entry for ``d.name`` to recover the
+    endpoint and resolve its token env var. ``Destination.endpoint``
+    already exposes the endpoint for display, but tokens live in
+    preset-specific fields (``token_env``, ``bearer_env``, etc.), so we
+    go back to the YAML here.
+    """
+    import os
+
+    # Late import: this module is loaded on every CLI invocation, but
+    # the YAML read only matters for operators who have audit sinks.
+    # _load_yaml takes a full file path, not a data_dir — mirror the
+    # writer's layout (CONFIG_FILE_NAME under data_dir).
+    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+
+    try:
+        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+    except Exception:
+        return d.endpoint, ""
+
+    # The token_env key lives inside the kind-specific sub-block (e.g.
+    # `splunk_hec.token_env`, `http_jsonl.bearer_env`). Walk both
+    # levels so we don't care which convention a given sink uses.
+    sinks = doc.get("audit_sinks") or []
+    token_env = ""
+    for sink in sinks:
+        if not isinstance(sink, dict) or sink.get("name") != d.name:
+            continue
+        token_env = str(sink.get("token_env", "") or "")
+        if not token_env:
+            # Nested: splunk_hec.token_env / otlp_logs.token_env / http_jsonl.bearer_env
+            for sub_key in ("splunk_hec", "otlp_logs", "http_jsonl"):
+                sub = sink.get(sub_key) or {}
+                if isinstance(sub, dict):
+                    token_env = str(sub.get("token_env") or sub.get("bearer_env") or "")
+                    if token_env:
+                        break
+        break
+
+    if not token_env:
+        return d.endpoint, ""
+
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    token = _resolve_api_key(token_env, dotenv_path)
+    return d.endpoint, token
+
+
+def _check_webhooks(cfg, r: _DoctorResult) -> None:
+    """Validate every entry in ``webhooks[]`` (notifier webhooks).
+
+    Checks (per entry):
+
+    * SSRF guard — same validation the Go gateway runs at start-up
+      (non-http(s) scheme, private/link-local, metadata endpoints).
+    * Secret presence — for types that require one (pagerduty, webex,
+      signed generic) the ``secret_env`` variable must resolve to a
+      non-empty value.
+    * Reachability — a best-effort OPTIONS request. We do *not* dispatch
+      a synthetic payload here because receivers may page on-call; for
+      that use ``defenseclaw setup webhook test <name>`` explicitly.
+    """
+    try:
+        entries = list_webhooks(cfg.data_dir)
+    except Exception as exc:
+        _emit("warn", "Webhooks", f"could not enumerate webhooks: {exc}", r=r)
+        return
+
+    if not entries:
+        _emit("skip", "Webhooks", "no webhooks configured", r=r)
+        return
+
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    for v in entries:
+        label = f"{v.name} (webhook/{v.type})"
+
+        if not v.enabled:
+            _emit("skip", label, "disabled", r=r)
+            continue
+
+        try:
+            validate_webhook_url(v.url)
+        except ValueError as exc:
+            _emit("fail", label, f"URL rejected by SSRF guard: {exc}", r=r)
+            continue
+
+        # Secret-presence: pagerduty routing key and webex bot token are
+        # required at runtime; for generic, an HMAC secret is optional
+        # but we warn loudly if the caller wired a secret_env that
+        # doesn't resolve.
+        if v.secret_env:
+            secret_value = _resolve_api_key(v.secret_env, dotenv_path)
+            if not secret_value:
+                if v.type in ("pagerduty", "webex"):
+                    _emit("fail", label, f"env var {v.secret_env!r} is empty", r=r)
+                    continue
+                _emit("warn", label, f"env var {v.secret_env!r} is empty", r=r)
+        elif v.type in ("pagerduty", "webex"):
+            _emit("fail", label, "secret_env is required for this type", r=r)
+            continue
+
+        if v.type == "webex" and not v.room_id:
+            _emit("fail", label, "room_id is required for webex", r=r)
+            continue
+
+        # Reachability probe — OPTIONS is the safest, many webhooks
+        # reject HEAD. Chat providers typically 405/400/404 on OPTIONS
+        # from unknown origins; that still proves the host is live.
+        code, body = _http_probe(v.url, method="OPTIONS", timeout=5.0)
+        if code == 0:
+            _emit("warn", label, f"unreachable: {body[:100]}", r=r)
+        elif 500 <= code < 600:
+            _emit("warn", label, f"server error (HTTP {code})", r=r)
+        else:
+            _emit("pass", label, f"reachable (HTTP {code})", r=r)
 
 
 def _check_virustotal(cfg, r: _DoctorResult) -> None:
@@ -478,7 +715,14 @@ def doctor(app: AppContext, json_out: bool) -> None:
     _check_llm_api_key(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
-    _check_splunk(cfg, r)
+    if not json_out:
+        click.echo()
+        click.echo("  ── Observability ──")
+    _check_observability(cfg, r)
+    if not json_out:
+        click.echo()
+        click.echo("  ── Webhooks ──")
+    _check_webhooks(cfg, r)
 
     if json_out:
         click.echo(json.dumps(r.to_dict(), indent=2))

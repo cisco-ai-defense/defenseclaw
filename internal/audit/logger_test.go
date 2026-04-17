@@ -47,8 +47,8 @@ func newCaptureSink() *captureSink {
 	return &captureSink{immediateFlushC: make(chan struct{}, 16)}
 }
 
-func (c *captureSink) Name() string                    { return "capture" }
-func (c *captureSink) Kind() string                    { return "capture" }
+func (c *captureSink) Name() string { return "capture" }
+func (c *captureSink) Kind() string { return "capture" }
 func (c *captureSink) Forward(_ context.Context, e sinks.Event) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -529,5 +529,96 @@ func TestLoggerRedactsFindingFieldsBeforeSQLite(t *testing.T) {
 	}
 	if f.Title != "PII detected" {
 		t.Fatalf("Title should be preserved verbatim; got %q", f.Title)
+	}
+}
+
+// TestLoggerLogActionWithCorrelation_PersistsRequestID asserts that
+// a request_id supplied by the guardrail request path flows all the
+// way to SQLite and to the sinks.Manager fan-out — the end-to-end
+// contract for Phase 5.
+func TestLoggerLogActionWithCorrelation_PersistsRequestID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	const (
+		traceID = "00-1234567890abcdef1234567890abcdef-0102030405060708-01"
+		reqID   = "req-phase5-abcdef"
+	)
+	if err := logger.LogActionWithCorrelation("guardrail-verdict", "gpt-5",
+		"direction=prompt action=block severity=HIGH", traceID, reqID); err != nil {
+		t.Fatalf("LogActionWithCorrelation: %v", err)
+	}
+	logger.Close()
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].TraceID != traceID {
+		t.Fatalf("SQLite trace_id = %q, want %q", events[0].TraceID, traceID)
+	}
+	if events[0].RequestID != reqID {
+		t.Fatalf("SQLite request_id = %q, want %q", events[0].RequestID, reqID)
+	}
+
+	snap := cs.snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("expected 1 forwarded event, got %d", len(snap))
+	}
+	if snap[0].RequestID != reqID {
+		t.Fatalf("sink request_id = %q, want %q", snap[0].RequestID, reqID)
+	}
+	if snap[0].TraceID != traceID {
+		t.Fatalf("sink trace_id = %q, want %q", snap[0].TraceID, traceID)
+	}
+}
+
+// TestLoggerLogActionWithTrace_EmptyRequestIDIsLegal asserts that the
+// legacy LogActionWithTrace path still works when the request_id is
+// not known (e.g., the file-watcher subsystem has no HTTP
+// correlation context). The row must land in SQLite with an empty
+// request_id and the sink fan-out must not panic.
+func TestLoggerLogActionWithTrace_EmptyRequestIDIsLegal(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	if err := logger.LogActionWithTrace("watch-start", "", "dirs=3", ""); err != nil {
+		t.Fatalf("LogActionWithTrace: %v", err)
+	}
+	logger.Close()
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].RequestID != "" {
+		t.Fatalf("empty request_id should persist as empty; got %q", events[0].RequestID)
+	}
+	if snap := cs.snapshot(); len(snap) != 1 || snap[0].RequestID != "" {
+		t.Fatalf("sink should have empty request_id; got %+v", snap)
 	}
 }

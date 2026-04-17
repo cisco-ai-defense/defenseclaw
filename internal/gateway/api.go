@@ -133,6 +133,12 @@ func (a *APIServer) Run(ctx context.Context) error {
 	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
 		handler = a.tokenAuth(handler)
 	}
+	// Phase 5: request-ID middleware runs outermost so every audit
+	// entry coming out of the API server — including auth failures
+	// and rate-limited requests — carries a correlation key. Clients
+	// that already mint their own trace id can pass it in via any
+	// of the recognised request-id headers and we honour it verbatim.
+	handler = requestIDMiddleware(handler)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -1213,8 +1219,17 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			req.Direction, req.Model, req.Severity, req.ElapsedMs)
 	}
 
+	requestID := RequestIDFromContext(r.Context())
+	if requestID != "" {
+		// Append the correlation key so the human-readable
+		// gateway.log line (which still routes through LogAction
+		// and does not carry structured fields) is also searchable
+		// by request_id. Structured sinks pick it up from the
+		// dedicated Event.RequestID column below.
+		details += fmt.Sprintf(" request_id=%s", requestID)
+	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("guardrail-verdict", req.Model, details)
+		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
 	}
 	if a.store != nil {
 		evt := audit.Event{
@@ -1223,6 +1238,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			Severity:  req.Severity,
 			Details:   details,
 			Timestamp: time.Now().UTC(),
+			RequestID: requestID,
 		}
 		_ = a.store.LogEvent(evt)
 	}
@@ -1307,8 +1323,12 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		out.Action, out.Severity, out.ScannerSources,
 		redaction.Reason(truncate(out.Reason, 120)))
 
+	requestID := RequestIDFromContext(r.Context())
+	if requestID != "" {
+		details += fmt.Sprintf(" request_id=%s", requestID)
+	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("guardrail-opa-verdict", req.Model, details)
+		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
 	}
 	if a.store != nil {
 		evt := audit.Event{
@@ -1317,6 +1337,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 			Severity:  out.Severity,
 			Details:   details,
 			Timestamp: time.Now().UTC(),
+			RequestID: requestID,
 		}
 		_ = a.store.LogEvent(evt)
 	}

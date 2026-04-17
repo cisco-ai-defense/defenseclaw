@@ -68,13 +68,13 @@ type ToolInspectRequest struct {
 
 // ToolInspectVerdict is the response from the inspect endpoint.
 type ToolInspectVerdict struct {
-	Action          string        `json:"action"`
-	Severity        string        `json:"severity"`
-	Confidence      float64       `json:"confidence"`
-	Reason          string        `json:"reason"`
-	Findings        []string      `json:"findings"`
+	Action           string        `json:"action"`
+	Severity         string        `json:"severity"`
+	Confidence       float64       `json:"confidence"`
+	Reason           string        `json:"reason"`
+	Findings         []string      `json:"findings"`
 	DetailedFindings []RuleFinding `json:"detailed_findings,omitempty"`
-	Mode            string        `json:"mode"`
+	Mode             string        `json:"mode"`
 }
 
 // inspectToolPolicy runs all rule categories against the tool args.
@@ -316,10 +316,13 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		traceID = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
 	}
 
-	_ = a.logger.LogActionWithTrace(auditAction, req.Tool,
-		fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
-			verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode),
-		traceID)
+	requestID := RequestIDFromContext(r.Context())
+	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
+		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode)
+	if requestID != "" {
+		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
+	}
+	_ = a.logger.LogActionWithCorrelation(auditAction, req.Tool, auditDetails, traceID, requestID)
 
 	a.emitCodeGuardOTel(&req, verdict, elapsed)
 
@@ -337,11 +340,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// when the caller opts in to raw response PII, the
 		// audit-store row must still flow through the sink
 		// barrier so SQLite/Splunk never see the raw literal.
-		_ = a.logger.LogActionWithTrace("inspect-reveal", req.Tool,
+		_ = a.logger.LogActionWithCorrelation("inspect-reveal", req.Tool,
 			fmt.Sprintf("severity=%s remote=%s reason=%s",
 				verdict.Severity, r.RemoteAddr,
 				redaction.ForSinkReason(verdict.Reason)),
-			traceID)
+			traceID, requestID)
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }

@@ -49,6 +49,10 @@ type Event struct {
 	Severity  string    `json:"severity"`
 	RunID     string    `json:"run_id,omitempty"`
 	TraceID   string    `json:"trace_id,omitempty"`
+	// RequestID is the per-request correlation key minted at the top of
+	// every proxy path (Phase 5 wiring). Empty until the gateway
+	// threads it through via context; sinks must tolerate blank values.
+	RequestID string `json:"request_id,omitempty"`
 
 	// Structured payload — when set, this is the canonical machine-readable
 	// representation of the event (e.g. a guardrail verdict). Sinks should
