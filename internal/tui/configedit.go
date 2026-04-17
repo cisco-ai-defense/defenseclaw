@@ -290,6 +290,30 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OpenShell.Mode = val
 	case "openshell.version":
 		c.OpenShell.Version = val
+
+	// Inspect LLM — editable. api_key is accepted here so the
+	// operator can paste-then-persist a fresh value, but the
+	// configField is rendered with Kind=password so View() masks it.
+	// Prefer api_key_env in steady state to avoid writing the
+	// cleartext to ~/.defenseclaw/config.yaml.
+	case "inspect_llm.provider":
+		c.InspectLLM.Provider = val
+	case "inspect_llm.model":
+		c.InspectLLM.Model = val
+	case "inspect_llm.api_key":
+		c.InspectLLM.APIKey = val
+	case "inspect_llm.api_key_env":
+		c.InspectLLM.APIKeyEnv = val
+	case "inspect_llm.base_url":
+		c.InspectLLM.BaseURL = val
+	case "inspect_llm.timeout":
+		c.InspectLLM.Timeout = intVal
+	case "inspect_llm.max_retries":
+		c.InspectLLM.MaxRetries = intVal
+
+		// Cisco AI Defense + Firewall are deliberately read-only in
+		// the TUI. Their rows use Kind=header so they are never
+		// routed here — see ciscoAIDefenseFields / firewallFields.
 	}
 
 	// Actions matrices are handled with a dotted-prefix fallback

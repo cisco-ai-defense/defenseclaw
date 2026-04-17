@@ -382,6 +382,38 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Mode", Key: "openshell.mode", Kind: "string", Value: c.OpenShell.Mode},
 			{Label: "Version", Key: "openshell.version", Kind: "string", Value: c.OpenShell.Version},
 		}},
+		// Inspect LLM: the model/provider used by judge-mode guardrail
+		// evaluations. Fully editable — the api_key field is shown
+		// redacted (kind=password) so the cleartext never lands in a
+		// log/screencap even if the operator types it here. Preferring
+		// api_key_env keeps the secret in keychain-backed env vars and
+		// out of the YAML on disk.
+		{Name: "Inspect LLM", Fields: []configField{
+			{Label: "Provider", Key: "inspect_llm.provider", Kind: "choice", Options: []string{"openai", "anthropic", "azure", "cohere", "vllm", "ollama"}, Value: c.InspectLLM.Provider},
+			{Label: "Model", Key: "inspect_llm.model", Kind: "string", Value: c.InspectLLM.Model},
+			{Label: "API Key (redacted)", Key: "inspect_llm.api_key", Kind: "password", Value: c.InspectLLM.APIKey},
+			{Label: "API Key Env", Key: "inspect_llm.api_key_env", Kind: "string", Value: c.InspectLLM.APIKeyEnv},
+			{Label: "Base URL", Key: "inspect_llm.base_url", Kind: "string", Value: c.InspectLLM.BaseURL},
+			{Label: "Timeout (s)", Key: "inspect_llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.Timeout)},
+			{Label: "Max Retries", Key: "inspect_llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.MaxRetries)},
+		}},
+		// Cisco AI Defense: cloud-hosted prompt/response moderation.
+		// The timeout + endpoint knobs are straightforward, but
+		// enabled_rules is a server-provisioned allow-list that
+		// operators cannot edit inline — the list comes from the
+		// Cisco AI Defense console. We render it read-only and the
+		// api_key is always read-only in the TUI: operators rotate it
+		// via `defenseclaw config set cisco_ai_defense.api_key_env …`
+		// or keychain, never by typing a live bearer into the config
+		// form.
+		{Name: "Cisco AI Defense", Fields: ciscoAIDefenseFields(c)},
+		// Firewall: Packet Filter (pf) or nft anchor paths used by
+		// the enforcement sidecar. Read-only because the paths map
+		// to system-owned files that DefenseClaw does not create —
+		// editing them in-TUI would silently orphan the existing
+		// rules. Operators should edit ~/.defenseclaw/config.yaml
+		// directly when migrating between hosts.
+		{Name: "Firewall", Fields: firewallFields(c)},
 	}
 	for si := range p.sections {
 		for fi := range p.sections[si].Fields {
@@ -2151,6 +2183,50 @@ func fmtOTelResource(attrs map[string]string) string {
 		parts = append(parts, k+"="+attrs[k])
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ciscoAIDefenseFields builds the Cisco AI Defense read-only section.
+// api_key is always masked (whether it's set via the direct field or
+// resolved from the env) because the TUI is not the right place to
+// compare shared secrets — edit via `defenseclaw config set` or your
+// keychain. enabled_rules is rendered as a single comma-joined line
+// so the operator can spot mis-provisioned allow-lists at a glance
+// without opening the YAML.
+func ciscoAIDefenseFields(c *config.Config) []configField {
+	keyState := "(unset)"
+	if c.CiscoAIDefense.APIKey != "" {
+		keyState = "(configured inline — redacted)"
+	} else if c.CiscoAIDefense.APIKeyEnv != "" {
+		if c.CiscoAIDefense.ResolvedAPIKey() != "" {
+			keyState = fmt.Sprintf("(resolved from $%s)", c.CiscoAIDefense.APIKeyEnv)
+		} else {
+			keyState = fmt.Sprintf("($%s not set)", c.CiscoAIDefense.APIKeyEnv)
+		}
+	}
+	rules := "(none)"
+	if len(c.CiscoAIDefense.EnabledRules) > 0 {
+		rules = strings.Join(c.CiscoAIDefense.EnabledRules, ", ")
+	}
+	return []configField{
+		{Label: "Endpoint", Key: "cisco_ai_defense.endpoint", Kind: "header", Value: c.CiscoAIDefense.Endpoint},
+		{Label: "API Key", Key: "cisco_ai_defense.api_key", Kind: "header", Value: keyState},
+		{Label: "API Key Env", Key: "cisco_ai_defense.api_key_env", Kind: "header", Value: c.CiscoAIDefense.APIKeyEnv},
+		{Label: "Timeout (ms)", Key: "cisco_ai_defense.timeout_ms", Kind: "header", Value: fmt.Sprintf("%d", c.CiscoAIDefense.TimeoutMs)},
+		{Label: "Enabled Rules", Key: "cisco_ai_defense.enabled_rules", Kind: "header", Value: rules},
+		{Label: "How to edit", Key: "cisco_ai_defense.hint", Kind: "header", Value: "set via `defenseclaw config set cisco_ai_defense.*` or the Cisco AI Defense console (enabled_rules)"},
+	}
+}
+
+// firewallFields renders the Firewall anchor paths read-only. See the
+// "Firewall" section comment in loadSections for why this isn't
+// editable in-TUI.
+func firewallFields(c *config.Config) []configField {
+	return []configField{
+		{Label: "Config File", Key: "firewall.config_file", Kind: "header", Value: c.Firewall.ConfigFile},
+		{Label: "Rules File", Key: "firewall.rules_file", Kind: "header", Value: c.Firewall.RulesFile},
+		{Label: "Anchor Name", Key: "firewall.anchor_name", Kind: "header", Value: c.Firewall.AnchorName},
+		{Label: "How to edit", Key: "firewall.hint", Kind: "header", Value: "edit ~/.defenseclaw/config.yaml directly — these paths bind to system-owned files"},
+	}
 }
 
 // fmtOTelHeaders renders the OTel headers map as a single summary
