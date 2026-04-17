@@ -98,27 +98,44 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
     # as time.Time. RFC3339 in UTC avoids any TZ-confusion between
     # CLI and TUI runs.
     import datetime as _dt
+    import tempfile
     payload["captured_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(
         timespec="seconds"
     ).replace("+00:00", "Z")
-    tmp_path = path + ".tmp"
+    tmp_path = ""
     try:
         os.makedirs(data_dir, exist_ok=True)
-        with open(tmp_path, "w", encoding="utf-8") as fh:
+        # Use NamedTemporaryFile so concurrent doctor runs (e.g. a
+        # cron job plus a manual invocation) don't collide on a
+        # shared ".tmp" filename. Each writer gets a unique path,
+        # then atomically replaces the canonical cache.
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=data_dir,
+            prefix=".doctor_cache.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = fh.name
             json.dump(payload, fh, indent=2)
         # Atomic replace so a concurrent TUI read never sees a
         # half-written JSON document.
         os.replace(tmp_path, path)
+        tmp_path = ""
     except OSError as exc:
         click.echo(
             f"warning: could not write doctor cache at {path}: {exc}",
             err=True,
         )
-        # Best-effort cleanup of the tempfile on failure.
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+    finally:
+        # Best-effort cleanup of an orphaned tempfile if replace()
+        # failed or an exception fired mid-write.
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 _json_mode = False
@@ -811,29 +828,9 @@ def doctor(app: AppContext, json_out: bool) -> None:
         )
 
 
-def run_doctor_checks(cfg) -> _DoctorResult:
-    """Run all doctor checks programmatically (for use by setup --verify)."""
-    r = _DoctorResult()
-
-    click.echo()
-    click.echo("  ── Verifying configuration ──")
-    _check_llm_api_key(cfg, r)
-    _check_guardrail_proxy(cfg, r)
-    _check_sidecar(cfg, r)
-    _check_openclaw_gateway(cfg, r)
-    _check_cisco_ai_defense(cfg, r)
-
-    click.echo()
-    if r.failed:
-        click.echo(click.style(f"  ⚠ {r.failed} check(s) failed", fg="red")
-                    + " — review above and fix before using DefenseClaw")
-    elif r.warned:
-        click.echo(click.style(f"  {r.passed} passed, {r.warned} warning(s)", fg="yellow"))
-    else:
-        click.echo(click.style(f"  All {r.passed} checks passed", fg="green"))
-    click.echo()
-    # Mirror the same cache-write as the top-level doctor command so
-    # callers of ``setup --verify`` also keep the Overview panel in
-    # sync with reality.
-    _write_doctor_cache(cfg, r)
-    return r
+# Note: earlier revisions exposed a ``run_doctor_checks(cfg)`` helper
+# that bundled a subset of checks for ``setup --verify``. It was never
+# wired up — ``cmd_setup.py`` calls each ``_check_*`` directly — and the
+# helper also wrote a partial cache that would clobber a full-coverage
+# ``doctor_cache.json``. It has been removed to prevent the Overview
+# panel from silently reporting "3 pass" after a partial verify.

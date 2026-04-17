@@ -285,6 +285,43 @@ class DoctorCacheWriteTests(unittest.TestCase):
             files = sorted(os.listdir(tmp))
         self.assertEqual(files, ["doctor_cache.json"], files)
 
+    def test_concurrent_writes_do_not_corrupt_cache(self):
+        # Regression: earlier revisions used a fixed ".tmp" suffix for
+        # the staging file, so two concurrent doctor runs raced on the
+        # same path and one could either crash or rename a partial
+        # file over the other's finished cache. We now mint a unique
+        # tempfile per write via tempfile.NamedTemporaryFile, which
+        # this test locks in.
+        import json
+        import tempfile
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def write_one(i):
+                r = _DoctorResult()
+                r.passed = i
+                self._run_write(tmp, r)
+
+            threads = [
+                threading.Thread(target=write_one, args=(i,))
+                for i in range(1, 9)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            cache_path = os.path.join(tmp, "doctor_cache.json")
+            # Exactly one canonical cache file, no orphaned tempfiles.
+            entries = sorted(os.listdir(tmp))
+            self.assertEqual(entries, ["doctor_cache.json"], entries)
+            # And the survivor is syntactically valid JSON — the key
+            # property the Go loader depends on.
+            with open(cache_path) as fh:
+                payload = json.load(fh)
+            self.assertIn("passed", payload)
+            self.assertIn("captured_at", payload)
+
 
 class DoctorJsonOutputTests(unittest.TestCase):
     """Test --json-output flag on doctor."""
