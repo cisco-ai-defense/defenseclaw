@@ -312,6 +312,15 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Metrics Endpoint", Key: "otel.metrics.endpoint", Kind: "string", Value: c.OTel.Metrics.Endpoint},
 			{Label: "Headers (read-only)", Key: "otel.headers.summary", Kind: "header", Value: fmtOTelHeaders(c.OTel.Headers)},
 		}},
+		// Actions matrix: three parallel 5×3 tables that drive the
+		// admission gate's per-severity response. Rather than render
+		// three separate 15-row blocks we build them with a shared
+		// helper so the column layout, option lists, and key names
+		// stay identical. When the CLI grows a new severity or
+		// action column, this is the one place to change.
+		{Name: "Skill Actions", Fields: actionMatrixFields("skill_actions", c.SkillActions)},
+		{Name: "MCP Actions", Fields: actionMatrixFields("mcp_actions", c.MCPActions)},
+		{Name: "Plugin Actions", Fields: actionMatrixFields("plugin_actions", c.PluginActions)},
 		{Name: "Watch", Fields: []configField{
 			{Label: "Debounce MS", Key: "watch.debounce_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.DebounceMs)},
 			{Label: "Auto Block", Key: "watch.auto_block", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.AutoBlock)},
@@ -1982,6 +1991,158 @@ func fmtOTelHeaders(h map[string]string) string {
 	return strings.Join(keys, ", ") + "  (values redacted)"
 }
 
+// actionMatrixConfig is the minimum surface actionMatrixFields needs
+// from each of the three ${X}ActionsConfig types. The types are
+// structurally identical but Go does not auto-promote them to a
+// shared interface, so we declare an explicit trait here and let the
+// concrete configs satisfy it via a type-specific accessor.
+type actionMatrixConfig interface {
+	severity(name string) config.SeverityAction
+}
+
+// Accessors — trivial but deliberate: they keep actionMatrixFields
+// decoupled from any ordering / field-name change in the config
+// structs. A compile error here is preferable to a silent wrong-field
+// read under future renames.
+type skillActionsView struct{ c config.SkillActionsConfig }
+
+func (s skillActionsView) severity(name string) config.SeverityAction {
+	switch name {
+	case "critical":
+		return s.c.Critical
+	case "high":
+		return s.c.High
+	case "medium":
+		return s.c.Medium
+	case "low":
+		return s.c.Low
+	case "info":
+		return s.c.Info
+	}
+	return config.SeverityAction{}
+}
+
+type mcpActionsView struct{ c config.MCPActionsConfig }
+
+func (m mcpActionsView) severity(name string) config.SeverityAction {
+	switch name {
+	case "critical":
+		return m.c.Critical
+	case "high":
+		return m.c.High
+	case "medium":
+		return m.c.Medium
+	case "low":
+		return m.c.Low
+	case "info":
+		return m.c.Info
+	}
+	return config.SeverityAction{}
+}
+
+type pluginActionsView struct{ c config.PluginActionsConfig }
+
+func (p pluginActionsView) severity(name string) config.SeverityAction {
+	switch name {
+	case "critical":
+		return p.c.Critical
+	case "high":
+		return p.c.High
+	case "medium":
+		return p.c.Medium
+	case "low":
+		return p.c.Low
+	case "info":
+		return p.c.Info
+	}
+	return config.SeverityAction{}
+}
+
+// actionMatrixFields renders the per-severity × per-column action
+// matrix for skill_actions / mcp_actions / plugin_actions. The
+// matrix is the admission gate's policy table — each severity maps
+// to three independent knobs (file, runtime, install) that together
+// decide what happens when the scanner returns a finding at that
+// severity. We model it here as 15 choice rows (5 severities × 3
+// columns) grouped by severity header. This is verbose but keeps the
+// existing single-key configField form usable; a dedicated 2D grid
+// editor would be a larger scope-creep win for not much UX gain.
+//
+// The keys use the same dotted path the Python / viper side uses
+// (e.g. `skill_actions.critical.file`) so SaveConfig() writes back
+// with no key translation.
+//
+// Dispatch routes `any` through a switch on the `prefix` argument to
+// pick which config struct to read from. A generic function would
+// save a few lines but the three types have no shared interface in
+// internal/config and inventing one just for the TUI editor would
+// bleed rendering concerns back into the model.
+func actionMatrixFields(prefix string, cfg any) []configField {
+	var view actionMatrixConfig
+	switch prefix {
+	case "skill_actions":
+		view = skillActionsView{c: cfg.(config.SkillActionsConfig)}
+	case "mcp_actions":
+		view = mcpActionsView{c: cfg.(config.MCPActionsConfig)}
+	case "plugin_actions":
+		view = pluginActionsView{c: cfg.(config.PluginActionsConfig)}
+	default:
+		// Unknown prefix — return a single header so the TUI renders
+		// something legible instead of an empty section. Defensive
+		// against a future caller typo; callers in this package are
+		// all compile-checked.
+		return []configField{{Label: "(unknown actions prefix)", Key: prefix + ".error", Kind: "header"}}
+	}
+
+	// Severity order follows the scanner's severity enum (CRITICAL
+	// first). Keeping display order == enum order avoids operator
+	// confusion when the hint text says "most-severe → least".
+	severities := []string{"critical", "high", "medium", "low", "info"}
+	// Option sets are deliberately duplicated (not shared) because
+	// install has three states while file/runtime have two. A single
+	// `[]string{"none","quarantine","disable","enable","block","allow"}`
+	// slice would compile but let the operator pick invalid
+	// combinations per column.
+	fileOpts := []string{string(config.FileActionNone), string(config.FileActionQuarantine)}
+	runtimeOpts := []string{string(config.RuntimeEnable), string(config.RuntimeDisable)}
+	installOpts := []string{string(config.InstallNone), string(config.InstallBlock), string(config.InstallAllow)}
+
+	fields := make([]configField, 0, len(severities)*4+1)
+	fields = append(fields, configField{
+		Label: "──  " + strings.ToUpper(strings.ReplaceAll(prefix, "_", " ")) + " (severity → file · runtime · install)  ──",
+		Key:   prefix + ".hint",
+		Kind:  "header",
+		Value: "file: quarantine/none · runtime: enable/disable · install: none/block/allow",
+	})
+	for _, sev := range severities {
+		a := view.severity(sev)
+		fields = append(fields,
+			configField{
+				Label:   strings.ToUpper(sev[:1]) + sev[1:] + " · file",
+				Key:     prefix + "." + sev + ".file",
+				Kind:    "choice",
+				Value:   string(a.File),
+				Options: fileOpts,
+			},
+			configField{
+				Label:   strings.ToUpper(sev[:1]) + sev[1:] + " · runtime",
+				Key:     prefix + "." + sev + ".runtime",
+				Kind:    "choice",
+				Value:   string(a.Runtime),
+				Options: runtimeOpts,
+			},
+			configField{
+				Label:   strings.ToUpper(sev[:1]) + sev[1:] + " · install",
+				Key:     prefix + "." + sev + ".install",
+				Kind:    "choice",
+				Value:   string(a.Install),
+				Options: installOpts,
+			},
+		)
+	}
+	return fields
+}
+
 // auditSinkSummaryFields renders one read-only row per declared audit
 // sink. The single-key configField form cannot represent the
 // audit_sinks[] schema (per-sink kind, filter, kind-specific block),
@@ -2073,7 +2234,16 @@ func webhookSummaryFields(c *config.Config) []configField {
 		if kind == "" {
 			kind = "webhook"
 		}
-		label := fmt.Sprintf("%s[%d]", kind, i)
+		// Prefer the operator-chosen name (``defenseclaw setup webhook
+		// add --name <slug>``) so the summary matches the CLI surface
+		// used to edit it. Fall back to the ``kind[i]`` pattern only
+		// for hand-edited configs that skipped ``name:`` entirely.
+		label := w.Name
+		if label == "" {
+			label = fmt.Sprintf("%s[%d]", kind, i)
+		} else {
+			label = fmt.Sprintf("%s (%s)", label, kind)
+		}
 		summary := fmt.Sprintf("[%s] %s", state, w.URL)
 		if w.MinSeverity != "" {
 			summary += "  min=" + w.MinSeverity

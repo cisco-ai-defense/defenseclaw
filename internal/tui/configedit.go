@@ -206,4 +206,72 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "openshell.version":
 		c.OpenShell.Version = val
 	}
+
+	// Actions matrices are handled with a dotted-prefix fallback
+	// because the 45-case switch above would quadruple the length
+	// of this function with zero additional precision. The key
+	// shape is `${prefix}.${severity}.${column}` — any malformed
+	// key silently falls through, which is fine: it will also
+	// fail the `f.Value != f.Original` diff check and never be
+	// committed if the viper layer rejects it on Save.
+	if strings.HasPrefix(key, "skill_actions.") ||
+		strings.HasPrefix(key, "mcp_actions.") ||
+		strings.HasPrefix(key, "plugin_actions.") {
+		applyActionsField(c, key, val)
+	}
+}
+
+// applyActionsField writes back to the five-severity × three-action
+// matrix. Kept separate from applyConfigField so the switch there
+// stays readable; doing the parse here localises all the string-to-
+// enum coercion in one place.
+func applyActionsField(c *config.Config, key, val string) {
+	parts := strings.Split(key, ".")
+	if len(parts) != 3 {
+		return
+	}
+	prefix, sev, col := parts[0], parts[1], parts[2]
+
+	// Resolve the pointer to the SeverityAction we need to mutate.
+	// Using a pointer avoids the copy-then-assign dance that would
+	// otherwise double the switch cases.
+	var target *config.SeverityAction
+	switch prefix {
+	case "skill_actions":
+		target = severityPtr(&c.SkillActions.Critical, &c.SkillActions.High, &c.SkillActions.Medium, &c.SkillActions.Low, &c.SkillActions.Info, sev)
+	case "mcp_actions":
+		target = severityPtr(&c.MCPActions.Critical, &c.MCPActions.High, &c.MCPActions.Medium, &c.MCPActions.Low, &c.MCPActions.Info, sev)
+	case "plugin_actions":
+		target = severityPtr(&c.PluginActions.Critical, &c.PluginActions.High, &c.PluginActions.Medium, &c.PluginActions.Low, &c.PluginActions.Info, sev)
+	}
+	if target == nil {
+		return
+	}
+	switch col {
+	case "file":
+		target.File = config.FileAction(val)
+	case "runtime":
+		target.Runtime = config.RuntimeAction(val)
+	case "install":
+		target.Install = config.InstallAction(val)
+	}
+}
+
+// severityPtr picks the *SeverityAction that matches the severity
+// name. Using a variadic map would cost an allocation per call; an
+// explicit switch is cheaper and keeps the call-sites single-lined.
+func severityPtr(critical, high, medium, low, info *config.SeverityAction, name string) *config.SeverityAction {
+	switch name {
+	case "critical":
+		return critical
+	case "high":
+		return high
+	case "medium":
+		return medium
+	case "low":
+		return low
+	case "info":
+		return info
+	}
+	return nil
 }
