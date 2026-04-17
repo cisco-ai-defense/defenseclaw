@@ -83,14 +83,24 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.Mode = val
 	case "guardrail.scanner_mode":
 		c.Guardrail.ScannerMode = val
+	case "guardrail.host":
+		c.Guardrail.Host = val
 	case "guardrail.port":
 		c.Guardrail.Port = intVal
 	case "guardrail.model":
 		c.Guardrail.Model = val
+	case "guardrail.model_name":
+		c.Guardrail.ModelName = val
+	case "guardrail.original_model":
+		c.Guardrail.OriginalModel = val
 	case "guardrail.api_key_env":
 		c.Guardrail.APIKeyEnv = val
+	case "guardrail.api_base":
+		c.Guardrail.APIBase = val
 	case "guardrail.block_message":
 		c.Guardrail.BlockMessage = val
+	case "guardrail.retain_judge_bodies":
+		c.Guardrail.RetainJudgeBodies = boolVal
 	case "guardrail.detection_strategy":
 		c.Guardrail.DetectionStrategy = val
 	case "guardrail.detection_strategy_prompt":
@@ -290,6 +300,16 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OpenShell.Mode = val
 	case "openshell.version":
 		c.OpenShell.Version = val
+	case "openshell.sandbox_home":
+		c.OpenShell.SandboxHome = val
+	case "openshell.auto_pair":
+		// Tristate: "" clears the override (nil → defer to
+		// ShouldAutoPair default=true); "true"/"false" land an
+		// explicit pointer. Any other string (malformed edit) is
+		// treated as clear so we never write a bogus value.
+		c.OpenShell.AutoPair = parseTristateBool(val)
+	case "openshell.host_networking":
+		c.OpenShell.HostNetworking = parseTristateBool(val)
 
 	// Inspect LLM — editable. api_key is accepted here so the
 	// operator can paste-then-persist a fresh value, but the
@@ -364,6 +384,25 @@ func applyActionsField(c *config.Config, key, val string) {
 	case "install":
 		target.Install = config.InstallAction(val)
 	}
+}
+
+// parseTristateBool converts the choice value back to a *bool for
+// the OpenShell tristate knobs (AutoPair, HostNetworking). The TUI
+// renders these as three-way choices because the underlying *bool
+// distinguishes "unset → code default" from "explicit false", and
+// we need to round-trip all three states. Malformed values clear
+// the override instead of panicking so a corrupted keystroke can
+// never wedge the panel.
+func parseTristateBool(val string) *bool {
+	switch strings.TrimSpace(strings.ToLower(val)) {
+	case "true":
+		t := true
+		return &t
+	case "false":
+		f := false
+		return &f
+	}
+	return nil
 }
 
 // splitCSV splits "a, b , c" into ["a","b","c"]. Empty input

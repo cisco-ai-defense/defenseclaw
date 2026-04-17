@@ -228,6 +228,18 @@ func (p *SetupPanel) loadSections() {
 	c := p.cfg
 	p.sections = []configSection{
 		{Name: "General", Fields: []configField{
+			// P2-#14: config_version is read-only on purpose — the
+			// migration engine (see internal/config/config.go
+			// migrateConfig) owns the upgrade path. Hand-editing
+			// this field would skip step-wise migrations and leave
+			// the YAML with a higher version than its actual
+			// schema, masking real schema drift from loaders.
+			// Rendering as a header + effective-vs-on-disk summary
+			// so operators can spot the "oh, config.yaml is
+			// behind" case without needing to read the migration
+			// code.
+			{Label: "Config Version", Key: "config_version", Kind: "header", Value: fmtConfigVersion(c)},
+			{Label: "── Paths ──", Kind: "header"},
 			{Label: "Data Dir", Key: "data_dir", Kind: "string", Value: c.DataDir},
 			{Label: "Audit DB", Key: "audit_db", Kind: "string", Value: c.AuditDB},
 			{Label: "Quarantine Dir", Key: "quarantine_dir", Kind: "string", Value: c.QuarantineDir},
@@ -260,11 +272,16 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Enabled", Key: "guardrail.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Enabled)},
 			{Label: "Mode", Key: "guardrail.mode", Kind: "choice", Value: c.Guardrail.Mode, Options: []string{"observe", "action"}},
 			{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"}},
+			{Label: "Host", Key: "guardrail.host", Kind: "string", Value: c.Guardrail.Host},
 			{Label: "Port", Key: "guardrail.port", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Port)},
 			{Label: "Model", Key: "guardrail.model", Kind: "string", Value: c.Guardrail.Model},
+			{Label: "Model Name", Key: "guardrail.model_name", Kind: "string", Value: c.Guardrail.ModelName},
+			{Label: "Original Model", Key: "guardrail.original_model", Kind: "string", Value: c.Guardrail.OriginalModel},
 			{Label: "API Key Env", Key: "guardrail.api_key_env", Kind: "password", Value: c.Guardrail.APIKeyEnv},
+			{Label: "API Base", Key: "guardrail.api_base", Kind: "string", Value: c.Guardrail.APIBase},
 			{Label: "Block Message", Key: "guardrail.block_message", Kind: "string", Value: c.Guardrail.BlockMessage},
 			{Label: "Stream Buffer", Key: "guardrail.stream_buffer_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.StreamBufferBytes)},
+			{Label: "Retain Judge Bodies", Key: "guardrail.retain_judge_bodies", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.RetainJudgeBodies)},
 			// Detection
 			{Label: "── Detection ──", Kind: "header"},
 			{Label: "Strategy", Key: "guardrail.detection_strategy", Kind: "choice", Value: c.Guardrail.DetectionStrategy, Options: []string{"regex_only", "regex_judge", "judge_first"}},
@@ -376,11 +393,21 @@ func (p *SetupPanel) loadSections() {
 			{Label: "Rescan Enabled", Key: "watch.rescan_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.RescanEnabled)},
 			{Label: "Rescan Interval Min", Key: "watch.rescan_interval_min", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.RescanIntervalMin)},
 		}},
+		// P2-#13: OpenShell now exposes the sandbox_home + *bool
+		// tristates (auto_pair, host_networking). The tristates are
+		// rendered as kind=choice with "", "true", "false" because
+		// the underlying *bool distinguishes "unset → ShouldAutoPair
+		// default (true)" from "explicit false". Using plain bool
+		// would collapse those states and flip the default silently
+		// the next time someone opens the form.
 		{Name: "OpenShell", Fields: []configField{
 			{Label: "Binary", Key: "openshell.binary", Kind: "string", Value: c.OpenShell.Binary},
 			{Label: "Policy Dir", Key: "openshell.policy_dir", Kind: "string", Value: c.OpenShell.PolicyDir},
-			{Label: "Mode", Key: "openshell.mode", Kind: "string", Value: c.OpenShell.Mode},
+			{Label: "Mode", Key: "openshell.mode", Kind: "choice", Options: []string{"", "docker", "standalone"}, Value: c.OpenShell.Mode},
 			{Label: "Version", Key: "openshell.version", Kind: "string", Value: c.OpenShell.Version},
+			{Label: "Sandbox Home", Key: "openshell.sandbox_home", Kind: "string", Value: c.OpenShell.SandboxHome},
+			{Label: "Auto Pair (tristate)", Key: "openshell.auto_pair", Kind: "choice", Options: []string{"", "true", "false"}, Value: fmtTristateBool(c.OpenShell.AutoPair)},
+			{Label: "Host Networking (tristate)", Key: "openshell.host_networking", Kind: "choice", Options: []string{"", "true", "false"}, Value: fmtTristateBool(c.OpenShell.HostNetworking)},
 		}},
 		// Inspect LLM: the model/provider used by judge-mode guardrail
 		// evaluations. Fully editable — the api_key field is shown
@@ -2183,6 +2210,39 @@ func fmtOTelResource(attrs map[string]string) string {
 		parts = append(parts, k+"="+attrs[k])
 	}
 	return strings.Join(parts, ", ")
+}
+
+// fmtConfigVersion renders "N (schema vM)" when the loaded YAML is
+// behind the binary's CurrentConfigVersion, so operators can tell
+// whether migrateConfig applied on the last load. When they match
+// we render a single number to avoid visual noise. Negative/zero
+// input (fresh config in-memory) falls back to "(unset)" so the
+// row never shows "-1" or "0" which would be confusing.
+func fmtConfigVersion(c *config.Config) string {
+	if c == nil || c.ConfigVersion <= 0 {
+		return fmt.Sprintf("(unset, binary schema v%d)", config.CurrentConfigVersion)
+	}
+	if c.ConfigVersion == config.CurrentConfigVersion {
+		return fmt.Sprintf("%d", c.ConfigVersion)
+	}
+	return fmt.Sprintf("%d (binary expects schema v%d — migration on next save)",
+		c.ConfigVersion, config.CurrentConfigVersion)
+}
+
+// fmtTristateBool renders a *bool as "", "true", or "false" so the
+// choice-renderer can display all three states distinctly. nil maps
+// to "" (meaning "defer to the code-level default") — see
+// OpenShellConfig.ShouldAutoPair / HostNetworkingEnabled for the
+// defaults we're preserving. A plain "%v" would print "<nil>" which
+// isn't a valid Options entry and would re-pick itself on re-save.
+func fmtTristateBool(b *bool) string {
+	if b == nil {
+		return ""
+	}
+	if *b {
+		return "true"
+	}
+	return "false"
 }
 
 // ciscoAIDefenseFields builds the Cisco AI Defense read-only section.
