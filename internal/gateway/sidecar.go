@@ -117,7 +117,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		}
 	}
 
-
 	client.OnEvent = router.Route
 
 	alertCtx, alertCancel := context.WithCancel(context.Background())
@@ -150,6 +149,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		events.WithFanout(otel.EmitGatewayEvent)
 	}
 	SetEventWriter(events)
+	emitDiagnostic("observability", "gateway event pipeline initialised", map[string]string{
+		"jsonl": filepath.Join(cfg.DataDir, "gateway.jsonl"),
+	})
 
 	// Phase 2.3: when retention is enabled, persist judge bodies to
 	// the local SQLite audit store so operators can triage judge

@@ -139,7 +139,8 @@ var migrations = []migration{
 				actor TEXT NOT NULL DEFAULT 'defenseclaw',
 				details TEXT,
 				severity TEXT,
-				run_id TEXT
+				run_id TEXT,
+				trace_id TEXT
 			);
 			CREATE TABLE IF NOT EXISTS scan_results (
 				id TEXT PRIMARY KEY,
@@ -295,6 +296,22 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		description: "add trace_id column to audit_events",
+		apply: func(ex dbExecer) error {
+			exists, err := hasColumnDB(ex, "audit_events", "trace_id")
+			if err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+			if _, err := ex.Exec(`ALTER TABLE audit_events ADD COLUMN trace_id TEXT`); err != nil {
+				return fmt.Errorf("alter audit_events.trace_id: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 func (s *Store) Init() error {
@@ -442,9 +459,9 @@ func (s *Store) LogEvent(e Event) error {
 
 	ts := e.Timestamp.Format(time.RFC3339Nano)
 	_, err := s.db.Exec(
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity, nullStr(e.RunID),
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity, nullStr(e.RunID), nullStr(e.TraceID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -604,7 +621,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -615,14 +632,15 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
+		var target, details, severity, runID, traceID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID); err != nil {
 			return nil, fmt.Errorf("audit: scan row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
 		e.RunID = runID.String
+		e.TraceID = traceID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
