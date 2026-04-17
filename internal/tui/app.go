@@ -1104,6 +1104,51 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		case "x":
 			return m.executor.Execute("defenseclaw", []string{"mcp", "unset", sel.URL}, "unset mcp "+sel.URL)
 		}
+	case PanelPlugins:
+		// All plugin mutations route through the defenseclaw
+		// Python CLI so admission, runtime, and quarantine state
+		// stay coherent (see cli/defenseclaw/commands/cmd_plugin.py
+		// PolicyEngine.* calls). Never fork this state in Go — the
+		// CLI is the single source of truth.
+		sel := m.plugins.Selected()
+		if sel == nil {
+			return nil
+		}
+		// Prefer plugin name for user-facing commands since the
+		// CLI's block/allow/disable/enable/quarantine/restore
+		// resolve via _resolve_openclaw_plugin_id(name). Fall
+		// back to the ID when Name is blank (rare, e.g. manifests
+		// missing display fields).
+		name := sel.Name
+		if name == "" {
+			name = sel.ID
+		}
+		switch key {
+		case "s":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "scan", name}, "scan plugin "+name)
+		case "i":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "info", name}, "info plugin "+name)
+		case "b":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "block", name}, "block plugin "+name)
+		case "a":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "allow", name}, "allow plugin "+name)
+		case "u":
+			// "Unblock" in the action menu maps to `plugin allow`
+			// because that is the CLI verb that clears the block
+			// list and (if needed) re-enables the runtime (see
+			// cmd_plugin.allow → pe.allow + _enable_plugin_via_gateway).
+			return m.executor.Execute("defenseclaw", []string{"plugin", "allow", name}, "unblock plugin "+name)
+		case "d":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "disable", name}, "disable plugin "+name)
+		case "e":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "enable", name}, "enable plugin "+name)
+		case "q":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "quarantine", name}, "quarantine plugin "+name)
+		case "r":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "restore", name}, "restore plugin "+name)
+		case "x":
+			return m.executor.Execute("defenseclaw", []string{"plugin", "remove", name}, "remove plugin "+name)
+		}
 	}
 	return nil
 }
@@ -1562,6 +1607,33 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd := m.executor.Execute("defenseclaw", []string{"plugin", "scan", sel.ID}, "scan plugin "+sel.ID)
 			m.activePanel = PanelActivity
 			return m, cmd
+		}
+	case "o":
+		// Open the contextual action menu. Parity with Skills/MCPs
+		// (both use 'o'). The action menu dispatches via
+		// executeActionMenuItem → `defenseclaw plugin <verb> <name>`,
+		// routing mutations through the CLI so PolicyEngine,
+		// admission audit, and gateway RPC stay in one place.
+		if sel := m.plugins.Selected(); sel != nil {
+			name := sel.Name
+			if name == "" {
+				name = sel.ID
+			}
+			info := [][2]string{
+				{"ID", sel.ID},
+				{"Version", sel.Version},
+				{"Origin", sel.Origin},
+				{"Status", sel.Status},
+				{"Verdict", sel.Verdict},
+			}
+			if sel.Scan != nil {
+				info = append(info,
+					[2]string{"Max severity", sel.Scan.MaxSeverity},
+					[2]string{"Findings", fmt.Sprintf("%d", sel.Scan.TotalFindings)},
+				)
+			}
+			m.actionMenu.SetSize(m.width, m.height)
+			m.actionMenu.Show(name, sel.Status, info, PluginActions(sel.Verdict, sel.Status, sel.Enabled))
 		}
 	}
 	return m, nil

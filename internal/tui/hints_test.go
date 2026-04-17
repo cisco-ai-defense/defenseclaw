@@ -117,8 +117,12 @@ func TestHintEngine(t *testing.T) {
 
 	t.Run("plugins_normal", func(t *testing.T) {
 		hint := engine.HintForPanel(PanelPlugins, SystemState{})
-		if !strings.Contains(hint, "Plugins") || !strings.Contains(hint, "tools") {
-			t.Errorf("expected plugins hint, got: %s", hint)
+		// Must surface the actions shortcut (PluginActions menu is
+		// the whole point of P0-#2) and at least one verb so
+		// operators know what `o` unlocks without reading the
+		// source.
+		if !strings.Contains(hint, "actions") || !strings.Contains(hint, "scan") {
+			t.Errorf("expected plugins hint to advertise 'actions' shortcut and scan verb, got: %s", hint)
 		}
 	})
 

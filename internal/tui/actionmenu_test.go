@@ -220,6 +220,95 @@ func TestMCPActions(t *testing.T) {
 	})
 }
 
+func TestPluginActions(t *testing.T) {
+	t.Run("blocked_and_disabled_surfaces_unblock_enable_quarantine", func(t *testing.T) {
+		actions := PluginActions("blocked", "installed", false)
+		keys := actionKeys(actions)
+		assertContains(t, keys, "s", "blocked should have scan")
+		assertContains(t, keys, "i", "blocked should have info")
+		assertContains(t, keys, "u", "blocked should expose unblock")
+		assertContains(t, keys, "e", "disabled should expose enable")
+		assertContains(t, keys, "q", "non-quarantined should expose quarantine")
+		assertContains(t, keys, "x", "every plugin should expose remove")
+		assertNotContains(t, keys, "b", "blocked must not re-expose block")
+		assertNotContains(t, keys, "a", "blocked must not expose allow (unblock == allow)")
+		assertNotContains(t, keys, "d", "disabled must not expose disable")
+		assertNotContains(t, keys, "r", "non-quarantined must not expose restore")
+	})
+
+	t.Run("allowed_and_enabled_surfaces_block_disable_quarantine", func(t *testing.T) {
+		actions := PluginActions("allowed", "installed", true)
+		keys := actionKeys(actions)
+		assertContains(t, keys, "b", "allowed should expose block")
+		assertContains(t, keys, "d", "enabled should expose disable")
+		assertContains(t, keys, "q", "non-quarantined should expose quarantine")
+		assertContains(t, keys, "x", "every plugin should expose remove")
+		assertNotContains(t, keys, "u", "allowed must not expose unblock")
+		assertNotContains(t, keys, "a", "allowed must not re-expose allow")
+		assertNotContains(t, keys, "e", "enabled must not expose enable")
+	})
+
+	t.Run("clean_plugin_exposes_block_and_allow", func(t *testing.T) {
+		actions := PluginActions("clean", "installed", true)
+		keys := actionKeys(actions)
+		assertContains(t, keys, "b", "clean should expose block")
+		assertContains(t, keys, "a", "clean should expose allow")
+		assertContains(t, keys, "d", "enabled should expose disable")
+	})
+
+	t.Run("quarantined_plugin_exposes_restore_not_quarantine", func(t *testing.T) {
+		actions := PluginActions("blocked", "quarantined", false)
+		keys := actionKeys(actions)
+		assertContains(t, keys, "r", "quarantined should expose restore")
+		assertNotContains(t, keys, "q", "quarantined must not expose quarantine again")
+	})
+
+	t.Run("always_has_scan_info_remove", func(t *testing.T) {
+		cases := []struct {
+			verdict string
+			status  string
+			enabled bool
+		}{
+			{"blocked", "quarantined", false},
+			{"allowed", "installed", true},
+			{"clean", "", false},
+			{"warning", "installed", true},
+			{"", "", false},
+		}
+		for _, c := range cases {
+			actions := PluginActions(c.verdict, c.status, c.enabled)
+			keys := actionKeys(actions)
+			label := c.verdict + "/" + c.status
+			assertContains(t, keys, "s", label+": scan")
+			assertContains(t, keys, "i", label+": info")
+			assertContains(t, keys, "x", label+": remove")
+		}
+	})
+
+	t.Run("no_duplicate_keys", func(t *testing.T) {
+		// Duplicate keys would make the ActionMenu dispatcher
+		// ambiguous — the first match wins and the second action
+		// becomes unreachable. Guarding this in a unit test keeps
+		// future maintainers honest as new verbs are added.
+		cases := [][3]any{
+			{"blocked", "installed", false},
+			{"allowed", "installed", true},
+			{"clean", "quarantined", true},
+			{"warning", "installed", true},
+		}
+		for _, c := range cases {
+			actions := PluginActions(c[0].(string), c[1].(string), c[2].(bool))
+			seen := map[string]bool{}
+			for _, a := range actions {
+				if seen[a.Key] {
+					t.Errorf("duplicate key %q in PluginActions(%v)", a.Key, c)
+				}
+				seen[a.Key] = true
+			}
+		}
+	})
+}
+
 func actionKeys(actions []ActionItem) map[string]bool {
 	keys := make(map[string]bool)
 	for _, a := range actions {

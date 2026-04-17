@@ -133,7 +133,7 @@ func (h *HintEngine) mcpsHint(_ SystemState) string {
 }
 
 func (h *HintEngine) pluginsHint(_ SystemState) string {
-	return "j/k to navigate, Enter for actions menu. Plugins provide tools and hooks to OpenClaw agents."
+	return "j/k nav · o actions (scan/block/allow/disable/enable/quarantine/restore/remove) · s scan · r refresh · Enter details."
 }
 
 func (h *HintEngine) inventoryHint(_ SystemState) string {
