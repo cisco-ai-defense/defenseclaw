@@ -77,6 +77,46 @@ var wizardDescriptions = [wizardCount]string{
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
 }
 
+// wizardHowTo gives operators a quick "what this wizard will actually
+// do" + "what you need on hand" cheat-sheet, shown on the wizard
+// landing page below the one-line description. Keeping it here (rather
+// than hard-coded in renderWizards) makes it easy to keep aligned with
+// the CLI command the wizard shells out to — see wizardCommands.
+var wizardHowTo = [wizardCount]string{
+	// Skill Scanner
+	"Runs: defenseclaw setup skill-scanner\n" +
+		"What you'll need: (optional) LLM API key env var, VirusTotal API key env var, Cisco AI Defense API key.\n" +
+		"Tip: strict policy blocks MEDIUM+ findings; use 'lenient' only for dev environments.",
+	// MCP Scanner
+	"Runs: defenseclaw setup mcp-scanner\n" +
+		"What you'll need: the list of analyzers (prompts/resources/instructions) you want on.\n" +
+		"Tip: scan_instructions catches malicious server-side directives that prompts/resources miss.",
+	// Gateway
+	"Runs: defenseclaw setup gateway\n" +
+		"What you'll need: host + port the gateway should bind, TLS preference, OPENCLAW_GATEWAY_TOKEN env.\n" +
+		"Tip: for non-loopback hosts, TLS is auto-enabled — supply a cert path or turn skip-verify on for dev only.",
+	// Guardrail
+	"Runs: defenseclaw setup guardrail\n" +
+		"What you'll need: upstream LLM API key env, judge model + key (if using regex_judge/judge_first), block message.\n" +
+		"Tip: start in 'observe' mode to measure false positives before flipping to 'action'.",
+	// Splunk
+	"Runs: defenseclaw setup splunk\n" +
+		"What you'll need: HEC endpoint (https://…:8088), HEC token env var, index name.\n" +
+		"Tip: this adds a Splunk HEC entry to audit_sinks[] — the old single splunk.* block is deprecated.",
+	// Observability
+	"Runs: defenseclaw setup observability add <preset>\n" +
+		"What you'll need: vendor realm/region, ingest token env var, optional service.name/environment overrides.\n" +
+		"Tip: presets pre-fill endpoint + headers. Pick 'otlp' for any vendor not in the list.",
+	// Webhook
+	"Runs: defenseclaw setup webhook add <type>\n" +
+		"What you'll need: webhook URL (or env var), HMAC secret env (slack/generic), event filter list.\n" +
+		"Tip: webhooks fire per audit event; use the 'events' list to avoid flooding chat with LOW/INFO.",
+	// Sandbox
+	"Runs: defenseclaw sandbox setup\n" +
+		"What you'll need: OpenShell binary on PATH (Linux), optional sandbox home directory.\n" +
+		"Tip: macOS has no OpenShell — the wizard will skip runtime checks but still write policy YAML.",
+}
+
 // observabilityPresets mirrors cli/defenseclaw/observability/presets.py::preset_choices().
 // The preset id is passed positionally to `setup observability add`; the
 // display label is shown in the TUI picker.
@@ -98,6 +138,16 @@ var observabilityPresets = [][2]string{
 type configSection struct {
 	Name   string
 	Fields []configField
+	// Summary is a one-line description of what this section
+	// controls. Rendered at the bottom of the Config Editor so
+	// operators can orient themselves without having to cross-
+	// reference docs/CONFIG_FILES.md. Kept intentionally terse:
+	// long prose lives in the docs/ tree.
+	Summary string
+	// Help is an optional multi-line paragraph shown below Summary
+	// when the section is focused. Use for guidance that doesn't
+	// fit in one line (e.g. "how to edit" / "when to use this").
+	Help string
 }
 
 type configField struct {
@@ -107,6 +157,12 @@ type configField struct {
 	Value    string
 	Original string
 	Options  []string // valid choices for "choice" kind
+	// Hint is a short one-line description of what this field does.
+	// Rendered in the Config Editor footer when the cursor lands on
+	// this field so operators know what they're changing before
+	// pressing Enter. Keep it short (< 80 chars) — multi-line help
+	// belongs in docs/CONFIG_FILES.md.
+	Hint string
 }
 
 // wizardFormField defines a single field in a wizard setup form.
@@ -227,86 +283,168 @@ func (p *SetupPanel) loadSections() {
 	}
 	c := p.cfg
 	p.sections = []configSection{
-		{Name: "General", Fields: []configField{
-			// P2-#14: config_version is read-only on purpose — the
-			// migration engine (see internal/config/config.go
-			// migrateConfig) owns the upgrade path. Hand-editing
-			// this field would skip step-wise migrations and leave
-			// the YAML with a higher version than its actual
-			// schema, masking real schema drift from loaders.
-			// Rendering as a header + effective-vs-on-disk summary
-			// so operators can spot the "oh, config.yaml is
-			// behind" case without needing to read the migration
-			// code.
-			{Label: "Config Version", Key: "config_version", Kind: "header", Value: fmtConfigVersion(c)},
-			{Label: "── Paths ──", Kind: "header"},
-			{Label: "Data Dir", Key: "data_dir", Kind: "string", Value: c.DataDir},
-			{Label: "Audit DB", Key: "audit_db", Kind: "string", Value: c.AuditDB},
-			{Label: "Quarantine Dir", Key: "quarantine_dir", Kind: "string", Value: c.QuarantineDir},
-			{Label: "Plugin Dir", Key: "plugin_dir", Kind: "string", Value: c.PluginDir},
-			{Label: "Policy Dir", Key: "policy_dir", Kind: "string", Value: c.PolicyDir},
-			{Label: "Environment", Key: "environment", Kind: "string", Value: c.Environment},
-			{Label: "── Shared LLM ──", Kind: "header"},
-			{Label: "Default LLM API Key Env", Key: "default_llm_api_key_env", Kind: "password", Value: c.DefaultLLMAPIKeyEnv},
-			{Label: "Default LLM Model", Key: "default_llm_model", Kind: "string", Value: c.DefaultLLMModel},
-		}},
-		{Name: "Claw", Fields: []configField{
-			{Label: "Mode", Key: "claw.mode", Kind: "string", Value: string(c.Claw.Mode)},
-			{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir},
-			{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile},
-		}},
-		{Name: "Gateway", Fields: []configField{
-			{Label: "Host", Key: "gateway.host", Kind: "string", Value: c.Gateway.Host},
-			{Label: "Port", Key: "gateway.port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Port)},
-			{Label: "API Port", Key: "gateway.api_port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.APIPort)},
-			{Label: "API Bind", Key: "gateway.api_bind", Kind: "string", Value: c.Gateway.APIBind},
-			{Label: "Auto Approve Safe", Key: "gateway.auto_approve_safe", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.AutoApprove)},
-			{Label: "TLS", Key: "gateway.tls", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.TLS)},
-			{Label: "Reconnect MS", Key: "gateway.reconnect_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.ReconnectMs)},
-			{Label: "Max Reconnect MS", Key: "gateway.max_reconnect_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.MaxReconnectMs)},
-			{Label: "Token Env", Key: "gateway.token_env", Kind: "password", Value: c.Gateway.TokenEnv},
-		}},
-		{Name: "Guardrail", Fields: []configField{
-			// Core
-			{Label: "── Core ──", Kind: "header"},
-			{Label: "Enabled", Key: "guardrail.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Enabled)},
-			{Label: "Mode", Key: "guardrail.mode", Kind: "choice", Value: c.Guardrail.Mode, Options: []string{"observe", "action"}},
-			{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"}},
-			{Label: "Host", Key: "guardrail.host", Kind: "string", Value: c.Guardrail.Host},
-			{Label: "Port", Key: "guardrail.port", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Port)},
-			{Label: "Model", Key: "guardrail.model", Kind: "string", Value: c.Guardrail.Model},
-			{Label: "Model Name", Key: "guardrail.model_name", Kind: "string", Value: c.Guardrail.ModelName},
-			{Label: "Original Model", Key: "guardrail.original_model", Kind: "string", Value: c.Guardrail.OriginalModel},
-			{Label: "API Key Env", Key: "guardrail.api_key_env", Kind: "password", Value: c.Guardrail.APIKeyEnv},
-			{Label: "API Base", Key: "guardrail.api_base", Kind: "string", Value: c.Guardrail.APIBase},
-			{Label: "Block Message", Key: "guardrail.block_message", Kind: "string", Value: c.Guardrail.BlockMessage},
-			{Label: "Stream Buffer", Key: "guardrail.stream_buffer_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.StreamBufferBytes)},
-			{Label: "Retain Judge Bodies", Key: "guardrail.retain_judge_bodies", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.RetainJudgeBodies)},
-			// Detection
-			{Label: "── Detection ──", Kind: "header"},
-			{Label: "Strategy", Key: "guardrail.detection_strategy", Kind: "choice", Value: c.Guardrail.DetectionStrategy, Options: []string{"regex_only", "regex_judge", "judge_first"}},
-			{Label: "Strategy (Prompt)", Key: "guardrail.detection_strategy_prompt", Kind: "choice", Value: c.Guardrail.DetectionStrategyPrompt, Options: []string{"", "regex_only", "regex_judge", "judge_first"}},
-			{Label: "Strategy (Completion)", Key: "guardrail.detection_strategy_completion", Kind: "choice", Value: c.Guardrail.DetectionStrategyCompletion, Options: []string{"", "regex_only", "regex_judge", "judge_first"}},
-			{Label: "Strategy (Tool Call)", Key: "guardrail.detection_strategy_tool_call", Kind: "choice", Value: c.Guardrail.DetectionStrategyToolCall, Options: []string{"", "regex_only", "regex_judge", "judge_first"}},
-			{Label: "Rule Pack Dir", Key: "guardrail.rule_pack_dir", Kind: "string", Value: c.Guardrail.RulePackDir},
-			{Label: "Judge Sweep", Key: "guardrail.judge_sweep", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.JudgeSweep)},
-			// LLM Judge
-			{Label: "── LLM Judge ──", Kind: "header"},
-			{Label: "Judge Enabled", Key: "guardrail.judge.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Enabled)},
-			{Label: "Judge Model", Key: "guardrail.judge.model", Kind: "string", Value: c.Guardrail.Judge.Model},
-			{Label: "Judge API Key Env", Key: "guardrail.judge.api_key_env", Kind: "password", Value: c.Guardrail.Judge.APIKeyEnv},
-			{Label: "Judge API Base", Key: "guardrail.judge.api_base", Kind: "string", Value: c.Guardrail.Judge.APIBase},
-			{Label: "Judge Timeout", Key: "guardrail.judge.timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.Timeout)},
-			{Label: "Adjudication Timeout", Key: "guardrail.judge.adjudication_timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.AdjudicationTimeout)},
-			{Label: "Fallbacks", Key: "guardrail.judge.fallbacks", Kind: "string", Value: strings.Join(c.Guardrail.Judge.Fallbacks, ",")},
-			// Judge Categories
-			{Label: "── Judge Categories ──", Kind: "header"},
-			{Label: "Injection", Key: "guardrail.judge.injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Injection)},
-			{Label: "PII", Key: "guardrail.judge.pii", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PII)},
-			{Label: "PII (Prompt)", Key: "guardrail.judge.pii_prompt", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIIPrompt)},
-			{Label: "PII (Completion)", Key: "guardrail.judge.pii_completion", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIICompletion)},
-			{Label: "Tool Injection", Key: "guardrail.judge.tool_injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.ToolInjection)},
-		}},
+		{
+			Name: "General",
+			Summary: "Global paths, environment label, and the shared LLM key fallback. " +
+				"Everything under ~/.defenseclaw/ lives here.",
+			Help: "Config Version is read-only (the loader migrates on save). " +
+				"Default LLM *env* lets judges / scanners share one API key; leave blank to force per-component keys.",
+			Fields: []configField{
+				// P2-#14: config_version is read-only on purpose — the
+				// migration engine (see internal/config/config.go
+				// migrateConfig) owns the upgrade path. Hand-editing
+				// this field would skip step-wise migrations and leave
+				// the YAML with a higher version than its actual
+				// schema, masking real schema drift from loaders.
+				{Label: "Config Version", Key: "config_version", Kind: "header", Value: fmtConfigVersion(c),
+					Hint: "Read-only. Loader migrates config.yaml on save (see internal/config/config.go::migrateConfig)."},
+				{Label: "── Paths ──", Kind: "header"},
+				{Label: "Data Dir", Key: "data_dir", Kind: "string", Value: c.DataDir,
+					Hint: "Root directory for DefenseClaw state (default ~/.defenseclaw)."},
+				{Label: "Audit DB", Key: "audit_db", Kind: "string", Value: c.AuditDB,
+					Hint: "SQLite file path for the audit log. Delete while gateway is stopped to reset history."},
+				{Label: "Quarantine Dir", Key: "quarantine_dir", Kind: "string", Value: c.QuarantineDir,
+					Hint: "Where quarantined skills/plugins/MCPs are moved. Must be writable and outside claw skill dirs."},
+				{Label: "Plugin Dir", Key: "plugin_dir", Kind: "string", Value: c.PluginDir,
+					Hint: "Directory DefenseClaw scans for installed plugins (TS bundles)."},
+				{Label: "Policy Dir", Key: "policy_dir", Kind: "string", Value: c.PolicyDir,
+					Hint: "Root of policy packs (default/strict/permissive rule sets)."},
+				{Label: "Environment", Key: "environment", Kind: "string", Value: c.Environment,
+					Hint: "Free-form label (dev/staging/prod). Forwarded as an OTel resource attribute + audit tag."},
+				{Label: "── Shared LLM ──", Kind: "header"},
+				{Label: "Default LLM API Key Env", Key: "default_llm_api_key_env", Kind: "password", Value: c.DefaultLLMAPIKeyEnv,
+					Hint: "Env var NAME holding the shared LLM key (e.g. OPENAI_API_KEY). Used as fallback by judge + scanners."},
+				{Label: "Default LLM Model", Key: "default_llm_model", Kind: "string", Value: c.DefaultLLMModel,
+					Hint: "Fallback model (e.g. gpt-4o-mini) used when a component leaves .model blank."},
+			},
+		},
+		{
+			Name:    "Claw",
+			Summary: "Which agent framework DefenseClaw defends (skill/MCP directory resolution derives from this).",
+			Help: "Currently only 'openclaw' is supported; future modes (nemoclaw, opencode, claudecode) will " +
+				"change where skills/MCPs are discovered. Changing this without also migrating content will orphan scans.",
+			Fields: []configField{
+				{Label: "Mode", Key: "claw.mode", Kind: "string", Value: string(c.Claw.Mode),
+					Hint: "openclaw (default). Controls skill/MCP dir resolution — see internal/config/claw.go."},
+				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
+					Hint: "Override for ~/.openclaw/. Leave empty to use the OS default."},
+				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
+					Hint: "Path to openclaw.json (for per-user skill_dir overrides)."},
+			},
+		},
+		{
+			Name:    "Gateway",
+			Summary: "Sidecar WebSocket gateway: where OpenClaw connects, TLS/auth, API bind, reconnect tuning.",
+			Help: "gateway.port is the WebSocket OpenClaw connects to; api_port is the local REST sidecar. " +
+				"Leave host=localhost for embedded runs — change only when running the gateway on a different box. " +
+				"Token *env* keeps secrets out of YAML; device_key_file is the persistent machine identity.",
+			Fields: []configField{
+				{Label: "Host", Key: "gateway.host", Kind: "string", Value: c.Gateway.Host,
+					Hint: "Where clients reach the gateway. 127.0.0.1/localhost disables TLS enforcement."},
+				{Label: "Port", Key: "gateway.port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Port),
+					Hint: "WebSocket port (default 9090). Must match the value OpenClaw/agent hosts dial."},
+				{Label: "API Port", Key: "gateway.api_port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.APIPort),
+					Hint: "REST sidecar port (default 9099). Used by the CLI/TUI to issue commands."},
+				{Label: "API Bind", Key: "gateway.api_bind", Kind: "string", Value: c.Gateway.APIBind,
+					Hint: "Bind address for API Port (default 127.0.0.1). Change to 0.0.0.0 only behind a firewall."},
+				{Label: "Auto Approve Safe", Key: "gateway.auto_approve_safe", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.AutoApprove),
+					Hint: "Auto-approve CLEAN scans without operator prompt. MEDIUM+ always prompts regardless."},
+				{Label: "TLS", Key: "gateway.tls", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.TLS),
+					Hint: "Force wss:// + cert validation. Auto-enabled for non-loopback hosts."},
+				{Label: "TLS Skip Verify", Key: "gateway.tls_skip_verify", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.TLSSkipVerify),
+					Hint: "Skip cert chain verification (self-signed dev certs only). Dangerous in prod."},
+				{Label: "Reconnect MS", Key: "gateway.reconnect_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.ReconnectMs),
+					Hint: "Initial backoff after a disconnect (milliseconds). Doubles up to Max Reconnect MS."},
+				{Label: "Max Reconnect MS", Key: "gateway.max_reconnect_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.MaxReconnectMs),
+					Hint: "Reconnect backoff ceiling (milliseconds)."},
+				{Label: "Approval Timeout (s)", Key: "gateway.approval_timeout_s", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.ApprovalTimeout),
+					Hint: "How long the gateway waits for an operator approval before failing closed (seconds)."},
+				{Label: "Token Env", Key: "gateway.token_env", Kind: "password", Value: c.Gateway.TokenEnv,
+					Hint: "Env var NAME holding the gateway auth token (default OPENCLAW_GATEWAY_TOKEN)."},
+				{Label: "Device Key File", Key: "gateway.device_key_file", Kind: "string", Value: c.Gateway.DeviceKeyFile,
+					Hint: "Path to the per-machine private key used to derive master secrets (default ~/.defenseclaw/device.key)."},
+			},
+		},
+		{
+			Name: "Guardrail",
+			Summary: "LLM-egress proxy: detect prompt-injection & PII via regex + optional LLM judge. " +
+				"Use the Guardrail wizard for guided setup.",
+			Help: "Mode 'observe' logs only; 'action' blocks matched requests. " +
+				"Scanner modes: local=regex+judge, remote=Cisco AI Defense API, both=chained. " +
+				"Per-direction strategies override the global one (prompt/completion/tool_call).",
+			Fields: []configField{
+				// Core
+				{Label: "── Core ──", Kind: "header"},
+				{Label: "Enabled", Key: "guardrail.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Enabled),
+					Hint: "Master switch. Off = gateway passes LLM traffic through without inspection."},
+				{Label: "Mode", Key: "guardrail.mode", Kind: "choice", Value: c.Guardrail.Mode, Options: []string{"observe", "action"},
+					Hint: "observe=log only (no blocking); action=return block_message on hit."},
+				{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"},
+					Hint: "local=regex+judge only; remote=Cisco AI Defense only; both=chained (local then remote)."},
+				{Label: "Host", Key: "guardrail.host", Kind: "string", Value: c.Guardrail.Host,
+					Hint: "Bind address for the proxy. Defaults to 127.0.0.1 (avoids ::1 vs 127.0.0.1 dial issues on macOS)."},
+				{Label: "Port", Key: "guardrail.port", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Port),
+					Hint: "Proxy listen port. Clients set OPENAI_BASE_URL (or equivalent) to http://host:port."},
+				{Label: "Model", Key: "guardrail.model", Kind: "string", Value: c.Guardrail.Model,
+					Hint: "Upstream model identifier the proxy rewrites requests to (e.g. gpt-4o, claude-sonnet-4)."},
+				{Label: "Model Name", Key: "guardrail.model_name", Kind: "string", Value: c.Guardrail.ModelName,
+					Hint: "Display name shown to agents (defaults to Model when blank)."},
+				{Label: "Original Model", Key: "guardrail.original_model", Kind: "string", Value: c.Guardrail.OriginalModel,
+					Hint: "What the client thought it was calling — used to spoof an unchanged model response."},
+				{Label: "API Key Env", Key: "guardrail.api_key_env", Kind: "password", Value: c.Guardrail.APIKeyEnv,
+					Hint: "Env var NAME holding the upstream API key. Proxy reads this at request time."},
+				{Label: "API Base", Key: "guardrail.api_base", Kind: "string", Value: c.Guardrail.APIBase,
+					Hint: "Upstream API URL. Leave blank for each provider's default."},
+				{Label: "Block Message", Key: "guardrail.block_message", Kind: "string", Value: c.Guardrail.BlockMessage,
+					Hint: "Response text returned when a request is blocked (action mode)."},
+				{Label: "Stream Buffer", Key: "guardrail.stream_buffer_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.StreamBufferBytes),
+					Hint: "Chunk size (bytes) for streaming inspection. Larger = higher latency but fewer scan calls."},
+				{Label: "Retain Judge Bodies", Key: "guardrail.retain_judge_bodies", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.RetainJudgeBodies),
+					Hint: "Persist raw judge verdicts locally (for forensics). Downstream sinks always get redacted copies."},
+				// Detection
+				{Label: "── Detection ──", Kind: "header"},
+				{Label: "Strategy", Key: "guardrail.detection_strategy", Kind: "choice", Value: c.Guardrail.DetectionStrategy, Options: []string{"regex_only", "regex_judge", "judge_first"},
+					Hint: "Global default: regex_only=fast; regex_judge=recommended; judge_first=LLM precedes regex."},
+				{Label: "Strategy (Prompt)", Key: "guardrail.detection_strategy_prompt", Kind: "choice", Value: c.Guardrail.DetectionStrategyPrompt, Options: []string{"", "regex_only", "regex_judge", "judge_first"},
+					Hint: "Override global strategy for inbound prompts. Blank=inherit."},
+				{Label: "Strategy (Completion)", Key: "guardrail.detection_strategy_completion", Kind: "choice", Value: c.Guardrail.DetectionStrategyCompletion, Options: []string{"", "regex_only", "regex_judge", "judge_first"},
+					Hint: "Override global strategy for LLM completions. Blank=inherit."},
+				{Label: "Strategy (Tool Call)", Key: "guardrail.detection_strategy_tool_call", Kind: "choice", Value: c.Guardrail.DetectionStrategyToolCall, Options: []string{"", "regex_only", "regex_judge", "judge_first"},
+					Hint: "Override global strategy for tool-call arguments. Blank=inherit."},
+				{Label: "Rule Pack Dir", Key: "guardrail.rule_pack_dir", Kind: "string", Value: c.Guardrail.RulePackDir,
+					Hint: "Path to the active rule pack (default/strict/permissive). Manage via the Policy panel."},
+				{Label: "Judge Sweep", Key: "guardrail.judge_sweep", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.JudgeSweep),
+					Hint: "Run the judge on ALL requests in regex_only mode (background). Used to measure regex coverage."},
+				// LLM Judge
+				{Label: "── LLM Judge ──", Kind: "header"},
+				{Label: "Judge Enabled", Key: "guardrail.judge.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Enabled),
+					Hint: "Enable the LLM-as-a-judge scanner. Required for regex_judge and judge_first strategies."},
+				{Label: "Judge Model", Key: "guardrail.judge.model", Kind: "string", Value: c.Guardrail.Judge.Model,
+					Hint: "Judge model id, provider/model (e.g. bedrock/claude-3-5-haiku-20241022)."},
+				{Label: "Judge API Key Env", Key: "guardrail.judge.api_key_env", Kind: "password", Value: c.Guardrail.Judge.APIKeyEnv,
+					Hint: "Env var NAME holding the judge API key (falls back to default_llm_api_key_env)."},
+				{Label: "Judge API Base", Key: "guardrail.judge.api_base", Kind: "string", Value: c.Guardrail.Judge.APIBase,
+					Hint: "Override API base URL for the judge provider (blank=default)."},
+				{Label: "Judge Timeout", Key: "guardrail.judge.timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.Timeout),
+					Hint: "Seconds to wait for one judge call. Low values trigger fallbacks."},
+				{Label: "Adjudication Timeout", Key: "guardrail.judge.adjudication_timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.AdjudicationTimeout),
+					Hint: "Total time budget across primary + fallback judges. Must exceed Judge Timeout."},
+				{Label: "Fallbacks", Key: "guardrail.judge.fallbacks", Kind: "string", Value: strings.Join(c.Guardrail.Judge.Fallbacks, ","),
+					Hint: "CSV of backup judge models (tried in order on timeout/failure)."},
+				// Judge Categories
+				{Label: "── Judge Categories ──", Kind: "header"},
+				{Label: "Injection", Key: "guardrail.judge.injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Injection),
+					Hint: "Detect prompt-injection attempts via the judge (recommended: ON)."},
+				{Label: "PII", Key: "guardrail.judge.pii", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PII),
+					Hint: "Master PII toggle. Use pii_prompt/pii_completion for fine-grained control."},
+				{Label: "PII (Prompt)", Key: "guardrail.judge.pii_prompt", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIIPrompt),
+					Hint: "Flag PII on inbound prompts."},
+				{Label: "PII (Completion)", Key: "guardrail.judge.pii_completion", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIICompletion),
+					Hint: "Flag PII on LLM completions (data leakage from the model)."},
+				{Label: "Tool Injection", Key: "guardrail.judge.tool_injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.ToolInjection),
+					Hint: "Detect malicious payloads inside tool-call arguments."},
+			},
+		},
 		// P2-#9: Scanner section now surfaces every field the CLI and
 		// the Python scanners know about. Previous version hid 12 of
 		// the 17 knobs (use_trigger / use_virustotal / use_aidefense /
@@ -317,82 +455,176 @@ func (p *SetupPanel) loadSections() {
 		// Sub-headers split the view into Skill / MCP / Plugin
 		// families so a long scroll doesn't blur the scanner
 		// ownership.
-		{Name: "Scanners", Fields: []configField{
-			{Label: "── Skill Scanner ──", Kind: "header"},
-			{Label: "Binary", Key: "scanners.skill_scanner.binary", Kind: "string", Value: c.Scanners.SkillScanner.Binary},
-			{Label: "Policy", Key: "scanners.skill_scanner.policy", Kind: "choice", Value: c.Scanners.SkillScanner.Policy, Options: []string{"permissive", "strict", "observe"}},
-			{Label: "Lenient", Key: "scanners.skill_scanner.lenient", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.Lenient)},
-			{Label: "Use LLM", Key: "scanners.skill_scanner.use_llm", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseLLM)},
-			{Label: "LLM Consensus Runs", Key: "scanners.skill_scanner.llm_consensus_runs", Kind: "int", Value: fmt.Sprintf("%d", c.Scanners.SkillScanner.LLMConsensus)},
-			{Label: "Use Behavioral", Key: "scanners.skill_scanner.use_behavioral", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseBehavioral)},
-			{Label: "Enable Meta", Key: "scanners.skill_scanner.enable_meta", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.EnableMeta)},
-			{Label: "Use Trigger", Key: "scanners.skill_scanner.use_trigger", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseTrigger)},
-			{Label: "Use VirusTotal", Key: "scanners.skill_scanner.use_virustotal", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseVirusTotal)},
-			{Label: "VirusTotal Key Env", Key: "scanners.skill_scanner.virustotal_api_key_env", Kind: "password", Value: c.Scanners.SkillScanner.VirusTotalKeyEnv},
-			{Label: "Use AI Defense", Key: "scanners.skill_scanner.use_aidefense", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseAIDefense)},
-			{Label: "── MCP Scanner ──", Kind: "header"},
-			{Label: "Binary", Key: "scanners.mcp_scanner.binary", Kind: "string", Value: c.Scanners.MCPScanner.Binary},
-			{Label: "Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers},
-			{Label: "Scan Prompts", Key: "scanners.mcp_scanner.scan_prompts", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanPrompts)},
-			{Label: "Scan Resources", Key: "scanners.mcp_scanner.scan_resources", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanResources)},
-			{Label: "Scan Instructions", Key: "scanners.mcp_scanner.scan_instructions", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanInstructions)},
-			{Label: "── Plugin / CodeGuard ──", Kind: "header"},
-			{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner},
-			{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard},
-		}},
+		{
+			Name: "Scanners",
+			Summary: "Skill/MCP/Plugin scanner binaries + behavior flags. " +
+				"Use the Skill Scanner wizard for guided Cisco/VirusTotal/LLM setup.",
+			Help: "policy: strict=block on MEDIUM+, permissive=block on HIGH+, observe=log only. " +
+				"use_* toggles chain extra detectors (regex→behavioral→LLM→VirusTotal→AI Defense). " +
+				"LLM Consensus Runs >1 re-queries and requires agreement (reduces false positives).",
+			Fields: []configField{
+				{Label: "── Skill Scanner ──", Kind: "header"},
+				{Label: "Binary", Key: "scanners.skill_scanner.binary", Kind: "string", Value: c.Scanners.SkillScanner.Binary,
+					Hint: "Path/name of the skill-scanner executable (default 'skill-scanner' on $PATH)."},
+				{Label: "Policy", Key: "scanners.skill_scanner.policy", Kind: "choice", Value: c.Scanners.SkillScanner.Policy, Options: []string{"permissive", "strict", "observe"},
+					Hint: "strict=block MEDIUM+; permissive=block HIGH+; observe=log only."},
+				{Label: "Lenient", Key: "scanners.skill_scanner.lenient", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.Lenient),
+					Hint: "Downgrade findings by one severity (dev/testing use only)."},
+				{Label: "Use LLM", Key: "scanners.skill_scanner.use_llm", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseLLM),
+					Hint: "Enable LLM-assisted classification. Requires default_llm_api_key_env to be set."},
+				{Label: "LLM Consensus Runs", Key: "scanners.skill_scanner.llm_consensus_runs", Kind: "int", Value: fmt.Sprintf("%d", c.Scanners.SkillScanner.LLMConsensus),
+					Hint: "Number of LLM runs to vote across (1-5). Higher = fewer false positives, more latency."},
+				{Label: "Use Behavioral", Key: "scanners.skill_scanner.use_behavioral", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseBehavioral),
+					Hint: "Run dynamic behavioral analysis (requires sandbox). Off on macOS (no OpenShell)."},
+				{Label: "Enable Meta", Key: "scanners.skill_scanner.enable_meta", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.EnableMeta),
+					Hint: "Scan skill metadata (name, description, version) for red flags."},
+				{Label: "Use Trigger", Key: "scanners.skill_scanner.use_trigger", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseTrigger),
+					Hint: "Enable trigger-word heuristics (detects prompt-injection payloads in skill code)."},
+				{Label: "Use VirusTotal", Key: "scanners.skill_scanner.use_virustotal", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseVirusTotal),
+					Hint: "Submit artifact hashes to VirusTotal. Needs virustotal_api_key_env."},
+				{Label: "VirusTotal Key Env", Key: "scanners.skill_scanner.virustotal_api_key_env", Kind: "password", Value: c.Scanners.SkillScanner.VirusTotalKeyEnv,
+					Hint: "Env var NAME holding the VirusTotal API key (default VIRUSTOTAL_API_KEY)."},
+				{Label: "Use AI Defense", Key: "scanners.skill_scanner.use_aidefense", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseAIDefense),
+					Hint: "Chain Cisco AI Defense cloud scan. Configure in the Cisco AI Defense section."},
+				{Label: "── MCP Scanner ──", Kind: "header"},
+				{Label: "Binary", Key: "scanners.mcp_scanner.binary", Kind: "string", Value: c.Scanners.MCPScanner.Binary,
+					Hint: "Path/name of the mcp-scanner executable."},
+				{Label: "Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers,
+					Hint: "CSV of analyzer IDs (e.g. 'yara,trigger,llm'). Blank=built-in defaults."},
+				{Label: "Scan Prompts", Key: "scanners.mcp_scanner.scan_prompts", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanPrompts),
+					Hint: "Scan MCP prompt templates for injection/PII."},
+				{Label: "Scan Resources", Key: "scanners.mcp_scanner.scan_resources", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanResources),
+					Hint: "Scan MCP resource contents (data returned by tools)."},
+				{Label: "Scan Instructions", Key: "scanners.mcp_scanner.scan_instructions", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanInstructions),
+					Hint: "Scan server-provided instructions for malicious directives."},
+				{Label: "── Plugin / CodeGuard ──", Kind: "header"},
+				{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner,
+					Hint: "Command to scan OpenClaw TS plugins (defaults to built-in)."},
+				{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard,
+					Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
+			},
+		},
 		// P2-#9: Gateway inline watcher/watchdog live alongside the
 		// gateway address settings — they're part of the same
 		// process but logically distinct sub-concerns. Kept as a
 		// separate section so operators can scroll to "just the
 		// watcher" without wading past reconnect timers etc.
-		{Name: "Gateway Watcher", Fields: []configField{
-			{Label: "Enabled", Key: "gateway.watcher.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Enabled)},
-			{Label: "── Skill ──", Kind: "header"},
-			{Label: "Enabled", Key: "gateway.watcher.skill.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.Enabled)},
-			{Label: "Take Action", Key: "gateway.watcher.skill.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.TakeAction)},
-			{Label: "Dirs", Key: "gateway.watcher.skill.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Skill.Dirs, ",")},
-			{Label: "── Plugin ──", Kind: "header"},
-			{Label: "Enabled", Key: "gateway.watcher.plugin.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Plugin.Enabled)},
-			{Label: "Take Action", Key: "gateway.watcher.plugin.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Plugin.TakeAction)},
-			{Label: "Dirs", Key: "gateway.watcher.plugin.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Plugin.Dirs, ",")},
-			{Label: "── MCP ──", Kind: "header"},
-			{Label: "Take Action", Key: "gateway.watcher.mcp.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.MCP.TakeAction)},
-		}},
-		{Name: "Gateway Watchdog", Fields: []configField{
-			{Label: "Enabled", Key: "gateway.watchdog.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watchdog.Enabled)},
-			{Label: "Interval (s)", Key: "gateway.watchdog.interval", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Watchdog.Interval)},
-			{Label: "Debounce (failures)", Key: "gateway.watchdog.debounce", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Watchdog.Debounce)},
-		}},
+		{
+			Name: "Gateway Watcher",
+			Summary: "Filesystem watcher that auto-scans new skills/plugins/MCPs as they appear.",
+			Help: "take_action=true re-runs the admission gate when a file changes (may block an already-running agent). " +
+				"Dirs: CSV of extra paths to watch beyond the claw-mode defaults.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "gateway.watcher.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Enabled),
+					Hint: "Master switch for all watchers."},
+				{Label: "── Skill ──", Kind: "header"},
+				{Label: "Enabled", Key: "gateway.watcher.skill.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.Enabled),
+					Hint: "Watch skill directories (~/.openclaw/skills, workspace/skills)."},
+				{Label: "Take Action", Key: "gateway.watcher.skill.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.TakeAction),
+					Hint: "Re-apply enforcement (block/quarantine) on changes. Off = scan-and-log only."},
+				{Label: "Dirs", Key: "gateway.watcher.skill.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Skill.Dirs, ","),
+					Hint: "CSV of extra skill directories. Claw-mode defaults are always watched."},
+				{Label: "── Plugin ──", Kind: "header"},
+				{Label: "Enabled", Key: "gateway.watcher.plugin.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Plugin.Enabled),
+					Hint: "Watch the plugin_dir for new/changed TS plugins."},
+				{Label: "Take Action", Key: "gateway.watcher.plugin.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Plugin.TakeAction),
+					Hint: "Re-apply enforcement on plugin changes."},
+				{Label: "Dirs", Key: "gateway.watcher.plugin.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Plugin.Dirs, ","),
+					Hint: "CSV of extra plugin directories."},
+				{Label: "── MCP ──", Kind: "header"},
+				{Label: "Take Action", Key: "gateway.watcher.mcp.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.MCP.TakeAction),
+					Hint: "Re-apply enforcement when an MCP server config changes (~/.openclaw/mcp.json)."},
+			},
+		},
+		{
+			Name:    "Gateway Watchdog",
+			Summary: "Health-check loop that restarts the gateway process when it becomes unresponsive.",
+			Help:    "Runs inside the sidecar. Useful if the gateway is exposed long-running (agent host).",
+			Fields: []configField{
+				{Label: "Enabled", Key: "gateway.watchdog.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watchdog.Enabled),
+					Hint: "Turn the watchdog on/off. Keep on in production."},
+				{Label: "Interval (s)", Key: "gateway.watchdog.interval", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Watchdog.Interval),
+					Hint: "Seconds between health checks (default 30)."},
+				{Label: "Debounce (failures)", Key: "gateway.watchdog.debounce", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Watchdog.Debounce),
+					Hint: "Consecutive failed checks before triggering a restart (default 3)."},
+			},
+		},
 		// Audit sinks live in their own list-based section editor (Phase
 		// 3.3). The single-key-per-row form below cannot represent the
 		// audit_sinks[] schema without losing per-sink kind/filter
 		// metadata, so we surface a read-only summary here and direct
 		// the operator to the dedicated editor.
-		{Name: "Audit Sinks", Fields: auditSinkSummaryFields(c)},
+		{
+			Name: "Audit Sinks",
+			Summary: "SIEM / OTel / Splunk / S3 fan-out for audit events. Read-only summary — " +
+				"use the dedicated list editor (menu 'Audit Sinks') or `defenseclaw audit sinks …`.",
+			Help: "Each sink has a kind, optional filters, and its own credentials. " +
+				"Secrets are stored as env-var NAMES, never inline. Unknown sinks are ignored (forward-compatible).",
+			Fields: auditSinkSummaryFields(c),
+		},
 		// Webhooks: notifier list (``webhooks[]``) is managed via the
 		// ``setup webhook`` wizard + CLI. Inline single-key edits can't
 		// represent the per-entry schema (type, secret_env, events,
 		// etc.) and re-hydrating secrets in a TUI form is out of scope,
 		// so we expose a read-only summary here and route operators to
 		// the dedicated wizard.
-		{Name: "Webhooks", Fields: webhookSummaryFields(c)},
-		{Name: "OTel", Fields: otelFields(c)},
+		{
+			Name: "Webhooks",
+			Summary: "HTTP(S) notifiers for high-severity events. Read-only summary — " +
+				"use the `setup webhook` wizard or `defenseclaw webhook …` CLI.",
+			Help: "Each entry has type (slack/teams/pagerduty/generic), URL/env, secret_env (HMAC), " +
+				"and a list of subscribed events (block, quarantine, allow, etc.).",
+			Fields: webhookSummaryFields(c),
+		},
+		{
+			Name: "OTel",
+			Summary: "OpenTelemetry exporter config (traces + logs + metrics). " +
+				"Use the Observability wizard for guided setup.",
+			Help: "endpoint accepts http(s):// or grpc://. Headers + resource attributes are read-only " +
+				"here — edit ~/.defenseclaw/config.yaml directly or via the wizard.",
+			Fields: otelFields(c),
+		},
 		// Actions matrix: three parallel 5×3 tables that drive the
 		// admission gate's per-severity response. Rather than render
 		// three separate 15-row blocks we build them with a shared
 		// helper so the column layout, option lists, and key names
 		// stay identical. When the CLI grows a new severity or
 		// action column, this is the one place to change.
-		{Name: "Skill Actions", Fields: actionMatrixFields("skill_actions", c.SkillActions)},
-		{Name: "MCP Actions", Fields: actionMatrixFields("mcp_actions", c.MCPActions)},
-		{Name: "Plugin Actions", Fields: actionMatrixFields("plugin_actions", c.PluginActions)},
-		{Name: "Watch", Fields: []configField{
-			{Label: "Debounce MS", Key: "watch.debounce_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.DebounceMs)},
-			{Label: "Auto Block", Key: "watch.auto_block", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.AutoBlock)},
-			{Label: "Allow List Bypass", Key: "watch.allow_list_bypass_scan", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.AllowListBypassScan)},
-			{Label: "Rescan Enabled", Key: "watch.rescan_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.RescanEnabled)},
-			{Label: "Rescan Interval Min", Key: "watch.rescan_interval_min", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.RescanIntervalMin)},
-		}},
+		{
+			Name:    "Skill Actions",
+			Summary: "Per-severity response matrix for skill admission gate (CLEAN → CRITICAL).",
+			Help:    "Each cell picks one of: allow, warn, block, quarantine. Changes apply on next scan; no restart needed.",
+			Fields:  actionMatrixFields("skill_actions", c.SkillActions),
+		},
+		{
+			Name:    "MCP Actions",
+			Summary: "Per-severity response matrix for MCP server admission gate.",
+			Help:    "Same shape as Skill Actions. Applied when an MCP is installed or when its config changes.",
+			Fields:  actionMatrixFields("mcp_actions", c.MCPActions),
+		},
+		{
+			Name:    "Plugin Actions",
+			Summary: "Per-severity response matrix for OpenClaw TS plugins.",
+			Help:    "Same shape as Skill Actions. Governs the plugin_dir admission gate.",
+			Fields:  actionMatrixFields("plugin_actions", c.PluginActions),
+		},
+		{
+			Name:    "Watch",
+			Summary: "Filesystem-watch tuning (shared across skill/plugin/MCP watchers).",
+			Help:    "Debounce coalesces rapid saves; rescan periodically re-evaluates installed artifacts.",
+			Fields: []configField{
+				{Label: "Debounce MS", Key: "watch.debounce_ms", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.DebounceMs),
+					Hint: "Milliseconds to wait for edits to settle before scanning (default 500)."},
+				{Label: "Auto Block", Key: "watch.auto_block", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.AutoBlock),
+					Hint: "Block on HIGH/CRITICAL findings automatically (bypasses approval timeout)."},
+				{Label: "Allow List Bypass", Key: "watch.allow_list_bypass_scan", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.AllowListBypassScan),
+					Hint: "Skip re-scanning artifacts already on the allow list (faster, but less defensive)."},
+				{Label: "Rescan Enabled", Key: "watch.rescan_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Watch.RescanEnabled),
+					Hint: "Periodically re-scan installed artifacts (catches new rule-pack findings)."},
+				{Label: "Rescan Interval Min", Key: "watch.rescan_interval_min", Kind: "int", Value: fmt.Sprintf("%d", c.Watch.RescanIntervalMin),
+					Hint: "Minutes between rescans (default 1440 = daily). Only used when Rescan Enabled."},
+			},
+		},
 		// P2-#13: OpenShell now exposes the sandbox_home + *bool
 		// tristates (auto_pair, host_networking). The tristates are
 		// rendered as kind=choice with "", "true", "false" because
@@ -400,30 +632,57 @@ func (p *SetupPanel) loadSections() {
 		// default (true)" from "explicit false". Using plain bool
 		// would collapse those states and flip the default silently
 		// the next time someone opens the form.
-		{Name: "OpenShell", Fields: []configField{
-			{Label: "Binary", Key: "openshell.binary", Kind: "string", Value: c.OpenShell.Binary},
-			{Label: "Policy Dir", Key: "openshell.policy_dir", Kind: "string", Value: c.OpenShell.PolicyDir},
-			{Label: "Mode", Key: "openshell.mode", Kind: "choice", Options: []string{"", "docker", "standalone"}, Value: c.OpenShell.Mode},
-			{Label: "Version", Key: "openshell.version", Kind: "string", Value: c.OpenShell.Version},
-			{Label: "Sandbox Home", Key: "openshell.sandbox_home", Kind: "string", Value: c.OpenShell.SandboxHome},
-			{Label: "Auto Pair (tristate)", Key: "openshell.auto_pair", Kind: "choice", Options: []string{"", "true", "false"}, Value: fmtTristateBool(c.OpenShell.AutoPair)},
-			{Label: "Host Networking (tristate)", Key: "openshell.host_networking", Kind: "choice", Options: []string{"", "true", "false"}, Value: fmtTristateBool(c.OpenShell.HostNetworking)},
-		}},
+		{
+			Name: "OpenShell",
+			Summary: "NVIDIA OpenShell sandbox integration (Linux only — macOS degrades gracefully).",
+			Help: "mode=docker uses Docker-backed sandboxes; standalone uses native namespaces. " +
+				"Tristates (auto_pair, host_networking) keep 'unset' distinct from explicit false — " +
+				"blank inherits the DefenseClaw default, which matters when we flip defaults across releases.",
+			Fields: []configField{
+				{Label: "Binary", Key: "openshell.binary", Kind: "string", Value: c.OpenShell.Binary,
+					Hint: "Path to openshell executable. Blank=look on $PATH."},
+				{Label: "Policy Dir", Key: "openshell.policy_dir", Kind: "string", Value: c.OpenShell.PolicyDir,
+					Hint: "Where DefenseClaw writes OpenShell policy YAML (default ~/.defenseclaw/openshell-policies)."},
+				{Label: "Mode", Key: "openshell.mode", Kind: "choice", Options: []string{"", "docker", "standalone"}, Value: c.OpenShell.Mode,
+					Hint: "docker=containerized; standalone=bare namespaces; blank=auto-detect."},
+				{Label: "Version", Key: "openshell.version", Kind: "string", Value: c.OpenShell.Version,
+					Hint: "Pinned OpenShell version for compatibility checks. Blank=accept any."},
+				{Label: "Sandbox Home", Key: "openshell.sandbox_home", Kind: "string", Value: c.OpenShell.SandboxHome,
+					Hint: "Root of per-sandbox state. Blank=~/.openshell/sandboxes."},
+				{Label: "Auto Pair (tristate)", Key: "openshell.auto_pair", Kind: "choice", Options: []string{"", "true", "false"}, Value: fmtTristateBool(c.OpenShell.AutoPair),
+					Hint: "Auto-pair new sandboxes with DefenseClaw. Blank=default (true)."},
+				{Label: "Host Networking (tristate)", Key: "openshell.host_networking", Kind: "choice", Options: []string{"", "true", "false"}, Value: fmtTristateBool(c.OpenShell.HostNetworking),
+					Hint: "Grant sandboxes host network access. Blank=default (false). Risky — only for dev."},
+			},
+		},
 		// Inspect LLM: the model/provider used by judge-mode guardrail
 		// evaluations. Fully editable — the api_key field is shown
 		// redacted (kind=password) so the cleartext never lands in a
 		// log/screencap even if the operator types it here. Preferring
 		// api_key_env keeps the secret in keychain-backed env vars and
 		// out of the YAML on disk.
-		{Name: "Inspect LLM", Fields: []configField{
-			{Label: "Provider", Key: "inspect_llm.provider", Kind: "choice", Options: []string{"openai", "anthropic", "azure", "cohere", "vllm", "ollama"}, Value: c.InspectLLM.Provider},
-			{Label: "Model", Key: "inspect_llm.model", Kind: "string", Value: c.InspectLLM.Model},
-			{Label: "API Key (redacted)", Key: "inspect_llm.api_key", Kind: "password", Value: c.InspectLLM.APIKey},
-			{Label: "API Key Env", Key: "inspect_llm.api_key_env", Kind: "string", Value: c.InspectLLM.APIKeyEnv},
-			{Label: "Base URL", Key: "inspect_llm.base_url", Kind: "string", Value: c.InspectLLM.BaseURL},
-			{Label: "Timeout (s)", Key: "inspect_llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.Timeout)},
-			{Label: "Max Retries", Key: "inspect_llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.MaxRetries)},
-		}},
+		{
+			Name: "Inspect LLM",
+			Summary: "Model used by `defenseclaw inspect` (manual triage) and legacy judge fallback.",
+			Help: "Prefer api_key_env over api_key to keep secrets out of config.yaml. " +
+				"The redacted api_key field lets you paste a value in-TUI — it's stored but never shown.",
+			Fields: []configField{
+				{Label: "Provider", Key: "inspect_llm.provider", Kind: "choice", Options: []string{"openai", "anthropic", "azure", "cohere", "vllm", "ollama"}, Value: c.InspectLLM.Provider,
+					Hint: "LLM provider family — picks the HTTP shape + default base URL."},
+				{Label: "Model", Key: "inspect_llm.model", Kind: "string", Value: c.InspectLLM.Model,
+					Hint: "Model identifier (e.g. gpt-4o-mini, claude-3-5-haiku-20241022)."},
+				{Label: "API Key (redacted)", Key: "inspect_llm.api_key", Kind: "password", Value: c.InspectLLM.APIKey,
+					Hint: "Inline key. Discouraged — prefer API Key Env to keep secrets out of config.yaml."},
+				{Label: "API Key Env", Key: "inspect_llm.api_key_env", Kind: "string", Value: c.InspectLLM.APIKeyEnv,
+					Hint: "Env var NAME holding the key. Takes precedence over the inline api_key when both are set."},
+				{Label: "Base URL", Key: "inspect_llm.base_url", Kind: "string", Value: c.InspectLLM.BaseURL,
+					Hint: "Override provider base URL (for Azure/vLLM/Ollama or compliance proxies)."},
+				{Label: "Timeout (s)", Key: "inspect_llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.Timeout),
+					Hint: "Per-request timeout in seconds (default 30)."},
+				{Label: "Max Retries", Key: "inspect_llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.MaxRetries),
+					Hint: "Retries with exponential backoff (default 2). 0=fail fast."},
+			},
+		},
 		// Cisco AI Defense: cloud-hosted prompt/response moderation.
 		// The timeout + endpoint knobs are straightforward, but
 		// enabled_rules is a server-provisioned allow-list that
@@ -433,14 +692,27 @@ func (p *SetupPanel) loadSections() {
 		// via `defenseclaw config set cisco_ai_defense.api_key_env …`
 		// or keychain, never by typing a live bearer into the config
 		// form.
-		{Name: "Cisco AI Defense", Fields: ciscoAIDefenseFields(c)},
+		{
+			Name: "Cisco AI Defense",
+			Summary: "Cloud-hosted prompt/response moderation. Enable via the Guardrail wizard " +
+				"(scanner_mode=remote|both).",
+			Help: "api_key and enabled_rules come from the AI Defense console and are read-only here. " +
+				"Rotate keys via `defenseclaw config set cisco_ai_defense.api_key_env …` or your keychain.",
+			Fields: ciscoAIDefenseFields(c),
+		},
 		// Firewall: Packet Filter (pf) or nft anchor paths used by
 		// the enforcement sidecar. Read-only because the paths map
 		// to system-owned files that DefenseClaw does not create —
 		// editing them in-TUI would silently orphan the existing
 		// rules. Operators should edit ~/.defenseclaw/config.yaml
 		// directly when migrating between hosts.
-		{Name: "Firewall", Fields: firewallFields(c)},
+		{
+			Name: "Firewall",
+			Summary: "Host firewall anchor paths (pf on macOS, nft on Linux). Read-only in the TUI.",
+			Help: "Paths reference system-owned files DefenseClaw doesn't create — editing them here " +
+				"would orphan active rules. Edit ~/.defenseclaw/config.yaml directly if you need to migrate hosts.",
+			Fields: firewallFields(c),
+		},
 	}
 	for si := range p.sections {
 		for fi := range p.sections[si].Fields {
@@ -1985,6 +2257,17 @@ func (p *SetupPanel) renderWizards() string {
 	b.WriteString("  " + dim.Render(wizardDescriptions[p.activeWizard]))
 	b.WriteString("\n\n")
 
+	// "What this wizard does + what you'll need" block. Multi-line so
+	// each sub-bullet (Runs/Needs/Tip) renders on its own line, giving
+	// operators a scannable checklist before they hit Configure.
+	howTo := wizardHowTo[p.activeWizard]
+	if howTo != "" {
+		for _, line := range strings.Split(howTo, "\n") {
+			b.WriteString("  " + dim.Render(line) + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	status := p.wizardStatus[p.activeWizard]
 	if status == "" {
 		status = "Not run"
@@ -2044,8 +2327,29 @@ func (p *SetupPanel) renderConfigEditor() string {
 	highlight := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("240"))
 	hoverFg := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	changed := lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	hintFg := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
+	summaryFg := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
-	visibleLines := p.height - 8
+	// Per-section orientation: a one-line summary so operators can tell
+	// at a glance what this tab owns. Rendered between the tab strip
+	// and the field list. Kept terse — detail lives in the focused-
+	// field hint below and in docs/CONFIG_FILES.md.
+	if sec.Summary != "" {
+		b.WriteString("  " + summaryFg.Render(sec.Summary) + "\n\n")
+	}
+
+	// Help footer lines subtract from the visible field list height so
+	// scrolling still stops before we overflow the panel. Kept the
+	// original p.height-8 baseline and just pay for the extra
+	// summary/help/hint rows we now render.
+	extraFooter := 2 // hint row + blank spacer above it
+	if sec.Summary != "" {
+		extraFooter += 2
+	}
+	if sec.Help != "" {
+		extraFooter += 2
+	}
+	visibleLines := p.height - 8 - extraFooter
 	if visibleLines < 5 {
 		visibleLines = 5
 	}
@@ -2118,6 +2422,25 @@ func (p *SetupPanel) renderConfigEditor() string {
 
 	b.WriteString("\n")
 
+	// Focused-field hint: show the Hint for whichever row the operator
+	// is on (activeLine preferred, falls back to mouse hover). Headers
+	// don't carry hints — fall through to the section Help paragraph
+	// instead so users who land on a divider still see context.
+	hint := ""
+	idx := p.activeLine
+	if idx < 0 || idx >= len(sec.Fields) {
+		idx = p.configHover
+	}
+	if idx >= 0 && idx < len(sec.Fields) {
+		hint = sec.Fields[idx].Hint
+	}
+	if hint == "" {
+		hint = sec.Help
+	}
+	if hint != "" {
+		b.WriteString("  " + hintFg.Render(hint) + "\n\n")
+	}
+
 	// Action bar
 	actions := []string{"[`] Wizards", "[Arrows] Navigate", "[Enter/Click] Edit/Toggle"}
 	if p.HasChanges() {
@@ -2151,40 +2474,65 @@ func (p *SetupPanel) renderConfigEditor() string {
 func otelFields(c *config.Config) []configField {
 	f := []configField{
 		{Label: "── Globals ──", Kind: "header"},
-		{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled)},
-		{Label: "Protocol", Key: "otel.protocol", Kind: "choice", Options: []string{"grpc", "http/protobuf"}, Value: c.OTel.Protocol},
-		{Label: "Endpoint", Key: "otel.endpoint", Kind: "string", Value: c.OTel.Endpoint},
-		{Label: "TLS Insecure", Key: "otel.tls.insecure", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.TLS.Insecure)},
-		{Label: "TLS CA Cert", Key: "otel.tls.ca_cert", Kind: "string", Value: c.OTel.TLS.CACert},
+		{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled),
+			Hint: "Master switch for OpenTelemetry export (traces + logs + metrics)."},
+		{Label: "Protocol", Key: "otel.protocol", Kind: "choice", Options: []string{"grpc", "http/protobuf"}, Value: c.OTel.Protocol,
+			Hint: "Default OTLP transport. grpc is binary + faster; http/protobuf is friendlier to proxies."},
+		{Label: "Endpoint", Key: "otel.endpoint", Kind: "string", Value: c.OTel.Endpoint,
+			Hint: "Default collector URL (e.g. https://otlp.collector:4317). Per-signal overrides live below."},
+		{Label: "TLS Insecure", Key: "otel.tls.insecure", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.TLS.Insecure),
+			Hint: "Skip TLS verification. Dev only — never in prod."},
+		{Label: "TLS CA Cert", Key: "otel.tls.ca_cert", Kind: "string", Value: c.OTel.TLS.CACert,
+			Hint: "Path to a CA bundle for TLS verification (PEM)."},
 		{Label: "Headers (read-only)", Key: "otel.headers.summary", Kind: "header", Value: fmtOTelHeaders(c.OTel.Headers)},
 
 		{Label: "── Traces ──", Kind: "header"},
-		{Label: "Enabled", Key: "otel.traces.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Traces.Enabled)},
-		{Label: "Sampler", Key: "otel.traces.sampler", Kind: "choice", Options: []string{"always_on", "always_off", "traceidratio", "parentbased_always_on", "parentbased_always_off", "parentbased_traceidratio"}, Value: c.OTel.Traces.Sampler},
-		{Label: "Sampler Arg", Key: "otel.traces.sampler_arg", Kind: "string", Value: c.OTel.Traces.SamplerArg},
-		{Label: "Endpoint override", Key: "otel.traces.endpoint", Kind: "string", Value: c.OTel.Traces.Endpoint},
-		{Label: "Protocol override", Key: "otel.traces.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Traces.Protocol},
-		{Label: "URL Path", Key: "otel.traces.url_path", Kind: "string", Value: c.OTel.Traces.URLPath},
+		{Label: "Enabled", Key: "otel.traces.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Traces.Enabled),
+			Hint: "Export OTel spans (one per admission-gate decision, scan, etc.)."},
+		{Label: "Sampler", Key: "otel.traces.sampler", Kind: "choice", Options: []string{"always_on", "always_off", "traceidratio", "parentbased_always_on", "parentbased_always_off", "parentbased_traceidratio"}, Value: c.OTel.Traces.Sampler,
+			Hint: "How aggressively to drop traces (always_on=keep all; traceidratio uses Sampler Arg)."},
+		{Label: "Sampler Arg", Key: "otel.traces.sampler_arg", Kind: "string", Value: c.OTel.Traces.SamplerArg,
+			Hint: "Ratio argument for traceidratio samplers (e.g. '0.1' = keep 10%)."},
+		{Label: "Endpoint override", Key: "otel.traces.endpoint", Kind: "string", Value: c.OTel.Traces.Endpoint,
+			Hint: "Traces-only collector URL. Blank=use Globals endpoint."},
+		{Label: "Protocol override", Key: "otel.traces.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Traces.Protocol,
+			Hint: "Traces-only protocol. Blank=inherit global protocol."},
+		{Label: "URL Path", Key: "otel.traces.url_path", Kind: "string", Value: c.OTel.Traces.URLPath,
+			Hint: "HTTP path suffix (e.g. /v1/traces). Ignored for grpc."},
 
 		{Label: "── Logs ──", Kind: "header"},
-		{Label: "Enabled", Key: "otel.logs.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.Enabled)},
-		{Label: "Emit individual findings", Key: "otel.logs.emit_individual_findings", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.EmitIndividualFindings)},
-		{Label: "Endpoint override", Key: "otel.logs.endpoint", Kind: "string", Value: c.OTel.Logs.Endpoint},
-		{Label: "Protocol override", Key: "otel.logs.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Logs.Protocol},
-		{Label: "URL Path", Key: "otel.logs.url_path", Kind: "string", Value: c.OTel.Logs.URLPath},
+		{Label: "Enabled", Key: "otel.logs.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.Enabled),
+			Hint: "Export OTel log records (audit events + gateway logs)."},
+		{Label: "Emit individual findings", Key: "otel.logs.emit_individual_findings", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.EmitIndividualFindings),
+			Hint: "One log record per finding (high cardinality). Off=one record per scan result."},
+		{Label: "Endpoint override", Key: "otel.logs.endpoint", Kind: "string", Value: c.OTel.Logs.Endpoint,
+			Hint: "Logs-only collector URL. Blank=use Globals endpoint."},
+		{Label: "Protocol override", Key: "otel.logs.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Logs.Protocol,
+			Hint: "Logs-only protocol. Blank=inherit global protocol."},
+		{Label: "URL Path", Key: "otel.logs.url_path", Kind: "string", Value: c.OTel.Logs.URLPath,
+			Hint: "HTTP path suffix (e.g. /v1/logs). Ignored for grpc."},
 
 		{Label: "── Metrics ──", Kind: "header"},
-		{Label: "Enabled", Key: "otel.metrics.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Metrics.Enabled)},
-		{Label: "Export interval (s)", Key: "otel.metrics.export_interval_s", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Metrics.ExportIntervalS)},
-		{Label: "Temporality", Key: "otel.metrics.temporality", Kind: "choice", Options: []string{"delta", "cumulative"}, Value: c.OTel.Metrics.Temporality},
-		{Label: "Endpoint override", Key: "otel.metrics.endpoint", Kind: "string", Value: c.OTel.Metrics.Endpoint},
-		{Label: "Protocol override", Key: "otel.metrics.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Metrics.Protocol},
-		{Label: "URL Path", Key: "otel.metrics.url_path", Kind: "string", Value: c.OTel.Metrics.URLPath},
+		{Label: "Enabled", Key: "otel.metrics.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Metrics.Enabled),
+			Hint: "Export OTel metrics (gate latency, scan counts, cache hits)."},
+		{Label: "Export interval (s)", Key: "otel.metrics.export_interval_s", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Metrics.ExportIntervalS),
+			Hint: "Seconds between metric pushes (default 60)."},
+		{Label: "Temporality", Key: "otel.metrics.temporality", Kind: "choice", Options: []string{"delta", "cumulative"}, Value: c.OTel.Metrics.Temporality,
+			Hint: "delta=Prometheus-style; cumulative=OTel-native. Some vendors (Datadog) require delta."},
+		{Label: "Endpoint override", Key: "otel.metrics.endpoint", Kind: "string", Value: c.OTel.Metrics.Endpoint,
+			Hint: "Metrics-only collector URL. Blank=use Globals endpoint."},
+		{Label: "Protocol override", Key: "otel.metrics.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Metrics.Protocol,
+			Hint: "Metrics-only protocol. Blank=inherit global protocol."},
+		{Label: "URL Path", Key: "otel.metrics.url_path", Kind: "string", Value: c.OTel.Metrics.URLPath,
+			Hint: "HTTP path suffix (e.g. /v1/metrics). Ignored for grpc."},
 
 		{Label: "── Batch ──", Kind: "header"},
-		{Label: "Max export batch size", Key: "otel.batch.max_export_batch_size", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.MaxExportBatchSize)},
-		{Label: "Scheduled delay (ms)", Key: "otel.batch.scheduled_delay_ms", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.ScheduledDelayMs)},
-		{Label: "Max queue size", Key: "otel.batch.max_queue_size", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.MaxQueueSize)},
+		{Label: "Max export batch size", Key: "otel.batch.max_export_batch_size", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.MaxExportBatchSize),
+			Hint: "Max spans/logs per OTLP request. Increase if collector back-pressures; decrease if requests time out."},
+		{Label: "Scheduled delay (ms)", Key: "otel.batch.scheduled_delay_ms", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.ScheduledDelayMs),
+			Hint: "How long the batcher waits before flushing a partial batch (default 5000)."},
+		{Label: "Max queue size", Key: "otel.batch.max_queue_size", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.MaxQueueSize),
+			Hint: "In-memory buffer size before drops start. Raise on high-throughput hosts."},
 
 		{Label: "── Resource ──", Kind: "header"},
 		{Label: "Attributes (read-only)", Key: "otel.resource.summary", Kind: "header", Value: fmtOTelResource(c.OTel.Resource.Attributes)},
@@ -2428,8 +2776,13 @@ func actionMatrixFields(prefix string, cfg any) []configField {
 		Kind:  "header",
 		Value: "file: quarantine/none · runtime: enable/disable · install: none/block/allow",
 	})
+	// Column-level hints are the same across severities (the action
+	// semantics don't change). We inject the severity into the hint
+	// so the footer text still reads naturally (e.g. "On a HIGH
+	// finding, quarantine the file...").
 	for _, sev := range severities {
 		a := view.severity(sev)
+		sevUpper := strings.ToUpper(sev)
 		fields = append(fields,
 			configField{
 				Label:   strings.ToUpper(sev[:1]) + sev[1:] + " · file",
@@ -2437,6 +2790,7 @@ func actionMatrixFields(prefix string, cfg any) []configField {
 				Kind:    "choice",
 				Value:   string(a.File),
 				Options: fileOpts,
+				Hint:    "On " + sevUpper + ": quarantine moves the artifact to quarantine_dir; none leaves it in place.",
 			},
 			configField{
 				Label:   strings.ToUpper(sev[:1]) + sev[1:] + " · runtime",
@@ -2444,6 +2798,7 @@ func actionMatrixFields(prefix string, cfg any) []configField {
 				Kind:    "choice",
 				Value:   string(a.Runtime),
 				Options: runtimeOpts,
+				Hint:    "On " + sevUpper + ": disable stops the artifact from being invoked at runtime; enable keeps it live.",
 			},
 			configField{
 				Label:   strings.ToUpper(sev[:1]) + sev[1:] + " · install",
@@ -2451,6 +2806,7 @@ func actionMatrixFields(prefix string, cfg any) []configField {
 				Kind:    "choice",
 				Value:   string(a.Install),
 				Options: installOpts,
+				Hint:    "On " + sevUpper + ": block rejects new installs; allow permits them; none defers to the operator.",
 			},
 		)
 	}

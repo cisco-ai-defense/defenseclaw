@@ -69,12 +69,18 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Gateway.AutoApprove = boolVal
 	case "gateway.tls":
 		c.Gateway.TLS = boolVal
+	case "gateway.tls_skip_verify":
+		c.Gateway.TLSSkipVerify = boolVal
 	case "gateway.reconnect_ms":
 		c.Gateway.ReconnectMs = intVal
 	case "gateway.max_reconnect_ms":
 		c.Gateway.MaxReconnectMs = intVal
+	case "gateway.approval_timeout_s":
+		c.Gateway.ApprovalTimeout = intVal
 	case "gateway.token_env":
 		c.Gateway.TokenEnv = val
+	case "gateway.device_key_file":
+		c.Gateway.DeviceKeyFile = val
 
 	// Guardrail
 	case "guardrail.enabled":
