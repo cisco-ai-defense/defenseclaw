@@ -230,16 +230,44 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OTel.TLS.CACert = val
 	case "otel.traces.enabled":
 		c.OTel.Traces.Enabled = boolVal
+	case "otel.traces.sampler":
+		c.OTel.Traces.Sampler = val
+	case "otel.traces.sampler_arg":
+		c.OTel.Traces.SamplerArg = val
 	case "otel.traces.endpoint":
 		c.OTel.Traces.Endpoint = val
+	case "otel.traces.protocol":
+		c.OTel.Traces.Protocol = val
+	case "otel.traces.url_path":
+		c.OTel.Traces.URLPath = val
 	case "otel.logs.enabled":
 		c.OTel.Logs.Enabled = boolVal
+	case "otel.logs.emit_individual_findings":
+		c.OTel.Logs.EmitIndividualFindings = boolVal
 	case "otel.logs.endpoint":
 		c.OTel.Logs.Endpoint = val
+	case "otel.logs.protocol":
+		c.OTel.Logs.Protocol = val
+	case "otel.logs.url_path":
+		c.OTel.Logs.URLPath = val
 	case "otel.metrics.enabled":
 		c.OTel.Metrics.Enabled = boolVal
+	case "otel.metrics.export_interval_s":
+		c.OTel.Metrics.ExportIntervalS = intVal
+	case "otel.metrics.temporality":
+		c.OTel.Metrics.Temporality = val
 	case "otel.metrics.endpoint":
 		c.OTel.Metrics.Endpoint = val
+	case "otel.metrics.protocol":
+		c.OTel.Metrics.Protocol = val
+	case "otel.metrics.url_path":
+		c.OTel.Metrics.URLPath = val
+	case "otel.batch.max_export_batch_size":
+		c.OTel.Batch.MaxExportBatchSize = intVal
+	case "otel.batch.scheduled_delay_ms":
+		c.OTel.Batch.ScheduledDelayMs = intVal
+	case "otel.batch.max_queue_size":
+		c.OTel.Batch.MaxQueueSize = intVal
 
 	// Watch
 	case "watch.debounce_ms":

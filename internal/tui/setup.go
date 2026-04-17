@@ -346,20 +346,7 @@ func (p *SetupPanel) loadSections() {
 		// so we expose a read-only summary here and route operators to
 		// the dedicated wizard.
 		{Name: "Webhooks", Fields: webhookSummaryFields(c)},
-		{Name: "OTel", Fields: []configField{
-			{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled)},
-			{Label: "Protocol", Key: "otel.protocol", Kind: "string", Value: c.OTel.Protocol},
-			{Label: "Endpoint", Key: "otel.endpoint", Kind: "string", Value: c.OTel.Endpoint},
-			{Label: "TLS Insecure", Key: "otel.tls.insecure", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.TLS.Insecure)},
-			{Label: "TLS CA Cert", Key: "otel.tls.ca_cert", Kind: "string", Value: c.OTel.TLS.CACert},
-			{Label: "Traces Enabled", Key: "otel.traces.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Traces.Enabled)},
-			{Label: "Traces Endpoint", Key: "otel.traces.endpoint", Kind: "string", Value: c.OTel.Traces.Endpoint},
-			{Label: "Logs Enabled", Key: "otel.logs.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.Enabled)},
-			{Label: "Logs Endpoint", Key: "otel.logs.endpoint", Kind: "string", Value: c.OTel.Logs.Endpoint},
-			{Label: "Metrics Enabled", Key: "otel.metrics.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Metrics.Enabled)},
-			{Label: "Metrics Endpoint", Key: "otel.metrics.endpoint", Kind: "string", Value: c.OTel.Metrics.Endpoint},
-			{Label: "Headers (read-only)", Key: "otel.headers.summary", Kind: "header", Value: fmtOTelHeaders(c.OTel.Headers)},
-		}},
+		{Name: "OTel", Fields: otelFields(c)},
 		// Actions matrix: three parallel 5×3 tables that drive the
 		// admission gate's per-severity response. Rather than render
 		// three separate 15-row blocks we build them with a shared
@@ -2021,6 +2008,85 @@ func (p *SetupPanel) renderConfigEditor() string {
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// otelFields builds the full OTel section — globals, TLS, per-signal
+// overrides, batch tuning, and resource summary. Keeping this in one
+// place makes it trivial to spot-check against config.OTelConfig when
+// the schema grows a new knob.
+//
+// Per-signal protocol/url_path are exposed because OTLP-HTTP
+// deployments commonly need one endpoint but three different
+// `/v1/traces`, `/v1/logs`, `/v1/metrics` paths. Batch sizing shows up
+// because it's the #1 tuning knob when an operator is trying to stop
+// a collector from back-pressuring on high-throughput gates.
+//
+// Headers and Resource.Attributes are map-shaped; we render summaries
+// here (with header values redacted so tokens don't end up in screen
+// recordings) and route mutation through the CLI wizard, which is
+// schema-aware and writes the full envelope.
+func otelFields(c *config.Config) []configField {
+	f := []configField{
+		{Label: "── Globals ──", Kind: "header"},
+		{Label: "Enabled", Key: "otel.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Enabled)},
+		{Label: "Protocol", Key: "otel.protocol", Kind: "choice", Options: []string{"grpc", "http/protobuf"}, Value: c.OTel.Protocol},
+		{Label: "Endpoint", Key: "otel.endpoint", Kind: "string", Value: c.OTel.Endpoint},
+		{Label: "TLS Insecure", Key: "otel.tls.insecure", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.TLS.Insecure)},
+		{Label: "TLS CA Cert", Key: "otel.tls.ca_cert", Kind: "string", Value: c.OTel.TLS.CACert},
+		{Label: "Headers (read-only)", Key: "otel.headers.summary", Kind: "header", Value: fmtOTelHeaders(c.OTel.Headers)},
+
+		{Label: "── Traces ──", Kind: "header"},
+		{Label: "Enabled", Key: "otel.traces.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Traces.Enabled)},
+		{Label: "Sampler", Key: "otel.traces.sampler", Kind: "choice", Options: []string{"always_on", "always_off", "traceidratio", "parentbased_always_on", "parentbased_always_off", "parentbased_traceidratio"}, Value: c.OTel.Traces.Sampler},
+		{Label: "Sampler Arg", Key: "otel.traces.sampler_arg", Kind: "string", Value: c.OTel.Traces.SamplerArg},
+		{Label: "Endpoint override", Key: "otel.traces.endpoint", Kind: "string", Value: c.OTel.Traces.Endpoint},
+		{Label: "Protocol override", Key: "otel.traces.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Traces.Protocol},
+		{Label: "URL Path", Key: "otel.traces.url_path", Kind: "string", Value: c.OTel.Traces.URLPath},
+
+		{Label: "── Logs ──", Kind: "header"},
+		{Label: "Enabled", Key: "otel.logs.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.Enabled)},
+		{Label: "Emit individual findings", Key: "otel.logs.emit_individual_findings", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Logs.EmitIndividualFindings)},
+		{Label: "Endpoint override", Key: "otel.logs.endpoint", Kind: "string", Value: c.OTel.Logs.Endpoint},
+		{Label: "Protocol override", Key: "otel.logs.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Logs.Protocol},
+		{Label: "URL Path", Key: "otel.logs.url_path", Kind: "string", Value: c.OTel.Logs.URLPath},
+
+		{Label: "── Metrics ──", Kind: "header"},
+		{Label: "Enabled", Key: "otel.metrics.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Metrics.Enabled)},
+		{Label: "Export interval (s)", Key: "otel.metrics.export_interval_s", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Metrics.ExportIntervalS)},
+		{Label: "Temporality", Key: "otel.metrics.temporality", Kind: "choice", Options: []string{"delta", "cumulative"}, Value: c.OTel.Metrics.Temporality},
+		{Label: "Endpoint override", Key: "otel.metrics.endpoint", Kind: "string", Value: c.OTel.Metrics.Endpoint},
+		{Label: "Protocol override", Key: "otel.metrics.protocol", Kind: "choice", Options: []string{"", "grpc", "http/protobuf"}, Value: c.OTel.Metrics.Protocol},
+		{Label: "URL Path", Key: "otel.metrics.url_path", Kind: "string", Value: c.OTel.Metrics.URLPath},
+
+		{Label: "── Batch ──", Kind: "header"},
+		{Label: "Max export batch size", Key: "otel.batch.max_export_batch_size", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.MaxExportBatchSize)},
+		{Label: "Scheduled delay (ms)", Key: "otel.batch.scheduled_delay_ms", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.ScheduledDelayMs)},
+		{Label: "Max queue size", Key: "otel.batch.max_queue_size", Kind: "int", Value: fmt.Sprintf("%d", c.OTel.Batch.MaxQueueSize)},
+
+		{Label: "── Resource ──", Kind: "header"},
+		{Label: "Attributes (read-only)", Key: "otel.resource.summary", Kind: "header", Value: fmtOTelResource(c.OTel.Resource.Attributes)},
+	}
+	return f
+}
+
+// fmtOTelResource renders the resource attribute map as "k=v, k=v".
+// service.* keys are shown in full since they're identity metadata
+// and never secret; any other key is also shown verbatim because
+// OTel resource attributes should not carry tokens.
+func fmtOTelResource(attrs map[string]string) string {
+	if len(attrs) == 0 {
+		return "(none)"
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+attrs[k])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // fmtOTelHeaders renders the OTel headers map as a single summary
