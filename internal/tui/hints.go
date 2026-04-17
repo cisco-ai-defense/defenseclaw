@@ -131,7 +131,7 @@ func (h *HintEngine) skillsHint(state SystemState) string {
 }
 
 func (h *HintEngine) mcpsHint(_ SystemState) string {
-	return "j/k to navigate, Enter for actions menu, \"s\" to scan, \"b\" to block, \"a\" to allow."
+	return "j/k nav · o actions (block/allow/unblock/unset) · s scan · n add server · r refresh · Enter detail."
 }
 
 func (h *HintEngine) pluginsHint(_ SystemState) string {

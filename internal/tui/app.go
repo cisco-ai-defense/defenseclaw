@@ -116,6 +116,7 @@ type Model struct {
 	detail     DetailModal
 	palette    PaletteModel
 	actionMenu ActionMenu
+	mcpSetForm MCPSetForm
 	helpOpen   bool
 
 	// Persistent command input
@@ -193,6 +194,7 @@ func New(deps Deps) Model {
 		detail:     NewDetailModal(),
 		palette:    NewPaletteModel(theme, registry, executor),
 		actionMenu: NewActionMenu(theme),
+		mcpSetForm: NewMCPSetForm(),
 
 		cmdInput: ti,
 
@@ -1124,9 +1126,16 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		if sel == nil {
 			return nil
 		}
+		// Every key surfaced by MCPActions() must map to a CLI
+		// verb or the action menu will render "Info" as a button
+		// and then silently do nothing. Info is read-only so we
+		// route through the shell list rather than `mcp info` —
+		// the CLI doesn't have a per-server inspect command yet.
 		switch key {
 		case "s":
 			return m.executor.Execute("defenseclaw", []string{"mcp", "scan", sel.URL}, "scan mcp "+sel.URL)
+		case "i":
+			return m.executor.Execute("defenseclaw", []string{"mcp", "list"}, "list mcp")
 		case "b":
 			return m.executor.Execute("defenseclaw", []string{"mcp", "block", sel.URL}, "block mcp "+sel.URL)
 		case "a":
@@ -1620,6 +1629,20 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The Set form owns the keyboard while it's open — route
+	// everything through it. On submit it emits (binary, args) and
+	// the caller dispatches through CommandExecutor so the MCP
+	// `set` verb runs out-of-process (matching every other
+	// mutation in this panel).
+	if m.mcpSetForm.IsActive() {
+		submit, bin, args, display := m.mcpSetForm.HandleKey(msg.String())
+		if submit {
+			m.mcpSetForm.Close()
+			m.activePanel = PanelActivity
+			return m, m.executor.Execute(bin, args, display)
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "j", "down":
 		m.mcps.CursorDown()
@@ -1643,11 +1666,27 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.actionMenu.Show(sel.URL, sel.Status, info, MCPActions(sel.Status))
 		}
 	case "b":
-		m.mcps.ToggleBlock()
+		// Pre-P0-#5 this called ToggleBlock() which mutated the
+		// local audit store only. That bypasses the admission gate,
+		// the gateway RPC, and the formal audit event — so a block
+		// from the TUI looked different in the log than a block from
+		// the shell. Now every mutation routes through the Python
+		// CLI, which is the single source of truth for policy.
+		if sel := m.mcps.Selected(); sel != nil {
+			cmd := m.executor.Execute("defenseclaw", []string{"mcp", "block", sel.URL}, "block mcp "+sel.URL)
+			m.activePanel = PanelActivity
+			return m, cmd
+		}
 	case "a":
-		sel := m.mcps.Selected()
-		if sel != nil && sel.Status == "blocked" {
-			m.mcps.ToggleBlock()
+		// 'a' always means "allow". The old "only if blocked"
+		// short-circuit was a footgun — operators watching a row go
+		// from blocked→allowed wanted the full allow-list entry,
+		// not an unblock-and-stop. Unblock is still reachable via
+		// 'u' in the action menu.
+		if sel := m.mcps.Selected(); sel != nil {
+			cmd := m.executor.Execute("defenseclaw", []string{"mcp", "allow", sel.URL}, "allow mcp "+sel.URL)
+			m.activePanel = PanelActivity
+			return m, cmd
 		}
 	case "s":
 		if sel := m.mcps.Selected(); sel != nil {
@@ -1655,6 +1694,12 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.activePanel = PanelActivity
 			return m, cmd
 		}
+	case "n", "+":
+		// Open the MCP Set form. The form owns its own state and
+		// on submit dispatches `defenseclaw mcp set <name> ...`.
+		// 'n' mirrors "new" (parity with skill install), '+' is a
+		// convenience alias for keyboards that preserve shift.
+		m.mcpSetForm.Open("")
 	case "r":
 		m.mcps.Refresh()
 	}
@@ -2426,6 +2471,15 @@ func (m Model) renderActivePanel() string {
 	case PanelSkills:
 		return m.skills.View()
 	case PanelMCPs:
+		// The Set form is an overlay on the MCP panel — when it's
+		// open the operator is explicitly in "add / edit" mode and
+		// the list underneath would just be visual noise. We swap
+		// the whole panel render here (rather than post-composing
+		// in renderFrame) so the form gets the full height and the
+		// status bar continues to pick up MCP-panel hints.
+		if m.mcpSetForm.IsActive() {
+			return m.mcpSetForm.View()
+		}
 		return m.mcps.View()
 	case PanelPlugins:
 		return m.plugins.View(m.width, m.height-5)
