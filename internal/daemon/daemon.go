@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
@@ -61,15 +58,24 @@ func New(dataDir string) *Daemon {
 func (d *Daemon) PIDFile() string { return d.pidFile }
 func (d *Daemon) LogFile() string { return d.logFile }
 
-// newLogWriter returns a size-rotated log writer. Old files are compressed
-// and kept in the same directory. At most 3 backups of 50 MB each.
-func (d *Daemon) newLogWriter() io.WriteCloser {
-	return &lumberjack.Logger{
-		Filename:   d.logFile,
-		MaxSize:    50, // megabytes
-		MaxBackups: 3,
-		Compress:   true,
-	}
+// openLogFileForChild opens the textual daemon log as an append-mode *os.File
+// suitable for the child process's stdout/stderr. Returning a real file (not
+// an io.Writer) lets os/exec inherit the fd directly into the child — there
+// is NO parent-side pipe or goroutine, so writes to stderr from the child
+// continue to land on disk even after the spawning CLI exits.
+//
+// That's the fix for the symptom "gateway.log stops updating once the daemon
+// detaches" / "no [guardrail] ← lines ever appear": previously Stdout/Stderr
+// were a *lumberjack.Logger, which os/exec handles via a pipe + a goroutine
+// inside the *parent*. When the parent exited the goroutine died, the pipe's
+// read end closed, and every fmt.Fprintf(os.Stderr, ...) in the gateway was
+// silently discarded with EPIPE.
+//
+// Size-based rotation of gateway.log is tracked as a follow-up; the naive
+// approach (re-wrapping in lumberjack) is what caused the EPIPE regression,
+// so rotation needs a SIGUSR1-reopen or supervised sidecar instead.
+func (d *Daemon) openLogFileForChild() (*os.File, error) {
+	return os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 }
 
 type pidInfo struct {
@@ -155,18 +161,21 @@ func (d *Daemon) Start(args []string) (int, error) {
 		return 0, fmt.Errorf("daemon: create data dir: %w", err)
 	}
 
-	logWriter := d.newLogWriter()
+	logFile, err := d.openLogFileForChild()
+	if err != nil {
+		return 0, fmt.Errorf("daemon: open log file: %w", err)
+	}
 
 	executable, err := os.Executable()
 	if err != nil {
-		_ = logWriter.Close()
+		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: get executable: %w", err)
 	}
 
 	// Open /dev/null for stdin
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
-		_ = logWriter.Close()
+		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: open /dev/null: %w", err)
 	}
 
@@ -174,8 +183,10 @@ func (d *Daemon) Start(args []string) (int, error) {
 	cmd := exec.Command(executable, args...)
 	cmd.Env = env
 	cmd.Stdin = devNull
-	cmd.Stdout = logWriter
-	cmd.Stderr = logWriter
+	// Pass *os.File so os/exec dup2's these directly into the child (fd 1/2).
+	// No pipe, no goroutine — writes survive after we (the parent CLI) exit.
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	cmd.Dir = d.dataDir
 
 	// Detach from parent process group (platform-specific)
@@ -183,7 +194,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 
 	if err := cmd.Start(); err != nil {
 		devNull.Close()
-		_ = logWriter.Close()
+		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: start process: %w", err)
 	}
 
@@ -192,16 +203,19 @@ func (d *Daemon) Start(args []string) (int, error) {
 	if err := d.writePIDInfo(pid, executable); err != nil {
 		_ = cmd.Process.Kill()
 		devNull.Close()
-		_ = logWriter.Close()
+		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: write pid: %w", err)
 	}
 
-	// Don't wait for the child — we detached it
-	go func() {
-		_ = cmd.Wait()
-		devNull.Close()
-		_ = logWriter.Close()
-	}()
+	// Close our copy of the file descriptors — the child holds its own dup'd
+	// fds now, and keeping these open in the parent only delays GC once the
+	// parent CLI exits.
+	devNull.Close()
+	_ = logFile.Close()
+
+	// We do NOT cmd.Wait() from a parent goroutine anymore: on process exit
+	// that goroutine dies too, and there's no pipe to drain. The child is
+	// reparented to init, which reaps it.
 
 	// Give the child a moment to start and verify it's running
 	time.Sleep(100 * time.Millisecond)
