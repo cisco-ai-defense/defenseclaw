@@ -54,5 +54,11 @@ categories:
     finding_id: JUDGE-INJ-TOKEN
     severity: HIGH
 
+# Strict posture: zero tolerance for single-category injection hits.
+# One high-confidence JUDGE-INJ-* finding is enough to block. Pair
+# with broader rule packs when operating in security-sensitive
+# environments. Relaxing these values defeats the posture contract
+# and must be done deliberately — see the strict-vs-default
+# regression test in internal/gateway/rulepack_posture_test.go.
 min_categories_for_high: 1
 single_category_max_severity: HIGH

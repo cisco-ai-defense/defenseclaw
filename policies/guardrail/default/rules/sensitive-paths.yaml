@@ -74,22 +74,30 @@ rules:
     confidence: 0.85
     tags: [credential, file-sensitive]
   - id: PATH-ETC-PASSWD
-    pattern: '/etc/passwd\b'
+    # Tolerates common obfuscations: "/etc/passwd" (canonical),
+    # "etc passwd" (space-separated), "etc\\passwd" (backslash),
+    # "etc slash passwd" (spelled-out slash), and "etc%2Fpasswd"
+    # (URL-encoded). Without these the LLM Judge has to carry the
+    # entire load for obfuscated prompts such as "cat my etc passwd".
+    # `pas{1,4}wd` also tolerates the common "passswd" typo
+    # (extra s) which LLMs happily resolve to /etc/passwd but
+    # a strict-spelling regex misses.
+    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)'
     title: "/etc/passwd access"
     severity: HIGH
-    confidence: 0.90
+    confidence: 0.85
     tags: [system-file]
   - id: PATH-ETC-SHADOW
-    pattern: '/etc/shadow\b'
+    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)'
     title: "/etc/shadow access"
     severity: CRITICAL
-    confidence: 0.95
+    confidence: 0.90
     tags: [system-file, credential]
   - id: PATH-ETC-SUDOERS
-    pattern: '/etc/sudoers\b'
+    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)'
     title: "/etc/sudoers access"
     severity: HIGH
-    confidence: 0.90
+    confidence: 0.85
     tags: [system-file, privilege]
   - id: PATH-PROC-ENVIRON
     pattern: '/proc/(?:\d+|self)/environ'

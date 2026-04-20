@@ -74,19 +74,19 @@ rules:
     confidence: 0.85
     tags: [credential, file-sensitive]
   - id: PATH-ETC-PASSWD
-    pattern: '/etc/passwd\b'
+    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)'
     title: "/etc/passwd access"
     severity: HIGH
     confidence: 0.90
     tags: [system-file]
   - id: PATH-ETC-SHADOW
-    pattern: '/etc/shadow\b'
+    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)'
     title: "/etc/shadow access"
     severity: CRITICAL
     confidence: 0.95
     tags: [system-file, credential]
   - id: PATH-ETC-SUDOERS
-    pattern: '/etc/sudoers\b'
+    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)'
     title: "/etc/sudoers access"
     severity: HIGH
     confidence: 0.90
