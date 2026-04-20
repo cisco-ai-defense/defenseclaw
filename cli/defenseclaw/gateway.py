@@ -14,14 +14,23 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""HTTP client for the Go orchestrator's REST API.
+"""Gateway-related helpers shared by every Click command.
 
-Communicates with the sidecar at http://{host}:{api_port}.
-Mirrors the endpoints exposed in internal/gateway/api.go.
+This module hosts two cohesive but independent responsibilities:
+
+* :class:`OrchestratorClient` — the HTTP client the Python CLI uses to
+  talk to the running sidecar at ``http://{host}:{api_port}``.  Mirrors
+  the endpoints exposed in ``internal/gateway/api.go``.
+* :func:`resolve_gateway_binary` — the single source of truth for where
+  the Python CLI looks for the ``defenseclaw-gateway`` executable on
+  disk.  See the helper's own docstring for the resolution order and
+  the UX bug that prompted it.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 from typing import Any
 
 import requests
@@ -125,3 +134,76 @@ class OrchestratorClient:
             return True
         except (requests.ConnectionError, requests.Timeout):
             return False
+
+
+# ---------------------------------------------------------------------------
+# Binary resolver
+# ---------------------------------------------------------------------------
+#
+# Every caller that needs to shell out to the Go sidecar used to write
+# ``shutil.which("defenseclaw-gateway")`` inline and treat a ``None``
+# result as "not installed".  That silently misbehaves right after
+# ``make all``: the binary is installed at ``~/.local/bin/defenseclaw-
+# gateway`` (the ``INSTALL_DIR`` in the ``Makefile``) but the user's
+# current shell hasn't picked up the ``PATH`` entry that ``scripts/
+# add-to-path.sh`` just appended to their rc file.  Opening a new shell
+# (or ``source``ing the rc file) fixes it, but we should not make users
+# debug that to run ``defenseclaw tui``.  The helper below centralises
+# the lookup and adds a fallback to the canonical install path so the
+# CLI stays usable in the very same shell that ran ``make all``.
+
+
+GATEWAY_BIN_NAME = "defenseclaw-gateway"
+
+_CANONICAL_INSTALL_DIR = os.path.join(os.path.expanduser("~"), ".local", "bin")
+
+
+def canonical_install_path() -> str:
+    """Return the canonical install path written by ``make gateway-install``.
+
+    Exposed so error messages and the upgrade command can reference the
+    exact same path instead of each hard-coding the string.
+    """
+    return os.path.join(_CANONICAL_INSTALL_DIR, GATEWAY_BIN_NAME)
+
+
+def resolve_gateway_binary() -> str | None:
+    """Return the first resolvable path to the gateway binary, or ``None``.
+
+    Resolution order:
+
+    1. ``DEFENSECLAW_GATEWAY_BIN`` — explicit env override used by
+       tests, packagers, and vendored distributions that drop the
+       binary somewhere non-standard.  Returned verbatim (even when the
+       file is missing) so the real ``exec`` error surfaces to the
+       caller rather than a generic "not found" from here.
+    2. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
+       happy path for installed releases and for users whose shell has
+       already sourced the updated rc file.
+    3. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
+       that keeps ``defenseclaw tui`` working in the same shell that
+       just ran ``make all``.
+
+    ``None`` only if every option above fails to resolve to a runnable
+    file on disk.  Callers own the user-facing error message.
+    """
+    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
+    if override:
+        return override
+
+    via_path = shutil.which(GATEWAY_BIN_NAME)
+    if via_path:
+        return via_path
+
+    canonical = canonical_install_path()
+    if _is_runnable_file(canonical):
+        return canonical
+
+    return None
+
+
+def _is_runnable_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    except OSError:
+        return False

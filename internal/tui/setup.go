@@ -311,11 +311,31 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Root of policy packs (default/strict/permissive rule sets)."},
 				{Label: "Environment", Key: "environment", Kind: "string", Value: c.Environment,
 					Hint: "Free-form label (dev/staging/prod). Forwarded as an OTel resource attribute + audit tag."},
-				{Label: "── Shared LLM ──", Kind: "header"},
-				{Label: "Default LLM API Key Env", Key: "default_llm_api_key_env", Kind: "password", Value: c.DefaultLLMAPIKeyEnv,
-					Hint: "Env var NAME holding the shared LLM key (e.g. OPENAI_API_KEY). Used as fallback by judge + scanners."},
-				{Label: "Default LLM Model", Key: "default_llm_model", Kind: "string", Value: c.DefaultLLMModel,
-					Hint: "Fallback model (e.g. gpt-4o-mini) used when a component leaves .model blank."},
+				// Unified top-level llm: block. This is the single
+				// source of truth consumed by guardrail (Bifrost), the
+				// MCP scanner, the skill scanner, and the plugin
+				// scanner via Config.ResolveLLM(...). Per-component
+				// overrides live under guardrail.judge.llm and
+				// scanners.<name>.llm; legacy default_llm_* /
+				// inspect_llm fields are accepted on load but migrated
+				// into this block — operators should edit them here.
+				{Label: "── Unified LLM (shared by scanners + guardrail) ──", Kind: "header"},
+				{Label: "Provider", Key: "llm.provider", Kind: "choice",
+					Options: []string{"anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai", "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai", "ollama", "vllm", "lm_studio"},
+					Value:   c.LLM.Provider,
+					Hint:    "LLM provider family (cloud or local). Written as provider/model to LiteLLM + Bifrost."},
+				{Label: "Model", Key: "llm.model", Kind: "string", Value: c.LLM.Model,
+					Hint: "Model identifier (e.g. claude-3-5-sonnet-20241022, gpt-4o, llama3.1). Combined with provider as provider/model."},
+				{Label: "API Key Env", Key: "llm.api_key_env", Kind: "string", Value: c.LLM.APIKeyEnv,
+					Hint: "Env var NAME holding the unified key. Leave blank to use DEFENSECLAW_LLM_KEY (the canonical default)."},
+				{Label: "API Key (redacted)", Key: "llm.api_key", Kind: "password", Value: c.LLM.APIKey,
+					Hint: "Inline key. Discouraged — prefer API Key Env so secrets stay out of config.yaml."},
+				{Label: "Base URL", Key: "llm.base_url", Kind: "string", Value: c.LLM.BaseURL,
+					Hint: "Override provider base URL (for Azure/vLLM/Ollama/LM Studio or compliance proxies)."},
+				{Label: "Timeout (s)", Key: "llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.LLM.Timeout),
+					Hint: "Per-request timeout in seconds (default 30)."},
+				{Label: "Max Retries", Key: "llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.LLM.MaxRetries),
+					Hint: "Retries with exponential backoff (default 2). 0 = fail fast."},
 			},
 		},
 		{
@@ -359,8 +379,8 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Reconnect backoff ceiling (milliseconds)."},
 				{Label: "Approval Timeout (s)", Key: "gateway.approval_timeout_s", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.ApprovalTimeout),
 					Hint: "How long the gateway waits for an operator approval before failing closed (seconds)."},
-				{Label: "Token Env", Key: "gateway.token_env", Kind: "password", Value: c.Gateway.TokenEnv,
-					Hint: "Env var NAME holding the gateway auth token (default OPENCLAW_GATEWAY_TOKEN)."},
+				{Label: "Token Env", Key: "gateway.token_env", Kind: "string", Value: c.Gateway.TokenEnv,
+					Hint: "Env var NAME holding the gateway auth token (default OPENCLAW_GATEWAY_TOKEN). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
 				{Label: "Device Key File", Key: "gateway.device_key_file", Kind: "string", Value: c.Gateway.DeviceKeyFile,
 					Hint: "Path to the per-machine private key used to derive master secrets (default ~/.defenseclaw/device.key)."},
 			},
@@ -391,8 +411,8 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Display name shown to agents (defaults to Model when blank)."},
 				{Label: "Original Model", Key: "guardrail.original_model", Kind: "string", Value: c.Guardrail.OriginalModel,
 					Hint: "What the client thought it was calling — used to spoof an unchanged model response."},
-				{Label: "API Key Env", Key: "guardrail.api_key_env", Kind: "password", Value: c.Guardrail.APIKeyEnv,
-					Hint: "Env var NAME holding the upstream API key. Proxy reads this at request time."},
+				{Label: "API Key Env", Key: "guardrail.api_key_env", Kind: "string", Value: c.Guardrail.APIKeyEnv,
+					Hint: "Env var NAME holding the upstream API key. Proxy reads the value at request time; leave blank to inherit llm.api_key_env (DEFENSECLAW_LLM_KEY)."},
 				{Label: "API Base", Key: "guardrail.api_base", Kind: "string", Value: c.Guardrail.APIBase,
 					Hint: "Upstream API URL. Leave blank for each provider's default."},
 				{Label: "Block Message", Key: "guardrail.block_message", Kind: "string", Value: c.Guardrail.BlockMessage,
@@ -421,8 +441,8 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Enable the LLM-as-a-judge scanner. Required for regex_judge and judge_first strategies."},
 				{Label: "Judge Model", Key: "guardrail.judge.model", Kind: "string", Value: c.Guardrail.Judge.Model,
 					Hint: "Judge model id, provider/model (e.g. bedrock/claude-3-5-haiku-20241022)."},
-				{Label: "Judge API Key Env", Key: "guardrail.judge.api_key_env", Kind: "password", Value: c.Guardrail.Judge.APIKeyEnv,
-					Hint: "Env var NAME holding the judge API key (falls back to default_llm_api_key_env)."},
+				{Label: "Judge API Key Env", Key: "guardrail.judge.api_key_env", Kind: "string", Value: c.Guardrail.Judge.APIKeyEnv,
+					Hint: "Env var NAME holding the judge API key. Leave blank to inherit llm.api_key_env (DEFENSECLAW_LLM_KEY) via Config.resolve_llm."},
 				{Label: "Judge API Base", Key: "guardrail.judge.api_base", Kind: "string", Value: c.Guardrail.Judge.APIBase,
 					Hint: "Override API base URL for the judge provider (blank=default)."},
 				{Label: "Judge Timeout", Key: "guardrail.judge.timeout", Kind: "string", Value: fmt.Sprintf("%.1f", c.Guardrail.Judge.Timeout),
@@ -471,7 +491,7 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Lenient", Key: "scanners.skill_scanner.lenient", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.Lenient),
 					Hint: "Downgrade findings by one severity (dev/testing use only)."},
 				{Label: "Use LLM", Key: "scanners.skill_scanner.use_llm", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseLLM),
-					Hint: "Enable LLM-assisted classification. Requires default_llm_api_key_env to be set."},
+					Hint: "Enable LLM-assisted classification. Requires the unified llm.api_key_env (DEFENSECLAW_LLM_KEY) or a per-scanner override under scanners.skill_scanner.llm.api_key_env."},
 				{Label: "LLM Consensus Runs", Key: "scanners.skill_scanner.llm_consensus_runs", Kind: "int", Value: fmt.Sprintf("%d", c.Scanners.SkillScanner.LLMConsensus),
 					Hint: "Number of LLM runs to vote across (1-5). Higher = fewer false positives, more latency."},
 				{Label: "Use Behavioral", Key: "scanners.skill_scanner.use_behavioral", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseBehavioral),
@@ -482,8 +502,8 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Enable trigger-word heuristics (detects prompt-injection payloads in skill code)."},
 				{Label: "Use VirusTotal", Key: "scanners.skill_scanner.use_virustotal", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseVirusTotal),
 					Hint: "Submit artifact hashes to VirusTotal. Needs virustotal_api_key_env."},
-				{Label: "VirusTotal Key Env", Key: "scanners.skill_scanner.virustotal_api_key_env", Kind: "password", Value: c.Scanners.SkillScanner.VirusTotalKeyEnv,
-					Hint: "Env var NAME holding the VirusTotal API key (default VIRUSTOTAL_API_KEY)."},
+				{Label: "VirusTotal Key Env", Key: "scanners.skill_scanner.virustotal_api_key_env", Kind: "string", Value: c.Scanners.SkillScanner.VirusTotalKeyEnv,
+					Hint: "Env var NAME holding the VirusTotal API key (default VIRUSTOTAL_API_KEY). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
 				{Label: "Use AI Defense", Key: "scanners.skill_scanner.use_aidefense", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseAIDefense),
 					Hint: "Chain Cisco AI Defense cloud scan. Configure in the Cisco AI Defense section."},
 				{Label: "── MCP Scanner ──", Kind: "header"},
@@ -655,32 +675,26 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Grant sandboxes host network access. Blank=default (false). Risky — only for dev."},
 			},
 		},
-		// Inspect LLM: the model/provider used by judge-mode guardrail
-		// evaluations. Fully editable — the api_key field is shown
-		// redacted (kind=password) so the cleartext never lands in a
-		// log/screencap even if the operator types it here. Preferring
-		// api_key_env keeps the secret in keychain-backed env vars and
-		// out of the YAML on disk.
+		// Legacy inspect_llm: block. Kept as a read-only section for
+		// operators upgrading from v4 — edits route through the unified
+		// "Unified LLM" section under the top-level llm: block. The
+		// config.load() migration shim copies inspect_llm → llm at
+		// load time when the unified block is empty, so these values
+		// are effectively mirrored in the live process; writing via
+		// the TUI would reintroduce drift.
 		{
-			Name:    "Inspect LLM",
-			Summary: "Model used by `defenseclaw inspect` (manual triage) and legacy judge fallback.",
-			Help: "Prefer api_key_env over api_key to keep secrets out of config.yaml. " +
-				"The redacted api_key field lets you paste a value in-TUI — it's stored but never shown.",
+			Name:    "Inspect LLM (legacy — read-only)",
+			Summary: "Deprecated v4 block. Edit the Unified LLM section instead; values here are migrated on load.",
+			Help: "Fields in this section are rendered for visibility but are read-only. Use the " +
+				"Unified LLM section (top-level llm:) to change the model, provider, or API key — " +
+				"those settings are shared by guardrail, MCP scanner, skill scanner, and plugin scanner.",
 			Fields: []configField{
-				{Label: "Provider", Key: "inspect_llm.provider", Kind: "choice", Options: []string{"openai", "anthropic", "azure", "cohere", "vllm", "ollama"}, Value: c.InspectLLM.Provider,
-					Hint: "LLM provider family — picks the HTTP shape + default base URL."},
-				{Label: "Model", Key: "inspect_llm.model", Kind: "string", Value: c.InspectLLM.Model,
-					Hint: "Model identifier (e.g. gpt-4o-mini, claude-3-5-haiku-20241022)."},
-				{Label: "API Key (redacted)", Key: "inspect_llm.api_key", Kind: "password", Value: c.InspectLLM.APIKey,
-					Hint: "Inline key. Discouraged — prefer API Key Env to keep secrets out of config.yaml."},
-				{Label: "API Key Env", Key: "inspect_llm.api_key_env", Kind: "string", Value: c.InspectLLM.APIKeyEnv,
-					Hint: "Env var NAME holding the key. Takes precedence over the inline api_key when both are set."},
-				{Label: "Base URL", Key: "inspect_llm.base_url", Kind: "string", Value: c.InspectLLM.BaseURL,
-					Hint: "Override provider base URL (for Azure/vLLM/Ollama or compliance proxies)."},
-				{Label: "Timeout (s)", Key: "inspect_llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.Timeout),
-					Hint: "Per-request timeout in seconds (default 30)."},
-				{Label: "Max Retries", Key: "inspect_llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.InspectLLM.MaxRetries),
-					Hint: "Retries with exponential backoff (default 2). 0=fail fast."},
+				{Label: "Provider", Kind: "header", Value: c.InspectLLM.Provider},
+				{Label: "Model", Kind: "header", Value: c.InspectLLM.Model},
+				{Label: "API Key Env", Kind: "header", Value: c.InspectLLM.APIKeyEnv},
+				{Label: "Base URL", Kind: "header", Value: c.InspectLLM.BaseURL},
+				{Label: "Timeout (s)", Kind: "header", Value: fmt.Sprintf("%d", c.InspectLLM.Timeout)},
+				{Label: "Max Retries", Kind: "header", Value: fmt.Sprintf("%d", c.InspectLLM.MaxRetries)},
 			},
 		},
 		// Cisco AI Defense: cloud-hosted prompt/response moderation.
@@ -1158,8 +1172,14 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 
 	base = append(base, "--non-interactive")
 
-	// For guardrail wizard, combine Provider + Model into --judge-model provider/model
+	// For guardrail wizard, combine Provider + Model into
+	// ``--judge-model provider/model``. ``judgeModelDirty`` is set when
+	// the operator actually edits either field away from its pre-filled
+	// default — without that guard, pre-filling from the unified ``llm:``
+	// block would always write an explicit ``gc.judge.model`` override
+	// instead of inheriting at runtime via resolve_llm.
 	var judgeProvider, judgeModel string
+	var judgeModelDirty bool
 
 	// Observability has different "skip" semantics: every non-bool
 	// input feeds the writer's inputs dict verbatim, so we must pass
@@ -1180,13 +1200,28 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 			// already consumed as positionals above.
 			continue
 		}
-		// The Judge section uses "Provider" and "Model" labels (under "LLM Judge" section)
+		// The Judge section uses "Provider" and "Model" labels (under
+		// "LLM Judge" section). We always capture both Values so the
+		// combined ``provider/model`` form is correct when EITHER
+		// field changes, and mark ``judgeModelDirty`` when the operator
+		// actually edited anything. If neither differs from its
+		// (possibly unified-inherited) Default, we leave the flag off
+		// entirely so ``gc.judge.model`` stays empty and resolve_llm
+		// falls through to the top-level ``llm:`` block — that's the
+		// true inherit path. See guardrailWizardFields for the
+		// pre-fill side of this contract.
 		if f.Label == "Provider" && f.Flag == "" {
 			judgeProvider = f.Value
+			if f.Value != f.Default {
+				judgeModelDirty = true
+			}
 			continue
 		}
 		if f.Label == "Model" && f.Flag == "--judge-model" {
 			judgeModel = f.Value
+			if f.Value != f.Default {
+				judgeModelDirty = true
+			}
 			continue
 		}
 
@@ -1213,7 +1248,7 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 		}
 	}
 
-	if judgeModel != "" {
+	if judgeModelDirty && judgeModel != "" {
 		combined := judgeModel
 		if judgeProvider != "" {
 			combined = judgeProvider + "/" + judgeModel
@@ -1385,6 +1420,14 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 	judgeModel := ""
 	judgeKeyEnv := ""
 	judgeBase := ""
+	// Defaults used to gate the "Value == Default → skip flag" rule in
+	// buildWizardArgs. When non-empty, these signal that the wizard is
+	// pre-filling from the unified ``llm:`` block — accepting those
+	// values verbatim should inherit (no flag sent), not override.
+	judgeProviderDefault := "bedrock"
+	judgeModelDefault := ""
+	judgeKeyEnvDefault := ""
+	judgeBaseDefault := ""
 	port := ""
 	blockMsg := ""
 	ciscoEndpoint := ""
@@ -1427,8 +1470,36 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 				judgeModel = g.Judge.Model
 			}
 		}
+		// v5 UX: judge fields fall through to the unified top-level
+		// ``llm:`` block via Config.resolve_llm("guardrail.judge"). We
+		// pre-fill BOTH ``Value`` and ``Default`` with the inherited
+		// values so the wizard renders them (visibility) but the form
+		// submission logic (see buildWizardArgs: ``Value == Default``
+		// skip) drops the flag when the operator hits Enter through
+		// the defaults. That preserves true inherit semantics — the
+		// non-interactive CLI path leaves ``gc.judge.*`` empty, and
+		// every request resolves through ``Config.resolve_llm`` so
+		// subsequent changes to ``cfg.llm.*`` propagate to the judge
+		// automatically. Only fields the operator actually *changes*
+		// become explicit ``guardrail.judge.*`` overrides.
 		judgeKeyEnv = g.Judge.APIKeyEnv
+		if judgeKeyEnv == "" && p.cfg.LLM.APIKeyEnv != "" {
+			judgeKeyEnv = p.cfg.LLM.APIKeyEnv
+			judgeKeyEnvDefault = p.cfg.LLM.APIKeyEnv
+		}
 		judgeBase = g.Judge.APIBase
+		if judgeBase == "" && p.cfg.LLM.BaseURL != "" {
+			judgeBase = p.cfg.LLM.BaseURL
+			judgeBaseDefault = p.cfg.LLM.BaseURL
+		}
+		if judgeModel == "" && p.cfg.LLM.Model != "" {
+			judgeModel = p.cfg.LLM.Model
+			judgeModelDefault = p.cfg.LLM.Model
+			if p.cfg.LLM.Provider != "" {
+				judgeProvider = p.cfg.LLM.Provider
+				judgeProviderDefault = p.cfg.LLM.Provider
+			}
+		}
 
 		cisco := &p.cfg.CiscoAIDefense
 		ciscoEndpoint = cisco.Endpoint
@@ -1453,10 +1524,10 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 
 		// ─── LLM Judge ───
 		{Label: "LLM Judge", Kind: "section"},
-		{Label: "Provider", Flag: "", Kind: "choice", Options: bifrostProviders(), Value: judgeProvider, Default: "bedrock", Hint: "LLM provider via Bifrost SDK (Tab to cycle, type to search)"},
-		{Label: "Model", Flag: "--judge-model", Kind: "string", Value: judgeModel, Hint: "e.g. us.anthropic.claude-3-5-haiku-20241022-v1:0"},
-		{Label: "API Key Env", Flag: "--judge-api-key-env", Kind: "string", Value: judgeKeyEnv, Hint: "Env var holding API key (e.g. BIFROST_API_KEY)"},
-		{Label: "API Base URL", Flag: "--judge-api-base", Kind: "string", Value: judgeBase, Hint: "Leave blank for direct provider access"},
+		{Label: "Provider", Flag: "", Kind: "choice", Options: bifrostProviders(), Value: judgeProvider, Default: judgeProviderDefault, Hint: "LLM provider via Bifrost SDK (Tab to cycle, type to search)"},
+		{Label: "Model", Flag: "--judge-model", Kind: "string", Value: judgeModel, Default: judgeModelDefault, Hint: "e.g. us.anthropic.claude-3-5-haiku-20241022-v1:0"},
+		{Label: "API Key Env", Flag: "--judge-api-key-env", Kind: "string", Value: judgeKeyEnv, Default: judgeKeyEnvDefault, Hint: "Env var NAME holding API key (default: DEFENSECLAW_LLM_KEY, inherited from unified llm: block)"},
+		{Label: "API Base URL", Flag: "--judge-api-base", Kind: "string", Value: judgeBase, Default: judgeBaseDefault, Hint: "Leave blank for direct provider access"},
 
 		// ─── Cisco AI Defense (Remote) ───
 		{Label: "Cisco AI Defense", Kind: "section"},

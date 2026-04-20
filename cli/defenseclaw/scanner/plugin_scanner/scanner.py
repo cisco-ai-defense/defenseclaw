@@ -74,6 +74,19 @@ def scan_plugin(
     else:
         policy = default_policy()
 
+    # Apply the unified LLM override on top of the loaded policy. This
+    # is the hook that lets the top-level ``llm:`` config (resolved for
+    # ``scanners.plugin``) flow in without forcing every caller to
+    # author a YAML policy file. Precedence ends up being:
+    #     CLI flag  >  scanners.plugin.llm  >  top-level llm  >  YAML policy.llm
+    # The first three are collapsed by ``Config.resolve_llm`` before
+    # reaching us; the YAML policy is what ``policy.llm`` already is,
+    # so we only need to override fields the resolver actually set.
+    if options and options.llm_override:
+        for key, value in options.llm_override.items():
+            if hasattr(policy.llm, key) and value not in (None, ""):
+                setattr(policy.llm, key, value)
+
     # Profile from options overrides policy profile
     profile = (options.profile if options and options.profile else None) or policy.profile
 

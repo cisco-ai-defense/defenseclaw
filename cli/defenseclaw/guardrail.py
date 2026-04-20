@@ -322,8 +322,46 @@ def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
 
 
 def detect_api_key_env(model: str) -> str:
-    """Guess the API key env var from the model string."""
+    """Guess the API key env var from the model string.
+
+    Routing is prefix-first: a model written as ``"bedrock/us.anthropic.claude-…"``
+    must yield the *Bedrock* bearer env var, not ``ANTHROPIC_API_KEY``,
+    because that's the provider LiteLLM will actually call. Earlier
+    revisions substring-matched ``"claude"`` and got this wrong, so
+    every Bedrock Claude model silently wrote the key into the
+    Anthropic env var while the scanner read from ``AWS_BEARER_TOKEN_BEDROCK``
+    — i.e. an empty key. The prefix check runs before any substring
+    matching to prevent that regression.
+    """
     lower = model.lower()
+    # Prefix routing (strongest signal). Order matters only within this
+    # block: bedrock before anthropic because bedrock/claude-* is a
+    # *Bedrock* call, not an Anthropic call.
+    if "/" in lower:
+        prefix = lower.split("/", 1)[0]
+        if prefix == "bedrock":
+            # LiteLLM reads the Bedrock short-term bearer token (ABSK…)
+            # from AWS_BEARER_TOKEN_BEDROCK; AWS_ACCESS_KEY_ID is the
+            # SigV4 key-id pair, which is a different auth flow.
+            # Suggesting the bearer env var keeps setup, doctor, and
+            # the Python scanner bridge (_llm_env.py) in lockstep —
+            # otherwise `setup llm` writes one env var and the
+            # scanners read another. Operators using long-term SigV4
+            # creds should override api_key_env by hand.
+            return "AWS_BEARER_TOKEN_BEDROCK"
+        if prefix == "anthropic":
+            return "ANTHROPIC_API_KEY"
+        if prefix == "azure":
+            return "AZURE_OPENAI_API_KEY"
+        if prefix == "openrouter":
+            return "OPENROUTER_API_KEY"
+        if prefix == "openai":
+            return "OPENAI_API_KEY"
+        if prefix in ("gemini", "google", "vertex_ai"):
+            return "GOOGLE_API_KEY"
+    # Substring fallback for bare model names (``claude-3``, ``gpt-4o``)
+    # — same behavior as before so existing configs without provider
+    # prefixes still resolve.
     if "anthropic" in lower or "claude" in lower:
         return "ANTHROPIC_API_KEY"
     if "azure" in lower:
@@ -335,7 +373,7 @@ def detect_api_key_env(model: str) -> str:
     if "gemini" in lower or "google" in lower:
         return "GOOGLE_API_KEY"
     if "bedrock" in lower:
-        return "AWS_ACCESS_KEY_ID"
+        return "AWS_BEARER_TOKEN_BEDROCK"
     return "LLM_API_KEY"
 
 

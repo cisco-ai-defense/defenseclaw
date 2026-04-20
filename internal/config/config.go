@@ -21,10 +21,31 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
+
+// DefenseClawLLMKeyEnv is the canonical environment variable holding the
+// unified LLM API key that powers every LLM-using component in DefenseClaw
+// (guardrail upstream, LLM judge, MCP scanner, skill scanner, plugin scanner).
+// A user only needs to set this one env var to configure LLM access across
+// the whole product. Per-component overrides are still available via the
+// nested "llm:" blocks under "scanners.*", "guardrail", and
+// "guardrail.judge". Local providers (ollama, vllm) don't need a key —
+// an empty resolved value is allowed downstream.
+const DefenseClawLLMKeyEnv = "DEFENSECLAW_LLM_KEY"
+
+// DefenseClawLLMModelEnv is the env var holding the default
+// "provider/model" string when llm.model is empty in config.yaml.
+const DefenseClawLLMModelEnv = "DEFENSECLAW_LLM_MODEL"
+
+// defaultLLMTimeoutSeconds is the HTTP timeout for LLM calls when unset.
+const defaultLLMTimeoutSeconds = 30
+
+// defaultLLMMaxRetries is the retry count for LLM calls when unset.
+const defaultLLMMaxRetries = 2
 
 type ClawMode string
 
@@ -46,31 +67,61 @@ type ClawConfig struct {
 // list; decouples OTel from any vendor-specific auto-injection. There is
 // no in-process migration shim — the v3→v4 step requires operator action,
 // and Load() emits a hard error when a legacy `splunk:` block is found.
-const CurrentConfigVersion = 4
+//
+// v5: introduces the unified `llm:` block at the top level plus optional
+// per-component `llm:` overrides under scanners.*, guardrail, and
+// guardrail.judge. The legacy `default_llm_api_key_env`,
+// `default_llm_model`, `inspect_llm`, `guardrail.model`,
+// `guardrail.api_key_env`, `guardrail.api_base`, `guardrail.judge.model`,
+// `guardrail.judge.api_key_env`, and `guardrail.judge.api_base` fields
+// are migrated in-process by migrateConfig: their values are copied
+// into the matching LLMConfig slots, then the legacy fields are left
+// alone so hand-edited configs keep round-tripping. `defenseclaw setup
+// migrate-llm` writes the canonical v5 shape back to disk.
+const CurrentConfigVersion = 5
 
 type Config struct {
-	ConfigVersion       int                  `mapstructure:"config_version"        yaml:"config_version"`
-	DefaultLLMAPIKeyEnv string               `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
-	DefaultLLMModel     string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
-	DataDir             string               `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB             string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir       string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir           string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir           string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment         string               `mapstructure:"environment"      yaml:"environment"`
-	Claw                ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	InspectLLM          InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
-	CiscoAIDefense      CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners            ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell           OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch               WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall            FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail           GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway             GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions        SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions          MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions       PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel                OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	ConfigVersion int `mapstructure:"config_version"        yaml:"config_version"`
+
+	// LLM is the top-level unified LLM configuration. Every LLM-using
+	// component (guardrail, judge, mcp scanner, skill scanner, plugin
+	// scanner) resolves its effective LLM settings by layering its
+	// own per-component `llm:` override on top of this block. The
+	// resolver is Config.ResolveLLM(path).
+	//
+	// For most deployments the operator sets exactly two things:
+	//   llm.api_key_env: DEFENSECLAW_LLM_KEY
+	//   llm.model:       openai/gpt-4o  (Bifrost + LiteLLM style)
+	// and every scanner inherits them.
+	LLM LLMConfig `mapstructure:"llm" yaml:"llm,omitempty"`
+
+	// DefaultLLMAPIKeyEnv / DefaultLLMModel are DEPRECATED (legacy v<5
+	// fields). Load() migrates populated values into c.LLM, but new
+	// code should read c.LLM / c.ResolveLLM(...) instead. The YAML
+	// tag is kept with omitempty so round-tripped configs don't
+	// resurface these after migration.
+	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
+	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
+
+	DataDir        string               `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment    string               `mapstructure:"environment"      yaml:"environment"`
+	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
@@ -79,31 +130,316 @@ type Config struct {
 	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
 }
 
-// ResolvedDefaultLLMAPIKey returns the shared LLM API key from the configured
-// env var. Components (judge, scanners) fall back to this when they have no
-// component-specific key configured.
-func (c *Config) ResolvedDefaultLLMAPIKey() string {
-	if c.DefaultLLMAPIKeyEnv != "" {
-		if v := os.Getenv(c.DefaultLLMAPIKeyEnv); v != "" {
+// LLMConfig is the unified LLM configuration block used at the top level
+// and as a per-component override under "scanners.*", "guardrail", and
+// "guardrail.judge". A LoadedConfig.ResolveLLM(path) call merges the
+// top-level defaults with the per-component override and returns the
+// resolved settings for that call site.
+//
+// Model string conventions:
+//
+//   - The required format is "provider/model-id", e.g.
+//     "openai/gpt-4o", "anthropic/claude-3-5-sonnet-20241022",
+//     "ollama/llama3.1", "vllm/mistral-7b-instruct",
+//     "azure/<deployment-name>", "gemini/gemini-2.0-flash",
+//     "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0".
+//   - This prefix is shared by the Go gateway (Bifrost routes by the
+//     "provider/" prefix) AND by the Python scanners (LiteLLM accepts
+//     the same "provider/model" shape). Passing a bare model id
+//     without a provider prefix is allowed but will emit a warning
+//     at resolution time and may behave differently between Bifrost
+//     and LiteLLM.
+//   - Recognized prefixes: openai, anthropic, azure, gemini, vertex_ai,
+//     bedrock, groq, mistral, cohere, ollama, vllm, deepseek, xai,
+//     fireworks_ai, perplexity, huggingface, replicate, openrouter,
+//     together_ai, cerebras. Anything else emits an unknown-prefix
+//     warning so typos surface immediately.
+//
+// APIKey vs APIKeyEnv:
+//
+//   - Prefer APIKeyEnv (the name of an env var) so secrets stay out of
+//     config.yaml. An empty APIKeyEnv defaults to DEFENSECLAW_LLM_KEY,
+//     the canonical env var for the whole product.
+//   - APIKey is honored as a last resort for tests and single-machine
+//     installs, but a warnPlaintextSecrets pass at Load() will log a
+//     deprecation line every time it is non-empty.
+//
+// BaseURL:
+//
+//   - Optional. When empty, providers use their library default
+//     (api.openai.com, api.anthropic.com, etc.). Set this to point at
+//     a local gateway (http://127.0.0.1:11434 for Ollama,
+//     http://127.0.0.1:8000/v1 for a local vLLM server) or a
+//     corporate proxy.
+type LLMConfig struct {
+	// Model is the "provider/model" identifier. See the package doc
+	// above for the recognized prefixes and conventions.
+	Model string `mapstructure:"model"       yaml:"model,omitempty"`
+	// Provider is optional and only read when Model has no "provider/"
+	// prefix. Prefer encoding the provider in Model directly.
+	Provider string `mapstructure:"provider"    yaml:"provider,omitempty"`
+	// APIKey is an inline secret. Prefer APIKeyEnv.
+	APIKey string `mapstructure:"api_key"     yaml:"api_key,omitempty"`
+	// APIKeyEnv is the name of the environment variable to read the
+	// API key from. Empty defaults to DEFENSECLAW_LLM_KEY.
+	APIKeyEnv string `mapstructure:"api_key_env" yaml:"api_key_env,omitempty"`
+	// BaseURL points at a non-default endpoint (local Ollama, corporate
+	// proxy, Azure endpoint). Empty means "use the provider default".
+	BaseURL string `mapstructure:"base_url"    yaml:"base_url,omitempty"`
+	// Timeout is the per-request HTTP timeout in seconds. 0 picks a
+	// sensible default (defaultLLMTimeoutSeconds).
+	Timeout int `mapstructure:"timeout"     yaml:"timeout,omitempty"`
+	// MaxRetries bounds upstream retry attempts. 0 picks a sensible
+	// default (defaultLLMMaxRetries).
+	MaxRetries int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
+}
+
+// ResolvedAPIKey returns the API key from the env var first, then the
+// inline value. Resolution order:
+//
+//  1. If APIKeyEnv is explicitly set, read from that env var and return
+//     it if non-empty.
+//  2. Otherwise, if APIKey is explicitly set inline, return it — users
+//     who hard-code a key in config.yaml expect it to win over the
+//     unified-key fallback.
+//  3. Finally, fall back to the canonical DEFENSECLAW_LLM_KEY env var
+//     so operators can set exactly one env var and have every
+//     LLM-using component inherit it.
+//
+// Mirrors cli/defenseclaw/config.py::LLMConfig.resolved_api_key — the
+// Python parity test (cli/tests/test_llm_env.py::ParityTests) asserts
+// these stay in lock-step.
+func (l LLMConfig) ResolvedAPIKey() string {
+	if l.APIKeyEnv != "" {
+		if v := strings.TrimSpace(os.Getenv(l.APIKeyEnv)); v != "" {
 			return v
 		}
+	}
+	if l.APIKey != "" {
+		return l.APIKey
+	}
+	return strings.TrimSpace(os.Getenv(DefenseClawLLMKeyEnv))
+}
+
+// EffectiveTimeout returns Timeout or the default when unset.
+func (l LLMConfig) EffectiveTimeout() int {
+	if l.Timeout > 0 {
+		return l.Timeout
+	}
+	return defaultLLMTimeoutSeconds
+}
+
+// EffectiveMaxRetries returns MaxRetries or the default when unset.
+func (l LLMConfig) EffectiveMaxRetries() int {
+	if l.MaxRetries > 0 {
+		return l.MaxRetries
+	}
+	return defaultLLMMaxRetries
+}
+
+// ProviderPrefix extracts the "provider" part of Model ("openai/gpt-4o"
+// → "openai"). Returns "" when Model is empty or lacks a slash.
+func (l LLMConfig) ProviderPrefix() string {
+	if l.Provider != "" {
+		return strings.ToLower(strings.TrimSpace(l.Provider))
+	}
+	if idx := strings.Index(l.Model, "/"); idx > 0 {
+		return strings.ToLower(l.Model[:idx])
 	}
 	return ""
 }
 
-// EffectiveInspectLLM returns InspectLLM with the shared default key applied
-// as a fallback so callers don't need to wire the fallback themselves.
-func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
-	llm := c.InspectLLM
-	if llm.ResolvedAPIKey() == "" {
-		if sharedKey := c.ResolvedDefaultLLMAPIKey(); sharedKey != "" && llm.APIKey == "" {
-			llm.APIKey = sharedKey
+// IsLocalProvider returns true when the resolved provider prefix points
+// at an on-box runtime that doesn't require an API key (ollama, vllm,
+// lm_studio). Local providers let the wizard skip the key prompt and
+// let `defenseclaw doctor` skip the "missing key" warning.
+func (l LLMConfig) IsLocalProvider() bool {
+	switch l.ProviderPrefix() {
+	case "ollama", "vllm", "lm_studio", "lmstudio", "local":
+		return true
+	}
+	if l.BaseURL != "" {
+		host := strings.ToLower(l.BaseURL)
+		if strings.Contains(host, "127.0.0.1") ||
+			strings.Contains(host, "localhost") ||
+			strings.Contains(host, "[::1]") ||
+			strings.HasPrefix(host, "unix:") {
+			return true
 		}
 	}
-	if llm.Model == "" && c.DefaultLLMModel != "" {
-		llm.Model = c.DefaultLLMModel
+	return false
+}
+
+// recognizedLLMProviders lists the "provider/" prefixes the gateway and
+// LiteLLM both understand. Unknown prefixes emit a one-shot warning.
+var recognizedLLMProviders = map[string]struct{}{
+	"openai":       {},
+	"anthropic":    {},
+	"azure":        {},
+	"gemini":       {},
+	"vertex_ai":    {},
+	"bedrock":      {},
+	"groq":         {},
+	"mistral":      {},
+	"cohere":       {},
+	"ollama":       {},
+	"vllm":         {},
+	"deepseek":     {},
+	"xai":          {},
+	"fireworks_ai": {},
+	"perplexity":   {},
+	"huggingface":  {},
+	"replicate":    {},
+	"openrouter":   {},
+	"together_ai":  {},
+	"cerebras":     {},
+	"lm_studio":    {},
+	"lmstudio":     {},
+	"local":        {},
+}
+
+// warnedPrefixes keeps one-shot-per-process warning state.
+var warnedPrefixes = map[string]struct{}{}
+
+func maybeWarnUnknownProvider(prefix, componentPath string) {
+	if prefix == "" {
+		return
 	}
-	return llm
+	if _, ok := recognizedLLMProviders[prefix]; ok {
+		return
+	}
+	key := componentPath + "\x00" + prefix
+	if _, seen := warnedPrefixes[key]; seen {
+		return
+	}
+	warnedPrefixes[key] = struct{}{}
+	log.Printf("WARNING: config: unknown LLM provider prefix %q for %s — "+
+		"expected one of openai/anthropic/azure/gemini/vertex_ai/bedrock/"+
+		"groq/mistral/cohere/ollama/vllm/deepseek/xai/fireworks_ai/"+
+		"perplexity/huggingface/replicate/openrouter/together_ai/cerebras/"+
+		"lm_studio/local. Gateway (Bifrost) and scanners (LiteLLM) may "+
+		"disagree on how to route this model",
+		prefix, componentPath)
+}
+
+// ResolveLLM returns the effective LLMConfig for the given component
+// path. The path selects which per-component override block to layer on
+// top of c.LLM. Supported paths:
+//
+//   - ""                       — returns c.LLM as-is
+//   - "scanners.mcp"           — scanners.mcp_scanner.llm
+//   - "scanners.skill"         — scanners.skill_scanner.llm
+//   - "scanners.plugin"        — scanners.plugin_scanner_llm (reserved)
+//   - "guardrail"              — guardrail.llm
+//   - "guardrail.judge"        — guardrail.judge.llm
+//
+// Merge rules: every non-empty scalar on the override wins. An unset
+// Model on the override inherits from the top level, so an operator can
+// set a single llm.model once and every scanner picks it up. The
+// returned LLMConfig always has a resolved Model: if still empty, the
+// DEFENSECLAW_LLM_MODEL env var is consulted.
+//
+// This method is the single source of truth for LLM resolution across
+// the whole Go codebase — callers must NEVER read c.InspectLLM or the
+// legacy top-level default_llm_* fields directly.
+func (c *Config) ResolveLLM(path string) LLMConfig {
+	out := c.LLM
+	var override LLMConfig
+	switch path {
+	case "":
+		// no-op
+	case "scanners.mcp":
+		override = c.Scanners.MCPScanner.LLM
+	case "scanners.skill":
+		override = c.Scanners.SkillScanner.LLM
+	case "scanners.plugin":
+		override = c.Scanners.PluginScannerLLM
+	case "guardrail":
+		override = c.Guardrail.LLM
+	case "guardrail.judge":
+		override = c.Guardrail.Judge.LLM
+	default:
+		log.Printf("WARNING: config: ResolveLLM called with unknown path %q", path)
+	}
+
+	if override.Model != "" {
+		out.Model = override.Model
+	}
+	if override.Provider != "" {
+		out.Provider = override.Provider
+	}
+	if override.APIKey != "" {
+		out.APIKey = override.APIKey
+	}
+	if override.APIKeyEnv != "" {
+		out.APIKeyEnv = override.APIKeyEnv
+	}
+	if override.BaseURL != "" {
+		out.BaseURL = override.BaseURL
+	}
+	if override.Timeout > 0 {
+		out.Timeout = override.Timeout
+	}
+	if override.MaxRetries > 0 {
+		out.MaxRetries = override.MaxRetries
+	}
+
+	if out.Model == "" {
+		if env := strings.TrimSpace(os.Getenv(DefenseClawLLMModelEnv)); env != "" {
+			out.Model = env
+		}
+	}
+
+	// Legacy fallback: honor DefaultLLMModel when top-level model is
+	// still empty after env consultation. This keeps pre-v5 configs
+	// working until operators run `defenseclaw setup migrate-llm`.
+	if out.Model == "" && c.DefaultLLMModel != "" {
+		out.Model = c.DefaultLLMModel
+	}
+	if out.APIKeyEnv == "" && c.DefaultLLMAPIKeyEnv != "" {
+		out.APIKeyEnv = c.DefaultLLMAPIKeyEnv
+	}
+
+	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
+	return out
+}
+
+// ResolvedDefaultLLMAPIKey returns the shared LLM API key from the
+// configured env var. DEPRECATED: prefer Config.ResolveLLM(path) which
+// handles the top-level + per-component override merge for each
+// component in one call.
+func (c *Config) ResolvedDefaultLLMAPIKey() string {
+	return c.ResolveLLM("").ResolvedAPIKey()
+}
+
+// EffectiveInspectLLM returns InspectLLM-shaped settings by delegating to
+// ResolveLLM. DEPRECATED: prefer c.ResolveLLM("scanners.skill") /
+// c.ResolveLLM("scanners.mcp") directly.
+func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
+	base := c.ResolveLLM("")
+	out := c.InspectLLM
+	if out.Model == "" {
+		out.Model = base.Model
+	}
+	if out.Provider == "" {
+		out.Provider = base.Provider
+	}
+	if out.APIKey == "" {
+		out.APIKey = base.APIKey
+	}
+	if out.APIKeyEnv == "" {
+		out.APIKeyEnv = base.APIKeyEnv
+	}
+	if out.BaseURL == "" {
+		out.BaseURL = base.BaseURL
+	}
+	if out.Timeout == 0 {
+		out.Timeout = base.EffectiveTimeout()
+	}
+	if out.MaxRetries == 0 {
+		out.MaxRetries = base.EffectiveMaxRetries()
+	}
+	return out
 }
 
 type OTelConfig struct {
@@ -242,18 +578,22 @@ func (c *InspectLLMConfig) ResolvedAPIKey() string {
 }
 
 type SkillScannerConfig struct {
-	Binary           string `mapstructure:"binary"                 yaml:"binary"`
-	UseLLM           bool   `mapstructure:"use_llm"                yaml:"use_llm"`
-	UseBehavioral    bool   `mapstructure:"use_behavioral"         yaml:"use_behavioral"`
-	EnableMeta       bool   `mapstructure:"enable_meta"            yaml:"enable_meta"`
-	UseTrigger       bool   `mapstructure:"use_trigger"            yaml:"use_trigger"`
-	UseVirusTotal    bool   `mapstructure:"use_virustotal"         yaml:"use_virustotal"`
-	UseAIDefense     bool   `mapstructure:"use_aidefense"          yaml:"use_aidefense"`
-	LLMConsensus     int    `mapstructure:"llm_consensus_runs"     yaml:"llm_consensus_runs"`
-	Policy           string `mapstructure:"policy"                 yaml:"policy"`
-	Lenient          bool   `mapstructure:"lenient"                yaml:"lenient"`
-	VirusTotalKey    string `mapstructure:"virustotal_api_key"     yaml:"virustotal_api_key"`
-	VirusTotalKeyEnv string `mapstructure:"virustotal_api_key_env" yaml:"virustotal_api_key_env"`
+	Binary        string `mapstructure:"binary"                 yaml:"binary"`
+	UseLLM        bool   `mapstructure:"use_llm"                yaml:"use_llm"`
+	UseBehavioral bool   `mapstructure:"use_behavioral"         yaml:"use_behavioral"`
+	EnableMeta    bool   `mapstructure:"enable_meta"            yaml:"enable_meta"`
+	UseTrigger    bool   `mapstructure:"use_trigger"            yaml:"use_trigger"`
+	UseVirusTotal bool   `mapstructure:"use_virustotal"         yaml:"use_virustotal"`
+	UseAIDefense  bool   `mapstructure:"use_aidefense"          yaml:"use_aidefense"`
+	LLMConsensus  int    `mapstructure:"llm_consensus_runs"     yaml:"llm_consensus_runs"`
+	Policy        string `mapstructure:"policy"                 yaml:"policy"`
+	Lenient       bool   `mapstructure:"lenient"                yaml:"lenient"`
+	// LLM overrides the top-level llm: block for the skill scanner.
+	// Every field is optional: unset fields inherit from Config.LLM
+	// via Config.ResolveLLM("scanners.skill").
+	LLM              LLMConfig `mapstructure:"llm"                    yaml:"llm,omitempty"`
+	VirusTotalKey    string    `mapstructure:"virustotal_api_key"     yaml:"virustotal_api_key"`
+	VirusTotalKeyEnv string    `mapstructure:"virustotal_api_key_env" yaml:"virustotal_api_key_env"`
 }
 
 // ResolvedVirusTotalKey returns the VirusTotal key from the env var (if set) or the direct value.
@@ -272,13 +612,22 @@ type MCPScannerConfig struct {
 	ScanPrompts      bool   `mapstructure:"scan_prompts"      yaml:"scan_prompts"`
 	ScanResources    bool   `mapstructure:"scan_resources"    yaml:"scan_resources"`
 	ScanInstructions bool   `mapstructure:"scan_instructions" yaml:"scan_instructions"`
+	// LLM overrides the top-level llm: block for the MCP scanner.
+	LLM LLMConfig `mapstructure:"llm"               yaml:"llm,omitempty"`
 }
 
 type ScannersConfig struct {
 	SkillScanner  SkillScannerConfig `mapstructure:"skill_scanner"  yaml:"skill_scanner"`
 	MCPScanner    MCPScannerConfig   `mapstructure:"mcp_scanner"    yaml:"mcp_scanner"`
 	PluginScanner string             `mapstructure:"plugin_scanner" yaml:"plugin_scanner"`
-	CodeGuard     string             `mapstructure:"codeguard"       yaml:"codeguard"`
+	// PluginScannerLLM overrides the top-level llm: block for the
+	// plugin scanner, which goes through LiteLLM directly (not the
+	// Bifrost gateway) to avoid burning guardrail tokens on
+	// 3rd-party plugin analysis. Lives under scanners.plugin_llm in
+	// YAML so it doesn't collide with the string-typed
+	// plugin_scanner field above.
+	PluginScannerLLM LLMConfig `mapstructure:"plugin_llm"     yaml:"plugin_llm,omitempty"`
+	CodeGuard        string    `mapstructure:"codeguard"       yaml:"codeguard"`
 }
 
 type OpenShellConfig struct {
@@ -377,17 +726,32 @@ func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 }
 
 type GuardrailConfig struct {
-	Enabled           bool        `mapstructure:"enabled"              yaml:"enabled"`
-	Mode              string      `mapstructure:"mode"                 yaml:"mode"`
-	ScannerMode       string      `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
-	Host              string      `mapstructure:"host"                 yaml:"host,omitempty"`
-	Port              int         `mapstructure:"port"                 yaml:"port"`
-	Model             string      `mapstructure:"model"                yaml:"model"`
-	ModelName         string      `mapstructure:"model_name"           yaml:"model_name"`
-	APIKeyEnv         string      `mapstructure:"api_key_env"          yaml:"api_key_env"`
-	OriginalModel     string      `mapstructure:"original_model"       yaml:"original_model"`
+	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
+	Mode        string `mapstructure:"mode"                 yaml:"mode"`
+	ScannerMode string `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
+	Host        string `mapstructure:"host"                 yaml:"host,omitempty"`
+	Port        int    `mapstructure:"port"                 yaml:"port"`
+
+	// LLM overrides the top-level llm: block for the guardrail upstream
+	// (the model that DefenseClaw proxies client traffic to). Prefer
+	// Config.ResolveLLM("guardrail") over reading LLM / legacy Model
+	// directly.
+	LLM LLMConfig `mapstructure:"llm"                  yaml:"llm,omitempty"`
+
+	// Model / ModelName / APIKeyEnv / APIBase are DEPRECATED (v<5
+	// fields). Load() copies populated values into LLM. New readers
+	// MUST go through ResolveLLM("guardrail").
+	Model     string `mapstructure:"model"                yaml:"model,omitempty"`
+	ModelName string `mapstructure:"model_name"           yaml:"model_name,omitempty"`
+	APIKeyEnv string `mapstructure:"api_key_env"          yaml:"api_key_env,omitempty"`
+	APIBase   string `mapstructure:"api_base"             yaml:"api_base,omitempty"`
+
+	// OriginalModel is NOT a secret-bearing field. It records the
+	// upstream model name the client will see rewritten onto outgoing
+	// requests (Bifrost model-routing). It is orthogonal to the
+	// LLM block.
+	OriginalModel     string      `mapstructure:"original_model"       yaml:"original_model,omitempty"`
 	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
-	APIBase           string      `mapstructure:"api_base"             yaml:"api_base"`
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
 	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
@@ -445,17 +809,30 @@ type JudgeConfig struct {
 	PIIPrompt     bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
 	PIICompletion bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
 	ToolInjection bool    `mapstructure:"tool_injection"  yaml:"tool_injection"`
-	Model         string  `mapstructure:"model"           yaml:"model"`
-	APIKeyEnv     string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
-	APIBase       string  `mapstructure:"api_base"        yaml:"api_base"`
 	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
+
+	// LLM overrides the top-level llm: block for the LLM judge. Prefer
+	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
+	// Model directly.
+	LLM LLMConfig `mapstructure:"llm"             yaml:"llm,omitempty"`
+
+	// Model / APIKeyEnv / APIBase are DEPRECATED (v<5 fields). Load()
+	// copies populated values into LLM. New readers MUST go through
+	// ResolveLLM("guardrail.judge").
+	Model     string `mapstructure:"model"           yaml:"model,omitempty"`
+	APIKeyEnv string `mapstructure:"api_key_env"     yaml:"api_key_env,omitempty"`
+	APIBase   string `mapstructure:"api_base"        yaml:"api_base,omitempty"`
 
 	Fallbacks           []string `mapstructure:"fallbacks"            yaml:"fallbacks,omitempty"`
 	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
 }
 
 // ResolvedJudgeAPIKey returns the judge API key from the env var.
+// DEPRECATED: prefer Config.ResolveLLM("guardrail.judge").ResolvedAPIKey().
 func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
+	if c.LLM.APIKeyEnv != "" || c.LLM.APIKey != "" {
+		return c.LLM.ResolvedAPIKey()
+	}
 	if c.APIKeyEnv != "" {
 		if v := os.Getenv(c.APIKeyEnv); v != "" {
 			return v
@@ -466,6 +843,7 @@ func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
 
 // ResolvedJudgeAPIKeyWithFallback returns the judge key, falling back to the
 // shared default LLM key when none is configured.
+// DEPRECATED: prefer Config.ResolveLLM("guardrail.judge").ResolvedAPIKey().
 func (c *JudgeConfig) ResolvedJudgeAPIKeyWithFallback(sharedKey string) string {
 	if k := c.ResolvedJudgeAPIKey(); k != "" {
 		return k
@@ -740,8 +1118,86 @@ func migrateConfig(cfg *Config) {
 		// no-op: hard migration is enforced at file-load time.
 	}
 
+	// v4 → v5: copy legacy LLM fields into the unified LLMConfig blocks
+	// so ResolveLLM(...) returns the same answers as the pre-v5
+	// ResolvedDefaultLLMAPIKey / EffectiveInspectLLM /
+	// ResolvedJudgeAPIKey functions. Migration is one-way and
+	// idempotent: if the v5 llm: block is already populated we
+	// leave it alone, otherwise we populate it from the legacy
+	// fields. We deliberately do NOT clear the legacy fields here
+	// so hand-edited YAML keeps round-tripping; `defenseclaw setup
+	// migrate-llm` is the tool that actually rewrites the file.
+	if cfg.ConfigVersion < 5 {
+		migrateLLMConfigFields(cfg)
+	}
+
 	cfg.ConfigVersion = CurrentConfigVersion
 	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
+}
+
+// migrateLLMConfigFields performs the v4→v5 migration: legacy fields
+// (default_llm_api_key_env, default_llm_model, inspect_llm.*,
+// guardrail.model, guardrail.api_key_env, guardrail.api_base,
+// guardrail.judge.model, guardrail.judge.api_key_env,
+// guardrail.judge.api_base) are copied into the unified LLMConfig
+// slots on the top level and per-component overrides.
+//
+// Idempotent: re-running does nothing when the v5 slots are already
+// populated.
+func migrateLLMConfigFields(cfg *Config) {
+	// Top-level: inspect_llm + default_llm_* → cfg.LLM.
+	if cfg.LLM.APIKeyEnv == "" {
+		if cfg.DefaultLLMAPIKeyEnv != "" {
+			cfg.LLM.APIKeyEnv = cfg.DefaultLLMAPIKeyEnv
+		} else if cfg.InspectLLM.APIKeyEnv != "" {
+			cfg.LLM.APIKeyEnv = cfg.InspectLLM.APIKeyEnv
+		}
+	}
+	if cfg.LLM.APIKey == "" && cfg.InspectLLM.APIKey != "" {
+		cfg.LLM.APIKey = cfg.InspectLLM.APIKey
+	}
+	if cfg.LLM.Model == "" {
+		switch {
+		case cfg.DefaultLLMModel != "":
+			cfg.LLM.Model = cfg.DefaultLLMModel
+		case cfg.InspectLLM.Model != "":
+			cfg.LLM.Model = cfg.InspectLLM.Model
+		}
+	}
+	if cfg.LLM.Provider == "" && cfg.InspectLLM.Provider != "" {
+		cfg.LLM.Provider = cfg.InspectLLM.Provider
+	}
+	if cfg.LLM.BaseURL == "" && cfg.InspectLLM.BaseURL != "" {
+		cfg.LLM.BaseURL = cfg.InspectLLM.BaseURL
+	}
+	if cfg.LLM.Timeout == 0 && cfg.InspectLLM.Timeout > 0 {
+		cfg.LLM.Timeout = cfg.InspectLLM.Timeout
+	}
+	if cfg.LLM.MaxRetries == 0 && cfg.InspectLLM.MaxRetries > 0 {
+		cfg.LLM.MaxRetries = cfg.InspectLLM.MaxRetries
+	}
+
+	// Guardrail upstream.
+	if cfg.Guardrail.LLM.Model == "" && cfg.Guardrail.Model != "" {
+		cfg.Guardrail.LLM.Model = cfg.Guardrail.Model
+	}
+	if cfg.Guardrail.LLM.APIKeyEnv == "" && cfg.Guardrail.APIKeyEnv != "" {
+		cfg.Guardrail.LLM.APIKeyEnv = cfg.Guardrail.APIKeyEnv
+	}
+	if cfg.Guardrail.LLM.BaseURL == "" && cfg.Guardrail.APIBase != "" {
+		cfg.Guardrail.LLM.BaseURL = cfg.Guardrail.APIBase
+	}
+
+	// Judge.
+	if cfg.Guardrail.Judge.LLM.Model == "" && cfg.Guardrail.Judge.Model != "" {
+		cfg.Guardrail.Judge.LLM.Model = cfg.Guardrail.Judge.Model
+	}
+	if cfg.Guardrail.Judge.LLM.APIKeyEnv == "" && cfg.Guardrail.Judge.APIKeyEnv != "" {
+		cfg.Guardrail.Judge.LLM.APIKeyEnv = cfg.Guardrail.Judge.APIKeyEnv
+	}
+	if cfg.Guardrail.Judge.LLM.BaseURL == "" && cfg.Guardrail.Judge.APIBase != "" {
+		cfg.Guardrail.Judge.LLM.BaseURL = cfg.Guardrail.Judge.APIBase
+	}
 }
 
 // detectLegacySplunk returns the first populated splunk.* key found in the
@@ -779,8 +1235,11 @@ func warnPlaintextSecrets(cfg *Config) {
 			"migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
 			section, field, envDefault, section, field, envDefault)
 	}
+	if cfg.LLM.APIKey != "" {
+		warn("llm", "api_key", DefenseClawLLMKeyEnv)
+	}
 	if cfg.InspectLLM.APIKey != "" {
-		warn("inspect_llm", "api_key", "LLM_API_KEY")
+		warn("inspect_llm", "api_key", DefenseClawLLMKeyEnv)
 	}
 	if cfg.CiscoAIDefense.APIKey != "" {
 		warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
@@ -822,6 +1281,21 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("claw.home_dir", "~/.openclaw")
 	viper.SetDefault("claw.config_file", "~/.openclaw/openclaw.json")
 
+	// Unified v5 LLM block. DEFENSECLAW_LLM_KEY / DEFENSECLAW_LLM_MODEL
+	// are the canonical env vars — both are bound below so operators can
+	// set them in ~/.defenseclaw/.env without touching config.yaml.
+	viper.SetDefault("llm.provider", "")
+	viper.SetDefault("llm.model", "")
+	viper.SetDefault("llm.api_key", "")
+	viper.SetDefault("llm.api_key_env", DefenseClawLLMKeyEnv)
+	viper.SetDefault("llm.base_url", "")
+	viper.SetDefault("llm.timeout", defaultLLMTimeoutSeconds)
+	viper.SetDefault("llm.max_retries", defaultLLMMaxRetries)
+	_ = viper.BindEnv("llm.api_key_env", DefenseClawLLMKeyEnv)
+	_ = viper.BindEnv("llm.model", DefenseClawLLMModelEnv)
+
+	// Legacy inspect_llm defaults preserved for back-compat with
+	// pre-v5 hand-edited configs. New writers should emit `llm:`.
 	viper.SetDefault("inspect_llm.provider", "")
 	viper.SetDefault("inspect_llm.model", "")
 	viper.SetDefault("inspect_llm.api_key", "")

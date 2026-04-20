@@ -288,24 +288,60 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
+    """Verify the unified LLM key used by the guardrail proxy.
+
+    In v5 the guardrail's LLM settings come from
+    ``Config.resolve_llm("guardrail")`` — which layers
+    ``guardrail.llm`` on top of the top-level ``llm:`` block. We
+    read from there rather than the legacy ``guardrail.api_key_env``/
+    ``guardrail.model`` fields so edits to the unified block are
+    honored without re-running ``setup``.
+
+    Local providers (Ollama, vLLM, LM Studio) and localhost base URLs
+    skip the API-key check entirely — these runtimes don't
+    authenticate incoming requests, so demanding a key would surface
+    a misleading failure. We still warn if the model string is
+    empty, because without it Bifrost has nothing to route to.
+    """
     gc = cfg.guardrail
     if not gc.enabled:
         _emit("skip", "LLM API key", "guardrail disabled", r=r)
         return
 
-    env_name = gc.api_key_env
-    if not env_name:
-        _emit("fail", "LLM API key", "api_key_env not configured", r=r)
+    llm = cfg.resolve_llm("guardrail")
+    model = llm.model or gc.model or ""
+
+    if llm.is_local_provider():
+        base = llm.base_url or "(default)"
+        if not model:
+            _emit(
+                "warn", "LLM API key",
+                f"local provider '{llm.provider}' configured (base_url={base}) but no model set",
+                r=r,
+            )
+        else:
+            _emit(
+                "skip", "LLM API key",
+                f"local provider '{llm.provider}' needs no key (base_url={base}, model={model})",
+                r=r,
+            )
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
-    api_key = _resolve_api_key(env_name, dotenv_path)
+    # Pre-v5 configs stash the env name on ``guardrail.api_key_env``;
+    # Config.load() migrates that into cfg.guardrail.llm.api_key_env
+    # so resolve_llm() picks it up, but tests (and any in-memory
+    # Config constructed without load()) may still rely on the
+    # legacy field. Fall back here so those paths don't spuriously
+    # report "api_key_env not configured".
+    env_name = llm.api_key_env or gc.api_key_env or "DEFENSECLAW_LLM_KEY"
+    api_key = llm.resolved_api_key()
+    if not api_key:
+        api_key = _resolve_api_key(env_name, dotenv_path)
 
     if not api_key:
         _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})", r=r)
         return
-
-    model = gc.model or ""
     # Route by *provider prefix* (the segment before the first "/"). The
     # env-name prefix is a last-resort fallback ONLY used when the model
     # string is empty or has no provider prefix — routing on env name can
@@ -322,11 +358,15 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         _verify_anthropic(api_key, r, model)
     elif provider == "openai":
         _verify_openai(api_key, r)
+    elif provider == "bedrock":
+        _verify_bedrock(api_key, r)
     elif provider == "" and env_name.startswith("ANTHROPIC"):
         # Model string missing — fall back to env name prefix.
         _verify_anthropic(api_key, r, model)
     elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
+    elif provider == "" and env_name.startswith("AWS_BEARER_TOKEN_BEDROCK"):
+        _verify_bedrock(api_key, r)
     else:
         _emit(
             "pass", "LLM API key",
@@ -409,6 +449,94 @@ def _verify_openai(api_key: str, r: _DoctorResult) -> None:
         _emit("warn", "LLM API key (OpenAI)", f"could not reach api.openai.com: {body}", r=r)
     else:
         _emit("fail", "LLM API key (OpenAI)", f"HTTP {code}", r=r)
+
+
+# Region used when we have to probe Bedrock but no region is pinned on
+# the resolved LLM config or in the environment. us-east-1 has the
+# broadest Bedrock foundation-model availability, which is what the
+# probe queries — a key that's valid in another region still returns
+# 200 here because the listFoundationModels endpoint is bearer-token
+# authed, not region-scoped auth. Operators running Bedrock in an
+# isolated partition (GovCloud etc.) should override via AWS_REGION.
+_BEDROCK_DEFAULT_REGION = "us-east-1"
+
+
+def _bedrock_region() -> str:
+    for env_var in ("AWS_REGION", "AWS_REGION_NAME", "AWS_DEFAULT_REGION"):
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            return val
+    return _BEDROCK_DEFAULT_REGION
+
+
+def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
+    """Verify an AWS Bedrock API key (short-term ABSK bearer token).
+
+    LiteLLM and the DefenseClaw scanner bridge authenticate to Bedrock
+    via ``Authorization: Bearer <ABSK…>`` — the short-term API key
+    format AWS introduced alongside GA of Bedrock. That's a different
+    auth path from the long-term SigV4 ``AKIA…`` key-id / secret pair:
+
+    * ``ABSK…``  → bearer token, verifiable with a single GET.
+    * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
+                  which would pull in botocore just for the doctor.
+                  Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
+    * anything else → shape we don't recognize; pass with a note, same
+                      as the generic fallback in ``_check_llm_api_key``.
+
+    The foundation-models list endpoint is a cheap GET that returns
+    the list of models enabled for the account. ``200`` confirms auth
+    is working end-to-end; ``401/403`` flags a bad or scoped-out key
+    before the operator discovers it at scan time.
+    """
+    if api_key.startswith("AKIA") or api_key.startswith("ASIA"):
+        _emit(
+            "warn", "LLM API key (Bedrock)",
+            "AWS SigV4 credentials detected — doctor skips signed probes; "
+            "run 'aws sts get-caller-identity' to verify.",
+            r=r,
+        )
+        return
+    if not api_key.startswith("ABSK"):
+        _emit(
+            "pass", "LLM API key (Bedrock)",
+            f"key is set ({len(api_key)} chars) but shape not recognized; "
+            "assuming operator knows what they're doing.",
+            r=r,
+        )
+        return
+    region = _bedrock_region()
+    url = f"https://bedrock.{region}.amazonaws.com/foundation-models"
+    code, body = _http_probe(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=10.0,
+    )
+    if code == 200:
+        _emit("pass", "LLM API key (Bedrock)", f"authenticated successfully ({region})", r=r)
+    elif code == 401:
+        _emit("fail", "LLM API key (Bedrock)", "invalid key (401 Unauthorized)", r=r)
+    elif code == 403:
+        # 403 from Bedrock usually means the token is valid but the
+        # IAM policy/resource doesn't grant bedrock:ListFoundationModels.
+        # That's a policy problem, not a key problem — downgrade to warn
+        # so the scan still runs (the scanner uses InvokeModel, which
+        # may be permitted even when List is not).
+        _emit(
+            "warn", "LLM API key (Bedrock)",
+            "403 Forbidden — key authenticates but lacks "
+            "bedrock:ListFoundationModels; InvokeModel may still work.",
+            r=r,
+        )
+    elif code == 0:
+        _emit(
+            "warn", "LLM API key (Bedrock)",
+            f"could not reach bedrock.{region}.amazonaws.com: {body}",
+            r=r,
+        )
+    else:
+        _emit("fail", "LLM API key (Bedrock)", f"HTTP {code}", r=r)
 
 
 def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:

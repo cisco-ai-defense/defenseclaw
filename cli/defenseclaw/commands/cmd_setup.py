@@ -29,6 +29,7 @@ import subprocess
 
 import click
 
+from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
@@ -52,6 +53,221 @@ setup.add_command(observability)
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
 setup.add_command(webhook)
+
+
+# --------------------------------------------------------------------------
+# `defenseclaw setup migrate-llm`
+# --------------------------------------------------------------------------
+# Rewrites ~/.defenseclaw/config.yaml to scrub legacy v4 LLM fields
+# (``inspect_llm:``, ``default_llm_*``, and the bare
+# ``guardrail.{model,api_key_env,api_base}`` / ``guardrail.judge.*``
+# slots) after the values have been copied into the unified top-level
+# ``llm:`` block. The load-time migration in
+# :func:`defenseclaw.config._migrate_llm_fields` is idempotent and
+# additive — it never clears the legacy slots — so operators upgrading
+# from v4 will keep round-tripping a redundant copy of the same values
+# in their YAML until they run this command.
+#
+# Safety posture: we snapshot the current file to ``config.yaml.bak``
+# before writing so operators always have a one-command undo. The
+# command is intentionally idempotent; running it twice is a no-op and
+# is safe inside CI pipelines.
+@setup.command("migrate-llm")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would change without modifying config.yaml.",
+)
+@click.option(
+    "--no-backup",
+    is_flag=True,
+    default=False,
+    help="Skip writing config.yaml.bak (advanced; use only when orchestrated by a VCS).",
+)
+@pass_ctx
+def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
+    """Rewrite config.yaml to the unified v5 LLM shape.
+
+    Copies ``inspect_llm``, ``default_llm_*``, and legacy ``guardrail``
+    fields into ``llm:`` (if not already merged), then clears the v4
+    slots so a round-trip through ``config.load()``/``save()`` produces
+    a minimal YAML. Writes a ``config.yaml.bak`` alongside the live
+    file unless ``--no-backup`` is passed.
+    """
+    import shutil
+
+    cfg = app.cfg
+    # Surface what we're about to remove before touching disk, so
+    # operators eyeballing CI logs can sanity-check the change.
+    legacy_summary: list[str] = []
+    il = getattr(cfg, "inspect_llm", None)
+    if il is not None and (il.model or il.provider or il.api_key_env or il.api_key or il.base_url):
+        legacy_summary.append(
+            f"inspect_llm: provider={il.provider!r} model={il.model!r} "
+            f"api_key_env={il.api_key_env!r} base_url={il.base_url!r}"
+        )
+    if cfg.default_llm_model:
+        legacy_summary.append(f"default_llm_model={cfg.default_llm_model!r}")
+    if cfg.default_llm_api_key_env:
+        legacy_summary.append(f"default_llm_api_key_env={cfg.default_llm_api_key_env!r}")
+    if cfg.guardrail.model or cfg.guardrail.api_key_env or cfg.guardrail.api_base:
+        legacy_summary.append(
+            f"guardrail: model={cfg.guardrail.model!r} "
+            f"api_key_env={cfg.guardrail.api_key_env!r} api_base={cfg.guardrail.api_base!r}"
+        )
+    jc = cfg.guardrail.judge
+    if jc.model or jc.api_key_env or jc.api_base:
+        legacy_summary.append(
+            f"guardrail.judge: model={jc.model!r} api_key_env={jc.api_key_env!r} api_base={jc.api_base!r}"
+        )
+
+    if not legacy_summary:
+        click.echo("  Config already in v5 shape — nothing to migrate.")
+        # Still scrub the one-shot warning flag so a follow-up load
+        # doesn't re-emit it in the same process.
+        if hasattr(cfg, "_llm_migration_warned"):
+            cfg._llm_migration_warned = False  # type: ignore[attr-defined]
+        return
+
+    click.echo("  Legacy v4 LLM fields detected:")
+    for line in legacy_summary:
+        click.echo(f"    - {line}")
+    click.echo()
+    click.echo("  Unified llm: block (post-migration):")
+    llm = cfg.llm
+    click.echo(f"    provider={llm.provider!r}, model={llm.model!r}, api_key_env={llm.api_key_env!r}")
+    click.echo(f"    base_url={llm.base_url!r}, timeout={llm.timeout}, max_retries={llm.max_retries}")
+    click.echo()
+
+    if dry_run:
+        click.echo("  --dry-run: no files modified.")
+        return
+
+    # Backup before we mutate. We use the app's configured data_dir
+    # rather than os.path.expanduser so this works inside sandboxed
+    # tests and portable installs.
+    cfg_path = os.path.join(cfg.data_dir, "config.yaml")
+    if not no_backup and os.path.exists(cfg_path):
+        backup_path = cfg_path + ".bak"
+        shutil.copy2(cfg_path, backup_path)
+        click.echo(f"  Backed up {cfg_path} -> {backup_path}")
+
+    # Clear the legacy slots. This mirrors _clear_legacy_llm_fields()
+    # but is kept inline so the command has no hidden behavior — an
+    # operator reading the source sees exactly which fields are
+    # cleared.
+    if il is not None:
+        il.provider = ""
+        il.model = ""
+        il.api_key = ""
+        il.api_key_env = ""
+        il.base_url = ""
+        il.timeout = 0
+        il.max_retries = 0
+    cfg.default_llm_model = ""
+    cfg.default_llm_api_key_env = ""
+    cfg.guardrail.model = ""
+    cfg.guardrail.api_key_env = ""
+    cfg.guardrail.api_base = ""
+    jc.model = ""
+    jc.api_key_env = ""
+    jc.api_base = ""
+
+    cfg.save()
+    click.echo(f"  Wrote {cfg_path} (v5 shape).")
+
+
+# --------------------------------------------------------------------------
+# `defenseclaw setup llm`
+# --------------------------------------------------------------------------
+# First-class CLI entry point for (re)configuring the unified top-level
+# ``llm:`` block. Before this subcommand existed, operators had three
+# partial paths to the same config:
+#
+#   * ``scripts/setup-llm.sh`` — shell script invoked by ``make all``,
+#     but invisible from ``defenseclaw --help``.
+#   * ``defenseclaw setup skill-scanner`` / ``mcp-scanner`` — prompt for
+#     LLM settings as a side effect, but scoped to that scanner.
+#   * Hand-editing ``~/.defenseclaw/.env`` + ``config.yaml``.
+#
+# Exposing ``_configure_llm`` as ``defenseclaw setup llm`` gives the
+# unified configurator a stable, discoverable surface. It's a thin
+# wrapper — the prompt logic lives in ``_configure_llm`` so the init
+# wizard and this command stay in lockstep.
+@setup.command("llm")
+@click.option(
+    "--show",
+    is_flag=True,
+    default=False,
+    help="Print the current unified LLM config and exit (no prompts).",
+)
+@pass_ctx
+def setup_llm(app: AppContext, show: bool) -> None:
+    """Configure the unified top-level ``llm:`` block.
+
+    Prompts for provider, model, API key env var, and base URL, writing
+    the values to ``~/.defenseclaw/config.yaml`` (config) and
+    ``~/.defenseclaw/.env`` (secret, chmod 0600). Every LLM-using
+    component (guardrail judge, MCP scanner, skill scanner, plugin
+    scanner) resolves through this block via ``Config.resolve_llm``, so
+    a single edit reroutes them all.
+
+    Use ``--show`` to inspect the current resolved values without
+    modifying anything. This is the CLI equivalent of
+    ``scripts/setup-llm.sh`` and the LLM section of ``defenseclaw init``.
+    """
+    cfg = app.cfg
+    llm = cfg.llm
+
+    if show:
+        resolved = cfg.resolve_llm("")
+        click.echo()
+        click.echo("  Unified LLM configuration")
+        click.echo("  ─────────────────────────")
+        click.echo(f"    provider:    {resolved.provider or '(unset)'}")
+        click.echo(f"    model:       {resolved.model or '(unset)'}")
+        key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+        key_val = resolved.resolved_api_key()
+        key_state = _mask(key_val) if key_val else "(not set)"
+        click.echo(f"    api_key_env: {key_env} = {key_state}")
+        if resolved.base_url:
+            click.echo(f"    base_url:    {resolved.base_url}")
+        click.echo(f"    timeout:     {resolved.timeout}s")
+        click.echo(f"    max_retries: {resolved.max_retries}")
+        click.echo()
+        click.echo(
+            "  To change: run 'defenseclaw setup llm' without --show.",
+        )
+        return
+
+    click.echo()
+    click.echo("  Unified LLM configuration")
+    click.echo("  ─────────────────────────")
+    click.echo(
+        "  Every LLM-using component (guardrail judge, MCP scanner,"
+    )
+    click.echo(
+        "  skill scanner, plugin scanner) resolves through this block"
+    )
+    click.echo(
+        "  by default. Per-component overrides live under"
+    )
+    click.echo(
+        "  scanners.*.llm / guardrail.{llm,judge.llm}."
+    )
+    click.echo()
+    if llm.model:
+        click.echo(f"  Current: model={llm.model}, api_key_env={llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}")
+        click.echo()
+
+    _configure_llm(cfg, cfg.data_dir)
+    cfg.save()
+
+    click.echo()
+    click.echo(f"  ✓ Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+    click.echo()
+    click.echo("  Next: defenseclaw doctor       # verify the unified LLM is reachable")
 
 
 @setup.command("skill-scanner")
@@ -82,13 +298,15 @@ def setup_skill_scanner(
     Interactively configure how skill-scanner runs. Enables LLM analysis,
     behavioral dataflow analysis, meta-analyzer filtering, and more.
 
-    LLM and Cisco AI Defense settings are stored in the shared
-    inspect_llm and cisco_ai_defense config sections.
+    LLM settings land in the unified top-level ``llm:`` block (see
+    ``Config.resolve_llm`` for the merge semantics) so skill, MCP,
+    plugin, and guardrail scanners all share the same defaults. Cisco
+    AI Defense settings continue to live in ``cisco_ai_defense``.
 
     Use --non-interactive with flags for CI/scripted configuration.
     """
     sc = app.cfg.scanners.skill_scanner
-    llm = app.cfg.inspect_llm
+    llm = app.cfg.llm
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
@@ -115,7 +333,13 @@ def setup_skill_scanner(
         if lenient is not None:
             sc.lenient = lenient
     else:
-        _interactive_setup(sc, llm, aid, app.cfg.data_dir)
+        _interactive_setup(sc, llm, aid, app.cfg)
+
+    # In non-interactive mode, a successful write to cfg.llm should
+    # still scrub the legacy inspect_llm block so the YAML converges on
+    # the v5 shape.
+    if non_interactive and (llm.provider or llm.model):
+        _clear_legacy_llm_fields(app.cfg)
 
     app.cfg.save()
     _print_summary(sc, llm, aid)
@@ -140,7 +364,14 @@ def setup_skill_scanner(
         app.logger.log_action("setup-skill-scanner", "config", " ".join(parts))
 
 
-def _interactive_setup(sc, llm, aid, data_dir: str) -> None:
+def _interactive_setup(sc, llm, aid, cfg) -> None:
+    """Skill scanner interactive wizard.
+
+    Takes the parent ``cfg`` rather than just ``data_dir`` so the LLM
+    helper can clean up legacy ``inspect_llm`` fields and so other
+    cross-cutting concerns stay addressable without widening callers.
+    """
+    data_dir = cfg.data_dir
     click.echo()
     click.echo("  Skill Scanner Configuration")
     click.echo("  ────────────────────────────")
@@ -151,14 +382,16 @@ def _interactive_setup(sc, llm, aid, data_dir: str) -> None:
     sc.use_llm = click.confirm("  Enable LLM analyzer (semantic analysis)?", default=sc.use_llm)
 
     if sc.use_llm:
-        _configure_inspect_llm(llm, data_dir)
+        _configure_llm(cfg, data_dir)
         sc.enable_meta = click.confirm("  Enable meta-analyzer (false positive filtering)?", default=sc.enable_meta)
         sc.llm_consensus_runs = click.prompt(
             "  LLM consensus runs (0 = disabled)", type=int, default=sc.llm_consensus_runs,
         )
-    else:
-        llm.api_key = ""
-        llm.api_key_env = ""
+    # NB: disabling the skill scanner's LLM analyzer no longer clears
+    # the unified cfg.llm block — the MCP scanner, plugin scanner, and
+    # guardrail judge all share it. If the operator truly wants to
+    # remove the key they should edit ~/.defenseclaw/.env directly or
+    # run `defenseclaw setup migrate-llm --clear`.
 
     sc.use_trigger = click.confirm("  Enable trigger analyzer (vague description checks)?", default=sc.use_trigger)
     sc.use_virustotal = click.confirm("  Enable VirusTotal binary scanner?", default=sc.use_virustotal)
@@ -190,28 +423,178 @@ def _interactive_setup(sc, llm, aid, data_dir: str) -> None:
     sc.lenient = click.confirm("  Lenient mode (tolerate malformed skills)?", default=sc.lenient)
 
 
-def _configure_inspect_llm(llm, data_dir: str) -> None:
-    """Prompt for shared inspect_llm settings (provider, model, API key).
+# Local LLM providers that run on-box and don't require an API key.
+# Kept in lockstep with _LOCAL_LLM_PROVIDERS in defenseclaw/config.py and
+# IsLocalProvider() in internal/config/config.go.
+_LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
 
-    The API key is stored in ~/.defenseclaw/.env, not in config.yaml.
+# Default base URLs for local providers so the wizard can offer a sane
+# prefill. Operators can still override to point at a shared LAN host.
+_LOCAL_LLM_DEFAULT_BASE_URL = {
+    "ollama":    "http://127.0.0.1:11434",
+    "vllm":      "http://127.0.0.1:8000/v1",
+    "lm_studio": "http://127.0.0.1:1234/v1",
+    "lmstudio":  "http://127.0.0.1:1234/v1",
+}
+
+# Provider choices offered in the wizard. Cloud providers first (most
+# operators), then local runtimes. The list is a superset of guardrail's
+# KNOWN_PROVIDERS so the wizard can configure Ollama/vLLM without edits
+# to that module.
+_WIZARD_LLM_PROVIDERS = [
+    "anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai",
+    "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai",
+    "ollama", "vllm", "lm_studio",
+]
+
+
+def _configure_llm(cfg, data_dir: str) -> None:
+    """Prompt for unified ``llm:`` settings (provider, model, API key).
+
+    Writes to the top-level ``cfg.llm`` block — the single source of
+    truth consumed by guardrail (Bifrost), MCP scanner, skill scanner,
+    and the plugin scanner via :meth:`Config.resolve_llm`. Per-scanner
+    overrides can be added later by editing ``scanners.*.llm`` or
+    ``guardrail.judge.llm`` directly.
+
+    The API key is stored in ``~/.defenseclaw/.env`` (never in
+    ``config.yaml``) under the canonical ``DEFENSECLAW_LLM_KEY`` env
+    var, so rotating it requires a single edit rather than one per
+    scanner. Operators who need a custom env var name can still set
+    ``cfg.llm.api_key_env`` by hand.
+
+    Local providers (ollama, vllm, lm_studio) skip the API key prompt
+    entirely and instead prompt for a base URL with a sensible default
+    — these runtimes don't authenticate incoming requests.
     """
-    from defenseclaw.guardrail import KNOWN_PROVIDERS, detect_api_key_env
+    from defenseclaw.guardrail import detect_api_key_env
+    llm = cfg.llm
+
+    default_provider = llm.provider if llm.provider in _WIZARD_LLM_PROVIDERS else "anthropic"
+    llm.provider = click.prompt(
+        "  LLM provider (cloud: anthropic/openai/..., local: ollama/vllm/lm_studio)",
+        type=click.Choice(_WIZARD_LLM_PROVIDERS),
+        default=default_provider,
+    )
+    llm.model = click.prompt(
+        "  LLM model id (e.g. 'claude-3-5-sonnet-20241022', 'gpt-4o', 'llama3.1')",
+        default=llm.model or "",
+        show_default=False,
+    )
+
+    if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
+        # Local runtimes: no API key. Prompt for the endpoint URL with a
+        # sensible default so the scanner can find the loopback server.
+        default_base = llm.base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
+        llm.base_url = click.prompt(
+            f"  {llm.provider} base URL",
+            default=default_base,
+            show_default=True,
+        )
+        llm.api_key = ""
+        llm.api_key_env = ""
+    else:
+        # Cloud providers: prompt once for the unified key and store it
+        # under DEFENSECLAW_LLM_KEY so every scanner / guardrail call
+        # picks it up via Config.resolve_llm(...).
+        #
+        # If the operator already has a provider-specific env var in
+        # their .env (e.g. ANTHROPIC_API_KEY), we surface that as the
+        # suggested target so existing setups keep working without
+        # forcing a rename; otherwise we default to the canonical
+        # DEFENSECLAW_LLM_KEY.
+        existing_env = llm.api_key_env
+        suggested_env = existing_env or DEFENSECLAW_LLM_KEY_ENV
+        env_name = click.prompt(
+            "  API key env var (leave as DEFENSECLAW_LLM_KEY for the unified key)",
+            default=suggested_env,
+            show_default=True,
+        )
+        # Hint the user where to put the key when they've customised
+        # the env var to something provider-specific (e.g. when sharing
+        # a laptop with other tools that read ANTHROPIC_API_KEY).
+        if env_name != DEFENSECLAW_LLM_KEY_ENV:
+            guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
+            if env_name != guessed and guessed != "LLM_API_KEY":
+                click.echo(
+                    f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}; "
+                    f"we'll still read {env_name} because you set it explicitly."
+                )
+        _prompt_and_save_secret(env_name, llm.api_key, data_dir)
+        llm.api_key = ""
+        llm.api_key_env = env_name
+        llm.base_url = click.prompt(
+            "  LLM base URL (leave blank to use provider default)",
+            default=llm.base_url or "", show_default=False,
+        )
+
+    llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
+    llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries or 2)
+
+    # Clear legacy v4 fields so the next save() doesn't re-emit a stale
+    # inspect_llm: block. The v5 migration in config.load() copies
+    # inspect_llm → llm one-way when llm is empty, so leaving the old
+    # block populated after a successful wizard run would round-trip a
+    # redundant copy of the same values into YAML.
+    _clear_legacy_llm_fields(cfg)
+
+
+def _clear_legacy_llm_fields(cfg) -> None:
+    """Zero out v4-era LLM fields after a successful wizard write.
+
+    Idempotent. Only called once the caller has populated ``cfg.llm``.
+    """
+    il = getattr(cfg, "inspect_llm", None)
+    if il is not None:
+        il.provider = ""
+        il.model = ""
+        il.api_key = ""
+        il.api_key_env = ""
+        il.base_url = ""
+        il.timeout = 0
+        il.max_retries = 0
+    # Top-level v4 fallbacks.
+    if hasattr(cfg, "default_llm_model"):
+        cfg.default_llm_model = ""
+    if hasattr(cfg, "default_llm_api_key_env"):
+        cfg.default_llm_api_key_env = ""
+
+
+# Back-compat alias: older call sites (and any out-of-tree scripts)
+# still reference _configure_inspect_llm. Kept as a thin shim; both
+# spellings write to the unified block now.
+def _configure_inspect_llm(llm, data_dir: str) -> None:  # pragma: no cover
+    """DEPRECATED: use :func:`_configure_llm` with the full Config.
+
+    Retained so external callers (e.g. TUI shelling out to Python) keep
+    working during the migration window. Mutates the provided LLMConfig
+    directly; cannot clean up legacy ``inspect_llm`` fields because it
+    doesn't have the parent Config in hand.
+    """
+    from defenseclaw.guardrail import detect_api_key_env
+    default_provider = llm.provider if llm.provider in _WIZARD_LLM_PROVIDERS else "anthropic"
     llm.provider = click.prompt(
         "  LLM provider",
-        type=click.Choice(KNOWN_PROVIDERS),
-        default=llm.provider if llm.provider in KNOWN_PROVIDERS else "anthropic",
+        type=click.Choice(_WIZARD_LLM_PROVIDERS),
+        default=default_provider,
     )
     llm.model = click.prompt("  LLM model name", default=llm.model or "", show_default=False)
-    env_name = detect_api_key_env(f"{llm.provider}/{llm.model}")
-    _prompt_and_save_secret(env_name, llm.api_key, data_dir)
-    llm.api_key = ""
-    llm.api_key_env = env_name
-    llm.base_url = click.prompt(
-        "  LLM base URL (leave blank to use provider default)",
-        default=llm.base_url or "", show_default=False,
-    )
-    llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout)
-    llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries)
+    if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
+        default_base = llm.base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
+        llm.base_url = click.prompt(f"  {llm.provider} base URL", default=default_base)
+        llm.api_key = ""
+        llm.api_key_env = ""
+    else:
+        env_name = detect_api_key_env(f"{llm.provider}/{llm.model}")
+        _prompt_and_save_secret(env_name, llm.api_key, data_dir)
+        llm.api_key = ""
+        llm.api_key_env = env_name
+        llm.base_url = click.prompt(
+            "  LLM base URL (leave blank to use provider default)",
+            default=llm.base_url or "", show_default=False,
+        )
+    llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
+    llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries or 2)
 
 
 def _configure_cisco_ai_defense(aid, data_dir: str) -> None:
@@ -307,15 +690,17 @@ def _print_summary(sc, llm, aid) -> None:
         ("scanners.skill_scanner", "use_llm", str(sc.use_llm).lower()),
     ]
     if sc.use_llm:
-        rows.append(("inspect_llm", "provider", llm.provider))
+        rows.append(("llm", "provider", llm.provider))
         if llm.model:
-            rows.append(("inspect_llm", "model", llm.model))
+            rows.append(("llm", "model", llm.model))
         rows.append(("scanners.skill_scanner", "enable_meta", str(sc.enable_meta).lower()))
         if sc.llm_consensus_runs > 0:
             rows.append(("scanners.skill_scanner", "llm_consensus_runs", str(sc.llm_consensus_runs)))
         api_key = llm.resolved_api_key()
         if api_key:
-            rows.append(("inspect_llm", "api_key_env", llm.api_key_env or "(in .env)"))
+            rows.append(("llm", "api_key_env", llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV))
+        if llm.base_url:
+            rows.append(("llm", "base_url", llm.base_url))
     if sc.use_trigger:
         rows.append(("scanners.skill_scanner", "use_trigger", "true"))
     if sc.use_virustotal:
@@ -364,13 +749,14 @@ def setup_mcp_scanner(
     Interactively configure how mcp-scanner runs. MCP servers are managed
     via ``defenseclaw mcp set/unset`` rather than directory watching.
 
-    LLM and Cisco AI Defense settings are stored in the shared
-    inspect_llm and cisco_ai_defense config sections.
+    LLM settings land in the unified top-level ``llm:`` block (shared
+    with skill/plugin scanners and guardrail). Cisco AI Defense settings
+    continue to live in ``cisco_ai_defense``.
 
     Use --non-interactive with flags for CI/scripted configuration.
     """
     mc = app.cfg.scanners.mcp_scanner
-    llm = app.cfg.inspect_llm
+    llm = app.cfg.llm
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
@@ -388,6 +774,11 @@ def setup_mcp_scanner(
             mc.scan_instructions = scan_instructions
     else:
         _interactive_mcp_setup(mc, app.cfg)
+
+    # In non-interactive mode, when the operator passed --llm-provider
+    # or --llm-model we also want the YAML to converge on v5 shape.
+    if non_interactive and (llm.provider or llm.model):
+        _clear_legacy_llm_fields(app.cfg)
 
     app.cfg.save()
     _print_mcp_summary(mc, llm, aid)
@@ -413,7 +804,10 @@ def setup_mcp_scanner(
 
 
 def _interactive_mcp_setup(mc, cfg) -> None:
-    llm = cfg.inspect_llm
+    # Read model presence from the unified llm: block so the "enable
+    # LLM analyzer?" default tracks whatever the shared config already
+    # holds, regardless of which scanner first populated it.
+    llm = cfg.llm
     aid = cfg.cisco_ai_defense
 
     click.echo()
@@ -429,7 +823,7 @@ def _interactive_mcp_setup(mc, cfg) -> None:
 
     use_llm = click.confirm("  Enable LLM analyzer?", default=bool(llm.model))
     if use_llm:
-        _configure_inspect_llm(llm, cfg.data_dir)
+        _configure_llm(cfg, cfg.data_dir)
         if "llm" not in mc.analyzers:
             mc.analyzers = f"{mc.analyzers},llm" if mc.analyzers else "llm"
 
@@ -456,11 +850,13 @@ def _print_mcp_summary(mc, llm, aid) -> None:
         ("scanners.mcp_scanner", "analyzers", mc.analyzers or "(all)"),
     ]
     if llm.provider:
-        rows.append(("inspect_llm", "provider", llm.provider))
+        rows.append(("llm", "provider", llm.provider))
     if llm.model:
-        rows.append(("inspect_llm", "model", llm.model))
+        rows.append(("llm", "model", llm.model))
         if llm.api_key_env:
-            rows.append(("inspect_llm", "api_key_env", llm.api_key_env))
+            rows.append(("llm", "api_key_env", llm.api_key_env))
+        if llm.base_url:
+            rows.append(("llm", "base_url", llm.base_url))
     if aid.endpoint:
         rows.append(("cisco_ai_defense", "endpoint", aid.endpoint))
     if mc.scan_prompts:
@@ -751,8 +1147,22 @@ def setup_guardrail(
             gc.judge.api_base = judge_api_base
         if judge_api_key_env is not None:
             gc.judge.api_key_env = judge_api_key_env
-            if not app.cfg.default_llm_api_key_env:
-                app.cfg.default_llm_api_key_env = judge_api_key_env
+            # Mirror the interactive path (see _interactive_guardrail_setup):
+            # when the operator supplies a NEW env var that diverges from the
+            # unified DEFENSECLAW_LLM_KEY, share it into the v5 top-level
+            # ``llm.api_key_env`` so every other LLM-using component
+            # (MCP/skill/plugin scanners) resolves through the same key.
+            # Writing to the deprecated v4 ``default_llm_api_key_env`` would
+            # be scrubbed by ``setup migrate-llm`` on next load and silently
+            # undo this setting.
+            unified_env = app.cfg.llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+            if (
+                judge_api_key_env
+                and judge_api_key_env != DEFENSECLAW_LLM_KEY_ENV
+                and judge_api_key_env != unified_env
+                and not app.cfg.llm.api_key_env
+            ):
+                app.cfg.llm.api_key_env = judge_api_key_env
         gc.enabled = True
 
         # Apply sensible strategy defaults when judge is enabled
@@ -1086,25 +1496,92 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         gc.detection_strategy = strategy_map[strat_choice]
 
         click.echo()
-        gc.judge.api_base = click.prompt(
-            "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
-            default=gc.judge.api_base or "", show_default=False,
-        )
-        gc.judge.model = click.prompt(
-            "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
-            default=gc.judge.model or "", show_default=False,
+
+        # V5 UX: when the operator has already configured the unified
+        # top-level ``llm:`` block (common after ``make all`` runs
+        # ``scripts/setup-llm.sh``), default the judge to INHERIT those
+        # values — empty judge fields fall through ``Config.resolve_llm``
+        # to the top-level block and pick up ``DEFENSECLAW_LLM_KEY``
+        # automatically. This avoids the legacy UX where the judge
+        # prompted for a separate ``JUDGE_API_KEY`` that diverged from
+        # the unified key.
+        top_llm = app.cfg.llm
+        has_unified_llm = bool(top_llm.model) and bool(top_llm.resolved_api_key())
+        judge_already_customised = bool(
+            gc.judge.model or gc.judge.api_base or gc.judge.api_key_env,
         )
 
-        default_key_env = gc.judge.api_key_env or "JUDGE_API_KEY"
-        gc.judge.api_key_env = click.prompt(
-            "  API key env var name", default=default_key_env,
-        )
-        env_val = os.environ.get(gc.judge.api_key_env, "")
-        if env_val:
-            click.echo(f"    Current value: {_mask(env_val)} (set)")
+        inherit_unified = False
+        if has_unified_llm and not judge_already_customised:
+            click.echo("  Judge can reuse your unified LLM settings:")
+            click.echo(f"    model:       {top_llm.model}")
+            if top_llm.base_url:
+                click.echo(f"    base URL:    {top_llm.base_url}")
+            click.echo(
+                "    api key:     "
+                f"{top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV} (inherited)"
+            )
+            click.echo()
+            inherit_unified = click.confirm(
+                "  Inherit the unified LLM for the judge?", default=True,
+            )
+
+        if inherit_unified:
+            # Empty strings on the judge block mean "fall back to the
+            # top-level ``llm:`` block" — see resolve_llm("guardrail.judge").
+            gc.judge.model = ""
+            gc.judge.api_base = ""
+            gc.judge.api_key_env = ""
+            click.echo(
+                f"  ✓ Judge will use {top_llm.model} via "
+                f"{top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}."
+            )
         else:
-            click.echo(f"    {gc.judge.api_key_env} is not set in environment")
-        _prompt_and_save_secret(gc.judge.api_key_env, "", app.cfg.data_dir)
+            # Pre-fill each prompt from the top-level ``llm:`` block so
+            # operators who DO want to override only have to retype the
+            # fields they're actually changing.
+            default_api_base = gc.judge.api_base or top_llm.base_url or ""
+            gc.judge.api_base = click.prompt(
+                "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
+                default=default_api_base,
+                show_default=bool(default_api_base),
+            )
+            default_model = gc.judge.model or top_llm.model or ""
+            gc.judge.model = click.prompt(
+                "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
+                default=default_model,
+                show_default=bool(default_model),
+            )
+
+            # Default to the unified ``DEFENSECLAW_LLM_KEY`` — NOT the
+            # legacy ``JUDGE_API_KEY``. The operator can still override
+            # it to a per-component env var; when they do, we'll prompt
+            # for the secret value below. When they accept the default
+            # unified key, the secret is already persisted to ``.env``
+            # via ``scripts/setup-llm.sh`` or ``defenseclaw setup llm``,
+            # so we skip the redundant secret prompt.
+            default_key_env = (
+                gc.judge.api_key_env
+                or top_llm.api_key_env
+                or DEFENSECLAW_LLM_KEY_ENV
+            )
+            gc.judge.api_key_env = click.prompt(
+                "  API key env var name", default=default_key_env,
+            )
+            env_val = os.environ.get(gc.judge.api_key_env, "")
+            if env_val:
+                click.echo(f"    Current value: {_mask(env_val)} (set)")
+            else:
+                click.echo(f"    {gc.judge.api_key_env} is not set in environment")
+
+            # Only prompt for a secret value when the operator picked a
+            # custom env var that ISN'T already satisfied by the unified
+            # key. ``DEFENSECLAW_LLM_KEY`` is expected to be wired up by
+            # ``scripts/setup-llm.sh`` before this code runs; re-asking
+            # for it here confuses operators who just set it.
+            unified_env = top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+            if gc.judge.api_key_env != unified_env or not env_val:
+                _prompt_and_save_secret(gc.judge.api_key_env, "", app.cfg.data_dir)
 
         click.echo()
         if click.confirm("  Configure fallback models?", default=bool(gc.judge.fallbacks)):
@@ -1127,14 +1604,30 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         if not getattr(gc, "detection_strategy_completion", None):
             gc.detection_strategy_completion = "regex_only"
 
-        # If no component-specific judge key was configured, offer to share it
-        # across all LLM components via default_llm_api_key_env.
-        if gc.judge.api_key_env:
+        # Only prompt to "share" the judge key across scanners when the
+        # operator chose a CUSTOM env var AND the unified block isn't
+        # already pointing somewhere. If they inherited the unified
+        # ``DEFENSECLAW_LLM_KEY`` there's nothing to share (every
+        # scanner already resolves through it via
+        # ``Config.resolve_llm``); if ``llm.api_key_env`` is already
+        # set to a different value, silently overwriting it would
+        # disrupt the MCP/skill/plugin scanners — so we refuse to
+        # clobber and leave the operator to run ``defenseclaw setup
+        # llm`` explicitly. We write to ``llm.api_key_env`` (v5)
+        # rather than the deprecated ``default_llm_api_key_env`` (v4)
+        # so ``defenseclaw setup migrate-llm`` doesn't silently undo
+        # the change on the next run.
+        custom_judge_key = (
+            gc.judge.api_key_env
+            and gc.judge.api_key_env != DEFENSECLAW_LLM_KEY_ENV
+            and gc.judge.api_key_env != (top_llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV)
+        )
+        if custom_judge_key and not app.cfg.llm.api_key_env:
             if click.confirm(
                 f"  Use {gc.judge.api_key_env} as the shared LLM key for all scanners too?",
                 default=True,
             ):
-                app.cfg.default_llm_api_key_env = gc.judge.api_key_env
+                app.cfg.llm.api_key_env = gc.judge.api_key_env
     else:
         gc.detection_strategy = "regex_only"
         gc.detection_strategy_completion = "regex_only"

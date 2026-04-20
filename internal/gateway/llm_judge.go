@@ -84,17 +84,30 @@ func redactEntity(s string) string {
 }
 
 // LLMJudge uses an LLM to detect prompt injection and PII exfiltration.
+//
+// The judge's LLM settings (model, API key, base URL) come from the
+// unified LLMConfig resolved via Config.ResolveLLM("guardrail.judge") —
+// which layers guardrail.judge.llm on top of the top-level llm: block,
+// with legacy JudgeConfig.Model/APIKeyEnv/APIBase honored only as a
+// migration fallback. The non-LLM knobs (Enabled, Timeout, PII toggles,
+// ToolInjection, Fallbacks, …) continue to come from JudgeConfig.
 type LLMJudge struct {
 	cfg      *config.JudgeConfig
+	model    string
 	provider LLMProvider
 	rp       *guardrail.RulePack
 }
 
-// NewLLMJudge creates a judge from config. Returns nil if judge is disabled
-// or no model/API key is configured. The optional RulePack supplies
-// externalized judge prompts, suppressions, and severity overrides.
-// sharedAPIKey is the fallback key from Config.ResolvedDefaultLLMAPIKey().
-func NewLLMJudge(cfg *config.JudgeConfig, dotenvPath string, rp *guardrail.RulePack, sharedAPIKey string) *LLMJudge {
+// NewLLMJudge creates a judge from config. Returns nil if judge is
+// disabled or no model/API key is configured. The resolved llm carries
+// the model, API key, and optional base URL (already merged across the
+// top-level llm: block and guardrail.judge.llm override by
+// Config.ResolveLLM). When llm.IsLocalProvider() is true we allow an
+// empty API key so operators can point the judge at a local Ollama /
+// vLLM / LM Studio endpoint without fabricating a credential. The
+// optional RulePack supplies externalized judge prompts, suppressions,
+// and severity overrides.
+func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack) *LLMJudge {
 	if cfg == nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: config is nil\n")
 		return nil
@@ -103,29 +116,43 @@ func NewLLMJudge(cfg *config.JudgeConfig, dotenvPath string, rp *guardrail.RuleP
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge not enabled in config\n")
 		return nil
 	}
-	if cfg.Model == "" {
-		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no model configured\n")
+	model := llm.Model
+	if model == "" {
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no model configured (set llm.model or guardrail.judge.llm.model)\n")
 		return nil
 	}
-	apiKey := cfg.ResolvedJudgeAPIKeyWithFallback(sharedAPIKey)
-	if apiKey == "" {
-		apiKey = ResolveAPIKey(cfg.APIKeyEnv, dotenvPath)
+
+	// API key resolution:
+	//   1. llm.ResolvedAPIKey() — honors llm.APIKeyEnv (or the canonical
+	//      DEFENSECLAW_LLM_KEY) and falls back to inline llm.APIKey.
+	//   2. dotenv fallback — when a custom APIKeyEnv was requested but
+	//      the process env is empty, look in ~/.defenseclaw/.env.
+	//   3. Local providers (Ollama / vLLM / localhost base URL) don't
+	//      need a key; we proceed with an empty one.
+	apiKey := llm.ResolvedAPIKey()
+	if apiKey == "" && llm.APIKeyEnv != "" {
+		apiKey = ResolveAPIKey(llm.APIKeyEnv, dotenvPath)
 	}
-	if apiKey == "" {
+	if apiKey == "" && !llm.IsLocalProvider() {
 		dotenvDisplay := "(none)"
 		if dotenvPath != "" {
 			dotenvDisplay = "(configured)"
 		}
-		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no API key found (env=%s, dotenv=%s)\n", cfg.APIKeyEnv, dotenvDisplay)
+		envName := llm.APIKeyEnv
+		if envName == "" {
+			envName = config.DefenseClawLLMKeyEnv
+		}
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no API key found (env=%s, dotenv=%s)\n", envName, dotenvDisplay)
 		return nil
 	}
-	provider, err := NewProviderWithBase(cfg.Model, apiKey, cfg.APIBase)
+
+	provider, err := NewProviderWithBase(model, apiKey, llm.BaseURL)
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
 		return nil
 	}
-	fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", cfg.Model)
-	return &LLMJudge{cfg: cfg, provider: provider, rp: rp}
+	fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
+	return &LLMJudge{cfg: cfg, model: model, provider: provider, rp: rp}
 }
 
 // RunJudges runs injection and PII judges according to config.
@@ -294,14 +321,14 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection error: %v\n", err)
-		emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+		emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
 			err.Error(), "")
 		return errorVerdict("llm-judge-injection")
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+		emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
 			"empty-response", "")
 		return errorVerdict("llm-judge-injection")
@@ -325,7 +352,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		// triage fallback (MEDIUM alert) applies instead of a blanket
 		// allow. JudgeFailed also prevents the verdict from being counted
 		// as an authoritative clean.
-		emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+		emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
 			"parse-failed", judgeRawForEmit(rawResponse))
 		return errorVerdict("llm-judge-injection")
@@ -334,7 +361,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	verdict := j.injectionToVerdict(parsed)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection verdict: action=%s severity=%s findings=%v\n",
 		verdict.Action, verdict.Severity, verdict.Findings)
-	emitJudge("injection", j.cfg.Model, gatewaylog.DirectionPrompt,
+	emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse))
 	return verdict
@@ -498,7 +525,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii error (dir=%s): %v\n", direction, err)
-		emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+		emitJudge("pii", j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
 			err.Error(), "")
 		return errorVerdict("llm-judge-pii")
@@ -506,7 +533,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+		emitJudge("pii", j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
 			"empty-response", "")
 		return errorVerdict("llm-judge-pii")
@@ -528,7 +555,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 
 	parsed := parseJudgeJSON(rawResponse)
 	if parsed == nil {
-		emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+		emitJudge("pii", j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
 			"parse-failed", judgeRawForEmit(rawResponse))
 		return errorVerdict("llm-judge-pii")
@@ -537,7 +564,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	verdict := j.piiToVerdict(parsed, direction, toolName)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii verdict (dir=%s): action=%s severity=%s findings=%v\n",
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
-	emitJudge("pii", j.cfg.Model, gatewaylog.Direction(direction),
+	emitJudge("pii", j.model, gatewaylog.Direction(direction),
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse))
 	return verdict

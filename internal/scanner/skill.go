@@ -26,12 +26,27 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// liteLLMModel returns the model string shaped for LiteLLM /
+// provider-native routers. LiteLLM accepts “"provider/model-id"“
+// directly — the same shape DefenseClaw uses in config. A bare
+// “llm.Model“ with a separate “llm.Provider“ gets stitched into
+// “"<provider>/<model>"“. Empty models are passed through unchanged
+// (the caller should handle that case).
+func liteLLMModel(llm config.LLMConfig) string {
+	model := llm.Model
+	if model != "" && llm.Provider != "" && !strings.Contains(model, "/") {
+		return llm.Provider + "/" + model
+	}
+	return model
+}
 
 // extractJSON finds the first top-level JSON object in data.
 // Scanner CLIs sometimes print progress text to stdout before the JSON;
@@ -76,17 +91,70 @@ func extractJSON(data []byte) []byte {
 	return data
 }
 
+// SkillScanner shells out to the Python “cisco-ai-skill-scanner“ CLI.
+//
+// The LLM-facing surface is driven by the unified “config.LLMConfig“
+// (top-level “llm:“ merged with “scanners.skill.llm:“ overrides,
+// resolved once by “Config.ResolveLLM“). “InspectLLM“ is kept as a
+// deprecated back-compat field: old callers that constructed the
+// scanner with an “InspectLLMConfig“ still work because
+// “NewSkillScanner“ translates it into “LLM“ on the way in. New
+// call sites should use “NewSkillScannerFromLLM“ and pass the
+// resolved unified config directly.
 type SkillScanner struct {
 	Config         config.SkillScannerConfig
-	InspectLLM     config.InspectLLMConfig
+	LLM            config.LLMConfig
+	InspectLLM     config.InspectLLMConfig // Deprecated: populated only for back-compat; do not read.
 	CiscoAIDefense config.CiscoAIDefenseConfig
 }
 
+// inspectToLLM copies the legacy “InspectLLMConfig“ shape into the
+// unified “LLMConfig“ so the scanner can drive everything off a
+// single structure internally. Kept local so “config“ doesn't grow
+// another conversion helper for a shape we plan to retire.
+func inspectToLLM(il config.InspectLLMConfig) config.LLMConfig {
+	return config.LLMConfig{
+		Model:      il.Model,
+		Provider:   il.Provider,
+		APIKey:     il.APIKey,
+		APIKeyEnv:  il.APIKeyEnv,
+		BaseURL:    il.BaseURL,
+		Timeout:    il.Timeout,
+		MaxRetries: il.MaxRetries,
+	}
+}
+
+// NewSkillScanner is the back-compat constructor. Accepts the legacy
+// “InspectLLMConfig“ shape and translates it into the unified
+// “LLMConfig“ internally so downstream code only needs one path.
+// New callers should use “NewSkillScannerFromLLM“ and pass
+// “Config.ResolveLLM("scanners.skill")“ directly.
 func NewSkillScanner(cfg config.SkillScannerConfig, llm config.InspectLLMConfig, aid config.CiscoAIDefenseConfig) *SkillScanner {
 	if cfg.Binary == "" {
 		cfg.Binary = "skill-scanner"
 	}
-	return &SkillScanner{Config: cfg, InspectLLM: llm, CiscoAIDefense: aid}
+	return &SkillScanner{
+		Config:         cfg,
+		LLM:            inspectToLLM(llm),
+		InspectLLM:     llm,
+		CiscoAIDefense: aid,
+	}
+}
+
+// NewSkillScannerFromLLM constructs a scanner directly from the
+// resolved unified LLM config. Preferred constructor — call sites
+// should resolve once via “rootCfg.ResolveLLM("scanners.skill")“ and
+// pass the result here so per-scanner overrides on top of the
+// top-level “llm:“ block are honored.
+func NewSkillScannerFromLLM(cfg config.SkillScannerConfig, llm config.LLMConfig, aid config.CiscoAIDefenseConfig) *SkillScanner {
+	if cfg.Binary == "" {
+		cfg.Binary = "skill-scanner"
+	}
+	return &SkillScanner{
+		Config:         cfg,
+		LLM:            llm,
+		CiscoAIDefense: aid,
+	}
 }
 
 func (s *SkillScanner) Name() string               { return "skill-scanner" }
@@ -114,8 +182,8 @@ func (s *SkillScanner) buildArgs(target string) []string {
 	if s.Config.UseAIDefense {
 		args = append(args, "--use-aidefense")
 	}
-	if s.InspectLLM.Provider != "" {
-		args = append(args, "--llm-provider", s.InspectLLM.Provider)
+	if s.LLM.Provider != "" {
+		args = append(args, "--llm-provider", s.LLM.Provider)
 	}
 	if s.Config.LLMConsensus > 0 {
 		args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))
@@ -141,8 +209,13 @@ func (s *SkillScanner) scanEnv() []string {
 		envVar string
 		value  string
 	}{
-		{"SKILL_SCANNER_LLM_API_KEY", s.InspectLLM.ResolvedAPIKey()},
-		{"SKILL_SCANNER_LLM_MODEL", s.InspectLLM.Model},
+		// skill-scanner's bespoke env vars. The underlying Python
+		// scanner reads these directly today — we keep writing them
+		// until skill-scanner migrates to provider-native env vars.
+		// ``LiteLLMModel`` stitches bare model + provider into
+		// ``provider/model`` when needed so LiteLLM can route it.
+		{"SKILL_SCANNER_LLM_API_KEY", s.LLM.ResolvedAPIKey()},
+		{"SKILL_SCANNER_LLM_MODEL", liteLLMModel(s.LLM)},
 		{"VIRUSTOTAL_API_KEY", s.Config.ResolvedVirusTotalKey()},
 		{"AI_DEFENSE_API_KEY", s.CiscoAIDefense.ResolvedAPIKey()},
 	}

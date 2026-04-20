@@ -32,6 +32,7 @@ from defenseclaw.config import (
     GatewayConfig,
     GuardrailConfig,
     JudgeConfig,
+    LLMConfig,
     OpenShellConfig,
     ScannersConfig,
     SkillScannerConfig,
@@ -66,7 +67,9 @@ class RequirementPredicateTests(unittest.TestCase):
         cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=False))
         self.assertEqual(C._judge_api_key(cfg), C.Requirement.NOT_USED)
 
-    def test_judge_key_required_when_judge_enabled(self):
+    def test_judge_key_not_used_when_default_key_covers_it(self):
+        """With no per-component llm.api_key_env override, JUDGE_API_KEY
+        is NOT_USED because the top-level DEFENSECLAW_LLM_KEY covers it."""
         cfg = _make_cfg(
             "/tmp/dc-test",
             guardrail=GuardrailConfig(
@@ -74,7 +77,36 @@ class RequirementPredicateTests(unittest.TestCase):
                 judge=JudgeConfig(enabled=True),
             ),
         )
+        self.assertEqual(C._judge_api_key(cfg), C.Requirement.NOT_USED)
+
+    def test_judge_key_required_with_custom_override(self):
+        """When judge.llm.api_key_env points at a non-default env var,
+        that env var is REQUIRED."""
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                judge=JudgeConfig(
+                    enabled=True,
+                    llm=LLMConfig(api_key_env="MY_JUDGE_KEY"),
+                ),
+            ),
+        )
         self.assertEqual(C._judge_api_key(cfg), C.Requirement.REQUIRED)
+
+    def test_judge_key_not_used_for_local_provider(self):
+        """Local providers (ollama/vllm) don't need a key."""
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                judge=JudgeConfig(
+                    enabled=True,
+                    llm=LLMConfig(model="ollama/llama3.1", api_key_env="MY_JUDGE_KEY"),
+                ),
+            ),
+        )
+        self.assertEqual(C._judge_api_key(cfg), C.Requirement.NOT_USED)
 
     def test_judge_key_not_used_when_guardrail_on_but_judge_off(self):
         cfg = _make_cfg(
@@ -116,11 +148,33 @@ class RequirementPredicateTests(unittest.TestCase):
         on = _make_cfg("/tmp/dc-test", splunk=SplunkConfig(enabled=True))
         self.assertEqual(C._splunk_token(on), C.Requirement.REQUIRED)
 
-    def test_llm_provider_key_tracks_guardrail_state(self):
-        off = _make_cfg("/tmp/dc-test")
-        self.assertEqual(C._llm_provider_key(off), C.Requirement.NOT_USED)
-        on = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True))
-        self.assertEqual(C._llm_provider_key(on), C.Requirement.OPTIONAL)
+    def test_defenseclaw_llm_key_not_used_when_nothing_uses_llm(self):
+        cfg = _make_cfg("/tmp/dc-test")
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.NOT_USED)
+
+    def test_defenseclaw_llm_key_required_when_guardrail_on(self):
+        cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True))
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
+
+    def test_defenseclaw_llm_key_optional_with_local_guardrail(self):
+        """Local provider needs no key, but the knob is still surfaced."""
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                llm=LLMConfig(model="ollama/llama3.1"),
+            ),
+        )
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
+
+    def test_defenseclaw_llm_key_required_when_skill_scanner_llm_on(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            scanners=ScannersConfig(
+                skill_scanner=SkillScannerConfig(use_llm=True),
+            ),
+        )
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
 
 
 class EffectiveEnvNameTests(unittest.TestCase):
@@ -131,7 +185,10 @@ class EffectiveEnvNameTests(unittest.TestCase):
             "/tmp/dc-test",
             guardrail=GuardrailConfig(
                 enabled=True,
-                judge=JudgeConfig(enabled=True, api_key_env="MY_JUDGE"),
+                judge=JudgeConfig(
+                    enabled=True,
+                    llm=LLMConfig(api_key_env="MY_JUDGE"),
+                ),
             ),
         )
         judge_spec = C.lookup("JUDGE_API_KEY")

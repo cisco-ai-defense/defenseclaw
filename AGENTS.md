@@ -68,6 +68,29 @@ test/                   E2E tests, unit tests, fixtures
 - `internal/tui/doctor_cache.go` + `cli/defenseclaw/commands/cmd_doctor.py::_write_doctor_cache` — cached doctor snapshot for the Overview panel
 - `docs/TUI.md` — panels, keybindings, parity model, files the TUI touches
 
+## Unified LLM Configuration (v5)
+
+DefenseClaw resolves every LLM setting — guardrail, judge, MCP scanner,
+skill scanner, plugin scanner — through a single top-level `llm:` block
+with per-component overrides. NEVER read `cfg.InspectLLM`,
+`cfg.DefaultLLMModel`, `cfg.DefaultLLMAPIKeyEnv`, or `cfg.Guardrail.Model`
+directly; they are legacy shims retained for pre-v5 config
+back-compat. The only correct accessors are:
+
+- Go:     `cfg.ResolveLLM("guardrail" | "guardrail.judge" | "scanners.mcp" | "scanners.skill" | "scanners.plugin" | "")`
+- Python: `cfg.resolve_llm(<same paths>)`
+
+Both return an `LLMConfig` whose every non-empty override field wins over
+the top-level block. Empty fields inherit from the top level, then from
+`DEFENSECLAW_LLM_MODEL` / `DEFENSECLAW_LLM_KEY` env vars, then (last
+resort) from the legacy `default_llm_*` fields. The
+`defenseclaw setup migrate-llm` subcommand is the operator-facing path to
+collapse a v4 YAML onto the v5 shape; it backs up `config.yaml` first.
+
+For LiteLLM-backed scanners, centralize provider→env mapping via
+`cli/defenseclaw/scanner/_llm_env.py::inject_llm_env`; never shell-out
+raw `OPENAI_API_KEY=…` from the scanner wrapper.
+
 ## Claw Mode
 
 DefenseClaw supports multiple agent frameworks via `claw.mode` in config.

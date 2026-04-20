@@ -107,12 +107,77 @@ def _openclaw_gateway_token(_cfg: Config) -> Requirement:
     return Requirement.REQUIRED
 
 
+def _any_llm_component_uses_default_key(cfg: Config) -> bool:
+    """Return True when any enabled LLM-using component would fall back
+    to ``DEFENSECLAW_LLM_KEY`` and isn't a local (no-key) provider.
+
+    Mirrors the resolver logic in :meth:`Config.resolve_llm`: a component
+    that has its own ``llm.api_key_env`` override is classified under
+    that env var instead. Local providers (ollama/vllm/lm_studio) don't
+    need a key, so we skip them even if the component is on.
+    """
+    def needs_key(path: str) -> bool:
+        r = cfg.resolve_llm(path)
+        if r.is_local_provider():
+            return False
+        # If the resolved api_key_env is empty, the component falls back
+        # to DEFENSECLAW_LLM_KEY — so this IS the canonical env var that
+        # must be set. If it's non-empty, the operator pointed at a
+        # different env var (handled by the judge/inspect entries below).
+        return not r.api_key_env or r.api_key_env == "DEFENSECLAW_LLM_KEY"
+
+    gc = getattr(cfg, "guardrail", None)
+    if gc is not None and getattr(gc, "enabled", False):
+        if needs_key("guardrail"):
+            return True
+        judge = getattr(gc, "judge", None)
+        if judge is not None and getattr(judge, "enabled", False) and needs_key("guardrail.judge"):
+            return True
+    sc = getattr(cfg, "scanners", None)
+    if sc is not None:
+        ss = getattr(sc, "skill_scanner", None)
+        if ss is not None and getattr(ss, "use_llm", False) and needs_key("scanners.skill"):
+            return True
+        ms = getattr(sc, "mcp_scanner", None)
+        if ms is not None:
+            # mcp-scanner uses LLM only when scan_prompts/scan_resources/
+            # scan_instructions is on (which triggers LiteLLM). Err on the
+            # side of "required" when any of those are set.
+            if any(getattr(ms, attr, False) for attr in ("scan_prompts", "scan_resources", "scan_instructions")):
+                if needs_key("scanners.mcp"):
+                    return True
+    return False
+
+
+def _defenseclaw_llm_key(cfg: Config) -> Requirement:
+    """DEFENSECLAW_LLM_KEY is the single canonical LLM env var. It's
+    REQUIRED whenever any LLM-using component would fall back to it
+    (i.e. no per-component override) and isn't a local provider.
+    """
+    if _any_llm_component_uses_default_key(cfg):
+        return Requirement.REQUIRED
+    # Surface it as OPTIONAL when the guardrail is on so operators see
+    # the knob exists even if every component has a custom override.
+    gc = getattr(cfg, "guardrail", None)
+    if gc is not None and getattr(gc, "enabled", False):
+        return Requirement.OPTIONAL
+    return Requirement.NOT_USED
+
+
 def _judge_api_key(cfg: Config) -> Requirement:
     gc = getattr(cfg, "guardrail", None)
     if gc is None or not gc.enabled:
         return Requirement.NOT_USED
     judge = getattr(gc, "judge", None)
     if judge is None or not judge.enabled:
+        return Requirement.NOT_USED
+    # If the judge uses a local provider (e.g. ollama) no key is needed.
+    if cfg.resolve_llm("guardrail.judge").is_local_provider():
+        return Requirement.NOT_USED
+    # If the judge falls back to DEFENSECLAW_LLM_KEY, that top-level
+    # entry covers it — this spec tracks only the *custom* override.
+    r = cfg.resolve_llm("guardrail.judge")
+    if not r.api_key_env or r.api_key_env == "DEFENSECLAW_LLM_KEY":
         return Requirement.NOT_USED
     return Requirement.REQUIRED
 
@@ -149,17 +214,23 @@ def _splunk_token(cfg: Config) -> Requirement:
 
 
 def _inspect_llm_key(cfg: Config) -> Requirement:
-    # The inspect_llm analyzer is used by skill-scanner's LLM mode.
-    # When the user hasn't turned on --use-llm, the key is not needed.
+    """Tracks a *custom* skill-scanner LLM env var — only surfaces when
+    the operator has overridden ``scanners.skill_scanner.llm.api_key_env``
+    away from the default. The default DEFENSECLAW_LLM_KEY fallback is
+    handled by the top-level entry.
+    """
     sc = getattr(cfg, "scanners", None)
     if sc is None:
         return Requirement.NOT_USED
     ss = getattr(sc, "skill_scanner", None)
     if ss is None or not getattr(ss, "use_llm", False):
         return Requirement.NOT_USED
-    # Even when the analyzer is on, operators can point at a local
-    # model that needs no key — so it stays OPTIONAL rather than forced.
-    return Requirement.OPTIONAL
+    if cfg.resolve_llm("scanners.skill").is_local_provider():
+        return Requirement.NOT_USED
+    r = cfg.resolve_llm("scanners.skill")
+    if not r.api_key_env or r.api_key_env == "DEFENSECLAW_LLM_KEY":
+        return Requirement.NOT_USED
+    return Requirement.REQUIRED
 
 
 # --- effective env-name overrides ---
@@ -168,9 +239,11 @@ def _inspect_llm_key(cfg: Config) -> Requirement:
 # actually configure?". Return "" to keep the canonical name.
 
 def _judge_env(cfg: Config) -> str:
-    gc = getattr(cfg, "guardrail", None)
-    judge = getattr(gc, "judge", None) if gc is not None else None
-    return getattr(judge, "api_key_env", "") if judge is not None else ""
+    # Prefer the resolved per-component env var so operators see the
+    # env var they actually wired up (not the canonical default when no
+    # override is set — that case is reported by the top-level
+    # DEFENSECLAW_LLM_KEY entry, so we return the canonical name here).
+    return cfg.resolve_llm("guardrail.judge").api_key_env
 
 
 def _cisco_env(cfg: Config) -> str:
@@ -192,28 +265,35 @@ def _splunk_env(cfg: Config) -> str:
 
 
 def _inspect_llm_env(cfg: Config) -> str:
-    il = getattr(cfg, "inspect_llm", None)
-    return il.api_key_env if il is not None else ""
-
-
-def _llm_provider_key(cfg: Config) -> Requirement:
-    # Generic LLM provider keys (ANTHROPIC/OPENAI/AZURE/etc.) are read
-    # by OpenClaw's fetch interceptor from ``auth-profiles.json`` at
-    # runtime — DefenseClaw itself never requires them. We surface them
-    # as OPTIONAL when the guardrail is on so operators setting up
-    # remote providers see the knob exists, and as NOT_USED when the
-    # guardrail is disabled (they'd be irrelevant to DefenseClaw).
-    gc = getattr(cfg, "guardrail", None)
-    if gc is None or not gc.enabled:
-        return Requirement.NOT_USED
-    return Requirement.OPTIONAL
+    return cfg.resolve_llm("scanners.skill").api_key_env
 
 
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
+# Registry ordering matters: DEFENSECLAW_LLM_KEY comes first so the
+# `defenseclaw keys list` / `quickstart` UX shows the single knob
+# operators most often need to set. The JUDGE_API_KEY / SKILL_SCANNER_LLM
+# entries below fire only when the operator has configured a *custom*
+# per-component env-var override (via ``llm.api_key_env`` in
+# ``guardrail.judge`` / ``scanners.skill_scanner``). Provider-specific
+# keys (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` / etc.) are NOT
+# tracked here: DefenseClaw routes all LLM traffic through Bifrost
+# (gateway) and LiteLLM (scanners), both of which derive the provider-
+# specific env var from the unified ``DEFENSECLAW_LLM_KEY`` + model
+# prefix. See ``cli/defenseclaw/scanner/_llm_env.py`` for the mapping.
 CREDENTIALS: tuple[CredentialSpec, ...] = (
+    CredentialSpec(
+        env_name="DEFENSECLAW_LLM_KEY",
+        feature="llm.default",
+        description=(
+            "Canonical LLM API key used by the guardrail upstream, LLM "
+            "judge, MCP/skill/plugin scanners. Override per-component "
+            "with a component-specific llm.api_key_env."
+        ),
+        required=_defenseclaw_llm_key,
+    ),
     CredentialSpec(
         env_name="OPENCLAW_GATEWAY_TOKEN",
         feature="gateway",
@@ -224,7 +304,10 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
     CredentialSpec(
         env_name="JUDGE_API_KEY",
         feature="guardrail.judge",
-        description="API key for the LLM Judge adjudicator (enabled via guardrail.judge.enabled)",
+        description=(
+            "Custom LLM Judge key — only tracked when "
+            "guardrail.judge.llm.api_key_env overrides DEFENSECLAW_LLM_KEY."
+        ),
         required=_judge_api_key,
         effective_env_name=_judge_env,
     ),
@@ -250,39 +333,12 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         effective_env_name=_splunk_env,
     ),
     CredentialSpec(
-        env_name="ANTHROPIC_API_KEY",
-        feature="providers.anthropic",
-        description="Anthropic provider key (read by OpenClaw's fetch interceptor at runtime)",
-        required=_llm_provider_key,
-    ),
-    CredentialSpec(
-        env_name="OPENAI_API_KEY",
-        feature="providers.openai",
-        description="OpenAI provider key (read by OpenClaw's fetch interceptor at runtime)",
-        required=_llm_provider_key,
-    ),
-    CredentialSpec(
-        env_name="AZURE_OPENAI_API_KEY",
-        feature="providers.azure",
-        description="Azure OpenAI key (used alongside AZURE_OPENAI_ENDPOINT)",
-        required=_llm_provider_key,
-    ),
-    CredentialSpec(
-        env_name="GOOGLE_API_KEY",
-        feature="providers.google",
-        description="Google / Gemini provider key",
-        required=_llm_provider_key,
-    ),
-    CredentialSpec(
-        env_name="OPENROUTER_API_KEY",
-        feature="providers.openrouter",
-        description="OpenRouter provider key",
-        required=_llm_provider_key,
-    ),
-    CredentialSpec(
-        env_name="DEFENSECLAW_INSPECT_LLM_API_KEY",
-        feature="skill-scanner.inspect_llm",
-        description="Fallback LLM key for skill-scanner's LLM analyzer when inspect_llm.api_key_env is unset",
+        env_name="DEFENSECLAW_SKILL_SCANNER_LLM_KEY",
+        feature="skill-scanner.llm",
+        description=(
+            "Custom skill-scanner LLM key — only tracked when "
+            "scanners.skill_scanner.llm.api_key_env overrides DEFENSECLAW_LLM_KEY."
+        ),
         required=_inspect_llm_key,
         effective_env_name=_inspect_llm_env,
     ),

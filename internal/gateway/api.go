@@ -928,7 +928,16 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner, a.scannerCfg.EffectiveInspectLLM(), a.scannerCfg.CiscoAIDefense)
+	// Route through the unified resolver so top-level ``llm:`` defaults
+	// flow into the skill scanner with ``scanners.skill.llm:`` overrides
+	// applied on top. ``NewSkillScannerFromLLM`` is the post-v5
+	// constructor; the legacy ``NewSkillScanner`` path is kept alive
+	// only for tests that still pass ``InspectLLMConfig``.
+	ss := scanner.NewSkillScannerFromLLM(
+		a.scannerCfg.Scanners.SkillScanner,
+		a.scannerCfg.ResolveLLM("scanners.skill"),
+		a.scannerCfg.CiscoAIDefense,
+	)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -1027,7 +1036,11 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ms := scanner.NewMCPScanner(a.scannerCfg.Scanners.MCPScanner, a.scannerCfg.EffectiveInspectLLM(), a.scannerCfg.CiscoAIDefense)
+	ms := scanner.NewMCPScannerFromLLM(
+		a.scannerCfg.Scanners.MCPScanner,
+		a.scannerCfg.ResolveLLM("scanners.mcp"),
+		a.scannerCfg.CiscoAIDefense,
+	)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()

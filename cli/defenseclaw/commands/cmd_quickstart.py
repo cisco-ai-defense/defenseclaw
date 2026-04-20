@@ -57,7 +57,7 @@ from defenseclaw.context import AppContext
     "--with-judge/--no-judge",
     "with_judge",
     default=False,
-    help="Enable the LLM Judge adjudicator (requires JUDGE_API_KEY).",
+    help="Enable the LLM Judge adjudicator (reuses the unified DEFENSECLAW_LLM_KEY).",
 )
 @click.option(
     "--non-interactive",

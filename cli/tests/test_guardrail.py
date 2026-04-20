@@ -841,7 +841,11 @@ class TestDetectCurrentModelEdgeCases(unittest.TestCase):
 
 class TestDetectApiKeyEnvEdgeCases(unittest.TestCase):
     def test_bedrock(self):
-        self.assertEqual(detect_api_key_env("bedrock/llama-3.1-70b"), "AWS_ACCESS_KEY_ID")
+        # Bedrock uses the LiteLLM bearer-token env var rather than the
+        # SigV4 key-id so the suggestion matches what the Python scanner
+        # bridge (_llm_env.py) actually reads. See guardrail.detect_api_key_env
+        # for the trade-off discussion.
+        self.assertEqual(detect_api_key_env("bedrock/llama-3.1-70b"), "AWS_BEARER_TOKEN_BEDROCK")
 
     def test_o1_model(self):
         self.assertEqual(detect_api_key_env("openai/o1-preview"), "OPENAI_API_KEY")

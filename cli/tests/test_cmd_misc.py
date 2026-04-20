@@ -472,6 +472,92 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(self.app.cfg.scanners.skill_scanner.use_behavioral)
 
+class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
+    """``setup guardrail --non-interactive --judge-api-key-env …`` must write
+    to the v5 top-level ``llm.api_key_env`` (not the deprecated v4
+    ``default_llm_api_key_env``) only when there's no existing unified
+    key to clobber. These regressions have bitten us twice:
+
+    1. Writing to ``default_llm_api_key_env`` is silently undone by
+       ``setup migrate-llm`` on the next config load, so the setting
+       evaporates between TUI runs.
+    2. Silently overwriting a pre-existing ``llm.api_key_env`` would
+       disrupt the MCP/skill/plugin scanners that were pointing at the
+       previous unified key.
+    """
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke_guardrail(self, *extra):
+        from defenseclaw.commands.cmd_setup import setup
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ):
+            return self.runner.invoke(
+                setup,
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--no-restart",
+                    "--no-verify",
+                    "--mode", "observe",
+                    "--scanner-mode", "local",
+                    "--judge-model", "bedrock/claude-3-5-haiku-20241022",
+                    *extra,
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+
+    def test_custom_judge_env_shared_into_unified_when_unset(self):
+        """Operator supplies a custom judge env var on a fresh config →
+        the v5 ``llm.api_key_env`` mirrors it (so all scanners resolve
+        through the same key), and the deprecated v4 field stays empty."""
+        self.app.cfg.llm.api_key_env = ""
+        self.app.cfg.default_llm_api_key_env = ""
+
+        result = self._invoke_guardrail("--judge-api-key-env", "CUSTOM_TEAM_KEY")
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "CUSTOM_TEAM_KEY")
+        self.assertEqual(self.app.cfg.llm.api_key_env, "CUSTOM_TEAM_KEY")
+        self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
+
+    def test_default_llm_key_env_does_not_touch_unified(self):
+        """Accepting the canonical ``DEFENSECLAW_LLM_KEY`` as the judge
+        key must not silently overwrite the unified block — every
+        scanner already resolves through ``DEFENSECLAW_LLM_KEY`` by
+        fallback, so writing it into ``llm.api_key_env`` is redundant."""
+        self.app.cfg.llm.api_key_env = ""
+        self.app.cfg.default_llm_api_key_env = ""
+
+        result = self._invoke_guardrail("--judge-api-key-env", "DEFENSECLAW_LLM_KEY")
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "DEFENSECLAW_LLM_KEY")
+        self.assertEqual(self.app.cfg.llm.api_key_env, "")
+        self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
+
+    def test_existing_unified_llm_key_is_not_clobbered(self):
+        """Non-interactive must never silently change an already-set
+        ``llm.api_key_env`` — the other scanners may be pointing at it."""
+        self.app.cfg.llm.api_key_env = "EXISTING_SHARED_KEY"
+        self.app.cfg.default_llm_api_key_env = ""
+
+        result = self._invoke_guardrail("--judge-api-key-env", "JUDGE_ONLY_KEY")
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "JUDGE_ONLY_KEY")
+        self.assertEqual(self.app.cfg.llm.api_key_env, "EXISTING_SHARED_KEY")
+        self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
+
+
 class TestSetupHelpers(unittest.TestCase):
     def test_mask_short_key(self):
         from defenseclaw.commands.cmd_setup import _mask
@@ -495,7 +581,12 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def test_llm_provider_written_to_inspect_llm(self):
+    def test_llm_provider_written_to_unified_llm(self):
+        # v5: --llm-provider / --llm-model populate the unified top-level
+        # llm: block so every scanner (skill/MCP/plugin) and guardrail
+        # share the same defaults via Config.resolve_llm(...). The
+        # legacy inspect_llm: block is scrubbed in the same write to
+        # avoid drift between the two blocks on disk.
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -506,11 +597,13 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.app.cfg.inspect_llm.provider, "openai")
-        self.assertEqual(self.app.cfg.inspect_llm.model, "gpt-4o")
+        self.assertEqual(self.app.cfg.llm.provider, "openai")
+        self.assertEqual(self.app.cfg.llm.model, "gpt-4o")
+        self.assertEqual(self.app.cfg.inspect_llm.provider, "")
+        self.assertEqual(self.app.cfg.inspect_llm.model, "")
         self.assertTrue(self.app.cfg.scanners.skill_scanner.use_llm)
 
-    def test_summary_shows_inspect_llm_section(self):
+    def test_summary_shows_unified_llm_section(self):
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -521,7 +614,12 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("inspect_llm.provider", result.output)
+        # v5 summaries advertise llm.* rows (the unified block). The
+        # legacy "inspect_llm" label must NOT appear — otherwise
+        # operators will edit the wrong block and wonder why nothing
+        # changes.
+        self.assertIn("llm.provider", result.output)
+        self.assertNotIn("inspect_llm.provider", result.output)
 
     def test_aidefense_flag_still_on_scanner_config(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -537,7 +635,9 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
 
 
 class TestSetupMCPScannerCommonConfig(unittest.TestCase):
-    """Verify setup mcp-scanner --non-interactive writes to inspect_llm."""
+    """Verify `setup mcp-scanner --non-interactive` writes to the
+    unified llm: block and leaves the legacy inspect_llm: block
+    empty — the v5 shape consumed by Config.resolve_llm."""
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
@@ -546,7 +646,7 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def test_llm_provider_written_to_inspect_llm(self):
+    def test_llm_provider_written_to_unified_llm(self):
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -558,10 +658,13 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.app.cfg.inspect_llm.provider, "openai")
-        self.assertEqual(self.app.cfg.inspect_llm.model, "gpt-4o")
+        self.assertEqual(self.app.cfg.llm.provider, "openai")
+        self.assertEqual(self.app.cfg.llm.model, "gpt-4o")
+        # Legacy block scrubbed so the YAML converges on v5 shape.
+        self.assertEqual(self.app.cfg.inspect_llm.provider, "")
+        self.assertEqual(self.app.cfg.inspect_llm.model, "")
 
-    def test_summary_shows_inspect_llm_section(self):
+    def test_summary_shows_unified_llm_section(self):
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -572,8 +675,9 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("inspect_llm.provider", result.output)
-        self.assertIn("inspect_llm.model", result.output)
+        self.assertIn("llm.provider", result.output)
+        self.assertIn("llm.model", result.output)
+        self.assertNotIn("inspect_llm.provider", result.output)
 
     def test_mcp_scanner_no_old_llm_flags(self):
         """The old --endpoint-url, --llm-base-url, --llm-timeout, --llm-max-retries flags are gone."""
@@ -893,6 +997,106 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Splunk Web Credentials", result.output)
         self.assertIn("Username:  admin", result.output)
         self.assertIn("Password:  test-splunk-pass", result.output)
+
+
+# ---------------------------------------------------------------------------
+# Setup migrate-llm — v4→v5 config rewrite
+# ---------------------------------------------------------------------------
+
+class TestSetupMigrateLLM(unittest.TestCase):
+    """``defenseclaw setup migrate-llm`` rewrites the on-disk YAML
+    from the v4 shape (``inspect_llm:`` + ``default_llm_*`` +
+    legacy ``guardrail.model``) to the unified v5 ``llm:`` block.
+
+    The command must be:
+
+    1. Idempotent — a second run on a v5 config is a no-op.
+    2. Safe — a ``.bak`` snapshot is written unless ``--no-backup``.
+    3. Honest — ``--dry-run`` exits 0 without touching disk.
+    """
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.runner = CliRunner()
+        # Simulate an in-memory config loaded from a v4 YAML: both
+        # the legacy fields AND the unified block are populated
+        # (_migrate_llm_fields is additive and runs on every load).
+        cfg = self.app.cfg
+        cfg.inspect_llm.provider = "anthropic"
+        cfg.inspect_llm.model = "claude-3-5-sonnet-20241022"
+        cfg.default_llm_api_key_env = "ANTHROPIC_API_KEY"
+        cfg.guardrail.model = "anthropic/claude-3-5-sonnet-20241022"
+        cfg.guardrail.api_key_env = "ANTHROPIC_API_KEY"
+        cfg.llm.provider = "anthropic"
+        cfg.llm.model = "claude-3-5-sonnet-20241022"
+        cfg.llm.api_key_env = "ANTHROPIC_API_KEY"
+        cfg.save()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def test_dry_run_leaves_fields_populated(self):
+        from defenseclaw.commands.cmd_setup import setup
+        result = self.runner.invoke(
+            setup, ["migrate-llm", "--dry-run"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Legacy v4 LLM fields detected", result.output)
+        self.assertIn("--dry-run", result.output)
+        # Legacy fields must still be present in memory.
+        self.assertEqual(self.app.cfg.inspect_llm.model, "claude-3-5-sonnet-20241022")
+        self.assertEqual(self.app.cfg.guardrail.model, "anthropic/claude-3-5-sonnet-20241022")
+
+    def test_migrate_clears_legacy_and_writes_backup(self):
+        from defenseclaw.commands.cmd_setup import setup
+        cfg_path = os.path.join(self.app.cfg.data_dir, "config.yaml")
+        self.assertTrue(os.path.exists(cfg_path))
+
+        result = self.runner.invoke(
+            setup, ["migrate-llm"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.exists(cfg_path + ".bak"), "backup not written")
+        # Legacy fields scrubbed; unified block preserved.
+        self.assertEqual(self.app.cfg.inspect_llm.model, "")
+        self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
+        self.assertEqual(self.app.cfg.guardrail.model, "")
+        self.assertEqual(self.app.cfg.guardrail.api_key_env, "")
+        self.assertEqual(self.app.cfg.llm.model, "claude-3-5-sonnet-20241022")
+        self.assertEqual(self.app.cfg.llm.api_key_env, "ANTHROPIC_API_KEY")
+
+    def test_migrate_is_idempotent(self):
+        from defenseclaw.commands.cmd_setup import setup
+        # First migration.
+        r1 = self.runner.invoke(
+            setup, ["migrate-llm"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(r1.exit_code, 0)
+        # Second migration must be a no-op and say so explicitly so
+        # operators (and CI pipelines) can detect the converged state
+        # without parsing YAML.
+        r2 = self.runner.invoke(
+            setup, ["migrate-llm"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(r2.exit_code, 0)
+        self.assertIn("already in v5 shape", r2.output)
+
+    def test_no_backup_skips_bak_file(self):
+        from defenseclaw.commands.cmd_setup import setup
+        cfg_path = os.path.join(self.app.cfg.data_dir, "config.yaml")
+        # Ensure a stale .bak from a previous test doesn't confuse us.
+        bak = cfg_path + ".bak"
+        if os.path.exists(bak):
+            os.remove(bak)
+
+        result = self.runner.invoke(
+            setup, ["migrate-llm", "--no-backup"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(os.path.exists(bak), "--no-backup must not write a .bak")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
 
-.PHONY: all path doctor uninstall quickstart \
+.PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -38,7 +38,7 @@ DIST_DIR    := dist
 #
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
-all: install path quickstart
+all: install path quickstart llm-setup
 	@echo ""
 	@echo "╭────────────────────────────────────────────────────────────╮"
 	@echo "│  DefenseClaw is installed and ready.                       │"
@@ -75,6 +75,29 @@ quickstart:
 	else \
 		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
 		exit 1; \
+	fi
+
+# Post-install interactive prompt for DEFENSECLAW_LLM_KEY + llm.model.
+# Quickstart sets up the config skeleton non-interactively; this target
+# fills in the two values that actually require a human (API key, model
+# choice). Silently skipped when:
+#   - stdin is not a TTY (CI, pipes, `make all < /dev/null`)
+#   - NO_LLM_SETUP=1 or YES=1 is set (explicit opt-out)
+#   - CI=true (GitHub Actions / GitLab / most CI runners)
+# The script itself is idempotent: if both values are already present
+# it exits without prompting, so rerunning `make all` is a no-op.
+llm-setup:
+	@if [ "$${NO_LLM_SETUP:-0}" = "1" ] || [ "$${YES:-0}" = "1" ] \
+	    || [ "$${CI:-}" = "true" ] || [ ! -t 0 ] || [ ! -t 1 ]; then \
+		echo "  Skipping interactive LLM setup (non-TTY or NO_LLM_SETUP=1)."; \
+		echo "  Configure later with:"; \
+		echo "    defenseclaw setup llm          # unified LLM (key + model, shared by judge + scanners)"; \
+		echo "    defenseclaw setup llm --show   # inspect the currently configured LLM"; \
+	else \
+		./scripts/setup-llm.sh || { \
+			echo "  LLM setup exited with errors — rerun with: defenseclaw setup llm"; \
+			true; \
+		}; \
 	fi
 
 # Thin wrappers over the CLI so operators never need to remember whether
@@ -197,11 +220,33 @@ cli-install: pycli
 
 gateway-install: cli-install gateway
 	@mkdir -p $(INSTALL_DIR)
-	@cp $(GATEWAY) $(INSTALL_DIR)/$(GATEWAY)
+	@# Atomic replace: Linux returns ETXTBSY when overwriting an executable
+	@# that is currently running (e.g. the sidecar started via `defenseclaw-
+	@# gateway start`). cp(1) opens the destination for writing, which
+	@# trips that check. rename(2) (invoked by mv) only swaps the directory
+	@# entry, so the running process keeps the old inode and upgrades work
+	@# live. We copy to a sibling temp file first so a partial write can
+	@# never clobber a working binary.
+	@gwt="$(INSTALL_DIR)/$(GATEWAY)"; \
+	tmp="$$gwt.new.$$$$"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	cp $(GATEWAY) "$$tmp"; \
+	chmod +x "$$tmp"; \
+	mv -f "$$tmp" "$$gwt"
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY) 2>/dev/null || true; \
 	fi
 	@echo "Installed $(GATEWAY) to $(INSTALL_DIR)"
+	@# If a sidecar is already running it kept the old inode; tell the
+	@# operator so they know a restart is needed to pick up the new build.
+	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
+	@# matches this very make invocation ("make gateway-install") and
+	@# any editor/tail window with the binary path on its cmdline, so
+	@# it would fire a false "sidecar is running" hint on every build.
+	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+		echo "  Gateway sidecar is running an older build — restart with:"; \
+		echo "    $(INSTALL_DIR)/$(GATEWAY) restart"; \
+	fi
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
 		echo "Add $(INSTALL_DIR) to your PATH:"; \

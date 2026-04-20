@@ -113,7 +113,10 @@ def scan(
         llm_consensus_runs, enable_meta, lenient,
     )
 
-    scanner = PluginScannerWrapper()
+    # Route the unified LLM config (top-level ``llm:`` + any
+    # ``scanners.plugin.llm:`` overrides) into the wrapper. The
+    # wrapper layers per-call CLI flags on top before dispatching.
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
     if not as_json:
         flags = []
         if policy_name:
@@ -170,7 +173,15 @@ def _build_scan_options(
     enable_meta: bool,
     lenient: bool,
 ) -> dict:
-    """Build scan options dict from CLI flags + skill_scanner LLM config."""
+    """Build ``PluginScannerWrapper.scan`` kwargs from CLI flags.
+
+    LLM defaults (model, api_key, base_url, provider) come from the
+    unified :class:`LLMConfig` — resolved at ``scanners.plugin`` and
+    threaded in via ``PluginScannerWrapper(llm=...)``. This function
+    only forwards the per-invocation knobs the operator set on this
+    particular command line. Any field left at its default ("", 0)
+    falls through to the unified config.
+    """
     opts: dict = {}
 
     if policy_name:
@@ -178,14 +189,14 @@ def _build_scan_options(
     if profile:
         opts["profile"] = profile
 
-    # LLM config: CLI flags override, then fall back to skill_scanner config
     if use_llm:
-        cfg = app.cfg.scanners.skill_scanner
         opts["use_llm"] = True
-        opts["llm_model"] = llm_model or cfg.llm_model or "claude-sonnet-4-20250514"
-        opts["llm_api_key"] = cfg.llm_api_key
-        opts["llm_provider"] = llm_provider or cfg.llm_provider
-        opts["llm_consensus_runs"] = llm_consensus_runs or cfg.llm_consensus_runs or 1
+        if llm_model:
+            opts["llm_model"] = llm_model
+        if llm_provider:
+            opts["llm_provider"] = llm_provider
+        if llm_consensus_runs > 0:
+            opts["llm_consensus_runs"] = llm_consensus_runs
 
     if not enable_meta:
         opts["disable_meta"] = True
@@ -324,7 +335,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
         # --- Scan (unless allow-listed) ---
         if not allowed:
             click.echo(f"[install] scanning {source_path}...")
-            scanner = PluginScannerWrapper()
+            scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
             try:
                 result = scanner.scan(source_path)
             except Exception as exc:

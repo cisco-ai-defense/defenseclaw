@@ -133,7 +133,7 @@ func NewGuardrailProxy(
 	policyDir string,
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
-	sharedAPIKey string,
+	judgeLLM config.LLMConfig,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -142,7 +142,7 @@ func NewGuardrailProxy(
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
 	}
 
-	judge := NewLLMJudge(&cfg.Judge, dotenvPath, rp, sharedAPIKey)
+	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
 	inspector.SetDetectionStrategy(

@@ -483,6 +483,112 @@ class TestInspectLLMConfig(unittest.TestCase):
         self.assertEqual(llm.resolved_api_key(), "")
 
 
+class TestConfigResolveLLM(unittest.TestCase):
+    """``Config.resolve_llm`` merges top-level ``llm:`` with a per-component
+    override block. This test class pins the precedence so the wrong scanner
+    doesn't silently pick up the wrong key when operators layer overrides.
+
+    Precedence (high -> low):
+      1. ``<path>.llm`` override block
+      2. top-level ``cfg.llm``
+      3. ``DEFENSECLAW_LLM_MODEL`` env (model only)
+      4. legacy ``default_llm_model`` / ``default_llm_api_key_env``
+    """
+
+    def setUp(self):
+        from defenseclaw.config import LLMConfig
+        self.LLMConfig = LLMConfig
+
+    def _make_cfg(self):
+        """Build a minimal Config without touching disk."""
+        from defenseclaw.config import Config
+        return Config(data_dir=tempfile.mkdtemp())
+
+    def tearDown(self):
+        os.environ.pop("DEFENSECLAW_LLM_MODEL", None)
+
+    def test_empty_path_returns_top_level(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(provider="openai", model="gpt-4o")
+        got = cfg.resolve_llm()
+        self.assertEqual(got.model, "gpt-4o")
+        self.assertEqual(got.provider, "openai")
+
+    def test_mcp_override_beats_top_level(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(provider="openai", model="gpt-4o", api_key_env="DEFENSECLAW_LLM_KEY")
+        cfg.scanners.mcp_scanner.llm = self.LLMConfig(model="gpt-4o-mini", api_key_env="MCP_KEY")
+        got = cfg.resolve_llm("scanners.mcp")
+        self.assertEqual(got.model, "gpt-4o-mini")
+        self.assertEqual(got.provider, "openai", "provider should inherit when override is empty")
+        self.assertEqual(got.api_key_env, "MCP_KEY")
+
+    def test_skill_override_partial_inherits(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(provider="anthropic", model="claude-3-5-sonnet", base_url="https://top")
+        cfg.scanners.skill_scanner.llm = self.LLMConfig(model="claude-3-5-haiku")
+        got = cfg.resolve_llm("scanners.skill")
+        self.assertEqual(got.model, "claude-3-5-haiku")
+        self.assertEqual(got.provider, "anthropic")
+        self.assertEqual(got.base_url, "https://top")
+
+    def test_plugin_override_resolves(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(model="top")
+        cfg.scanners.plugin_llm = self.LLMConfig(model="plugin-override")
+        got = cfg.resolve_llm("scanners.plugin")
+        self.assertEqual(got.model, "plugin-override")
+
+    def test_guardrail_override_resolves(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(provider="openai", model="gpt-4o")
+        cfg.guardrail.llm = self.LLMConfig(model="gpt-4o-mini")
+        got = cfg.resolve_llm("guardrail")
+        self.assertEqual(got.model, "gpt-4o-mini")
+        self.assertEqual(got.provider, "openai")
+
+    def test_guardrail_judge_override_resolves(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(model="top")
+        cfg.guardrail.judge.llm = self.LLMConfig(model="judge-override")
+        got = cfg.resolve_llm("guardrail.judge")
+        self.assertEqual(got.model, "judge-override")
+
+    def test_unknown_path_returns_top_level(self):
+        cfg = self._make_cfg()
+        cfg.llm = self.LLMConfig(model="top")
+        got = cfg.resolve_llm("scanners.does_not_exist")
+        # Unknown paths warn but degrade gracefully rather than crashing —
+        # operators relying on DEFENSECLAW_LLM_KEY shouldn't see an outage
+        # over a typo'd override path.
+        self.assertEqual(got.model, "top")
+
+    def test_env_fallback_fills_empty_model(self):
+        os.environ["DEFENSECLAW_LLM_MODEL"] = "openai/gpt-4o-from-env"
+        cfg = self._make_cfg()
+        got = cfg.resolve_llm()
+        self.assertEqual(got.model, "openai/gpt-4o-from-env")
+
+    def test_legacy_default_llm_model_back_compat(self):
+        cfg = self._make_cfg()
+        cfg.default_llm_model = "openai/gpt-4o-legacy"
+        got = cfg.resolve_llm()
+        self.assertEqual(got.model, "openai/gpt-4o-legacy")
+
+    def test_legacy_default_llm_api_key_env_back_compat(self):
+        cfg = self._make_cfg()
+        cfg.default_llm_api_key_env = "LEGACY_KEY_ENV"
+        got = cfg.resolve_llm()
+        self.assertEqual(got.api_key_env, "LEGACY_KEY_ENV")
+
+    def test_env_beats_legacy_default_llm_model(self):
+        os.environ["DEFENSECLAW_LLM_MODEL"] = "env-wins"
+        cfg = self._make_cfg()
+        cfg.default_llm_model = "legacy-loses"
+        got = cfg.resolve_llm()
+        self.assertEqual(got.model, "env-wins")
+
+
 class TestCiscoAIDefenseConfig(unittest.TestCase):
     def test_defaults(self):
         aid = CiscoAIDefenseConfig()

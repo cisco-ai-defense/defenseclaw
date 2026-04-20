@@ -346,11 +346,25 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 			{"Policy dir", p.cfg.PolicyDir},
 			{"Data dir", p.cfg.DataDir},
 		}
-		if p.cfg.InspectLLM.Provider != "" {
-			rows = append(rows, [2]string{"LLM Provider", p.cfg.InspectLLM.Provider})
+		// Prefer the unified llm: block for the Overview header. This
+		// is what Config.ResolveLLM(...) returns by default, so it
+		// matches what guardrail, MCP scanner, skill scanner, and
+		// plugin scanner actually use. Fall back to the legacy
+		// inspect_llm fields only when the unified block is empty
+		// (load-time migration should normally populate it).
+		llmProvider := p.cfg.LLM.Provider
+		if llmProvider == "" {
+			llmProvider = p.cfg.InspectLLM.Provider
 		}
-		if p.cfg.InspectLLM.Model != "" {
-			rows = append(rows, [2]string{"LLM Model", p.cfg.InspectLLM.Model})
+		llmModel := p.cfg.LLM.Model
+		if llmModel == "" {
+			llmModel = p.cfg.InspectLLM.Model
+		}
+		if llmProvider != "" {
+			rows = append(rows, [2]string{"LLM Provider", llmProvider})
+		}
+		if llmModel != "" {
+			rows = append(rows, [2]string{"LLM Model", llmModel})
 		}
 		if p.cfg.CiscoAIDefense.Endpoint != "" {
 			rows = append(rows, [2]string{"AI Defense", p.cfg.CiscoAIDefense.Endpoint})
@@ -440,7 +454,15 @@ func (p *OverviewPanel) renderScannersBox(w int) string {
 		if mode == "" {
 			mode = "observe"
 		}
+		// Guardrail model resolution: prefer the explicit
+		// guardrail.model override for transparency (it's what's on
+		// the wire), then fall back to the unified llm: block, and
+		// finally to the legacy inspect_llm: block for operators
+		// still on v4 config files.
 		model := p.cfg.Guardrail.Model
+		if model == "" {
+			model = p.cfg.LLM.Model
+		}
 		if model == "" {
 			model = p.cfg.InspectLLM.Model
 		}

@@ -19,9 +19,10 @@
 from __future__ import annotations
 
 import os
-import shutil
 
 import click
+
+from defenseclaw.gateway import canonical_install_path, resolve_gateway_binary
 
 
 @click.command("tui")
@@ -31,12 +32,21 @@ def tui() -> None:
     Hands off to the defenseclaw-gateway binary which provides the
     full Bubbletea-based terminal UI with alerts, skills, MCPs,
     inventory, logs, and audit panels.
+
+    Binary resolution goes through :func:`defenseclaw.gateway.resolve_gateway_binary`
+    which also falls back to the canonical install path so we keep
+    working in the very shell that just ran ``make all`` (where
+    ``~/.local/bin`` is not yet on ``PATH``).
     """
-    gateway = shutil.which("defenseclaw-gateway")
+    gateway = resolve_gateway_binary()
     if gateway is None:
+        canonical = canonical_install_path()
         click.echo(
-            "Error: defenseclaw-gateway not found on PATH.\n"
-            "Install it with: make gateway-install",
+            "Error: defenseclaw-gateway not found.\n"
+            f"  Looked on PATH and at {canonical}.\n"
+            "  Install it with: make gateway-install\n"
+            "  If you just ran 'make all', open a new shell or run:\n"
+            "    source ~/.zshrc   # or ~/.bashrc / ~/.profile",
             err=True,
         )
         raise SystemExit(1)
