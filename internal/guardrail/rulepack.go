@@ -98,6 +98,14 @@ type RulesFileYAML struct {
 	Version  int           `yaml:"version"`
 	Category string        `yaml:"category"`
 	Rules    []RuleDefYAML `yaml:"rules"`
+
+	// SourcePath is the absolute path the file was read from. The
+	// ``yaml:"-"`` tag keeps it out of serialized output so round-
+	// tripping (e.g., TUI viewer → Marshal → display) doesn't leak
+	// the operator's filesystem layout into a rule-pack YAML. The
+	// TUI's rule-pack editor uses this to launch ``$EDITOR`` on
+	// the exact file that backs the highlighted rule.
+	SourcePath string `yaml:"-"`
 }
 
 // RuleDefYAML is a single detection rule definition in YAML.
@@ -166,7 +174,8 @@ func loadRuleFiles(dir string) []*RulesFileYAML {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(rulesDir, e.Name()))
+		full := filepath.Join(rulesDir, e.Name())
+		data, err := os.ReadFile(full)
 		if err != nil {
 			log.Printf("guardrail: read rules/%s: %v", e.Name(), err)
 			continue
@@ -180,6 +189,10 @@ func loadRuleFiles(dir string) []*RulesFileYAML {
 			log.Printf("guardrail: rules/%s version %d unsupported, skipping", e.Name(), rf.Version)
 			continue
 		}
+		// Record where the file came from so downstream surfaces
+		// (notably the TUI's rule-pack editor) can round-trip edits
+		// to the exact file without guessing a path from category.
+		rf.SourcePath = full
 		files = append(files, &rf)
 	}
 	return files

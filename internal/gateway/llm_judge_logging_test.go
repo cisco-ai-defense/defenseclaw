@@ -17,11 +17,12 @@ import (
 
 // These tests pin the opt-in semantics of Phase 2.3 (retain judge raw
 // bodies). The hot path is `judgeRawForEmit`, which MUST be default-off
-// and ONLY return the truncated raw body when one of two controls is
+// and ONLY return the truncated raw body when one of three controls is
 // explicitly enabled:
 //
 //  1. DEFENSECLAW_JUDGE_TRACE=1 (ephemeral, session-only)
-//  2. guardrail.retain_judge_bodies = true (durable, via SetRetainJudgeBodies)
+//  2. DEFENSECLAW_REVEAL_PII=1  (ephemeral, local triage)
+//  3. guardrail.retain_judge_bodies = true (durable, via SetRetainJudgeBodies)
 //
 // A regression here would silently persist model-echoed PII into
 // gateway.jsonl, the OTel logs pipeline, and every configured audit
@@ -33,11 +34,16 @@ func restoreRetainJudgeBodies(t *testing.T) {
 	t.Helper()
 	prev := retainJudgeBodies.Load()
 	t.Cleanup(func() { retainJudgeBodies.Store(prev) })
+	// Ensure REVEAL_PII is off for the duration of each test unless the
+	// test explicitly flips it. Tests that depend on "default off"
+	// semantics must not be polluted by an inherited env var from the
+	// operator's shell.
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
 }
 
 func TestJudgeRawForEmit_DefaultOffReturnsEmpty(t *testing.T) {
 	restoreRetainJudgeBodies(t)
-	// Ensure neither control is on. t.Setenv restores automatically.
+	// Ensure no control is on. t.Setenv restores automatically.
 	t.Setenv("DEFENSECLAW_JUDGE_TRACE", "")
 	retainJudgeBodies.Store(false)
 
@@ -55,6 +61,28 @@ func TestJudgeRawForEmit_EnvTraceEnables(t *testing.T) {
 			t.Setenv("DEFENSECLAW_JUDGE_TRACE", v)
 			if got := judgeRawForEmit(judgePayload); !strings.Contains(got, "phone") {
 				t.Fatalf("env %q did not enable retention: %q", v, got)
+			}
+		})
+	}
+}
+
+// TestJudgeRawForEmit_RevealPIIEnables pins the Task-4 invariant:
+// operators debugging with DEFENSECLAW_REVEAL_PII=1 must see judge
+// raw bodies without also flipping DEFENSECLAW_JUDGE_TRACE. The live
+// bug that motivated this was operators seeing "<redacted len=503
+// sha=...>" in gateway.log for judge responses even after enabling
+// REVEAL, forcing a second env var flip just to answer "what did the
+// judge actually say matched?".
+func TestJudgeRawForEmit_RevealPIIEnables(t *testing.T) {
+	restoreRetainJudgeBodies(t)
+	retainJudgeBodies.Store(false)
+	t.Setenv("DEFENSECLAW_JUDGE_TRACE", "")
+
+	for _, v := range []string{"1", "true", "yes", "on", "TRUE"} {
+		t.Run("reveal="+v, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_REVEAL_PII", v)
+			if got := judgeRawForEmit(judgePayload); !strings.Contains(got, "phone") {
+				t.Fatalf("REVEAL_PII=%q did not enable retention: %q", v, got)
 			}
 		})
 	}
