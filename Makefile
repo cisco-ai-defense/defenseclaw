@@ -211,6 +211,22 @@ cli-install: pycli
 	@mkdir -p $(INSTALL_DIR)
 	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
 	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
+	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
+	@# plus the -api / -pre-commit siblings) on PATH via the same
+	@# ~/.local/bin symlink pattern we already use for the main CLI.
+	@# Without these, a fresh `make all` leaves `defenseclaw doctor`
+	@# reporting '[FAIL] Scanner: skill-scanner — not on PATH' because
+	@# the binaries live in $(VENV)/bin but $(VENV)/bin is never on the
+	@# operator's shell PATH by design. `|| true` keeps this optional
+	@# so old venvs that somehow lack one of the entry points don't
+	@# break install; the doctor check surfaces any real misses.
+	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
+	             mcp-scanner mcp-scanner-api; do \
+		src="$(CURDIR)/$(VENV)/bin/$$tool"; \
+		if [ -x "$$src" ]; then \
+			ln -sf "$$src" "$(INSTALL_DIR)/$$tool"; \
+		fi; \
+	done
 	@echo "Installed defenseclaw CLI to $(INSTALL_DIR)"
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
