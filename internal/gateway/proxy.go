@@ -1978,6 +1978,18 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 		p.writeBlockedResponseGemini(w, msg)
 		return
 	}
+	if provider == "bedrock" {
+		// Bedrock decides streaming vs non-streaming from the URL path
+		// (/converse-stream vs /converse, /invoke-with-response-stream
+		// vs /invoke) rather than a `stream: true` body field, so the
+		// passthrough dispatcher re-derives it there. The AWS SDK on
+		// the client side expects `application/vnd.amazon.eventstream`
+		// binary framing for streaming endpoints and fails to parse
+		// plain OpenAI-style SSE as produced by writeBlockedStream,
+		// surfacing "Truncated event message received" to the caller.
+		p.writeBlockedPassthroughBedrock(w, path, model, msg)
+		return
+	}
 	// OpenAI Responses API (/v1/responses or /openai/v1/responses).
 	if strings.HasSuffix(path, "/responses") {
 		if stream {

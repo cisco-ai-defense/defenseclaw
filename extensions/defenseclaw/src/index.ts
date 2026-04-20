@@ -46,6 +46,12 @@ import {
 } from "./agent_identity.js";
 import { DaemonClient } from "./client.js";
 import { HEADER_HTTP_CONTENT_TYPE } from "./correlation-headers.js";
+
+/** OpenClaw passes full gateway config and the defenseclaw plugin entry config. */
+type DefenseClawPluginHost = PluginApi & {
+  config?: unknown;
+  pluginConfig?: { awsHttp1Shim?: "auto" | "on" | "off" };
+};
 import { PolicyEnforcer, runSkillScan, runPluginScan, runCodeScan } from "./policy/enforcer.js";
 import { scanMCPServer } from "./scanners/mcp-scanner.js";
 import type {
@@ -55,6 +61,7 @@ import type {
   OutboundSidecarRequestLog,
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
+import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
@@ -117,7 +124,15 @@ function formatFindings(findings: Finding[], limit = 15): string[] {
   return lines;
 }
 
-export default function (api: PluginApi) {
+export default function (api: DefenseClawPluginHost) {
+  // Before any BedrockRuntimeClient: AWS SDK v3 uses HTTP/2 unless
+  // AWS_BEDROCK_FORCE_HTTP1=1; we set that plus an optional Smithy patch so
+  // Bedrock traffic hits our https.request hook (the guardrail proxy).
+  patchAwsSdkHttp1ForGuardrail({
+    openclawConfig: api.config,
+    pluginConfig: api.pluginConfig,
+  });
+
   // ─── Runtime: tool call interception ───
 
   const sidecarConfig = loadSidecarConfig();
@@ -182,6 +197,10 @@ export default function (api: PluginApi) {
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
   // the guardrail proxy regardless of which provider/model OpenClaw uses.
   const interceptor = createFetchInterceptor(sidecarConfig.guardrailPort);
+  // Start immediately so gateway model prewarm (before plugin services) also
+  // routes through the guardrail when Bedrock is the primary model.
+  interceptor.start();
+
   api.registerService({
     id: "llm-interceptor",
     start: async () => {

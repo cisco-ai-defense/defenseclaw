@@ -64,6 +64,14 @@ function createMockContext() {
   const commands: Record<string, { handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }> = {};
 
   const api = {
+    config: {
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-4o" },
+        },
+      },
+    },
+    pluginConfig: {},
     on: vi.fn((event: string, handler: EventHandler) => {
       listeners[event] = handler;
     }),
@@ -102,6 +110,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1ShimEvaluated;
+    delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1GuardrailPatch;
     mockEnforcer.syncFromDaemon.mockResolvedValue(undefined);
     mockEnforcer.block.mockResolvedValue(undefined);
     mockEnforcer.allow.mockResolvedValue(undefined);
