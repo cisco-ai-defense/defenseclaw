@@ -418,6 +418,12 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
         if app.logger:
             app.logger.log_action("plugin-install", plugin_name, f"source={name_or_path}")
 
+        from defenseclaw.commands import hint
+        hint(
+            "List plugins:      defenseclaw plugin list",
+            "Restart gateway:   defenseclaw-gateway restart",
+        )
+
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -470,6 +476,9 @@ def list_plugins(app: AppContext, as_json: bool) -> None:
         return
 
     _print_plugin_list_table(plugins, scan_map, actions_map)
+
+    from defenseclaw.commands import hint
+    hint("Scan a plugin:  defenseclaw plugin scan <name>")
 
 
 def _merge_all_plugins(plugin_dir: str) -> list[dict[str, Any]]:
@@ -832,6 +841,9 @@ def remove(app: AppContext, name: str) -> None:
     click.echo(f"Removed plugin: {safe_name}")
     if app.logger:
         app.logger.log_action("plugin-remove", safe_name, "")
+
+    from defenseclaw.commands import hint
+    hint("Restart gateway to apply:  defenseclaw-gateway restart")
 
 
 # ---------------------------------------------------------------------------

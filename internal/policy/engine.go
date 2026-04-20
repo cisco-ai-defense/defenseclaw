@@ -100,6 +100,58 @@ func (e *Engine) RegoDir() string {
 	return e.regoDir
 }
 
+// ReadPath returns the value at the given data path (slash-separated, e.g.
+// "budget/pricing") from the in-memory data store. Returns nil if the path
+// is missing. Intended for non-Rego consumers that need access to static
+// data tables (such as the budget pricing map).
+func (e *Engine) ReadPath(path string) interface{} {
+	e.mu.RLock()
+	store := e.store
+	e.mu.RUnlock()
+	if store == nil {
+		return nil
+	}
+
+	ctx := context.Background()
+	txn, err := store.NewTransaction(ctx)
+	if err != nil {
+		return nil
+	}
+	defer store.Abort(ctx, txn)
+
+	parts := []string{}
+	for _, p := range splitPath(path) {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	storagePath := storage.Path(parts)
+	v, err := store.Read(ctx, txn, storagePath)
+	if err != nil {
+		return nil
+	}
+	return v
+}
+
+func splitPath(p string) []string {
+	var out []string
+	cur := ""
+	for i := 0; i < len(p); i++ {
+		if p[i] == '/' || p[i] == '.' {
+			if cur != "" {
+				out = append(out, cur)
+			}
+			cur = ""
+			continue
+		}
+		cur += string(p[i])
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Admission
 // ---------------------------------------------------------------------------
@@ -207,6 +259,28 @@ func (e *Engine) EvaluateSkillActions(ctx context.Context, input SkillActionsInp
 		FileAction:    stringVal(result, "file_action"),
 		InstallAction: stringVal(result, "install_action"),
 		ShouldBlock:   boolVal(result, "should_block"),
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Budget
+// ---------------------------------------------------------------------------
+
+// EvaluateBudget runs the token/cost budget policy for a pre-call decision.
+// The caller supplies the subject, model, pre-flight estimates, and the
+// current sliding-window usage snapshot. A returned action of "deny"
+// signals LLM-04 (Model DoS) or spend-cap enforcement.
+func (e *Engine) EvaluateBudget(ctx context.Context, input BudgetInput) (*BudgetOutput, error) {
+	result, err := e.eval(ctx, "data.defenseclaw.budget", input)
+	if err != nil {
+		return nil, fmt.Errorf("policy: budget eval: %w", err)
+	}
+	return &BudgetOutput{
+		Action:    stringVal(result, "action"),
+		Reason:    stringVal(result, "reason"),
+		Rule:      stringVal(result, "rule"),
+		Limit:     floatVal(result, "limit"),
+		Remaining: floatVal(result, "remaining"),
 	}, nil
 }
 
@@ -374,6 +448,31 @@ func boolVal(m map[string]interface{}, key string) bool {
 		return false
 	}
 	return b
+}
+
+func floatVal(m map[string]interface{}, key string) float64 {
+	v, ok := m[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0
+		}
+		return f
+	default:
+		return 0
+	}
 }
 
 func toStringSlice(m map[string]interface{}, key string) []string {

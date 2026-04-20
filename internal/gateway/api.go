@@ -921,7 +921,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner, a.scannerCfg.InspectLLM, a.scannerCfg.CiscoAIDefense)
+	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner, a.scannerCfg.EffectiveInspectLLM(), a.scannerCfg.CiscoAIDefense)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -1020,7 +1020,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ms := scanner.NewMCPScanner(a.scannerCfg.Scanners.MCPScanner, a.scannerCfg.InspectLLM, a.scannerCfg.CiscoAIDefense)
+	ms := scanner.NewMCPScanner(a.scannerCfg.Scanners.MCPScanner, a.scannerCfg.EffectiveInspectLLM(), a.scannerCfg.CiscoAIDefense)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -1169,6 +1169,25 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		req.Direction, req.Action, req.Severity, len(req.Findings), req.ElapsedMs)
 	if req.Reason != "" {
 		details += fmt.Sprintf(" reason=%s", truncate(req.Reason, 120))
+	}
+
+	if nfs := NormalizeScanVerdict(&ScanVerdict{
+		Severity: req.Severity,
+		Findings: req.Findings,
+	}); len(nfs) > 0 {
+		ids := make([]string, 0, len(nfs))
+		seen := make(map[string]bool, len(nfs))
+		for _, nf := range nfs {
+			if seen[nf.CanonicalID] {
+				continue
+			}
+			seen[nf.CanonicalID] = true
+			ids = append(ids, nf.CanonicalID)
+			if len(ids) >= 8 {
+				break
+			}
+		}
+		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
 
 	switch req.Action {

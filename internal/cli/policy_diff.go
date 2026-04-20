@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -98,9 +99,14 @@ func discoverRequiredEndpoints(ocConfigPath string) []requiredEndpoint {
 
 	var eps []requiredEndpoint
 
-	// Discover channels
+	// Discover channels (sorted for deterministic output)
 	channels, _ := oc["channels"].(map[string]interface{})
+	chNames := make([]string, 0, len(channels))
 	for chName := range channels {
+		chNames = append(chNames, chName)
+	}
+	sort.Strings(chNames)
+	for _, chName := range chNames {
 		chLower := strings.ToLower(chName)
 		if known, ok := sandbox.KnownChannelEndpoints[chLower]; ok {
 			for _, ep := range known {
@@ -109,14 +115,19 @@ func discoverRequiredEndpoints(ocConfigPath string) []requiredEndpoint {
 		}
 	}
 
-	// Discover model providers
+	// Discover model providers (sorted for deterministic output)
 	models, _ := oc["models"].(map[string]interface{})
 	providers, _ := models["providers"].(map[string]interface{})
-	for provName, provCfg := range providers {
+	provNames := make([]string, 0, len(providers))
+	for provName := range providers {
+		provNames = append(provNames, provName)
+	}
+	sort.Strings(provNames)
+	for _, provName := range provNames {
 		if provName == "litellm" {
 			continue
 		}
-		provMap, _ := provCfg.(map[string]interface{})
+		provMap, _ := providers[provName].(map[string]interface{})
 		if baseURL, ok := provMap["baseUrl"].(string); ok {
 			host, port, skip := sandbox.ParseMCPEndpoint(baseURL)
 			if !skip && host != "" {

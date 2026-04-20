@@ -595,6 +595,8 @@ func categorizeAction(action string) string {
 		strings.Contains(action, "gateway-recovered"),
 		strings.Contains(action, "guardrail-degraded"):
 		return "health"
+	case strings.Contains(action, "budget"):
+		return "budget"
 	case strings.Contains(action, "guardrail"):
 		return "guardrail"
 	case strings.Contains(action, "drift"),

@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -115,6 +114,7 @@ type ChatRequest struct {
 	Stop        json.RawMessage `json:"stop,omitempty"`
 	Tools       json.RawMessage `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	Fallbacks   []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
 	RawBody     json.RawMessage `json:"-"`
 	TargetURL   string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor
 	TargetAPIKey string         `json:"-"` // from Authorization header, forwarded to upstream
@@ -170,32 +170,30 @@ type LLMProvider interface {
 
 // NewProvider creates an LLM provider adapter based on the model string.
 // The model format is "provider/model-name" (e.g. "anthropic/claude-opus-4-5").
+// All provider routing and API translation is handled by the Bifrost Go SDK.
 func NewProvider(model string, apiKey string) (LLMProvider, error) {
 	provider, modelID := splitModel(model)
 	if provider == "" {
 		provider = inferProvider(modelID, apiKey)
 	}
-	switch provider {
-	case "anthropic":
-		return &anthropicProvider{model: modelID, apiKey: apiKey}, nil
-	case "openai":
-		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
-	case "openrouter":
-		return &openrouterProvider{model: modelID, apiKey: apiKey}, nil
-	case "gemini-openai":
-		return &geminiCompatProvider{model: modelID, apiKey: apiKey}, nil
-	case "gemini":
-		return &geminiNativeProvider{model: modelID, apiKey: apiKey}, nil
-	case "azure":
-		return nil, fmt.Errorf("provider: azure requires api_base; use NewProviderWithBase")
-	default:
-		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: "https://api.openai.com"}, nil
+
+	providerKey, err := mapProviderKey(provider)
+	if err != nil {
+		return nil, err
 	}
+	return &bifrostProvider{
+		providerKey: providerKey,
+		model:       modelID,
+		apiKey:      apiKey,
+	}, nil
 }
 
 // inferProvider detects the provider from the model name or API key format
 // when no explicit "provider/" prefix is given.
 func inferProvider(model string, apiKey string) string {
+	if strings.HasPrefix(apiKey, "ABSK") {
+		return "bedrock"
+	}
 	if strings.HasPrefix(model, "claude") {
 		return "anthropic"
 	}
@@ -211,36 +209,58 @@ func inferProvider(model string, apiKey string) string {
 	return "openai"
 }
 
-// NewProviderWithBase creates a provider that sends requests to a custom base URL
-// using OpenAI-compatible format. Used for the LLM judge to support arbitrary endpoints.
-func NewProviderWithBase(model string, apiKey string, baseURL string) LLMProvider {
-	provider, modelID := splitModel(model)
+// NewProviderWithBase creates a provider that sends requests to a custom base URL.
+// The Bifrost SDK handles all provider-specific API differences (auth headers,
+// request format translation, streaming) internally.
+func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvider, error) {
 	if baseURL == "" {
-		p, _ := NewProvider(model, apiKey)
-		return p
+		return NewProvider(model, apiKey)
 	}
-	// Route to the appropriate provider with custom baseURL
-	switch provider {
-	case "openrouter":
-		return &openrouterProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
-	case "gemini-openai":
-		return &geminiCompatProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
-	case "gemini":
-		return &geminiNativeProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
-	case "azure":
-		return &azureOpenAIProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
-	default:
-		return &openaiProvider{model: modelID, apiKey: apiKey, baseURL: strings.TrimRight(baseURL, "/")}
+
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	provider, modelID := splitModel(model)
+	if provider == "" {
+		provider = inferProvider(modelID, apiKey)
 	}
+
+	providerKey, err := mapProviderKey(provider)
+	if err != nil {
+		return nil, err
+	}
+	return &bifrostProvider{
+		providerKey: providerKey,
+		model:       modelID,
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+	}, nil
 }
 
+// knownProviders lists provider prefixes recognized in "provider/model" strings.
 var knownProviders = map[string]bool{
-	"openai":        true,
-	"anthropic":     true,
-	"openrouter":    true,
-	"azure":         true,
-	"gemini":        true,
+	"openai":      true,
+	"anthropic":   true,
+	"openrouter":  true,
+	"azure":       true,
+	"gemini":      true,
 	"gemini-openai": true,
+	"bedrock":     true,
+	// amazon-bedrock is OpenClaw's stock provider name for AWS Bedrock; see
+	// https://docs.openclaw.ai/providers/bedrock. Both prefixes are accepted
+	// and routed to the same Bifrost Bedrock backend via mapProviderKey.
+	"amazon-bedrock": true,
+	"groq":        true,
+	"mistral":     true,
+	"ollama":      true,
+	"vertex":      true,
+	"cohere":      true,
+	"perplexity":  true,
+	"cerebras":    true,
+	"fireworks":   true,
+	"xai":         true,
+	"huggingface": true,
+	"replicate":   true,
+	"vllm":        true,
 }
 
 func splitModel(model string) (provider, modelID string) {
@@ -255,11 +275,9 @@ func splitModel(model string) (provider, modelID string) {
 	return "", model
 }
 
-// providerHTTPClient is used for all upstream LLM provider requests.
+// providerHTTPClient is used for passthrough upstream requests in the proxy.
 // No client-level Timeout is set because each call site passes a
-// context.WithTimeout (2 min non-streaming, 5 min streaming) — a
-// client-level timeout would race with (and potentially shadow) that
-// context deadline.
+// context.WithTimeout — a client-level timeout would race with that.
 var providerHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		MaxIdleConns:        20,

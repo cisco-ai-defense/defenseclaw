@@ -879,4 +879,8 @@ func (m *mockInspectorBlockAll) Inspect(_ context.Context, _, _ string, _ []Chat
 	return &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test block"}
 }
 
+func (m *mockInspectorBlockAll) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	return m.Inspect(ctx, direction, content, messages, model, mode)
+}
+
 func (m *mockInspectorBlockAll) SetScannerMode(_ string) {}

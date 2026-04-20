@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -78,14 +79,28 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
 
-	// Wire LLM judge for tool call injection detection if configured.
-	if cfg.Guardrail.Judge.Enabled && cfg.Guardrail.Judge.ToolInjection {
+	// Load guardrail rule pack for judge prompts, suppressions, etc.
+	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
+	rp.Validate()
+	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
+	router.SetRulePack(rp)
+	ApplyRulePackOverrides(rp)
+
+	// Wire LLM judge when enabled. The judge handles tool-call injection
+	// detection AND tool-result PII inspection (via inspectToolResult),
+	// so it must be initialized whenever judge is enabled — not only when
+	// tool_injection is on.
+	if cfg.Guardrail.Judge.Enabled {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
-		judge := NewLLMJudge(&cfg.Guardrail.Judge, dotenvPath)
+		judge := NewLLMJudge(&cfg.Guardrail.Judge, dotenvPath, rp, cfg.ResolvedDefaultLLMAPIKey())
 		if judge != nil {
 			router.SetJudge(judge)
-			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled for tool call inspection (model=%s)\n",
-				cfg.Guardrail.Judge.Model)
+			features := "tool-result-pii"
+			if cfg.Guardrail.Judge.ToolInjection {
+				features += ", tool-injection"
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n",
+				features, cfg.Guardrail.Judge.Model)
 		}
 	}
 
@@ -600,6 +615,15 @@ func (s *Sidecar) activeSessionKeys() []string {
 
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
+	// Reuse the rule pack already loaded by NewSidecar and stored on the
+	// router, avoiding a redundant disk/embed read and potential drift.
+	rp := s.router.rp
+	if rp == nil {
+		rp = guardrail.LoadRulePack(s.cfg.Guardrail.RulePackDir)
+		rp.Validate()
+		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
+	}
+
 	proxy, err := NewGuardrailProxy(
 		&s.cfg.Guardrail,
 		&s.cfg.CiscoAIDefense,
@@ -610,6 +634,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.cfg.DataDir,
 		s.cfg.PolicyDir,
 		s.notify,
+		rp,
+		s.cfg.ResolvedDefaultLLMAPIKey(),
+		s.cfg.Budget,
+		s.opa,
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)

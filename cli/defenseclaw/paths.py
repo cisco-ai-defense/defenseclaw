@@ -89,6 +89,18 @@ def bundled_extensions_dir() -> Path:
     )
 
 
+def bundled_guardrail_profiles_dir() -> Path | None:
+    """Guardrail rule-pack profile directory (default/strict/permissive)."""
+    candidates = [
+        _DATA_DIR / "policies" / "guardrail",
+        _REPO_ROOT / "policies" / "guardrail",
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
 def bundled_openshell_policies_dir() -> Path | None:
     """OpenShell policy templates (default.rego, default-data.yaml, etc.)."""
     candidates = [

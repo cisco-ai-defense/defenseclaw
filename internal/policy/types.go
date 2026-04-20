@@ -143,3 +143,34 @@ type SkillActionsOutput struct {
 	InstallAction string `json:"install_action"`
 	ShouldBlock   bool   `json:"should_block"`
 }
+
+// BudgetUsage is the current sliding-window usage snapshot for a subject.
+// All values are integers except cost, which is in USD.
+type BudgetUsage struct {
+	TokensLastMinute   int64   `json:"tokens_last_minute"`
+	TokensLastHour     int64   `json:"tokens_last_hour"`
+	TokensLastDay      int64   `json:"tokens_last_day"`
+	RequestsLastMinute int64   `json:"requests_last_minute"`
+	RequestsLastHour   int64   `json:"requests_last_hour"`
+	RequestsLastDay    int64   `json:"requests_last_day"`
+	CostLastHour       float64 `json:"cost_last_hour"`
+	CostLastDay        float64 `json:"cost_last_day"`
+}
+
+// BudgetInput is the structured input passed to the OPA budget policy.
+type BudgetInput struct {
+	Subject         string      `json:"subject"`
+	Model           string      `json:"model"`
+	EstimatedTokens int64       `json:"estimated_tokens"`
+	EstimatedCost   float64     `json:"estimated_cost"`
+	Usage           BudgetUsage `json:"usage"`
+}
+
+// BudgetOutput is the structured output from the OPA budget policy.
+type BudgetOutput struct {
+	Action    string  `json:"action"` // "allow" or "deny"
+	Reason    string  `json:"reason"`
+	Rule      string  `json:"rule"`
+	Limit     float64 `json:"limit"`
+	Remaining float64 `json:"remaining"`
+}

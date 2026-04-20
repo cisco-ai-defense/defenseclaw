@@ -22,6 +22,7 @@ jobs:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
       E2E_PROFILE: core
@@ -275,8 +276,22 @@ jobs:
           PY
 
           defenseclaw-gateway restart || defenseclaw-gateway start
-          sleep 5
-          defenseclaw-gateway status
+          # Wait up to 30s for the sidecar to become healthy rather than a
+          # fixed 5s sleep (self-hosted runners can be slow under load).
+          for i in $(seq 1 30); do
+            if defenseclaw-gateway status >/dev/null 2>&1; then
+              echo "sidecar healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          defenseclaw-gateway status || {
+            echo "--- gateway.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            echo "--- watchdog.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
+            exit 1
+          }
 
       - name: Unit tests
         run: make test
@@ -289,6 +304,17 @@ jobs:
 
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
+
+      - name: Upload DefenseClaw logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: defenseclaw-logs-core
+          path: |
+            ~/.defenseclaw/*.log
+            ~/.defenseclaw/config.yaml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Post-run cleanup
         if: always()
@@ -321,10 +347,32 @@ jobs:
     timeout-minutes: 45
     env:
       OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # ANTHROPIC_API_KEY intentionally NOT plumbed into this job. The full-live
+      # guardrail agent now runs on OpenClaw's stock amazon-bedrock provider
+      # (auth=aws-sdk, AWS_BEARER_TOKEN_BEDROCK below). Injecting a stale /
+      # low-balance Anthropic key here triggers three false-positive failures:
+      #   (a) the defenseclaw doctor "LLM API key" check hits api.anthropic.com
+      #       because its current provider routing does a substring match on
+      #       "anthropic" in the model name (see cli/defenseclaw/commands/
+      #       cmd_doctor.py),
+      #   (b) the Anthropic /v1/messages passthrough test gets 400 "credit
+      #       balance too low",
+      #   (c) the duplicate-header / X-AI-Auth tests likewise call
+      #       api.anthropic.com directly.
+      # Those tests all skip cleanly with "ANTHROPIC_API_KEY not set" when the
+      # env var is absent, which is the correct behavior for a Bedrock-only
+      # live run.
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      BIFROST_API_KEY: ${{ secrets.BIFROST_API_KEY }}
+      # BIFROST_API_KEY holds an AWS Bedrock bearer token (ABSK…). Expose it to
+      # both our in-process Bifrost (via BIFROST_API_KEY) and to OpenClaw's
+      # stock amazon-bedrock provider (via AWS_BEARER_TOKEN_BEDROCK) so OC can
+      # talk to Bedrock natively through the AWS SDK default credential chain.
+      # See https://docs.openclaw.ai/providers/bedrock ("auth: aws-sdk").
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BIFROST_API_KEY }}
+      AWS_REGION: us-east-1
       SPLUNK_ACCESS_TOKEN: ${{ secrets.SPLUNK_ACCESS_TOKEN }}
       SPLUNK_REALM: ${{ secrets.SPLUNK_REALM }}
       E2E_PROFILE: full-live
@@ -546,7 +594,17 @@ jobs:
           import os
           from pathlib import Path
 
-          target_model = "anthropic/claude-sonnet-4-5"
+          # Full-live CI LLM provider: AWS Bedrock via OpenClaw's stock
+          # amazon-bedrock provider. We use a Claude Haiku 4.5 inference profile
+          # because it's the cheapest current Anthropic model on Bedrock with
+          # tool-calling support (required by block/allow enforcement tests) —
+          # same model family our in-process Bifrost e2e test covers.
+          # Auth is the AWS SDK default chain, which picks up
+          # AWS_BEARER_TOKEN_BEDROCK from the job env (set to BIFROST_API_KEY).
+          # See https://docs.openclaw.ai/providers/bedrock.
+          bedrock_provider = "amazon-bedrock"
+          bedrock_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+          target_model = f"{bedrock_provider}/{bedrock_model_id}"
           state_dir = Path(os.path.expanduser("~/.openclaw"))
           cfg_path = state_dir / "openclaw.json"
           auth_path = state_dir / "agents" / "main" / "agent" / "auth-profiles.json"
@@ -569,13 +627,44 @@ jobs:
           with cfg_path.open() as f:
               cfg = json.load(f)
 
+          # Register amazon-bedrock provider explicitly with bedrock-converse-stream
+          # API + aws-sdk auth. No apiKey field — AWS SDK chain supplies creds
+          # from AWS_BEARER_TOKEN_BEDROCK at request time.
+          aws_region = os.environ.get("AWS_REGION", "us-east-1")
+          models_cfg = cfg.setdefault("models", {})
+          providers_cfg = models_cfg.setdefault("providers", {})
+          providers_cfg[bedrock_provider] = {
+              "baseUrl": f"https://bedrock-runtime.{aws_region}.amazonaws.com",
+              "api": "bedrock-converse-stream",
+              "auth": "aws-sdk",
+              "models": [
+                  {
+                      "id": bedrock_model_id,
+                      "name": "Claude Haiku 4.5 (Bedrock)",
+                      "input": ["text"],
+                      "contextWindow": 200000,
+                      "maxTokens": 8192,
+                  }
+              ],
+          }
+
+          # IMPORTANT: do NOT add an amazon-bedrock entry under auth.profiles.
+          # OpenClaw's config schema restricts profile mode values to
+          # {"api_key", "oauth", "token"} (an earlier version of this file
+          # tried mode="aws_sdk" and OpenClaw rejected the whole config at
+          # startup). Per https://docs.openclaw.ai/providers/bedrock, the
+          # provider entry above sets auth="aws-sdk", which tells OpenClaw to
+          # resolve credentials through the AWS SDK default chain
+          # (AWS_BEARER_TOKEN_BEDROCK / AWS_ACCESS_KEY_ID / AWS_PROFILE) at
+          # request time — no auth profile is needed.
+          #
+          # Scrub any stale amazon-bedrock entries from an older run's config
+          # (e.g. if the backup/restore flow somehow leaked a bad profile).
           auth_cfg = cfg.setdefault("auth", {})
           auth_profiles = auth_cfg.setdefault("profiles", {})
-          auth_profiles["anthropic:default"] = {
-              "provider": "anthropic",
-              "mode": "api_key",
-          }
-          auth_cfg.setdefault("order", {})["anthropic"] = ["anthropic:default"]
+          auth_profiles.pop(f"{bedrock_provider}:default", None)
+          auth_order = auth_cfg.setdefault("order", {})
+          auth_order.pop(bedrock_provider, None)
 
           agents = cfg.setdefault("agents", {})
           defaults = agents.setdefault("defaults", {})
@@ -589,23 +678,17 @@ jobs:
               json.dump(cfg, f, indent=2)
               f.write("\n")
 
+          # auth-profiles.json: empty profile store. amazon-bedrock
+          # authenticates via the AWS SDK default chain driven by the
+          # provider's auth="aws-sdk" setting, so we don't register a keyref
+          # here. Writing an empty store (rather than leaving a stale file)
+          # ensures a prior run's ANTHROPIC_API_KEY-based profile doesn't
+          # bleed through.
           auth_path.parent.mkdir(parents=True, exist_ok=True)
           auth_store = {
               "version": 1,
-              "profiles": {
-                  "anthropic:default": {
-                      "type": "api_key",
-                      "provider": "anthropic",
-                      "keyRef": {
-                          "source": "env",
-                          "provider": "default",
-                          "id": "ANTHROPIC_API_KEY",
-                      },
-                  }
-              },
-              "order": {
-                  "anthropic": ["anthropic:default"],
-              },
+              "profiles": {},
+              "order": {},
           }
           with auth_path.open("w") as f:
               json.dump(auth_store, f, indent=2)
@@ -626,7 +709,18 @@ jobs:
           dropin_path = Path(os.environ["OPENCLAW_SERVICE_DROPIN_PATH"])
           env_path.parent.mkdir(parents=True, exist_ok=True)
           lines = []
-          for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCLAW_GATEWAY_TOKEN"):
+          # AWS_BEARER_TOKEN_BEDROCK + AWS_REGION are required by OpenClaw's
+          # amazon-bedrock provider (AWS SDK default chain). BIFROST_API_KEY is
+          # kept for our in-process Bifrost callers. Both point at the same
+          # ABSK… token held in the BIFROST_API_KEY secret.
+          for key in (
+              "ANTHROPIC_API_KEY",
+              "OPENAI_API_KEY",
+              "OPENCLAW_GATEWAY_TOKEN",
+              "AWS_BEARER_TOKEN_BEDROCK",
+              "AWS_REGION",
+              "BIFROST_API_KEY",
+          ):
               value = os.environ.get(key, "")
               if value:
                   lines.append(f"{key}={value}")
@@ -637,7 +731,11 @@ jobs:
           systemctl --user daemon-reload
 
           echo "OPENCLAW_MODEL_PATCHED=true" >> "$GITHUB_ENV"
-          echo "GUARDRAIL_REQUEST_MODEL=anthropic/claude-sonnet-4-5" >> "$GITHUB_ENV"
+          # Set a provisional guardrail target. The Init DefenseClaw step
+          # overwrites this with the actual OC_MODEL it discovers from
+          # openclaw.json, so this value is just a safe default if that step
+          # somehow fails to read the freshly-patched config.
+          echo "GUARDRAIL_REQUEST_MODEL=amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0" >> "$GITHUB_ENV"
 
       - name: Init DefenseClaw
         run: |
@@ -656,6 +754,20 @@ jobs:
           fi
           if [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
             echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          # BIFROST_API_KEY = AWS Bedrock bearer token (ABSK…). Consumed by the
+          # guardrail sidecar via api_key_env=BIFROST_API_KEY (set in the
+          # guardrail config step below) and by our in-process Bifrost SDK.
+          # AWS_BEARER_TOKEN_BEDROCK + AWS_REGION feed OpenClaw's stock
+          # amazon-bedrock provider (AWS SDK default chain).
+          if [ -n "${BIFROST_API_KEY:-}" ]; then
+            echo "BIFROST_API_KEY=${BIFROST_API_KEY}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${AWS_BEARER_TOKEN_BEDROCK:-}" ]; then
+            echo "AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}" >> ~/.defenseclaw/.env
+          fi
+          if [ -n "${AWS_REGION:-}" ]; then
+            echo "AWS_REGION=${AWS_REGION}" >> ~/.defenseclaw/.env
           fi
           if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
             echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
@@ -690,14 +802,19 @@ jobs:
 
           if [ -n "$OC_MODEL" ]; then
             MODEL_NAME=$(echo "$OC_MODEL" | sed 's|.*/||')
-            if echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
+            # Bedrock must be matched BEFORE the generic anthropic/claude pattern
+            # because a Bedrock inference profile id looks like
+            # "amazon-bedrock/us.anthropic.claude-haiku-4-5-...".
+            if echo "$OC_MODEL" | grep -qi "^\(amazon-\)\?bedrock/\|bedrock\|/us\.anthropic\.\|/amazon\.\|/nova"; then
+              # Our embedded Bifrost Go SDK accepts an AWS Bedrock bearer token
+              # (ABSK…) directly as BIFROST_API_KEY. No SigV4 signing required.
+              API_KEY_ENV="BIFROST_API_KEY"
+            elif echo "$OC_MODEL" | grep -qi "anthropic\|claude\|sonnet\|haiku\|opus"; then
               API_KEY_ENV="ANTHROPIC_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "openai\|gpt\|o1\|o3\|o4"; then
               API_KEY_ENV="OPENAI_API_KEY"
             elif echo "$OC_MODEL" | grep -qi "gemini\|google"; then
               API_KEY_ENV="GOOGLE_API_KEY"
-            elif echo "$OC_MODEL" | grep -qi "bedrock\|amazon\|nova"; then
-              GUARDRAIL_REASON="Bedrock model detected — live guardrail proxy does not yet support SigV4 auth"
             else
               GUARDRAIL_REASON="model provider is not supported by the live guardrail proxy"
             fi
@@ -748,6 +865,23 @@ jobs:
               cfg['guardrail']['model'] = os.environ.get('OC_MODEL', '')
               cfg['guardrail']['model_name'] = os.environ.get('MODEL_NAME', '')
               cfg['guardrail']['api_key_env'] = os.environ.get('API_KEY_ENV', '')
+              cfg['guardrail']['detection_strategy'] = 'regex_judge'
+              cfg['guardrail']['detection_strategy_completion'] = 'regex_only'
+              cfg['guardrail'].setdefault('judge', {})
+              cfg['guardrail']['judge']['enabled'] = True
+              cfg['guardrail']['judge']['injection'] = True
+              cfg['guardrail']['judge']['pii'] = True
+              cfg['guardrail']['judge']['pii_prompt'] = True
+              cfg['guardrail']['judge']['pii_completion'] = True
+              cfg['guardrail']['judge']['tool_injection'] = True
+              cfg['guardrail']['judge']['model'] = os.environ.get('JUDGE_MODEL', os.environ.get('OC_MODEL', ''))
+              cfg['guardrail']['judge']['api_key_env'] = os.environ.get('JUDGE_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
+              cfg['guardrail']['judge']['api_base'] = os.environ.get('JUDGE_API_BASE', '')
+              cfg['guardrail']['judge']['timeout'] = 30
+              # Shared LLM key — scanners and judge can fall back to this
+              shared_key_env = os.environ.get('DEFAULT_LLM_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
+              if shared_key_env:
+                  cfg['default_llm_api_key_env'] = shared_key_env
               cfg['skill_actions'] = {
                   'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
                   'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
@@ -760,8 +894,22 @@ jobs:
           PY
 
           defenseclaw-gateway restart || defenseclaw-gateway start
-          sleep 5
-          defenseclaw-gateway status
+          # Wait up to 30s for the sidecar to become healthy rather than a
+          # fixed 5s sleep (self-hosted runners can be slow under load).
+          for i in $(seq 1 30); do
+            if defenseclaw-gateway status >/dev/null 2>&1; then
+              echo "sidecar healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          defenseclaw-gateway status || {
+            echo "--- gateway.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            echo "--- watchdog.log (tail) ---"
+            tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
+            exit 1
+          }
 
       - name: Unit tests
         run: make test
@@ -774,6 +922,17 @@ jobs:
 
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
+
+      - name: Upload DefenseClaw logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: defenseclaw-logs-full-live
+          path: |
+            ~/.defenseclaw/*.log
+            ~/.defenseclaw/config.yaml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Restore OpenClaw Anthropic model
         if: always()

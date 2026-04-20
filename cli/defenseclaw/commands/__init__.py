@@ -18,7 +18,19 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
+
+import click
+
+
+def hint(*lines: str) -> None:
+    """Print dim post-command hints, only when stdout is a terminal."""
+    if not sys.stdout.isatty():
+        return
+    click.echo()
+    for line in lines:
+        click.echo(click.style(line, dim=True))
 
 
 def compute_verdict(

@@ -30,21 +30,46 @@ defenseclaw setup guardrail
 The wizard walks through:
 - **Mode**: `observe` (log only) or `action` (block threats) — start with `observe`
 - **Port**: guardrail proxy port (default `4000`)
+- **LLM Judge**: optional but recommended — uses an LLM to verify detections and reduce false positives
+- **Detection strategy**: `regex_judge` (default) balances accuracy and speed
 
-No model or API key prompts — the fetch interceptor captures provider
-auth headers set by OpenClaw's provider SDKs (`Authorization`,
-`x-api-key`, `api-key`) and forwards them to the proxy as `X-AI-Auth`.
-All supported providers (Anthropic, OpenAI, Azure, Gemini, OpenRouter,
-Ollama, Bedrock) are covered transparently.
+**Upstream LLM keys:** The fetch interceptor captures provider auth
+headers set by OpenClaw's provider SDKs (`Authorization`, `x-api-key`,
+`api-key`) and forwards them to the proxy as `X-AI-Auth`. DefenseClaw
+does not need your upstream LLM key — OpenClaw manages that.
+
+**Judge LLM key (if enabling the judge):** The judge makes its own
+independent LLM calls. You need a key for the judge's model provider:
+
+```bash
+# Store the judge key in ~/.defenseclaw/.env
+echo "ANTHROPIC_API_KEY=sk-ant-your-key" >> ~/.defenseclaw/.env
+```
+
+The setup wizard will ask for the env var name (default: `JUDGE_API_KEY`)
+and offer to share it across all LLM components via `default_llm_api_key_env`.
 
 ### Non-interactive
 
 ```bash
+# Basic (regex-only, no judge)
 defenseclaw setup guardrail \
   --non-interactive \
   --mode observe \
   --port 4000
+
+# With LLM judge (recommended)
+defenseclaw setup guardrail \
+  --non-interactive \
+  --mode action \
+  --judge-model "anthropic/claude-sonnet-4-20250514" \
+  --judge-api-key-env "ANTHROPIC_API_KEY"
 ```
+
+When `--judge-model` is provided, the judge is auto-enabled and the
+detection strategy defaults to `regex_judge` (regex triages, judge
+verifies ambiguous matches). Post-call completion inspection uses
+`regex_only` to avoid adding latency to responses.
 
 ## 3. Start Services
 

@@ -92,6 +92,7 @@ func printCodeScanResults(result *scanner.ScanResult) {
 		fmt.Printf("CodeGuard scan: %s\n", result.Target)
 		fmt.Println("  No findings — clean")
 		fmt.Printf("  Duration: %s\n", result.Duration)
+		printHint("Run full audit:  defenseclaw doctor")
 		return
 	}
 
@@ -107,4 +108,5 @@ func printCodeScanResults(result *scanner.ScanResult) {
 
 	fmt.Println()
 	fmt.Printf("  Duration: %s\n", result.Duration)
+	printHint("View alerts:  defenseclaw alerts")
 }

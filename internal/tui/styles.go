@@ -16,7 +16,7 @@
 
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 var (
 	// Tab bar
@@ -40,17 +40,6 @@ var (
 	SelectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 	NormalStyle   = lipgloss.NewStyle()
 	HeaderStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238"))
-
-	// Status bar
-	StatusBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252")).
-			Padding(0, 1)
-	StatusLabelStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("62")).
-				Foreground(lipgloss.Color("230")).
-				Padding(0, 1).
-				Bold(true)
 
 	// Detail modal
 	ModalStyle = lipgloss.NewStyle().

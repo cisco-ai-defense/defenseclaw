@@ -85,5 +85,12 @@ def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | N
 
     if as_json:
         click.echo(json.dumps(inv, indent=2))
-    else:
-        format_claw_aibom_human(inv, summary_only=summary_only)
+        return
+
+    format_claw_aibom_human(inv, summary_only=summary_only)
+
+    from defenseclaw.commands import hint
+    hint(
+        "View alerts:  defenseclaw alerts",
+        "Scan skills:  defenseclaw skill scan all",
+    )

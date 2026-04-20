@@ -74,6 +74,31 @@
     "log_all_actions": true,
     "log_scan_results": true
   },
+  "budget": {
+    "subjects": {
+      "default": {
+        "tokens_per_minute": 0,
+        "tokens_per_hour": 0,
+        "tokens_per_day": 0,
+        "requests_per_minute": 0,
+        "requests_per_hour": 0,
+        "requests_per_day": 0,
+        "cost_per_hour": 0,
+        "cost_per_day": 0
+      }
+    },
+    "pricing": {
+      "gpt-4o": {"input_per_1k": 0.0025, "output_per_1k": 0.010},
+      "gpt-4o-mini": {"input_per_1k": 0.00015, "output_per_1k": 0.0006},
+      "gpt-4-turbo": {"input_per_1k": 0.010, "output_per_1k": 0.030},
+      "gpt-3.5-turbo": {"input_per_1k": 0.0005, "output_per_1k": 0.0015},
+      "claude-3-5-sonnet": {"input_per_1k": 0.003, "output_per_1k": 0.015},
+      "claude-3-opus": {"input_per_1k": 0.015, "output_per_1k": 0.075},
+      "claude-3-haiku": {"input_per_1k": 0.00025, "output_per_1k": 0.00125},
+      "gemini-pro": {"input_per_1k": 0.0005, "output_per_1k": 0.0015},
+      "default": {"input_per_1k": 0.001, "output_per_1k": 0.003}
+    }
+  },
   "guardrail": {
     "severity_rank": {
       "NONE": 0,

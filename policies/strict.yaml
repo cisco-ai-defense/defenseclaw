@@ -89,7 +89,6 @@ guardrail:
       - "aws_access_key"
       - "aws_secret_access"
       - "password="
-      - "token:"
       - "bearer "
       - "ghp_"
       - "gho_"
@@ -148,6 +147,18 @@ watch:
 #     events: [block]
 #     enabled: true
 webhooks: []
+
+# Token/cost budget enforcement (LLM-04 Model DoS + spend caps). Strict
+# preset defaults to enforce mode so over-budget requests are rejected.
+# Populate per-subject limits in ~/.defenseclaw/policies/rego/data.json
+# (`data.budget.subjects`). A subject with no entry falls back to
+# `data.budget.subjects.default`; zero limits mean "unlimited".
+budget:
+  enabled: true
+  mode: enforce
+  subject_header: X-DC-Subject
+  default_subject: default
+  log_allowed: false
 
 enforcement:
   max_enforcement_delay_seconds: 1
