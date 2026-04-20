@@ -327,6 +327,9 @@ def list_skills(app: AppContext, as_json: bool) -> None:
     actions_map = _build_actions_map(app.store)
 
     if not skills and not actions_map and not scan_map:
+        if as_json:
+            click.echo("[]")
+            return
         click.echo("No skills found. Is openclaw installed?")
         return
 
