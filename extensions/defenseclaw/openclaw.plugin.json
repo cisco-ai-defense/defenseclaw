@@ -17,6 +17,12 @@
         "enum": ["observe", "action"],
         "default": "observe",
         "description": "Guardrail mode: observe (log only) or action (block threats)"
+      },
+      "awsHttp1Shim": {
+        "type": "string",
+        "enum": ["auto", "on", "off"],
+        "default": "auto",
+        "description": "Amazon Bedrock: pi-ai uses HTTP/2 by default, which bypasses the guardrail proxy. When enabled, sets AWS_BEDROCK_FORCE_HTTP1=1 (pi-ai) and applies a Smithy fallback patch. auto = on only if OpenClaw model config references Bedrock; on = always; off = never."
       }
     }
   }

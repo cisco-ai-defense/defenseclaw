@@ -246,18 +246,66 @@ export function createFetchInterceptor(guardrailPort: number) {
     type NodeIncomingMessage = unknown;
     type NodeClientRequest = ReturnType<typeof http.request>;
 
+    /**
+     * Normalize the varied `https.request` call shapes into a single URL string
+     * we can match against LLM provider domains. Callers may pass:
+     *   - request(url: string)
+     *   - request(url: URL)
+     *   - request(options)                   // { host|hostname, port, path, protocol }
+     *   - request(url, options)              // URL first, then extra options
+     * @smithy/node-http-handler v4 passes an options object with `host` (NOT
+     * `hostname`), separate `port`, and separate `path`, so we must read both
+     * `host` and `hostname` and fold `path` back in to match on domain + path.
+     */
+    function buildUrlStringFromArgs(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+    ): string {
+      if (typeof urlOrOptions === "string") return urlOrOptions;
+      if (urlOrOptions instanceof URL) return urlOrOptions.toString();
+
+      const opts = urlOrOptions as {
+        host?: unknown;
+        hostname?: unknown;
+        port?: unknown;
+        path?: unknown;
+        protocol?: unknown;
+      };
+      const overlay = (typeof secondArg === "object" && secondArg !== null
+        ? (secondArg as typeof opts)
+        : {});
+
+      const host =
+        (typeof overlay.hostname === "string" && overlay.hostname) ||
+        (typeof overlay.host === "string" && overlay.host) ||
+        (typeof opts.hostname === "string" && opts.hostname) ||
+        (typeof opts.host === "string" && opts.host) ||
+        "";
+      const port =
+        (overlay.port !== undefined ? String(overlay.port) : "") ||
+        (opts.port !== undefined ? String(opts.port) : "");
+      const path =
+        (typeof overlay.path === "string" && overlay.path) ||
+        (typeof opts.path === "string" && opts.path) ||
+        "/";
+      const proto =
+        (typeof overlay.protocol === "string" && overlay.protocol) ||
+        (typeof opts.protocol === "string" && opts.protocol) ||
+        "https:";
+
+      if (!host) return "";
+      const hostPart = port ? `${host}:${port}` : host;
+      return `${proto}//${hostPart}${path}`;
+    }
+
     function patchedHttpsRequest(
       urlOrOptions: string | URL | NodeRequestOptions,
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
-      const urlStr = typeof urlOrOptions === "string"
-        ? urlOrOptions
-        : urlOrOptions instanceof URL
-          ? urlOrOptions.toString()
-          : ((urlOrOptions as NodeRequestOptions).hostname as string ?? "");
+      const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
-      if (isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort)) {
+      if (urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort)) {
         let opts: NodeRequestOptions = {};
         let cb = callback;
 
@@ -269,13 +317,9 @@ export function createFetchInterceptor(guardrailPort: number) {
           opts = optionsOrCallback as NodeRequestOptions;
         }
 
-        // Parse original URL to get host, path, protocol
         let originalUrl: URL;
         try {
-          const optsAs = opts as { hostname?: string; path?: string };
-          originalUrl = new URL(typeof urlOrOptions === "string" ? urlOrOptions
-            : urlOrOptions instanceof URL ? urlOrOptions.toString()
-            : `https://${optsAs.hostname ?? ""}${optsAs.path ?? ""}`);
+          originalUrl = new URL(urlStr);
         } catch {
           return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
         }
@@ -284,13 +328,71 @@ export function createFetchInterceptor(guardrailPort: number) {
         const providerKey = extractProviderKeyFromRecord(hdrs);
         const proxyHdrs = buildProxyHeaders(originalUrl.origin, providerKey);
 
+        // Spread `opts` first, then overwrite target fields. Crucially, drop:
+        //
+        //  - `host` (smithy passes `host` not `hostname`; Node's `host` wins
+        //    over `hostname` in some paths, which would send traffic to the
+        //    original LLM domain instead of the proxy);
+        //  - `agent` (callers like @smithy/node-http-handler pass an
+        //    `https.Agent`. Node's `http.request` rejects an agent whose
+        //    `protocol === "https:"` with `ERR_INVALID_PROTOCOL`: "Protocol
+        //    'http:' not supported. Expected 'https:'". We want Node to use
+        //    the default http agent for the proxy hop, so set `agent: false`);
+        //  - TLS-only options (`ca`, `cert`, `key`, ...) which have no meaning
+        //    on a plain http.request and could still drag protocol checks in.
+        const {
+          host: _legacyHost,
+          agent: _legacyAgent,
+          ca: _ca,
+          cert: _cert,
+          key: _key,
+          pfx: _pfx,
+          passphrase: _passphrase,
+          servername: _servername,
+          ciphers: _ciphers,
+          ecdhCurve: _ecdhCurve,
+          secureProtocol: _secureProtocol,
+          minVersion: _minVersion,
+          maxVersion: _maxVersion,
+          sigalgs: _sigalgs,
+          crl: _crl,
+          dhparam: _dhparam,
+          rejectUnauthorized: _rejectUnauthorized,
+          checkServerIdentity: _checkServerIdentity,
+          session: _session,
+          allowPartialTrustChain: _allowPartialTrustChain,
+          ...restOpts
+        } = opts as { host?: unknown; agent?: unknown } & Record<string, unknown>;
+        void _legacyHost;
+        void _legacyAgent;
+        void _ca;
+        void _cert;
+        void _key;
+        void _pfx;
+        void _passphrase;
+        void _servername;
+        void _ciphers;
+        void _ecdhCurve;
+        void _secureProtocol;
+        void _minVersion;
+        void _maxVersion;
+        void _sigalgs;
+        void _crl;
+        void _dhparam;
+        void _rejectUnauthorized;
+        void _checkServerIdentity;
+        void _session;
+        void _allowPartialTrustChain;
         const newOpts: NodeRequestOptions = {
-          ...opts,
+          ...restOpts,
           hostname: "127.0.0.1",
           port: guardrailPort,
           protocol: "http:",
           path: `${originalUrl.pathname}${originalUrl.search}`,
           headers: { ...hdrs, ...proxyHdrs },
+          // Force Node to pick a default http.Agent for this request. Leaving
+          // the caller's https.Agent in place would throw at socket allocation.
+          agent: false,
         };
 
         console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);
