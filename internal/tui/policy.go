@@ -17,12 +17,16 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"gopkg.in/yaml.v3"
 
@@ -92,6 +96,45 @@ type PolicyPanel struct {
 	policyScroll   int
 	policiesLoaded bool // lazy-loaded so tests don't need a real ~/.defenseclaw
 	policyForm     PolicyCreateForm
+
+	// B3a: Policies tab viewer overlay. When open, the panel renders
+	// the YAML of the highlighted admission policy in a bordered
+	// overlay so operators never have to leave the Policies tab.
+	// policyDetailScroll is the index of the first body line to
+	// render; clamped in renderPolicyDetailOverlay so a window
+	// resize never strands the view past EOF.
+	policyDetailOpen   bool
+	policyDetailYAML   string
+	policyDetailName   string
+	policyDetailScroll int
+
+	// B3b: Rule-pack rule detail overlay. Same idea as the policy
+	// overlay but scoped to a single rule inside the active pack.
+	// ruleDetailPath is the backing file for the highlighted rule,
+	// populated at openRuleDetail() time so the 'e' edit keybind
+	// can launch ``$EDITOR`` on the exact file (rules are grouped
+	// per-file by category, so editing the file is the right unit
+	// of editing — tweaking one rule in isolation would require
+	// a structured patch the guardrail loader doesn't offer yet).
+	ruleDetailOpen   bool
+	ruleDetailYAML   string
+	ruleDetailPath   string
+	ruleDetailScroll int
+
+	// B3d: pendingCmd is a tea.Cmd queued by HandleKey that should
+	// run in the TUI (not via the CommandExecutor / Activity panel).
+	// We use this for `defenseclaw policy test` so the output lands
+	// in the OPA side panel instead of flipping the active tab.
+	pendingCmd tea.Cmd
+}
+
+// RegoTestResultMsg carries the raw stdout+stderr of `defenseclaw
+// policy test`. Kept as a single blob because operators want to
+// eyeball the whole report (pass/fail counts + individual failures)
+// rather than paginate it.
+type RegoTestResultMsg struct {
+	Output string
+	Err    error
 }
 
 // NewPolicyPanel creates a PolicyPanel.
@@ -198,6 +241,27 @@ func (p *PolicyPanel) loadRegoSource() {
 	p.regoSource = string(data)
 }
 
+// TakeCmd drains a pending tea.Cmd queued by HandleKey. Returns nil
+// when no async command was requested. Callers should invoke this
+// after HandleKey to pick up jobs that run inside the TUI (vs. via
+// the CommandExecutor / Activity panel).
+func (p *PolicyPanel) TakeCmd() tea.Cmd {
+	cmd := p.pendingCmd
+	p.pendingCmd = nil
+	return cmd
+}
+
+// IsOverlayActive reports whether the panel is in a state where it
+// must exclusively own keyboard/mouse input. The outer key router in
+// app.go consults this so shortcuts like digit-panel-switch or the
+// global palette binding can't fire out from under a read-only YAML
+// viewer or an in-panel form. Keeping this one predicate avoids the
+// per-overlay check lists we had before (and the associated "oh we
+// forgot to guard the new one" bugs).
+func (p *PolicyPanel) IsOverlayActive() bool {
+	return p.policyDetailOpen || p.ruleDetailOpen || p.policyForm.IsActive()
+}
+
 // HandleKey processes keyboard input for the policy panel.
 func (p *PolicyPanel) HandleKey(key string) (runBin string, runArgs []string, runName string) {
 	if !p.loaded {
@@ -216,15 +280,106 @@ func (p *PolicyPanel) HandleKey(key string) (runBin string, runArgs []string, ru
 		return
 	}
 
+	// B3a / B3b: if a read-only YAML overlay is open, let it absorb
+	// esc / enter / q to close. Anything else on an overlay is a
+	// no-op so typing 'tab' while reading a policy doesn't silently
+	// flip tabs underneath it.
+	if p.policyDetailOpen {
+		switch key {
+		case "esc", "enter", "q":
+			p.policyDetailOpen = false
+			p.policyDetailYAML = ""
+			p.policyDetailName = ""
+			p.policyDetailScroll = 0
+		case "up", "k":
+			if p.policyDetailScroll > 0 {
+				p.policyDetailScroll--
+			}
+		case "down", "j":
+			p.policyDetailScroll++
+		case "pgup":
+			p.policyDetailScroll -= 10
+			if p.policyDetailScroll < 0 {
+				p.policyDetailScroll = 0
+			}
+		case "pgdown":
+			p.policyDetailScroll += 10
+		case "home", "g":
+			p.policyDetailScroll = 0
+		case "end", "G":
+			// Render clamps on draw; use a large sentinel and rely
+			// on renderPolicyDetailOverlay to pin to EOF.
+			p.policyDetailScroll = 1 << 30
+		}
+		return
+	}
+	if p.ruleDetailOpen {
+		switch key {
+		case "esc", "enter", "q":
+			p.ruleDetailOpen = false
+			p.ruleDetailYAML = ""
+			p.ruleDetailPath = ""
+			p.ruleDetailScroll = 0
+		case "up", "k":
+			if p.ruleDetailScroll > 0 {
+				p.ruleDetailScroll--
+			}
+		case "down", "j":
+			p.ruleDetailScroll++
+		case "pgup":
+			p.ruleDetailScroll -= 10
+			if p.ruleDetailScroll < 0 {
+				p.ruleDetailScroll = 0
+			}
+		case "pgdown":
+			p.ruleDetailScroll += 10
+		case "home", "g":
+			p.ruleDetailScroll = 0
+		case "end", "G":
+			p.ruleDetailScroll = 1 << 30
+		case "e":
+			// Launch $EDITOR on the file that backs this rule.
+			// We edit the whole file (not just the single rule)
+			// because rules are grouped per-category in one YAML
+			// and the guardrail loader re-reads the file wholesale.
+			// Trying to splice a single rule back in would need a
+			// structured patcher we don't have yet; opening the
+			// file directly is honest about what's being edited.
+			if p.ruleDetailPath != "" {
+				p.pendingCmd = launchEditorCmd(p.ruleDetailPath)
+			}
+		}
+		return
+	}
+
+	// B3c: on the Suppressions tab we want `tab` to cycle the inner
+	// sections (pre-judge → finding → tool), not the outer
+	// sub-tabs. Gate the outer tab handler so
+	// handleSuppressionsKey's `tab` branch is reachable. Outer
+	// navigation is still accessible via ]/[ (bracket keys), which
+	// we add below for every sub-tab as an alias so the habit is
+	// consistent.
 	switch key {
-	case "tab", "right":
+	case "]":
 		p.activeTab = (p.activeTab + 1) % policyTabCount
 		p.resetCursors()
 		return
-	case "shift+tab", "left":
+	case "[":
 		p.activeTab = (p.activeTab + policyTabCount - 1) % policyTabCount
 		p.resetCursors()
 		return
+	case "tab", "right":
+		if p.activeTab != policyTabSuppressions {
+			p.activeTab = (p.activeTab + 1) % policyTabCount
+			p.resetCursors()
+			return
+		}
+	case "shift+tab", "left":
+		if p.activeTab != policyTabSuppressions {
+			p.activeTab = (p.activeTab + policyTabCount - 1) % policyTabCount
+			p.resetCursors()
+			return
+		}
 	}
 
 	switch p.activeTab {
@@ -345,6 +500,39 @@ func (p *PolicyPanel) selectedPolicyName() string {
 	return p.policies[p.policyCursor]
 }
 
+// openPolicyDetail loads a policy's YAML directly from disk and
+// prepares the read-only overlay. Intentionally bypasses the CLI
+// because `policy show` is just a pretty-printer over the same file
+// — staying local removes a subprocess per click and lets the
+// operator keep filter/cursor state on the tab.
+func (p *PolicyPanel) openPolicyDetail(name string) {
+	if p.cfg == nil || p.cfg.PolicyDir == "" {
+		return
+	}
+	candidates := []string{
+		filepath.Join(p.cfg.PolicyDir, name+".yaml"),
+		filepath.Join(p.cfg.PolicyDir, name+".yml"),
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		p.policyDetailOpen = true
+		p.policyDetailYAML = string(data)
+		p.policyDetailName = name
+		p.policyDetailScroll = 0
+		return
+	}
+	// Couldn't find a readable YAML — surface the miss in the
+	// overlay itself so the operator isn't left staring at an
+	// unresponsive key press.
+	p.policyDetailOpen = true
+	p.policyDetailName = name
+	p.policyDetailYAML = fmt.Sprintf("(policy %q not found in %s)", name, p.cfg.PolicyDir)
+	p.policyDetailScroll = 0
+}
+
 // handlePoliciesKey dispatches admission-policy verbs. Everything
 // that mutates state routes through the CLI for audit-event parity
 // (same rationale as skills/mcps). Only list navigation and the
@@ -374,11 +562,18 @@ func (p *PolicyPanel) handlePoliciesKey(key string) (string, []string, string) {
 		// operator who wants the nicely-formatted table + active
 		// marker. Separate from 'r' (which refreshes our view).
 		return "defenseclaw", []string{"policy", "list"}, "policy list"
-	case "s":
+	case "s", "enter":
+		// B3a: open the policy YAML in an in-panel overlay. Reading
+		// the file locally keeps the operator on the Policies tab
+		// instead of bouncing to Activity — the CLI `policy show`
+		// just pretty-prints the same YAML we can read directly.
+		// Enter triggers the overlay as well; activation now
+		// happens via 'a' (see below) to remove the ambiguity of
+		// "enter sometimes opens, sometimes activates".
 		if name := p.selectedPolicyName(); name != "" {
-			return "defenseclaw", []string{"policy", "show", name}, "policy show " + name
+			p.openPolicyDetail(name)
 		}
-	case "enter", "a":
+	case "a":
 		if name := p.selectedPolicyName(); name != "" {
 			return "defenseclaw", []string{"policy", "activate", name}, "policy activate " + name
 		}
@@ -401,6 +596,9 @@ func (p *PolicyPanel) viewPolicies(w, h int) string {
 	if p.policyForm.IsActive() {
 		p.policyForm.SetSize(w, h)
 		return p.policyForm.View()
+	}
+	if p.policyDetailOpen {
+		return p.renderPolicyDetailOverlay(w, h)
 	}
 	if !p.policiesLoaded {
 		p.loadPolicies()
@@ -479,6 +677,20 @@ func (p *PolicyPanel) handleRulePackKey(key string) (string, []string, string) {
 			}
 		case "down", "j":
 			p.ruleCursor++
+		case "enter":
+			// B3b: drill into the highlighted rule. The overlay
+			// itself offers an 'e' key that delegates to the
+			// editor path below, so users can preview first or
+			// skip straight to editing.
+			p.openRuleDetail()
+		case "e":
+			// Shortcut: edit the highlighted rule's file without
+			// first opening the viewer overlay. Uses the same
+			// flat-index logic as openRuleDetail so ruleCursor
+			// maps consistently whether the user drills in or not.
+			if path := p.ruleFilePathAtCursor(); path != "" {
+				p.pendingCmd = launchEditorCmd(path)
+			}
 		}
 		return "", nil, ""
 	}
@@ -555,7 +767,15 @@ func (p *PolicyPanel) handleSuppressionsKey(key string) {
 	maxSection := 2
 	switch key {
 	case "tab":
+		// B3c: cycle *within* the suppressions tab so
+		// pre-judge → finding → tool → pre-judge feels like a
+		// toggle. The outer panel gates the global tab handler
+		// exactly so this branch is reachable.
 		p.suppSection = (p.suppSection + 1) % (maxSection + 1)
+		p.suppCursor = 0
+		p.suppScroll = 0
+	case "shift+tab":
+		p.suppSection = (p.suppSection + maxSection) % (maxSection + 1)
 		p.suppCursor = 0
 		p.suppScroll = 0
 	case "up", "k":
@@ -566,6 +786,18 @@ func (p *PolicyPanel) handleSuppressionsKey(key string) {
 		p.suppCursor++
 	case "d":
 		p.deleteSuppression()
+	case "enter", "e":
+		// B3c: editing individual suppression rows inline would
+		// require a multi-field form for each section (pre-judge
+		// has strips; finding has id+reason; tool has pattern+
+		// reason+severity). Until that lands, launch $EDITOR on
+		// suppressions.yaml so operators aren't blocked on
+		// changing anything at all. loadSuppressions() re-reads
+		// the file when the tab is revisited.
+		if p.cfg != nil && p.cfg.Guardrail.RulePackDir != "" {
+			path := filepath.Join(p.cfg.Guardrail.RulePackDir, "suppressions.yaml")
+			p.pendingCmd = launchEditorCmd(path)
+		}
 	}
 }
 
@@ -643,14 +875,161 @@ func (p *PolicyPanel) handleOPAKey(key string) (string, []string, string) {
 	case "r":
 		return "defenseclaw", []string{"policy", "reload"}, "policy reload"
 	case "T":
-		// Capital-T runs the rego test suite (`policy test`), which
-		// is a distinct CLI verb from lowercase t (toggle
-		// show-tests). Matching casing here (unlike the rest of
-		// the panel) because lowercase t already has a UX meaning
-		// in this tab and we don't want to reshuffle muscle memory.
-		return "defenseclaw", []string{"policy", "test"}, "policy test"
+		// Capital-T runs the rego test suite (`policy test`). We
+		// capture stdout+stderr into regoOutput via a pendingCmd
+		// instead of dispatching through the Activity panel — the
+		// operator is already reading a policy on this tab, so
+		// flipping the active view would be jarring. Matching
+		// casing here because lowercase t already toggles
+		// show-tests and we don't want to reshuffle muscle memory.
+		p.regoOutput = "running `defenseclaw policy test` …"
+		p.pendingCmd = runPolicyTestCmd()
+	case "E":
+		// B3d: launch $EDITOR on the highlighted rego file. We do
+		// this via a pending tea.ExecProcess so bubbletea can
+		// release the terminal cleanly; saving and quitting the
+		// editor returns control to the TUI. No-op when there's
+		// no selected file so we don't spawn an editor on an
+		// empty buffer.
+		if p.regoCursor >= 0 && p.regoCursor < len(p.regoFiles) {
+			path := p.regoFiles[p.regoCursor]
+			p.pendingCmd = launchEditorCmd(path)
+		}
 	}
 	return "", nil, ""
+}
+
+// runPolicyTestCmd returns a tea.Cmd that shells out to
+// `defenseclaw policy test` and wraps the combined output in a
+// RegoTestResultMsg. Runs with a bounded context so a hung test
+// binary can't freeze the UI.
+func runPolicyTestCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, resolveDefenseclawBin(), "policy", "test")
+		out, err := cmd.CombinedOutput()
+		return RegoTestResultMsg{Output: string(out), Err: err}
+	}
+}
+
+// launchEditorCmd returns a tea.Cmd that pauses bubbletea, opens
+// $EDITOR on path, and resumes. Falls back to `vi` so we always
+// have something to launch.
+func launchEditorCmd(path string) tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	c := exec.Command(editor, path)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return EditorClosedMsg{Path: path, Err: err}
+	})
+}
+
+// EditorClosedMsg is dispatched after the external editor exits so
+// the OPA tab can reload the rego source from disk.
+type EditorClosedMsg struct {
+	Path string
+	Err  error
+}
+
+// ApplyRegoTestResult stores the output of `defenseclaw policy test`
+// in the side panel. Exposed as a method so app.go can wire the
+// RegoTestResultMsg without touching unexported fields.
+func (p *PolicyPanel) ApplyRegoTestResult(out string, err error) {
+	if err != nil && out == "" {
+		p.regoOutput = "policy test failed: " + err.Error()
+		return
+	}
+	p.regoOutput = strings.TrimRight(out, "\n")
+}
+
+// ReloadRegoSource re-reads the highlighted file from disk after an
+// external editor session so edits are visible immediately.
+func (p *PolicyPanel) ReloadRegoSource() {
+	p.loadRegoSource()
+}
+
+// ReloadFromDisk re-runs the full policy-panel load sequence. Used
+// after an external editor session on a non-rego file (e.g.,
+// suppressions.yaml) where we don't know which caches need
+// invalidating, so just reload everything. The cost is cheap —
+// guardrail.LoadRulePack is a handful of YAML unmarshals.
+func (p *PolicyPanel) ReloadFromDisk() {
+	p.load()
+	// If an overlay is open it's showing stale YAML now; re-render
+	// against the freshly-loaded rule files so the operator sees
+	// their edits. If the edited file removed the rule under the
+	// cursor we clamp and skip, rather than error-out mid-view.
+	if p.ruleDetailOpen {
+		if p.ruleFilePathAtCursor() == "" {
+			p.ruleDetailOpen = false
+			p.ruleDetailYAML = ""
+			p.ruleDetailPath = ""
+			return
+		}
+		p.openRuleDetail()
+	}
+}
+
+// openRuleDetail serializes the highlighted rule back to YAML for
+// the detail overlay. We marshal a single-rule RulesFileYAML so the
+// output is self-describing (category + version header) and
+// copy-pasteable into a real rule file.
+// ruleFilePathAtCursor returns the backing file of the rule under
+// ruleCursor, flattening the (file → rules) layout the same way
+// openRuleDetail does so the two paths always agree on which rule
+// the cursor is "on".
+func (p *PolicyPanel) ruleFilePathAtCursor() string {
+	idx := 0
+	for _, rf := range p.packRules {
+		for range rf.Rules {
+			if idx == p.ruleCursor {
+				return rf.SourcePath
+			}
+			idx++
+		}
+	}
+	return ""
+}
+
+func (p *PolicyPanel) openRuleDetail() {
+	type flatRule struct {
+		Category   string
+		SourcePath string
+		Rule       guardrail.RuleDefYAML
+	}
+	var rules []flatRule
+	for _, rf := range p.packRules {
+		for _, r := range rf.Rules {
+			rules = append(rules, flatRule{
+				Category:   rf.Category,
+				SourcePath: rf.SourcePath,
+				Rule:       r,
+			})
+		}
+	}
+	if p.ruleCursor < 0 || p.ruleCursor >= len(rules) {
+		return
+	}
+	selected := rules[p.ruleCursor]
+	p.ruleDetailPath = selected.SourcePath
+	wrapper := guardrail.RulesFileYAML{
+		Version:  1,
+		Category: selected.Category,
+		Rules:    []guardrail.RuleDefYAML{selected.Rule},
+	}
+	out, err := yaml.Marshal(&wrapper)
+	if err != nil {
+		p.ruleDetailOpen = true
+		p.ruleDetailYAML = "(failed to marshal rule: " + err.Error() + ")"
+		p.ruleDetailScroll = 0
+		return
+	}
+	p.ruleDetailOpen = true
+	p.ruleDetailYAML = string(out)
+	p.ruleDetailScroll = 0
 }
 
 // ----------------------------------------------------------------
@@ -705,18 +1084,27 @@ func (p *PolicyPanel) helpText() string {
 		if p.policyForm.IsActive() {
 			return "tab/↓ next  shift+tab/↑ prev  enter submit  esc cancel"
 		}
-		return "↑/↓ nav · enter/a activate · s show · n create · d delete · l list · v validate · r refresh"
-	case policyTabRulePacks:
-		if p.packDetail {
-			return "↑/↓ browse rules  esc back"
+		if p.policyDetailOpen {
+			return "↑/↓ scroll · pgup/pgdn page · g/G jump · esc/enter/q close"
 		}
-		return "↑/↓ select pack  enter activate/browse  tab next section"
+		return "↑/↓ nav · s/enter show · a activate · n create · d delete · l list · v validate · r refresh · ]/[ tab"
+	case policyTabRulePacks:
+		if p.ruleDetailOpen {
+			if p.ruleDetailPath != "" {
+				return "↑/↓ scroll · pgup/pgdn · g/G · e edit file · esc/enter/q close"
+			}
+			return "↑/↓ scroll · pgup/pgdn · g/G · esc/enter/q close (embedded default)"
+		}
+		if p.packDetail {
+			return "↑/↓ browse rules · enter view · e edit file · esc back"
+		}
+		return "↑/↓ select pack  enter activate/browse  ]/[ next section"
 	case policyTabJudge:
-		return "↑/↓ select judge  tab next section"
+		return "↑/↓ select judge  ]/[ next section"
 	case policyTabSuppressions:
-		return "↑/↓ select  tab section  d delete  tab next section"
+		return "↑/↓ select · tab/shift+tab section · enter/e edit · d delete · ]/[ outer tab"
 	case policyTabOPA:
-		return "↑/↓ select module · v validate · r reload · t toggle tests · T run tests"
+		return "↑/↓ select · v validate · r reload · t toggle tests · T run tests · E edit"
 	}
 	return ""
 }
@@ -783,11 +1171,14 @@ func (p *PolicyPanel) viewRulePacks(w, h int) string {
 }
 
 func (p *PolicyPanel) viewRuleDetail(w, h int) string {
+	if p.ruleDetailOpen {
+		return p.renderRuleDetailOverlay(w, h)
+	}
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	bold := lipgloss.NewStyle().Bold(true)
 
 	var b strings.Builder
-	b.WriteString(bold.Render("RULES — "+p.activePack) + "  " + dim.Render("(esc to go back)") + "\n\n")
+	b.WriteString(bold.Render("RULES — "+p.activePack) + "  " + dim.Render("(enter: view · esc: back)") + "\n\n")
 
 	type flatRule struct {
 		Category string
@@ -838,6 +1229,132 @@ func (p *PolicyPanel) viewRuleDetail(w, h int) string {
 
 	fmt.Fprintf(&b, "\n%s", dim.Render(fmt.Sprintf("  %d rules total", len(rules))))
 	return b.String()
+}
+
+// clampYAMLBody prepares a read-only YAML body for rendering inside
+// a fixed viewport: splits into lines, clamps *scroll to stay within
+// the document, truncates each visible line to the column budget,
+// and returns both the joined text and the scroll window so the
+// caller can render an "N/M" footer. Extracted so the policy and
+// rule overlays agree on behavior — the review caught them both
+// overflowing on long sensitive-paths files.
+func clampYAMLBody(yaml string, w, bodyRows int, scroll *int) (rendered string, first, last, total int) {
+	lines := strings.Split(yaml, "\n")
+	total = len(lines)
+	if bodyRows < 1 {
+		bodyRows = 1
+	}
+	if w < 8 {
+		w = 8
+	}
+
+	// Clamp scroll: allow leaving the last page visible, never past EOF.
+	maxScroll := total - bodyRows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if scroll != nil {
+		if *scroll > maxScroll {
+			*scroll = maxScroll
+		}
+		if *scroll < 0 {
+			*scroll = 0
+		}
+	}
+	start := 0
+	if scroll != nil {
+		start = *scroll
+	}
+	end := start + bodyRows
+	if end > total {
+		end = total
+	}
+
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		line := lines[i]
+		// Plain byte truncation — YAML bodies are ASCII-dominant
+		// and the terminals we target render the occasional
+		// multibyte code point wider than its rune count anyway.
+		// Matches viewRuleDetail's existing truncation approach.
+		if len(line) > w {
+			line = line[:w]
+		}
+		b.WriteString(line)
+		if i < end-1 {
+			b.WriteString("\n")
+		}
+	}
+	first = start + 1
+	last = end
+	if total == 0 {
+		first = 0
+	}
+	return b.String(), first, last, total
+}
+
+// renderPolicyDetailOverlay draws the read-only YAML viewer for the
+// Policies tab. The header tells the operator this is a modal-like
+// overlay (hence the esc/enter hint). The body is hard-clamped to
+// the available (w, h): long sensitive-paths files used to overflow
+// the panel and spill into neighbouring chrome; we now paginate in
+// place with j/k/pgup/pgdown/home/end and show an N/M footer so the
+// operator knows when there's more to scroll. We intentionally
+// don't colorize the YAML body because the bundled terminals vary
+// wildly on 256-color support and mis-rendered YAML is worse than
+// plain text.
+func (p *PolicyPanel) renderPolicyDetailOverlay(w, h int) string {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	bold := lipgloss.NewStyle().Bold(true)
+
+	header := bold.Render("POLICY — "+p.policyDetailName) +
+		"  " + dim.Render("(↑/↓ scroll · esc/enter/q: close)")
+
+	// Reserve two rows: one blank separator after the header and
+	// one footer line. The rest is body.
+	bodyRows := h - 3
+	if bodyRows < 1 {
+		bodyRows = 1
+	}
+	body, first, last, total := clampYAMLBody(p.policyDetailYAML, w, bodyRows, &p.policyDetailScroll)
+
+	footer := dim.Render(fmt.Sprintf("lines %d-%d / %d", first, last, total))
+	return header + "\n\n" + body + "\n" + footer
+}
+
+// renderRuleDetailOverlay draws the read-only YAML for a single rule
+// inside the active pack. Mirrors renderPolicyDetailOverlay so the
+// two feel like the same control — muscle memory matters here.
+func (p *PolicyPanel) renderRuleDetailOverlay(w, h int) string {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	bold := lipgloss.NewStyle().Bold(true)
+
+	hint := "(↑/↓ scroll · e: edit file · esc/enter/q: close)"
+	if p.ruleDetailPath == "" {
+		// No source path means the rule was synthesised (embedded
+		// default) and can't be edited in place — don't advertise
+		// an edit key that will silently do nothing.
+		hint = "(↑/↓ scroll · esc/enter/q: close · embedded default, not editable)"
+	}
+	header := bold.Render("RULE") + "  " + dim.Render(hint)
+
+	// Reserve rows for header (2), optional file line (1-2), and footer (1-2).
+	reserved := 4
+	if p.ruleDetailPath != "" {
+		reserved += 2
+	}
+	bodyRows := h - reserved
+	if bodyRows < 1 {
+		bodyRows = 1
+	}
+	body, first, last, total := clampYAMLBody(p.ruleDetailYAML, w, bodyRows, &p.ruleDetailScroll)
+
+	footer := dim.Render(fmt.Sprintf("lines %d-%d / %d", first, last, total))
+	fileLine := ""
+	if p.ruleDetailPath != "" {
+		fileLine = "\n\n" + dim.Render("file: "+p.ruleDetailPath)
+	}
+	return header + "\n\n" + body + "\n" + footer + fileLine
 }
 
 // ----------------------------------------------------------------

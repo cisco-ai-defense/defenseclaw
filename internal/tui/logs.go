@@ -171,6 +171,16 @@ type LogsPanel struct {
 	searching  bool
 	searchText string
 
+	// B4b: per-line cursor into the *currently filtered* view of
+	// the active source. Kept per-source so switching tabs doesn't
+	// silently jump the selection to a line the operator didn't
+	// scroll to. When a source is tailing (paused=false) and the
+	// cursor has never been moved, we clamp it to the bottom so
+	// "live tail + press Enter" opens the most recent line
+	// (matching the pre-B4b behaviour of SelectedVerdict).
+	cursor      [logSourceCount]int
+	cursorMoved [logSourceCount]bool
+
 	// Verdicts-only state: cached structured events and a chip-
 	// filter for action (block/alert/allow). Cardinalities other
 	// than action (category, model) are still queryable via the
@@ -336,26 +346,38 @@ func (p LogsPanel) handleKey(msg tea.KeyPressMsg) (LogsPanel, tea.Cmd) {
 			p.scroll = 0
 		}
 	case "up", "k":
-		if p.scroll > 0 {
-			p.scroll--
-			p.paused = true
-		}
+		// B4b: up/down now move the per-line cursor and pin the
+		// view so the cursor stays on-screen. This gives Enter
+		// something precise to target — previously "scroll then
+		// Enter" opened whichever line happened to be last
+		// visible, which surprised operators who expected it to
+		// open the row they were looking at.
+		p.moveCursor(-1)
+		p.paused = true
 	case "down", "j":
-		maxScroll := len(p.filteredLines()) - p.visibleLines()
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if p.scroll < maxScroll {
-			p.scroll++
-		}
+		p.moveCursor(1)
+		p.paused = true
+	case "pgup":
+		p.moveCursor(-p.visibleLines())
+		p.paused = true
+	case "pgdown":
+		p.moveCursor(p.visibleLines())
+		p.paused = true
 	case "G":
+		// Jump cursor + scroll to the newest line and resume live
+		// tailing. Matches vim's G but with the extra twist of
+		// flipping back into live mode — the operator is asking
+		// for "show me what's happening now".
 		totalLines := len(p.filteredLines())
-		visible := p.visibleLines()
-		if totalLines > visible {
-			p.scroll = totalLines - visible
+		if totalLines > 0 {
+			p.cursor[p.source] = totalLines - 1
+			p.cursorMoved[p.source] = true
 		}
+		p.clampScrollToCursor()
 		p.paused = false
 	case "g":
+		p.cursor[p.source] = 0
+		p.cursorMoved[p.source] = true
 		p.scroll = 0
 		p.paused = true
 
@@ -584,8 +606,9 @@ func severityRank(s string) int {
 }
 
 // SelectedVerdict returns the structured event under the current
-// cursor in the Verdicts tab, or nil if the tab is not active or
-// the cursor is out of range. Used by the detail modal (Phase 3.2).
+// per-line cursor in the Verdicts tab, or nil if the tab is not
+// active or the cursor is out of range. Used by the detail modal
+// (Phase 3.2).
 func (p *LogsPanel) SelectedVerdict() *verdictRow {
 	if p.source != logSourceVerdicts {
 		return nil
@@ -593,19 +616,17 @@ func (p *LogsPanel) SelectedVerdict() *verdictRow {
 	// filteredVerdicts walks p.verdicts in lockstep with the
 	// rendered-line filter, so indexing into its output is
 	// always safe even with text/preset filters active. Prior
-	// implementations keyed off filteredLines()'s index but then
-	// looked the row up in the *unfiltered* p.verdicts, which
-	// opened the wrong detail modal whenever a filter shrank
-	// the view (M1).
+	// implementations keyed off scroll+visible-1 ("last visible
+	// line") which surprised operators who scrolled up to a
+	// specific row before pressing Enter (B4b).
 	filtered := p.filteredVerdicts()
 	if len(filtered) == 0 {
 		return nil
 	}
-	// Convert scroll + visible position to the underlying row.
-	// scroll points at the first displayed row; cursor is the
-	// last visible line since the user typically "tails" the
-	// view — pressing Enter should open that most-recent event.
-	idx := p.scroll + p.visibleLines() - 1
+	idx := p.cursor[logSourceVerdicts]
+	if !p.cursorMoved[logSourceVerdicts] {
+		idx = len(filtered) - 1
+	}
 	if idx < 0 {
 		idx = 0
 	}
@@ -614,6 +635,159 @@ func (p *LogsPanel) SelectedVerdict() *verdictRow {
 	}
 	row := filtered[idx]
 	return &row
+}
+
+// SelectedRawLine returns the raw line under the cursor for
+// non-Verdicts sources. Returned empty when there's nothing to
+// open so callers can skip the modal instead of showing a blank.
+func (p *LogsPanel) SelectedRawLine() string {
+	if p.source == logSourceVerdicts {
+		return ""
+	}
+	filtered := p.filteredLines()
+	if len(filtered) == 0 {
+		return ""
+	}
+	idx := p.cursor[p.source]
+	if !p.cursorMoved[p.source] {
+		idx = len(filtered) - 1
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(filtered) {
+		idx = len(filtered) - 1
+	}
+	return filtered[idx]
+}
+
+// moveCursor shifts the per-source cursor by delta lines, clamps it
+// to the filtered-view bounds, and ensures the scroll window still
+// contains it. Callers flip p.paused themselves because some entry
+// points (the per-source chip filter buttons) should not pause
+// automatically just because the filter shrank the view under the
+// cursor.
+func (p *LogsPanel) moveCursor(delta int) {
+	total := len(p.filteredLines())
+	if total == 0 {
+		p.cursor[p.source] = 0
+		p.cursorMoved[p.source] = true
+		return
+	}
+	// Seed the cursor at the bottom the first time the operator
+	// presses a navigation key while live-tailing. Without this
+	// seed, a user who has never moved up/down would find the
+	// first down-arrow snap them to line 0 instead of the newest
+	// row — confusing UX.
+	if !p.cursorMoved[p.source] {
+		p.cursor[p.source] = total - 1
+	}
+	c := p.cursor[p.source] + delta
+	if c < 0 {
+		c = 0
+	}
+	if c >= total {
+		c = total - 1
+	}
+	p.cursor[p.source] = c
+	p.cursorMoved[p.source] = true
+	p.clampScrollToCursor()
+}
+
+// clampScrollToCursor keeps the scroll window covering p.cursor.
+// Used whenever the cursor moves or the filtered view shrinks so
+// the selected row never falls off-screen.
+func (p *LogsPanel) clampScrollToCursor() {
+	total := len(p.filteredLines())
+	visible := p.visibleLines()
+	if visible < 1 {
+		visible = 1
+	}
+	c := p.cursor[p.source]
+	if c < 0 {
+		c = 0
+	}
+	if c >= total {
+		c = total - 1
+		if c < 0 {
+			c = 0
+		}
+	}
+	if c < p.scroll {
+		p.scroll = c
+	}
+	if c >= p.scroll+visible {
+		p.scroll = c - visible + 1
+	}
+	if p.scroll < 0 {
+		p.scroll = 0
+	}
+	maxScroll := total - visible
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if p.scroll > maxScroll {
+		p.scroll = maxScroll
+	}
+}
+
+// SetCursor positions the per-source cursor explicitly (used by
+// mouse click hit-tests on log rows). Accepts a filtered-view
+// index so callers don't need to think about scroll offsets.
+func (p *LogsPanel) SetCursor(filteredIdx int) {
+	total := len(p.filteredLines())
+	if total == 0 {
+		return
+	}
+	if filteredIdx < 0 {
+		filteredIdx = 0
+	}
+	if filteredIdx >= total {
+		filteredIdx = total - 1
+	}
+	p.cursor[p.source] = filteredIdx
+	p.cursorMoved[p.source] = true
+	p.paused = true
+	p.clampScrollToCursor()
+}
+
+// SetVerdictAction / SetVerdictEventType / SetVerdictSeverity are
+// mouse-friendly setters for the three Verdicts chip filters.
+// They accept the string value directly (not an index) so callers
+// don't have to re-scan the *Filters slices just to click a chip
+// they can see. Unknown values are silently ignored rather than
+// panicking — a chip-bar layout drift shouldn't crash the TUI.
+func (p *LogsPanel) SetVerdictAction(action string) {
+	for _, a := range verdictActionFilters {
+		if a == action {
+			p.verdictAction = action
+			p.scroll = 0
+			p.cursorMoved[p.source] = false
+			return
+		}
+	}
+}
+
+func (p *LogsPanel) SetVerdictEventType(t string) {
+	for _, known := range verdictEventTypeFilters {
+		if known == t {
+			p.verdictEventType = t
+			p.scroll = 0
+			p.cursorMoved[p.source] = false
+			return
+		}
+	}
+}
+
+func (p *LogsPanel) SetVerdictSeverity(s string) {
+	for _, known := range verdictSeverityFilters {
+		if known == s {
+			p.verdictSeverity = s
+			p.scroll = 0
+			p.cursorMoved[p.source] = false
+			return
+		}
+	}
 }
 
 // TogglePause toggles the pause state (for mouse clicks).
@@ -630,6 +804,88 @@ func (p *LogsPanel) SetFilter(f string) {
 // FilterBarHeight returns how many lines the filter bar takes.
 func (p *LogsPanel) FilterBarHeight() int {
 	return 3 // tabs + filters + separator
+}
+
+// VerdictChipHitTest maps a click at (x, relY) on the Verdicts
+// chip bar to the chip value under the cursor. relY is the
+// zero-based row offset into the panel. Returns (kind, value, ok)
+// where kind is one of "action", "type", "severity". Using
+// lipgloss.Width ensures the hit test stays aligned with the
+// rendered badge widths even when labels change.
+//
+// Layout (Verdicts only):
+//
+//	row 2 → action chips
+//	row 3 → event-type chips
+//	row 4 → severity chips
+//
+// relY outside that window returns ok=false so the caller can fall
+// through to its normal log-line click handler.
+func (p *LogsPanel) VerdictChipHitTest(x, relY int) (kind, value string, ok bool) {
+	if p.source != logSourceVerdicts {
+		return "", "", false
+	}
+	var labelPrefix string
+	var values []string
+	var labels map[string]string
+	switch relY {
+	case 2:
+		kind = "action"
+		labelPrefix = "action:"
+		values = verdictActionFilters
+		labels = verdictActionLabels
+	case 3:
+		kind = "type"
+		labelPrefix = "type:  "
+		values = verdictEventTypeFilters
+		labels = verdictEventTypeLabels
+	case 4:
+		kind = "severity"
+		labelPrefix = "sev:   "
+		values = verdictSeverityFilters
+		labels = verdictSeverityLabels
+	default:
+		return "", "", false
+	}
+	// View() renders each chip row as:
+	//   "  <labelPrefix>  <badge1> <badge2> … "
+	// so the leading two spaces + the prefix width + two spaces
+	// before the first chip are fixed. Badges are space-separated
+	// (one space).
+	cursor := 2 + lipgloss.Width(labelPrefix) + 2
+	for _, v := range values {
+		text := fmt.Sprintf(" %s ", labels[v])
+		w := lipgloss.Width(text)
+		if x >= cursor && x < cursor+w {
+			return kind, v, true
+		}
+		cursor += w + 1
+	}
+	return "", "", false
+}
+
+// LogRowHitTest converts a click at (relY) on a log row into a
+// filtered-view index. Returns ok=false when the click fell on
+// chrome (tabs, chips, separator, hint). Callers use this to set
+// the cursor and optionally open the detail modal.
+func (p *LogsPanel) LogRowHitTest(relY int) (idx int, ok bool) {
+	headerRows := 2 // tabs + filter bar
+	if p.source == logSourceVerdicts {
+		headerRows += 3 // action / type / severity chip rows
+	}
+	headerRows++ // separator
+	if p.searching {
+		headerRows++
+	}
+	if relY < headerRows {
+		return 0, false
+	}
+	filtered := p.filteredLines()
+	rowIdx := p.scroll + (relY - headerRows)
+	if rowIdx < 0 || rowIdx >= len(filtered) {
+		return 0, false
+	}
+	return rowIdx, true
 }
 
 // ScrollBy adjusts the scroll offset for mouse wheel.
@@ -847,9 +1103,26 @@ func (p *LogsPanel) View() string {
 		end = 0
 	}
 
+	// Compute cursor position lazily so "live tail + no nav yet"
+	// highlights the newest line instead of a stale zero.
+	cursorIdx := p.cursor[p.source]
+	if !p.cursorMoved[p.source] {
+		cursorIdx = len(filtered) - 1
+	}
+	cursorStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Bold(true)
 	for i := start; i < end; i++ {
 		line := filtered[i]
 		colored := p.colorLine(line)
+		if i == cursorIdx {
+			// Render a gutter marker so the selection is visible
+			// even on terminals where background color is muted
+			// by a transparent theme.
+			b.WriteString(cursorStyle.Render("▸ " + colored))
+			b.WriteString("\n")
+			continue
+		}
 		b.WriteString("  " + colored + "\n")
 	}
 
@@ -870,10 +1143,11 @@ func (p *LogsPanel) View() string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	if p.source == logSourceVerdicts {
 		b.WriteString(hint.Render(fmt.Sprintf(
-			"  Streaming %s. Space pause, / search, a action, t type, s severity, Enter detail, J judge history.",
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · a/t/s chips · J judge history.",
 			logSourceNames[p.source])))
 	} else {
-		b.WriteString(hint.Render(fmt.Sprintf("  Streaming %s. Space to pause, / to search, e for errors, w for warnings.",
+		b.WriteString(hint.Render(fmt.Sprintf(
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · e errors · w warnings.",
 			logSourceNames[p.source])))
 		// Gateway / Watchdog tabs tail free-form stderr logs that
 		// mostly carry startup chatter. Operators looking for

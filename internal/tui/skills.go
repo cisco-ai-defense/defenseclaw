@@ -17,20 +17,56 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
+// skillListJSON mirrors a single object in `defenseclaw skill list --json`
+// (see cli/defenseclaw/commands/cmd_skill.py::_print_skill_list_json).
+// Catalog-first: everything the CLI surfaces is available, including
+// the merged scan + enforcement metadata. We decode the whole shape
+// into Go so later UI (details, correlation) doesn't need a second
+// JSON pass.
+type skillListJSON struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	Source      string             `json:"source"`
+	Status      string             `json:"status"`
+	Eligible    bool               `json:"eligible"`
+	Disabled    bool               `json:"disabled"`
+	Bundled     bool               `json:"bundled"`
+	Homepage    string             `json:"homepage,omitempty"`
+	Scan        *skillScanJSON     `json:"scan,omitempty"`
+	Actions     *audit.ActionState `json:"actions,omitempty"`
+	Verdict     string             `json:"verdict,omitempty"`
+}
+
+type skillScanJSON struct {
+	Target        string `json:"target"`
+	Clean         bool   `json:"clean"`
+	MaxSeverity   string `json:"max_severity"`
+	TotalFindings int    `json:"total_findings"`
+}
+
 type skillItem struct {
-	Name    string
-	Status  string
-	Actions string
-	Reason  string
-	Time    string
+	Name        string
+	Status      string
+	Actions     string
+	Reason      string
+	Time        string
+	Description string
+	Source      string
+	Verdict     string
+	Severity    string
 }
 
 type SkillDetailInfo struct {
@@ -51,61 +87,159 @@ type SkillsPanel struct {
 	message        string
 	filter         string
 	filtering      bool
+	loaded         bool
+	loading        bool
 	detailOpen     bool
 	detailCache    *SkillDetailInfo
 	detailCacheIdx int
+}
+
+// SkillsLoadedMsg is sent when `defenseclaw skill list --json` completes.
+// Modeled on PluginsLoadedMsg so the dispatch pattern is identical —
+// adding a third is trivial if we ever split plugins/skills/mcps into
+// more tabs.
+type SkillsLoadedMsg struct {
+	Items []skillItem
+	Err   error
 }
 
 func NewSkillsPanel(store *audit.Store) SkillsPanel {
 	return SkillsPanel{store: store}
 }
 
-func (p *SkillsPanel) Refresh() {
-	if p.store == nil {
-		return
-	}
-
-	p.items = nil
-
-	entries, err := p.store.ListActionsByType("skill")
-	if err != nil {
-		p.message = fmt.Sprintf("Error: %v", err)
-		return
-	}
-	for _, e := range entries {
-		// Status resolution order mirrors the Python CLI's
-		// _skill_status_display (cli/defenseclaw/commands/cmd_skill.py)
-		// so the TUI and `defenseclaw skill list` never disagree:
-		// quarantine wins over install-block, which wins over
-		// runtime-disable, which wins over install-allow, and
-		// anything else is "active". Keeping the order in lock-step
-		// with the CLI means SkillActions' branches stay valid —
-		// e.g. the "quarantined" branch (restore) is only reachable
-		// when file=quarantine is set, not just when install=block.
-		var status string
-		switch {
-		case e.Actions.File == "quarantine":
-			status = "quarantined"
-		case e.Actions.Install == "block":
-			status = "blocked"
-		case e.Actions.Runtime == "disable":
-			status = "disabled"
-		case e.Actions.Install == "allow":
-			status = "allowed"
-		default:
-			status = "active"
+// LoadCmd returns a tea.Cmd that invokes `defenseclaw skill list --json`
+// in a subprocess and converts the output into skillItem rows. Matches
+// PluginsPanel.LoadCmd in shape so the main Update loop wires them
+// uniformly. We cap the subprocess at 15s so a hung sidecar cannot
+// freeze the TUI.
+func (p *SkillsPanel) LoadCmd() tea.Cmd {
+	p.loading = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, resolveDefenseclawBin(), "skill", "list", "--json")
+		out, err := cmd.Output()
+		if err != nil {
+			return SkillsLoadedMsg{Err: err}
 		}
-		p.items = append(p.items, skillItem{
-			Name:    e.TargetName,
-			Status:  status,
-			Actions: e.Actions.Summary(),
-			Reason:  e.Reason,
-			Time:    e.UpdatedAt.Format("2006-01-02 15:04"),
-		})
+		var raw []skillListJSON
+		if err := json.Unmarshal(out, &raw); err != nil {
+			return SkillsLoadedMsg{Err: fmt.Errorf("parse skill list: %w", err)}
+		}
+		items := make([]skillItem, 0, len(raw))
+		for _, s := range raw {
+			items = append(items, skillListToItem(s))
+		}
+		return SkillsLoadedMsg{Items: items}
+	}
+}
+
+// skillListToItem derives display fields from a single decoded entry.
+// Status precedence mirrors cli/defenseclaw/commands/cmd_skill.py
+// _skill_status_display:
+//
+//	disabled → quarantined → blocked → disabled → allowed →
+//	scan-severity (CRITICAL/HIGH → rejected, MEDIUM/LOW → warning) →
+//	eligible → removed → inactive
+//
+// The severity branch was originally absent in the Go TUI, which
+// caused an "eligible" skill whose most recent scan was HIGH to
+// render as `active` — the CLI would call out the same skill as
+// `rejected`. The review flagged that gap; we keep the two
+// implementations in lockstep here.
+func skillListToItem(s skillListJSON) skillItem {
+	severity := ""
+	if s.Scan != nil {
+		severity = s.Scan.MaxSeverity
+	}
+	// Mirror cmd_skill.py's branch: only consider scan severity
+	// when there actually was a scan with findings. Python treats
+	// "CLEAN" (the no-findings sentinel) as pass-through.
+	scanMismatch := ""
+	if s.Scan != nil && !s.Scan.Clean {
+		switch strings.ToUpper(severity) {
+		case "CRITICAL", "HIGH":
+			scanMismatch = "rejected"
+		case "MEDIUM", "LOW":
+			scanMismatch = "warning"
+		}
 	}
 
-	p.applyFilter()
+	status := "active"
+	actionsSummary := "-"
+	switch {
+	case s.Disabled:
+		status = "disabled"
+	case s.Actions != nil && s.Actions.File == "quarantine":
+		status = "quarantined"
+	case s.Actions != nil && s.Actions.Install == "block":
+		status = "blocked"
+	case s.Actions != nil && s.Actions.Runtime == "disable":
+		status = "disabled"
+	case s.Actions != nil && s.Actions.Install == "allow":
+		status = "allowed"
+	case s.Status == "blocked":
+		status = "blocked"
+	case s.Status == "disabled":
+		status = "disabled"
+	case scanMismatch != "":
+		// Parity with Python: severity check precedes `eligible →
+		// ready` so a skill with a dirty scan is visible as
+		// rejected/warning even if no enforcement action has been
+		// configured yet.
+		status = scanMismatch
+	case s.Eligible:
+		status = "active"
+	case s.Source == "enforcement" || s.Source == "scan-history":
+		status = "removed"
+	default:
+		status = "inactive"
+	}
+	if s.Actions != nil && !s.Actions.IsEmpty() {
+		actionsSummary = s.Actions.Summary()
+	}
+	return skillItem{
+		Name:        s.Name,
+		Status:      status,
+		Actions:     actionsSummary,
+		Reason:      "",
+		Time:        "",
+		Description: s.Description,
+		Source:      s.Source,
+		Verdict:     s.Verdict,
+		Severity:    severity,
+	}
+}
+
+// ApplyLoaded consumes a SkillsLoadedMsg and rebuilds p.items / p.filtered.
+// Mirrors PluginsPanel.ApplyLoaded; keeps cursor in range.
+func (p *SkillsPanel) ApplyLoaded(msg SkillsLoadedMsg) {
+	p.loading = false
+	if msg.Err != nil {
+		p.message = fmt.Sprintf("Error loading skills: %v", msg.Err)
+		return
+	}
+	p.items = msg.Items
+	p.loaded = true
 	p.message = ""
+	p.applyFilter()
+	p.detailCache = nil
+}
+
+// IsLoaded reports whether the panel has fetched data at least once.
+// Used by app.go to decide whether to dispatch LoadCmd on tab switch.
+func (p *SkillsPanel) IsLoaded() bool { return p.loaded }
+
+// IsLoading reports whether a LoadCmd is in flight — used to render
+// a hint while the async subprocess is running.
+func (p *SkillsPanel) IsLoading() bool { return p.loading }
+
+// Refresh re-applies the current text filter over the cached items.
+// Kept as a lightweight pass so tests that pre-populate p.items still
+// pass without dispatching a subprocess. The authoritative refresh
+// path is LoadCmd.
+func (p *SkillsPanel) Refresh() {
+	p.applyFilter()
 }
 
 func (p *SkillsPanel) applyFilter() {
@@ -115,7 +249,7 @@ func (p *SkillsPanel) applyFilter() {
 		p.filtered = nil
 		query := strings.ToLower(p.filter)
 		for _, item := range p.items {
-			text := strings.ToLower(item.Name + " " + item.Status + " " + item.Reason)
+			text := strings.ToLower(item.Name + " " + item.Status + " " + item.Reason + " " + item.Description + " " + item.Source)
 			if strings.Contains(text, query) {
 				p.filtered = append(p.filtered, item)
 			}
@@ -167,9 +301,12 @@ func (p *SkillsPanel) Selected() *skillItem {
 	return nil
 }
 
+// ToggleBlock is kept for backward compatibility with existing key
+// handlers that bypass the CLI. New entry points should dispatch
+// through the CLI executor so audit parity is preserved.
 func (p *SkillsPanel) ToggleBlock() string {
 	sel := p.Selected()
-	if sel == nil {
+	if sel == nil || p.store == nil {
 		return ""
 	}
 	if sel.Status == "blocked" {
@@ -295,26 +432,34 @@ func (p *SkillsPanel) BlockedCount() int {
 }
 
 func statusBadge(status string) string {
+	// Colors chosen to match what the CLI uses for the same labels:
+	// rejected borrows the `blocked` red (the two are emotionally
+	// the same signal — do not run), warning uses amber so it is
+	// immediately distinguishable from allowed/active green.
 	bg := lipgloss.Color("245")
 	switch strings.ToLower(status) {
-	case "blocked":
+	case "blocked", "rejected":
 		bg = lipgloss.Color("196")
-	case "allowed":
+	case "allowed", "active":
 		bg = lipgloss.Color("46")
 	case "quarantined":
 		bg = lipgloss.Color("133")
+	case "warning":
+		bg = lipgloss.Color("208")
+	case "disabled", "removed", "inactive":
+		bg = lipgloss.Color("240")
 	}
 	fg := lipgloss.Color("16")
-	if strings.ToLower(status) == "allowed" {
-		fg = lipgloss.Color("16")
-	}
-	label := fmt.Sprintf(" %-10s ", strings.ToUpper(status))
+	label := fmt.Sprintf(" %-12s ", strings.ToUpper(status))
 	return lipgloss.NewStyle().Background(bg).Foreground(fg).Bold(true).Render(label)
 }
 
 func (p *SkillsPanel) View() string {
 	if p.message != "" {
 		return p.message
+	}
+	if p.loading && len(p.items) == 0 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("  Loading skills…")
 	}
 
 	var b strings.Builder
@@ -359,11 +504,15 @@ func (p *SkillsPanel) View() string {
 		if p.filter != "" {
 			return b.String() + StyleInfo.Render("  No skills match the filter.")
 		}
+		if !p.loaded {
+			return b.String() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
+				"  Press \"r\" to load skills. Runs \"defenseclaw skill list --json\".")
+		}
 		return b.String() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
-			"  No skills with enforcement actions.\n  Press : then type \"block skill <name>\" or \"allow skill <name>\"")
+			"  No skills found.\n  Install one with: defenseclaw skill install <name>")
 	}
 
-	header := fmt.Sprintf("  %-14s %-30s %-20s %-20s %-16s", "STATUS", "NAME", "ACTIONS", "REASON", "SINCE")
+	header := fmt.Sprintf("  %-14s %-28s %-14s %-10s %-18s", "STATUS", "NAME", "SOURCE", "SEVERITY", "ACTIONS")
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("243")).Render(header))
 	b.WriteString("\n")
 
@@ -385,16 +534,20 @@ func (p *SkillsPanel) View() string {
 		item := p.filtered[i]
 		badge := statusBadge(item.Status)
 		name := item.Name
-		if len(name) > 30 {
-			name = name[:27] + "…"
+		if len(name) > 28 {
+			name = name[:25] + "…"
+		}
+		source := item.Source
+		if len(source) > 14 {
+			source = source[:11] + "…"
+		}
+		severity := item.Severity
+		if severity == "" {
+			severity = "-"
 		}
 		actions := item.Actions
-		if len(actions) > 20 {
-			actions = actions[:17] + "…"
-		}
-		reason := item.Reason
-		if len(reason) > 20 {
-			reason = reason[:17] + "…"
+		if len(actions) > 18 {
+			actions = actions[:15] + "…"
 		}
 
 		pointer := "  "
@@ -402,7 +555,14 @@ func (p *SkillsPanel) View() string {
 			pointer = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true).Render("▸ ")
 		}
 
-		line := fmt.Sprintf("%s%s %-30s %-20s %-20s %-16s", pointer, badge, name, actions, reason, item.Time)
+		sev := severity
+		if item.Severity != "" {
+			sev = SeverityStyle(item.Severity).Render(fmt.Sprintf("%-10s", item.Severity))
+		} else {
+			sev = fmt.Sprintf("%-10s", "-")
+		}
+
+		line := fmt.Sprintf("%s%s %-28s %-14s %s %-18s", pointer, badge, name, source, sev, actions)
 
 		if i == p.cursor {
 			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(p.width).Render(line)
@@ -457,10 +617,20 @@ func (p *SkillsPanel) renderDetail() string {
 	d.WriteString("\n")
 
 	d.WriteString(labelStyle.Render("  Status: ") + valStyle.Render(strings.ToUpper(info.Item.Status)))
-	d.WriteString(labelStyle.Render("    Since: ") + valStyle.Render(info.Item.Time) + "\n")
+	if info.Item.Source != "" {
+		d.WriteString(labelStyle.Render("    Source: ") + valStyle.Render(info.Item.Source))
+	}
+	if info.Item.Verdict != "" {
+		d.WriteString(labelStyle.Render("    Verdict: ") + valStyle.Render(info.Item.Verdict))
+	}
+	d.WriteString("\n")
 
-	if info.Item.Reason != "" {
-		d.WriteString(labelStyle.Render("  Reason: ") + valStyle.Render(info.Item.Reason) + "\n")
+	if info.Item.Description != "" {
+		desc := info.Item.Description
+		if len(desc) > 120 {
+			desc = desc[:117] + "…"
+		}
+		d.WriteString(labelStyle.Render("  Description: ") + valStyle.Render(desc) + "\n")
 	}
 
 	if info.Action != nil {
