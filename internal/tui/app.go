@@ -305,6 +305,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.plugins.loaded && !m.plugins.loading {
 			cmds = append(cmds, m.plugins.LoadCmd())
 		}
+		// Also refresh skills/MCPs via the CLI so the TUI stays in
+		// sync with out-of-process `defenseclaw skill …`/`mcp …`
+		// mutations. Only reload if we already have a cached copy
+		// — first-time load is still driven by switchPanel.
+		if m.skills.IsLoaded() && !m.skills.IsLoading() {
+			cmds = append(cmds, m.skills.LoadCmd())
+		}
+		if m.mcps.IsLoaded() && !m.mcps.IsLoading() {
+			cmds = append(cmds, m.mcps.LoadCmd())
+		}
 		return m, tea.Batch(cmds...)
 
 	case healthUpdateMsg:
@@ -346,6 +356,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.plugins.loaded && !m.plugins.loading {
 			postCmds = append(postCmds, m.plugins.LoadCmd())
 		}
+		// A `defenseclaw skill …` / `mcp …` invocation likely
+		// mutated the merged catalog — rebuild the TUI view so the
+		// operator sees the effect without pressing 'r'.
+		if m.skills.IsLoaded() && !m.skills.IsLoading() {
+			postCmds = append(postCmds, m.skills.LoadCmd())
+		}
+		if m.mcps.IsLoaded() && !m.mcps.IsLoading() {
+			postCmds = append(postCmds, m.mcps.LoadCmd())
+		}
 		// P3-#21: any successful `defenseclaw doctor` run writes
 		// the cache file from the CLI side — re-read it so the
 		// Overview DOCTOR box reflects the new numbers without
@@ -381,6 +400,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PluginsLoadedMsg:
 		m.plugins.ApplyLoaded(msg)
+		return m, nil
+
+	case SkillsLoadedMsg:
+		// Skills now loads via `defenseclaw skill list --json` in a
+		// subprocess so the TUI sees the same merged catalog the CLI
+		// prints. ApplyLoaded rewrites p.items + p.filtered; no
+		// further refresh needed.
+		m.skills.ApplyLoaded(msg)
+		return m, nil
+
+	case MCPsLoadedMsg:
+		// Same treatment for MCPs: the source of truth is
+		// `defenseclaw mcp list --json`, not the audit store.
+		m.mcps.ApplyLoaded(msg)
+		return m, nil
+
+	case RegoTestResultMsg:
+		// B3d: surface `defenseclaw policy test` output in the OPA
+		// side panel. Keeping this in Update (not in the executor
+		// callback) avoids a round trip through the Activity panel
+		// and preserves the operator's place in the Policies tab.
+		m.policy.ApplyRegoTestResult(msg.Output, msg.Err)
+		return m, nil
+
+	case EditorClosedMsg:
+		// After an external $EDITOR session, reload the policy
+		// panel from disk so the operator sees their edits
+		// immediately. The reload is cheap (a handful of YAML
+		// unmarshals) so we don't bother branching on the edited
+		// file's type. Errors are surfaced via a toast rather
+		// than a modal because the operator can just reopen the
+		// editor.
+		m.policy.ReloadFromDisk()
+		m.policy.ReloadRegoSource()
+		if msg.Err != nil {
+			m.toasts.Push(ToastError, "editor: "+msg.Err.Error())
+		}
 		return m, nil
 
 	case tea.BackgroundColorMsg:
@@ -469,6 +525,16 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// If a panel has an in-panel overlay/form/editor open, don't let
+	// a click on the tab strip above silently flip panels out from
+	// underneath it — the user is clearly focused on the overlay
+	// and a stray click on the header row (common when aiming at
+	// the overlay's border) should be a no-op. Mirror the key-router
+	// guard above so keyboard and mouse behaviour stay consistent.
+	if m.panelExclusive() {
+		return m.handlePanelClick(x, y)
+	}
+
 	// Click on header row => tab switch
 	if y == 0 {
 		if panel := m.tabHitTest(x); panel >= 0 {
@@ -503,7 +569,10 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
-	if m.helpOpen || m.actionMenu.IsVisible() || m.detail.IsVisible() {
+	// Don't scroll the panel underneath a modal or in-panel overlay —
+	// it's jarring to scroll (and invalidate cursor positions)
+	// invisibly while a YAML viewer or form is covering the list.
+	if m.helpOpen || m.actionMenu.IsVisible() || m.detail.IsVisible() || m.panelExclusive() {
 		return m, nil
 	}
 	switch mouse.Button {
@@ -835,6 +904,7 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 			if x >= tabX+3 {
 				m.logs.TogglePause()
 			}
+			return m, nil
 		}
 		if relY == 1 {
 			btnX := 2
@@ -849,6 +919,39 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 				}
 				btnX += w + 2
 			}
+			return m, nil
+		}
+		// B4a: chip-row hit test for Verdicts source. The panel
+		// owns the geometry (labels + prefix widths) via the
+		// VerdictChipHitTest helper so this handler stays small
+		// and we don't re-derive the row layout in two places.
+		if kind, value, ok := m.logs.VerdictChipHitTest(x, relY); ok {
+			switch kind {
+			case "action":
+				m.logs.SetVerdictAction(value)
+			case "type":
+				m.logs.SetVerdictEventType(value)
+			case "severity":
+				m.logs.SetVerdictSeverity(value)
+			}
+			return m, nil
+		}
+		// B4b: clicking on a log row moves the cursor there and,
+		// for the Verdicts source, opens the detail modal — mouse
+		// parity with Enter. For Gateway/Watchdog a single click
+		// just parks the cursor; Enter still opens the raw-line
+		// modal so operators don't get a modal for every scroll
+		// click.
+		if idx, ok := m.logs.LogRowHitTest(relY); ok {
+			m.logs.SetCursor(idx)
+			if m.logs.source == logSourceVerdicts {
+				if row := m.logs.SelectedVerdict(); row != nil {
+					pairs := verdictDetailPairs(*row)
+					m.detail.SetSize(m.width, m.height)
+					m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
+				}
+			}
+			return m, nil
 		}
 	}
 	return m, nil
@@ -930,10 +1033,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// If Setup has a form, wizard running, output visible, field
-	// editing, or the Audit Sinks editor is active, let it consume keys.
-	if m.activePanel == PanelSetup && (m.setup.editing || m.setup.wizFormEditing || m.setup.IsFormActive() || m.setup.IsWizardRunning() || len(m.setup.wizOutput) > 0 || m.setup.IsEditorActive()) {
-		return m.handleSetupKey(msg)
+	// If any panel has an overlay/form/editor/detail modal active,
+	// route keys directly to the panel. This runs BEFORE the global
+	// shortcut table so `q` inside a YAML viewer closes the overlay
+	// (see policy.HandleKey's overlay branch) instead of falling
+	// through to a global "q = quit" binding, and digit keys inside
+	// a form don't hop panels. Ctrl+C is still honoured below as
+	// the single canonical quit key.
+	if m.panelExclusive() {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m.handlePanelKey(msg)
 	}
 
 	if m.panelOwnsDigitShortcut(msg.String()) {
@@ -942,12 +1053,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c":
+		// Ctrl+C is the only global quit key now. "q" used to also
+		// quit, but that turned closing an in-panel overlay (typing
+		// q to dismiss a policy YAML viewer) into an accidental
+		// TUI-exit — so q is no longer wired here and is free for
+		// panels to use as a local close / quarantine / etc. key.
 		return m, tea.Quit
 	case "q":
-		if m.activePanel == PanelSetup {
-			return m.handlePanelKey(msg)
-		}
-		return m, tea.Quit
+		// Delegate to the active panel; if the panel doesn't bind
+		// "q" for something specific (e.g., Setup's back, action
+		// menu's quarantine), this is an intentional no-op.
+		return m.handlePanelKey(msg)
 
 	case "?":
 		m.helpOpen = true
@@ -1023,6 +1139,40 @@ func (m Model) panelOwnsDigitShortcut(key string) bool {
 	default:
 		return false
 	}
+}
+
+// panelExclusive returns true when the active panel has an overlay,
+// form, editor, or detail modal visible and must swallow keys before
+// the global router gets a chance. Without this, a user typing "q"
+// inside the policy YAML viewer (or any future panel overlay) would
+// fall through to the global "q = quit" binding and kill the whole
+// TUI — the exact bug the user hit when trying to close a rule
+// pack overlay. Same story for number keys flipping panels while a
+// form is open.
+func (m Model) panelExclusive() bool {
+	switch m.activePanel {
+	case PanelPolicy:
+		return m.policy.IsOverlayActive()
+	case PanelSkills:
+		return m.skills.IsDetailOpen()
+	case PanelMCPs:
+		return m.mcps.IsDetailOpen() || m.mcpSetForm.IsActive()
+	case PanelPlugins:
+		return m.plugins.IsDetailOpen()
+	case PanelTools:
+		return m.tools.IsDetailOpen()
+	case PanelAlerts:
+		return m.alerts.IsDetailOpen()
+	case PanelAudit:
+		return m.auditHist.IsDetailOpen()
+	case PanelInventory:
+		return m.inventory.IsDetailOpen()
+	case PanelSetup:
+		return m.setup.editing || m.setup.wizFormEditing ||
+			m.setup.IsFormActive() || m.setup.IsWizardRunning() ||
+			len(m.setup.wizOutput) > 0 || m.setup.IsEditorActive()
+	}
+	return false
 }
 
 func (m Model) isFilterActive() bool {
@@ -1407,6 +1557,14 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handlePolicyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	bin, args, name := m.policy.HandleKey(msg.String())
+	// B3d: if the policy panel queued a pending tea.Cmd (e.g., the
+	// in-panel `policy test` runner or an editor launch), run it
+	// directly instead of going through the executor. We drain the
+	// pending cmd before dispatching CLI verbs so a single key
+	// press can't both queue a local cmd and a CLI spawn.
+	if pending := m.policy.TakeCmd(); pending != nil {
+		return m, pending
+	}
 	if bin != "" {
 		m.activePanel = PanelActivity
 		return m, m.executor.Execute(bin, args, name)
@@ -1686,7 +1844,12 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case "r":
-		m.skills.Refresh()
+		// 'r' now re-runs `defenseclaw skill list --json` rather
+		// than re-filtering the stale audit-store view. The old
+		// `m.skills.Refresh()` just replayed whatever was already
+		// in memory, which is why operators kept seeing stale
+		// data after an out-of-process `defenseclaw skill …`.
+		return m, m.skills.LoadCmd()
 	}
 	return m, nil
 }
@@ -1764,7 +1927,10 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// convenience alias for keyboards that preserve shift.
 		m.mcpSetForm.Open("")
 	case "r":
-		m.mcps.Refresh()
+		// Same rationale as the skills 'r' key — pull the merged
+		// catalog from the CLI instead of re-filtering the
+		// already-loaded rows.
+		return m, m.mcps.LoadCmd()
 	}
 	return m, nil
 }
@@ -1872,6 +2038,17 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			pairs := verdictDetailPairs(*row)
 			m.detail.SetSize(m.width, m.height)
 			m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
+			return m, nil
+		}
+	}
+	// B4b: Enter on Gateway / Watchdog opens a one-field modal
+	// with the raw log line so operators can copy-paste without
+	// truncation. The Verdicts branch above already handles its
+	// source because its modal is richer (structured kv pairs).
+	if key == "enter" && !m.logs.searching && m.logs.source != logSourceVerdicts {
+		if line := m.logs.SelectedRawLine(); line != "" {
+			m.detail.SetSize(m.width, m.height)
+			m.detail.Show(fmt.Sprintf("%s log line", logSourceNames[m.logs.source]), [][2]string{{"Line", line}})
 			return m, nil
 		}
 	}
@@ -2338,6 +2515,17 @@ func (m *Model) switchPanel(panel int) tea.Cmd {
 		if !m.plugins.loaded && !m.plugins.loading {
 			return m.plugins.LoadCmd()
 		}
+	case PanelSkills:
+		// First visit kicks off `defenseclaw skill list --json`.
+		// Subsequent visits reuse the cached rows — slowRefreshMsg
+		// is responsible for keeping them fresh.
+		if !m.skills.IsLoaded() && !m.skills.IsLoading() {
+			return m.skills.LoadCmd()
+		}
+	case PanelMCPs:
+		if !m.mcps.IsLoaded() && !m.mcps.IsLoading() {
+			return m.mcps.LoadCmd()
+		}
 	case PanelTools:
 		// Tools loads synchronously off the audit store — no
 		// async load command needed. Refresh here so an operator
@@ -2686,7 +2874,7 @@ func (m Model) renderHelp() string {
 			{"Tab / Shift+Tab", "Next / previous panel"},
 			{": or Ctrl+K", "Open command palette"},
 			{"?", "Toggle this help"},
-			{"q / Ctrl+C", "Quit"},
+			{"Ctrl+C", "Quit"},
 		}},
 		{"Lists (Alerts, Skills, MCPs, Plugins, Inventory, Audit)", [][2]string{
 			{"j/k or Up/Down", "Navigate items"},

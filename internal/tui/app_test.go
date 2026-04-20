@@ -138,6 +138,98 @@ func digitKey(text string) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Text: text, Code: []rune(text)[0]})
 }
 
+// TestGlobalQDoesNotQuit pins the user-visible contract that "q"
+// alone never shuts the TUI down. Previously the global key router
+// treated q as a synonym for Ctrl+C, which turned closing an
+// in-panel overlay (e.g., the policy YAML viewer dismiss key) into
+// an accidental exit — see the B-rolling bugfix plan's "remove q
+// for quit" entry.
+func TestGlobalQDoesNotQuit(t *testing.T) {
+	model := New(Deps{Version: "test"})
+	model.activePanel = PanelOverview
+
+	_, cmd := model.handleKey(digitKey("q"))
+
+	if cmd != nil {
+		// tea.Quit is the only cmd that would return a QuitMsg
+		// when invoked; we reject any non-nil cmd from the q
+		// path because the only acceptable outcome is "panel got
+		// the key and did nothing" (nil) or "panel returned a
+		// benign cmd". The Overview panel binds nothing to q so
+		// nil is the expected shape here.
+		if msg := cmd(); msg != nil {
+			if _, isQuit := msg.(tea.QuitMsg); isQuit {
+				t.Fatalf("q triggered tea.Quit; must only be Ctrl+C")
+			}
+		}
+	}
+}
+
+// TestCtrlCStillQuits guards the inverse: removing q must not have
+// also severed the one intentional quit key.
+func TestCtrlCStillQuits(t *testing.T) {
+	model := New(Deps{Version: "test"})
+	ctrlC := tea.KeyPressMsg(tea.Key{Text: "", Code: 'c', Mod: tea.ModCtrl})
+
+	_, cmd := model.handleKey(ctrlC)
+	if cmd == nil {
+		t.Fatalf("Ctrl+C returned nil cmd; want tea.Quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("Ctrl+C cmd did not produce QuitMsg")
+	}
+}
+
+// TestPanelExclusiveBlocksPanelSwitch verifies that when a panel
+// has an overlay open, digit shortcuts route to the panel instead
+// of hopping to another panel. This is the "don't let clicks/keys
+// leak through to panels above" guarantee the user asked for.
+func TestPanelExclusiveBlocksPanelSwitch(t *testing.T) {
+	model := New(Deps{Version: "test"})
+	model.activePanel = PanelPolicy
+	model.policy.policyDetailOpen = true
+	model.policy.policyDetailYAML = "name: demo"
+	model.policy.policyDetailName = "demo"
+
+	next, _ := model.handleKey(digitKey("3"))
+	got := next.(Model)
+
+	if got.activePanel != PanelPolicy {
+		t.Fatalf("digit while overlay open switched panels to %d, want PanelPolicy", got.activePanel)
+	}
+	// Overlay should still be open — digit must not dismiss it
+	// either, since only esc / enter / q inside the overlay
+	// close it.
+	if !got.policy.policyDetailOpen {
+		t.Fatalf("overlay was dismissed by digit; want preserved")
+	}
+}
+
+// TestPolicyOverlayQClosesOverlay verifies the specific user-reported
+// bug: pressing "q" inside an open policy YAML overlay must close
+// the overlay in-place, not quit the whole TUI.
+func TestPolicyOverlayQClosesOverlay(t *testing.T) {
+	model := New(Deps{Version: "test"})
+	model.activePanel = PanelPolicy
+	model.policy.policyDetailOpen = true
+	model.policy.policyDetailYAML = "name: demo"
+	model.policy.policyDetailName = "demo"
+
+	next, cmd := model.handleKey(digitKey("q"))
+	got := next.(Model)
+
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			if _, isQuit := msg.(tea.QuitMsg); isQuit {
+				t.Fatalf("q inside policy overlay triggered Quit")
+			}
+		}
+	}
+	if got.policy.policyDetailOpen {
+		t.Fatalf("q inside policy overlay did not close it")
+	}
+}
+
 func newTestAuditStore(t *testing.T) *audit.Store {
 	t.Helper()
 

@@ -17,20 +17,50 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
+// mcpListJSON mirrors a single entry from `defenseclaw mcp list --json`
+// (cli/defenseclaw/commands/cmd_mcp.py::list_mcps). The CLI is the
+// source of truth — TUI just renders a thinner view of the same data.
+type mcpListJSON struct {
+	Name      string             `json:"name"`
+	Transport string             `json:"transport,omitempty"`
+	Command   string             `json:"command,omitempty"`
+	Args      []string           `json:"args,omitempty"`
+	URL       string             `json:"url,omitempty"`
+	Severity  string             `json:"severity,omitempty"`
+	Actions   *audit.ActionState `json:"actions,omitempty"`
+	Verdict   string             `json:"verdict,omitempty"`
+}
+
+// mcpItem is the flattened row displayed in the MCPs panel. The `URL`
+// field historically held what the audit store calls `target_name`,
+// which is the server name (see cmd_mcp.py: `defenseclaw mcp
+// scan/block/allow/unblock/unset` all take the server name). Keeping
+// that field name avoids rewriting every call site in app.go that
+// threads `sel.URL` through as the CLI argument.
 type mcpItem struct {
-	URL     string
-	Status  string
-	Actions string
-	Reason  string
-	Time    string
+	URL       string // server name (what the CLI verbs accept)
+	Status    string
+	Actions   string
+	Reason    string
+	Time      string
+	Transport string
+	Command   string
+	ServerURL string
+	Severity  string
+	Verdict   string
 }
 
 type MCPDetailInfo struct {
@@ -51,48 +81,103 @@ type MCPsPanel struct {
 	message        string
 	filter         string
 	filtering      bool
+	loaded         bool
+	loading        bool
 	detailOpen     bool
 	detailCache    *MCPDetailInfo
 	detailCacheIdx int
+}
+
+// MCPsLoadedMsg carries the result of an async `defenseclaw mcp list
+// --json` invocation. Shape mirrors PluginsLoadedMsg / SkillsLoadedMsg.
+type MCPsLoadedMsg struct {
+	Items []mcpItem
+	Err   error
 }
 
 func NewMCPsPanel(store *audit.Store) MCPsPanel {
 	return MCPsPanel{store: store}
 }
 
-func (p *MCPsPanel) Refresh() {
-	if p.store == nil {
-		return
-	}
-
-	p.items = nil
-
-	entries, err := p.store.ListActionsByType("mcp")
-	if err != nil {
-		p.message = fmt.Sprintf("Error: %v", err)
-		return
-	}
-	for _, e := range entries {
-		var status string
-		switch e.Actions.Install {
-		case "block":
-			status = "blocked"
-		case "allow":
-			status = "allowed"
-		default:
-			status = "active"
+// LoadCmd runs `defenseclaw mcp list --json` asynchronously and emits
+// an MCPsLoadedMsg. Same 15s ceiling as SkillsPanel.LoadCmd.
+func (p *MCPsPanel) LoadCmd() tea.Cmd {
+	p.loading = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, resolveDefenseclawBin(), "mcp", "list", "--json")
+		out, err := cmd.Output()
+		if err != nil {
+			return MCPsLoadedMsg{Err: err}
 		}
-		p.items = append(p.items, mcpItem{
-			URL:     e.TargetName,
-			Status:  status,
-			Actions: e.Actions.Summary(),
-			Reason:  e.Reason,
-			Time:    e.UpdatedAt.Format("2006-01-02 15:04"),
-		})
+		var raw []mcpListJSON
+		if err := json.Unmarshal(out, &raw); err != nil {
+			return MCPsLoadedMsg{Err: fmt.Errorf("parse mcp list: %w", err)}
+		}
+		items := make([]mcpItem, 0, len(raw))
+		for _, m := range raw {
+			items = append(items, mcpListToItem(m))
+		}
+		return MCPsLoadedMsg{Items: items}
 	}
+}
 
-	p.applyFilter()
+// mcpListToItem flattens a JSON entry into an mcpItem. Status
+// precedence matches the CLI's action-first rendering.
+func mcpListToItem(m mcpListJSON) mcpItem {
+	status := "active"
+	actionsSummary := "-"
+	if m.Actions != nil {
+		switch {
+		case m.Actions.File == "quarantine":
+			status = "quarantined"
+		case m.Actions.Install == "block":
+			status = "blocked"
+		case m.Actions.Runtime == "disable":
+			status = "disabled"
+		case m.Actions.Install == "allow":
+			status = "allowed"
+		}
+		if !m.Actions.IsEmpty() {
+			actionsSummary = m.Actions.Summary()
+		}
+	}
+	return mcpItem{
+		URL:       m.Name,
+		Status:    status,
+		Actions:   actionsSummary,
+		Reason:    "",
+		Time:      "",
+		Transport: m.Transport,
+		Command:   m.Command,
+		ServerURL: m.URL,
+		Severity:  m.Severity,
+		Verdict:   m.Verdict,
+	}
+}
+
+// ApplyLoaded consumes an MCPsLoadedMsg. Keeps cursor in range.
+func (p *MCPsPanel) ApplyLoaded(msg MCPsLoadedMsg) {
+	p.loading = false
+	if msg.Err != nil {
+		p.message = fmt.Sprintf("Error loading MCPs: %v", msg.Err)
+		return
+	}
+	p.items = msg.Items
+	p.loaded = true
 	p.message = ""
+	p.applyFilter()
+	p.detailCache = nil
+}
+
+func (p *MCPsPanel) IsLoaded() bool  { return p.loaded }
+func (p *MCPsPanel) IsLoading() bool { return p.loading }
+
+// Refresh is now a filter-only pass so tests can populate p.items
+// directly. The authoritative refresh is LoadCmd.
+func (p *MCPsPanel) Refresh() {
+	p.applyFilter()
 }
 
 func (p *MCPsPanel) applyFilter() {
@@ -102,7 +187,7 @@ func (p *MCPsPanel) applyFilter() {
 		p.filtered = nil
 		query := strings.ToLower(p.filter)
 		for _, item := range p.items {
-			text := strings.ToLower(item.URL + " " + item.Status + " " + item.Reason)
+			text := strings.ToLower(item.URL + " " + item.Status + " " + item.Reason + " " + item.ServerURL + " " + item.Command)
 			if strings.Contains(text, query) {
 				p.filtered = append(p.filtered, item)
 			}
@@ -156,7 +241,7 @@ func (p *MCPsPanel) Selected() *mcpItem {
 
 func (p *MCPsPanel) ToggleBlock() string {
 	sel := p.Selected()
-	if sel == nil {
+	if sel == nil || p.store == nil {
 		return ""
 	}
 	if sel.Status == "blocked" {
@@ -230,7 +315,7 @@ func (p *MCPsPanel) GetDetailInfo() *MCPDetailInfo {
 
 	scans, _ := p.store.LatestScansByScanner("mcp-scanner")
 	for i := range scans {
-		if scans[i].Target == sel.URL {
+		if scans[i].Target == sel.URL || scans[i].Target == sel.ServerURL {
 			info.ScanInfo = &scans[i]
 			findings, _ := p.store.ListFindingsByScan(scans[i].ID)
 			info.Findings = findings
@@ -284,6 +369,9 @@ func (p *MCPsPanel) View() string {
 	if p.message != "" {
 		return p.message
 	}
+	if p.loading && len(p.items) == 0 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("  Loading MCP servers…")
+	}
 
 	var b strings.Builder
 
@@ -327,11 +415,15 @@ func (p *MCPsPanel) View() string {
 		if p.filter != "" {
 			return b.String() + StyleInfo.Render("  No MCP servers match the filter.")
 		}
+		if !p.loaded {
+			return b.String() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
+				"  Press \"r\" to load MCP servers. Runs \"defenseclaw mcp list --json\".")
+		}
 		return b.String() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
-			"  No MCP servers with enforcement actions.\n  Press : then type \"block mcp <url>\" or \"allow mcp <url>\"")
+			"  No MCP servers configured in openclaw.json (mcp.servers).")
 	}
 
-	header := fmt.Sprintf("  %-14s %-38s %-20s %-20s %-16s", "STATUS", "URL", "ACTIONS", "REASON", "SINCE")
+	header := fmt.Sprintf("  %-14s %-22s %-10s %-10s %-18s", "STATUS", "NAME", "TRANSPORT", "SEVERITY", "ACTIONS")
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("243")).Render(header))
 	b.WriteString("\n")
 
@@ -352,17 +444,22 @@ func (p *MCPsPanel) View() string {
 	for i := start; i < end; i++ {
 		item := p.filtered[i]
 		badge := statusBadge(item.Status)
-		url := item.URL
-		if len(url) > 38 {
-			url = url[:35] + "…"
+		name := item.URL
+		if len(name) > 22 {
+			name = name[:19] + "…"
+		}
+		transport := item.Transport
+		if transport == "" {
+			transport = "-"
+		}
+		severity := item.Severity
+		sev := fmt.Sprintf("%-10s", "-")
+		if severity != "" {
+			sev = SeverityStyle(severity).Render(fmt.Sprintf("%-10s", severity))
 		}
 		actions := item.Actions
-		if len(actions) > 20 {
-			actions = actions[:17] + "…"
-		}
-		reason := item.Reason
-		if len(reason) > 20 {
-			reason = reason[:17] + "…"
+		if len(actions) > 18 {
+			actions = actions[:15] + "…"
 		}
 
 		pointer := "  "
@@ -370,7 +467,7 @@ func (p *MCPsPanel) View() string {
 			pointer = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true).Render("▸ ")
 		}
 
-		line := fmt.Sprintf("%s%s %-38s %-20s %-20s %-16s", pointer, badge, url, actions, reason, item.Time)
+		line := fmt.Sprintf("%s%s %-22s %-10s %s %-18s", pointer, badge, name, transport, sev, actions)
 
 		if i == p.cursor {
 			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(p.width).Render(line)
@@ -425,10 +522,19 @@ func (p *MCPsPanel) renderDetail() string {
 	d.WriteString("\n")
 
 	d.WriteString(labelStyle.Render("  Status: ") + valStyle.Render(strings.ToUpper(info.Item.Status)))
-	d.WriteString(labelStyle.Render("    Since: ") + valStyle.Render(info.Item.Time) + "\n")
+	if info.Item.Transport != "" {
+		d.WriteString(labelStyle.Render("    Transport: ") + valStyle.Render(info.Item.Transport))
+	}
+	if info.Item.Verdict != "" {
+		d.WriteString(labelStyle.Render("    Verdict: ") + valStyle.Render(info.Item.Verdict))
+	}
+	d.WriteString("\n")
 
-	if info.Item.Reason != "" {
-		d.WriteString(labelStyle.Render("  Reason: ") + valStyle.Render(info.Item.Reason) + "\n")
+	if info.Item.ServerURL != "" {
+		d.WriteString(labelStyle.Render("  URL: ") + valStyle.Render(info.Item.ServerURL) + "\n")
+	}
+	if info.Item.Command != "" {
+		d.WriteString(labelStyle.Render("  Command: ") + valStyle.Render(info.Item.Command) + "\n")
 	}
 
 	if info.Action != nil {
