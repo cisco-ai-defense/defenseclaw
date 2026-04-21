@@ -17,6 +17,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +27,10 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
+
+// ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
+// Nil in binaries/tests that do not install the hook.
+var ReportConfigLoadError func(ctx context.Context, reason string)
 
 // DefenseClawLLMKeyEnv is the canonical environment variable holding the
 // unified LLM API key that powers every LLM-using component in DefenseClaw
@@ -58,6 +63,39 @@ type ClawConfig struct {
 	Mode       ClawMode `mapstructure:"mode"        yaml:"mode"`
 	HomeDir    string   `mapstructure:"home_dir"    yaml:"home_dir"`
 	ConfigFile string   `mapstructure:"config_file" yaml:"config_file"`
+}
+
+// AgentConfig [v7] pins the logical agent identity for this
+// sidecar deployment. The three-tier identity model distinguishes:
+//
+//   - AgentID (this field): logical, stable across restarts &
+//     instances. Operators set this in config.yaml; it is what
+//     aggregates like /v1/agentwatch/agents, /v1/events, /summary,
+//     and /risk-summary key off. Blank means "no agent identity
+//     pinned" — downstream consumers must tolerate that.
+//   - AgentInstanceID: per-session, assigned by the gateway's
+//     agent registry at session start; never configured.
+//   - SidecarInstanceID: per-process, minted at sidecar boot; never
+//     configured.
+//
+// Keeping this at the top level (not nested under `claw:`) means it
+// survives future multi-agent-framework expansions without schema
+// churn.
+type AgentConfig struct {
+	// ID is the stable logical agent identifier. If empty, the
+	// sidecar runs without a pinned agent identity — all events
+	// still carry AgentInstanceID & SidecarInstanceID so they
+	// correlate within a session, but cross-session aggregation
+	// by agent is not possible.
+	//
+	// Convention: lower-kebab-case, globally unique within a
+	// tenant (e.g. "code-review-bot", "triage-agent-prod").
+	ID string `mapstructure:"id" yaml:"id,omitempty"`
+
+	// Name is a human-readable display name surfaced in the TUI,
+	// webhook notifications, and event.agent_name. Blank falls
+	// back to ID. Never used for aggregation.
+	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
 // CurrentConfigVersion is bumped when the config schema changes in a way
@@ -110,6 +148,7 @@ type Config struct {
 	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
 	Environment    string               `mapstructure:"environment"      yaml:"environment"`
 	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	Agent          AgentConfig          `mapstructure:"agent"            yaml:"agent,omitempty"`
 	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
 	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
 	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
@@ -1015,6 +1054,9 @@ func Load() (*Config, error) {
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			if !os.IsNotExist(err) {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "read_config")
+				}
 				return nil, fmt.Errorf("config: read %s: %w", configFile, err)
 			}
 		}
@@ -1033,6 +1075,9 @@ func Load() (*Config, error) {
 	// of audit_sinks. Detect any populated legacy keys and refuse to
 	// start so operators don't silently lose Splunk forwarding.
 	if legacy := detectLegacySplunk(); legacy != "" {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "legacy_splunk")
+		}
 		return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
 			"DefenseClaw v4 replaced it with `audit_sinks:`. "+
 			"Run `defenseclaw setup observability migrate-splunk --apply` "+
@@ -1042,6 +1087,9 @@ func Load() (*Config, error) {
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "unmarshal")
+		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 
@@ -1049,17 +1097,29 @@ func Load() (*Config, error) {
 
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+			}
 			return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
 		}
 	}
 
 	if err := cfg.SkillActions.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "skill_actions_invalid")
+		}
 		return nil, err
 	}
 	if err := cfg.MCPActions.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "mcp_actions_invalid")
+		}
 		return nil, err
 	}
 	if err := cfg.PluginActions.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "plugin_actions_invalid")
+		}
 		return nil, err
 	}
 	if cfg.OpenShell.IsStandalone() {

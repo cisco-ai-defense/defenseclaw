@@ -342,3 +342,75 @@ via single-key form fields).
 - `secret_env` / room_id presence for types that need it
 - reachability (HEAD/OPTIONS) — **never** dispatches live events; use
   `setup webhook test` for an end-to-end synthetic dispatch.
+
+---
+
+## 8. Local OTLP + schema validation stack
+
+`deploy/observability/` ships a one-shot docker-compose stack you can
+point a local sidecar at to see every span / metric / log flowing
+end-to-end in Grafana. It bundles:
+
+- `otel-collector` on `127.0.0.1:4317` (gRPC) + `4318` (HTTP)
+- `prometheus` (metrics) on `127.0.0.1:9090`
+- `loki` (logs) on `127.0.0.1:3100`
+- `tempo` (traces) on `127.0.0.1:3200`
+- `grafana` (UI + provisioned DefenseClaw dashboard) on
+  `http://127.0.0.1:3000`
+
+Quick start:
+
+```bash
+cd deploy/observability
+./run.sh up
+eval "$(./run.sh env)"        # exports OTEL_EXPORTER_OTLP_ENDPOINT etc.
+go run ./cmd/defenseclaw gateway
+./run.sh down                 # or ./run.sh reset to wipe volumes
+```
+
+The provisioned dashboard pulls straight from the live Prometheus
+metric names the sidecar already emits: `defenseclaw_gateway_verdicts`,
+`defenseclaw_scanner_errors`, `defenseclaw_guardrail_latency`, plus
+the v7 addition `defenseclaw_schema_violations_total` (see below).
+
+### 8.1 Runtime JSON-schema validation
+
+The gateway event writer (`internal/gatewaylog.Writer`) runs a **strict
+JSON Schema gate** over every event it emits. The validator compiles
+`schemas/gateway-event-envelope.json` and its three `$ref`d sibling
+schemas (scan / scan_finding / activity) at boot — these files are
+embedded into the binary at build time, so the sidecar has no
+filesystem dependency on the repo.
+
+When an event fails validation we:
+
+1. **Drop** the event from JSONL, stderr, OTel fanout, and sinks — it
+   never reaches any downstream consumer.
+2. **Emit an `EventError`** with
+   `subsystem=gatewaylog`, `code=SCHEMA_VIOLATION`, `message=<leaf
+   violation>`, `cause=<dropped event_type>` so the violation is
+   visible on every tier including SIEM/OTel backends.
+3. **Increment `defenseclaw.schema.violations`** (labelled by
+   `event_type` and `code`) so operators can alert on contract drift
+   from PromQL without having to tail JSONL.
+4. Guard against recursion: if the crafted violation event itself
+   fails validation (must not happen in practice) we never re-enter
+   the validator — the operator gets one error per bad source event,
+   guaranteed.
+
+Operational controls:
+
+- `DEFENSECLAW_SCHEMA_VALIDATION=off` (or `false`/`0`/`disabled`)
+  disables the gate at sidecar start. Breakglass for when a newer
+  binary emits a field the shipped schema doesn't know about yet;
+  re-enable as soon as the schema PR merges.
+- The **"Schema violations / min"** panel on the Grafana dashboard
+  is the canary: any sustained non-zero rate is a contract regression
+  and should open a ticket.
+- The embedded schema copies under `internal/gatewaylog/schemas/*.json`
+  are pinned to `schemas/*.json` by `TestEmbeddedSchemasMatchRepo`.
+  If the test fails, re-run:
+  ```bash
+  cp schemas/*.json internal/gatewaylog/schemas/
+  ```
+  before shipping.

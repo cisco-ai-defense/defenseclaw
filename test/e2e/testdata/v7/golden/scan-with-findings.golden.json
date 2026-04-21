@@ -1,0 +1,27 @@
+{
+  "binary_version": "\u003cstripped\u003e",
+  "content_hash": "\u003cstripped\u003e",
+  "event_type": "scan",
+  "generation": 1,
+  "run_id": "\u003cstripped\u003e",
+  "scan": {
+    "counts": {
+      "CRITICAL": 0,
+      "HIGH": 1,
+      "INFO": 0,
+      "LOW": 0,
+      "MEDIUM": 0
+    },
+    "scan_id": "\u003cstripped\u003e",
+    "scanner": "skill",
+    "severity_max": "HIGH",
+    "target": "/tmp/e2e",
+    "target_type": "skill",
+    "total_count": 1,
+    "verdict": "block"
+  },
+  "schema_version": 7,
+  "severity": "HIGH",
+  "sidecar_instance_id": "22222222-2222-2222-2222-222222222222",
+  "ts": "2000-01-01T00:00:00Z"
+}

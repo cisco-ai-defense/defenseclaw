@@ -1,0 +1,15 @@
+{
+  "binary_version": "\u003cstripped\u003e",
+  "content_hash": "\u003cstripped\u003e",
+  "event_type": "verdict",
+  "generation": 1,
+  "schema_version": 7,
+  "severity": "HIGH",
+  "ts": "2000-01-01T00:00:00Z",
+  "verdict": {
+    "action": "block",
+    "latency_ms": 1,
+    "reason": "test",
+    "stage": "final"
+  }
+}

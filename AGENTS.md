@@ -150,6 +150,15 @@ All six paths must be tested.
 - TUI mutations route through the Python CLI — never reimplement an action in Go. The mapping table is `internal/tui/command.go::BuildRegistry()` and it's gated by `internal/tui/cli_parity_test.go`, which uses `scripts/audit_parity.py` to introspect the live Click tree. If you add a TUI action you must add the matching Click subcommand first; the parity test will fail loudly otherwise.
 - `defenseclaw doctor` writes `~/.defenseclaw/doctor_cache.json` on every run (success or failure). The Go TUI's Overview panel reads it on startup + after each doctor invocation. Stale threshold is 15 min — see `internal/tui/doctor_cache.go`. Don't bypass this cache by running doctor's network probes from Go.
 
+## v7 Observability Gotchas
+
+- **Provenance** is stamped by `gatewaylog.Writer.Emit` (via `Event.StampProvenance` at the writer choke point) — do not stamp provenance manually at arbitrary call sites.
+- **`LogActivity`** bypasses the sanitizer for `activity_events` payload columns (`before_json` / `after_json` / `diff_json`) but **not** for the redacted summary row in `audit_events` / sink fan-out.
+- **Sink failures** emit a metric, a gateway structured event, and an audit row — when adding new failure modes, wire all three surfaces consistently.
+- **Three-tier identity:** never collapse `agent_instance_id` onto `sidecar_instance_id`; they are different dimensions (session/process vs gateway process).
+- **`make check-v7`** must pass before any PR that touches audit actions, gateway error codes, or JSON schemas (`check-audit-actions`, `check-error-codes`, `check-schemas`).
+- **Golden events** under `test/e2e/testdata/v7/golden/` are part of the downstream contract — regenerate only with `go test ./test/e2e/ -run TestGoldenEvents -update` and review the diff.
+
 ## Boundaries
 
 - `defenseclaw-spec.md` — read-only, do not modify

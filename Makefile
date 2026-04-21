@@ -15,6 +15,7 @@ DIST_DIR    := dist
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
+        check check-audit-actions check-error-codes check-schemas check-v7 \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -314,6 +315,27 @@ test-verbose:
 test-file:
 	@test -n "$(FILE)" || { echo "Usage: make test-file FILE=test_config"; exit 1; }
 	$(VENV)/bin/python -m unittest cli.tests.$(FILE) -v
+
+# ---------------------------------------------------------------------------
+# v7 parity gates — prevent drift between Go (source of truth),
+# Python, and JSON schemas. Adding a new audit action / error code
+# / schema? Run `make check` locally before pushing; CI runs this
+# too and will fail the build on drift.
+# ---------------------------------------------------------------------------
+
+check: check-v7
+
+check-v7: check-audit-actions check-error-codes check-schemas
+	@echo "check-v7: all parity gates passed."
+
+check-audit-actions:
+	@$(VENV)/bin/python scripts/check_audit_actions.py
+
+check-error-codes:
+	@$(VENV)/bin/python scripts/check_error_codes.py
+
+check-schemas:
+	@$(VENV)/bin/python scripts/check_schemas.py
 
 # ---------------------------------------------------------------------------
 # Lint targets

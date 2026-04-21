@@ -1,0 +1,14 @@
+{
+  "binary_version": "\u003cstripped\u003e",
+  "content_hash": "\u003cstripped\u003e",
+  "error": {
+    "code": "SUBPROCESS_EXIT",
+    "message": "exit 1",
+    "subsystem": "scanner"
+  },
+  "event_type": "error",
+  "generation": 1,
+  "schema_version": 7,
+  "severity": "MEDIUM",
+  "ts": "2000-01-01T00:00:00Z"
+}
