@@ -3256,6 +3256,17 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 	}
 	defer otelProvider.Shutdown(context.Background())
 
+	// v7 review finding H3: handleGuardrailEvent resolves the logical
+	// agent identity via SharedAgentRegistry().AgentID(). In
+	// production APIServer.Start() installs it; unit tests bypass
+	// Start() so we must seed it explicitly or gen_ai.agent.id on
+	// the token histogram will be "" and Splunk cost attribution
+	// breaks. InstallSharedAgentRegistry is idempotent and merges
+	// non-empty identity into any previously-installed (empty) shared
+	// registry, so this is safe even if earlier tests in the package
+	// already installed one.
+	InstallSharedAgentRegistry("agent-h3-test", "openclaw")
+
 	api := &APIServer{health: NewSidecarHealth(), logger: logger, store: store}
 	api.SetOTelProvider(otelProvider)
 
@@ -3340,6 +3351,40 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 	}
 	if outputSum != 120 {
 		t.Errorf("output token sum = %v, want 120", outputSum)
+	}
+
+	// v7 review finding H3: gen_ai.agent.name and gen_ai.agent.id
+	// must land on the token histogram. Without these two
+	// dimensions Splunk cannot attribute spend to a specific agent
+	// (agent_name is the logical identity surfaced to operators;
+	// agent_id is the canonical id used for the registry / plugin
+	// protocol). Earlier versions of the test only asserted the
+	// token sums, so a regression that stopped plumbing agentID
+	// through RecordLLMTokens was invisible at the call-site level.
+	const wantAgentName = "openclaw"
+	var sawAgentName, sawAgentID bool
+	for _, dp := range tokenHist.DataPoints {
+		for _, attr := range dp.Attributes.ToSlice() {
+			switch string(attr.Key) {
+			case "gen_ai.agent.name":
+				if attr.Value.AsString() == wantAgentName {
+					sawAgentName = true
+				}
+			case "gen_ai.agent.id":
+				// Any non-empty agent.id satisfies the check — the
+				// shared registry produces a stable UUID we do not
+				// want to pin in the test.
+				if attr.Value.AsString() != "" {
+					sawAgentID = true
+				}
+			}
+		}
+	}
+	if !sawAgentName {
+		t.Errorf("expected gen_ai.agent.name=%q on gen_ai.client.token.usage (review H3)", wantAgentName)
+	}
+	if !sawAgentID {
+		t.Error("expected non-empty gen_ai.agent.id on gen_ai.client.token.usage (review H3 — SharedAgentRegistry not propagated)")
 	}
 }
 

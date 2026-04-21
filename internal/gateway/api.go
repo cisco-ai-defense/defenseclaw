@@ -256,7 +256,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-disable", req.SkillKey, "disabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-disable", req.SkillKey, "disabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "skillKey": req.SkillKey})
 }
@@ -291,7 +291,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-enable", req.SkillKey, "enabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-enable", req.SkillKey, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "skillKey": req.SkillKey})
 }
@@ -332,7 +332,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-plugin-disable", req.PluginName, "disabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-disable", req.PluginName, "disabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "pluginName": req.PluginName})
 }
@@ -369,7 +369,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-plugin-enable", req.PluginName, "enabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-enable", req.PluginName, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "pluginName": req.PluginName})
 }
@@ -486,7 +486,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-config-patch", req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
+		_ = a.logger.LogActionCtx(r.Context(), "api-config-patch", req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
 }
@@ -559,7 +559,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.logger != nil {
-			_ = a.logger.LogAction("api-enforce-block", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+			_ = a.logger.LogActionCtx(r.Context(), "api-enforce-block", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 		}
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "blocked"})
 	case http.MethodDelete:
@@ -568,7 +568,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.logger != nil {
-			_ = a.logger.LogAction("api-enforce-unblock", req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
+			_ = a.logger.LogActionCtx(r.Context(), "api-enforce-unblock", req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
 		}
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked"})
 	}
@@ -647,7 +647,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-enforce-allow", policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+		_ = a.logger.LogActionCtx(r.Context(), "api-enforce-allow", policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 }
@@ -1002,7 +1002,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
@@ -1049,7 +1049,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-plugin-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
@@ -1105,7 +1105,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-mcp-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogActionCtx(r.Context(), "api-mcp-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
@@ -1145,7 +1145,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-fetch", req.Target, "streaming skill tar.gz")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch", req.Target, "streaming skill tar.gz")
 	}
 
 	w.Header().Set("Content-Type", "application/gzip")
@@ -1292,7 +1292,15 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
+		// v7 envelope threading: see review finding C1. The previous
+		// LogActionWithCorrelation carried only trace_id + request_id
+		// onto the guardrail-verdict audit row — every other
+		// dimension (session_id, agent_*, policy_id, destination_app,
+		// tool_*) was silently dropped before the row reached
+		// SQLite/sinks/OTel. LogActionCtx routes through the same
+		// ctx envelope the middleware already stamped for this
+		// request so all five surfaces agree.
+		_ = a.logger.LogActionCtx(r.Context(), "guardrail-verdict", req.Model, details)
 	}
 	if a.store != nil {
 		evt := audit.Event{
@@ -1303,6 +1311,9 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
 		}
+		// Store-level twin row (TUI-only surface) — ApplyEnvelope
+		// keeps it in lockstep with the logger row above.
+		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
 		_ = a.store.LogEvent(evt)
 	}
 
@@ -1322,7 +1333,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", SharedAgentRegistry().AgentID(), tIn, tOut)
 		}
 	}
 
@@ -1391,7 +1402,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
+		_ = a.logger.LogActionCtx(r.Context(), "guardrail-opa-verdict", req.Model, details)
 	}
 	if a.store != nil {
 		evt := audit.Event{
@@ -1402,6 +1413,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
 		}
+		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
 		_ = a.store.LogEvent(evt)
 	}
 
@@ -1482,7 +1494,7 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.cfgMu.Unlock()
 
 		if a.logger != nil {
-			_ = a.logger.LogAction("guardrail-config-reload", "", strings.Join(changed, " "))
+			_ = a.logger.LogActionCtx(r.Context(), "guardrail-config-reload", "", strings.Join(changed, " "))
 		}
 
 		a.writeJSON(w, http.StatusOK, resp)
@@ -2049,7 +2061,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
+		_ = a.logger.LogActionCtx(r.Context(), "policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
 	}
 	emitLifecycle(r.Context(), "policy", "reload", map[string]string{
 		"policy_dir": a.scannerCfg.PolicyDir,

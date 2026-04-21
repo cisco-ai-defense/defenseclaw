@@ -209,7 +209,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 		TraceID:   in.TraceID,
 		Activity:  gwActivity,
 	}
-	gwEv.StampProvenance()
+	stampGatewayEnvelope(&gwEv)
 	if otel != nil {
 		otel.RecordGatewayEvent(gwEv)
 	}

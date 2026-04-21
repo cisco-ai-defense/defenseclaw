@@ -66,6 +66,14 @@ func testSurfaceVerdict(t *testing.T, h *observabilityHarness) {
 			Reason:    "injection",
 			LatencyMs: 12,
 		}
+		// Envelope dimensions for the verdict counter. These MUST
+		// make it onto the metric (see telemetry.RecordGatewayEvent)
+		// because Splunk dashboards pivot on them to answer
+		// "which policy blocked the most verdicts for destination_app X".
+		// Prior to the review's H2 fix these were silently dropped,
+		// and no test caught it.
+		ev.PolicyID = "pol-e2e-block-injection"
+		ev.DestinationApp = "openclaw"
 		h.GW.Emit(ev)
 	})
 	assertOTelSpanPresent(t, h)
@@ -84,6 +92,16 @@ func testSurfaceVerdict(t *testing.T, h *observabilityHarness) {
 	}
 	if !metricHasAttrKeyValue(rm, "defenseclaw.gateway.verdicts", "verdict.action", "block") {
 		t.Fatal("expected verdict.action=block on defenseclaw.gateway.verdicts")
+	}
+	// v7 review finding H2: policy_id and destination_app were
+	// added to the verdict counter's attribute set but no existing
+	// test asserted them. A regression that silently reverts the
+	// enrichment would be undetectable without these two checks.
+	if !metricHasAttrKeyValue(rm, "defenseclaw.gateway.verdicts", "policy_id", "pol-e2e-block-injection") {
+		t.Fatal("expected policy_id=pol-e2e-block-injection on defenseclaw.gateway.verdicts (review H2)")
+	}
+	if !metricHasAttrKeyValue(rm, "defenseclaw.gateway.verdicts", "destination_app", "openclaw") {
+		t.Fatal("expected destination_app=openclaw on defenseclaw.gateway.verdicts (review H2)")
 	}
 	// TODO(v7-followup): persist EventVerdict to a first-class SQLite projection (audit_events
 	// twin rows exist for guardrail-verdict action but not for isolated gateway.Emit in tests).

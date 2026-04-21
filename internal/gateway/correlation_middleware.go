@@ -36,10 +36,23 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
+
+// currentRunIDFromEnv snapshots the DEFENSECLAW_RUN_ID env var once
+// per request. Kept local to the middleware so the middleware does
+// not depend on sidecar startup code; callers that pin the run id
+// via flag override set the env var at process start. Returns "" if
+// unset — downstream layers handle that the same as any other
+// missing correlation field.
+func currentRunIDFromEnv() string {
+	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+}
 
 // SessionIDHeader is the canonical header used by clients to scope
 // a session across multiple requests. Accepting it is optional —
@@ -200,6 +213,29 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			}
 
 			enrichHTTPSpanFromContext(ctx)
+
+			// v7 closure: snapshot the resolved envelope into an
+			// audit-package context key so every downstream
+			// audit.Logger.LogEventCtx(ctx, ...) call auto-fills
+			// the seven correlation fields (run_id, trace_id,
+			// request_id, session_id, agent_id, agent_name,
+			// agent_instance_id) without manual plumbing. The
+			// sidecar_instance_id is filled by the audit store
+			// choke point from the per-process UUID, so we do
+			// not duplicate it here — keeping the envelope
+			// focused on request-scoped values avoids
+			// ambiguity when a test overrides it.
+			id := AgentIdentityFromContext(ctx)
+			audEnv := audit.CorrelationEnvelope{
+				RunID:           currentRunIDFromEnv(),
+				TraceID:         TraceIDFromContext(ctx),
+				RequestID:       RequestIDFromContext(ctx),
+				SessionID:       SessionIDFromContext(ctx),
+				AgentID:         id.AgentID,
+				AgentName:       id.AgentName,
+				AgentInstanceID: id.AgentInstanceID,
+			}
+			ctx = audit.ContextWithEnvelope(ctx, audEnv)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

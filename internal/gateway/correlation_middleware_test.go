@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 // TestContextHelpers_RoundTrip pins the symmetric read/write helpers
@@ -161,6 +163,46 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 	}
 	if gotIdentity.AgentInstanceID == "" {
 		t.Error("agent_instance_id empty; want session-scoped uuid")
+	}
+}
+
+// TestCorrelationMiddleware_StampsAuditEnvelope closes the v7 loop:
+// the middleware snapshots the resolved correlation + agent identity
+// into an audit.CorrelationEnvelope so any downstream call to
+// audit.Logger.LogEventCtx auto-fills all seven fields without the
+// handler plumbing them through manually. Regressing this means
+// every audit row in a request scope loses its join keys.
+func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
+	reg := NewAgentRegistry("agent-env", "Envelope Agent")
+	mw := CorrelationMiddleware(reg)
+
+	t.Setenv("DEFENSECLAW_RUN_ID", "run-env-1")
+
+	var env audit.CorrelationEnvelope
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		env = audit.EnvelopeFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set(SessionIDHeader, "sess-env")
+	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if env.RunID != "run-env-1" {
+		t.Errorf("RunID=%q want run-env-1", env.RunID)
+	}
+	if env.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("TraceID=%q want 4bf9...4736", env.TraceID)
+	}
+	if env.SessionID != "sess-env" {
+		t.Errorf("SessionID=%q want sess-env", env.SessionID)
+	}
+	if env.AgentID != "agent-env" {
+		t.Errorf("AgentID=%q want agent-env", env.AgentID)
+	}
+	if env.AgentInstanceID == "" {
+		t.Error("AgentInstanceID empty; want session-scoped uuid")
 	}
 }
 

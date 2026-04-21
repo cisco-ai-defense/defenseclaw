@@ -22,6 +22,6 @@
   },
   "schema_version": 7,
   "severity": "HIGH",
-  "sidecar_instance_id": "22222222-2222-2222-2222-222222222222",
+  "sidecar_instance_id": "\u003cstripped\u003e",
   "ts": "2000-01-01T00:00:00Z"
 }

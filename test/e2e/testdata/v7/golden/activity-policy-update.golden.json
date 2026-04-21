@@ -18,5 +18,6 @@
   "run_id": "\u003cstripped\u003e",
   "schema_version": 7,
   "severity": "INFO",
+  "sidecar_instance_id": "\u003cstripped\u003e",
   "ts": "2000-01-01T00:00:00Z"
 }

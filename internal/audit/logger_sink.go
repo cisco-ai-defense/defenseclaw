@@ -127,7 +127,7 @@ func (l *Logger) emitSinkFailureAuditAndGateway(ctx context.Context, sinkName, k
 			Cause:     err.Error(),
 		},
 	}
-	ev.StampProvenance()
+	stampGatewayEnvelope(&ev)
 	if otel != nil {
 		otel.RecordGatewayEvent(ev)
 	}

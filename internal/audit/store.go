@@ -30,6 +30,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 type Event struct {
@@ -999,6 +1000,31 @@ func (s *Store) LogEvent(e Event) error {
 	}
 	if e.RunID == "" {
 		e.RunID = currentRunID()
+	}
+
+	// v7: stamp the provenance quartet + the per-process sidecar UUID
+	// at the one true choke point for audit_events. This is the
+	// analogue of gatewaylog.Writer.Emit's StampProvenance — callers
+	// that forgot (or never knew about) the envelope still produce a
+	// fully-populated SQLite row. The snapshot is always taken from
+	// version.Current() so a single wire run shows consistent
+	// schema/content/generation across every event; pre-stamped
+	// callers keep their values so historical replays stay stable.
+	prov := version.Current()
+	if e.SchemaVersion == 0 {
+		e.SchemaVersion = prov.SchemaVersion
+	}
+	if e.ContentHash == "" {
+		e.ContentHash = prov.ContentHash
+	}
+	if e.Generation == 0 {
+		e.Generation = prov.Generation
+	}
+	if e.BinaryVersion == "" {
+		e.BinaryVersion = prov.BinaryVersion
+	}
+	if e.SidecarInstanceID == "" {
+		e.SidecarInstanceID = ProcessAgentInstanceID()
 	}
 
 	ts := e.Timestamp.Format(time.RFC3339Nano)

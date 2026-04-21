@@ -204,6 +204,150 @@ func TestEmitGatewayEvent_ErrorAttributesWithCause(t *testing.T) {
 	}
 }
 
+// TestEmitGatewayEvent_StampsV7Envelope pins the v7 contract that
+// Provider.EmitGatewayEvent auto-stamps the provenance quartet
+// (schema_version, content_hash, generation, binary_version) + the
+// per-process sidecar_instance_id onto events that bypass
+// gatewaylog.Writer.Emit. Callers such as the watcher, policy engine,
+// and telemetry/capacity_emit all hit this code path directly — if
+// we don't stamp here, every OTel log record they drive ships with
+// an empty envelope and dashboards lose the ability to pivot on
+// config generation or sidecar identity.
+func TestEmitGatewayEvent_StampsV7Envelope(t *testing.T) {
+	// Pin a known sidecar id so the round-trip assertion is
+	// deterministic. We restore the previous value on exit so
+	// other tests in the package see the same process-scoped
+	// identifier they expect.
+	prev := gatewaylog.SidecarInstanceID()
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(prev) })
+	gatewaylog.SetSidecarInstanceID("sidecar-envelope-test")
+
+	p, exp := newProviderWithLogCapture(t)
+	// Event has NO envelope fields populated — this is the
+	// "bypass Writer.Emit" shape.
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  gatewaylog.SeverityInfo,
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem: "watcher", Transition: "start",
+		},
+	})
+	records := exp.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("records=%d want 1", len(records))
+	}
+	rec := records[0]
+
+	if got := attrValue(rec, "defenseclaw.sidecar_instance_id"); got != "sidecar-envelope-test" {
+		t.Errorf("sidecar_instance_id attr=%q, want sidecar-envelope-test", got)
+	}
+	if got, ok := intAttrValue(rec, "defenseclaw.schema_version"); !ok || got == 0 {
+		t.Errorf("schema_version attr=%d (ok=%v) — provenance quartet did not stamp", got, ok)
+	}
+	// binary_version is always set via StampProvenance (falls back
+	// to "dev" when unset by ldflags). content_hash / generation
+	// may be "" / 0 depending on whether config.Save ran earlier
+	// in the test binary — we only assert the presence-stable
+	// fields (schema_version, binary_version, sidecar_instance_id).
+	if got := attrValue(rec, "defenseclaw.binary_version"); got == "" {
+		t.Errorf("binary_version attr empty — provenance did not stamp")
+	}
+}
+
+// TestEmitGatewayEvent_LogAttributeContract is the machine-verified
+// contract test for every v7 correlation-envelope attribute the OTel
+// log record is supposed to carry. The review of PR #127 revealed
+// that 12 of the 13 keys below were written by production code but
+// never asserted by any test — a typo in gateway_events.go or a
+// revert of the enrichment would have shipped silently, breaking
+// downstream pipelines (Splunk dashboards, SBOM correlation) that
+// pivot on these exact keys.
+//
+// This test populates every envelope field on the source
+// gatewaylog.Event and confirms that each one round-trips onto the
+// OTel log record under the expected "defenseclaw.*" key. Any
+// future addition to the envelope MUST extend this table — the test
+// is the single machine-verified contract for the attribute set.
+func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
+	// Pin sidecar so the provenance auto-stamp inside
+	// Provider.EmitGatewayEvent doesn't mask the field we're asserting.
+	prev := gatewaylog.SidecarInstanceID()
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(prev) })
+	gatewaylog.SetSidecarInstanceID("sidecar-contract-test")
+
+	p, exp := newProviderWithLogCapture(t)
+
+	// Fully populated event: every envelope dimension + every
+	// provenance slot set to a distinctive literal so a swapped
+	// mapping in gateway_events.go would surface as a value
+	// mismatch, not a silent absence.
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType:         gatewaylog.EventLifecycle,
+		Severity:          gatewaylog.SeverityInfo,
+		RunID:             "run-contract",
+		RequestID:         "req-contract",
+		SessionID:         "sess-contract",
+		TraceID:           "trace-contract",
+		AgentID:           "agent-contract",
+		AgentName:         "openclaw",
+		AgentInstanceID:   "inst-contract",
+		SidecarInstanceID: "sidecar-pinned-on-event",
+		PolicyID:          "policy-contract",
+		DestinationApp:    "destapp-contract",
+		ToolName:          "tool-name-contract",
+		ToolID:            "tool-id-contract",
+		SchemaVersion:     7,
+		ContentHash:       "hash-contract",
+		Generation:        42,
+		BinaryVersion:     "bin-contract",
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem: "svc", Transition: "t",
+		},
+	})
+	records := exp.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("records=%d want 1", len(records))
+	}
+	rec := records[0]
+
+	// String-typed envelope slots — assertAttrString both proves
+	// the key is present AND that the value round-tripped.
+	assertAttrString(t, rec, "defenseclaw.run_id", "run-contract")
+	assertAttrString(t, rec, "defenseclaw.request_id", "req-contract")
+	assertAttrString(t, rec, "defenseclaw.session_id", "sess-contract")
+	assertAttrString(t, rec, "defenseclaw.trace_id", "trace-contract")
+	assertAttrString(t, rec, "defenseclaw.agent_id", "agent-contract")
+	assertAttrString(t, rec, "defenseclaw.agent_name", "openclaw")
+	assertAttrString(t, rec, "defenseclaw.agent_instance_id", "inst-contract")
+	assertAttrString(t, rec, "defenseclaw.sidecar_instance_id", "sidecar-pinned-on-event")
+	assertAttrString(t, rec, "defenseclaw.policy_id", "policy-contract")
+	assertAttrString(t, rec, "defenseclaw.destination_app", "destapp-contract")
+	assertAttrString(t, rec, "defenseclaw.tool_name", "tool-name-contract")
+	assertAttrString(t, rec, "defenseclaw.tool_id", "tool-id-contract")
+	assertAttrString(t, rec, "defenseclaw.content_hash", "hash-contract")
+	assertAttrString(t, rec, "defenseclaw.binary_version", "bin-contract")
+
+	// Numeric provenance slots — schema_version is Int, generation
+	// is Int64. Use the intAttrValue helper declared at the top of
+	// this file.
+	if got, ok := intAttrValue(rec, "defenseclaw.schema_version"); !ok || got != 7 {
+		t.Errorf("defenseclaw.schema_version=%d (ok=%v), want 7", got, ok)
+	}
+	if got, ok := intAttrValue(rec, "defenseclaw.generation"); !ok || got != 42 {
+		t.Errorf("defenseclaw.generation=%d (ok=%v), want 42", got, ok)
+	}
+}
+
+// assertAttrString fails the test if the named attribute is missing
+// or does not match want. Centralizes the common pattern used across
+// H4's contract assertions.
+func assertAttrString(t *testing.T, rec sdklog.Record, key, want string) {
+	t.Helper()
+	if got := attrValue(rec, key); got != want {
+		t.Errorf("attr %q = %q, want %q", key, got, want)
+	}
+}
+
 func TestEmitGatewayEvent_NilPayloadDoesNotPanic(t *testing.T) {
 	// Contract: a verdict event with a nil Verdict payload is an
 	// observability bug, but must not crash the sidecar. The envelope

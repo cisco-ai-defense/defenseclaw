@@ -837,7 +837,14 @@ func (p *Provider) RecordApproval(ctx context.Context, result string, auto, dang
 
 // RecordLLMTokens records token consumption metrics per OTel GenAI semconv.
 // gen_ai.client.token.usage histogram with gen_ai.token.type = "input"/"output".
-func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName string, prompt, completion int64) {
+//
+// agentName is the human-readable logical agent name ("openclaw",
+// "sample-agent", …). agentID is the bounded deployment-scoped agent
+// identifier (e.g. the claw-mode agent key). Both are omitted from
+// metric attributes when empty so pre-v7 callers do not inflate the
+// series count — see docs/OTEL-IMPLEMENTATION-STATUS.md for the
+// cardinality contract.
+func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName, agentID string, prompt, completion int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
@@ -848,6 +855,9 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 	}
 	if agentName != "" {
 		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.name", agentName))
+	}
+	if agentID != "" {
+		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.id", agentID))
 	}
 	if prompt > 0 {
 		attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", "input")}, commonAttrs...)
@@ -860,8 +870,9 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 }
 
 // RecordLLMDuration records LLM call duration per OTel GenAI semconv.
-// gen_ai.client.operation.duration histogram, unit=seconds.
-func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, providerName, model, agentName string, durationSeconds float64) {
+// gen_ai.client.operation.duration histogram, unit=seconds. See
+// RecordLLMTokens for the agentName / agentID cardinality contract.
+func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, providerName, model, agentName, agentID string, durationSeconds float64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
@@ -872,6 +883,9 @@ func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, provide
 	}
 	if agentName != "" {
 		attrs = append(attrs, attribute.String("gen_ai.agent.name", agentName))
+	}
+	if agentID != "" {
+		attrs = append(attrs, attribute.String("gen_ai.agent.id", agentID))
 	}
 	p.metrics.genAIOperationDuration.Record(ctx, durationSeconds, metric.WithAttributes(attrs...))
 }

@@ -177,6 +177,42 @@ func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Ev
 	emitter.EmitGatewayEvent(ev)
 }
 
+// stampGatewayEnvelope fills the v7 correlation + identity envelope
+// on a gatewaylog.Event that does NOT flow through Writer.Emit — i.e.
+// events the audit Logger hands directly to otel.RecordGatewayEvent
+// or the structured emitter bridge. Writer.Emit auto-stamps
+// sidecar_instance_id and provenance at its choke point, but these
+// two side channels (OTel logs + bridge) bypass it entirely, so we
+// re-implement the minimum contract here:
+//
+//   - sidecar_instance_id: per-process UUID, never overwrites
+//   - provenance quartet: from version.Current(), never overwrites
+//   - run_id: from DEFENSECLAW_RUN_ID if the caller didn't set one
+//
+// Never overwrites caller-supplied values so tests pinning a
+// specific generation or trace id keep their pin. This is the
+// single helper responsible for keeping log-tier and JSONL-tier
+// envelopes in lockstep — if you add a field to the Writer choke,
+// add it here too.
+func stampGatewayEnvelope(ev *gatewaylog.Event) {
+	if ev == nil {
+		return
+	}
+	if ev.SidecarInstanceID == "" {
+		ev.SidecarInstanceID = ProcessAgentInstanceID()
+	}
+	if ev.RunID == "" {
+		ev.RunID = currentRunID()
+	}
+	// StampProvenance is idempotent-ish: only fills zero fields when
+	// the writer choke point is not the first stamper. We keep the
+	// same contract here so a caller that pre-stamped (test harness)
+	// wins over version.Current().
+	if ev.SchemaVersion == 0 {
+		ev.StampProvenance()
+	}
+}
+
 // ScanCorrelation threads per-request correlation identifiers and
 // agent identity down into the scan emission pipeline (EventScan,
 // EventScanFinding, scan_results and scan_findings SQLite rows).
@@ -306,6 +342,22 @@ func (l *Logger) LogAction(action, target, details string) error {
 	return l.LogActionWithTrace(action, target, details, "")
 }
 
+// LogActionCtx is the context-aware shortcut for HTTP-driven call sites.
+// It pulls the v7 correlation envelope from ctx (stamped by the gateway
+// CorrelationMiddleware) so downstream audit rows, sinks, and OTel
+// signals all carry the same trace/session/agent/policy identity as
+// the matching gateway.jsonl row — without each call site plumbing
+// seven strings by hand.
+//
+// Use this from every proxy / router / api handler that already has a
+// *http.Request in scope. Non-HTTP callers (watcher, CLI commands)
+// should continue using LogAction / LogActionWithCorrelation since
+// their ctx will not carry an envelope (EnvelopeFromContext returns
+// the zero value, which the auto-fill treats as "no override").
+func (l *Logger) LogActionCtx(ctx context.Context, action, target, details string) error {
+	return l.logActionWithEnvelope(EnvelopeFromContext(ctx), action, target, details)
+}
+
 // LogActionWithTrace persists an action event with an OTel trace ID for
 // cross-system correlation between Splunk O11y and Splunk local.
 func (l *Logger) LogActionWithTrace(action, target, details, traceID string) error {
@@ -313,29 +365,45 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 }
 
 // LogActionWithCorrelation persists an action event with both an OTel
-// trace ID and a gateway request ID. This is the single code path all
-// new call sites should use once Phase 5 threading is live; the older
-// LogAction / LogActionWithTrace helpers delegate here with the
-// request_id left empty.
+// trace ID and a gateway request ID. Kept for non-HTTP callers that
+// resolved the ids out-of-band (watcher rescans, CLI orchestration).
+// HTTP-driven call sites should use LogActionCtx instead so every
+// envelope dimension (session_id, agent_id, agent_name,
+// agent_instance_id, policy_id, destination_app, tool_*) stays in
+// lockstep with the request's gateway.jsonl row.
 //
 // An empty requestID is legal (pre-proxy subsystems like the watcher
 // have no HTTP correlation context); the SQLite column is nullable
 // and downstream sinks strip the attribute when unset.
 func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requestID string) error {
+	return l.logActionWithEnvelope(CorrelationEnvelope{
+		TraceID:   traceID,
+		RequestID: requestID,
+	}, action, target, details)
+}
+
+// logActionWithEnvelope is the shared implementation for every LogAction*
+// variant. Centralizing here guarantees that LogAction, LogActionCtx, and
+// LogActionWithCorrelation all thread the same audit-event shape onto
+// SQLite, sinks, and OTel — a regression in one surface can no longer
+// diverge from the others.
+func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, details string) error {
 	sinksMgr, otel, structured := l.snapshot()
-	event := sanitizeEvent(Event{
-		ID:                uuid.New().String(),
-		Timestamp:         time.Now().UTC(),
-		Action:            action,
-		Target:            target,
-		Actor:             "defenseclaw",
-		Details:           details,
-		Severity:          "INFO",
-		RunID:             currentRunID(),
-		TraceID:           traceID,
-		RequestID:         requestID,
+	event := Event{
+		ID:        uuid.New().String(),
+		Timestamp: time.Now().UTC(),
+		Action:    action,
+		Target:    target,
+		Actor:     "defenseclaw",
+		Details:   details,
+		Severity:  "INFO",
+		RunID:     currentRunID(),
+		// Process-scoped identifier — never collapses onto
+		// agent_instance_id (per-session) per the three-tier contract.
 		SidecarInstanceID: ProcessAgentInstanceID(),
-	})
+	}
+	applyEnvelope(&event, env)
+	event = sanitizeEvent(event)
 	storeErr := l.store.LogEvent(event)
 	if storeErr != nil {
 		if otel != nil {
@@ -430,6 +498,24 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 	}
 
 	return nil
+}
+
+// LogEventCtx is the context-aware variant of LogEvent. It pulls the
+// v7 correlation envelope (run_id, trace_id, request_id, session_id,
+// agent_*, policy_id, destination_app, tool_*) from ctx via the
+// gateway correlation middleware and auto-fills any empty field on
+// event before handing off to LogEvent. This is the preferred entry
+// point for any HTTP-driven code path so every audit row carries
+// the same envelope as the matching gateway.jsonl row without each
+// call site having to plumb seven strings manually.
+//
+// Non-empty fields on event always win over the ctx envelope —
+// callers that already resolved a specific identity (e.g. a
+// scanner callback that uses the agent from the scan target, not
+// the request) keep their pin.
+func (l *Logger) LogEventCtx(ctx context.Context, event Event) error {
+	applyEnvelope(&event, EnvelopeFromContext(ctx))
+	return l.LogEvent(event)
 }
 
 // LogEvent persists a pre-built event through the full audit pipeline
@@ -586,6 +672,30 @@ func (l *Logger) LogActivity(in ActivityInput) error {
 // Summary is a single-line human string; Details is an arbitrary
 // map that becomes the details blob.
 func (l *Logger) LogAlert(source, severity, summary string, details map[string]any) error {
+	return l.logAlertWithEnvelope(CorrelationEnvelope{}, source, severity, summary, details)
+}
+
+// LogAlertCtx is the context-aware variant of LogAlert. It lifts the
+// v7 correlation envelope out of ctx so the resulting gateway.jsonl
+// row, OTel log record, and audit_events row all carry the same
+// trace / session / agent / policy identity as the request that
+// triggered the alert.
+//
+// Non-HTTP callers (watcher, CLI) can continue calling LogAlert; the
+// ctx-less path leaves the envelope empty, which round-trips as NULL
+// in SQLite and an absent attribute in OTel — the same behavior as
+// before this change.
+func (l *Logger) LogAlertCtx(ctx context.Context, source, severity, summary string, details map[string]any) error {
+	return l.logAlertWithEnvelope(EnvelopeFromContext(ctx), source, severity, summary, details)
+}
+
+// logAlertWithEnvelope is the shared implementation for LogAlert /
+// LogAlertCtx. The envelope drives both the gateway event (trace_id,
+// agent_*, policy_id on the JSONL row + OTel log attrs) and the
+// audit_events row (same dimensions persisted to SQLite + sinks), so
+// a ctx-scoped alert produced inside an HTTP handler shows up as one
+// consistent record across every tier.
+func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity, summary string, details map[string]any) error {
 	if l == nil {
 		return nil
 	}
@@ -614,20 +724,36 @@ func (l *Logger) LogAlert(source, severity, summary string, details map[string]a
 			Transition: "alert",
 			Details:    map[string]string{"summary": redaction.ForSinkReason(summary)},
 		},
+		// Stamp every envelope dimension gatewaylog.Event carries —
+		// stampGatewayEnvelope still runs below to fill
+		// sidecar_instance_id + provenance if empty.
+		RunID:           env.RunID,
+		TraceID:         env.TraceID,
+		RequestID:       env.RequestID,
+		SessionID:       env.SessionID,
+		AgentID:         env.AgentID,
+		AgentName:       env.AgentName,
+		AgentInstanceID: env.AgentInstanceID,
+		PolicyID:        env.PolicyID,
+		DestinationApp:  env.DestinationApp,
+		ToolName:        env.ToolName,
+		ToolID:          env.ToolID,
 	}
-	gwEv.StampProvenance()
+	stampGatewayEnvelope(&gwEv)
 	if otel != nil {
 		otel.RecordGatewayEvent(gwEv)
 	}
 	l.emitGatewaySnapshot(emitter, gwEv)
 
-	return l.LogEvent(Event{
+	ev := Event{
 		Action:   string(ActionAlert),
 		Target:   source,
 		Actor:    "defenseclaw",
 		Details:  string(blob),
 		Severity: severity,
-	})
+	}
+	applyEnvelope(&ev, env)
+	return l.LogEvent(ev)
 }
 
 // Close flushes and closes every audit sink. Safe to call when no

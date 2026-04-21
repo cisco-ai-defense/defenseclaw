@@ -27,6 +27,8 @@ import (
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
@@ -1161,7 +1163,39 @@ func Load() (*Config, error) {
 	}
 
 	warnPlaintextSecrets(&cfg)
+
+	// v7 provenance: seed the content_hash from the on-disk config
+	// bytes at load time so events emitted between sidecar boot and
+	// the first Save() already carry a meaningful fingerprint.
+	// Without this, dashboards would see `content_hash=""` for every
+	// event until someone explicitly saves the config through the
+	// CLI/TUI, which hides genuine drift across restarts. Prefer
+	// the original (dot-preserving) bytes read by
+	// extractOTelResourceAttributes; fall back to a re-marshal when
+	// the file did not exist (first boot / default config) so the
+	// hash is still stable across identical in-memory configs.
+	seedProvenanceOnLoad(configFile, &cfg)
+
 	return &cfg, nil
+}
+
+// seedProvenanceOnLoad stamps the process-wide content hash from the
+// config we just loaded. Separated from Load() so the branching stays
+// readable and so tests can bypass it by not calling Load(). A hash
+// failure is non-fatal — we just leave the prior value in place, which
+// is the correct behavior for transient read races (editor saving
+// in-place under us) where the next successful Load() will re-seed.
+func seedProvenanceOnLoad(configFile string, cfg *Config) {
+	if data, err := os.ReadFile(configFile); err == nil && len(data) > 0 {
+		version.SetContentHash(data)
+		return
+	}
+	// File not found or empty — fall back to a canonical re-marshal
+	// of the in-memory Config so first-boot events still carry a
+	// non-empty, deterministic fingerprint of the default config.
+	if data, err := yaml.Marshal(cfg); err == nil && len(data) > 0 {
+		version.SetContentHash(data)
+	}
 }
 
 // extractOTelResourceAttributes reads the config file with yaml.v3
@@ -1519,7 +1553,25 @@ func (c *Config) Save() error {
 		return fmt.Errorf("config: marshal: %w", err)
 	}
 
-	return os.WriteFile(configFile, data, 0o600)
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		return err
+	}
+
+	// v7 provenance: every successful config save updates the
+	// content_hash (so downstream events carry a fingerprint of
+	// exactly which config shape produced them) and bumps the
+	// monotonic generation counter (so dashboards can detect churn
+	// without diffing hashes). A failed Save() never reaches this
+	// line — a stale generation would fire spurious "config
+	// changed" alerts. Hash the marshaled YAML bytes directly; they
+	// are already deterministic per (Config struct, yaml.Marshal
+	// impl) and any Load() reading the same file will compute the
+	// same fingerprint, which is the property needed for content
+	// hash stability across save↔load round-trips.
+	version.SetContentHash(data)
+	version.BumpGeneration()
+
+	return nil
 }
 
 func setDefaults(dataDir string) {

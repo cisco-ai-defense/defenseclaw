@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // legacySchemaWithoutRunID is the pre-migration-2 schema (no run_id on audit_events / scan_results).
@@ -233,6 +235,113 @@ func TestStoreLogEventAutoPopulatesSidecarInstanceID(t *testing.T) {
 	if got := events[0].AgentInstanceID; got != "" {
 		t.Errorf("AgentInstanceID leaked process id = %q (v6 regression: per-session must not inherit per-process)", got)
 	}
+}
+
+// TestStoreLogEventStampsProvenance pins the v7 provenance contract
+// at the store choke point. Every audit_events row must carry a
+// non-zero schema_version + a binary_version when those are unset by
+// the caller, so downstream SQLite readers can pivot on config
+// generation without scraping Details. Pre-stamped values must win
+// (historical replays stay stable), and both the config-hash and
+// generation flow through version.Current() so the whole process
+// shares a single consistent snapshot for the duration of a run.
+func TestStoreLogEventStampsProvenance(t *testing.T) {
+	// Pin a deterministic content hash + generation so the assertions
+	// are stable across parallel test runs and don't depend on
+	// whatever config.Save() ran before us.
+	version.SetContentHash([]byte("unit-provenance-test"))
+	version.SetBinaryVersion("unit-test-binary")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	t.Run("empty_envelope_auto_fills", func(t *testing.T) {
+		if err := store.LogEvent(Event{
+			Action:   "v7-provenance-empty",
+			Target:   "target-empty",
+			Severity: "INFO",
+		}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+		events, err := store.ListEvents(10)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		// Most recent event ordering: ListEvents returns
+		// newest-first in production. Fish out the one we care
+		// about by action so the test is order-agnostic.
+		var got Event
+		for _, e := range events {
+			if e.Action == "v7-provenance-empty" {
+				got = e
+				break
+			}
+		}
+		if got.Action == "" {
+			t.Fatalf("never found v7-provenance-empty audit row: %+v", events)
+		}
+		prov := version.Current()
+		if got.SchemaVersion != prov.SchemaVersion {
+			t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, prov.SchemaVersion)
+		}
+		if got.ContentHash != prov.ContentHash || got.ContentHash == "" {
+			t.Errorf("ContentHash = %q, want %q (non-empty)", got.ContentHash, prov.ContentHash)
+		}
+		if got.BinaryVersion != prov.BinaryVersion || got.BinaryVersion == "" {
+			t.Errorf("BinaryVersion = %q, want %q (non-empty)", got.BinaryVersion, prov.BinaryVersion)
+		}
+		// Generation is monotonic and may have been bumped by
+		// other tests; we only assert it round-trips into the row.
+		if got.Generation != prov.Generation {
+			t.Errorf("Generation = %d, want %d", got.Generation, prov.Generation)
+		}
+	})
+
+	t.Run("preserves_caller_supplied_values", func(t *testing.T) {
+		if err := store.LogEvent(Event{
+			Action:        "v7-provenance-preset",
+			Target:        "target-preset",
+			Severity:      "INFO",
+			SchemaVersion: 99,
+			ContentHash:   "frozen-hash",
+			Generation:    7,
+			BinaryVersion: "frozen-binary",
+		}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+		events, err := store.ListEvents(10)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		var got Event
+		for _, e := range events {
+			if e.Action == "v7-provenance-preset" {
+				got = e
+				break
+			}
+		}
+		if got.Action == "" {
+			t.Fatalf("never found v7-provenance-preset audit row: %+v", events)
+		}
+		if got.SchemaVersion != 99 {
+			t.Errorf("SchemaVersion = %d, want 99 (caller value overwritten)", got.SchemaVersion)
+		}
+		if got.ContentHash != "frozen-hash" {
+			t.Errorf("ContentHash = %q, want frozen-hash", got.ContentHash)
+		}
+		if got.Generation != 7 {
+			t.Errorf("Generation = %d, want 7", got.Generation)
+		}
+		if got.BinaryVersion != "frozen-binary" {
+			t.Errorf("BinaryVersion = %q, want frozen-binary", got.BinaryVersion)
+		}
+	})
 }
 
 func TestStoreLogEventUsesEnvRunID(t *testing.T) {

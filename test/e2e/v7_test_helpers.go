@@ -193,7 +193,22 @@ func newObservabilityHarness(t *testing.T) *observabilityHarness {
 	// Pin the process-wide sidecar instance id so auto-fills
 	// (Logger.LogEvent, logActivityImpl) yield exactly what
 	// envelopeBase() expects on the SidecarInstanceID axis.
+	//
+	// Production initializes BOTH package-level stamps at sidecar
+	// startup — audit.SetProcessAgentInstanceID (audit_events
+	// column) and gatewaylog.SetSidecarInstanceID (gateway.jsonl
+	// column stamped at Writer.Emit). Skipping either one here
+	// lets events that pass through a different emission path
+	// (logger.stampGatewayEnvelope vs writer.Emit's auto-fill)
+	// silently drop the field — exactly the kind of regression
+	// the presence-check in stripVolatileGatewayJSON is meant
+	// to catch. See review finding C2.
 	audit.SetProcessAgentInstanceID(e2eSidecarInstanceID)
+	gatewaylog.SetSidecarInstanceID(e2eSidecarInstanceID)
+	t.Cleanup(func() {
+		audit.SetProcessAgentInstanceID("")
+		gatewaylog.SetSidecarInstanceID("")
+	})
 
 	dbPath := filepath.Join(t.TempDir(), "audit.db")
 	st, err := audit.NewStore(dbPath)
@@ -415,6 +430,25 @@ func minimalScanResult(findings []scanner.Finding) *scanner.ScanResult {
 }
 
 // stripVolatileGatewayJSON normalizes JSON for golden comparison.
+//
+// The split below is deliberate and protects against the
+// "normalizer masks a production regression" failure mode documented
+// in the review for PR #127. The v7 provenance quartet
+// (content_hash, binary_version, generation, schema_version) and the
+// sidecar_instance_id are production-critical identifiers: a
+// regression that drops or empties any of them silently breaks
+// downstream pipelines (Splunk deduplication, SBOM correlation,
+// host-level fan-out), but their literal values depend on the build
+// + current process and therefore cannot live inside a checked-in
+// golden. Earlier versions of this helper stripped those keys
+// unconditionally — if production code ever shipped "" for
+// content_hash, the normalizer would replace it with "<stripped>"
+// and the golden would still match.
+//
+// The current implementation instead asserts PRESENCE (non-empty and
+// the right type) before substituting the stable placeholder. A
+// regression to "" / 0 / missing now fails the golden test loudly
+// with an explicit message pointing at the offending field.
 func stripVolatileGatewayJSON(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var m map[string]any
@@ -422,14 +456,32 @@ func stripVolatileGatewayJSON(t *testing.T, raw []byte) []byte {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	m["ts"] = "2000-01-01T00:00:00Z"
-	for _, k := range []string{"run_id", "request_id", "session_id", "trace_id", "content_hash", "binary_version"} {
+
+	// --- Presence-guarded provenance fields (must be non-empty) ---
+	// content_hash: SHA-256 hex produced by version.SetContentHash*.
+	// An empty or missing hash means provenance stamping is broken —
+	// golden tests MUST catch that, not mask it.
+	requireNonEmptyString(t, m, "content_hash")
+	// binary_version: semver / commit-sha identifying the build.
+	// Empty means the linker ldflag or test seed wasn't applied.
+	requireNonEmptyString(t, m, "binary_version")
+	// sidecar_instance_id: process-scoped UUID stamped at startup.
+	// Empty means the writer choke point is bypassed — this was
+	// bug D in the review. Present-check guards against regression.
+	requireNonEmptyString(t, m, "sidecar_instance_id")
+	// generation: counter bumped on every config save. Must be
+	// numeric AND strictly positive; zero/missing means
+	// version.BumpGeneration never ran.
+	requirePositiveNumber(t, m, "generation")
+
+	// --- Now safe to strip: presence was just verified ---
+	for _, k := range []string{"run_id", "request_id", "session_id", "trace_id", "content_hash", "binary_version", "sidecar_instance_id"} {
 		if _, ok := m[k]; ok {
 			m[k] = "<stripped>"
 		}
 	}
-	if _, ok := m["generation"]; ok {
-		m["generation"] = 1
-	}
+	m["generation"] = 1
+
 	// nested payloads that often carry ids
 	stripMap := func(key string) {
 		sub, ok := m[key].(map[string]any)
@@ -451,6 +503,43 @@ func stripVolatileGatewayJSON(t *testing.T, raw []byte) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return out
+}
+
+// requireNonEmptyString fails the test if m[key] is missing, not a
+// string, or the empty string. Used by stripVolatileGatewayJSON to
+// guard presence of v7 provenance / identity fields before they are
+// replaced with a stable placeholder for golden comparison.
+func requireNonEmptyString(t *testing.T, m map[string]any, key string) {
+	t.Helper()
+	raw, ok := m[key]
+	if !ok {
+		t.Fatalf("golden presence check: %q missing from gateway event (v7 provenance/identity field must always be stamped)", key)
+	}
+	s, ok := raw.(string)
+	if !ok {
+		t.Fatalf("golden presence check: %q is %T, want string", key, raw)
+	}
+	if s == "" {
+		t.Fatalf("golden presence check: %q is empty (provenance stamp / sidecar id not applied — review finding A/B/D)", key)
+	}
+}
+
+// requirePositiveNumber fails the test if m[key] is missing, not a
+// JSON number, or not strictly positive. Guards generation so a
+// regression to 0 or missing is caught before the placeholder swap.
+func requirePositiveNumber(t *testing.T, m map[string]any, key string) {
+	t.Helper()
+	raw, ok := m[key]
+	if !ok {
+		t.Fatalf("golden presence check: %q missing (version.BumpGeneration never ran)", key)
+	}
+	n, ok := raw.(float64) // encoding/json uses float64 for Number
+	if !ok {
+		t.Fatalf("golden presence check: %q is %T, want number", key, raw)
+	}
+	if n <= 0 {
+		t.Fatalf("golden presence check: %q=%v must be > 0 (generation regression — review finding B)", key, n)
+	}
 }
 
 var updateGolden bool

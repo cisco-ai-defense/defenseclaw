@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -430,5 +431,226 @@ func TestCorrelation_MultipleRequestsKeepDistinctIDs(t *testing.T) {
 		if gotJSONL[i] != want {
 			t.Fatalf("jsonl row %d request_id=%q want %q", i, gotJSONL[i], want)
 		}
+	}
+}
+
+// TestCorrelation_RequestEnvelopeLandsOnAuditAndSink is the v7 review
+// I1 integration test: it exercises the full HTTP → middleware →
+// handler → LogActionCtx → SQLite + Splunk HEC pipeline and asserts
+// that every correlation dimension seeded by CorrelationMiddleware
+// lands on both the audit row AND the sink envelope.
+//
+// Why this test exists: prior to PR #127, CorrelationMiddleware wrote
+// an audit.CorrelationEnvelope into ctx but no production call site
+// consumed it via LogEventCtx/LogActionCtx. Only a context-level unit
+// test (TestCorrelationMiddleware_StampsAuditEnvelope) covered the
+// middleware, which meant a revert of LogActionCtx in proxy.go /
+// api.go — leaving every audit row with empty session_id / agent_id /
+// policy_id — would pass CI. This test closes that gap by asserting
+// the envelope through the full write path, not just the context
+// handoff.
+func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "run-i1")
+
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "audit.db")
+
+	store, err := audit.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("store.Init: %v", err)
+	}
+	defer store.Close()
+
+	capture := &hecCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			capture.append(body)
+			w.WriteHeader(http.StatusOK)
+		}))
+	defer srv.Close()
+
+	splunk, err := sinks.NewSplunkHECSink(sinks.SplunkHECConfig{
+		Name:           "splunk-i1",
+		Endpoint:       srv.URL,
+		Token:          "t",
+		BatchSize:      1,
+		FlushIntervalS: 3600,
+	})
+	if err != nil {
+		t.Fatalf("NewSplunkHECSink: %v", err)
+	}
+	defer splunk.Close()
+
+	mgr := sinks.NewManager()
+	mgr.Register(splunk)
+
+	logger := audit.NewLogger(store)
+	logger.SetSinks(mgr)
+	defer logger.Close()
+
+	// Dedicated registry — NOT the process-shared one — so this test
+	// is hermetic and does not depend on whatever earlier tests
+	// installed via InstallSharedAgentRegistry.
+	reg := NewAgentRegistry("agent-i1", "Integration Agent")
+
+	// Match the production middleware chain: requestIDMiddleware must
+	// run BEFORE CorrelationMiddleware so RequestIDFromContext has
+	// the inbound id by the time CorrelationMiddleware snapshots the
+	// audit envelope. Reversing the order (or omitting
+	// requestIDMiddleware) is exactly the bug shape this test guards
+	// against — the earlier unit-level TestCorrelationMiddleware_*
+	// did not catch it because they stopped at context inspection.
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Production-shape call: handler has r.Context() and
+		// delegates envelope propagation to the logger. A
+		// regression that reverts this to LogAction (context-free)
+		// would fail the sqlite/sink assertions below.
+		if err := logger.LogActionCtx(r.Context(),
+			"guardrail-inspection", "mcp://example/tool",
+			"integration probe"); err != nil {
+			t.Errorf("LogActionCtx: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := requestIDMiddleware(CorrelationMiddleware(reg)(inner))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", nil)
+	req.Header.Set(SessionIDHeader, "sess-i1")
+	req.Header.Set(RequestIDHeader, "req-i1-envelope-0001")
+	req.Header.Set("traceparent",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Give the async sink a brief moment to drain (BatchSize=1 + a
+	// low-severity action schedules a FlushAll on the next tick).
+	// The deadline mirrors TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(capture.all()) > 0 {
+			break
+		}
+		// non-immediate actions rely on the flush ticker — force a
+		// synchronous flush to keep the test deterministic without
+		// a long wall-clock wait.
+		_ = mgr.FlushAll(context.Background())
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// ---- SQLite assertion: every envelope dimension on the row. ----
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var match *audit.Event
+	for i := range events {
+		if events[i].Action == "guardrail-inspection" {
+			match = &events[i]
+			break
+		}
+	}
+	if match == nil {
+		t.Fatal("no guardrail-inspection row in audit_events")
+	}
+	// The middleware pulls RunID from DEFENSECLAW_RUN_ID, SessionID
+	// from the header, TraceID from traceparent, and agent identity
+	// from the registry. If LogActionCtx ever stops consuming
+	// ctx.EnvelopeFromContext, every one of these columns goes NULL
+	// and this test fails loudly.
+	wantDB := map[string]string{
+		"run_id":     "run-i1",
+		"trace_id":   "4bf92f3577b34da6a3ce929d0e0e4736",
+		"session_id": "sess-i1",
+		"agent_id":   "agent-i1",
+		"agent_name": "Integration Agent",
+		"request_id": "req-i1-envelope-0001",
+	}
+	gotDB := map[string]string{
+		"run_id":     match.RunID,
+		"trace_id":   match.TraceID,
+		"session_id": match.SessionID,
+		"agent_id":   match.AgentID,
+		"agent_name": match.AgentName,
+		"request_id": match.RequestID,
+	}
+	for k, want := range wantDB {
+		if gotDB[k] != want {
+			t.Errorf("sqlite %s=%q want %q (LogActionCtx dropped envelope)",
+				k, gotDB[k], want)
+		}
+	}
+	if match.AgentInstanceID == "" {
+		t.Error("sqlite agent_instance_id empty; session-scoped " +
+			"registry lookup did not reach the audit row")
+	}
+
+	// ---- Sink assertion: envelope flows to Splunk HEC body. ----
+	records := capture.all()
+	if len(records) == 0 {
+		t.Fatal("splunk HEC never received the guardrail-inspection envelope")
+	}
+	seen := false
+	for _, raw := range records {
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if line == "" {
+				continue
+			}
+			var env struct {
+				Event struct {
+					Action          string `json:"action"`
+					RunID           string `json:"run_id"`
+					RequestID       string `json:"request_id"`
+					SessionID       string `json:"session_id"`
+					TraceID         string `json:"trace_id"`
+					AgentID         string `json:"agent_id"`
+					AgentName       string `json:"agent_name"`
+					AgentInstanceID string `json:"agent_instance_id"`
+				} `json:"event"`
+			}
+			if err := json.Unmarshal([]byte(line), &env); err != nil {
+				t.Fatalf("bad HEC envelope: %v (%s)", err, line)
+			}
+			if env.Event.Action != "guardrail-inspection" {
+				continue
+			}
+			if env.Event.RunID != "run-i1" {
+				t.Errorf("sink run_id=%q want run-i1", env.Event.RunID)
+			}
+			if env.Event.SessionID != "sess-i1" {
+				t.Errorf("sink session_id=%q want sess-i1", env.Event.SessionID)
+			}
+			if env.Event.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+				t.Errorf("sink trace_id=%q want 4bf9...4736",
+					env.Event.TraceID)
+			}
+			if env.Event.RequestID != "req-i1-envelope-0001" {
+				t.Errorf("sink request_id=%q want req-i1-envelope-0001",
+					env.Event.RequestID)
+			}
+			if env.Event.AgentID != "agent-i1" {
+				t.Errorf("sink agent_id=%q want agent-i1", env.Event.AgentID)
+			}
+			if env.Event.AgentName != "Integration Agent" {
+				t.Errorf("sink agent_name=%q want %q",
+					env.Event.AgentName, "Integration Agent")
+			}
+			if env.Event.AgentInstanceID == "" {
+				t.Error("sink agent_instance_id empty; envelope was " +
+					"not forwarded to the sink fan-out")
+			}
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatal("splunk HEC capture contained no guardrail-inspection envelope")
 	}
 }

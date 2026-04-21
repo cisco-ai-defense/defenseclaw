@@ -122,14 +122,23 @@ type splunkAuditEvent struct {
 	// event attributes so dashboards (Splunk Local Bridge
 	// macros.conf, Cisco SIEM AgentWatch) can key on them without
 	// reparsing `details`. Matches the contract in sinks.Event.
-	SessionID       string         `json:"session_id,omitempty"`
-	AgentName       string         `json:"agent_name,omitempty"`
-	AgentInstanceID string         `json:"agent_instance_id,omitempty"`
-	PolicyID        string         `json:"policy_id,omitempty"`
-	DestinationApp  string         `json:"destination_app,omitempty"`
-	ToolName        string         `json:"tool_name,omitempty"`
-	ToolID          string         `json:"tool_id,omitempty"`
-	Structured      map[string]any `json:"structured,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	// AgentID (configured logical id) and SidecarInstanceID
+	// (per-process UUID) are both part of the v7 three-tier identity
+	// contract and MUST reach Splunk — dashboards key on these for
+	// cost attribution and incident forensics. They were omitted from
+	// an earlier revision of this struct, which the I1 integration
+	// test (TestCorrelation_RequestEnvelopeLandsOnAuditAndSink) now
+	// pins in place.
+	AgentID           string         `json:"agent_id,omitempty"`
+	AgentInstanceID   string         `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string         `json:"policy_id,omitempty"`
+	DestinationApp    string         `json:"destination_app,omitempty"`
+	ToolName          string         `json:"tool_name,omitempty"`
+	ToolID            string         `json:"tool_id,omitempty"`
+	Structured        map[string]any `json:"structured,omitempty"`
 }
 
 // NewSplunkHECSink validates config and returns a ready-to-use sink. The
@@ -260,14 +269,16 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			Source:          "defenseclaw",
 			TraceID:         e.TraceID,
 			RequestID:       e.RequestID,
-			SessionID:       e.SessionID,
-			AgentName:       e.AgentName,
-			AgentInstanceID: e.AgentInstanceID,
-			PolicyID:        e.PolicyID,
-			DestinationApp:  e.DestinationApp,
-			ToolName:        e.ToolName,
-			ToolID:          e.ToolID,
-			Structured:      e.Structured,
+			SessionID:         e.SessionID,
+			AgentName:         e.AgentName,
+			AgentID:           e.AgentID,
+			AgentInstanceID:   e.AgentInstanceID,
+			SidecarInstanceID: e.SidecarInstanceID,
+			PolicyID:          e.PolicyID,
+			DestinationApp:    e.DestinationApp,
+			ToolName:          e.ToolName,
+			ToolID:            e.ToolID,
+			Structured:        e.Structured,
 		},
 	}
 

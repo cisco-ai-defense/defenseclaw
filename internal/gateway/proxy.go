@@ -136,6 +136,15 @@ func (p *GuardrailProxy) agentNameForRequest(hint string) string {
 	return p.defaultAgentName
 }
 
+// agentIDForRequest returns the configured logical agent id for this
+// sidecar (from the shared registry), or empty string when no agent id
+// was configured. Used to label LLM metrics / spans with a deployment-
+// bounded identifier so o11y dashboards can group by agent without
+// relying on the free-text agent name.
+func (p *GuardrailProxy) agentIDForRequest() string {
+	return SharedAgentRegistry().AgentID()
+}
+
 // postCallContext returns a detached context for post-stream completion
 // inspection. The HTTP request context may already be cancelled by the time
 // the final POST-CALL inspection runs, which would kill in-flight LLM judge
@@ -540,7 +549,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
 		body = []byte(launderedBody)
 		if p.logger != nil {
-			_ = p.logger.LogAction("guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
+			_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
 		}
 	}
 
@@ -561,7 +570,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
 				body = []byte(patched)
 				if p.logger != nil {
-					_ = p.logger.LogAction("guardrail-notify-inject", site, "injected security notification into passthrough LLM request")
+					_ = p.logger.LogActionCtx(r.Context(), "guardrail-notify-inject", site, "injected security notification into passthrough LLM request")
 				}
 			} else {
 				// Not a failure: some provider surfaces (Anthropic,
@@ -1228,7 +1237,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				req.Messages = rebuilt.Messages
 			}
 			if p.logger != nil {
-				_ = p.logger.LogAction("guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
+				_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
 			}
 		}
 	}
@@ -1251,7 +1260,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				req.Messages = append([]ChatMessage{notification}, req.Messages...)
 			}
 			if p.logger != nil {
-				_ = p.logger.LogAction("guardrail-notify-inject", "", "injected security notification into LLM request")
+				_ = p.logger.LogActionCtx(r.Context(), "guardrail-notify-inject", "", "injected security notification into LLM request")
 			}
 		}
 	}
@@ -1378,7 +1387,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw")
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw", p.agentIDForRequest())
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return
@@ -1453,7 +1462,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 					promptTok = int(resp.Usage.PromptTokens)
 					completionTok = int(resp.Usage.CompletionTokens)
 				}
-				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, "openclaw")
+				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, "openclaw", p.agentIDForRequest())
 			}
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "completion", aliasModel)
@@ -1473,7 +1482,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 						promptTok = int(resp.Usage.PromptTokens)
 						completionTok = int(resp.Usage.CompletionTokens)
 					}
-					p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, "openclaw")
+					p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, "openclaw", p.agentIDForRequest())
 				}
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
@@ -1498,7 +1507,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			promptTok = int(resp.Usage.PromptTokens)
 			completionTok = int(resp.Usage.CompletionTokens)
 		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw", p.agentIDForRequest())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1695,7 +1704,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			fmt.Sprintf("upstream stream error: %v", err), err)
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw")
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw", p.agentIDForRequest())
 			llmSpan = nil
 		}
 	}
@@ -1706,7 +1715,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	if streamBlocked {
 		sseOutcome = "blocked"
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, "openclaw")
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, "openclaw", p.agentIDForRequest())
 		}
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
@@ -1803,7 +1812,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			promptTok = int(usage.PromptTokens)
 			completionTok = int(usage.CompletionTokens)
 		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw")
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, "openclaw", p.agentIDForRequest())
 	}
 
 	// Flush buffered tool-call chunks only when inspection passed.
@@ -2658,9 +2667,23 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 	}
 
 	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
+		// v7: route the verdict audit row through the context-aware
+		// path so every envelope dimension the CorrelationMiddleware
+		// stamped (trace_id, session_id, agent_*, policy_id,
+		// destination_app, tool_*) is persisted next to the
+		// human-readable details string. LogActionWithCorrelation
+		// only carries trace_id + request_id — the other dimensions
+		// used to be silently dropped on the SQLite row even when
+		// the matching gateway.jsonl row had them. See review
+		// finding C1 for the coverage-gap writeup.
+		_ = p.logger.LogActionCtx(ctx, "guardrail-verdict", model, details)
 	}
 	if p.store != nil {
+		// guardrail-inspection is the SQLite-only twin row the
+		// proxy writes for the TUI's alerts panel. Keep the same
+		// envelope as the logger row above — otherwise dashboards
+		// pivoting on agent_id would see two conflicting rows for
+		// the same verdict.
 		evt := audit.Event{
 			Action:    "guardrail-inspection",
 			Target:    model,
@@ -2669,11 +2692,17 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
 		}
+		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(ctx))
 		_ = p.store.LogEvent(evt)
 	}
 
 	if p.otel != nil {
-		ctx := context.Background()
+		// v7: use the request's own ctx (carries the active trace
+		// span) so histograms get trace-exemplar links in Splunk.
+		// The previous context.Background() shadow broke the
+		// metrics→traces join for every guardrail observation —
+		// operators following a span from traces could not see
+		// the accompanying latency / token histogram data points.
 		p.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", verdict.Action)
 		p.otel.RecordGuardrailLatency(ctx, "guardrail-proxy", elapsedMs)
 		if verdict.CiscoElapsedMs > 0 {
@@ -2681,7 +2710,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			p.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", verdict.Action)
 		}
 		if tokIn != nil || tokOut != nil {
-			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, "openclaw", ptrOr(tokIn, 0), ptrOr(tokOut, 0))
+			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, "openclaw", p.agentIDForRequest(), ptrOr(tokIn, 0), ptrOr(tokOut, 0))
 		}
 	}
 
@@ -2695,6 +2724,11 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Details:   details,
 			Severity:  verdict.Severity,
 		}
+		// v7: webhook payloads are one of the five external-facing
+		// surfaces; Splunk/PagerDuty/Slack consumers pivot on the same
+		// envelope dimensions as gateway.jsonl. Stamping here keeps the
+		// webhook body in lockstep with the matching logger/store rows.
+		audit.ApplyEnvelope(&event, audit.EnvelopeFromContext(ctx))
 		p.webhooks.Dispatch(event)
 	}
 }

@@ -509,6 +509,7 @@ func (p *Provider) EndLLMSpan(
 	providerName string,
 	startTime time.Time,
 	agentName string,
+	agentID string,
 ) {
 	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
 	// to the histogram data points, linking metrics to traces.
@@ -517,14 +518,14 @@ func (p *Provider) EndLLMSpan(
 		ctx = trace.ContextWithSpan(ctx, span)
 	}
 	durationSec := time.Since(startTime).Seconds()
-	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, int64(promptTokens), int64(completionTokens))
-	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, durationSec)
+	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, agentID, int64(promptTokens), int64(completionTokens))
+	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, agentID, durationSec)
 
 	if span == nil {
 		return
 	}
 
-	span.SetAttributes(
+	spanAttrs := []attribute.KeyValue{
 		attribute.String("gen_ai.response.model", responseModel),
 		attribute.StringSlice("gen_ai.response.finish_reasons", finishReasons),
 		attribute.Int("gen_ai.usage.input_tokens", promptTokens),
@@ -532,7 +533,17 @@ func (p *Provider) EndLLMSpan(
 		attribute.Int("defenseclaw.llm.tool_calls", toolCallCount),
 		attribute.String("defenseclaw.llm.guardrail", guardrail),
 		attribute.String("defenseclaw.llm.guardrail.result", guardrailResult),
-	)
+	}
+	// Stamp agent identity onto the LLM span so traces in o11y join
+	// cleanly with metrics by the same labels. Metrics omit empty,
+	// so we do too — keeps span attribute noise bounded.
+	if agentName != "" {
+		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.name", agentName))
+	}
+	if agentID != "" {
+		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.id", agentID))
+	}
+	span.SetAttributes(spanAttrs...)
 
 	if guardrailResult == "blocked" {
 		span.SetStatus(codes.Error, "guardrail blocked")

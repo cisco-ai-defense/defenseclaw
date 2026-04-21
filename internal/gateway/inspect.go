@@ -306,14 +306,17 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	default:
 		auditAction = "inspect-tool-allow"
 	}
-	var traceID string
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
 		a.otel.RecordInspectEvaluation(context.Background(), req.Tool, verdict.Action, verdict.Severity)
 		a.otel.RecordInspectLatency(context.Background(), req.Tool, elapsedMs)
 		a.otel.RecordGuardrailEvaluation(context.Background(), "policy-rules", verdict.Action)
 		a.otel.RecordGuardrailLatency(context.Background(), "policy-rules", elapsedMs)
-		traceID = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
+		// Inspect span is emitted for its side effect on the span
+		// exporter — trace_id is now pulled from r.Context() by
+		// LogActionCtx (the gateway CorrelationMiddleware seeded
+		// the same trace id into both).
+		_ = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
 	}
 
 	requestID := RequestIDFromContext(r.Context())
@@ -322,7 +325,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
-	_ = a.logger.LogActionWithCorrelation(auditAction, req.Tool, auditDetails, traceID, requestID)
+	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
 
 	a.emitCodeGuardOTel(&req, verdict, elapsed)
 
@@ -340,11 +343,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// when the caller opts in to raw response PII, the
 		// audit-store row must still flow through the sink
 		// barrier so SQLite/Splunk never see the raw literal.
-		_ = a.logger.LogActionWithCorrelation("inspect-reveal", req.Tool,
+		_ = a.logger.LogActionCtx(r.Context(), "inspect-reveal", req.Tool,
 			fmt.Sprintf("severity=%s remote=%s reason=%s",
 				verdict.Severity, r.RemoteAddr,
-				redaction.ForSinkReason(verdict.Reason)),
-			traceID, requestID)
+				redaction.ForSinkReason(verdict.Reason)))
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }

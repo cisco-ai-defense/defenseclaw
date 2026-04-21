@@ -521,6 +521,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				"none", "",
 				system, now,
 				"openclaw",
+				SharedAgentRegistry().AgentID(),
 			)
 
 			// Store LLM context so tool_call spans become children of this LLM span.
