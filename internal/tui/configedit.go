@@ -154,21 +154,11 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "scanners.codeguard":
 		c.Scanners.CodeGuard = val
 
-	// Splunk
-	case "splunk.enabled":
-		c.Splunk.Enabled = boolVal
-	case "splunk.hec_endpoint":
-		c.Splunk.HECEndpoint = val
-	case "splunk.hec_token_env":
-		c.Splunk.HECTokenEnv = val
-	case "splunk.index":
-		c.Splunk.Index = val
-	case "splunk.source":
-		c.Splunk.Source = val
-	case "splunk.verify_tls":
-		c.Splunk.VerifyTLS = boolVal
-	case "splunk.batch_size":
-		c.Splunk.BatchSize = intVal
+	// Audit sinks: declarative list-based config (audit_sinks[]).
+	// Inline single-key edits don't make sense for the new schema —
+	// CRUD lives in the dedicated audit-sinks editor (Phase 3.3, see
+	// SinkEditorModel below). The single-key form would re-introduce
+	// the old "one Splunk only" assumption we just removed.
 
 	// OTel
 	case "otel.enabled":
@@ -177,12 +167,22 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OTel.Protocol = val
 	case "otel.endpoint":
 		c.OTel.Endpoint = val
+	case "otel.tls.insecure":
+		c.OTel.TLS.Insecure = boolVal
+	case "otel.tls.ca_cert":
+		c.OTel.TLS.CACert = val
 	case "otel.traces.enabled":
 		c.OTel.Traces.Enabled = boolVal
+	case "otel.traces.endpoint":
+		c.OTel.Traces.Endpoint = val
 	case "otel.logs.enabled":
 		c.OTel.Logs.Enabled = boolVal
+	case "otel.logs.endpoint":
+		c.OTel.Logs.Endpoint = val
 	case "otel.metrics.enabled":
 		c.OTel.Metrics.Enabled = boolVal
+	case "otel.metrics.endpoint":
+		c.OTel.Metrics.Endpoint = val
 
 	// Watch
 	case "watch.debounce_ms":

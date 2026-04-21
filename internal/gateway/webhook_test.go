@@ -947,3 +947,129 @@ func TestCooldownNotBurnedOnFailedSend(t *testing.T) {
 		t.Fatalf("expected 8 HTTP attempts (2 full retry cycles), got %d", got)
 	}
 }
+
+// TestWebhookRedactsPIIFromAllChannels proves that every webhook
+// payload formatter (Slack, PagerDuty, Webex, generic) emits
+// redacted content instead of raw PII. The dispatcher must scrub
+// Details before calling any formatter — this test brackets all
+// four paths because each builds the payload differently (Slack
+// fields, PD custom_details map, Webex markdown, generic mirror).
+//
+// We drive the formatters via the Dispatch() entrypoint rather
+// than calling them directly so the test also covers the
+// belt-and-braces redaction we added at the Dispatch boundary.
+func TestWebhookRedactsPIIFromAllChannels(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+
+	type capture struct {
+		mu     sync.Mutex
+		bodies []string
+	}
+	caps := map[string]*capture{
+		"slack":     {},
+		"pagerduty": {},
+		"webex":     {},
+		"generic":   {},
+	}
+	mkSrv := func(key string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			caps[key].mu.Lock()
+			caps[key].bodies = append(caps[key].bodies, string(body))
+			caps[key].mu.Unlock()
+			w.WriteHeader(200)
+		}))
+	}
+	slack := mkSrv("slack")
+	pd := mkSrv("pagerduty")
+	webex := mkSrv("webex")
+	generic := mkSrv("generic")
+	defer slack.Close()
+	defer pd.Close()
+	defer webex.Close()
+	defer generic.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: slack.URL, Type: "slack", Enabled: true, CooldownSeconds: intPtr(0)},
+		{URL: pd.URL, Type: "pagerduty", Enabled: true, CooldownSeconds: intPtr(0)},
+		{URL: webex.URL, Type: "webex", Enabled: true, CooldownSeconds: intPtr(0)},
+		{URL: generic.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(0)},
+	})
+
+	evt := audit.Event{
+		ID:        "evt-pii",
+		Timestamp: time.Now().UTC(),
+		Action:    "block",
+		Target:    "sms-tool",
+		Actor:     "defenseclaw",
+		// Mix of PII shapes: phone, email, SSN.
+		Details:  "reason=matched secrets phone=4155551234 email=foo@example.com ssn=123-45-6789",
+		Severity: "HIGH",
+		RunID:    "run-pii",
+	}
+	d.Dispatch(evt)
+	d.Close()
+
+	pii := []string{"4155551234", "foo@example.com", "123-45-6789"}
+	for channel, c := range caps {
+		c.mu.Lock()
+		if len(c.bodies) == 0 {
+			c.mu.Unlock()
+			t.Errorf("%s: no payload received", channel)
+			continue
+		}
+		body := c.bodies[0]
+		c.mu.Unlock()
+		for _, needle := range pii {
+			if strings.Contains(body, needle) {
+				t.Errorf("%s payload leaked PII %q: %s", channel, needle, body)
+			}
+		}
+		// A redacted payload carries "<redacted" in its Details
+		// field; JSON-encoded as "\u003credacted" inside string
+		// values or as "<redacted" inside Webex markdown.
+		if !strings.Contains(body, "redacted len=") && !strings.Contains(body, "u003credacted") {
+			t.Errorf("%s payload missing redaction marker: %s", channel, body)
+		}
+	}
+}
+
+// TestWebhookRevealFlagDoesNotUnmaskPayloads confirms that webhooks,
+// being persistent remote sinks, never honor DEFENSECLAW_REVEAL_PII.
+// The reveal flag is stderr-only; anything crossing the network
+// boundary must stay redacted.
+func TestWebhookRevealFlagDoesNotUnmaskPayloads(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+
+	var body string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(buf)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(0)},
+	})
+	evt := audit.Event{
+		Action:   "block",
+		Target:   "t",
+		Actor:    "defenseclaw",
+		Details:  "phone=4155551234",
+		Severity: "HIGH",
+	}
+	d.Dispatch(evt)
+	d.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(body, "4155551234") {
+		t.Fatalf("webhook unmasked under reveal flag: %s", body)
+	}
+}

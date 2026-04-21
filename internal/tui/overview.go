@@ -205,7 +205,7 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 		{"Watchdog", "watcher"},
 		{"Guardrail", "guardrail"},
 		{"API", "api"},
-		{"Splunk", "splunk"},
+		{"Sinks", "sinks"},
 		{"Telemetry", "telemetry"},
 		{"Sandbox", "sandbox"},
 	}
@@ -475,8 +475,8 @@ func (p *OverviewPanel) subsystemState(h *HealthSnapshot, name string) string {
 		return h.Watcher.State
 	case "guardrail":
 		return h.Guardrail.State
-	case "splunk":
-		return h.Splunk.State
+	case "sinks":
+		return h.Sinks.State
 	case "telemetry":
 		return h.Telemetry.State
 	case "api":
@@ -503,8 +503,8 @@ func (p *OverviewPanel) subsystemHealth(name string) *SubsystemHealth {
 		return &h.Watcher
 	case "guardrail":
 		return &h.Guardrail
-	case "splunk":
-		return &h.Splunk
+	case "sinks":
+		return &h.Sinks
 	case "telemetry":
 		return &h.Telemetry
 	case "api":

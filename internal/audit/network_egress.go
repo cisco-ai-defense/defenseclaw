@@ -176,13 +176,10 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 			truncateStr(e.URL, 200), e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
 		Severity: "HIGH",
 	}
-	if err := l.store.LogEvent(alert); err != nil {
+	if err := l.LogEvent(alert); err != nil {
 		// Non-fatal: the primary egress row is already persisted.
 		fmt.Fprintf(os.Stderr, "[audit] network egress: alert event write failed: %v\n", err)
 	}
-
-	// Forward to Splunk HEC when configured.
-	l.forwardToSplunk(alert)
 
 	// Emit OTel alert counter.
 	if l.otel != nil {

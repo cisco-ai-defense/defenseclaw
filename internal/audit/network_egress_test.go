@@ -19,6 +19,7 @@ package audit
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -435,4 +436,71 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 			t.Errorf("timestamp %v is before expected floor %v", rows[0].Timestamp, before)
 		}
 	})
+}
+
+func TestLogger_LogNetworkEgress_BlockedAlertUsesLoggerPipeline(t *testing.T) {
+	t.Setenv("DEFENSECLAW_RUN_ID", "egress-run-id")
+
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+
+	err := logger.LogNetworkEgress(context.Background(), NetworkEgressEvent{
+		Hostname:      "exfil.bad",
+		URL:           "http://exfil.bad/upload?email=alice@example.com",
+		HTTPMethod:    "PUT",
+		Protocol:      "http",
+		PolicyOutcome: "Denied: matched alice@example.com",
+		DecisionCode:  "NETWORK_DENY_PATTERN",
+		Blocked:       true,
+	})
+	if err != nil {
+		t.Fatalf("LogNetworkEgress: %v", err)
+	}
+
+	forwarded := cs.snapshot()
+	if len(forwarded) != 1 {
+		t.Fatalf("forwarded event count=%d want 1", len(forwarded))
+	}
+	evt := forwarded[0]
+	if evt.Action != "network-egress-blocked" {
+		t.Fatalf("action=%q want network-egress-blocked", evt.Action)
+	}
+	if evt.ID == "" || evt.Actor == "" || evt.RunID == "" {
+		t.Fatalf("forwarded alert missing defaults: %+v", evt)
+	}
+	if evt.RunID != "egress-run-id" {
+		t.Fatalf("forwarded run_id=%q want egress-run-id", evt.RunID)
+	}
+	if strings.Contains(evt.Details, "alice@example.com") {
+		t.Fatalf("forwarded alert leaked raw email: %q", evt.Details)
+	}
+
+	alerts, err := store.ListAlerts(10)
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	var stored Event
+	var found bool
+	for _, alert := range alerts {
+		if alert.Action == "network-egress-blocked" && alert.Target == "exfil.bad" {
+			stored = alert
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("blocked alert not stored in audit_events")
+	}
+	if stored.ID == "" || stored.Actor == "" || stored.RunID == "" {
+		t.Fatalf("stored alert missing defaults: %+v", stored)
+	}
+	if stored.RunID != "egress-run-id" {
+		t.Fatalf("stored run_id=%q want egress-run-id", stored.RunID)
+	}
+	if strings.Contains(stored.Details, "alice@example.com") {
+		t.Fatalf("stored alert leaked raw email: %q", stored.Details)
+	}
 }

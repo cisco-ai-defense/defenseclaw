@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 var defaultEnabledRules = []map[string]string{
@@ -147,8 +148,16 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			// Cisco AI Defense error responses echo the
+			// offending prompt back in their `detail` field
+			// when input validation trips upstream. Treat
+			// the body as untrusted message content and
+			// redact before logging to stderr. The byte
+			// cap remains so pathological responses can't
+			// flood logs regardless of Reveal state.
+			bodySnippet := string(respBody[:minInt(len(respBody), 200)])
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: HTTP %d: %s\n",
-				resp.StatusCode, string(respBody[:minInt(len(respBody), 200)]))
+				resp.StatusCode, redaction.MessageContent(bodySnippet))
 			return nil
 		}
 

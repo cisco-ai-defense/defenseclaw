@@ -29,8 +29,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -55,12 +57,23 @@ type Sidecar struct {
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
 	alertWg     sync.WaitGroup
+
+	// events is the structured gatewaylog.Writer (gateway.jsonl +
+	// stderr pretty-print). Installed during NewSidecar so every
+	// verdict/judge/lifecycle emission lands here without plumbing
+	// the writer through every call site.
+	events *gatewaylog.Writer
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, otel *telemetry.Provider) (*Sidecar, error) {
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+
+	// Persist the retention flag before any goroutines start so the
+	// very first judge invocation sees the operator-configured value
+	// (otherwise the default-off atomic would race with early traffic).
+	SetRetainJudgeBodies(cfg.Guardrail.RetainJudgeBodies)
 
 	// In standalone sandbox mode the veth link is point-to-point;
 	// TLS is not needed and OpenClaw serves plain WS.
@@ -104,7 +117,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		}
 	}
 
-
 	client.OnEvent = router.Route
 
 	alertCtx, alertCancel := context.WithCancel(context.Background())
@@ -116,6 +128,60 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d endpoints)\n", len(webhooks.endpoints))
 		}
 	}
+
+	events, err := gatewaylog.New(gatewaylog.Config{
+		JSONLPath: filepath.Join(cfg.DataDir, "gateway.jsonl"),
+		Pretty:    os.Stderr,
+		Compress:  true,
+	})
+	if err != nil {
+		// Release the alertCtx we just acquired so we don't leak a
+		// goroutine-waiting context when boot fails before Run() picks
+		// up alertCancel.
+		alertCancel()
+		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
+	}
+	// Mirror every structured event onto the OTel pipeline so
+	// operators with an OTLP collector already deployed pick up
+	// verdicts / judge latency / errors for free — no extra
+	// config required when telemetry.enabled is true.
+	if otel != nil && otel.Enabled() {
+		events.WithFanout(otel.EmitGatewayEvent)
+	}
+	if logger != nil {
+		events.WithFanout(logger.ForwardGatewayEvent)
+	}
+	SetEventWriter(events)
+	emitDiagnostic("observability", "gateway event pipeline initialised", map[string]string{
+		"jsonl": filepath.Join(cfg.DataDir, "gateway.jsonl"),
+	})
+
+	// Phase 2.3: when retention is enabled, persist judge bodies to
+	// the local SQLite audit store so operators can triage judge
+	// behaviour after the fact. Only installed under the flag — the
+	// default remains "nothing persisted, nothing leaked".
+	if cfg.Guardrail.RetainJudgeBodies && store != nil {
+		SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
+			if err := store.InsertJudgeResponse(audit.JudgeResponse{
+				Kind:       p.Kind,
+				Direction:  string(dir),
+				Model:      p.Model,
+				Action:     p.Action,
+				Severity:   string(p.Severity),
+				LatencyMs:  p.LatencyMs,
+				ParseError: p.ParseError,
+				Raw:        p.RawResponse,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
+			}
+		})
+	}
+
+	emitLifecycle("gateway", "init", map[string]string{
+		"host":         cfg.Gateway.Host,
+		"api_port":     fmt.Sprintf("%d", cfg.Gateway.APIPort),
+		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
+	})
 
 	return &Sidecar{
 		cfg:         cfg,
@@ -130,6 +196,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		webhooks:    webhooks,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
+		events:      events,
 	}, nil
 }
 
@@ -140,6 +207,13 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	runID := os.Getenv("DEFENSECLAW_RUN_ID")
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
+	emitLifecycle("sidecar", "start", map[string]string{
+		"run_id":       runID,
+		"auto_approve": fmt.Sprintf("%v", s.cfg.Gateway.AutoApprove),
+		"watcher":      fmt.Sprintf("%v", s.cfg.Gateway.Watcher.Enabled),
+		"api_port":     fmt.Sprintf("%d", s.cfg.Gateway.APIPort),
+		"guardrail":    fmt.Sprintf("%v", s.cfg.Guardrail.Enabled),
+	})
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
 	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" {
@@ -159,11 +233,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.cfg.PolicyDir)
+				emitLifecycle("opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
+				emitError("opa", "compile-failed", "falling back to built-in policies", compileErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
+			emitError("opa", "init-failed", "falling back to built-in policies", err)
 		}
 	}
 
@@ -216,8 +293,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		s.otel.EmitStartupSpan(ctx)
 	}
 
-	// Report Splunk HEC health — not a goroutine, just state
-	s.reportSplunkHealth()
+	// Report aggregate audit-sink health — not a goroutine, just state
+	s.reportSinksHealth()
 
 	// Report sandbox health — only present when standalone mode is active
 	s.reportSandboxHealth(ctx)
@@ -230,12 +307,18 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertCancel()
 	s.alertWg.Wait()
 
+	emitLifecycle("gateway", "stop", nil)
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
 	}
 	s.logger.Close()
 	_ = s.client.Close()
+	if s.events != nil {
+		_ = s.events.Close()
+		SetEventWriter(nil)
+		SetJudgePersistor(nil)
+	}
 
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
@@ -444,14 +527,27 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
-	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, reason)
+	// The watcher builds `reason` from admission findings; it
+	// can embed the matched literal (e.g. the actual secret
+	// that tripped the scanner). All three downstream
+	// consumers below are externally visible:
+	//   * the enforcement message is injected into the LLM
+	//     system prompt, so leaking the raw literal there
+	//     sends PII straight to the model provider,
+	//   * the in-process NotificationQueue is later
+	//     rendered back into the LLM conversation,
+	//   * the webhook event flows to third-party sinks.
+	// We redact once at the boundary (ForSinkReason keeps
+	// rule IDs, scrubs literals) so every path is safe.
+	safeReason := redaction.ForSinkReason(reason)
+	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, safeReason)
 	notification := SecurityNotification{
 		SubjectType: subjectType,
 		SkillName:   subjectName,
 		Severity:    severity,
 		Findings:    findings,
 		Actions:     actions,
-		Reason:      reason,
+		Reason:      safeReason,
 	}
 	if s.notify != nil {
 		s.notify.Push(notification)
@@ -464,7 +560,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 			Action:    "block",
 			Target:    subjectName,
 			Actor:     "defenseclaw-watcher",
-			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), reason),
+			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), safeReason),
 			Severity:  severity,
 		}
 		s.webhooks.Dispatch(event)
@@ -821,66 +917,61 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
 }
 
-// reportSplunkHealth sets the Splunk HEC subsystem health based on config.
-func (s *Sidecar) reportSplunkHealth() {
-	if !s.cfg.Splunk.Enabled {
-		s.health.SetSplunk(StateDisabled, "", nil)
+// reportSinksHealth aggregates the configured audit-sink declarations
+// into the sidecar health snapshot. Per-sink Forward/Flush errors are
+// surfaced separately on the sinks.Manager itself; this function only
+// reports static configuration health (count, kinds, names) so the TUI
+// can render a "Sinks: 2 enabled (splunk_hec, otlp_logs)" row.
+//
+// The legacy splunk-bridge auto-generated credentials surface (Splunk
+// Web URL, local user/password) is intentionally dropped — the v4
+// audit_sinks model is provider-agnostic and operators bring their own
+// collector/SIEM credentials.
+func (s *Sidecar) reportSinksHealth() {
+	enabled := 0
+	kinds := make([]string, 0, len(s.cfg.AuditSinks))
+	rows := make([]map[string]interface{}, 0, len(s.cfg.AuditSinks))
+	for _, sink := range s.cfg.AuditSinks {
+		if !sink.Enabled {
+			continue
+		}
+		enabled++
+		kinds = append(kinds, string(sink.Kind))
+		row := map[string]interface{}{
+			"name":    sink.Name,
+			"kind":    string(sink.Kind),
+			"enabled": true,
+		}
+		switch sink.Kind {
+		case config.SinkKindSplunkHEC:
+			if sink.SplunkHEC != nil {
+				row["endpoint"] = sink.SplunkHEC.Endpoint
+				row["index"] = sink.SplunkHEC.Index
+			}
+		case config.SinkKindOTLPLogs:
+			if sink.OTLPLogs != nil {
+				row["endpoint"] = sink.OTLPLogs.Endpoint
+				row["protocol"] = sink.OTLPLogs.Protocol
+			}
+		case config.SinkKindHTTPJSONL:
+			if sink.HTTPJSONL != nil {
+				row["url"] = sink.HTTPJSONL.URL
+			}
+		}
+		rows = append(rows, row)
+	}
+
+	if enabled == 0 {
+		s.health.SetSinks(StateDisabled, "", nil)
 		return
 	}
 
 	details := map[string]interface{}{
-		"hec_endpoint": s.cfg.Splunk.HECEndpoint,
-		"index":        s.cfg.Splunk.Index,
+		"count": enabled,
+		"kinds": kinds,
+		"sinks": rows,
 	}
-
-	bridgeEnv := readDotEnvFile(filepath.Join(s.cfg.DataDir, "splunk-bridge", "env"))
-	if bridgeEnv == nil {
-		bridgeEnv = readDotEnvFile(s.cfg.DataDir)
-	}
-	if bridgeEnv["SPLUNK_PASSWORD"] != "" {
-		details["web_url"] = "http://127.0.0.1:8000"
-		details["web_user"] = "admin"
-		details["web_password_set"] = true
-	}
-	if user := bridgeEnv["DEFENSECLAW_LOCAL_USERNAME"]; user != "" {
-		details["username"] = user
-	}
-	if bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"] != "" {
-		details["password_set"] = true
-	}
-
-	s.health.SetSplunk(StateRunning, "", details)
-}
-
-// readDotEnvFile reads KEY=VALUE pairs from the .env (or .env.example) file in dataDir.
-func readDotEnvFile(dataDir string) map[string]string {
-	path := filepath.Join(dataDir, ".env")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		path = filepath.Join(dataDir, ".env.example")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-	}
-	env := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
-			v = v[1 : len(v)-1]
-		}
-		env[k] = v
-	}
-	return env
+	s.health.SetSinks(StateRunning, "", details)
 }
 
 // Client returns the underlying gateway client for direct RPC calls.

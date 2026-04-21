@@ -76,6 +76,7 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 		column string
 	}{
 		{table: "audit_events", column: "run_id"},
+		{table: "audit_events", column: "trace_id"},
 		{table: "scan_results", column: "run_id"},
 	} {
 		ok, err := store.hasColumn(spec.table, spec.column)
@@ -85,6 +86,38 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected %s.%s to exist after migration", spec.table, spec.column)
 		}
+	}
+}
+
+func TestLogEventRoundTripIncludesTraceID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	if err := store.LogEvent(Event{
+		Action:   "guardrail-inspection",
+		Target:   "gpt-4",
+		Details:  "trace-bearing event",
+		Severity: "HIGH",
+		TraceID:  "trace-123",
+	}); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ListEvents returned %d rows, want 1", len(events))
+	}
+	if got := events[0].TraceID; got != "trace-123" {
+		t.Fatalf("TraceID = %q, want %q", got, "trace-123")
 	}
 }
 

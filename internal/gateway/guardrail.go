@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -75,6 +76,19 @@ type TriageSignal struct {
 	Confidence float64
 }
 
+// guardrailSpanEmitter is the callback surface the inspector
+// uses to open and close OTel spans for each stage. Kept as a
+// pair of function fields instead of an interface so the
+// sidecar wiring can populate it from internal/telemetry
+// without the inspector package importing telemetry directly.
+//
+// A nil emitter (or either nil field) is valid — every call
+// site guards before invoking, so tests and non-otel consumers
+// opt out by just not calling SetTracer.
+type guardrailSpanEmitter struct {
+	start func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64))
+}
+
 // GuardrailInspector orchestrates local pattern scanning, Cisco AI Defense,
 // the LLM judge, and OPA policy evaluation.
 type GuardrailInspector struct {
@@ -98,6 +112,11 @@ type GuardrailInspector struct {
 	engineLoadErr error
 	engineInitOnce sync.Once
 	engineErrLogged sync.Once
+
+	// tracer is set via SetTracer() from the sidecar wiring layer
+	// once an OTel provider is available. Kept as an interface so
+	// the inspector doesn't need to import internal/telemetry.
+	tracer *guardrailSpanEmitter
 }
 
 // NewGuardrailInspector creates an inspector from config parameters.
@@ -108,6 +127,20 @@ func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge 
 		judge:       judge,
 		policyDir:   policyDir,
 	}
+}
+
+// SetTracerFunc installs the OTel span emitter. Pass nil to
+// disable span emission entirely (tests typically never call
+// this). The sidecar wires this to telemetry.Provider once
+// OTel is initialized.
+func (g *GuardrailInspector) SetTracerFunc(
+	start func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)),
+) {
+	if start == nil {
+		g.tracer = nil
+		return
+	}
+	g.tracer = &guardrailSpanEmitter{start: start}
 }
 
 // SetDetectionStrategy configures the multi-strategy dispatch fields.
@@ -150,14 +183,78 @@ func (g *GuardrailInspector) SetScannerMode(mode string) {
 func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	strategy := g.effectiveStrategy(direction)
 
+	// Open a span for the whole inspection — stage naming follows
+	// the strategy so dashboards can compare regex-only vs
+	// regex+judge latency distributions side-by-side.
+	var endSpan func(action, severity, reason string, latencyMs int64)
+	if g.tracer != nil && g.tracer.start != nil {
+		var newCtx context.Context
+		newCtx, endSpan = g.tracer.start(ctx, strategy, direction, model)
+		ctx = newCtx
+	}
+
+	start := time.Now()
+	var verdict *ScanVerdict
 	switch strategy {
 	case "regex_judge":
-		return g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
+		verdict = g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
 	case "judge_first":
-		return g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
+		verdict = g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
 	default:
-		return g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
 	}
+
+	latencyMs := time.Since(start).Milliseconds()
+
+	if endSpan != nil {
+		var action, sev, reason string
+		if verdict != nil {
+			action, sev, reason = verdict.Action, verdict.Severity, verdict.Reason
+		}
+		endSpan(action, sev, reason, latencyMs)
+	}
+
+	// Structured verdict emission — one record per top-level Inspect
+	// call, regardless of strategy. Skipping NONE/empty verdicts keeps
+	// the JSONL focused on real decisions; lifecycle events already
+	// cover the "nothing happened" case.
+	if verdict != nil && verdict.Severity != "" && verdict.Severity != "NONE" {
+		emitVerdict(
+			gatewaylog.Stage("guardrail"),
+			gatewaylog.Direction(direction),
+			model,
+			verdict.Action,
+			verdict.Reason,
+			deriveSeverity(verdict.Severity),
+			categoriesOf(verdict.Findings),
+			latencyMs,
+		)
+	}
+	return verdict
+}
+
+// categoriesOf returns deduped finding identifiers in insertion
+// order. ScanVerdict.Findings is a flat []string (e.g. "pii:email",
+// "injection:ignore-previous"), so we just preserve distinct entries
+// without trying to parse them — parsing happens downstream in the
+// TUI/sink consumers that know their own schema.
+func categoriesOf(findings []string) []string {
+	if len(findings) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(findings))
+	out := make([]string, 0, len(findings))
+	for _, f := range findings {
+		if f == "" {
+			continue
+		}
+		if _, ok := seen[f]; ok {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
+	}
+	return out
 }
 
 // InspectMidStream runs regex-only inspection for mid-stream SSE chunks.

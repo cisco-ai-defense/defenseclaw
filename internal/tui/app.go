@@ -67,7 +67,7 @@ type HealthSnapshot struct {
 	API       SubsystemHealth  `json:"api"`
 	Guardrail SubsystemHealth  `json:"guardrail"`
 	Telemetry SubsystemHealth  `json:"telemetry"`
-	Splunk    SubsystemHealth  `json:"splunk"`
+	Sinks     SubsystemHealth  `json:"sinks"`
 	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
 }
 
@@ -1564,9 +1564,45 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// On the Verdicts source, Enter opens a detail modal for the
+	// most-recent visible event. We intercept before handing the
+	// key to the panel so the panel's own "search entry" path
+	// doesn't swallow Enter while searching is inactive.
+	if msg.String() == "enter" && !m.logs.searching && m.logs.source == logSourceVerdicts {
+		if row := m.logs.SelectedVerdict(); row != nil {
+			pairs := verdictDetailPairs(*row)
+			m.detail.SetSize(m.width, m.height)
+			m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
+			return m, nil
+		}
+	}
 	var cmd tea.Cmd
 	m.logs, cmd = m.logs.Update(msg)
 	return m, cmd
+}
+
+// verdictDetailPairs formats a structured event into the ordered
+// label/value pairs the shared DetailModal expects. Larger bodies
+// (judge raw response, error cause) come last so the modal can
+// scroll without hiding the identification block.
+func verdictDetailPairs(r verdictRow) [][2]string {
+	pairs := [][2]string{
+		{"Timestamp", r.timestamp.Format(time.RFC3339Nano)},
+		{"Event type", r.eventType},
+		{"Severity", r.severity},
+		{"Action", r.action},
+		{"Stage", r.stage},
+		{"Direction", r.direction},
+		{"Model", r.model},
+	}
+	if r.kind != "" {
+		pairs = append(pairs, [2]string{"Judge kind", r.kind})
+	}
+	if r.reason != "" {
+		pairs = append(pairs, [2]string{"Reason", r.reason})
+	}
+	pairs = append(pairs, [2]string{"Raw JSON", r.raw})
+	return pairs
 }
 
 func (m Model) handleInventoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

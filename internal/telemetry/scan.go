@@ -24,6 +24,7 @@ import (
 
 	"go.opentelemetry.io/otel/log"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -114,7 +115,15 @@ func (p *Provider) EmitScanResult(result *scanner.ScanResult, scanID, targetType
 func (p *Provider) emitFindingLogs(ctx context.Context, result *scanner.ScanResult, scanID, targetType string) {
 	for _, f := range result.Findings {
 		sevText, sevNum := findingSeverityToOTel(string(f.Severity))
-		body := fmt.Sprintf("%s: %s", f.Title, f.Description)
+		// OTel is a persistent sink: ForSinkString always
+		// redacts regardless of DEFENSECLAW_REVEAL_PII. The
+		// title is static rule metadata, so it passes through
+		// unchanged; description and location routinely carry
+		// secret material / filesystem paths and must be
+		// scrubbed before export.
+		safeDesc := redaction.ForSinkString(f.Description)
+		safeLoc := redaction.ForSinkString(f.Location)
+		body := fmt.Sprintf("%s: %s", f.Title, safeDesc)
 
 		rec := log.Record{}
 		now := time.Now()
@@ -132,7 +141,7 @@ func (p *Provider) emitFindingLogs(ctx context.Context, result *scanner.ScanResu
 			log.String("defenseclaw.finding.severity", string(f.Severity)),
 			log.String("defenseclaw.finding.title", f.Title),
 			log.String("defenseclaw.finding.scanner", f.Scanner),
-			log.String("defenseclaw.finding.location", f.Location),
+			log.String("defenseclaw.finding.location", safeLoc),
 			log.String("defenseclaw.scan.target", result.Target),
 			log.String("defenseclaw.scan.target_type", targetType),
 		}

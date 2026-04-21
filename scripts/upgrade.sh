@@ -361,7 +361,7 @@ done
 
 if [[ "${HEALTH_OK}" -eq 0 ]]; then
     warn "Gateway did not become healthy within ${HEALTH_TIMEOUT}s"
-    info "Check logs: ~/.defenseclaw/gateway.log"
+    info "Check logs: ~/.defenseclaw/gateway.log (pretty) / ~/.defenseclaw/gateway.jsonl (structured)"
     info "Run:  defenseclaw-gateway status"
 fi
 

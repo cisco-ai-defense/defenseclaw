@@ -2960,15 +2960,23 @@ func TestHealthHandlerReturnsJSON(t *testing.T) {
 
 func TestHealthEndpointNoSecrets(t *testing.T) {
 	health := NewSidecarHealth()
-	// Simulate what a fixed reportSplunkHealth should produce: no raw passwords.
-	health.SetSplunk(StateRunning, "", map[string]interface{}{
-		"hec_endpoint":     "https://splunk.example.com:8088",
-		"index":            "defenseclaw",
-		"web_url":          "http://127.0.0.1:8000",
-		"web_user":         "admin",
-		"web_password_set": true,
-		"username":         "defenseclaw_local_user",
-		"password_set":     true,
+	// Simulate what a fixed reportSinksHealth should produce when a
+	// Splunk sink is registered: no raw passwords or HEC tokens, only
+	// boolean "_set" indicators per sink row.
+	health.SetSinks(StateRunning, "", map[string]interface{}{
+		"count": 1,
+		"kinds": []string{"splunk_hec"},
+		"sinks": []map[string]interface{}{{
+			"name":             "splunk-prod",
+			"kind":             "splunk_hec",
+			"hec_endpoint":     "https://splunk.example.com:8088",
+			"index":            "defenseclaw",
+			"web_url":          "http://127.0.0.1:8000",
+			"web_user":         "admin",
+			"web_password_set": true,
+			"username":         "defenseclaw_local_user",
+			"password_set":     true,
+		}},
 	})
 	api := &APIServer{health: health}
 
