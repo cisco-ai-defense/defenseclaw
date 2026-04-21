@@ -16,6 +16,9 @@
 
 package gateway
 
+// Verdict cache metrics + LLM judge spans are implemented in llm_judge.go and
+// internal/guardrail/verdict_cache.go (Track 3).
+
 import (
 	"context"
 	"fmt"
@@ -272,6 +275,7 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	// cover the "nothing happened" case.
 	if verdict != nil && verdict.Severity != "" && verdict.Severity != "NONE" {
 		emitVerdict(
+			ctx,
 			gatewaylog.Stage("guardrail"),
 			gatewaylog.Direction(direction),
 			model,
