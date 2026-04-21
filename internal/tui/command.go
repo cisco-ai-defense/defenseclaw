@@ -541,6 +541,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "plugins", CLIBinary: dc, CLIArgs: []string{"plugin", "list"}, Description: "List plugins", Category: "info"},
 		{TUIName: "tools", CLIBinary: dc, CLIArgs: []string{"tool", "list"}, Description: "List tools", Category: "info"},
 		{TUIName: "alerts", CLIBinary: dc, CLIArgs: []string{"alerts", "--no-tui"}, Description: "List alerts", Category: "info"},
+		{TUIName: "audit log-activity", CLIBinary: dc, CLIArgs: []string{"audit", "log-activity"}, Description: "Log operator activity (payload via --payload-file)", Category: "other", NeedsArg: true, ArgHint: "--payload-file <path>"},
 		{TUIName: "help", CLIBinary: dc, CLIArgs: []string{"--help"}, Description: "Show CLI help", Category: "info"},
 	}
 }

@@ -17,7 +17,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 const (
@@ -63,6 +67,11 @@ const slowRefreshInterval = 30 * time.Second
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type refreshMsg struct{}
+
+// refreshTickMsg is an alias for the periodic refresh tick used by tests
+// and SLO instrumentation (same handler as refreshMsg).
+type refreshTickMsg = refreshMsg
+
 type slowRefreshMsg struct{}
 type spinTickMsg struct{}
 
@@ -130,6 +139,7 @@ type Model struct {
 	hints    *HintEngine
 	executor *CommandExecutor
 	registry []CmdEntry
+	otelProv *telemetry.Provider
 
 	// Notifications
 	toasts ToastManager
@@ -153,6 +163,7 @@ type Deps struct {
 	OpenshellBinary string
 	AnchorName      string
 	Version         string
+	OTel            *telemetry.Provider
 }
 
 // SetProgram sets the tea.Program reference on the executor for sending messages.
@@ -165,6 +176,10 @@ func New(deps Deps) Model {
 	theme := DefaultTheme()
 	executor := NewCommandExecutor()
 	registry := BuildRegistry()
+	dataDir := ""
+	if deps.Config != nil {
+		dataDir = deps.Config.DataDir
+	}
 
 	ti := textinput.New()
 	ti.Placeholder = "Type a command… (no \"defenseclaw\" prefix needed)"
@@ -180,7 +195,7 @@ func New(deps Deps) Model {
 
 	m := Model{
 		overview:   NewOverviewPanel(theme, deps.Config, deps.Version),
-		alerts:     NewAlertsPanel(deps.Store),
+		alerts:     NewAlertsPanel(deps.Store, dataDir),
 		skills:     NewSkillsPanel(deps.Store),
 		mcps:       NewMCPsPanel(deps.Store),
 		plugins:    NewPluginsPanel(theme, deps.Store),
@@ -188,7 +203,7 @@ func New(deps Deps) Model {
 		policy:     NewPolicyPanel(theme, deps.Config),
 		logs:       NewLogsPanel(theme, deps.Config),
 		auditHist:  NewAuditPanel(theme, deps.Store),
-		activity:   NewActivityPanel(theme),
+		activity:   NewActivityPanel(theme, dataDir),
 		tools:      NewToolsPanel(deps.Store),
 		setup:      NewSetupPanel(theme, deps.Config, executor),
 		detail:     NewDetailModal(),
@@ -205,6 +220,7 @@ func New(deps Deps) Model {
 		executor: executor,
 		registry: registry,
 		version:  deps.Version,
+		otelProv: deps.OTel,
 
 		isDark:  true,
 		focused: true,
@@ -291,7 +307,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case refreshMsg:
+		t0 := time.Now()
 		m.refresh()
+		if m.otelProv != nil && m.otelProv.Enabled() {
+			ms := float64(time.Since(t0).Milliseconds())
+			m.otelProv.RecordTUIRefreshSLO(context.Background(), "all", ms)
+		}
 		m.toasts.Tick()
 		cmds = append(cmds, tickRefresh())
 		cmds = append(cmds, m.pollHealth())
@@ -381,6 +402,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PluginsLoadedMsg:
 		m.plugins.ApplyLoaded(msg)
+		return m, nil
+
+	case FilterChangeMsg:
+		m.noteTUIFilterChange(msg.Panel, msg.FilterType, msg.Old, msg.New)
 		return m, nil
 
 	case tea.BackgroundColorMsg:
@@ -626,7 +651,9 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 			positions := m.alerts.SevButtonPositions()
 			for i, pos := range positions {
 				if x >= pos[0] && x < pos[1] {
+					old := m.alerts.SevFilter()
 					m.alerts.SetSevFilter(sevFilterOrder[i])
+					m.noteTUIFilterChange(PanelNameAlerts, FilterTypeSeverity, old, m.alerts.SevFilter())
 					return m, nil
 				}
 			}
@@ -643,7 +670,7 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		idx := relY - headerLines + m.alerts.ScrollOffset()
 		if idx >= 0 && idx < m.alerts.FilteredCount() {
 			if m.alerts.CursorAt() == idx {
-				m.alerts.ToggleDetail()
+				m.alerts.ToggleExpandOrDetail()
 			} else {
 				m.alerts.SetCursor(idx)
 			}
@@ -1020,6 +1047,8 @@ func (m Model) panelOwnsDigitShortcut(key string) bool {
 		return key >= "1" && key <= "5"
 	case PanelInventory:
 		return key >= "1" && key <= "4"
+	case PanelActivity:
+		return key == "1" || key == "2"
 	default:
 		return false
 	}
@@ -1424,12 +1453,29 @@ func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "S":
 			if m.setup.HasChanges() {
+				actPath, _, err := m.setup.AuditActivityTempFile()
+				if err != nil {
+					m.toasts.Push(ToastError, err.Error())
+					return m, nil
+				}
 				if err := m.setup.SaveConfig(); err != nil {
+					if actPath != "" {
+						_ = os.Remove(actPath)
+					}
 					m.toasts.Push(ToastError, "Config save failed: "+err.Error())
 					return m, nil
 				}
 				m.cfg = m.setup.GetConfig()
 				m.toasts.Push(ToastSuccess, "Config saved — restarting gateway to apply changes…")
+				if actPath != "" {
+					c := exec.Command("defenseclaw", "audit", "log-activity", "--payload-file", actPath)
+					out, err := c.CombinedOutput()
+					if err != nil {
+						m.toasts.Push(ToastWarn, fmt.Sprintf("audit log-activity: %v %s", err, strings.TrimSpace(string(out))))
+					}
+					_ = os.Remove(actPath)
+				}
+				m.activePanel = PanelActivity
 				return m, m.executor.Execute("defenseclaw-gateway", []string{"restart"}, "restart (config changed)")
 			}
 			return m, nil
@@ -1551,7 +1597,7 @@ func (m Model) handleAlertsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		m.alerts.CursorUp()
 	case "enter":
-		m.alerts.ToggleDetail()
+		m.alerts.ToggleExpandOrDetail()
 	case "esc":
 		if m.alerts.IsDetailOpen() {
 			m.alerts.ToggleDetail()
@@ -1592,15 +1638,25 @@ func (m Model) handleAlertsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.alerts.Refresh()
 	// Severity quick-filter keys
 	case "1":
+		old := m.alerts.SevFilter()
 		m.alerts.SetSevFilter("")
+		m.noteTUIFilterChange(PanelNameAlerts, FilterTypeSeverity, old, m.alerts.SevFilter())
 	case "2":
+		old := m.alerts.SevFilter()
 		m.alerts.SetSevFilter("CRITICAL")
+		m.noteTUIFilterChange(PanelNameAlerts, FilterTypeSeverity, old, m.alerts.SevFilter())
 	case "3":
+		old := m.alerts.SevFilter()
 		m.alerts.SetSevFilter("HIGH")
+		m.noteTUIFilterChange(PanelNameAlerts, FilterTypeSeverity, old, m.alerts.SevFilter())
 	case "4":
+		old := m.alerts.SevFilter()
 		m.alerts.SetSevFilter("MEDIUM")
+		m.noteTUIFilterChange(PanelNameAlerts, FilterTypeSeverity, old, m.alerts.SevFilter())
 	case "5":
+		old := m.alerts.SevFilter()
 		m.alerts.SetSevFilter("LOW")
+		m.noteTUIFilterChange(PanelNameAlerts, FilterTypeSeverity, old, m.alerts.SevFilter())
 	case "c":
 		if m.store != nil {
 			ids := m.alerts.FilteredIDs()
@@ -2306,11 +2362,15 @@ func (m Model) View() tea.View {
 }
 
 func (m *Model) refresh() {
+	if refreshTestHook != nil {
+		refreshTestHook()
+	}
 	m.alerts.Refresh()
 	m.skills.Refresh()
 	m.mcps.Refresh()
 	m.tools.Refresh()
 	m.auditHist.Refresh()
+	m.activity.LoadMutations()
 	if m.store != nil {
 		if err := m.overview.SetEnforcementCounts(m.store); err != nil {
 			m.toasts.Push(ToastWarn, "Failed to refresh counts: "+err.Error())

@@ -143,7 +143,7 @@ func TestAlertsPanel_DetailEnrichment_FindingsScanner(t *testing.T) {
 		t.Fatalf("seed finding: %v", err)
 	}
 
-	panel := NewAlertsPanel(store)
+	panel := NewAlertsPanel(store, "")
 	panel.SetSize(120, 40)
 	panel.Refresh()
 	if panel.FilteredCount() == 0 {
@@ -180,7 +180,7 @@ func TestAlertsPanel_DetailEnrichment_HumanizedSummary(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("log: %v", err)
 	}
-	panel := NewAlertsPanel(store)
+	panel := NewAlertsPanel(store, "")
 	panel.SetSize(120, 40)
 	panel.Refresh()
 	panel.SetCursor(0)
@@ -212,7 +212,7 @@ func TestAlertsPanel_DetailEnrichment_HumanizedSuppressedWhenEqual(t *testing.T)
 	}); err != nil {
 		t.Fatalf("log: %v", err)
 	}
-	panel := NewAlertsPanel(store)
+	panel := NewAlertsPanel(store, "")
 	panel.SetSize(120, 40)
 	panel.Refresh()
 	panel.SetCursor(0)

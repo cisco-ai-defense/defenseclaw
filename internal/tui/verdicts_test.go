@@ -192,7 +192,10 @@ func TestCycleVerdictAction_RotatesThroughAllThenWrapsToEmpty(t *testing.T) {
 // silently hides a category of operator-relevant data.
 func TestCycleVerdictEventType_RotatesThroughAllThenWrapsToEmpty(t *testing.T) {
 	p := &LogsPanel{}
-	want := []string{"verdict", "judge", "lifecycle", "error", "diagnostic", ""}
+	want := []string{
+		"verdict", "judge", "lifecycle", "error", "diagnostic",
+		"scan", "scan_finding", "activity", "",
+	}
 	for i, exp := range want {
 		p.cycleVerdictEventType()
 		if p.verdictEventType != exp {
@@ -1130,6 +1133,9 @@ func TestVerdictEventTypeFiltersMatchSchema(t *testing.T) {
 		gatewaylog.EventLifecycle,
 		gatewaylog.EventError,
 		gatewaylog.EventDiagnostic,
+		gatewaylog.EventScan,
+		gatewaylog.EventScanFinding,
+		gatewaylog.EventActivity,
 	}
 	for _, et := range schemaTypes {
 		found := false

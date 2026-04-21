@@ -67,14 +67,17 @@ var verdictActionLabels = map[string]string{
 // is filterable just like "error" is. Renaming or adding an event
 // type in the schema must also update this list;
 // TestVerdictEventTypeFiltersMatchSchema catches drift at test time.
-var verdictEventTypeFilters = []string{"", "verdict", "judge", "lifecycle", "error", "diagnostic"}
+var verdictEventTypeFilters = []string{"", "verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity"}
 var verdictEventTypeLabels = map[string]string{
-	"":           "All events",
-	"verdict":    "Verdict",
-	"judge":      "Judge",
-	"lifecycle":  "Lifecycle",
-	"error":      "Error",
-	"diagnostic": "Diagnostic",
+	"":             "All events",
+	"verdict":      "Verdict",
+	"judge":        "Judge",
+	"lifecycle":    "Lifecycle",
+	"error":        "Error",
+	"diagnostic":   "Diagnostic",
+	"scan":         "Scan",
+	"scan_finding": "Scan finding",
+	"activity":     "Activity",
 }
 
 // verdictSeverityFilters cycles the Verdicts source through
@@ -241,6 +244,22 @@ type verdictRow struct {
 	// Diagnostic-payload extras.
 	diagnosticComponent string
 	diagnosticMessage   string
+
+	// v7 gateway envelope (agent identity for filters / provenance column).
+	agentID string
+
+	// Scan / scan_finding / activity payloads (gatewaylog.Event v7).
+	scanScanner   string
+	scanTarget    string
+	scanID        string
+	scanVerdict   string
+	findingRuleID string
+	findingLine   int
+	activityActor string
+	activityAct   string
+	activityTgt   string
+	verFrom       string
+	verTo         string
 }
 
 // judgeFinding mirrors gatewaylog.Finding on the TUI side. We keep
@@ -364,8 +383,11 @@ func (p LogsPanel) handleKey(msg tea.KeyPressMsg) (LogsPanel, tea.Cmd) {
 	// works.
 	case "t":
 		if !p.searching && p.source == logSourceVerdicts {
+			old := p.verdictEventType
 			p.cycleVerdictEventType()
 			p.scroll = 0
+			newV := p.verdictEventType
+			return p, filterChangeCmd(PanelNameLogs, FilterTypeEventType, old, newV)
 		} else if p.searching {
 			p.searchText += "t"
 		}
@@ -376,8 +398,11 @@ func (p LogsPanel) handleKey(msg tea.KeyPressMsg) (LogsPanel, tea.Cmd) {
 	// "severity" works.
 	case "s":
 		if !p.searching && p.source == logSourceVerdicts {
+			old := p.verdictSeverity
 			p.cycleVerdictSeverity()
 			p.scroll = 0
+			newV := p.verdictSeverity
+			return p, filterChangeCmd(PanelNameLogs, FilterTypeSeverity, old, newV)
 		} else if p.searching {
 			p.searchText += "s"
 		}
@@ -1186,6 +1211,7 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 		RunID     string    `json:"run_id"`
 		SessionID string    `json:"session_id"`
 		Provider  string    `json:"provider"`
+		AgentID   string    `json:"agent_id"`
 		Verdict   *struct {
 			Stage      string   `json:"stage"`
 			Action     string   `json:"action"`
@@ -1218,6 +1244,30 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 			Component string `json:"component"`
 			Message   string `json:"message"`
 		} `json:"diagnostic"`
+		Scan *struct {
+			ScanID   string `json:"scan_id"`
+			Scanner  string `json:"scanner"`
+			Target   string `json:"target"`
+			Verdict  string `json:"verdict"`
+			Duration int64  `json:"duration_ms"`
+		} `json:"scan"`
+		ScanFinding *struct {
+			ScanID     string `json:"scan_id"`
+			Scanner    string `json:"scanner"`
+			Target     string `json:"target"`
+			RuleID     string `json:"rule_id"`
+			Severity   string `json:"severity"`
+			Title      string `json:"title"`
+			LineNumber int    `json:"line_number"`
+		} `json:"scan_finding"`
+		Activity *struct {
+			Actor       string `json:"actor"`
+			Action      string `json:"action"`
+			TargetType  string `json:"target_type"`
+			TargetID    string `json:"target_id"`
+			VersionFrom string `json:"version_from"`
+			VersionTo   string `json:"version_to"`
+		} `json:"activity"`
 	}
 	if err := jsonUnmarshal([]byte(line), &raw); err != nil {
 		return verdictRow{}, false
@@ -1233,6 +1283,7 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 		runID:     raw.RunID,
 		sessionID: raw.SessionID,
 		provider:  raw.Provider,
+		agentID:   raw.AgentID,
 	}
 	if raw.Verdict != nil {
 		row.stage = raw.Verdict.Stage
@@ -1275,6 +1326,39 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 	if raw.Diagnostic != nil {
 		row.diagnosticComponent = raw.Diagnostic.Component
 		row.diagnosticMessage = raw.Diagnostic.Message
+	}
+	if raw.Scan != nil {
+		row.scanID = raw.Scan.ScanID
+		row.scanScanner = raw.Scan.Scanner
+		row.scanTarget = raw.Scan.Target
+		row.scanVerdict = raw.Scan.Verdict
+		row.action = "scan"
+		if raw.Scan.Duration > 0 {
+			row.latencyMs = raw.Scan.Duration
+		}
+	}
+	if raw.ScanFinding != nil {
+		row.scanID = raw.ScanFinding.ScanID
+		row.scanScanner = raw.ScanFinding.Scanner
+		row.scanTarget = raw.ScanFinding.Target
+		row.findingRuleID = raw.ScanFinding.RuleID
+		row.findingLine = raw.ScanFinding.LineNumber
+		row.action = "finding"
+		if raw.ScanFinding.Severity != "" {
+			row.severity = raw.ScanFinding.Severity
+		}
+	}
+	if raw.Activity != nil {
+		row.activityActor = raw.Activity.Actor
+		row.activityAct = raw.Activity.Action
+		if raw.Activity.TargetType != "" {
+			row.activityTgt = raw.Activity.TargetType + ":" + raw.Activity.TargetID
+		} else {
+			row.activityTgt = raw.Activity.TargetID
+		}
+		row.verFrom = raw.Activity.VersionFrom
+		row.verTo = raw.Activity.VersionTo
+		row.action = raw.Activity.Action
 	}
 	return row, true
 }
@@ -1366,6 +1450,34 @@ func renderVerdictLine(r verdictRow) string {
 				truncateVerdictReason(r.diagnosticMessage, 120))
 		}
 		return fmt.Sprintf("%s DIAG    %s", ts, r.raw)
+	case "scan":
+		return fmt.Sprintf("%s SCAN    %-8s scanner=%s target=%s verdict=%s scan_id=%s",
+			ts,
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.scanScanner, "-"),
+			truncateVerdictReason(r.scanTarget, 40),
+			nonEmpty(r.scanVerdict, "-"),
+			nonEmpty(r.scanID, "-"),
+		)
+	case "scan_finding":
+		return fmt.Sprintf("%s FINDING %-8s rule=%s line=%d %s @ %s",
+			ts,
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.findingRuleID, "-"),
+			r.findingLine,
+			truncateVerdictReason(r.scanTarget, 36),
+			nonEmpty(r.scanScanner, "-"),
+		)
+	case "activity":
+		return fmt.Sprintf("%s ACT     %-8s actor=%s action=%s target=%s %s→%s",
+			ts,
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.activityActor, "-"),
+			nonEmpty(r.activityAct, "-"),
+			truncateVerdictReason(r.activityTgt, 36),
+			nonEmpty(r.verFrom, "∅"),
+			nonEmpty(r.verTo, "∅"),
+		)
 	default:
 		return fmt.Sprintf("%s %-9s %s", ts, strings.ToUpper(nonEmpty(r.eventType, "event")), r.raw)
 	}
