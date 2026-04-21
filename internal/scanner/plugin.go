@@ -29,6 +29,8 @@ import (
 
 type PluginScanner struct {
 	BinaryPath string
+	Policy     string
+	Profile    string
 }
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
@@ -42,22 +44,31 @@ func (s *PluginScanner) Name() string               { return "plugin-scanner" }
 func (s *PluginScanner) Version() string            { return "1.0.0" }
 func (s *PluginScanner) SupportedTargets() []string { return []string{"plugin"} }
 
-func pluginScanCommand(binaryPath, target string) (string, []string) {
+func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
+	binaryPath := s.BinaryPath
 	if binaryPath == "" {
 		binaryPath = "defenseclaw"
 	}
+	var args []string
 	switch filepath.Base(binaryPath) {
 	case "defenseclaw-plugin-scanner", "defenseclaw-plugin-scanner.exe":
-		return binaryPath, []string{target}
+		args = []string{target}
 	default:
-		return binaryPath, []string{"plugin", "scan", "--json", target}
+		args = []string{"plugin", "scan", "--json", target}
 	}
+	if s.Policy != "" {
+		args = append(args, "--policy", s.Policy)
+	}
+	if s.Profile != "" {
+		args = append(args, "--profile", s.Profile)
+	}
+	return binaryPath, args
 }
 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
 
-	binaryPath, args := pluginScanCommand(s.BinaryPath, target)
+	binaryPath, args := s.pluginScanCommand(target)
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -59,6 +60,7 @@ type EventRouter struct {
 	otel     *telemetry.Provider
 	notify   *NotificationQueue
 	judge    *LLMJudge
+	rp       *guardrail.RulePack
 	judgeSem chan struct{} // bounds concurrent active tool-judge executions
 
 	autoApprove      bool
@@ -69,6 +71,8 @@ type EventRouter struct {
 
 	activeSessionsMu sync.RWMutex
 	activeSessions   map[string]time.Time // sessionKey → last seen
+
+	contextTracker *ContextTracker
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
@@ -84,6 +88,7 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		activeAgentSpans: make(map[string]*activeAgent),
 		activeSessions:   make(map[string]time.Time),
 		judgeSem:         make(chan struct{}, 16),
+		contextTracker:   NewContextTracker(0, 0),
 	}
 }
 
@@ -155,6 +160,11 @@ func (r *EventRouter) pruneSessionsLocked() {
 // SetJudge configures the LLM judge for tool call injection detection.
 func (r *EventRouter) SetJudge(j *LLMJudge) {
 	r.judge = j
+}
+
+// SetRulePack configures the guardrail rule pack for tool result inspection.
+func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
+	r.rp = rp
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -430,6 +440,26 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 
 			readLoopLogf("[bifrost] session.message: emitted LLM span model=%s provider=%s system=%s tokens=%d/%d",
 				msg.Model, msg.Provider, system, promptTokens, completionTokens)
+		}
+
+		if r.contextTracker != nil && envelope.SessionKey != "" && contentStr != "" {
+			r.contextTracker.Record(envelope.SessionKey, msg.Role, contentStr)
+		}
+
+		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
+				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
+					"repeated injection patterns detected across multiple user turns")
+				if r.otel != nil {
+					r.otel.EmitRuntimeAlert(
+						telemetry.AlertToolCallFlagged, "HIGH", telemetry.SourceLocalPattern,
+						fmt.Sprintf("Multi-turn injection attempt in session %s", truncate(envelope.SessionKey, 32)),
+						map[string]string{"session": envelope.SessionKey},
+						map[string]string{"action_taken": "alert"},
+						"", "",
+					)
+				}
+			}
 		}
 
 		_ = r.logger.LogAction("gateway-session-message", envelope.SessionKey,
@@ -828,6 +858,8 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 	_ = r.logger.LogAction("gateway-tool-result", payload.Tool,
 		fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
 
+	r.inspectToolResult(payload)
+
 	if r.otel != nil {
 		r.spanMu.Lock()
 		var as *activeSpan
@@ -843,6 +875,93 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 		if as != nil {
 			r.otel.EndToolSpan(as.span, exitCode, len(payload.Output), as.startTime, as.tool, as.provider)
 		}
+	}
+}
+
+// inspectToolResult checks tool output against sensitive-tools configuration
+// from the rule pack.
+//
+// The flow is:
+//  1. A deterministic regex scan (scanLocalPatterns) runs whenever
+//     result_inspection=true, regardless of judge availability. Previously
+//     the function was a no-op when judge_result=false OR when the judge
+//     was nil — that meant tools like users_org_info (shipped default has
+//     result_inspection=true, judge_result=false) received no inspection
+//     at all, and any judge-init failure silently disabled every sensitive
+//     tool-result scan in the process.
+//  2. If judge_result=true AND a judge is configured, the LLM PII judge
+//     also runs and its findings are merged with the regex findings.
+//  3. If judge_result=true but the judge is unavailable, a warning is
+//     logged once per call so the operator can see the degraded state —
+//     the deterministic scan still runs.
+func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
+	if r.rp == nil || payload.Output == "" {
+		return
+	}
+	stool := r.rp.LookupSensitiveTool(payload.Tool)
+	if stool == nil || !stool.ResultInspection {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[sidecar] inspecting sensitive tool result: %s (output_len=%d judge=%t)\n",
+		payload.Tool, len(payload.Output), stool.JudgeResult && r.judge != nil)
+
+	// Stage 1: deterministic regex scan. Always runs.
+	verdict := scanLocalPatterns("completion", payload.Output)
+
+	// Stage 2: LLM judge, if requested and available. Merge into verdict.
+	if stool.JudgeResult {
+		if r.judge == nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] tool %s requests judge_result but judge unavailable; using regex-only verdict\n",
+				payload.Tool)
+		} else {
+			select {
+			case r.judgeSem <- struct{}{}:
+				func() {
+					defer func() { <-r.judgeSem }()
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if jv := r.judge.RunJudges(ctx, "completion", payload.Output, payload.Tool); jv != nil {
+						verdict = mergeWithJudge(verdict, jv)
+					}
+				}()
+			default:
+				fmt.Fprintf(os.Stderr, "[sidecar] tool result judge skipped (at capacity), regex scan kept: %s\n",
+					payload.Tool)
+			}
+		}
+	}
+
+	if verdict == nil || verdict.Action == "allow" {
+		return
+	}
+
+	minEntities := stool.MinEntitiesAlert
+	if minEntities <= 0 {
+		minEntities = 1
+	}
+	entityCount := verdict.EntityCount
+	if entityCount == 0 {
+		entityCount = len(verdict.Findings)
+	}
+	if entityCount < minEntities {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
+		payload.Tool, verdict.Action, verdict.Severity, entityCount, verdict.Findings)
+	_ = r.logger.LogAction("tool-result-pii-alert", payload.Tool,
+		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
+			verdict.Severity, entityCount, len(verdict.Findings), verdict.Reason))
+	if r.notify != nil {
+		r.notify.Push(SecurityNotification{
+			SubjectType: "tool-result",
+			SkillName:   payload.Tool,
+			Severity:    verdict.Severity,
+			Findings:    entityCount,
+			Actions:     []string{"alert"},
+			Reason:      verdict.Reason,
+		})
 	}
 }
 

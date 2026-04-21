@@ -590,11 +590,12 @@ func toVerdict(s string) Verdict {
 }
 
 func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
+	llm := w.cfg.EffectiveInspectLLM()
 	switch evt.Type {
 	case InstallSkill:
-		return scanner.NewSkillScanner(w.cfg.Scanners.SkillScanner, w.cfg.InspectLLM, w.cfg.CiscoAIDefense)
+		return scanner.NewSkillScanner(w.cfg.Scanners.SkillScanner, llm, w.cfg.CiscoAIDefense)
 	case InstallMCP:
-		return scanner.NewMCPScanner(w.cfg.Scanners.MCPScanner, w.cfg.InspectLLM, w.cfg.CiscoAIDefense)
+		return scanner.NewMCPScanner(w.cfg.Scanners.MCPScanner, llm, w.cfg.CiscoAIDefense)
 
 	case InstallPlugin:
 		return scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner)
@@ -610,6 +611,10 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 	switch evt.Type {
 	case InstallSkill:
 		return w.cfg.Gateway.Watcher.Skill.TakeAction
+	case InstallPlugin:
+		return w.cfg.Gateway.Watcher.Plugin.TakeAction
+	case InstallMCP:
+		return w.cfg.Gateway.Watcher.MCP.TakeAction
 	default:
 		return w.cfg.Watch.AutoBlock
 	}

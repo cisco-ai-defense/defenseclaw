@@ -1,0 +1,111 @@
+version: 1
+category: c2
+rules:
+  - id: C2-WEBHOOK-SITE
+    pattern: '(?i)webhook\.site'
+    title: "webhook.site (known exfil)"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+  - id: C2-NGROK
+    pattern: '(?i)(?:ngrok\.io|ngrok-free\.app)'
+    title: "ngrok tunnel (exfil risk)"
+    severity: HIGH
+    confidence: 0.85
+    tags: [exfiltration, c2]
+  - id: C2-PIPEDREAM
+    pattern: '(?i)pipedream\.net'
+    title: "Pipedream (known exfil)"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+  - id: C2-REQUESTBIN
+    pattern: '(?i)requestbin\.com'
+    title: "RequestBin (known exfil)"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+  - id: C2-HOOKBIN
+    pattern: '(?i)hookbin\.com'
+    title: "HookBin (known exfil)"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+  - id: C2-BURP
+    pattern: '(?i)burpcollaborator\.net'
+    title: "Burp Collaborator (pentest C2)"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+  - id: C2-INTERACTSH
+    pattern: '(?i)interact\.sh'
+    title: "interact.sh (OOB exfil)"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+  - id: C2-OAST
+    pattern: '(?i)oast\.fun'
+    title: "oast.fun (OOB testing)"
+    severity: HIGH
+    confidence: 0.85
+    tags: [exfiltration, c2]
+  - id: C2-CANARY
+    pattern: '(?i)canarytokens\.com'
+    title: "Canary Tokens"
+    severity: MEDIUM
+    confidence: 0.75
+    tags: [exfiltration, c2]
+  - id: C2-PASTEBIN
+    pattern: '(?i)pastebin\.com/raw/'
+    title: "Pastebin raw fetch"
+    severity: MEDIUM
+    confidence: 0.70
+    tags: [exfiltration, c2]
+  - id: C2-METADATA-AWS
+    pattern: '169\.254\.169\.254'
+    title: "AWS metadata endpoint (SSRF)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [ssrf, credential]
+  - id: C2-METADATA-GCP
+    pattern: 'metadata\.google\.internal'
+    title: "GCP metadata endpoint (SSRF)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [ssrf, credential]
+  - id: C2-METADATA-AZURE
+    pattern: '169\.254\.169\.254/metadata'
+    title: "Azure metadata endpoint (SSRF)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [ssrf, credential]
+  - id: C2-METADATA-HEX
+    pattern: '(?i)0xa9fea9fe'
+    title: "AWS metadata endpoint (hex-encoded SSRF)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [ssrf, credential]
+  - id: C2-METADATA-DECIMAL
+    pattern: '(?:^|[/])2852039166(?:$|[/])'
+    title: "AWS metadata endpoint (decimal-encoded SSRF)"
+    severity: CRITICAL
+    confidence: 0.93
+    tags: [ssrf, credential]
+  - id: C2-METADATA-OCTAL
+    pattern: '0251\.0376\.0251\.0376'
+    title: "AWS metadata endpoint (octal-encoded SSRF)"
+    severity: CRITICAL
+    confidence: 0.93
+    tags: [ssrf, credential]
+  - id: C2-DNS-TUNNEL
+    pattern: '(?i)\bdig\b\s+[^;\n]*\bTXT\b\s+(?:[a-f0-9]{16,}|[A-Za-z2-7]{24,})\.[A-Za-z0-9-]{2,}\.'
+    title: "DNS TXT query with high-entropy label (tunneling indicator)"
+    severity: HIGH
+    confidence: 0.78
+    tags: [exfiltration, dns-tunnel]
+  - id: C2-DNS-EXFIL
+    pattern: '(?i)\bnslookup\b\s+[a-f0-9]{8,}\.\w+\.'
+    title: "nslookup with hex subdomain (DNS exfil)"
+    severity: HIGH
+    confidence: 0.80
+    tags: [exfiltration, dns-tunnel]

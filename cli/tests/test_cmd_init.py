@@ -90,6 +90,61 @@ class TestInitCommand(unittest.TestCase):
         self.assertEqual(init_events[0].action, "init")
         store.close()
 
+class TestInitVersionDisplay(unittest.TestCase):
+    """Tests for version info in init Environment section."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-ver-")
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_shows_cli_version(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which):
+        from pathlib import Path
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("DefenseClaw:", result.output)
+
+    @patch("defenseclaw.commands.cmd_init._get_gateway_version", return_value="v0.5.0")
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_shows_gateway_version(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw_ver):
+        from pathlib import Path
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Gateway:       v0.5.0", result.output)
+
+    @patch("defenseclaw.commands.cmd_init._get_gateway_version", return_value=None)
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_gateway_not_found(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which, _mock_gw_ver):
+        from pathlib import Path
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Gateway:       not found", result.output)
+
+
 class TestInitPreservesExistingConfig(unittest.TestCase):
     """Regression tests for P5 fix: init must not overwrite existing config."""
 
@@ -522,6 +577,61 @@ class TestInitSeedsSplunkBridge(unittest.TestCase):
         seeded_bin = os.path.join(self.tmp_dir, "splunk-bridge", "bin", "splunk-claw-bridge")
         self.assertTrue(os.path.isfile(seeded_bin))
         self.assertTrue(os.access(seeded_bin, os.X_OK))
+
+
+class TestSeedGuardrailProfiles(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-guardrail-")
+        self.bundle_dir = tempfile.mkdtemp(prefix="dclaw-bundle-guardrail-")
+        for profile in ("default", "strict", "permissive"):
+            rules_dir = os.path.join(self.bundle_dir, profile, "rules")
+            os.makedirs(rules_dir, exist_ok=True)
+            with open(os.path.join(rules_dir, "secrets.yaml"), "w", encoding="utf-8") as handle:
+                handle.write("rules: []\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        shutil.rmtree(self.bundle_dir, ignore_errors=True)
+
+    @patch("defenseclaw.commands.cmd_init.bundled_guardrail_profiles_dir")
+    def test_seeds_profiles_when_absent(self, mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_guardrail_profiles
+
+        mock_bundled.return_value = Path(self.bundle_dir)
+        _seed_guardrail_profiles(self.tmp_dir)
+
+        for profile in ("default", "strict", "permissive"):
+            seeded = os.path.join(self.tmp_dir, "guardrail", profile, "rules", "secrets.yaml")
+            self.assertTrue(os.path.isfile(seeded), f"expected seeded file {seeded}")
+
+    @patch("defenseclaw.commands.cmd_init.bundled_guardrail_profiles_dir")
+    def test_preserves_existing_profile(self, mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_guardrail_profiles
+
+        mock_bundled.return_value = Path(self.bundle_dir)
+        existing_dir = os.path.join(self.tmp_dir, "guardrail", "default")
+        os.makedirs(existing_dir, exist_ok=True)
+        marker = os.path.join(existing_dir, "user-edited.yaml")
+        with open(marker, "w", encoding="utf-8") as handle:
+            handle.write("custom: true\n")
+
+        _seed_guardrail_profiles(self.tmp_dir)
+
+        self.assertTrue(os.path.isfile(marker), "existing profile must be preserved intact")
+        self.assertFalse(
+            os.path.isfile(os.path.join(existing_dir, "rules", "secrets.yaml")),
+            "existing profile must not be overwritten",
+        )
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.tmp_dir, "guardrail", "strict", "rules", "secrets.yaml"))
+        )
+
+    @patch("defenseclaw.commands.cmd_init.bundled_guardrail_profiles_dir", return_value=None)
+    def test_missing_bundle_is_noop(self, _mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_guardrail_profiles
+
+        _seed_guardrail_profiles(self.tmp_dir)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp_dir, "guardrail")))
 
 
 class TestInstallScanners(unittest.TestCase):

@@ -89,7 +89,6 @@ guardrail:
       - "aws_access_key"
       - "aws_secret_access"
       - "password="
-      - "token:"
       - "bearer "
       - "ghp_"
       - "gho_"

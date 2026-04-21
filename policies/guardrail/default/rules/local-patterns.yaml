@@ -1,0 +1,79 @@
+version: 1
+injection:
+  - "ignore previous"
+  - "ignore all instructions"
+  - "ignore above"
+  - "ignore all previous"
+  - "ignore your instructions"
+  - "ignore prior"
+  - "disregard previous"
+  - "disregard all"
+  - "disregard your"
+  - "forget your instructions"
+  - "forget all previous"
+  - "override your instructions"
+  - "override all instructions"
+  - "you are now"
+  - "pretend you are"
+  - "jailbreak"
+  - "do anything now"
+  - "dan mode"
+  - "developer mode enabled"
+
+injection_regexes:
+  - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
+  - 'disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
+  - '(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)'
+  - '(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))'
+  - 'act\s+as\b'
+  - 'bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)'
+
+pii_requests:
+  - "find their ssn"
+  - "find my ssn"
+  - "look up their ssn"
+  - "retrieve their ssn"
+  - "get their ssn"
+  - "get my ssn"
+  - "social security number"
+  - "mother's maiden name"
+  - "mothers maiden name"
+  - "credit card number"
+  - "find their password"
+  - "look up their password"
+  - "find their email"
+  - "look up their email"
+  - "date of birth"
+  - "bank account number"
+  - "passport number"
+  - "driver's license"
+  - "drivers license"
+
+pii_data_regexes:
+  - '\b\d{3}-\d{2}-\d{4}\b'
+  - '\b\d{9}\b'
+  - '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+
+secrets:
+  - "sk-ant-"
+  - "sk-proj-"
+  - "api_key="
+  - "apikey="
+  - "-----begin rsa"
+  - "-----begin private"
+  - "-----begin openssh"
+  - "aws_access_key"
+  - "aws_secret_access"
+  - "password="
+  - "ghp_"
+  - "gho_"
+  - "github_pat_"
+
+exfiltration:
+  - "/etc/passwd"
+  - "/etc/shadow"
+  - "base64 -d"
+  - "base64 --decode"
+  - "exfiltrate"
+  - "send to my server"
+  - "curl http"

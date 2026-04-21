@@ -53,11 +53,18 @@ func TestInferProviderNew(t *testing.T) {
 		want   string
 	}{
 		{"claude-opus-4-5", "", "anthropic"},
+		{"claude-haiku-4-5", "sk-ant-api123", "anthropic"},
+		{"claude-sonnet-4-20250514", "regular-key", "anthropic"},
 		{"gpt-4o", "", "openai"},
+		{"gpt-4o-mini", "sk-proj-abc", "openai"},
+		{"o3-mini", "sk-test", "openai"},
 		{"gemini-2.0-flash", "", "gemini"},
 		{"anything", "AIzaSyExample", "gemini"},
 		{"anything", "sk-ant-api123", "anthropic"},
 		{"anything", "sk-proj-abc", "openai"},
+		{"anything", "ABSKtest123", "bedrock"},
+		{"us.anthropic.claude-3-5-haiku", "ABSKkey", "bedrock"},
+		{"unknown-model", "regular-key", "openai"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model+"_"+tt.apiKey, func(t *testing.T) {
@@ -66,5 +73,60 @@ func TestInferProviderNew(t *testing.T) {
 				t.Errorf("inferProvider(%q, %q) = %q, want %q", tt.model, tt.apiKey, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSplitModel_NewProviders(t *testing.T) {
+	tests := []struct {
+		input     string
+		wantProv  string
+		wantModel string
+	}{
+		{"bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0", "bedrock", "us.anthropic.claude-3-5-haiku-20241022-v1:0"},
+		{"groq/llama-3", "groq", "llama-3"},
+		{"mistral/mistral-large", "mistral", "mistral-large"},
+		{"ollama/llama3", "ollama", "llama3"},
+		{"vertex/gemini-pro", "vertex", "gemini-pro"},
+		{"cohere/command-r", "cohere", "command-r"},
+		{"perplexity/sonar-small", "perplexity", "sonar-small"},
+		{"cerebras/llama3", "cerebras", "llama3"},
+		{"fireworks/llama-v3", "fireworks", "llama-v3"},
+		{"xai/grok-2", "xai", "grok-2"},
+		{"huggingface/meta-llama/Llama-3", "huggingface", "meta-llama/Llama-3"},
+		{"replicate/meta/llama-3", "replicate", "meta/llama-3"},
+		{"vllm/meta-llama/Llama-3", "vllm", "meta-llama/Llama-3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			prov, model := splitModel(tt.input)
+			if prov != tt.wantProv || model != tt.wantModel {
+				t.Errorf("splitModel(%q) = (%q, %q), want (%q, %q)",
+					tt.input, prov, model, tt.wantProv, tt.wantModel)
+			}
+		})
+	}
+}
+
+func TestNewProvider_BifrostType(t *testing.T) {
+	p, err := NewProvider("openai/gpt-4", "test-key")
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if _, ok := p.(*bifrostProvider); !ok {
+		t.Errorf("expected *bifrostProvider, got %T", p)
+	}
+}
+
+func TestNewProviderWithBase_BifrostType(t *testing.T) {
+	p, err := NewProviderWithBase("anthropic/claude-3-sonnet", "test-key", "http://localhost:8080/v1")
+	if err != nil {
+		t.Fatalf("NewProviderWithBase: %v", err)
+	}
+	bp, ok := p.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", p)
+	}
+	if bp.baseURL != "http://localhost:8080/v1" {
+		t.Errorf("baseURL = %q", bp.baseURL)
 	}
 }

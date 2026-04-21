@@ -44,3 +44,6 @@ def install_skill_cmd(app: AppContext) -> None:
     click.echo("CodeGuard skill: installing...", nl=False)
     status = install_codeguard_skill(app.cfg)
     click.echo(f" {status}")
+
+    from defenseclaw.commands import hint
+    hint("Scan code now:  defenseclaw scan code <path>")

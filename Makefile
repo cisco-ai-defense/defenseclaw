@@ -12,7 +12,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 DIST_DIR    := dist
 
 .PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
+        plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
@@ -38,8 +38,9 @@ install: cli-install gateway-install plugin-install
 	@echo ""
 	@echo "Next steps:"
 	@echo "  source $(VENV)/bin/activate"
-	@echo "  defenseclaw init"
-	@echo "  defenseclaw setup guardrail   # configure LLM guardrail"
+	@echo "  defenseclaw              # launch the interactive TUI (first run starts setup wizard)"
+	@echo "  defenseclaw init         # or initialize via CLI (scripting / CI)"
+	@echo "  defenseclaw --help       # see all CLI commands"
 	@echo ""
 	@if [ "$$(uname -s)" = "Linux" ]; then \
 		echo "Sandbox mode (Linux):"; \
@@ -166,7 +167,10 @@ cli-test-cov:
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
 gateway-test:
-	go test -race ./internal/gateway/ ./test/... -v
+	go test -race ./internal/gateway/ ./internal/tui/ ./test/... -v
+
+tui-test:
+	go test -race -count=1 ./internal/tui/ -v
 
 go-test-cov:
 	go test -race -count=1 -coverprofile=coverage.out ./...
@@ -220,9 +224,9 @@ dist-cli: _bundle-data
 _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
+	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
-	@mkdir -p cli/defenseclaw/_data/scripts
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
@@ -230,10 +234,12 @@ _bundle-data:
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
 	cp policies/openshell/*.rego cli/defenseclaw/_data/policies/openshell/
 	cp policies/openshell/*.yaml cli/defenseclaw/_data/policies/openshell/
+	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/default
+	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/strict
+	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/permissive
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
-	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:
