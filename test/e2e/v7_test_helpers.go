@@ -8,10 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/santhosh-tekuri/jsonschema/v5"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -96,41 +97,86 @@ func moduleRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
+// validateAgainstSchema validates a JSON document against a JSON Schema
+// 2020-12 file on disk using the pure-Go santhosh-tekuri/jsonschema/v5
+// library (the same one wired into the production gatewaylog.Validator).
+//
+// The gateway-event-envelope schema references three sibling schemas
+// (scan-event, scan-finding-event, activity-event) via absolute
+// `$id` URIs, so we preload all four into the compiler when the
+// envelope is requested and resolve everything from the single
+// `schemas/` directory. This replaces an earlier Python shell-out that
+// required the `referencing` and `jsonschema` PyPI packages and broke
+// the go-test CI job (which installs Go only, no Python deps).
 func validateAgainstSchema(t *testing.T, jsonBytes []byte, schemaRel string) {
 	t.Helper()
 	root := moduleRoot(t)
 	schemaPath := filepath.Join(root, schemaRel)
-	py := filepath.Join(root, ".venv", "bin", "python3")
-	if _, err := os.Stat(py); err != nil {
-		py = "python3"
+	schemaDir := filepath.Dir(schemaPath)
+
+	compiler := jsonschema.NewCompiler()
+	compiler.Draft = jsonschema.Draft2020
+
+	// addResource pulls the schema file off disk, extracts its $id,
+	// and registers it with the compiler so $ref resolution works
+	// without any HTTP fetch.
+	addResource := func(path string) (string, error) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", path, err)
+		}
+		var hdr struct {
+			ID string `json:"$id"`
+		}
+		if err := json.Unmarshal(raw, &hdr); err != nil {
+			return "", fmt.Errorf("decode $id from %s: %w", path, err)
+		}
+		if hdr.ID == "" {
+			return "", fmt.Errorf("schema %s has no $id", path)
+		}
+		if err := compiler.AddResource(hdr.ID, bytes.NewReader(raw)); err != nil {
+			return "", fmt.Errorf("add resource %s: %w", path, err)
+		}
+		return hdr.ID, nil
 	}
-	cmd := exec.Command(py, "-c", `
-import json, sys
-from pathlib import Path
-from referencing import Registry, Resource
-from jsonschema import Draft202012Validator
 
-schema_path = Path(sys.argv[1])
-root = schema_path.parent
-schema_doc = json.loads(schema_path.read_text())
-doc = json.loads(sys.argv[2])
+	primaryID, err := addResource(schemaPath)
+	if err != nil {
+		t.Fatalf("jsonschema %s: %v", schemaRel, err)
+	}
 
-if schema_path.name == 'gateway-event-envelope.json':
-    resources = []
-    for name in ['scan-event.json', 'scan-finding-event.json', 'activity-event.json']:
-        uri = 'https://defenseclaw.io/schemas/' + name
-        p = root / name
-        if p.exists():
-            resources.append((uri, Resource.from_contents(json.loads(p.read_text()))))
-    registry = Registry().with_resources(resources)
-    Draft202012Validator(schema_doc, registry=registry).validate(doc)
-else:
-    Draft202012Validator(schema_doc).validate(doc)
-`, schemaPath, string(jsonBytes))
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("jsonschema %s: %v\n%s", schemaRel, err, stderr.String())
+	// The envelope references three sibling schemas via absolute
+	// $id. Preload them so Compile() can resolve the $refs. Missing
+	// siblings are skipped — only the envelope needs them, and other
+	// schemas are self-contained.
+	if filepath.Base(schemaPath) == "gateway-event-envelope.json" {
+		siblings := []string{
+			"scan-event.json",
+			"scan-finding-event.json",
+			"activity-event.json",
+		}
+		for _, name := range siblings {
+			p := filepath.Join(schemaDir, name)
+			if _, statErr := os.Stat(p); statErr != nil {
+				continue
+			}
+			if _, err := addResource(p); err != nil {
+				t.Fatalf("jsonschema %s: sibling %s: %v", schemaRel, name, err)
+			}
+		}
+	}
+
+	sch, err := compiler.Compile(primaryID)
+	if err != nil {
+		t.Fatalf("jsonschema %s: compile: %v", schemaRel, err)
+	}
+
+	var doc any
+	if err := json.Unmarshal(jsonBytes, &doc); err != nil {
+		t.Fatalf("jsonschema %s: decode document: %v", schemaRel, err)
+	}
+	if err := sch.Validate(doc); err != nil {
+		t.Fatalf("jsonschema %s: %v", schemaRel, err)
 	}
 }
 
