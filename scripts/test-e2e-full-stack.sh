@@ -1827,10 +1827,20 @@ phase_aibom() {
     echo "=== Phase 5E: AIBOM [CLI] ==="
     phase_timer_start
 
-    local out json key_check alerts count
-    out=$(defenseclaw aibom scan --json 2>&1 || true)
-    echo "$out"
-    json=$(echo "$out" | extract_json || true)
+    local out_file json key_check alerts count sz
+    # Capturing multi‑MB JSON into a shell variable and `echo`ing it can hit
+    # EAGAIN ("Resource temporarily unavailable") on constrained CI runners.
+    out_file="$(mktemp -t dc-aibom.XXXXXX.jsonl)"
+    defenseclaw aibom scan --json >"$out_file" 2>&1 || true
+    sz=$(wc -c <"$out_file" | tr -d ' ')
+    echo "[aibom] scan output: ${sz} bytes"
+    if [ "${sz:-0}" -le 524288 ]; then
+        cat "$out_file"
+    else
+        echo "[aibom] eliding full output from CI log (${sz} bytes); validating from temp copy"
+    fi
+    json=$(extract_json <"$out_file" || true)
+    rm -f "$out_file"
     if [ -n "$json" ] && echo "$json" | jq -e 'has("skills") or has("plugins") or has("mcp") or has("agents") or has("tools") or has("models") or has("memory") or has("components")' >/dev/null 2>&1; then
         pass "aibom: JSON inventory emitted"
     else
