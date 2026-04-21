@@ -324,4 +324,3 @@ func TestAuditParityScriptShape(t *testing.T) {
 		}
 	}
 }
-

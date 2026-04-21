@@ -27,25 +27,55 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, SkillScannerConfig
+from defenseclaw.config import (
+    CiscoAIDefenseConfig,
+    InspectLLMConfig,
+    LLMConfig,
+    SkillScannerConfig,
+)
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 
 if TYPE_CHECKING:
     pass
 
 
+def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
+    """Back-compat shim — mirrors the one in ``mcp.py``. Kept local so
+    each scanner can be deleted independently when we fully retire the
+    legacy ``InspectLLMConfig`` shape."""
+    return LLMConfig(
+        model=il.model,
+        provider=il.provider,
+        api_key=il.api_key,
+        api_key_env=il.api_key_env,
+        base_url=il.base_url,
+        timeout=il.timeout,
+        max_retries=il.max_retries,
+    )
+
+
 class SkillScannerWrapper:
-    """Wraps the cisco-ai-skill-scanner SDK."""
+    """Wraps the cisco-ai-skill-scanner SDK.
+
+    Mirrors :class:`MCPScannerWrapper` — accepts either a legacy
+    ``InspectLLMConfig`` or a unified ``LLMConfig`` via ``llm=``.
+    Internally everything is driven through :class:`LLMConfig` and the
+    shared :mod:`defenseclaw.scanner._llm_env` helpers.
+    """
 
     def __init__(
         self,
         config: SkillScannerConfig,
         inspect_llm: InspectLLMConfig | None = None,
         cisco_ai_defense: CiscoAIDefenseConfig | None = None,
+        *,
+        llm: LLMConfig | None = None,
     ) -> None:
         self.config = config
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
+        self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
 
     def name(self) -> str:
         return "skill-scanner"
@@ -66,7 +96,7 @@ class SkillScannerWrapper:
             raise SystemExit(1)
 
         cfg = self.config
-        llm = self.inspect_llm
+        llm = self._llm
         self._inject_env()
 
         policy = ScanPolicy.default()
@@ -83,10 +113,12 @@ class SkillScannerWrapper:
             build_kwargs["use_behavioral"] = True
         if cfg.use_llm:
             build_kwargs["use_llm"] = True
-            if llm.model:
-                model = llm.model
-                if llm.provider and "/" not in model:
-                    model = f"{llm.provider}/{model}"
+            # skill-scanner accepts the LiteLLM-style ``provider/model``
+            # string via llm_model; we still pass ``llm_provider``
+            # separately because skill-scanner uses it for routing
+            # decisions (e.g. local vs remote handling).
+            model = litellm_model(llm)
+            if model:
                 build_kwargs["llm_model"] = model
             if llm.provider:
                 build_kwargs["llm_provider"] = llm.provider
@@ -114,16 +146,26 @@ class SkillScannerWrapper:
         return self._convert(sdk_result, target, elapsed)
 
     def _inject_env(self) -> None:
-        """Inject API keys from config into env if not already set."""
+        """Inject API keys and the skill-scanner-specific env vars.
+
+        Two layers:
+
+        1. Provider-specific env vars for LiteLLM (via the shared
+           helper). This is how the analyzer eventually reaches the
+           model regardless of provider.
+        2. skill-scanner's bespoke env vars (``SKILL_SCANNER_LLM_*``,
+           ``VIRUSTOTAL_API_KEY``, ``AI_DEFENSE_API_KEY``) that the SDK
+           reads directly. Kept here until skill-scanner switches to the
+           provider-native env vars.
+        """
         cfg = self.config
-        llm = self.inspect_llm
+        llm = self._llm
         aid = self.cisco_ai_defense
-        llm_model = llm.model
-        if llm_model and llm.provider and "/" not in llm_model:
-            llm_model = f"{llm.provider}/{llm_model}"
+        inject_llm_env(llm)
+
         mappings = [
             ("SKILL_SCANNER_LLM_API_KEY", llm.resolved_api_key()),
-            ("SKILL_SCANNER_LLM_MODEL", llm_model),
+            ("SKILL_SCANNER_LLM_MODEL", litellm_model(llm)),
             ("VIRUSTOTAL_API_KEY", cfg.resolved_virustotal_api_key()),
             ("AI_DEFENSE_API_KEY", aid.resolved_api_key()),
         ]

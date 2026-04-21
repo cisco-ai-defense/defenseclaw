@@ -116,7 +116,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// tool_injection is on.
 	if cfg.Guardrail.Judge.Enabled {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
-		judge := NewLLMJudge(&cfg.Guardrail.Judge, dotenvPath, rp, cfg.ResolvedDefaultLLMAPIKey())
+		judgeLLM := cfg.ResolveLLM("guardrail.judge")
+		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp)
 		if judge != nil {
 			router.SetJudge(judge)
 			features := "tool-result-pii"
@@ -124,7 +125,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 				features += ", tool-injection"
 			}
 			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n",
-				features, cfg.Guardrail.Judge.Model)
+				features, judgeLLM.Model)
 		}
 	}
 
@@ -793,7 +794,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.cfg.PolicyDir,
 		s.notify,
 		rp,
-		s.cfg.ResolvedDefaultLLMAPIKey(),
+		s.cfg.ResolveLLM("guardrail.judge"),
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)

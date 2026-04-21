@@ -348,9 +348,23 @@ def _ensure_device_key(path: str) -> None:
         f"{b64_seed}\n"
         "-----END ED25519 PRIVATE KEY-----\n"
     )
-    with open(path, "w") as f:
-        os.chmod(path, 0o600)
+    # Create the file with 0o600 atomically so the key is never
+    # world-readable, even for the brief window between open() and
+    # the previous chmod(). ``O_EXCL`` ensures we don't overwrite a
+    # concurrently-created key (idempotent early-exit already covered
+    # the is-it-there case above).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        # Another process won the race — trust its key and exit.
+        return
+    with os.fdopen(fd, "w") as f:
         f.write(pem_data)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:

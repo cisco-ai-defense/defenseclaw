@@ -17,7 +17,7 @@ import (
 
 // TestWebhookWizardFields_TypeRebuildsForm asserts that the per-type
 // prompts (secret_env, room_id, …) appear / disappear when the user
-// cycles the ``whtype`` picker. The CLI's required inputs differ by
+// cycles the “whtype“ picker. The CLI's required inputs differ by
 // channel, so the TUI must expose the right set to avoid blocking
 // submit on an unreachable field.
 func TestWebhookWizardFields_TypeRebuildsForm(t *testing.T) {
@@ -77,7 +77,7 @@ func TestWebhookWizardFields_TypeRebuildsForm(t *testing.T) {
 }
 
 // TestWebhookWizardFields_URLIsRequired asserts the URL field is
-// marked Required so ``missingRequiredFields`` will block submit
+// marked Required so “missingRequiredFields“ will block submit
 // before shelling out to the Python CLI. A notifier webhook without
 // a URL is guaranteed to fail at the writer layer; catching it in
 // the form is the humane failure mode.
@@ -103,8 +103,8 @@ func TestWebhookWizardFields_URLIsRequired(t *testing.T) {
 }
 
 // TestBuildWizardArgs_WebhookTypeIsPositional asserts the channel
-// type is injected positionally after ``add`` so the CLI signature
-// matches ``defenseclaw setup webhook add <type>``. Mirroring
+// type is injected positionally after “add“ so the CLI signature
+// matches “defenseclaw setup webhook add <type>“. Mirroring
 // TestBuildWizardArgs_ObservabilityPresetIsPositional.
 func TestBuildWizardArgs_WebhookTypeIsPositional(t *testing.T) {
 	cases := []struct {
@@ -243,7 +243,7 @@ func TestSubmitWebhookForm_WebexRequiresRoomID(t *testing.T) {
 
 // TestWebhookWizardCommands_MatchCLISurface guards against the
 // wizardCommands slice drifting from the actual CLI group. If the
-// Python CLI ever moves ``setup webhook add`` the TUI must move too
+// Python CLI ever moves “setup webhook add“ the TUI must move too
 // or every submit will fail with "unknown command" after the user
 // has filled the form.
 func TestWebhookWizardCommands_MatchCLISurface(t *testing.T) {

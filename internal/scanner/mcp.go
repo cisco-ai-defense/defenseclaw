@@ -29,20 +29,49 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+// MCPScanner shells out to the Python “cisco-ai-mcp-scanner“ CLI.
+// Mirrors “SkillScanner“: the LLM-facing surface is driven by the
+// unified “config.LLMConfig“ resolved at “scanners.mcp“, with the
+// legacy “InspectLLMConfig“ kept only to preserve the old
+// “NewMCPScanner“ signature for existing callers/tests.
 type MCPScanner struct {
 	Config         config.MCPScannerConfig
-	InspectLLM     config.InspectLLMConfig
+	LLM            config.LLMConfig
+	InspectLLM     config.InspectLLMConfig // Deprecated: populated only for back-compat; do not read.
 	CiscoAIDefense config.CiscoAIDefenseConfig
 }
 
+// NewMCPScanner is the back-compat constructor. Translates the legacy
+// “InspectLLMConfig“ shape into the unified “LLMConfig“ internally
+// so everything downstream only deals with one structure. Prefer
+// “NewMCPScannerFromLLM“ in new code.
 func NewMCPScanner(cfg config.MCPScannerConfig, llm config.InspectLLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
 	if cfg.Binary == "" {
 		cfg.Binary = "mcp-scanner"
 	}
-	return &MCPScanner{Config: cfg, InspectLLM: llm, CiscoAIDefense: aid}
+	return &MCPScanner{
+		Config:         cfg,
+		LLM:            inspectToLLM(llm),
+		InspectLLM:     llm,
+		CiscoAIDefense: aid,
+	}
 }
 
-func (s *MCPScanner) Name() string              { return "mcp-scanner" }
+// NewMCPScannerFromLLM constructs a scanner directly from the unified
+// LLM config. Call sites should resolve once via
+// “rootCfg.ResolveLLM("scanners.mcp")“ and pass the result here.
+func NewMCPScannerFromLLM(cfg config.MCPScannerConfig, llm config.LLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
+	if cfg.Binary == "" {
+		cfg.Binary = "mcp-scanner"
+	}
+	return &MCPScanner{
+		Config:         cfg,
+		LLM:            llm,
+		CiscoAIDefense: aid,
+	}
+}
+
+func (s *MCPScanner) Name() string               { return "mcp-scanner" }
 func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
@@ -75,9 +104,14 @@ func (s *MCPScanner) scanEnv() []string {
 	}{
 		{"MCP_SCANNER_API_KEY", s.CiscoAIDefense.ResolvedAPIKey()},
 		{"MCP_SCANNER_ENDPOINT", s.CiscoAIDefense.Endpoint},
-		{"MCP_SCANNER_LLM_API_KEY", s.InspectLLM.ResolvedAPIKey()},
-		{"MCP_SCANNER_LLM_MODEL", s.InspectLLM.Model},
-		{"MCP_SCANNER_LLM_BASE_URL", s.InspectLLM.BaseURL},
+		// mcp-scanner-specific env vars. The Python scanner reads
+		// these directly; ``liteLLMModel`` yields the LiteLLM-shaped
+		// ``provider/model`` string when a bare model + separate
+		// provider were configured, matching what the unified
+		// ``Config.ResolveLLM`` produces.
+		{"MCP_SCANNER_LLM_API_KEY", s.LLM.ResolvedAPIKey()},
+		{"MCP_SCANNER_LLM_MODEL", liteLLMModel(s.LLM)},
+		{"MCP_SCANNER_LLM_BASE_URL", s.LLM.BaseURL},
 	}
 
 	existing := make(map[string]bool)

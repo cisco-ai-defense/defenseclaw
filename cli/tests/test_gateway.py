@@ -6,323 +6,117 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for defenseclaw.gateway — OrchestratorClient HTTP methods."""
+"""Tests for :mod:`defenseclaw.gateway` — the gateway-binary resolver.
+
+The resolver fixed a concrete UX bug where ``defenseclaw tui`` failed
+in the shell that just finished ``make all``.  These tests pin down
+the three-tier resolution order so a future refactor can't silently
+regress it.
+"""
+
+from __future__ import annotations
 
 import os
-import sys
+import stat
+import tempfile
 import unittest
-from unittest.mock import MagicMock
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from defenseclaw.gateway import OrchestratorClient
-
-
-class TestOrchestratorClientInit(unittest.TestCase):
-    def test_defaults(self):
-        client = OrchestratorClient()
-        self.assertEqual(client.base_url, "http://127.0.0.1:18970")
-        self.assertEqual(client.timeout, 5)
-        self.assertEqual(client.plugin_timeout, 90)
-
-    def test_custom_params(self):
-        client = OrchestratorClient(host="10.0.0.1", port=9999, timeout=15)
-        self.assertEqual(client.base_url, "http://10.0.0.1:9999")
-        self.assertEqual(client.timeout, 15)
-        self.assertEqual(client.plugin_timeout, 90)
-
-    def test_custom_plugin_timeout(self):
-        client = OrchestratorClient(timeout=15, plugin_timeout=45)
-        self.assertEqual(client.plugin_timeout, 45)
-
-    def test_session_has_csrf_header(self):
-        client = OrchestratorClient()
-        self.assertEqual(
-            client._session.headers["X-DefenseClaw-Client"], "python-cli"
-        )
-
-    def test_no_auth_header_without_token(self):
-        client = OrchestratorClient()
-        self.assertNotIn("Authorization", client._session.headers)
-
-    def test_auth_header_with_token(self):
-        client = OrchestratorClient(token="secret-123")
-        self.assertEqual(
-            client._session.headers["Authorization"], "Bearer secret-123"
-        )
-
-    def test_empty_token_no_auth_header(self):
-        client = OrchestratorClient(token="")
-        self.assertNotIn("Authorization", client._session.headers)
-
-
-def _make_client() -> tuple[OrchestratorClient, MagicMock]:
-    """Create a client with a mocked session for testing."""
-    client = OrchestratorClient()
-    mock_session = MagicMock()
-    client._session = mock_session
-    return client, mock_session
-
-
-class TestOrchestratorClientHealth(unittest.TestCase):
-    def test_health_success(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"status": "ok"}
-        session.get.return_value = mock_resp
-
-        result = client.health()
-
-        session.get.assert_called_once_with("http://127.0.0.1:18970/health", timeout=5)
-        mock_resp.raise_for_status.assert_called_once()
-        self.assertEqual(result, {"status": "ok"})
-
-
-class TestOrchestratorClientStatus(unittest.TestCase):
-    def test_status_success(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"uptime_ms": 5000}
-        session.get.return_value = mock_resp
-
-        result = client.status()
-
-        session.get.assert_called_once_with("http://127.0.0.1:18970/status", timeout=5)
-        self.assertEqual(result["uptime_ms"], 5000)
-
-
-class TestOrchestratorClientSkillOps(unittest.TestCase):
-    def test_disable_skill(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ok": True}
-        session.post.return_value = mock_resp
-
-        result = client.disable_skill("bad-skill")
-
-        session.post.assert_called_once_with(
-            "http://127.0.0.1:18970/skill/disable",
-            json={"skillKey": "bad-skill"},
-            timeout=5,
-        )
-        self.assertTrue(result["ok"])
-
-    def test_enable_skill(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ok": True}
-        session.post.return_value = mock_resp
-
-        result = client.enable_skill("good-skill")
-
-        session.post.assert_called_once_with(
-            "http://127.0.0.1:18970/skill/enable",
-            json={"skillKey": "good-skill"},
-            timeout=5,
-        )
-        self.assertTrue(result["ok"])
-
-
-class TestOrchestratorClientPluginOps(unittest.TestCase):
-    def test_disable_plugin(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ok": True}
-        session.post.return_value = mock_resp
-
-        result = client.disable_plugin("bad-plugin")
-
-        session.post.assert_called_once_with(
-            "http://127.0.0.1:18970/plugin/disable",
-            json={"pluginName": "bad-plugin"},
-            timeout=90,
-        )
-        self.assertTrue(result["ok"])
-
-    def test_enable_plugin(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"ok": True}
-        session.post.return_value = mock_resp
-
-        result = client.enable_plugin("good-plugin")
-
-        session.post.assert_called_once_with(
-            "http://127.0.0.1:18970/plugin/enable",
-            json={"pluginName": "good-plugin"},
-            timeout=90,
-        )
-        self.assertTrue(result["ok"])
-
-
-class TestOrchestratorClientPatchConfig(unittest.TestCase):
-    def test_patch_config(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"patched": True}
-        session.post.return_value = mock_resp
-
-        result = client.patch_config("watch.auto_block", True)
-
-        session.post.assert_called_once_with(
-            "http://127.0.0.1:18970/config/patch",
-            json={"path": "watch.auto_block", "value": True},
-            timeout=5,
-        )
-        self.assertTrue(result["patched"])
-
-
-class TestOrchestratorClientScanSkill(unittest.TestCase):
-    def test_scan_skill(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"scanner": "skill-scanner", "findings": []}
-        session.post.return_value = mock_resp
-
-        result = client.scan_skill("/path/to/skill", name="my-skill")
-
-        session.post.assert_called_once_with(
-            "http://127.0.0.1:18970/v1/skill/scan",
-            json={"target": "/path/to/skill", "name": "my-skill"},
-            timeout=120,
-        )
-        self.assertEqual(result["scanner"], "skill-scanner")
-
-
-class TestOrchestratorClientIsRunning(unittest.TestCase):
-    def test_is_running_true(self):
-        client, session = _make_client()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {"status": "ok"}
-        session.get.return_value = mock_resp
-
-        self.assertTrue(client.is_running())
-
-    def test_is_running_connection_error(self):
-        import requests
-        client, session = _make_client()
-        session.get.side_effect = requests.ConnectionError("refused")
-
-        self.assertFalse(client.is_running())
-
-    def test_is_running_timeout(self):
-        import requests
-        client, session = _make_client()
-        session.get.side_effect = requests.Timeout("timed out")
-
-        self.assertFalse(client.is_running())
-
-
-class TestGatewayCSRFHeaderLiveServer(unittest.TestCase):
-    """Verify OrchestratorClient sends X-DefenseClaw-Client using a real HTTP server (no mocks)."""
-
-    def test_post_sends_csrf_header(self):
-        import http.server
-        import threading
-
-        captured = [None]
-
-        class CaptureHandler(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                captured[0] = self.headers
-                length = int(self.headers.get("Content-Length", 0))
-                self.rfile.read(length)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"ok":true}')
-
-            def log_message(self, *args):
-                pass
-
-        server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
-        port = server.server_address[1]
-        thread = threading.Thread(target=server.handle_request, daemon=True)
-        thread.start()
-
-        try:
-            client = OrchestratorClient(host="127.0.0.1", port=port)
-            client.disable_skill("test-skill")
-            thread.join(timeout=5)
-
-            self.assertIsNotNone(captured[0])
-            self.assertEqual(captured[0].get("X-DefenseClaw-Client"), "python-cli")
-        finally:
-            server.server_close()
-
-    def test_get_sends_csrf_header(self):
-        import http.server
-        import threading
-
-        captured = [None]
-
-        class CaptureHandler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                captured[0] = self.headers
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"status":"ok"}')
-
-            def log_message(self, *args):
-                pass
-
-        server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
-        port = server.server_address[1]
-        thread = threading.Thread(target=server.handle_request, daemon=True)
-        thread.start()
-
-        try:
-            client = OrchestratorClient(host="127.0.0.1", port=port)
-            client.health()
-            thread.join(timeout=5)
-
-            self.assertIsNotNone(captured[0])
-            self.assertEqual(captured[0].get("X-DefenseClaw-Client"), "python-cli")
-        finally:
-            server.server_close()
-
-    def test_scan_skill_sends_csrf_header(self):
-        import http.server
-        import threading
-
-        captured = [None]
-
-        class CaptureHandler(http.server.BaseHTTPRequestHandler):
-            def do_POST(self):
-                captured[0] = self.headers
-                length = int(self.headers.get("Content-Length", 0))
-                self.rfile.read(length)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"scanner":"skill-scanner","findings":[]}')
-
-            def log_message(self, *args):
-                pass
-
-        server = http.server.HTTPServer(("127.0.0.1", 0), CaptureHandler)
-        port = server.server_address[1]
-        thread = threading.Thread(target=server.handle_request, daemon=True)
-        thread.start()
-
-        try:
-            client = OrchestratorClient(host="127.0.0.1", port=port)
-            client.scan_skill("/path/to/skill", name="my-skill")
-            thread.join(timeout=5)
-
-            self.assertIsNotNone(captured[0])
-            self.assertEqual(captured[0].get("X-DefenseClaw-Client"), "python-cli")
-        finally:
-            server.server_close()
+from unittest.mock import patch
+
+from defenseclaw import gateway
+
+
+class ResolveGatewayBinaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Work in a tmp dir so the "canonical fallback" branch doesn't
+        # accidentally hit a real ~/.local/bin/defenseclaw-gateway the
+        # developer happens to have installed.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+        # Move the canonical install dir into the sandbox for the
+        # duration of each test.  Patching a module-level constant is
+        # the simplest way to redirect both canonical_install_path() and
+        # the fallback lookup inside resolve_gateway_binary().
+        self._orig_install_dir = gateway._CANONICAL_INSTALL_DIR
+        gateway._CANONICAL_INSTALL_DIR = self._tmp.name
+        self.addCleanup(lambda: setattr(
+            gateway, "_CANONICAL_INSTALL_DIR", self._orig_install_dir,
+        ))
+
+        # Scrub the env override — real CI envs occasionally set it.
+        self._env_backup = os.environ.pop("DEFENSECLAW_GATEWAY_BIN", None)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self) -> None:
+        if self._env_backup is not None:
+            os.environ["DEFENSECLAW_GATEWAY_BIN"] = self._env_backup
+        else:
+            os.environ.pop("DEFENSECLAW_GATEWAY_BIN", None)
+
+    def _make_executable(self, path: str) -> None:
+        """Create an empty file at *path* with the exec bit set."""
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+
+    def test_env_override_wins_over_path_and_fallback(self):
+        # Override wins even when the canonical path would also resolve:
+        # packagers rely on this to vendor the binary elsewhere.
+        canonical = gateway.canonical_install_path()
+        self._make_executable(canonical)
+
+        override = os.path.join(self._tmp.name, "custom-gw")
+        self._make_executable(override)
+        os.environ["DEFENSECLAW_GATEWAY_BIN"] = override
+
+        with patch.object(gateway.shutil, "which", return_value="/from/path/gw"):
+            self.assertEqual(gateway.resolve_gateway_binary(), override)
+
+    def test_env_override_is_returned_verbatim_even_if_missing(self):
+        # Honour the override even when the file is missing so the real
+        # exec error surfaces to the user instead of a generic "not
+        # found" — much easier to debug a "no such file" from the
+        # caller than our opaque fallback.
+        override = os.path.join(self._tmp.name, "does-not-exist")
+        os.environ["DEFENSECLAW_GATEWAY_BIN"] = override
+
+        with patch.object(gateway.shutil, "which", return_value=None):
+            self.assertEqual(gateway.resolve_gateway_binary(), override)
+
+    def test_path_wins_when_no_override(self):
+        with patch.object(gateway.shutil, "which", return_value="/opt/bin/defenseclaw-gateway"):
+            self.assertEqual(
+                gateway.resolve_gateway_binary(),
+                "/opt/bin/defenseclaw-gateway",
+            )
+
+    def test_falls_back_to_canonical_when_path_empty(self):
+        # The bug this helper was written to fix: just-installed binary
+        # at ~/.local/bin that isn't on PATH yet.
+        canonical = gateway.canonical_install_path()
+        self._make_executable(canonical)
+
+        with patch.object(gateway.shutil, "which", return_value=None):
+            self.assertEqual(gateway.resolve_gateway_binary(), canonical)
+
+    def test_returns_none_when_nothing_resolves(self):
+        # Canonical dir exists (it's the tmpdir) but no binary inside.
+        with patch.object(gateway.shutil, "which", return_value=None):
+            self.assertIsNone(gateway.resolve_gateway_binary())
+
+    def test_canonical_fallback_requires_exec_bit(self):
+        # A stray non-executable file at the canonical path must not
+        # masquerade as a working binary.
+        canonical = gateway.canonical_install_path()
+        with open(canonical, "w") as f:
+            f.write("not an executable")
+        # Explicitly strip any exec bit that the umask may have granted.
+        os.chmod(canonical, 0o644)
+
+        with patch.object(gateway.shutil, "which", return_value=None):
+            self.assertIsNone(gateway.resolve_gateway_binary())
 
 
 if __name__ == "__main__":

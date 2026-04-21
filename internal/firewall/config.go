@@ -39,11 +39,11 @@ const (
 
 // FirewallConfig is the top-level firewall configuration.
 type FirewallConfig struct {
-	Version       string         `yaml:"version"`
-	DefaultAction string         `yaml:"default_action"` // allow or deny
-	Rules         []Rule         `yaml:"rules"`
+	Version       string          `yaml:"version"`
+	DefaultAction string          `yaml:"default_action"` // allow or deny
+	Rules         []Rule          `yaml:"rules"`
 	Allowlist     AllowlistConfig `yaml:"allowlist"`
-	Logging       LoggingConfig  `yaml:"logging"`
+	Logging       LoggingConfig   `yaml:"logging"`
 }
 
 // Rule defines a single named firewall rule.

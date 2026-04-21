@@ -545,6 +545,7 @@ def scan(
         app.cfg.scanners.skill_scanner,
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
+        llm=app.cfg.resolve_llm("scanners.skill"),
     )
 
     if scan_all or target == "all":
@@ -971,6 +972,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             app.cfg.scanners.skill_scanner,
             app.cfg.effective_inspect_llm(),
             app.cfg.cisco_ai_defense,
+            llm=app.cfg.resolve_llm("scanners.skill"),
         )
         result = scanner.scan(skill_dir)
 
@@ -1061,6 +1063,7 @@ def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
             app.cfg.scanners.skill_scanner,
             app.cfg.effective_inspect_llm(),
             app.cfg.cisco_ai_defense,
+            llm=app.cfg.resolve_llm("scanners.skill"),
         )
         result = scanner.scan(skill_dir)
 
@@ -1668,6 +1671,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         app.cfg.scanners.skill_scanner,
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
+        llm=app.cfg.resolve_llm("scanners.skill"),
     )
     try:
         result = scanner.scan(skill_path)

@@ -590,12 +590,24 @@ func toVerdict(s string) Verdict {
 }
 
 func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
-	llm := w.cfg.EffectiveInspectLLM()
+	// Each scanner kind gets its own resolved LLMConfig so
+	// ``scanners.{skill,mcp}.llm`` overrides layered on top of the
+	// global ``llm:`` block take effect. Resolving per-event (rather
+	// than caching once at watcher startup) means a config reload is
+	// picked up automatically on the next install.
 	switch evt.Type {
 	case InstallSkill:
-		return scanner.NewSkillScanner(w.cfg.Scanners.SkillScanner, llm, w.cfg.CiscoAIDefense)
+		return scanner.NewSkillScannerFromLLM(
+			w.cfg.Scanners.SkillScanner,
+			w.cfg.ResolveLLM("scanners.skill"),
+			w.cfg.CiscoAIDefense,
+		)
 	case InstallMCP:
-		return scanner.NewMCPScanner(w.cfg.Scanners.MCPScanner, llm, w.cfg.CiscoAIDefense)
+		return scanner.NewMCPScannerFromLLM(
+			w.cfg.Scanners.MCPScanner,
+			w.cfg.ResolveLLM("scanners.mcp"),
+			w.cfg.CiscoAIDefense,
+		)
 
 	case InstallPlugin:
 		return scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner)

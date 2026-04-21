@@ -54,10 +54,10 @@ var policyCreateLabels = [policyFieldCount]string{
 // BuildCommand time so the operator sees the error inline in the
 // form rather than deep inside a click.BadParameter traceback.
 var validActions = map[string]bool{
-	"":       true,
-	"block":  true,
-	"warn":   true,
-	"allow":  true,
+	"":      true,
+	"block": true,
+	"warn":  true,
+	"allow": true,
 }
 
 var validPresets = map[string]bool{

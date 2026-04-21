@@ -311,10 +311,10 @@ var policyDomainsCmd = &cobra.Command{
 
 		var data struct {
 			Firewall struct {
-				DefaultAction      string   `json:"default_action"`
+				DefaultAction       string   `json:"default_action"`
 				BlockedDestinations []string `json:"blocked_destinations"`
-				AllowedDomains     []string `json:"allowed_domains"`
-				AllowedPorts       []int    `json:"allowed_ports"`
+				AllowedDomains      []string `json:"allowed_domains"`
+				AllowedPorts        []int    `json:"allowed_ports"`
 			} `json:"firewall"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
@@ -370,4 +370,3 @@ func resolveRegoDir() string {
 
 	return ""
 }
-

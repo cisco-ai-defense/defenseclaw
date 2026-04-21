@@ -14,225 +14,336 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw-llm — thin CLI bridge to LLM provider SDKs.
+"""defenseclaw-llm — LiteLLM-backed subprocess bridge.
 
-Called by the TypeScript plugin scanner (and anything else) via subprocess.
-Routes to Anthropic or OpenAI based on the model name.
+Called by the TypeScript plugin scanner (``@defenseclaw/plugin-scanner``)
+and any other out-of-process component that needs to talk to an LLM
+without pulling in the full DefenseClaw Python dependency tree on its
+own. Uses LiteLLM's :func:`litellm.completion` so every provider
+LiteLLM supports — OpenAI, Anthropic, Google, Azure, Bedrock, Groq,
+Mistral, DeepSeek, Fireworks, Ollama, vLLM, LM Studio, OpenRouter,
+Together.ai, etc. — works through the same bridge with no SDK-specific
+branching here.
 
-Usage:
-  echo '{"model":"claude-sonnet-4-20250514","messages":[...]}' | python -m defenseclaw.llm
-  python -m defenseclaw.llm --model claude-sonnet-4-20250514 --prompt "Analyze this code..."
+Routing precedence (high → low) for each field:
 
-Input (stdin JSON):
-  {
-    "model": "claude-sonnet-4-20250514",
-    "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
-    "max_tokens": 8192,
-    "temperature": 0.0,
-    "api_key": "...",           // optional, falls back to env
-    "api_base": "...",          // optional
-    "provider": "anthropic"     // optional, auto-detected from model name
-  }
+1. Explicit JSON request field (``model``, ``api_key``, ``api_base``,
+   ``provider``, ``temperature``, ``max_tokens``).
+2. The unified :class:`defenseclaw.config.LLMConfig` resolved at
+   ``scanners.plugin`` — top-level ``llm:`` merged with
+   ``scanners.plugin.llm:`` overrides. This is where
+   ``DEFENSECLAW_LLM_KEY`` / ``DEFENSECLAW_LLM_MODEL`` land.
+3. Provider-specific env vars (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``,
+   …) that LiteLLM reads on its own as a last resort.
 
-Output (stdout JSON):
-  {
-    "content": "...",           // assistant response text
-    "model": "...",             // actual model used
-    "usage": {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N},
-    "error": null               // or error message string
-  }
+Guardrail bypass:
+    By design, the plugin scanner does NOT route through Bifrost.
+    Running DefenseClaw's own guardrails against third-party plugin
+    source code would double-bill operators and add latency for no
+    security benefit — the scanner IS the guardrail layer. If you want
+    guardrails on this path, stand Bifrost up separately and point
+    ``api_base`` at it.
+
+Usage::
+
+    echo '{"model":"anthropic/claude-sonnet-4-20250514","messages":[...]}' \\
+        | python -m defenseclaw.llm
+
+Input (stdin JSON) — every field is optional except ``messages``::
+
+    {
+        "model": "anthropic/claude-sonnet-4-20250514",
+        "messages": [{"role": "system", "content": "..."},
+                     {"role": "user",   "content": "..."}],
+        "max_tokens": 8192,
+        "temperature": 0.0,
+        "api_key": "...",
+        "api_base": "...",
+        "provider": "anthropic",
+        "timeout": 60,
+        "max_retries": 2
+    }
+
+Output (stdout JSON)::
+
+    {
+        "content": "...",
+        "model":   "anthropic/claude-sonnet-4-20250514",
+        "usage":   {"prompt_tokens": N,
+                    "completion_tokens": N,
+                    "total_tokens": N},
+        "error":   null
+    }
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+from typing import Any
+
+# Opt-in debug flag. Default off so the plugin scanner stays quiet on
+# stderr (the TS plugin pipes stderr through to the Cursor/OpenClaw
+# log panel, and a noisy bridge pollutes that view). When the operator
+# is debugging "why is my LLM analyzer silent?" they can set
+# ``DEFENSECLAW_LLM_DEBUG=1`` and get one ``[llm-bridge]`` line per
+# fallback so they can tell which stage is failing — import vs config
+# load vs resolve vs env injection. We intentionally avoid ``logging``
+# here because this module is executed as a short-lived subprocess
+# without any log configuration, and configuring a root logger per
+# invocation is worse than a plain stderr line.
+_DEBUG = os.environ.get("DEFENSECLAW_LLM_DEBUG", "").strip() not in ("", "0", "false", "False")
 
 
-def _resolve_provider(model: str, provider_hint: str = "") -> tuple[str, str]:
-    """Determine the provider and bare model name.
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        sys.stderr.write(f"[llm-bridge] {msg}\n")
 
-    Returns (provider, bare_model).  Handles prefixed names like
-    ``anthropic/claude-sonnet-4-20250514`` and bare names like ``claude-sonnet-4-20250514``.
+
+def _load_plugin_llm_config() -> dict[str, Any]:
+    """Best-effort load of the plugin-scoped unified LLM config.
+
+    We isolate the import/load inside a try/except because this module
+    is designed to run even when DefenseClaw isn't fully installed on
+    the host (e.g. a user running the plugin scanner stand-alone from
+    the OpenClaw plugin). Missing config → empty dict, callers treat
+    it as "no defaults available" and fall back to env vars.
+
+    Each stage swallows its own exceptions and logs to stderr only
+    when ``DEFENSECLAW_LLM_DEBUG=1`` — see module-level ``_debug``.
+    Silently ignoring errors here was the M6 concern: before the debug
+    hook, a config typo left the scanner running with *no* resolved
+    defaults and the only symptom was "LLM analyzer shows no findings",
+    which is indistinguishable from a clean scan.
+
+    Returned keys map 1:1 to the LiteLLM ``completion`` kwargs so the
+    caller can spread them straight in.
     """
-    if provider_hint:
-        bare = model.split("/", 1)[-1] if "/" in model else model
-        return provider_hint.lower(), bare
-
-    if "/" in model:
-        prefix, bare = model.split("/", 1)
-        return prefix.lower(), bare
-
-    lower = model.lower()
-    if lower.startswith("claude"):
-        return "anthropic", model
-    if lower.startswith(("gpt", "o1", "o3", "o4")):
-        return "openai", model
-    if lower.startswith("gemini"):
-        return "google", model
-
-    return "openai", model
-
-
-def _call_anthropic(
-    model: str,
-    messages: list[dict],
-    max_tokens: int,
-    temperature: float,
-    api_key: str | None,
-    api_base: str | None,
-) -> dict:
     try:
-        import anthropic
-    except ImportError:
-        return {
-            "content": "",
-            "model": model,
-            "usage": {},
-            "error": "anthropic SDK not installed. Install with: pip install anthropic",
-        }
+        # ``defenseclaw.config`` exposes ``load()`` as a module-level
+        # function, not ``Config.load()``. Using the module entry point
+        # also keeps the import surface minimal for plugin scanner
+        # subprocesses that don't need the whole ``Config`` class.
+        from defenseclaw.config import load as _load_config
+        from defenseclaw.scanner._llm_env import (
+            inject_llm_env,
+            litellm_completion_kwargs,
+        )
+    except Exception as exc:
+        _debug(f"import failed; falling back to env-only routing: {exc!r}")
+        return {}
 
-    kwargs: dict = {}
-    if api_key:
-        kwargs["api_key"] = api_key
-    if api_base:
-        kwargs["base_url"] = api_base
-
-    client = anthropic.Anthropic(**kwargs)
-
-    system_text = ""
-    api_messages = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_text = msg.get("content", "")
-        else:
-            api_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-
-    create_kwargs: dict = {
-        "model": model,
-        "messages": api_messages,
-        "max_tokens": max_tokens,
-    }
-    if temperature > 0:
-        create_kwargs["temperature"] = temperature
-    if system_text:
-        create_kwargs["system"] = system_text
-
-    response = client.messages.create(**create_kwargs)
-
-    content = ""
-    for block in response.content:
-        if hasattr(block, "text"):
-            content += block.text
-
-    usage = {}
-    if response.usage:
-        usage = {
-            "prompt_tokens": response.usage.input_tokens,
-            "completion_tokens": response.usage.output_tokens,
-            "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-        }
-
-    return {
-        "content": content,
-        "model": response.model,
-        "usage": usage,
-        "error": None,
-    }
-
-
-def _call_openai(
-    model: str,
-    messages: list[dict],
-    max_tokens: int,
-    temperature: float,
-    api_key: str | None,
-    api_base: str | None,
-) -> dict:
     try:
-        import openai
-    except ImportError:
-        return {
-            "content": "",
-            "model": model,
-            "usage": {},
-            "error": "openai SDK not installed. Install with: pip install openai",
-        }
+        cfg = _load_config()
+    except Exception as exc:
+        _debug(f"config.load() failed; check ~/.defenseclaw/config.yaml: {exc!r}")
+        return {}
 
-    kwargs: dict = {}
-    if api_key:
-        kwargs["api_key"] = api_key
-    if api_base:
-        kwargs["base_url"] = api_base
+    try:
+        resolved = cfg.resolve_llm("scanners.plugin")
+    except Exception as exc:
+        _debug(f"cfg.resolve_llm('scanners.plugin') failed: {exc!r}")
+        return {}
 
-    client = openai.OpenAI(**kwargs)
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
+    _debug(
+        "resolved plugin LLM: "
+        f"provider={resolved.provider!r} "
+        f"model={resolved.model!r} "
+        f"api_key_env={resolved.api_key_env!r} "
+        f"has_key={bool(resolved.resolved_api_key())} "
+        f"base_url={resolved.base_url!r}"
     )
 
-    content = ""
-    if response.choices and len(response.choices) > 0:
-        content = response.choices[0].message.content or ""
+    # Inject the resolved key into provider env vars so LiteLLM picks
+    # it up even on code paths that bypass ``api_key=`` (e.g. Bedrock's
+    # AWS credential chain, Vertex AI's application-default creds).
+    try:
+        touched = inject_llm_env(resolved)
+        if touched:
+            _debug(f"injected env vars: {touched}")
+    except Exception as exc:
+        _debug(f"inject_llm_env failed (non-fatal): {exc!r}")
 
-    usage = {}
-    if response.usage:
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens or 0,
-            "completion_tokens": response.usage.completion_tokens or 0,
-            "total_tokens": response.usage.total_tokens or 0,
-        }
+    try:
+        return litellm_completion_kwargs(resolved)
+    except Exception as exc:
+        _debug(f"litellm_completion_kwargs failed: {exc!r}")
+        return {}
 
-    return {
-        "content": content,
-        "model": response.model or model,
-        "usage": usage,
-        "error": None,
+
+def _merge_defaults(request: dict, defaults: dict) -> dict:
+    """Layer defaults under explicit request fields.
+
+    Anything the caller set wins; anything they left empty comes from
+    the resolved DefenseClaw config. Kept dead simple because LiteLLM's
+    ``completion`` is forgiving about missing optional kwargs.
+    """
+    merged: dict = dict(defaults)
+    # Map request field names → LiteLLM kwarg names. Most are 1:1
+    # except ``api_base`` which LiteLLM also accepts as ``api_base``
+    # (alias for base_url).
+    aliases = {
+        "model": "model",
+        "api_key": "api_key",
+        "api_base": "api_base",
+        "timeout": "timeout",
+        "max_retries": "num_retries",
     }
+    for req_name, litellm_name in aliases.items():
+        value = request.get(req_name)
+        if value:
+            merged[litellm_name] = value
+    return merged
 
 
 def call_llm(request: dict) -> dict:
-    model = request.get("model", "")
-    messages = request.get("messages", [])
-    max_tokens = request.get("max_tokens", 8192)
-    temperature = request.get("temperature", 0.0)
-    api_key = request.get("api_key")
-    api_base = request.get("api_base")
-    provider_hint = request.get("provider", "")
+    """Dispatch a single LLM completion via LiteLLM.
 
-    provider, bare_model = _resolve_provider(model, provider_hint)
+    Returns the canonical bridge response shape regardless of which
+    provider actually served the request. Any exception — import,
+    network, rate-limit, schema — is surfaced as ``error`` rather than
+    raised so the caller (typically a TS subprocess) gets a clean JSON
+    error document instead of a crash stack.
+    """
+    messages = request.get("messages", [])
+    if not messages:
+        return {
+            "content": "",
+            "model": request.get("model", ""),
+            "usage": {},
+            "error": "messages is required and must be a non-empty list",
+        }
 
     try:
-        if provider == "anthropic":
-            return _call_anthropic(bare_model, messages, max_tokens, temperature, api_key, api_base)
-        else:
-            return _call_openai(bare_model, messages, max_tokens, temperature, api_key, api_base)
+        import litellm
+    except ImportError:
+        return {
+            "content": "",
+            "model": request.get("model", ""),
+            "usage": {},
+            "error": (
+                "litellm not installed. Install with: pip install litellm "
+                "(bundled automatically with `defenseclaw` ≥ 0.5)"
+            ),
+        }
+
+    defaults = _load_plugin_llm_config()
+    kwargs = _merge_defaults(request, defaults)
+
+    # ``provider`` in the request is a hint for LiteLLM's routing when
+    # the model is ambiguous (e.g. ``gpt-4o`` could be OpenAI or Azure).
+    # LiteLLM expects this stitched into the model string as
+    # ``provider/model``, which matches our config convention — only
+    # prepend when the caller hasn't already.
+    model = kwargs.get("model") or request.get("model") or ""
+    provider_hint = request.get("provider", "").strip()
+    if model and provider_hint and "/" not in model:
+        model = f"{provider_hint}/{model}"
+    kwargs["model"] = model
+
+    if not kwargs.get("model"):
+        return {
+            "content": "",
+            "model": "",
+            "usage": {},
+            "error": (
+                "model is required — pass ``model`` in the request or set "
+                "``llm.model`` / ``DEFENSECLAW_LLM_MODEL`` in the DefenseClaw "
+                "config"
+            ),
+        }
+
+    # Per-request knobs that LiteLLM expects verbatim.
+    kwargs["messages"] = messages
+    kwargs["max_tokens"] = request.get("max_tokens", 8192)
+    kwargs["temperature"] = request.get("temperature", 0.0)
+
+    try:
+        response = litellm.completion(**kwargs)
     except Exception as exc:
         return {
             "content": "",
             "model": model,
             "usage": {},
-            "error": str(exc),
+            "error": f"{type(exc).__name__}: {exc}",
         }
 
+    # LiteLLM normalizes responses to the OpenAI ChatCompletion shape
+    # regardless of provider, so a single extraction path works for
+    # every supported backend.
+    content = ""
+    try:
+        choices = response.choices or []
+        if choices:
+            msg = choices[0].message
+            content = getattr(msg, "content", "") or ""
+    except Exception as exc:
+        return {
+            "content": "",
+            "model": model,
+            "usage": {},
+            "error": f"malformed LiteLLM response: {exc}",
+        }
 
-# Backward-compatible alias.
+    usage: dict = {}
+    response_usage = getattr(response, "usage", None)
+    if response_usage is not None:
+        prompt_tokens = getattr(response_usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(response_usage, "completion_tokens", 0) or 0
+        total_tokens = getattr(response_usage, "total_tokens", 0) or (
+            prompt_tokens + completion_tokens
+        )
+        usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    return {
+        "content": content,
+        "model": getattr(response, "model", "") or model,
+        "usage": usage,
+        "error": None,
+    }
+
+
+# Backward-compatible alias — older call sites (and the OpenClaw plugin
+# bridge) imported ``call_litellm`` before this module was renamed
+# ``call_llm``. Keep the name live so upgrading DefenseClaw doesn't
+# break a pinned plugin version.
 call_litellm = call_llm
 
 
 def main() -> None:
+    """Entry point for ``python -m defenseclaw.llm``.
+
+    Reads one JSON request from stdin, writes one JSON response to
+    stdout. Non-zero exit codes are deliberately avoided — errors are
+    reported in the response body so the caller can distinguish
+    transport failures (subprocess died) from model failures (rate
+    limit, auth, bad model id).
+    """
     raw = sys.stdin.read().strip()
     if not raw:
-        json.dump({"content": "", "model": "", "usage": {}, "error": "empty input"}, sys.stdout)
+        json.dump(
+            {"content": "", "model": "", "usage": {}, "error": "empty input"},
+            sys.stdout,
+        )
         return
 
     try:
         request = json.loads(raw)
     except json.JSONDecodeError as exc:
-        json.dump({"content": "", "model": "", "usage": {}, "error": f"invalid JSON: {exc}"}, sys.stdout)
+        json.dump(
+            {
+                "content": "",
+                "model": "",
+                "usage": {},
+                "error": f"invalid JSON: {exc}",
+            },
+            sys.stdout,
+        )
         return
 
     result = call_llm(request)

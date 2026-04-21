@@ -185,14 +185,14 @@ func TestSetupSections_WatcherAndWatchdogPresent(t *testing.T) {
 
 func TestSplitCSV(t *testing.T) {
 	cases := map[string][]string{
-		"":           nil,
-		"   ":        nil,
-		",":          nil,
-		"a":          {"a"},
-		"a,b":        {"a", "b"},
-		" a , b ":    {"a", "b"},
-		"a,,b":       {"a", "b"},
-		"~/x,~/y/z":  {"~/x", "~/y/z"},
+		"":          nil,
+		"   ":       nil,
+		",":         nil,
+		"a":         {"a"},
+		"a,b":       {"a", "b"},
+		" a , b ":   {"a", "b"},
+		"a,,b":      {"a", "b"},
+		"~/x,~/y/z": {"~/x", "~/y/z"},
 	}
 	for in, want := range cases {
 		got := splitCSV(in)

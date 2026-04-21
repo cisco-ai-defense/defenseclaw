@@ -575,6 +575,8 @@ main() {
     local skip_install=false
     local check_only=false
     local yes_mode=false
+    local run_quickstart=false
+    local quickstart_mode="observe"
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -590,14 +592,32 @@ main() {
                 yes_mode=true
                 shift
                 ;;
+            # Mirrors scripts/install.sh --quickstart so developers can
+            # do a one-shot `./scripts/install-dev.sh --quickstart` and
+            # end up with a working guardrail the same way release users do.
+            --quickstart)
+                run_quickstart=true
+                shift
+                ;;
+            --quickstart-mode)
+                if [[ $# -lt 2 ]]; then
+                    die "--quickstart-mode requires a value (observe|action)"
+                fi
+                quickstart_mode="$2"
+                case "${quickstart_mode}" in observe|action) ;; *) die "invalid --quickstart-mode: ${quickstart_mode}" ;; esac
+                run_quickstart=true
+                shift 2
+                ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
-                echo "  --skip-install   Build only, don't install to ${INSTALL_DIR}"
-                echo "  --check          Check dependencies only, don't install anything"
-                echo "  --yes, -y        Skip confirmation prompts"
-                echo "  --help, -h       Show this help message"
+                echo "  --skip-install          Build only, don't install to ${INSTALL_DIR}"
+                echo "  --check                 Check dependencies only, don't install anything"
+                echo "  --yes, -y               Skip confirmation prompts"
+                echo "  --quickstart            Run 'defenseclaw quickstart --non-interactive' post-install"
+                echo "  --quickstart-mode M     Pass --mode M to quickstart (observe|action; implies --quickstart)"
+                echo "  --help, -h              Show this help message"
                 exit 0
                 ;;
             *)
@@ -648,7 +668,22 @@ main() {
     else
         log_info "Skipping gateway install (--skip-install)"
     fi
-    
+
+    # Run quickstart against the venv binary directly — PATH may not
+    # include ${INSTALL_DIR} yet on a fresh shell, but the editable
+    # install in ${VENV_DIR}/bin is always a known good handle.
+    if [[ "${run_quickstart}" == true ]]; then
+        log_step "Running quickstart"
+        local dc_bin="${VENV_DIR}/bin/defenseclaw"
+        if [[ ! -x "${dc_bin}" ]]; then
+            log_warn "CLI binary not found at ${dc_bin} — skipping quickstart"
+        elif "${dc_bin}" quickstart --non-interactive --yes --mode "${quickstart_mode}"; then
+            log_success "Quickstart completed"
+        else
+            log_warn "Quickstart reported errors — run 'defenseclaw doctor' to investigate"
+        fi
+    fi
+
     print_next_steps
 }
 

@@ -80,7 +80,12 @@ jobs:
       - run: uv pip install pip pip-audit
       # TODO: Remove --ignore-vuln CVE-2026-4539 once pygments >= 2.19.3 is released
       # CVE-2026-4539: Low severity ReDoS in AdlLexer (local attack vector only)
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539
+      # TODO: Remove --ignore-vuln CVE-2026-28684 once cisco-ai-skill-scanner
+      # releases a version that allows python-dotenv >= 1.2.2. Scanner 2.0.9
+      # (the latest as of this commit) still pins python-dotenv==1.2.1.
+      # CVE-2026-28684: python-dotenv 1.2.1 — pulled in only via out-of-process
+      # Python scanner subprocesses, not linked into the gateway.
+      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684
 
   ts-build-test:
     name: TypeScript Build & Test

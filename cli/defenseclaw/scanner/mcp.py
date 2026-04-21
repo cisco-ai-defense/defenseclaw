@@ -37,57 +37,94 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, MCPScannerConfig, MCPServerEntry
+from defenseclaw.config import (
+    CiscoAIDefenseConfig,
+    InspectLLMConfig,
+    LLMConfig,
+    MCPScannerConfig,
+    MCPServerEntry,
+)
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 
 if TYPE_CHECKING:
     pass
 
+# Hard-coded per-provider HTTPS defaults. Only used when the operator
+# hasn't set ``llm.base_url`` — the mcp-scanner SDK wants an explicit
+# URL and won't fall back to LiteLLM's default discovery. Keep in sync
+# with ``cli/defenseclaw/scanner/_llm_env.py``'s provider map: any
+# new provider entry that has a stable HTTPS endpoint SHOULD be added
+# here too so mcp-scanner can reach it without manual config.
 _PROVIDER_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com",
     "anthropic": "https://api.anthropic.com",
 }
 
-_PROVIDER_ENV_VARS: dict[str, str] = {
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-}
+
+def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
+    """Translate a legacy ``InspectLLMConfig`` into the unified
+    :class:`LLMConfig` shape so we can drive the shared helpers. Used
+    only on the back-compat path — real call sites should pass an
+    already-resolved ``LLMConfig`` via ``llm=``.
+    """
+    return LLMConfig(
+        model=il.model,
+        provider=il.provider,
+        api_key=il.api_key,
+        api_key_env=il.api_key_env,
+        base_url=il.base_url,
+        timeout=il.timeout,
+        max_retries=il.max_retries,
+    )
 
 
 class MCPScannerWrapper:
-    """Wraps the cisco-ai-mcp-scanner SDK."""
+    """Wraps the cisco-ai-mcp-scanner SDK.
+
+    The wrapper accepts EITHER a legacy :class:`InspectLLMConfig` (the
+    v<5 shape, still used by older tests) OR a unified
+    :class:`LLMConfig` via ``llm=``. When both are supplied the
+    ``llm=`` argument wins. Internally everything is driven through
+    :class:`LLMConfig` and the shared
+    :mod:`defenseclaw.scanner._llm_env` helpers so the mcp-scanner
+    sees the same env var injection as every other scanner.
+    """
 
     def __init__(
         self,
         config: MCPScannerConfig,
         inspect_llm: InspectLLMConfig | None = None,
         cisco_ai_defense: CiscoAIDefenseConfig | None = None,
+        *,
+        llm: LLMConfig | None = None,
     ) -> None:
         self.config = config
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
+        # ``_llm`` is the canonical internal view. Prefer the explicit
+        # ``llm=`` arg; fall back to inspect_llm's translated shape.
+        self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
 
     def name(self) -> str:
         return "mcp-scanner"
 
     def _resolve_llm_base_url(self) -> str:
         """Resolve the LLM base URL from explicit config or provider name."""
-        llm = self.inspect_llm
+        llm = self._llm
         if llm.base_url:
             return llm.base_url
-        provider = llm.provider.lower().strip()
-        return _PROVIDER_BASE_URLS.get(provider, "")
+        return _PROVIDER_BASE_URLS.get(llm.provider_prefix(), "")
 
     def _inject_env(self) -> None:
-        """Inject LLM API key into provider-specific env var if not set."""
-        llm = self.inspect_llm
-        api_key = llm.resolved_api_key()
-        if not api_key:
-            return
-        provider = llm.provider.lower().strip()
-        env_var = _PROVIDER_ENV_VARS.get(provider)
-        if env_var and env_var not in os.environ:
-            os.environ[env_var] = api_key
+        """Inject LLM API key into provider-specific env var(s).
+
+        Delegates to the shared helper so every LiteLLM-backed scanner
+        picks the same env vars. Non-overwriting by default — if the
+        operator has already set ``OPENAI_API_KEY``/etc., we respect
+        it. Local providers (ollama/vllm) are auto-skipped.
+        """
+        inject_llm_env(self._llm)
 
     def scan(self, target: str, server_entry: MCPServerEntry | None = None) -> ScanResult:
         import time
@@ -110,21 +147,22 @@ class MCPScannerWrapper:
             )
             raise SystemExit(1)
 
-        llm = self.inspect_llm
+        llm = self._llm
         aid = self.cisco_ai_defense
         self._inject_env()
 
-        llm_model = llm.model
-        if llm_model and llm.provider and "/" not in llm_model:
-            llm_model = f"{llm.provider}/{llm_model}"
+        # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
+        # the mcp-scanner SDK passes it straight through to LiteLLM.
+        # ``litellm_model()`` stitches bare ``llm.model`` + ``llm.provider``
+        # when needed, otherwise uses the already-prefixed string.
         sdk_config = MCPConfig(
             api_key=aid.resolved_api_key(),
             endpoint_url=aid.endpoint,
             llm_provider_api_key=llm.resolved_api_key(),
-            llm_model=llm_model,
+            llm_model=litellm_model(llm),
             llm_base_url=self._resolve_llm_base_url(),
-            llm_timeout=llm.timeout,
-            llm_max_retries=llm.max_retries,
+            llm_timeout=llm.effective_timeout(),
+            llm_max_retries=llm.effective_max_retries(),
         )
 
         scanner = MCPSDKScanner(sdk_config)

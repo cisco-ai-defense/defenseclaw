@@ -45,10 +45,10 @@ type RulePack struct {
 
 // SuppressionsConfig maps to suppressions.yaml.
 type SuppressionsConfig struct {
-	Version            int                  `yaml:"version"`
-	PreJudgeStrips     []PreJudgeStrip      `yaml:"pre_judge_strips"`
-	FindingSupps       []FindingSuppression `yaml:"finding_suppressions"`
-	ToolSuppressions   []ToolSuppression    `yaml:"tool_suppressions"`
+	Version          int                  `yaml:"version"`
+	PreJudgeStrips   []PreJudgeStrip      `yaml:"pre_judge_strips"`
+	FindingSupps     []FindingSuppression `yaml:"finding_suppressions"`
+	ToolSuppressions []ToolSuppression    `yaml:"tool_suppressions"`
 }
 
 type PreJudgeStrip struct {
@@ -74,14 +74,14 @@ type ToolSuppression struct {
 
 // JudgeYAML maps to judge/*.yaml files.
 type JudgeYAML struct {
-	Version                  int                       `yaml:"version"`
-	Name                     string                    `yaml:"name"`
-	Enabled                  bool                      `yaml:"enabled"`
-	SystemPrompt             string                    `yaml:"system_prompt"`
-	AdjudicationPrompt       string                    `yaml:"adjudication_prompt,omitempty"`
-	Categories               map[string]JudgeCategory  `yaml:"categories"`
-	MinCategoriesForHigh     int                       `yaml:"min_categories_for_high,omitempty"`
-	SingleCategoryMaxSev     string                    `yaml:"single_category_max_severity,omitempty"`
+	Version              int                      `yaml:"version"`
+	Name                 string                   `yaml:"name"`
+	Enabled              bool                     `yaml:"enabled"`
+	SystemPrompt         string                   `yaml:"system_prompt"`
+	AdjudicationPrompt   string                   `yaml:"adjudication_prompt,omitempty"`
+	Categories           map[string]JudgeCategory `yaml:"categories"`
+	MinCategoriesForHigh int                      `yaml:"min_categories_for_high,omitempty"`
+	SingleCategoryMaxSev string                   `yaml:"single_category_max_severity,omitempty"`
 }
 
 type JudgeCategory struct {
@@ -95,8 +95,8 @@ type JudgeCategory struct {
 
 // RulesFileYAML maps to a rules/*.yaml file (e.g. rules/commands.yaml).
 type RulesFileYAML struct {
-	Version  int          `yaml:"version"`
-	Category string       `yaml:"category"`
+	Version  int           `yaml:"version"`
+	Category string        `yaml:"category"`
 	Rules    []RuleDefYAML `yaml:"rules"`
 }
 
@@ -117,10 +117,10 @@ type SensitiveToolsConfig struct {
 }
 
 type SensitiveTool struct {
-	Name              string `yaml:"name"`
-	ResultInspection  bool   `yaml:"result_inspection"`
-	JudgeResult       bool   `yaml:"judge_result"`
-	MinEntitiesAlert  int    `yaml:"min_entities_for_alert,omitempty"`
+	Name             string `yaml:"name"`
+	ResultInspection bool   `yaml:"result_inspection"`
+	JudgeResult      bool   `yaml:"judge_result"`
+	MinEntitiesAlert int    `yaml:"min_entities_for_alert,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

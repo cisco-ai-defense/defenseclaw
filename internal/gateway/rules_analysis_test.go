@@ -29,10 +29,10 @@ import (
 
 func TestFalsePositives_RealWorldBenign(t *testing.T) {
 	cases := []struct {
-		name     string
-		tool     string
-		args     string
-		maxSev   string // highest acceptable severity ("NONE" or "MEDIUM")
+		name   string
+		tool   string
+		args   string
+		maxSev string // highest acceptable severity ("NONE" or "MEDIUM")
 	}{
 		// --- Common dev commands ---
 		{"git status", "shell", `{"command":"git status"}`, "NONE"},
@@ -66,7 +66,7 @@ func TestFalsePositives_RealWorldBenign(t *testing.T) {
 		{"word: whiskey", "search", `{"query":"best whiskey brands 2024"}`, "NONE"},
 		{"word: basket", "search", `{"query":"shopping basket implementation"}`, "NONE"},
 		{"discuss shadow DOM", "search", `{"query":"shadow DOM in web components"}`, "NONE"},
-		{"discuss sudo docs", "search", `{"query":"how does sudo work on Linux"}`, "MEDIUM"}, // CMD-SUDO fires at MEDIUM, acceptable
+		{"discuss sudo docs", "search", `{"query":"how does sudo work on Linux"}`, "MEDIUM"},           // CMD-SUDO fires at MEDIUM, acceptable
 		{"discuss crontab format", "search", `{"query":"crontab schedule format examples"}`, "MEDIUM"}, // CMD-CRONTAB fires at MEDIUM, acceptable
 
 		// --- MCP tools with normal args ---

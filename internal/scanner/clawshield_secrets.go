@@ -30,7 +30,7 @@ type ClawShieldSecretsScanner struct{}
 
 func NewClawShieldSecretsScanner() *ClawShieldSecretsScanner { return &ClawShieldSecretsScanner{} }
 
-func (s *ClawShieldSecretsScanner) Name() string              { return "clawshield-secrets" }
+func (s *ClawShieldSecretsScanner) Name() string               { return "clawshield-secrets" }
 func (s *ClawShieldSecretsScanner) Version() string            { return "1.0.0" }
 func (s *ClawShieldSecretsScanner) SupportedTargets() []string { return []string{"skill", "code"} }
 

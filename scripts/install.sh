@@ -482,6 +482,38 @@ handle_openclaw() {
     fi
 }
 
+# ── Quickstart (optional) ─────────────────────────────────────────────────────
+# Invokes ``defenseclaw quickstart`` using the venv binary directly so it
+# runs even on a fresh shell where PATH has not been reloaded. Failure is
+# non-fatal — the installer's job is to land binaries, quickstart failures
+# are runtime/config issues the user can retry without reinstalling.
+
+run_quickstart() {
+    if [[ "${RUN_QUICKSTART}" != true ]]; then
+        return
+    fi
+
+    step "Running quickstart"
+
+    local dc_bin="${DEFENSECLAW_VENV}/bin/defenseclaw"
+    if [[ ! -x "${dc_bin}" ]]; then
+        warn "CLI binary not found at ${dc_bin} — skipping quickstart"
+        return
+    fi
+
+    local args=(quickstart --non-interactive --yes)
+    case "${QUICKSTART_MODE}" in
+        action)  args+=(--mode action) ;;
+        observe) args+=(--mode observe) ;;
+    esac
+
+    if "${dc_bin}" "${args[@]}"; then
+        ok "Quickstart completed"
+    else
+        warn "Quickstart reported errors — run 'defenseclaw doctor' to investigate"
+    fi
+}
+
 # ── PATH Configuration ────────────────────────────────────────────────────────
 
 ensure_path() {
@@ -537,6 +569,8 @@ printf "  ${DIM}Enterprise Governance for Agentic AI${NC}\n"
 YES_MODE=false
 LOCAL_DIR=""
 INSTALL_SANDBOX=false
+RUN_QUICKSTART=false
+QUICKSTART_MODE="observe"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -547,6 +581,18 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --yes|-y) YES_MODE=true; shift ;;
+        # Run ``defenseclaw quickstart --non-interactive`` after the
+        # binaries land. This gives a single-command install→bootstrap
+        # path: everything a user needs to go from ``curl | bash`` to a
+        # working guardrail without touching the CLI themselves.
+        --quickstart) RUN_QUICKSTART=true; shift ;;
+        --quickstart-mode)
+            [[ $# -lt 2 ]] && die "--quickstart-mode requires a value (observe|action)"
+            QUICKSTART_MODE="$2"
+            case "${QUICKSTART_MODE}" in observe|action) ;; *) die "invalid --quickstart-mode: ${QUICKSTART_MODE}" ;; esac
+            RUN_QUICKSTART=true
+            shift 2
+            ;;
         --help|-h)
             echo ""
             echo "Usage:"
@@ -554,12 +600,15 @@ while [[ $# -gt 0 ]]; do
             echo "  ./scripts/install.sh --local ./dist               # from local build"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
             echo "  curl ... | bash -s -- --sandbox                   # also install openshell-sandbox"
+            echo "  curl ... | bash -s -- --quickstart                # run quickstart after install"
             echo ""
             echo "Options:"
-            echo "  --sandbox      Also install openshell-sandbox (Linux only)"
-            echo "  --local <dir>  Install from a local dist directory"
-            echo "  --yes, -y      Skip all confirmation prompts"
-            echo "  --help, -h     Show this help"
+            echo "  --sandbox             Also install openshell-sandbox (Linux only)"
+            echo "  --local <dir>         Install from a local dist directory"
+            echo "  --yes, -y             Skip all confirmation prompts"
+            echo "  --quickstart          Run 'defenseclaw quickstart --non-interactive' post-install"
+            echo "  --quickstart-mode M   Pass --mode M to quickstart (observe|action; implies --quickstart)"
+            echo "  --help, -h            Show this help"
             echo ""
             echo "Environment variables:"
             echo "  DEFENSECLAW_HOME   Install directory (default: ~/.defenseclaw)"
@@ -608,6 +657,7 @@ if [[ "${INSTALL_SANDBOX}" == true ]]; then
     fi
 fi
 
+run_quickstart
 ensure_path
 print_success
 

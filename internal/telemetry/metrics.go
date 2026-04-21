@@ -39,7 +39,7 @@ type metricsSet struct {
 	approvalCount metric.Int64Counter
 
 	// GenAI semconv metrics
-	genAITokenUsage       metric.Float64Histogram // gen_ai.client.token.usage
+	genAITokenUsage        metric.Float64Histogram // gen_ai.client.token.usage
 	genAIOperationDuration metric.Float64Histogram // gen_ai.client.operation.duration
 
 	// Alert metrics
@@ -79,12 +79,12 @@ type metricsSet struct {
 	// entirely from gatewaylog.Event envelopes so the writer's
 	// fanout drives the whole pipeline — callers never touch the
 	// meter directly.
-	verdictsTotal     metric.Int64Counter
-	judgeInvocations  metric.Int64Counter
-	judgeLatency      metric.Float64Histogram
-	judgeErrors       metric.Int64Counter
-	gatewayErrors     metric.Int64Counter
-	sinkSendFailures  metric.Int64Counter
+	verdictsTotal    metric.Int64Counter
+	judgeInvocations metric.Int64Counter
+	judgeLatency     metric.Float64Histogram
+	judgeErrors      metric.Int64Counter
+	gatewayErrors    metric.Int64Counter
+	sinkSendFailures metric.Int64Counter
 }
 
 func newMetricsSet(m metric.Meter) (*metricsSet, error) {

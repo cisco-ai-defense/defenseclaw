@@ -153,9 +153,9 @@ func TestFmtOTelResource(t *testing.T) {
 		t.Errorf("empty map: got %q, want (none)", got)
 	}
 	in := map[string]string{
-		"service.name":        "defenseclaw-gateway",
-		"service.version":     "1.0.0",
-		"deployment.environ":  "prod",
+		"service.name":       "defenseclaw-gateway",
+		"service.version":    "1.0.0",
+		"deployment.environ": "prod",
 	}
 	got := fmtOTelResource(in)
 	if !strings.Contains(got, "service.name=defenseclaw-gateway") ||

@@ -30,7 +30,7 @@ type ClawShieldVulnScanner struct{}
 
 func NewClawShieldVulnScanner() *ClawShieldVulnScanner { return &ClawShieldVulnScanner{} }
 
-func (s *ClawShieldVulnScanner) Name() string              { return "clawshield-vuln" }
+func (s *ClawShieldVulnScanner) Name() string               { return "clawshield-vuln" }
 func (s *ClawShieldVulnScanner) Version() string            { return "1.0.0" }
 func (s *ClawShieldVulnScanner) SupportedTargets() []string { return []string{"skill", "code"} }
 

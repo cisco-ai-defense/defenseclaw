@@ -295,10 +295,10 @@ func TestForSinkReasonBypassesReveal(t *testing.T) {
 func TestForSinkReason_SecretShapes(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
 	cases := []struct {
-		name      string
-		in        string
-		keep      []string // substrings that MUST appear in the redacted form
-		leak      []string // substrings that MUST NOT appear
+		name string
+		in   string
+		keep []string // substrings that MUST appear in the redacted form
+		leak []string // substrings that MUST NOT appear
 	}{
 		{
 			name: "aws access key by rule id",

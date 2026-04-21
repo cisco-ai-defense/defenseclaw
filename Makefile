@@ -11,10 +11,115 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
 
-.PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
+.PHONY: all path doctor uninstall quickstart llm-setup \
+        build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+
+# ---------------------------------------------------------------------------
+# `make all` — one-shot build → install → PATH → quickstart
+# ---------------------------------------------------------------------------
+# Designed so a fresh clone only needs:
+#
+#   make all
+#
+# to reach a working guardrail. Everything downstream (install.sh,
+# install-dev.sh, `defenseclaw quickstart`) is wired to behave the
+# same way non-interactively, so CI and local dev share one codepath.
+#
+# Order matters:
+#   1. install — produces every binary and links into $(INSTALL_DIR)
+#   2. path    — ensures $(INSTALL_DIR) is on the user's shell PATH so
+#                `defenseclaw` resolves in *new* shells; current shell
+#                gets a reminder to source the rc file.
+#   3. quickstart — runs the CLI binary we just built, so even a stale
+#                shell PATH does not block the handoff.
+#
+# We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
+# CI jobs that only want the binaries.
+all: install path quickstart llm-setup
+	@echo ""
+	@echo "╭────────────────────────────────────────────────────────────╮"
+	@echo "│  DefenseClaw is installed and ready.                       │"
+	@echo "╰────────────────────────────────────────────────────────────╯"
+	@echo ""
+	@echo "Try it out:"
+	@echo "  defenseclaw            # launch the TUI"
+	@echo "  defenseclaw doctor     # health check"
+	@echo "  defenseclaw version    # CLI / gateway / plugin versions"
+	@echo ""
+
+path:
+	@if [ "$${NO_PATH:-0}" = "1" ]; then \
+		echo "NO_PATH=1 set — skipping PATH update"; \
+	else \
+		./scripts/add-to-path.sh "$(INSTALL_DIR)" $${YES:+--yes} || { \
+			echo "  PATH update skipped. Add manually:"; \
+			echo "    export PATH=\"$(INSTALL_DIR):\$$PATH\""; \
+		}; \
+	fi
+
+# Run the freshly-installed CLI binary directly so a stale shell PATH
+# doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
+# The CLI handles its own idempotence, so repeated `make all` is safe.
+quickstart:
+	@if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
+		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
+	elif [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+		"$(INSTALL_DIR)/defenseclaw" quickstart --non-interactive --yes \
+			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+		"$(VENV)/bin/defenseclaw" quickstart --non-interactive --yes \
+			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+	else \
+		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
+		exit 1; \
+	fi
+
+# Post-install interactive prompt for DEFENSECLAW_LLM_KEY + llm.model.
+# Quickstart sets up the config skeleton non-interactively; this target
+# fills in the two values that actually require a human (API key, model
+# choice). Silently skipped when:
+#   - stdin is not a TTY (CI, pipes, `make all < /dev/null`)
+#   - NO_LLM_SETUP=1 or YES=1 is set (explicit opt-out)
+#   - CI=true (GitHub Actions / GitLab / most CI runners)
+# The script itself is idempotent: if both values are already present
+# it exits without prompting, so rerunning `make all` is a no-op.
+llm-setup:
+	@if [ "$${NO_LLM_SETUP:-0}" = "1" ] || [ "$${YES:-0}" = "1" ] \
+	    || [ "$${CI:-}" = "true" ] || [ ! -t 0 ] || [ ! -t 1 ]; then \
+		echo "  Skipping interactive LLM setup (non-TTY or NO_LLM_SETUP=1)."; \
+		echo "  Configure later with:"; \
+		echo "    defenseclaw setup llm          # unified LLM (key + model, shared by judge + scanners)"; \
+		echo "    defenseclaw setup llm --show   # inspect the currently configured LLM"; \
+	else \
+		./scripts/setup-llm.sh || { \
+			echo "  LLM setup exited with errors — rerun with: defenseclaw setup llm"; \
+			true; \
+		}; \
+	fi
+
+# Thin wrappers over the CLI so operators never need to remember whether
+# the binary is on PATH yet. Both fall through to the venv binary when
+# the installed symlink is missing (e.g. after `make clean`).
+doctor:
+	@if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+		"$(INSTALL_DIR)/defenseclaw" doctor $(ARGS); \
+	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+		"$(VENV)/bin/defenseclaw" doctor $(ARGS); \
+	else \
+		echo "defenseclaw not installed — run 'make all' first"; exit 1; \
+	fi
+
+uninstall:
+	@if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+		"$(INSTALL_DIR)/defenseclaw" uninstall $(ARGS); \
+	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+		"$(VENV)/bin/defenseclaw" uninstall $(ARGS); \
+	else \
+		echo "defenseclaw not installed — nothing to uninstall"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # Aggregate targets
@@ -115,11 +220,33 @@ cli-install: pycli
 
 gateway-install: cli-install gateway
 	@mkdir -p $(INSTALL_DIR)
-	@cp $(GATEWAY) $(INSTALL_DIR)/$(GATEWAY)
+	@# Atomic replace: Linux returns ETXTBSY when overwriting an executable
+	@# that is currently running (e.g. the sidecar started via `defenseclaw-
+	@# gateway start`). cp(1) opens the destination for writing, which
+	@# trips that check. rename(2) (invoked by mv) only swaps the directory
+	@# entry, so the running process keeps the old inode and upgrades work
+	@# live. We copy to a sibling temp file first so a partial write can
+	@# never clobber a working binary.
+	@gwt="$(INSTALL_DIR)/$(GATEWAY)"; \
+	tmp="$$gwt.new.$$$$"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	cp $(GATEWAY) "$$tmp"; \
+	chmod +x "$$tmp"; \
+	mv -f "$$tmp" "$$gwt"
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		codesign -f -s - $(INSTALL_DIR)/$(GATEWAY) 2>/dev/null || true; \
 	fi
 	@echo "Installed $(GATEWAY) to $(INSTALL_DIR)"
+	@# If a sidecar is already running it kept the old inode; tell the
+	@# operator so they know a restart is needed to pick up the new build.
+	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
+	@# matches this very make invocation ("make gateway-install") and
+	@# any editor/tail window with the binary path on its cmdline, so
+	@# it would fire a false "sidecar is running" hint on every build.
+	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+		echo "  Gateway sidecar is running an older build — restart with:"; \
+		echo "    $(INSTALL_DIR)/$(GATEWAY) restart"; \
+	fi
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
 		echo "Add $(INSTALL_DIR) to your PATH:"; \
@@ -199,6 +326,15 @@ py-lint:
 	$(VENV)/bin/ruff check cli/defenseclaw/
 
 go-lint:
+	@# gofmt drift is the #1 review comment on every PR, so fail fast
+	@# on it before running the heavier analyzers.
+	@unformatted=$$(gofmt -l . 2>/dev/null); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt: the following files are not formatted:"; \
+		echo "$$unformatted" | sed 's/^/  /'; \
+		echo "Run 'gofmt -w .' to fix."; \
+		exit 1; \
+	fi
 	@tmp=$$(mktemp); \
 	status=0; \
 	if PATH="$(GOBIN):$(PATH)" golangci-lint run >"$$tmp" 2>&1; then \
@@ -207,7 +343,7 @@ go-lint:
 		exit 0; \
 	fi; \
 	status=$$?; \
-	if [ $$status -eq 127 ] || grep -q "used to build golangci-lint is lower than the targeted Go version" "$$tmp"; then \
+	if [ $$status -eq 127 ] || grep -qE "used to build golangci-lint is lower than the targeted Go version|package requires newer Go version" "$$tmp"; then \
 		cat "$$tmp"; \
 		echo "golangci-lint is unavailable or does not yet support this repo's Go toolchain; falling back to 'go vet ./...'"; \
 		rm -f "$$tmp"; \
