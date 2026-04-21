@@ -138,6 +138,9 @@ class PluginScannerWrapper:
         for f in result.findings:
             if getattr(f, "suppressed", False):
                 continue
+            rid = getattr(f, "rule_id", None) or ""
+            line = getattr(f, "line", None) or getattr(f, "line_number", None)
+            ln: int | None = int(line) if line is not None else None
             findings.append(Finding(
                 id=f.id,
                 severity=f.severity,
@@ -147,6 +150,8 @@ class PluginScannerWrapper:
                 remediation=f.remediation or "",
                 scanner="plugin-scanner",
                 tags=list(f.tags) if f.tags else [],
+                rule_id=rid,
+                line_number=ln,
             ))
 
         return ScanResult(

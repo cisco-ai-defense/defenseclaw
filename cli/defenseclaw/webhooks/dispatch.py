@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from defenseclaw.webhooks.otel_metrics import WebhookDeliveryTimer
 from defenseclaw.webhooks.writer import validate_webhook_url
 
 # ---------------------------------------------------------------------------
@@ -359,14 +360,18 @@ def send_synthetic(
     )
     status: int | None = None
     err: str | None = None
-    try:
-        with urllib.request.urlopen(req, timeout=max(1, int(timeout_seconds))) as resp:  # noqa: S310
-            status = int(resp.getcode())
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code)
-        err = f"HTTP {exc.code}: {exc.reason}"
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        err = str(exc)
+    with WebhookDeliveryTimer(webhook_type, url) as wt:
+        try:
+            with urllib.request.urlopen(req, timeout=max(1, int(timeout_seconds))) as resp:  # noqa: S310
+                status = int(resp.getcode())
+                wt.status_code = status
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            wt.status_code = status
+            err = f"HTTP {exc.code}: {exc.reason}"
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            wt.status_code = 0
+            err = str(exc)
 
     ok = status is not None and 200 <= status < 300
     return DispatchResult(

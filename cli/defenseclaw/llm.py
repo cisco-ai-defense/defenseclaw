@@ -81,7 +81,21 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+from contextlib import contextmanager
 from typing import Any
+
+try:
+    from opentelemetry import trace as otel_trace
+except ImportError:
+    otel_trace = None  # type: ignore[assignment]
+
+try:
+    from opentelemetry import metrics as otel_metrics
+except ImportError:
+    otel_metrics = None  # type: ignore[assignment]
+
+from defenseclaw.gateway_error_codes import ERR_LLM_BRIDGE_ERROR
 
 # Opt-in debug flag. Default off so the plugin scanner stays quiet on
 # stderr (the TS plugin pipes stderr through to the Cursor/OpenClaw
@@ -99,6 +113,97 @@ _DEBUG = os.environ.get("DEFENSECLAW_LLM_DEBUG", "").strip() not in ("", "0", "f
 def _debug(msg: str) -> None:
     if _DEBUG:
         sys.stderr.write(f"[llm-bridge] {msg}\n")
+
+
+_bridge_hist = None
+
+
+def _llm_bridge_histogram():
+    global _bridge_hist
+    if otel_metrics is None:
+        return None
+    if _bridge_hist is None:
+        meter = otel_metrics.get_meter("defenseclaw")
+        _bridge_hist = meter.create_histogram(
+            name="defenseclaw.llm_bridge.latency",
+            unit="ms",
+            description="LiteLLM bridge call latency",
+        )
+    return _bridge_hist
+
+
+def _record_llm_bridge_latency(model: str, status: str, duration_ms: float) -> None:
+    h = _llm_bridge_histogram()
+    if h is None:
+        return
+    attrs = {"status": status}
+    if model:
+        attrs["gen_ai.request.model"] = model
+    h.record(duration_ms, attributes=attrs)
+
+
+@contextmanager
+def _genai_span(model: str, provider_hint: str):
+    if otel_trace is None:
+        yield
+        return
+    tracer = otel_trace.get_tracer("defenseclaw.llm")
+    with tracer.start_as_current_span("gen_ai.chat.completions") as span:
+        span.set_attribute("gen_ai.operation.name", "chat")
+        if model:
+            span.set_attribute("gen_ai.request.model", model)
+        if provider_hint:
+            span.set_attribute("gen_ai.provider.name", provider_hint)
+        yield
+
+
+def _log_bridge_error_json(status: str, message: str) -> None:
+    rec = {
+        "defenseclaw": "llm-bridge",
+        "error_code": ERR_LLM_BRIDGE_ERROR,
+        "status": status,
+        "message": message[:2000],
+    }
+    sys.stderr.write(json.dumps(rec) + "\n")
+
+
+def _classify_llm_exception(exc: BaseException) -> str:
+    name = type(exc).__name__
+    mod = type(exc).__module__
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if mod.startswith("httpx") or mod.startswith("http"):
+        pass
+    try:
+        import requests  # noqa: PLC0415 — optional, same as litellm
+
+        if isinstance(exc, (requests.Timeout, requests.ConnectTimeout, requests.ReadTimeout)):
+            return "timeout"
+        if isinstance(exc, requests.ConnectionError):
+            return "network_error"
+    except Exception:
+        pass
+    try:
+        import litellm  # noqa: PLC0415
+
+        if isinstance(exc, getattr(litellm, "RateLimitError", ())):
+            return "rate_limited"
+        if isinstance(exc, getattr(litellm, "AuthenticationError", ())):
+            return "auth_failed"
+        if isinstance(exc, getattr(litellm, "Timeout", ())):
+            return "timeout"
+    except Exception:
+        pass
+    low = f"{name} {exc}".lower()
+    if "429" in low or "rate limit" in low:
+        return "rate_limited"
+    if "401" in low or "403" in low or "authentication" in low:
+        return "auth_failed"
+    if "timeout" in low:
+        return "timeout"
+    if "connection" in low or "connect" in low:
+        return "network_error"
+    return "internal"
 
 
 def _load_plugin_llm_config() -> dict[str, Any]:
@@ -213,6 +318,7 @@ def call_llm(request: dict) -> dict:
             "model": request.get("model", ""),
             "usage": {},
             "error": "messages is required and must be a non-empty list",
+            "error_code": None,
         }
 
     try:
@@ -226,6 +332,7 @@ def call_llm(request: dict) -> dict:
                 "litellm not installed. Install with: pip install litellm "
                 "(bundled automatically with `defenseclaw` ≥ 0.5)"
             ),
+            "error_code": None,
         }
 
     defaults = _load_plugin_llm_config()
@@ -252,6 +359,7 @@ def call_llm(request: dict) -> dict:
                 "``llm.model`` / ``DEFENSECLAW_LLM_MODEL`` in the DefenseClaw "
                 "config"
             ),
+            "error_code": None,
         }
 
     # Per-request knobs that LiteLLM expects verbatim.
@@ -259,15 +367,22 @@ def call_llm(request: dict) -> dict:
     kwargs["max_tokens"] = request.get("max_tokens", 8192)
     kwargs["temperature"] = request.get("temperature", 0.0)
 
-    try:
-        response = litellm.completion(**kwargs)
-    except Exception as exc:
-        return {
-            "content": "",
-            "model": model,
-            "usage": {},
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+    t0 = time.perf_counter()
+    with _genai_span(model, provider_hint):
+        try:
+            response = litellm.completion(**kwargs)
+        except Exception as exc:
+            ms = (time.perf_counter() - t0) * 1000.0
+            st = _classify_llm_exception(exc)
+            _record_llm_bridge_latency(model, st, ms)
+            _log_bridge_error_json(st, f"{type(exc).__name__}: {exc}")
+            return {
+                "content": "",
+                "model": model,
+                "usage": {},
+                "error": f"{type(exc).__name__}: {exc}",
+                "error_code": ERR_LLM_BRIDGE_ERROR,
+            }
 
     # LiteLLM normalizes responses to the OpenAI ChatCompletion shape
     # regardless of provider, so a single extraction path works for
@@ -279,11 +394,15 @@ def call_llm(request: dict) -> dict:
             msg = choices[0].message
             content = getattr(msg, "content", "") or ""
     except Exception as exc:
+        ms_bad = (time.perf_counter() - t0) * 1000.0
+        _record_llm_bridge_latency(model, "internal", ms_bad)
+        _log_bridge_error_json("internal", f"malformed LiteLLM response: {exc}")
         return {
             "content": "",
             "model": model,
             "usage": {},
             "error": f"malformed LiteLLM response: {exc}",
+            "error_code": ERR_LLM_BRIDGE_ERROR,
         }
 
     usage: dict = {}
@@ -300,11 +419,14 @@ def call_llm(request: dict) -> dict:
             "total_tokens": total_tokens,
         }
 
+    _record_llm_bridge_latency(model, "success", (time.perf_counter() - t0) * 1000.0)
+
     return {
         "content": content,
         "model": getattr(response, "model", "") or model,
         "usage": usage,
         "error": None,
+        "error_code": None,
     }
 
 

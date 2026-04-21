@@ -24,6 +24,23 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+# Mirrors gatewaylog.ErrCodeSubprocessExit — stable for logs/alerts.
+SUBPROCESS_EXIT = "SUBPROCESS_EXIT"
+
+
+class SubprocessExitError(RuntimeError):
+    """Raised when the LLM bridge subprocess exits non-zero."""
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        self.returncode = returncode
+        self.stderr = stderr or ""
+        self.code = SUBPROCESS_EXIT
+        msg = (
+            f"defenseclaw.llm subprocess failed (code={SUBPROCESS_EXIT}, "
+            f"returncode={returncode}): {self.stderr[:2000]}"
+        )
+        super().__init__(msg)
+
 
 @dataclass
 class LLMConfig:
@@ -123,12 +140,17 @@ def call_llm(
             text=True,
             timeout=120,
         )
-        response = json.loads(proc.stdout)
+        err_out = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            raise SubprocessExitError(proc.returncode, err_out)
+        response = json.loads(proc.stdout or "{}")
         return LLMResponse(
             content=response.get("content", ""),
             model=response.get("model", model),
             usage=response.get("usage", {}),
             error=response.get("error"),
         )
+    except SubprocessExitError:
+        raise
     except Exception as e:
         return LLMResponse(content="", model=model, usage={}, error=str(e))
