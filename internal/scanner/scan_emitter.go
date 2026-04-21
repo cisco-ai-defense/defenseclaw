@@ -97,6 +97,16 @@ func EmitScanResult(
 	counts := severityCounts(result)
 	maxSev := toGatewaySeverity(result.MaxSeverity())
 
+	// Normalize to v7 gateway-event schema enums. The raw Scanner /
+	// TargetType / Verdict values can be full scanner names ("skill-scanner"),
+	// classification bucket names ("code", "inventory"), or upper-case
+	// verdicts from external scanners. Writing the raw values tripped
+	// SCHEMA_VIOLATION drops on gateway.jsonl; persistence + telemetry
+	// keep the original values for backwards compatibility.
+	scannerEnum := NormalizeScannerEnum(result.Scanner)
+	targetTypeEnum := NormalizeTargetTypeEnum(targetType)
+	verdictEnum := NormalizeVerdictEnum(verdict)
+
 	prov := version.Current()
 	meta := ScanFindingMeta{
 		Timestamp:         result.Timestamp,
@@ -167,10 +177,10 @@ func EmitScanResult(
 			SidecarInstanceID: agent.SidecarInstanceID,
 			Scan: &gatewaylog.ScanPayload{
 				ScanID:      scanID,
-				Scanner:     result.Scanner,
+				Scanner:     scannerEnum,
 				Target:      result.Target,
-				TargetType:  targetType,
-				Verdict:     verdict,
+				TargetType:  targetTypeEnum,
+				Verdict:     verdictEnum,
 				DurationMs:  result.Duration.Milliseconds(),
 				SeverityMax: maxSev,
 				Counts:      counts,
@@ -199,7 +209,7 @@ func EmitScanResult(
 				SidecarInstanceID: agent.SidecarInstanceID,
 				ScanFinding: &gatewaylog.ScanFindingPayload{
 					ScanID:      scanID,
-					Scanner:     result.Scanner,
+					Scanner:     scannerEnum,
 					Target:      result.Target,
 					FindingID:   f.ID,
 					RuleID:      f.RuleID,

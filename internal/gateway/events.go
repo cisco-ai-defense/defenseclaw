@@ -305,15 +305,55 @@ func emitJudge(
 // message field. ctx may be context.Background() for boot/shutdown
 // transitions; when available (reloads triggered from an HTTP call)
 // pass the request context so the envelope carries correlation.
+//
+// Transition is normalized to the gateway-event-envelope schema enum
+// ("start"|"stop"|"ready"|"degraded"|"restored"|"alert"|"completed")
+// so semantically meaningful caller strings (e.g. "init", "reload",
+// "stream.open", "stream.close") do not trip the runtime validator
+// and get dropped as schema violations. The original intent is
+// preserved on details.transition_raw for audit fidelity.
 func emitLifecycle(ctx context.Context, subsystem, transition string, details map[string]string) {
+	normalized := normalizeLifecycleTransition(transition)
+	if normalized != transition {
+		if details == nil {
+			details = map[string]string{}
+		}
+		if _, ok := details["transition_raw"]; !ok {
+			details["transition_raw"] = transition
+		}
+	}
 	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventLifecycle,
 		Lifecycle: &gatewaylog.LifecyclePayload{
 			Subsystem:  subsystem,
-			Transition: transition,
+			Transition: normalized,
 			Details:    details,
 		},
 	})
+}
+
+// normalizeLifecycleTransition maps caller-supplied transition
+// strings to the closed enum defined in
+// internal/gatewaylog/schemas/gateway-event-envelope.json. Anything
+// that cannot be cleanly mapped is coerced to "completed" — the
+// least harmful terminal state — rather than left invalid.
+func normalizeLifecycleTransition(t string) string {
+	switch t {
+	case "start", "stop", "ready", "degraded", "restored", "alert", "completed":
+		return t
+	case "init", "boot", "stream.open", "open", "connect":
+		return "start"
+	case "stream.close", "close", "disconnect":
+		return "stop"
+	case "reload", "refresh":
+		return "completed"
+	case "error", "failed", "failure":
+		return "degraded"
+	case "recover", "reconnect":
+		return "restored"
+	default:
+		return "completed"
+	}
 }
 
 // emitError records a structured gateway error. Prefer this over

@@ -24,16 +24,17 @@ func (m *mockTel) RecordScanFindingByRule(_ context.Context, scanner, ruleID, se
 
 func TestEmitScanResult_TableDriven(t *testing.T) {
 	cases := []struct {
-		name     string
-		scanner  string
-		findings []Finding
-		wantN    int // EventScanFinding count
+		name        string
+		scanner     string
+		wantScanner string // v7 gateway-event-envelope schema enum
+		findings    []Finding
+		wantN       int // EventScanFinding count
 	}{
-		{"skill", "skill-scanner", []Finding{{ID: "1", Severity: SeverityHigh, Title: "t", Scanner: "skill-scanner", Category: "x"}}, 1},
-		{"mcp", "mcp-scanner", []Finding{{ID: "1", Severity: SeverityMedium, Title: "m", Scanner: "mcp-scanner"}}, 1},
-		{"plugin", "plugin-scanner", []Finding{{ID: "1", Severity: SeverityLow, Title: "p", Scanner: "plugin-scanner", RuleID: "r1"}}, 1},
-		{"aibom", "aibom", []Finding{{ID: "1", Severity: SeverityInfo, Title: "i", Scanner: "aibom"}}, 1},
-		{"codeguard", "codeguard", []Finding{{ID: "CG-1", Severity: SeverityCritical, Title: "c", Scanner: "codeguard", RuleID: "CG-1"}}, 1},
+		{"skill", "skill-scanner", "skill", []Finding{{ID: "1", Severity: SeverityHigh, Title: "t", Scanner: "skill-scanner", Category: "x"}}, 1},
+		{"mcp", "mcp-scanner", "mcp", []Finding{{ID: "1", Severity: SeverityMedium, Title: "m", Scanner: "mcp-scanner"}}, 1},
+		{"plugin", "plugin-scanner", "plugin", []Finding{{ID: "1", Severity: SeverityLow, Title: "p", Scanner: "plugin-scanner", RuleID: "r1"}}, 1},
+		{"aibom", "aibom", "aibom", []Finding{{ID: "1", Severity: SeverityInfo, Title: "i", Scanner: "aibom"}}, 1},
+		{"codeguard", "codeguard", "codeguard", []Finding{{ID: "CG-1", Severity: SeverityCritical, Title: "c", Scanner: "codeguard", RuleID: "CG-1"}}, 1},
 	}
 
 	for _, tc := range cases {
@@ -63,13 +64,23 @@ func TestEmitScanResult_TableDriven(t *testing.T) {
 				switch e.EventType {
 				case gatewaylog.EventScan:
 					scanCount++
-					if e.Scan == nil || e.Scan.Scanner != tc.scanner {
-						t.Fatalf("EventScan: %+v", e.Scan)
+					if e.Scan == nil || e.Scan.Scanner != tc.wantScanner {
+						t.Fatalf("EventScan scanner=%q want=%q payload=%+v", func() string {
+							if e.Scan == nil {
+								return ""
+							}
+							return e.Scan.Scanner
+						}(), tc.wantScanner, e.Scan)
 					}
 				case gatewaylog.EventScanFinding:
 					findingCount++
-					if e.ScanFinding == nil || e.ScanFinding.Scanner != tc.scanner {
-						t.Fatalf("EventScanFinding: %+v", e.ScanFinding)
+					if e.ScanFinding == nil || e.ScanFinding.Scanner != tc.wantScanner {
+						t.Fatalf("EventScanFinding scanner=%q want=%q payload=%+v", func() string {
+							if e.ScanFinding == nil {
+								return ""
+							}
+							return e.ScanFinding.Scanner
+						}(), tc.wantScanner, e.ScanFinding)
 					}
 					if e.ScanFinding.RuleID == "" {
 						t.Fatal("expected non-empty rule_id")
