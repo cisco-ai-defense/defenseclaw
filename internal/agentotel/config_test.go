@@ -76,7 +76,6 @@ func TestConfigureClaudeDirectWritesOTELEnv(t *testing.T) {
 	for _, key := range []string{
 		"BETA_TRACING_ENDPOINT",
 		"ENABLE_BETA_TRACING_DETAILED",
-		"ENABLE_ENHANCED_TELEMETRY_BETA",
 	} {
 		if _, ok := env[key]; ok {
 			t.Errorf("env[%q] should not be set in direct OTLP mode", key)
@@ -184,7 +183,6 @@ func TestConfigureClaudeSplunkDirectBootstrapsLogs(t *testing.T) {
 	for _, key := range []string{
 		"BETA_TRACING_ENDPOINT",
 		"ENABLE_BETA_TRACING_DETAILED",
-		"ENABLE_ENHANCED_TELEMETRY_BETA",
 	} {
 		if _, ok := env[key]; ok {
 			t.Fatalf("%s should be absent in direct Splunk mode", key)
@@ -304,7 +302,7 @@ func TestConfigureCodexDirectWritesHeaders(t *testing.T) {
 	}
 }
 
-func TestConfigureCodexSplunkDirectDisablesLogs(t *testing.T) {
+func TestConfigureCodexSplunkDirectBootstrapsLogs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -323,8 +321,8 @@ func TestConfigureCodexSplunkDirectDisablesLogs(t *testing.T) {
 	}
 	content := string(data)
 
-	if !strings.Contains(content, `exporter = "none"`) {
-		t.Fatal("logs exporter should be disabled in direct Splunk mode")
+	if !strings.Contains(content, `endpoint = "https://ingest.us1.signalfx.com/v1/logs"`) {
+		t.Fatal("logs exporter should bootstrap the shared OTEL provider in direct Splunk mode")
 	}
 	for _, want := range []string{
 		`endpoint = "https://ingest.us1.signalfx.com/v2/datapoint/otlp"`,

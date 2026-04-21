@@ -37,7 +37,7 @@ type telemetryTarget struct {
 	metricEndpoint           string
 	logEndpoint              string
 	logsEnabled              bool
-	claudeLogBootstrapNeeded bool
+	logBootstrapNeeded       bool
 	headerName               string
 	headerValue              string
 	warnings                 []string
@@ -242,16 +242,16 @@ func buildDirectSplunkTarget(opts ConfigureOpts) (telemetryTarget, error) {
 	}
 	headerName, headerValue := buildAuthHeader(opts, true)
 	target := telemetryTarget{
-		baseEndpoint:             "https://" + ingestHost,
-		traceEndpoint:            "https://" + ingestHost + "/v2/trace/otlp",
-		metricEndpoint:           "https://" + ingestHost + "/v2/datapoint/otlp",
-		logEndpoint:              "https://" + ingestHost + "/v1/logs",
-		logsEnabled:              false,
-		claudeLogBootstrapNeeded: true,
-		headerName:               headerName,
-		headerValue:              headerValue,
+		baseEndpoint:       "https://" + ingestHost,
+		traceEndpoint:      "https://" + ingestHost + "/v2/trace/otlp",
+		metricEndpoint:     "https://" + ingestHost + "/v2/datapoint/otlp",
+		logEndpoint:        "https://" + ingestHost + "/v1/logs",
+		logsEnabled:        false,
+		logBootstrapNeeded: true,
+		headerName:         headerName,
+		headerValue:        headerValue,
 		warnings: []string{
-			"Splunk direct mode configures traces and metrics directly; direct OTLP logs remain unsupported without a collector or relay",
+			"Splunk direct mode configures traces and metrics directly; OTLP logs may return 404 without a collector or relay",
 		},
 	}
 	if warning != "" {
@@ -359,9 +359,9 @@ func configureClaude(opts ConfigureOpts, target telemetryTarget) error {
 
 	env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 	env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] = "1"
+	env["ENABLE_ENHANCED_TELEMETRY_BETA"] = "1"
 	delete(env, "BETA_TRACING_ENDPOINT")
 	delete(env, "ENABLE_BETA_TRACING_DETAILED")
-	delete(env, "ENABLE_ENHANCED_TELEMETRY_BETA")
 	env["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf"
 	if target.baseEndpoint != "" {
 		env["OTEL_EXPORTER_OTLP_ENDPOINT"] = target.baseEndpoint
@@ -379,7 +379,7 @@ func configureClaude(opts ConfigureOpts, target telemetryTarget) error {
 	env["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"] = "http/protobuf"
 	env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] = target.metricEndpoint
 
-	if target.logsEnabled || target.claudeLogBootstrapNeeded {
+	if target.logsEnabled || target.logBootstrapNeeded {
 		env["OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"] = "http/protobuf"
 		env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = target.logEndpoint
 		env["OTEL_LOGS_EXPORTER"] = "otlp"
@@ -477,7 +477,7 @@ func configureCodex(opts ConfigureOpts, target telemetryTarget) error {
 	}
 	b.WriteString(codexManagedBeginMarker + "\n")
 	b.WriteString("[otel]\n")
-	if target.logsEnabled {
+	if target.logsEnabled || target.logBootstrapNeeded {
 		fmt.Fprintf(&b, "exporter = { \"otlp-http\" = { endpoint = %q, protocol = \"binary\"%s } }\n",
 			target.logEndpoint, formatTOMLHeaders(target))
 	} else {

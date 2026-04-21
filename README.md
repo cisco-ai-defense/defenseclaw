@@ -223,6 +223,44 @@ codex exec --skip-git-repo-check --json "Reply with ok only"
 claude -p --model haiku --output-format json "Reply with ok only"
 ```
 
+For a single session without changing persistent desktop config, use `run`:
+
+```bash
+export CODEX_RUN_ENV="codex-run-test-$(date +%s)"
+
+./defenseclaw-agent-otel run \
+  --tool codex \
+  --splunk-host app.us1.observability.splunkcloud.com \
+  --token "$SPLUNK_OBSERVABILITY_TOKEN" \
+  --environment "$CODEX_RUN_ENV" \
+  --tenant-id demo-tenant \
+  --workspace-id defenseclaw \
+  --agent-name codex-desktop \
+  -- exec --skip-git-repo-check --json "Reply with ok only"
+```
+
+```bash
+export CLAUDE_RUN_ENV="claude-run-test-$(date +%s)"
+
+./defenseclaw-agent-otel run \
+  --tool claude \
+  --splunk-host app.us1.observability.splunkcloud.com \
+  --token "$SPLUNK_OBSERVABILITY_TOKEN" \
+  --claude-environment "$CLAUDE_RUN_ENV" \
+  --claude-tenant-id demo-tenant \
+  --claude-workspace-id defenseclaw \
+  --claude-agent-name claude-desktop \
+  -- -p --model haiku --output-format json "Reply with ok only"
+```
+
+For `Claude Code`, `run` injects OTEL settings through runtime environment
+variables only. For `Codex`, `run` injects OTEL settings through runtime
+environment variables and one-shot `otel.*` CLI overrides. It does not modify
+the real `~/.claude/settings.json` or `~/.codex/config.toml`.
+
+When verifying these one-shot runs in Splunk O11y, the trace-derived series can
+take a couple of minutes to appear after the command finishes.
+
 Remove the desktop config later with:
 
 ```bash
