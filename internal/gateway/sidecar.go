@@ -84,6 +84,26 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// lockstep with audit.SetProcessAgentInstanceID — the two setters
 	// live in separate packages only to avoid an import cycle.
 	gatewaylog.SetSidecarInstanceID(agentInstanceID)
+
+	// Seed run_id so every audit row / gateway.jsonl event / OTel
+	// record in this sidecar run carries a non-empty correlation
+	// key. Precedence:
+	//   1. DEFENSECLAW_RUN_ID from the env (set by the daemon
+	//      launcher or an operator pinning a specific run id).
+	//   2. Newly minted UUID — covers `go run`, direct
+	//      `defenseclaw-gateway` invocations, and test harnesses
+	//      that never exported the env var.
+	// We mirror the resolved value back into the env so legacy
+	// readers (Python scanners, subprocess judges) and future
+	// child processes still pick it up transparently, and install
+	// the atomic copy for in-process readers that now prefer
+	// gatewaylog.ProcessRunID().
+	runID := strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	if runID == "" {
+		runID = uuid.NewString()
+		_ = os.Setenv("DEFENSECLAW_RUN_ID", runID)
+	}
+	gatewaylog.SetProcessRunID(runID)
 	if otel != nil {
 		otel.SetAgentInstanceID(agentInstanceID)
 	}
@@ -263,7 +283,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// body stays on disk under the same ACLs as the rest of the data
 	// directory.
 	if retainJudge && store != nil {
-		SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
+		SetJudgePersistor(func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts) {
 			if err := store.InsertJudgeResponse(audit.JudgeResponse{
 				Kind:       p.Kind,
 				Direction:  string(dir),
@@ -285,8 +305,23 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			// the sinks see only the structured metadata (kind,
 			// model, latency, verdict, parse error). The full body
 			// lives only in SQLite for local forensics.
+			//
+			// v7: merge the request-scoped correlation envelope
+			// (from ctx) with the per-emission overlay (tool +
+			// policy + destination_app derived from the active
+			// request). Without this, every llm-judge-response row
+			// landed in SQLite with agent/session/run/trace NULL
+			// because the closure had no access to request
+			// context — see review finding on empty envelope
+			// coverage for judge rows.
 			if logger != nil {
-				_ = logger.LogEvent(audit.Event{
+				env := audit.MergeEnvelope(audit.EnvelopeFromContext(ctx), audit.CorrelationEnvelope{
+					ToolName:       opts.ToolName,
+					ToolID:         opts.ToolID,
+					PolicyID:       opts.PolicyID,
+					DestinationApp: opts.DestinationApp,
+				})
+				evt := audit.Event{
 					Action:   "llm-judge-response",
 					Target:   p.Model,
 					Actor:    "defenseclaw-gateway",
@@ -295,7 +330,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 						"kind=%s direction=%s action=%s latency_ms=%d input_bytes=%d parse_error=%q",
 						p.Kind, dir, p.Action, p.LatencyMs, p.InputBytes, p.ParseError,
 					),
-				})
+				}
+				audit.ApplyEnvelope(&evt, env)
+				_ = logger.LogEvent(evt)
 			}
 		})
 	}
@@ -330,7 +367,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
 func (s *Sidecar) Run(ctx context.Context) error {
-	runID := os.Getenv("DEFENSECLAW_RUN_ID")
+	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
 	emitLifecycle(ctx, "sidecar", "start", map[string]string{

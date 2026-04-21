@@ -2776,6 +2776,92 @@ func TestInjectNotificationForPassthrough_Dispatch(t *testing.T) {
 				}
 			},
 		},
+		{
+			// Regression: prior to Phase 2 the openai-chat adapter's
+			// Matches() had a strings.Contains(path, "/messages")
+			// fallback that wrongly routed Anthropic traffic through
+			// the Chat Completions injector, producing a role:"system"
+			// entry inside messages[] that Anthropic upstream then
+			// rejected with 400 invalid_request_error. This test
+			// pins the correct route: /messages → anthropic adapter
+			// → top-level `system` field (NEVER messages[].role:system).
+			name:     "anthropic messages injects into top-level system field",
+			path:     "/v1/messages",
+			in:       `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`,
+			wantSite: "anthropic/system",
+			check: func(t *testing.T, out []byte) {
+				var got struct {
+					System   string `json:"system"`
+					Messages []struct {
+						Role string `json:"role"`
+					} `json:"messages"`
+				}
+				if err := json.Unmarshal(out, &got); err != nil {
+					t.Fatalf("output not valid JSON: %v", err)
+				}
+				if got.System != notice {
+					t.Errorf("top-level system not set to notice; got %q want %q", got.System, notice)
+				}
+				// Anthropic must NOT have a synthetic system entry in messages[].
+				for _, m := range got.Messages {
+					if m.Role == "system" {
+						t.Errorf("messages[] contains forbidden role:system entry — would be rejected by Anthropic upstream")
+					}
+				}
+				if len(got.Messages) != 1 {
+					t.Errorf("messages[] length = %d, want 1 (original user message only)", len(got.Messages))
+				}
+			},
+		},
+		{
+			// Preserve an existing string system prompt by prepending
+			// the notice with a blank-line separator.
+			name:     "anthropic messages prepends to existing string system",
+			path:     "/v1/messages",
+			in:       `{"model":"claude","system":"be terse","messages":[{"role":"user","content":"hi"}]}`,
+			wantSite: "anthropic/system",
+			check: func(t *testing.T, out []byte) {
+				var got struct {
+					System string `json:"system"`
+				}
+				if err := json.Unmarshal(out, &got); err != nil {
+					t.Fatalf("output not valid JSON: %v", err)
+				}
+				want := notice + "\n\nbe terse"
+				if got.System != want {
+					t.Errorf("system = %q, want %q", got.System, want)
+				}
+			},
+		},
+		{
+			// Anthropic also accepts array-of-blocks for `system`;
+			// the adapter must prepend a {type:text,text:...} block
+			// rather than overwriting or coercing the shape.
+			name:     "anthropic messages prepends block to existing system array",
+			path:     "/v1/messages",
+			in:       `{"model":"claude","system":[{"type":"text","text":"be terse"}],"messages":[{"role":"user","content":"hi"}]}`,
+			wantSite: "anthropic/system",
+			check: func(t *testing.T, out []byte) {
+				var got struct {
+					System []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"system"`
+				}
+				if err := json.Unmarshal(out, &got); err != nil {
+					t.Fatalf("output not valid JSON: %v", err)
+				}
+				if len(got.System) != 2 {
+					t.Fatalf("system array length = %d, want 2", len(got.System))
+				}
+				if got.System[0].Type != "text" || got.System[0].Text != notice {
+					t.Errorf("first system block = %+v, want {type:text,text:notice}", got.System[0])
+				}
+				if got.System[1].Text != "be terse" {
+					t.Errorf("second system block = %+v, want original block preserved", got.System[1])
+				}
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

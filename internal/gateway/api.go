@@ -1316,9 +1316,6 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
 		_ = a.store.LogEvent(evt)
 	}
-	if a.logger != nil {
-		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
-	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{
 		Action:    "guardrail-inspection",
 		Target:    req.Model,
@@ -1426,9 +1423,6 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		}
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
 		_ = a.store.LogEvent(evt)
-	}
-	if a.logger != nil {
-		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
 	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{
 		Action:    "guardrail-opa-inspection",

@@ -45,7 +45,17 @@ import {
   type KeyValueStorage,
 } from "./agent_identity.js";
 import { DaemonClient } from "./client.js";
-import { HEADER_HTTP_CONTENT_TYPE } from "./correlation-headers.js";
+import {
+  HEADER_DEFENSECLAW_AGENT_ID,
+  HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
+  HEADER_DEFENSECLAW_AGENT_NAME,
+  HEADER_DEFENSECLAW_POLICY_ID,
+  HEADER_DEFENSECLAW_RUN_ID,
+  HEADER_DEFENSECLAW_SESSION_ID,
+  HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
+  HEADER_DEFENSECLAW_TRACE_ID,
+  HEADER_HTTP_CONTENT_TYPE,
+} from "./correlation-headers.js";
 
 /** OpenClaw passes full gateway config and the defenseclaw plugin entry config. */
 type DefenseClawPluginHost = PluginApi & {
@@ -193,10 +203,74 @@ export default function (api: DefenseClawPluginHost) {
     getLogAgentId: () => identityCache?.agentId ?? "unknown",
   });
 
+  // Last-seen tool context, captured on every before_tool_call so the
+  // fetch interceptor can attach session_id / run_id to LLM traffic that
+  // is emitted from unrelated code paths later in the same agent turn.
+  // Snapshot-only: never carries payload data, only the correlation keys
+  // that the sidecar's CorrelationMiddleware already validates and
+  // length-caps.
+  let currentToolContext: { sessionId?: string; runId?: string } = {};
+
+  const trackToolContext = (ctx?: ToolContext): void => {
+    if (!ctx) return;
+    const sessionId = ctx.sessionId ?? ctx.sessionKey;
+    const runId = ctx.runId;
+    if (sessionId || runId) {
+      currentToolContext = { sessionId, runId };
+    }
+  };
+
+  // Build the v7 X-DefenseClaw-* correlation header snapshot for a single
+  // intercepted LLM call. Returns {} if identity has not yet bootstrapped;
+  // the proxy treats missing headers as "unknown" rather than failing the
+  // request. A fresh trace_id per call gives the proxy something to pivot
+  // on even when OpenClaw did not provide one.
+  const getFetchCorrelationHeaders = (): Record<string, string> => {
+    const h: Record<string, string> = {};
+    const agentId = identityCache?.agentId;
+    if (agentId) h[HEADER_DEFENSECLAW_AGENT_ID] = agentId;
+
+    const agentInstanceId =
+      daemonClient.getStickyAgentInstanceId() ??
+      identityCache?.sessionAgentInstanceId;
+    if (agentInstanceId) {
+      h[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID] = agentInstanceId;
+    }
+
+    const sidecarInstanceId = daemonClient.getEchoedSidecarInstanceId();
+    if (sidecarInstanceId) {
+      h[HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID] = sidecarInstanceId;
+    }
+
+    if (pluginAgentExtras.name) {
+      h[HEADER_DEFENSECLAW_AGENT_NAME] = pluginAgentExtras.name;
+    }
+    if (pluginAgentExtras.policyId) {
+      h[HEADER_DEFENSECLAW_POLICY_ID] = pluginAgentExtras.policyId;
+    }
+
+    if (currentToolContext.sessionId) {
+      h[HEADER_DEFENSECLAW_SESSION_ID] = currentToolContext.sessionId;
+    }
+    if (currentToolContext.runId) {
+      h[HEADER_DEFENSECLAW_RUN_ID] = currentToolContext.runId;
+    }
+
+    // Mint a fresh trace id per call so the proxy has at least one
+    // correlation key it did not have to derive itself. Downstream
+    // sinks dedupe on request_id (set by the proxy) rather than
+    // trace_id so there is no risk of collapsing rows.
+    h[HEADER_DEFENSECLAW_TRACE_ID] = randomUUID();
+    return h;
+  };
+
   // ─── LLM fetch interceptor ───
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
   // the guardrail proxy regardless of which provider/model OpenClaw uses.
-  const interceptor = createFetchInterceptor(sidecarConfig.guardrailPort);
+  const interceptor = createFetchInterceptor({
+    guardrailPort: sidecarConfig.guardrailPort,
+    getCorrelationHeaders: getFetchCorrelationHeaders,
+  });
   // Start immediately so gateway model prewarm (before plugin services) also
   // routes through the guardrail when Bedrock is the primary model.
   interceptor.start();
@@ -271,6 +345,13 @@ export default function (api: DefenseClawPluginHost) {
   }
 
   api.on("before_tool_call", async (event, ctx) => {
+    // Cache the current session/run so subsequent LLM fetch interceptions
+    // emitted from the same agent turn can stamp them on outbound
+    // X-DefenseClaw-* headers. Without this, intercepted LLM traffic
+    // arrives at the guardrail proxy with no session/run correlation and
+    // every guardrail-* audit row in SQLite ends up NULL on those columns.
+    trackToolContext(ctx);
+
     if (event.toolName === "message") {
       const content =
         (event.params?.content as string) || (event.params?.body as string) || "";

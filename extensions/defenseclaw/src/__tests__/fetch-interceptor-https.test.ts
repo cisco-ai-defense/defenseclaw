@@ -151,6 +151,73 @@ describe("https.request interception (smithy NodeHttpHandler shape)", () => {
     expect(opts.port).toBe(guardrailPort);
   });
 
+  it("stamps X-DefenseClaw-* correlation headers from getCorrelationHeaders", () => {
+    // Regression for v7: intercepted LLM traffic must carry the plugin's
+    // correlation envelope so the guardrail proxy can stamp agent_id,
+    // session_id, run_id, trace_id, policy_id on every guardrail-* audit
+    // row. Without this, SQLite rows for every intercepted LLM hop had
+    // those columns NULL.
+    interceptor.stop();
+    interceptor = createFetchInterceptor({
+      guardrailPort,
+      getCorrelationHeaders: () => ({
+        "X-DefenseClaw-Agent-Id": "agent-42",
+        "X-DefenseClaw-Session-Id": "session-abc",
+        "X-DefenseClaw-Run-Id": "run-xyz",
+        "X-DefenseClaw-Trace-Id": "trace-123",
+        "X-DefenseClaw-Policy-Id": "policy-strict",
+      }),
+    });
+    interceptor.start();
+
+    https.request(
+      {
+        host: "api.anthropic.com",
+        method: "POST",
+        path: "/v1/messages",
+        headers: { "x-api-key": "sk-ant-test" },
+      } as unknown as Parameters<typeof https.request>[0],
+      () => undefined,
+    );
+    expect(captured).toHaveLength(1);
+    const opts = captured[0].opts as { headers?: Record<string, string> };
+    expect(opts.headers?.["X-DefenseClaw-Agent-Id"]).toBe("agent-42");
+    expect(opts.headers?.["X-DefenseClaw-Session-Id"]).toBe("session-abc");
+    expect(opts.headers?.["X-DefenseClaw-Run-Id"]).toBe("run-xyz");
+    expect(opts.headers?.["X-DefenseClaw-Trace-Id"]).toBe("trace-123");
+    expect(opts.headers?.["X-DefenseClaw-Policy-Id"]).toBe("policy-strict");
+  });
+
+  it("omits empty correlation header values", () => {
+    // Empty/undefined fields must not appear at all — the proxy treats
+    // empty strings as "header present, value empty", which can trigger
+    // validation warnings on the audit row. The interceptor strips them
+    // out so the sidecar sees a clean request envelope.
+    interceptor.stop();
+    interceptor = createFetchInterceptor({
+      guardrailPort,
+      getCorrelationHeaders: () => ({
+        "X-DefenseClaw-Agent-Id": "agent-42",
+        "X-DefenseClaw-Session-Id": "",
+      }),
+    });
+    interceptor.start();
+
+    https.request(
+      {
+        host: "api.anthropic.com",
+        method: "POST",
+        path: "/v1/messages",
+        headers: {},
+      } as unknown as Parameters<typeof https.request>[0],
+      () => undefined,
+    );
+    expect(captured).toHaveLength(1);
+    const opts = captured[0].opts as { headers?: Record<string, string> };
+    expect(opts.headers?.["X-DefenseClaw-Agent-Id"]).toBe("agent-42");
+    expect(opts.headers).not.toHaveProperty("X-DefenseClaw-Session-Id");
+  });
+
   it("passes through non-LLM https.request calls", () => {
     let passthroughCalled = false;
     const passthrough = ((..._args: unknown[]) => {

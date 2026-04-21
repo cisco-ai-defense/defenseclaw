@@ -29,6 +29,16 @@
 
 import { createRequire } from "node:module";
 import { loadSidecarConfig } from "./sidecar-config.js";
+import {
+  HEADER_DEFENSECLAW_AGENT_ID,
+  HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
+  HEADER_DEFENSECLAW_AGENT_NAME,
+  HEADER_DEFENSECLAW_POLICY_ID,
+  HEADER_DEFENSECLAW_RUN_ID,
+  HEADER_DEFENSECLAW_SESSION_ID,
+  HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
+  HEADER_DEFENSECLAW_TRACE_ID,
+} from "./correlation-headers.js";
 // Canonical provider config — single source of truth shared with the Go proxy.
 // Copied from internal/configs/providers.json by `make plugin`.
 import providersConfig from "./providers.json" with { type: "json" };
@@ -140,9 +150,18 @@ function extractProviderKeyFromRecord(hdrs: Record<string, string>): string {
 }
 
 /**
- * Build the proxy-hop headers (X-DC-Target-URL, X-AI-Auth, X-DC-Auth) that
- * the guardrail proxy expects. Used by both the fetch and https.request
- * interceptors so the logic lives in one place.
+ * Synchronous snapshot of DefenseClaw correlation headers injected onto
+ * every intercepted LLM request. Returning an empty object is legal: the
+ * Go side treats any missing header as "unknown". Anything the getter
+ * does return is forwarded verbatim to the guardrail proxy so the audit /
+ * gateway.jsonl / OTel surfaces all see the same keys at once.
+ */
+export type CorrelationHeadersGetter = () => Record<string, string>;
+
+/**
+ * Build the proxy-hop headers (X-DC-Target-URL, X-AI-Auth, X-DC-Auth) plus
+ * any caller-supplied correlation headers (X-DefenseClaw-*) the guardrail
+ * proxy's CorrelationMiddleware stamps onto the audit envelope.
  *
  * OpenClaw already resolves the real provider API key and sets it in the
  * appropriate header for each provider SDK. We extract it from whichever
@@ -151,13 +170,12 @@ function extractProviderKeyFromRecord(hdrs: Record<string, string>): string {
 function buildProxyHeaders(
   targetOrigin: string,
   providerKey: string,
+  getCorrelationHeaders: CorrelationHeadersGetter,
 ): Record<string, string> {
   const hdrs: Record<string, string> = {
     [TARGET_URL_HEADER]: targetOrigin,
   };
 
-  // Forward the real provider key as X-AI-Auth so the proxy has a single
-  // unified header to read for all providers.
   if (providerKey) {
     hdrs[AI_AUTH_HEADER] = providerKey;
   }
@@ -168,15 +186,76 @@ function buildProxyHeaders(
     hdrs[DC_AUTH_HEADER] = `Bearer ${sidecarToken}`;
   }
 
+  // v7 correlation: inject X-DefenseClaw-* headers so the proxy's
+  // CorrelationMiddleware can stamp agent_id / session_id / run_id /
+  // trace_id / policy_id on every guardrail-* audit row. Without this,
+  // every LLM request emitted via the fetch interceptor landed in
+  // SQLite with those columns NULL because the proxy has no other way
+  // to learn plugin-side identity on an intercepted hop.
+  let corr: Record<string, string> | undefined;
+  try {
+    corr = getCorrelationHeaders();
+  } catch {
+    // Never let a misbehaving getter break LLM traffic — missing
+    // correlation headers are recoverable, blocked LLM calls are not.
+  }
+  if (corr) {
+    for (const [k, v] of Object.entries(corr)) {
+      if (v !== undefined && v !== "") hdrs[k] = v;
+    }
+  }
+
   return hdrs;
+}
+
+/**
+ * Default getter that returns nothing. Used when callers construct an
+ * interceptor without wiring identity — keeps older call sites working.
+ */
+const emptyCorrelationHeaders: CorrelationHeadersGetter = () => ({});
+
+/** Canonical header-name set so callers outside this module can stay DRY. */
+export const DEFENSECLAW_CORRELATION_HEADER_NAMES = [
+  HEADER_DEFENSECLAW_AGENT_ID,
+  HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
+  HEADER_DEFENSECLAW_AGENT_NAME,
+  HEADER_DEFENSECLAW_POLICY_ID,
+  HEADER_DEFENSECLAW_RUN_ID,
+  HEADER_DEFENSECLAW_SESSION_ID,
+  HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
+  HEADER_DEFENSECLAW_TRACE_ID,
+] as const;
+
+export interface CreateFetchInterceptorOptions {
+  guardrailPort: number;
+  /**
+   * Synchronous snapshot of DefenseClaw X-DefenseClaw-* correlation
+   * headers to stamp on every intercepted LLM request. Called once per
+   * request — implementations should return cached values rather than
+   * performing I/O.
+   */
+  getCorrelationHeaders?: CorrelationHeadersGetter;
 }
 
 /**
  * Creates an interceptor that, when started, patches globalThis.fetch to
  * redirect LLM API calls through the guardrail proxy.
  * Call stop() to restore the original fetch.
+ *
+ * Accepts either a legacy `guardrailPort` number (backwards-compatible
+ * with existing tests) or a structured options bag that additionally
+ * carries a correlation-headers getter.
  */
-export function createFetchInterceptor(guardrailPort: number) {
+export function createFetchInterceptor(
+  portOrOpts: number | CreateFetchInterceptorOptions,
+) {
+  const interceptorOpts: CreateFetchInterceptorOptions =
+    typeof portOrOpts === "number"
+      ? { guardrailPort: portOrOpts }
+      : portOrOpts;
+  const guardrailPort = interceptorOpts.guardrailPort;
+  const getCorrelationHeaders =
+    interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
   const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
@@ -211,7 +290,11 @@ export function createFetchInterceptor(guardrailPort: number) {
         input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
       );
       const providerKey = extractProviderKey(headers);
-      const proxyHdrs = buildProxyHeaders(original.origin, providerKey);
+      const proxyHdrs = buildProxyHeaders(
+        original.origin,
+        providerKey,
+        getCorrelationHeaders,
+      );
       for (const [k, v] of Object.entries(proxyHdrs)) {
         headers.set(k, v);
       }
@@ -326,7 +409,11 @@ export function createFetchInterceptor(guardrailPort: number) {
 
         const hdrs = opts.headers as Record<string, string> ?? {};
         const providerKey = extractProviderKeyFromRecord(hdrs);
-        const proxyHdrs = buildProxyHeaders(originalUrl.origin, providerKey);
+        const proxyHdrs = buildProxyHeaders(
+          originalUrl.origin,
+          providerKey,
+          getCorrelationHeaders,
+        );
 
         // Spread `opts` first, then overwrite target fields. Crucially, drop:
         //

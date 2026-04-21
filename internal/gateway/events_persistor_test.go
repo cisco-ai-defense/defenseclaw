@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
 		persistedDirection gatewaylog.Direction
 		persistedInvoked   int
 	)
-	SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
+	SetJudgePersistor(func(_ context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, _ JudgeEmitOpts) {
 		persistedMu.Lock()
 		defer persistedMu.Unlock()
 		persistedRaw = p.RawResponse
@@ -79,7 +80,7 @@ func TestEmitJudge_EmptyRawDoesNotCallPersistor(t *testing.T) {
 	_ = withCapturedEvents(t)
 
 	var called int
-	SetJudgePersistor(func(p gatewaylog.JudgePayload, _ gatewaylog.Direction) { called++ })
+	SetJudgePersistor(func(_ context.Context, _ gatewaylog.JudgePayload, _ gatewaylog.Direction, _ JudgeEmitOpts) { called++ })
 	t.Cleanup(func() { SetJudgePersistor(nil) })
 
 	emitJudge(t.Context(), "injection", "gpt-4", gatewaylog.DirectionPrompt, 0, 1, "allow",

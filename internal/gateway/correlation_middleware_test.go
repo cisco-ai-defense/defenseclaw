@@ -206,6 +206,62 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 	}
 }
 
+// TestCorrelationMiddleware_StampsPolicyAndDestination pins the v7
+// extension where the middleware reads X-DefenseClaw-Policy-Id and
+// X-DefenseClaw-Destination-App off the request headers and threads
+// them onto the audit envelope. Before this extension every runtime
+// event in SQLite had policy_id and destination_app NULL because the
+// middleware stopped at session/trace/agent — the correlation
+// envelope silently dropped these fields on the floor. Regressing
+// this means guardrail verdicts lose their policy attribution and
+// destination analytics break.
+func TestCorrelationMiddleware_StampsPolicyAndDestination(t *testing.T) {
+	reg := NewAgentRegistry("agent-env", "Envelope Agent")
+	mw := CorrelationMiddleware(reg)
+
+	var env audit.CorrelationEnvelope
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		env = audit.EnvelopeFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set(PolicyIDHeader, "strict-prod")
+	req.Header.Set(DestinationAppHeader, "openclaw-ide")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if env.PolicyID != "strict-prod" {
+		t.Errorf("PolicyID=%q want strict-prod", env.PolicyID)
+	}
+	if env.DestinationApp != "openclaw-ide" {
+		t.Errorf("DestinationApp=%q want openclaw-ide", env.DestinationApp)
+	}
+}
+
+// TestCorrelationMiddleware_BoundsPolicyAndDestination guards the
+// length cap / control-byte strip on policy/destination headers so
+// a hostile client cannot blow up SQLite rows or pollute sink fan-out
+// with multi-MB header values.
+func TestCorrelationMiddleware_BoundsPolicyAndDestination(t *testing.T) {
+	hugePolicy := strings.Repeat("P", maxPolicyIDLength*2)
+	hugeDest := strings.Repeat("D", maxDestinationAppLength*2)
+
+	h := http.Header{}
+	h.Set(PolicyIDHeader, hugePolicy+"\x00newline")
+	h.Set(DestinationAppHeader, hugeDest+"\n\rnull")
+
+	if got := policyIDFromHeaders(h); len(got) > maxPolicyIDLength {
+		t.Errorf("policy id not bounded: len=%d cap=%d", len(got), maxPolicyIDLength)
+	} else if strings.ContainsAny(got, "\x00\n\r") {
+		t.Errorf("control bytes leaked into policy id: %q", got)
+	}
+	if got := destinationAppFromHeaders(h); len(got) > maxDestinationAppLength {
+		t.Errorf("dest not bounded: len=%d cap=%d", len(got), maxDestinationAppLength)
+	} else if strings.ContainsAny(got, "\x00\n\r") {
+		t.Errorf("control bytes leaked into dest: %q", got)
+	}
+}
+
 // TestCorrelationMiddleware_NilRegistryTolerated makes the
 // middleware safe to install in degraded modes / unit harnesses.
 func TestCorrelationMiddleware_NilRegistryTolerated(t *testing.T) {

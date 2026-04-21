@@ -70,6 +70,56 @@ func EnvelopeFromContext(ctx context.Context) CorrelationEnvelope {
 	return v
 }
 
+// MergeEnvelope returns a copy of base with empty fields filled in
+// from overlay. Non-empty fields on base always win — identical to
+// applyEnvelope semantics, but over envelopes instead of events.
+//
+// The typical use is an emission site that has a request-scoped
+// envelope from ctx (via EnvelopeFromContext) plus a handful of
+// per-emission overrides (tool name, tool id, policy id, destination
+// app) known only at the call site. Merging those two envelopes
+// before calling LogEventCtx / ApplyEnvelope is strictly less
+// error-prone than mutating fields on a copy.
+func MergeEnvelope(base, overlay CorrelationEnvelope) CorrelationEnvelope {
+	if base.RunID == "" {
+		base.RunID = overlay.RunID
+	}
+	if base.TraceID == "" {
+		base.TraceID = overlay.TraceID
+	}
+	if base.RequestID == "" {
+		base.RequestID = overlay.RequestID
+	}
+	if base.SessionID == "" {
+		base.SessionID = overlay.SessionID
+	}
+	if base.AgentID == "" {
+		base.AgentID = overlay.AgentID
+	}
+	if base.AgentName == "" {
+		base.AgentName = overlay.AgentName
+	}
+	if base.AgentInstanceID == "" {
+		base.AgentInstanceID = overlay.AgentInstanceID
+	}
+	if base.SidecarInstanceID == "" {
+		base.SidecarInstanceID = overlay.SidecarInstanceID
+	}
+	if base.PolicyID == "" {
+		base.PolicyID = overlay.PolicyID
+	}
+	if base.DestinationApp == "" {
+		base.DestinationApp = overlay.DestinationApp
+	}
+	if base.ToolName == "" {
+		base.ToolName = overlay.ToolName
+	}
+	if base.ToolID == "" {
+		base.ToolID = overlay.ToolID
+	}
+	return base
+}
+
 // ApplyEnvelope fills empty fields on e from env. Non-empty fields on
 // e always win — matching the "caller intent is supreme" pattern used
 // elsewhere in v7 stamping (provenance, sidecar id).

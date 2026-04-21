@@ -214,6 +214,66 @@ func (r *EventRouter) agentNameForStream(hint string) string {
 	return r.defaultAgentName
 }
 
+// streamEnvelope synthesizes an audit correlation envelope for audit
+// rows emitted from the Bifrost stream goroutines. These goroutines
+// are not HTTP-scoped — no CorrelationMiddleware runs on them — so
+// the envelope has to be built from:
+//
+//   - gatewaylog.ProcessRunID() for run_id (seeded at sidecar boot).
+//   - The stream-provided session key for session_id (required; an
+//     empty session key leaves session_id unset).
+//   - SharedAgentRegistry().Resolve(ctx, sessionKey, "") for the
+//     three-tier agent identity (logical AgentID + per-session
+//     AgentInstanceID + process-wide SidecarInstanceID).
+//   - The router's configured defaults for agent_name (claw mode)
+//     and policy_id (guardrail mode) when the registry has nothing
+//     more specific.
+//
+// The envelope deliberately leaves trace_id / request_id empty —
+// stream events have no inbound HTTP trace (the outbound OTel spans
+// we start internally carry their own trace context for the agent
+// invocation). Callers that want to correlate a stream event with
+// a matching request should pivot on session_id + run_id.
+func (r *EventRouter) streamEnvelope(ctx context.Context, sessionKey string) audit.CorrelationEnvelope {
+	env := audit.CorrelationEnvelope{
+		RunID:     gatewaylog.ProcessRunID(),
+		SessionID: sessionKey,
+		AgentName: r.defaultAgentName,
+		PolicyID:  r.defaultPolicyID,
+	}
+	if reg := SharedAgentRegistry(); reg != nil {
+		id := reg.Resolve(ctx, sessionKey, "")
+		if id.AgentID != "" {
+			env.AgentID = id.AgentID
+		}
+		if id.AgentName != "" {
+			env.AgentName = id.AgentName
+		}
+		if id.AgentInstanceID != "" {
+			env.AgentInstanceID = id.AgentInstanceID
+		}
+		if id.SidecarInstanceID != "" {
+			env.SidecarInstanceID = id.SidecarInstanceID
+		}
+	}
+	return env
+}
+
+// logStreamAction is the stream-path analogue of
+// audit.Logger.LogActionCtx: it synthesizes a correlation envelope
+// from the router defaults + the current session and records an
+// audit row through the context-aware path. All Bifrost stream
+// goroutines (chat/session/tool/approval) route through this so
+// the session_id / agent_* / run_id coverage gap does not reappear
+// the next time someone adds an event type.
+func (r *EventRouter) logStreamAction(sessionKey, action, target, details string) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), r.streamEnvelope(context.Background(), sessionKey))
+	_ = r.logger.LogActionCtx(ctx, action, target, details)
+}
+
 // SetRulePack configures the guardrail rule pack for tool result inspection.
 func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
 	r.rp = rp
@@ -552,7 +612,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 
 		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
-				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
+				r.logStreamAction(envelope.SessionKey, "gateway-multi-turn-injection", envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")
 				// Async read-loop context — stamp session_id so the
 				// verdict event carries the conversation identifier
@@ -573,7 +633,12 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			}
 		}
 
-		_ = r.logger.LogAction("gateway-session-message", envelope.SessionKey,
+		// v7: stream events are off the HTTP path so we route through
+		// logStreamAction which synthesizes the correlation envelope
+		// locally (session/agent/run) before emitting. Without this,
+		// every gateway-session-message row landed in audit_events
+		// with session_id / agent_* / run_id NULL.
+		r.logStreamAction(envelope.SessionKey, "gateway-session-message", envelope.SessionKey,
 			fmt.Sprintf("role=%s msgId=%s seq=%d content_len=%d", msg.Role, envelope.MessageID, envelope.MessageSeq, len(contentStr)))
 		return
 	}
@@ -648,7 +713,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	// the local-pattern scanner matches. Always redact before any
 	// sink, log line, or UI surface — same rules as handleSessionTool.
 	scrubbedReason := redaction.ForSinkReason(verdict.Reason)
-	_ = r.logger.LogAction("gateway-session-prompt-alert", sessionKey,
+	r.logStreamAction(sessionKey, "gateway-session-prompt-alert", sessionKey,
 		fmt.Sprintf("msgId=%s model=%s action=%s severity=%s findings=%d reason=%s",
 			messageID, model, verdict.Action, verdict.Severity,
 			len(verdict.Findings), scrubbedReason))
@@ -708,7 +773,7 @@ func (r *EventRouter) handleSessionsChanged(evt EventFrame, seqStr string) {
 
 	if sc.Session.Status == "failed" || sc.Phase == "error" {
 		readLoopLogf("[bifrost] sessions.changed ERROR: session %s status=failed phase=%s", sc.SessionKey, sc.Phase)
-		_ = r.logger.LogAction("gateway-session-error", sc.SessionKey,
+		r.logStreamAction(sc.SessionKey, "gateway-session-error", sc.SessionKey,
 			fmt.Sprintf("phase=%s runId=%s model=%s", sc.Phase, sc.RunID, sc.Session.Model))
 	}
 }
@@ -737,7 +802,7 @@ func (r *EventRouter) handleChatEvent(evt EventFrame, seqStr string) {
 		scrubbedErr := redaction.MessageContent(ce.ErrorMessage)
 		readLoopLogf("[bifrost] chat ERROR: %q session=%s runId=%s",
 			scrubbedErr, ce.SessionKey, ce.RunID)
-		_ = r.logger.LogAction("gateway-chat-error", ce.SessionKey,
+		r.logStreamAction(ce.SessionKey, "gateway-chat-error", ce.SessionKey,
 			fmt.Sprintf("runId=%s error=%s", ce.RunID,
 				truncate(redaction.ForSinkString(ce.ErrorMessage), 200)))
 		ectx := ContextWithSessionID(context.Background(), ce.SessionKey)
@@ -901,7 +966,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 		switch data.Phase {
 		case "start":
 			readLoopLogf("[bifrost] agent lifecycle START runId=%s", se.RunID)
-			_ = r.logger.LogAction("gateway-agent-start", se.SessionKey,
+			r.logStreamAction(se.SessionKey, "gateway-agent-start", se.SessionKey,
 				fmt.Sprintf("runId=%s", se.RunID))
 
 			// Start invoke_agent span as root of this agent run.
@@ -935,7 +1000,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 			// the OTel span tag.
 			scrubbedErr := redaction.MessageContent(data.Error)
 			readLoopLogf("[bifrost] agent lifecycle ERROR runId=%s error=%q", se.RunID, scrubbedErr)
-			_ = r.logger.LogAction("gateway-agent-error", se.SessionKey,
+			r.logStreamAction(se.SessionKey, "gateway-agent-error", se.SessionKey,
 				fmt.Sprintf("runId=%s error=%s", se.RunID,
 					truncate(redaction.ForSinkString(data.Error), 200)))
 			ectx := ContextWithSessionID(context.Background(), se.SessionKey)
@@ -958,7 +1023,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 
 		case "end":
 			readLoopLogf("[bifrost] agent lifecycle END runId=%s", se.RunID)
-			_ = r.logger.LogAction("gateway-agent-end", se.SessionKey,
+			r.logStreamAction(se.SessionKey, "gateway-agent-end", se.SessionKey,
 				fmt.Sprintf("runId=%s", se.RunID))
 
 			// End invoke_agent span successfully.
@@ -1013,14 +1078,14 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		return
 	}
 
-	_ = r.logger.LogAction("gateway-tool-call", payload.Tool,
+	r.logStreamAction(payload.SessionID, "gateway-tool-call", payload.Tool,
 		fmt.Sprintf("status=%s args_length=%d", payload.Status, len(payload.Args)))
 
 	// Static block list — checked before any pattern scanning.
 	if r.policy != nil {
 		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
-			_ = r.logger.LogAction("gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
+			r.logStreamAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
 			vctx := ContextWithSessionID(context.Background(), payload.SessionID)
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", "static block list",
@@ -1039,7 +1104,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	flaggedPattern := ""
 	if dangerous {
 		flaggedPattern = findings[0].RuleID
-		_ = r.logger.LogAction("gateway-tool-call-flagged", payload.Tool,
+		r.logStreamAction(payload.SessionID, "gateway-tool-call-flagged", payload.Tool,
 			fmt.Sprintf("reason=%s severity=%s confidence=%.2f",
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
@@ -1061,7 +1126,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// The semaphore bounds concurrent judge executions while queued goroutines
 	// wait for a slot instead of dropping inspection entirely.
 	if r.judge != nil && len(payload.Args) > 0 {
-		go func(tool string, args json.RawMessage) {
+		go func(tool, sessionID string, args json.RawMessage) {
 			r.judgeSem <- struct{}{}
 			defer func() { <-r.judgeSem }()
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1077,7 +1142,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				// persistent sink.
 				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
 					tool, verdict.Severity, redaction.Reason(verdict.Reason))
-				_ = r.logger.LogAction("gateway-tool-call-judge-flagged", tool,
+				r.logStreamAction(sessionID, "gateway-tool-call-judge-flagged", tool,
 					fmt.Sprintf("severity=%s findings=%d reason=%s",
 						verdict.Severity, len(verdict.Findings),
 						redaction.ForSinkReason(verdict.Reason)))
@@ -1085,7 +1150,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
 				}
 			}
-		}(payload.Tool, payload.Args)
+		}(payload.Tool, payload.SessionID, payload.Args)
 	}
 
 	if r.otel != nil {
@@ -1149,7 +1214,7 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 		exitCode = *payload.ExitCode
 	}
 
-	_ = r.logger.LogAction("gateway-tool-result", payload.Tool,
+	r.logStreamAction(payload.SessionID, "gateway-tool-result", payload.Tool,
 		fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
 
 	r.inspectToolResult(payload)
@@ -1253,7 +1318,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
 		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
-	_ = r.logger.LogAction("tool-result-pii-alert", payload.Tool,
+	r.logStreamAction(payload.SessionID, "tool-result-pii-alert", payload.Tool,
 		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
 			verdict.Severity, entityCount, len(verdict.Findings),
 			redaction.ForSinkReason(verdict.Reason)))
@@ -1288,7 +1353,8 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	cmdName := baseCommand(rawCmd)
 	fmt.Fprintf(os.Stderr, "[sidecar] exec.approval.requested: id=%s command=%s argc=%d cwd=%s\n",
 		payload.ID, cmdName, len(argv), cwd)
-	_ = r.logger.LogAction("gateway-approval-requested", payload.ID,
+	approvalSession, _ := r.activeAgentCorrelation()
+	r.logStreamAction(approvalSession, "gateway-approval-requested", payload.ID,
 		fmt.Sprintf("command_name=%s argc=%d cwd=%s", cmdName, len(argv), cwd))
 
 	var approvalSpan trace.Span
@@ -1325,9 +1391,9 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 
 	if dangerous {
-		_ = r.logger.LogAction("gateway-approval-denied", payload.ID,
-			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
 		sessionID, _ := r.activeAgentCorrelation()
+		r.logStreamAction(sessionID, "gateway-approval-denied", payload.ID,
+			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
 		vctx := ContextWithSessionID(context.Background(), sessionID)
 		emitVerdict(vctx, gatewaylog.StageApproval, gatewaylog.DirectionPrompt, cmdName,
 			"block", fmt.Sprintf("%s: %s", topFinding.RuleID, topFinding.Title),
@@ -1351,7 +1417,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 
 	if r.autoApprove {
-		_ = r.logger.LogAction("gateway-approval-granted", payload.ID,
+		r.logStreamAction(approvalSession, "gateway-approval-granted", payload.ID,
 			fmt.Sprintf("reason=auto-approve command_name=%s", cmdName))
 		fmt.Fprintf(os.Stderr, "[sidecar] AUTO-APPROVED exec: %s\n", cmdName)
 
@@ -1364,7 +1430,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] PENDING exec approval: %s (awaiting manual approval)\n", cmdName)
-	_ = r.logger.LogAction("gateway-approval-pending", payload.ID,
+	r.logStreamAction(approvalSession, "gateway-approval-pending", payload.ID,
 		fmt.Sprintf("command_name=%s reason=awaiting-manual-approval", cmdName))
 
 	if r.otel != nil {

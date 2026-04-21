@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -49,7 +48,7 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 		Raw:        body,
 		RequestID:  RequestIDFromContext(ctx),
 		TraceID:    TraceIDFromContext(ctx),
-		RunID:      os.Getenv("DEFENSECLAW_RUN_ID"),
+		RunID:      gatewaylog.ProcessRunID(),
 		SessionID:  SessionIDFromContext(ctx),
 		InputHash:  "sha256:" + hex.EncodeToString(h[:]),
 		// InspectedModel is the upstream traffic model when known; judge model is p.Model.

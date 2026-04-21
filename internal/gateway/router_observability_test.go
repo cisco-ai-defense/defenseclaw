@@ -17,7 +17,10 @@
 package gateway
 
 import (
+	"context"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
 // TestAgentNameForStream verifies the precedence rule used when
@@ -105,6 +108,64 @@ func TestActiveAgentCorrelation_EmptyWhenMultipleAgents(t *testing.T) {
 	if sessionID != "" || runID != "" {
 		t.Errorf("activeAgentCorrelation with 2 agents = (%q, %q); want empty",
 			sessionID, runID)
+	}
+}
+
+// TestStreamEnvelope_PopulatesRunAndSession pins the v7 stream
+// correlation gap fix: every Bifrost stream goroutine (tool_call,
+// tool_result, approvals, session errors) emits audit rows via
+// logStreamAction → streamEnvelope. If streamEnvelope silently
+// drops run_id or session_id the entire stream surface loses its
+// join keys in SQLite and Splunk — exactly the regression that
+// prompted the v7 observability investigation.
+func TestStreamEnvelope_PopulatesRunAndSession(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false, nil)
+	r.SetDefaultAgentName("openclaw")
+	r.SetDefaultPolicyID("strict")
+
+	gatewaylog.SetProcessRunID("run-stream-1")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
+	env := r.streamEnvelope(context.Background(), "sess-stream-1")
+
+	if env.RunID != "run-stream-1" {
+		t.Errorf("RunID=%q want run-stream-1", env.RunID)
+	}
+	if env.SessionID != "sess-stream-1" {
+		t.Errorf("SessionID=%q want sess-stream-1", env.SessionID)
+	}
+	if env.AgentName != "openclaw" {
+		t.Errorf("AgentName=%q want openclaw (router default)", env.AgentName)
+	}
+	if env.PolicyID != "strict" {
+		t.Errorf("PolicyID=%q want strict (router default)", env.PolicyID)
+	}
+	// SharedAgentRegistry() may be nil in unit context; we do not
+	// require AgentID/AgentInstanceID here — the registry-backed
+	// coverage lives in TestCorrelationMiddleware_StampsAuditEnvelope.
+}
+
+// TestStreamEnvelope_EmptySessionIsTolerated guards the degraded
+// path: some stream frames (session.error on a session we have
+// never seen) arrive with no session key. streamEnvelope must still
+// return a valid envelope so logStreamAction can at minimum stamp
+// run_id + sidecar defaults, rather than dropping the event on the
+// floor.
+func TestStreamEnvelope_EmptySessionIsTolerated(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false, nil)
+
+	gatewaylog.SetProcessRunID("run-stream-2")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
+	env := r.streamEnvelope(context.Background(), "")
+
+	if env.RunID != "run-stream-2" {
+		t.Errorf("RunID=%q want run-stream-2", env.RunID)
+	}
+	if env.SessionID != "" {
+		t.Errorf("SessionID=%q want empty on no-session stream frame", env.SessionID)
 	}
 }
 

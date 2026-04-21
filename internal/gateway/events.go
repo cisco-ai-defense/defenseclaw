@@ -18,7 +18,6 @@ package gateway
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
 
@@ -55,7 +54,15 @@ var (
 	// belongs to the surrounding Event. A prior revision dropped
 	// this data when persisting, so every SQLite row wrote an empty
 	// direction regardless of inbound/outbound.
-	judgePersistor func(gatewaylog.JudgePayload, gatewaylog.Direction)
+	//
+	// v7: also carries the request ctx + per-emission opts
+	// (tool_name/tool_id/policy_id/destination_app) so the
+	// persistor can merge the request-scoped envelope with the
+	// emit-scoped overrides before writing the audit row. Before
+	// this, every llm-judge-response audit row had
+	// agent/session/run/trace/request NULL because the closure
+	// had no request context to pull from.
+	judgePersistor func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts)
 )
 
 // SetJudgePersistor installs the optional SQLite persistence hook
@@ -64,7 +71,7 @@ var (
 // raw payload plus the request direction so downstream storage
 // can tag whether the judge fired on an inbound prompt or an
 // outbound completion.
-func SetJudgePersistor(fn func(gatewaylog.JudgePayload, gatewaylog.Direction)) {
+func SetJudgePersistor(fn func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts)) {
 	gatewayEventsMu.Lock()
 	defer gatewayEventsMu.Unlock()
 	judgePersistor = fn
@@ -86,7 +93,7 @@ func activeJudgeStore() *JudgeStore {
 }
 
 // judgePersist returns the currently installed persistor (may be nil).
-func judgePersist() func(gatewaylog.JudgePayload, gatewaylog.Direction) {
+func judgePersist() func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts) {
 	gatewayEventsMu.RLock()
 	defer gatewayEventsMu.RUnlock()
 	return judgePersistor
@@ -161,7 +168,7 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 		}
 	}
 	if ev.RunID == "" {
-		ev.RunID = strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+		ev.RunID = gatewaylog.ProcessRunID()
 	}
 	id := AgentIdentityFromContext(ctx)
 	if ev.AgentID == "" {
@@ -288,7 +295,7 @@ func emitJudge(
 	if js := activeJudgeStore(); js != nil && raw != "" {
 		_ = js.PersistJudgeEvent(ctx, direction, payload, opts.ToolName, opts.ToolID, opts.PolicyID, opts.DestinationApp)
 	} else if persist := judgePersist(); persist != nil && raw != "" {
-		persist(payload, direction)
+		persist(ctx, payload, direction, opts)
 	}
 
 	emitEvent(ctx, gatewaylog.Event{

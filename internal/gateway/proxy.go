@@ -278,9 +278,16 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	InstallSharedAgentRegistry("", strings.TrimSpace(p.defaultAgentName))
 	limited := p.rateLimitMiddleware(mux)
 	logged := p.requestLogger(limited)
-	withRequestID := p.requestIDMiddleware(logged)
-	withCorr := CorrelationMiddleware(SharedAgentRegistry())(withRequestID)
-	handler := otelHTTPServerMiddleware("guardrail-proxy", withCorr)
+	// Middleware ordering matters for v7 correlation: request_id
+	// must be in the context BEFORE CorrelationMiddleware freezes
+	// the audit envelope, otherwise every audit row emitted from a
+	// proxy request will have request_id=NULL. Outer→inner on the
+	// actual request path is therefore:
+	//   otel → requestID → correlation → requestLogger → rate → mux
+	// which we construct by wrapping inside-out.
+	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
+	withRequestID := p.requestIDMiddleware(withCorr)
+	handler := otelHTTPServerMiddleware("guardrail-proxy", withRequestID)
 	srv := &http.Server{Addr: addr, Handler: handler}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
@@ -1473,7 +1480,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 
 	// --- Post-call inspection: tool call arguments ---
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		if verdict := p.inspectToolCalls(resp.Choices[0].Message.ToolCalls); verdict != nil {
+		if verdict := p.inspectToolCalls(r.Context(), resp.Choices[0].Message.ToolCalls); verdict != nil {
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				if p.otel != nil && llmSpan != nil {
@@ -1786,7 +1793,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	tcBlocked := false
 	toolCallCount := countToolCalls(assembledTC)
 	if len(assembledTC) > 0 {
-		if verdict := p.inspectToolCalls(assembledTC); verdict != nil {
+		if verdict := p.inspectToolCalls(r.Context(), assembledTC); verdict != nil {
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				tcBlocked = true
@@ -1964,20 +1971,23 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 // based on provider, request path, and streaming flag. The response format
 // must match the native API format of the original request so the caller
 // can parse the blocked message instead of treating it as an error.
+//
+// Dispatch order:
+//
+//  1. Bedrock is provider-specific (binary eventstream framing, AWS Sigv4
+//     auth) and predates the FormatAdapter registry — it keeps its own
+//     branch so #124's proxy_bedrock_block.go handler stays the single
+//     source of truth for Bedrock wire formats.
+//  2. The FormatAdapter registry is consulted next. An adapter that
+//     claims the path owns the full block envelope (non-stream + stream)
+//     and the provider hint is ignored — path-based routing is the more
+//     reliable signal when OpenClaw's plugin sets X-DC-Target-URL but
+//     leaves the provider hint unset.
+//  3. Fallback is the OpenAI Chat Completions writer, which is what we
+//     always returned before the registry existed. Adding new wire
+//     formats should go through the registry, not through more branches
+//     here.
 func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, provider, model string, stream bool, msg string) {
-	if provider == "anthropic" {
-		if stream {
-			p.writeBlockedStreamAnthropic(w, model, msg)
-		} else {
-			p.writeBlockedResponseAnthropic(w, model, msg)
-		}
-		return
-	}
-	if provider == "gemini" {
-		// Gemini generateContent — return in Gemini-native format.
-		p.writeBlockedResponseGemini(w, msg)
-		return
-	}
 	if provider == "bedrock" {
 		// Bedrock decides streaming vs non-streaming from the URL path
 		// (/converse-stream vs /converse, /invoke-with-response-stream
@@ -1990,16 +2000,13 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 		p.writeBlockedPassthroughBedrock(w, path, model, msg)
 		return
 	}
-	// OpenAI Responses API (/v1/responses or /openai/v1/responses).
-	if strings.HasSuffix(path, "/responses") {
-		if stream {
-			p.writeBlockedStreamOpenAIResponses(w, model, msg)
-		} else {
-			p.writeBlockedResponseOpenAIResponses(w, model, msg)
-		}
+	if a := adapterFor(path, provider); a != nil {
+		a.WriteBlockResponse(p, w, path, model, stream, msg)
 		return
 	}
-	// Chat Completions API and all other OpenAI-compatible paths.
+	// Legacy fallback: any path the registry didn't claim lands on the
+	// Chat Completions writer (preserves pre-v7 behavior for unknown
+	// providers). New formats MUST be added as registry entries.
 	if stream {
 		p.writeBlockedStream(w, model, msg)
 	} else {
@@ -2028,6 +2035,48 @@ func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg s
 	w.Header().Set("X-DefenseClaw-Blocked", "true")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// writeBlockedStreamGemini returns a blocked response as a Gemini
+// streamGenerateContent SSE stream. The Google GenAI client library
+// (both JS and Python) parses `data:` frames whose payload is the same
+// `candidates[]` envelope returned by the non-stream variant. Gemini's
+// own server emits one frame per chunk followed by a sentinel; since
+// we're returning a single short block message, we emit exactly one
+// frame with finishReason=SAFETY and let the client close the stream.
+//
+// When w doesn't support http.Flusher (recorder-based tests) we fall
+// back to the non-stream response so clients still see the block
+// banner rather than an EOF halfway through the stream.
+func (p *GuardrailProxy) writeBlockedStreamGemini(w http.ResponseWriter, msg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.writeBlockedResponseGemini(w, msg)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.WriteHeader(http.StatusOK)
+
+	frame := map[string]interface{}{
+		"candidates": []map[string]interface{}{{
+			"content": map[string]interface{}{
+				"parts": []map[string]interface{}{
+					{"text": msg},
+				},
+				"role": "model",
+			},
+			"finishReason": "SAFETY",
+			"index":        0,
+		}},
+		"defenseclaw_blocked": true,
+		"defenseclaw_reason":  msg,
+	}
+	data, _ := json.Marshal(frame)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	flusher.Flush()
 }
 
 // writeBlockedResponseOpenAIResponses returns a blocked response in OpenAI
@@ -2994,67 +3043,50 @@ func launderResponsesHistory(raw json.RawMessage) (json.RawMessage, int, error) 
 }
 
 // launderInboundHistory dispatches to the correct format-specific
-// launderer based on the request path. Returns the (possibly mutated)
-// body and the count of stripped turns. Errors are logged at the call
-// site but never fail the request — a laundering failure should never
-// block a legitimate user.
+// launderer via the FormatAdapter registry. Returns the (possibly
+// mutated) body and the count of stripped turns. Errors are logged at
+// the call site but never fail the request — a laundering failure
+// should never block a legitimate user.
+//
+// When no adapter claims the path the body is returned unchanged with
+// a 0 strip count. That is the correct no-op for formats we don't yet
+// understand (better than false positives on unrelated payloads).
 func launderInboundHistory(raw json.RawMessage, path string) (json.RawMessage, int) {
-	if strings.HasSuffix(path, "/responses") {
-		out, n, err := launderResponsesHistory(raw)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] launder responses history: %v\n", err)
-			return raw, 0
-		}
-		return out, n
+	a := adapterFor(path, "")
+	if a == nil {
+		return raw, 0
 	}
-	if strings.HasSuffix(path, "/chat/completions") || strings.Contains(path, "/messages") {
-		out, n, err := launderChatCompletionsHistory(raw)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] launder chat history: %v\n", err)
-			return raw, 0
-		}
-		return out, n
+	out, n, err := a.LaunderHistory(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] launder inbound history (%s): %v\n", a.Name(), err)
+		return raw, 0
 	}
-	return raw, 0
+	return out, n
 }
 
 // injectNotificationForPassthrough dispatches to the correct format-aware
-// injector based on the provider/path the request is bound for. Returns
-// the mutated raw body and a label describing the injection site for
-// observability. When no known injection path applies, returns the
-// original bytes and the empty label with a non-nil error.
+// injector via the FormatAdapter registry. Returns the mutated raw body
+// and a label describing the injection site (<adapter>/<slot>) for
+// observability. When no adapter claims the path, returns the original
+// bytes, the empty label, and a non-nil error so the caller can log-and-
+// forward without mutating the body.
 //
-// Current coverage:
-//   - OpenAI Chat Completions (path ends in /chat/completions, or provider=openai
-//     with `messages` field) → inject into `messages[]`
-//   - OpenAI Responses API (path ends in /responses) → inject into `instructions`
-//
-// Deferred (follow-up): Anthropic top-level `system`, Gemini
-// `systemInstruction`. Those providers currently bypass notification
-// injection entirely in the passthrough path — they still get notifications
-// pushed onto the queue by enqueueBlockNotification, but the queue content
-// only reaches the LLM when the *next* request happens to go through
-// handleChatCompletion or hits one of the wired paths above. That gap is
-// acceptable for this PR because (a) notifications are TTL-bounded so
-// stale-ness is self-correcting, (b) most OSS agent stacks route through
-// OpenAI-compatible endpoints, and (c) adding Anthropic/Gemini injection
-// requires per-provider payload synthesis that would double PR scope.
+// Adapter coverage (see buildAdapterRegistry for the match order):
+//   - openai-responses → merges into top-level `instructions` string
+//   - openai-chat      → prepends role:"system" into messages[]
+//     (also handles /messages Anthropic-shaped paths in Phase 1; Phase 2
+//     replaces that with a proper Anthropic adapter that uses the
+//     top-level `system` field instead)
 func injectNotificationForPassthrough(raw json.RawMessage, content, path string) (json.RawMessage, string, error) {
-	if strings.HasSuffix(path, "/responses") {
-		out, err := injectSystemMessageForResponsesAPI(raw, content)
-		if err != nil {
-			return raw, "", err
-		}
-		return out, "responses-api/instructions", nil
+	a := adapterFor(path, "")
+	if a == nil {
+		return raw, "", fmt.Errorf("proxy: inject passthrough: no adapter claims path %q", path)
 	}
-	if strings.HasSuffix(path, "/chat/completions") || strings.Contains(path, "/messages") {
-		out, err := injectSystemMessage(raw, content)
-		if err != nil {
-			return raw, "", err
-		}
-		return out, "chat-completions/messages", nil
+	out, err := a.InjectSystem(raw, content)
+	if err != nil {
+		return raw, "", err
 	}
-	return raw, "", fmt.Errorf("proxy: inject passthrough: no known injection path for %q", path)
+	return out, a.InjectionSite(), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -3074,7 +3106,7 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // inspectToolCalls scans tool call arguments in an OpenAI-format tool_calls
 // JSON array. Returns a block verdict if any HIGH/CRITICAL findings, nil
 // otherwise.
-func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVerdict {
+func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON json.RawMessage) *ScanVerdict {
 	if len(toolCallsJSON) == 0 {
 		return nil
 	}
@@ -3090,7 +3122,7 @@ func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVe
 	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT parse error (blocking): %v\n", err)
 		if p.logger != nil {
-			_ = p.logger.LogAction("guardrail-tool-call-parse-error", "", err.Error())
+			_ = p.logger.LogActionCtx(ctx, "guardrail-tool-call-parse-error", "", err.Error())
 		}
 		return &ScanVerdict{
 			Action:         "block",
@@ -3134,13 +3166,13 @@ func (p *GuardrailProxy) inspectToolCalls(toolCallsJSON json.RawMessage) *ScanVe
 
 	if p.logger != nil {
 		for _, tc := range toolCalls {
-			_ = p.logger.LogAction("guardrail-tool-call-inspect", tc.Function.Name,
+			_ = p.logger.LogActionCtx(ctx, "guardrail-tool-call-inspect", tc.Function.Name,
 				fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence))
 		}
 	}
 
 	if p.otel != nil {
-		p.otel.RecordGuardrailEvaluation(context.Background(), "tool-call-inspect", action)
+		p.otel.RecordGuardrailEvaluation(ctx, "tool-call-inspect", action)
 	}
 
 	return &ScanVerdict{

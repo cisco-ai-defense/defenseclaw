@@ -36,28 +36,48 @@ package gateway
 import (
 	"context"
 	"net/http"
-	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
-// currentRunIDFromEnv snapshots the DEFENSECLAW_RUN_ID env var once
-// per request. Kept local to the middleware so the middleware does
-// not depend on sidecar startup code; callers that pin the run id
-// via flag override set the env var at process start. Returns "" if
-// unset — downstream layers handle that the same as any other
-// missing correlation field.
-func currentRunIDFromEnv() string {
-	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+// currentProcessRunID snapshots the per-process run id once per
+// request. Prefers the atomic slot installed at sidecar boot
+// (gatewaylog.SetProcessRunID) over the legacy DEFENSECLAW_RUN_ID
+// env var so the middleware does not silently emit "" for
+// foreground / `go run` / in-test invocations that never exported
+// the env var. Returns "" if neither is set — downstream layers
+// handle that the same as any other missing correlation field.
+func currentProcessRunID() string {
+	return gatewaylog.ProcessRunID()
 }
 
 // SessionIDHeader is the canonical header used by clients to scope
 // a session across multiple requests. Accepting it is optional —
 // clients that do not send one get no session_id on their events.
 const SessionIDHeader = "X-DefenseClaw-Session-Id"
+
+// Note: PolicyIDHeader is declared alongside the other v7 identity
+// headers in agent_registry.go. We only add DestinationAppHeader +
+// the length bounds here because the reader helpers live in this
+// file.
+
+// DestinationAppHeader names the downstream application the caller
+// is routing this request to (e.g. "jira", "slack", "anthropic").
+// Populated by the plugin fetch interceptor; the gateway only needs
+// to read it so policy_id and destination_app land on the audit
+// envelope alongside the other correlation fields.
+const DestinationAppHeader = "X-DefenseClaw-Destination-App"
+
+// maxPolicyIDLength / maxDestinationAppLength bound client-supplied
+// identifiers for the same reason as maxRequestIDLength / maxSessionIDLength.
+const (
+	maxPolicyIDLength       = 128
+	maxDestinationAppLength = 128
+)
 
 // maxSessionIDLength bounds client-supplied session identifiers for
 // the same reason as maxRequestIDLength — every id is replicated
@@ -148,6 +168,41 @@ func sessionIDFromHeaders(h http.Header) string {
 	return sanitizeClientRequestID(v)
 }
 
+// policyIDFromHeaders returns the first non-empty policy id found
+// in the canonical header, length-bounded and sanitized the same
+// way as the request id. Empty string is the legal "not supplied"
+// signal — downstream layers treat it like any other missing
+// correlation field.
+func policyIDFromHeaders(h http.Header) string {
+	v := strings.TrimSpace(h.Get(PolicyIDHeader))
+	if v == "" {
+		return ""
+	}
+	if len(v) > maxPolicyIDLength {
+		v = truncateToRuneBoundary(v, maxPolicyIDLength)
+	}
+	if !needsRequestIDClean(v) {
+		return v
+	}
+	return sanitizeClientRequestID(v)
+}
+
+// destinationAppFromHeaders mirrors policyIDFromHeaders for the
+// downstream-app label.
+func destinationAppFromHeaders(h http.Header) string {
+	v := strings.TrimSpace(h.Get(DestinationAppHeader))
+	if v == "" {
+		return ""
+	}
+	if len(v) > maxDestinationAppLength {
+		v = truncateToRuneBoundary(v, maxDestinationAppLength)
+	}
+	if !needsRequestIDClean(v) {
+		return v
+	}
+	return sanitizeClientRequestID(v)
+}
+
 // traceIDFromHeaders extracts the W3C traceparent trace id (the
 // second of four dash-separated segments). Returns "" when no
 // valid traceparent is present. Exported via TraceIDFromContext
@@ -227,13 +282,15 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			// ambiguity when a test overrides it.
 			id := AgentIdentityFromContext(ctx)
 			audEnv := audit.CorrelationEnvelope{
-				RunID:           currentRunIDFromEnv(),
+				RunID:           currentProcessRunID(),
 				TraceID:         TraceIDFromContext(ctx),
 				RequestID:       RequestIDFromContext(ctx),
 				SessionID:       SessionIDFromContext(ctx),
 				AgentID:         id.AgentID,
 				AgentName:       id.AgentName,
 				AgentInstanceID: id.AgentInstanceID,
+				PolicyID:        policyIDFromHeaders(r.Header),
+				DestinationApp:  destinationAppFromHeaders(r.Header),
 			}
 			ctx = audit.ContextWithEnvelope(ctx, audEnv)
 

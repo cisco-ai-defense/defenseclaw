@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -2375,7 +2376,17 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// currentRunID resolves the per-process run id used to stamp audit
+// rows whose caller did not supply one. It prefers the atomic value
+// installed at sidecar boot by gatewaylog.SetProcessRunID over the
+// legacy DEFENSECLAW_RUN_ID env var so short-lived subprocesses and
+// `go run` entry points that never exported the env var still emit
+// correlatable rows. Empty return is legal — CLI subcommands and
+// pre-boot code legitimately have no run to attribute to.
 func currentRunID() string {
+	if v := gatewaylog.ProcessRunID(); v != "" {
+		return v
+	}
 	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
 }
 
