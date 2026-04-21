@@ -2362,17 +2362,14 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 	if p.logger != nil {
 		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
 	}
-	if p.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-inspection",
-			Target:    model,
-			Severity:  verdict.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-		}
-		_ = p.store.LogEvent(evt)
-	}
+	_ = persistAuditEvent(p.logger, p.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    model,
+		Severity:  verdict.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if p.otel != nil {
 		ctx := context.Background()

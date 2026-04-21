@@ -691,6 +691,18 @@ func TestDefaultConfig_OTelPerSignalFields(t *testing.T) {
 	})
 }
 
+func TestLoad_DefaultOTelProtocolEmpty(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.OTel.Protocol != "" {
+		t.Fatalf("otel.protocol default=%q want empty for SDK env fallback", cfg.OTel.Protocol)
+	}
+}
+
 func TestOTelConfig_PerSignalOverride(t *testing.T) {
 	cfg := OTelConfig{
 		Endpoint: "global:4317",

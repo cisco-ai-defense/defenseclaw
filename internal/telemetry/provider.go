@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,8 +29,8 @@ import (
 
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
-	logNoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/log/global"
+	logNoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/metric"
 	metricNoop "go.opentelemetry.io/otel/metric/noop"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -180,12 +181,30 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 	var err error
 
 	endpoint := resolveValue(cfg.Traces.Endpoint, cfg.Endpoint)
-	protocol := resolveValue(cfg.Traces.Protocol, cfg.Protocol)
+	protocol := resolveProtocol(
+		cfg.Traces.Protocol,
+		cfg.Protocol,
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+	)
 
 	if protocol == "http" {
-		opts := []tracehttp.Option{
-			tracehttp.WithEndpoint(endpoint),
-			tracehttp.WithHeaders(headers),
+		opts := []tracehttp.Option{}
+		if endpoint != "" {
+			if host, path, insecure, ok := splitEndpointURL(endpoint); ok {
+				opts = append(opts, tracehttp.WithEndpoint(host))
+				if insecure {
+					opts = append(opts, tracehttp.WithInsecure())
+				}
+				if cfg.Traces.URLPath == "" && path != "" && path != "/" {
+					opts = append(opts, tracehttp.WithURLPath(path))
+				}
+			} else {
+				opts = append(opts, tracehttp.WithEndpoint(endpoint))
+			}
+		}
+		if len(headers) > 0 {
+			opts = append(opts, tracehttp.WithHeaders(headers))
 		}
 		if cfg.Traces.URLPath != "" {
 			opts = append(opts, tracehttp.WithURLPath(cfg.Traces.URLPath))
@@ -202,9 +221,16 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 		}
 		exporter, err = tracehttp.New(ctx, opts...)
 	} else {
-		opts := []tracegrpc.Option{
-			tracegrpc.WithEndpoint(endpoint),
-			tracegrpc.WithHeaders(headers),
+		opts := []tracegrpc.Option{}
+		if endpoint != "" {
+			if endpointLooksLikeURL(endpoint) {
+				opts = append(opts, tracegrpc.WithEndpointURL(endpoint))
+			} else {
+				opts = append(opts, tracegrpc.WithEndpoint(endpoint))
+			}
+		}
+		if len(headers) > 0 {
+			opts = append(opts, tracegrpc.WithHeaders(headers))
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, tracegrpc.WithInsecure())
@@ -241,12 +267,30 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 	var err error
 
 	endpoint := resolveValue(cfg.Logs.Endpoint, cfg.Endpoint)
-	protocol := resolveValue(cfg.Logs.Protocol, cfg.Protocol)
+	protocol := resolveProtocol(
+		cfg.Logs.Protocol,
+		cfg.Protocol,
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+	)
 
 	if protocol == "http" {
-		opts := []loghttp.Option{
-			loghttp.WithEndpoint(endpoint),
-			loghttp.WithHeaders(headers),
+		opts := []loghttp.Option{}
+		if endpoint != "" {
+			if host, path, insecure, ok := splitEndpointURL(endpoint); ok {
+				opts = append(opts, loghttp.WithEndpoint(host))
+				if insecure {
+					opts = append(opts, loghttp.WithInsecure())
+				}
+				if cfg.Logs.URLPath == "" && path != "" && path != "/" {
+					opts = append(opts, loghttp.WithURLPath(path))
+				}
+			} else {
+				opts = append(opts, loghttp.WithEndpoint(endpoint))
+			}
+		}
+		if len(headers) > 0 {
+			opts = append(opts, loghttp.WithHeaders(headers))
 		}
 		if cfg.Logs.URLPath != "" {
 			opts = append(opts, loghttp.WithURLPath(cfg.Logs.URLPath))
@@ -263,9 +307,16 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 		}
 		exporter, err = loghttp.New(ctx, opts...)
 	} else {
-		opts := []loggrpc.Option{
-			loggrpc.WithEndpoint(endpoint),
-			loggrpc.WithHeaders(headers),
+		opts := []loggrpc.Option{}
+		if endpoint != "" {
+			if endpointLooksLikeURL(endpoint) {
+				opts = append(opts, loggrpc.WithEndpointURL(endpoint))
+			} else {
+				opts = append(opts, loggrpc.WithEndpoint(endpoint))
+			}
+		}
+		if len(headers) > 0 {
+			opts = append(opts, loggrpc.WithHeaders(headers))
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, loggrpc.WithInsecure())
@@ -312,14 +363,31 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 	var err error
 
 	endpoint := resolveValue(cfg.Metrics.Endpoint, cfg.Endpoint)
-	protocol := resolveValue(cfg.Metrics.Protocol, cfg.Protocol)
+	protocol := resolveProtocol(
+		cfg.Metrics.Protocol,
+		cfg.Protocol,
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+	)
 	tsel := temporalitySelector(cfg.Metrics.Temporality)
 
 	if protocol == "http" {
-		opts := []metrichttp.Option{
-			metrichttp.WithEndpoint(endpoint),
-			metrichttp.WithHeaders(headers),
-			metrichttp.WithTemporalitySelector(tsel),
+		opts := []metrichttp.Option{metrichttp.WithTemporalitySelector(tsel)}
+		if endpoint != "" {
+			if host, path, insecure, ok := splitEndpointURL(endpoint); ok {
+				opts = append(opts, metrichttp.WithEndpoint(host))
+				if insecure {
+					opts = append(opts, metrichttp.WithInsecure())
+				}
+				if cfg.Metrics.URLPath == "" && path != "" && path != "/" {
+					opts = append(opts, metrichttp.WithURLPath(path))
+				}
+			} else {
+				opts = append(opts, metrichttp.WithEndpoint(endpoint))
+			}
+		}
+		if len(headers) > 0 {
+			opts = append(opts, metrichttp.WithHeaders(headers))
 		}
 		if cfg.Metrics.URLPath != "" {
 			opts = append(opts, metrichttp.WithURLPath(cfg.Metrics.URLPath))
@@ -336,10 +404,16 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 		}
 		exporter, err = metrichttp.New(ctx, opts...)
 	} else {
-		opts := []metricgrpc.Option{
-			metricgrpc.WithEndpoint(endpoint),
-			metricgrpc.WithHeaders(headers),
-			metricgrpc.WithTemporalitySelector(tsel),
+		opts := []metricgrpc.Option{metricgrpc.WithTemporalitySelector(tsel)}
+		if endpoint != "" {
+			if endpointLooksLikeURL(endpoint) {
+				opts = append(opts, metricgrpc.WithEndpointURL(endpoint))
+			} else {
+				opts = append(opts, metricgrpc.WithEndpoint(endpoint))
+			}
+		}
+		if len(headers) > 0 {
+			opts = append(opts, metricgrpc.WithHeaders(headers))
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, metricgrpc.WithInsecure())
@@ -402,6 +476,37 @@ func resolveValue(signal, global string) string {
 		return signal
 	}
 	return global
+}
+
+func resolveProtocol(signal, global, signalEnv, globalEnv string) string {
+	if signal != "" {
+		return strings.ToLower(strings.TrimSpace(signal))
+	}
+	if global != "" {
+		return strings.ToLower(strings.TrimSpace(global))
+	}
+	if v := strings.TrimSpace(os.Getenv(signalEnv)); v != "" {
+		return strings.ToLower(v)
+	}
+	if v := strings.TrimSpace(os.Getenv(globalEnv)); v != "" {
+		return strings.ToLower(v)
+	}
+	return ""
+}
+
+func endpointLooksLikeURL(endpoint string) bool {
+	return strings.Contains(endpoint, "://")
+}
+
+func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
+	if !endpointLooksLikeURL(endpoint) {
+		return "", "", false, false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", "", false, false
+	}
+	return u.Host, u.Path, strings.EqualFold(u.Scheme, "http"), true
 }
 
 // expandHeaders substitutes ${ENV_VAR} references in header values so
