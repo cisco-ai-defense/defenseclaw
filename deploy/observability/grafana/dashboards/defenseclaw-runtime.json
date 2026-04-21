@@ -1,0 +1,206 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "panels": [
+    {"type": "row", "title": "Process health", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}},
+
+    {
+      "type": "stat",
+      "title": "Uptime",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "max(defenseclaw_process_uptime_seconds) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "stat",
+      "title": "Goroutines",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 6, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "max(defenseclaw_runtime_goroutines)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 2000}, {"color": "red", "value": 10000}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Heap alloc",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "max(defenseclaw_runtime_heap_alloc_bytes)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "stat",
+      "title": "Open FDs",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "max(defenseclaw_runtime_fd_in_use)", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Runtime trends", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Goroutines",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "max(defenseclaw_runtime_goroutines)", "legendFormat": "goroutines", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Heap alloc + objects",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "max(defenseclaw_runtime_heap_alloc_bytes)", "legendFormat": "heap_alloc (bytes)", "refId": "A"},
+        {"expr": "max(defenseclaw_runtime_heap_objects)", "legendFormat": "heap_objects", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GC pause (p99 sample, ns)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.99, sum(rate(defenseclaw_runtime_gc_pause_nanoseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ns"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "File descriptors",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "max(defenseclaw_runtime_fd_in_use)", "legendFormat": "fds", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "SLO compliance", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Block SLO compliance (<2s)",
+      "description": "Rolling 5m ratio of admission-block decisions completing under 2000 ms. Target: ≥ 0.99.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket{le=\"2000\"}[5m])) / clamp_min(sum(rate(defenseclaw_slo_block_latency_milliseconds_count[5m])), 0.0001)", "legendFormat": "block < 2000 ms", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0.9, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.99}, {"color": "green", "value": 0.995}]}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "TUI refresh SLO (<5s)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket{le=\"5000\"}[5m])) / clamp_min(sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m])), 0.0001)", "legendFormat": "refresh < 5000 ms", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0.9, "max": 1}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Block latency p50/p95/p99",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "TUI refresh p50/p95/p99",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+
+    {"type": "row", "title": "SQLite", "gridPos": {"x": 0, "y": 39, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "DB + WAL size",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 40, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "max(defenseclaw_sqlite_db_bytes)", "legendFormat": "db", "refId": "A"},
+        {"expr": "max(defenseclaw_sqlite_wal_bytes)", "legendFormat": "wal", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "SQLite pages / freelist",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 40, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "max(defenseclaw_sqlite_page_count)", "legendFormat": "pages", "refId": "A"},
+        {"expr": "max(defenseclaw_sqlite_freelist_count)", "legendFormat": "freelist", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "WAL checkpoint duration",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 48, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_sqlite_checkpoint_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "SQLite busy retries",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 48, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (operation) (rate(defenseclaw_sqlite_busy_retries_total[$__rate_interval]))", "legendFormat": "{{operation}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+
+    {"type": "row", "title": "Exporter health + capacity", "gridPos": {"x": 0, "y": 56, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "OTLP exporter freshness (seconds since last export)",
+      "description": "Should stay near the export interval (~2s).  >300s = alerts fire and telemetry is likely blind.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 57, "w": 12, "h": 8},
+      "targets": [{"expr": "time() - max by (exporter) (defenseclaw_telemetry_exporter_last_export_ts_seconds)", "legendFormat": "{{exporter}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "OTLP exporter errors by signal",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 57, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (exporter, signal) (rate(defenseclaw_telemetry_exporter_errors_total[$__rate_interval]))", "legendFormat": "{{exporter}} · {{signal}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue depth by queue",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 65, "w": 12, "h": 8},
+      "targets": [{"expr": "defenseclaw_queue_depth", "legendFormat": "{{queue}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue drops",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 65, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (queue, reason) (rate(defenseclaw_queue_drops_total[$__rate_interval]))", "legendFormat": "{{queue}} · {{reason}}", "refId": "A"}]
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "runtime", "slo"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Runtime & SLO",
+  "uid": "defenseclaw-runtime",
+  "version": 1,
+  "weekStart": ""
+}

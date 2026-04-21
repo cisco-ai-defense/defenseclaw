@@ -1,0 +1,201 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "panels": [
+    {"type": "row", "title": "Error surface", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}},
+
+    {
+      "type": "stat",
+      "title": "Schema violations / min",
+      "description": "Events dropped by gatewaylog.Writer because the envelope failed JSON-schema validation. Any value > 0 is a regression.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_schema_violations_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.001}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Gateway errors / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 6, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_errors_total[5m])) * 60 or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Panics (1h)",
+      "description": "RecordPanic in any subsystem. Non-zero = investigate stack traces in Loki.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_panics_total[1h])) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Config errors (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_config_load_errors_total[1h])) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+
+    {"type": "row", "title": "Gateway + schema errors", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Gateway errors by subsystem / code",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))", "legendFormat": "{{error_subsystem}} · {{error_code}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Schema violations by event type / code",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (event_type, code) (rate(defenseclaw_schema_violations_total[$__rate_interval]))", "legendFormat": "{{event_type}} · {{code}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "table",
+      "title": "Top error codes (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 24, "h": 8},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (error_subsystem, error_code) (increase(defenseclaw_gateway_errors_total[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "errors/1h"}}}]
+    },
+
+    {"type": "row", "title": "Audit sinks", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Sink batches delivered vs dropped",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum by (sink) (rate(defenseclaw_audit_sink_batches_delivered_total[$__rate_interval]))", "legendFormat": "delivered · {{sink}}", "refId": "A"},
+        {"expr": "sum by (sink) (rate(defenseclaw_audit_sink_batches_dropped_total[$__rate_interval]))", "legendFormat": "dropped · {{sink}}", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Sink delivery latency p95 (ms)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, sink) (rate(defenseclaw_audit_sink_delivery_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "p95 · {{sink}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Sink queue depth",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 8},
+      "targets": [{"expr": "defenseclaw_audit_sink_queue_depth", "legendFormat": "{{sink_kind}} · {{sink_name}}", "refId": "A"}]
+    },
+    {
+      "type": "state-timeline",
+      "title": "Sink circuit state (0=closed, 1=open, 2=half-open)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 8},
+      "targets": [{"expr": "defenseclaw_audit_sink_circuit_state", "legendFormat": "{{sink_kind}} · {{sink_name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "closed", "color": "green"}, "1": {"text": "open", "color": "red"}, "2": {"text": "half-open", "color": "orange"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.5}, {"color": "red", "value": 1}]}}}
+    },
+
+    {"type": "row", "title": "Webhooks", "gridPos": {"x": 0, "y": 39, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Webhook outcomes",
+      "description": "outcome ∈ {delivered, failed, cooldown_suppressed, circuit_open}",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 40, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (webhook_kind, outcome) (rate(defenseclaw_webhook_dispatches_total[$__rate_interval]))", "legendFormat": "{{webhook_kind}} · {{outcome}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook latency p95 by status",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 40, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, webhook_kind, http_status_code) (rate(defenseclaw_webhook_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{webhook_kind}} {{http_status_code}} p95", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Circuit breaker transitions",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 48, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (state) (rate(defenseclaw_webhook_circuit_breaker_total[$__rate_interval]))", "legendFormat": "{{state}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Cooldown-suppressed webhooks",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 48, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (webhook_kind) (rate(defenseclaw_webhook_cooldown_suppressed_total[$__rate_interval]))", "legendFormat": "{{webhook_kind}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+
+    {"type": "row", "title": "Process resilience", "gridPos": {"x": 0, "y": 56, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Panics by subsystem",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 57, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (subsystem) (rate(defenseclaw_panics_total[$__rate_interval]))", "legendFormat": "{{subsystem}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Watcher restarts + errors",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 57, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(defenseclaw_watcher_restarts_total[$__rate_interval]))", "legendFormat": "restarts", "refId": "A"},
+        {"expr": "sum(rate(defenseclaw_watcher_errors_total[$__rate_interval]))", "legendFormat": "errors", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Config load errors by type",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 65, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (error_type) (rate(defenseclaw_config_load_errors_total[$__rate_interval]))", "legendFormat": "{{error_type}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Audit DB errors by operation",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 65, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (operation) (rate(defenseclaw_audit_db_errors_total[$__rate_interval]))", "legendFormat": "{{operation}}", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Recent error events", "gridPos": {"x": 0, "y": 73, "w": 24, "h": 1}},
+
+    {
+      "type": "logs",
+      "title": "event_type=error (Loki)",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 74, "w": 24, "h": 12},
+      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} |= \"\\\"event_type\\\":\\\"error\\\"\" | json | line_format \"[{{.defenseclaw_error_subsystem}}/{{.defenseclaw_error_code}}] {{.body}}\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "reliability", "errors", "sinks"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Reliability",
+  "uid": "defenseclaw-reliability",
+  "version": 1,
+  "weekStart": ""
+}

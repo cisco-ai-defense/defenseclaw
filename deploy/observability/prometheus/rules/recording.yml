@@ -1,0 +1,128 @@
+# Recording rules — pre-aggregated series so dashboards stay snappy and
+# alerts have stable building blocks.
+#
+# Naming convention: <level>:<metric>:<agg>_<window>
+#   level = job | service | route | scanner | sink | webhook
+#   agg   = rate5m | ratio5m | p95_5m | ...
+groups:
+  - name: defenseclaw.verdict
+    interval: 30s
+    rules:
+      - record: service:defenseclaw_gateway_verdicts:rate5m
+        expr: sum(rate(defenseclaw_gateway_verdicts_total[5m]))
+      - record: service:defenseclaw_gateway_verdicts_by_action:rate5m
+        expr: sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total[5m]))
+      - record: service:defenseclaw_gateway_verdicts_by_stage:rate5m
+        expr: sum by (verdict_stage) (rate(defenseclaw_gateway_verdicts_total[5m]))
+      - record: service:defenseclaw_gateway_block_ratio:5m
+        expr: |
+          sum(rate(defenseclaw_gateway_verdicts_total{verdict_action="block"}[5m]))
+          /
+          clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[5m])), 0.0001)
+
+  - name: defenseclaw.http
+    interval: 30s
+    rules:
+      - record: service:defenseclaw_http_requests:rate5m
+        expr: sum(rate(defenseclaw_http_request_count_total[5m]))
+      - record: service:defenseclaw_http_requests_5xx_ratio:5m
+        expr: |
+          sum(rate(defenseclaw_http_request_count_total{http_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(defenseclaw_http_request_count_total[5m])), 0.0001)
+      - record: route:defenseclaw_http_duration:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, http_route) (rate(defenseclaw_http_request_duration_milliseconds_bucket[5m])))
+
+  - name: defenseclaw.scanner
+    interval: 30s
+    rules:
+      - record: scanner:defenseclaw_scan:rate5m
+        expr: sum by (scanner) (rate(defenseclaw_scan_count_total[5m]))
+      - record: scanner:defenseclaw_scan_errors:rate5m
+        expr: sum by (scanner) (rate(defenseclaw_scan_errors_total[5m]))
+      - record: scanner:defenseclaw_scan_duration:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, scanner) (rate(defenseclaw_scan_duration_milliseconds_bucket[5m])))
+      - record: scanner:defenseclaw_findings_by_severity:rate5m
+        expr: sum by (scanner, severity) (rate(defenseclaw_scan_findings_total[5m]))
+
+  - name: defenseclaw.slo.recording
+    interval: 30s
+    rules:
+      # ratio_5m is defined as "good events / total events" and is
+      # clamped to 1.0 when there is no traffic (avoids NaN rendering
+      # "no data" panels during quiet windows). See alerts.yml for the
+      # traffic-floor gate that keeps these from paging on idle systems.
+      - record: slo:defenseclaw_block_latency:ratio_5m
+        expr: |
+          (
+            sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket{le="2000"}[5m]))
+            /
+            clamp_min(sum(rate(defenseclaw_slo_block_latency_milliseconds_count[5m])), 0.0001)
+          )
+          or on() vector(1)
+      - record: slo:defenseclaw_tui_refresh:ratio_5m
+        expr: |
+          (
+            sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket{le="5000"}[5m]))
+            /
+            clamp_min(sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m])), 0.0001)
+          )
+          or on() vector(1)
+      # 30-day multi-window burn rate building blocks.
+      - record: slo:defenseclaw_block_latency:errors_1h
+        expr: |
+          sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket{le="+Inf"}[1h]))
+          -
+          sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket{le="2000"}[1h]))
+      - record: slo:defenseclaw_block_latency:total_1h
+        expr: sum(rate(defenseclaw_slo_block_latency_milliseconds_count[1h]))
+      - record: slo:defenseclaw_block_latency:error_ratio_1h
+        expr: |
+          slo:defenseclaw_block_latency:errors_1h
+          /
+          clamp_min(slo:defenseclaw_block_latency:total_1h, 0.0001)
+
+  - name: defenseclaw.sinks
+    interval: 30s
+    rules:
+      # defenseclaw.audit.sink.failures is tagged sink.kind/sink.name/sink.reason,
+      # NOT `sink`. Do not change this group-by without also updating
+      # alerts.yml::DefenseClawAuditSinkFailures.
+      - record: sink:defenseclaw_audit_sink_failures:rate5m
+        expr: sum by (sink_kind, sink_name) (rate(defenseclaw_audit_sink_failures_total[5m]))
+      # defenseclaw.audit.sink.batches.* is tagged sink/kind (legacy
+      # RecordSinkBatchDelivered/Failed shape); keep `sink` here.
+      #
+      # Drop-ratio is semantically undefined on a silent sink: a
+      # single dropped batch with zero deliveries within the lookback
+      # would compute as 100% drop, which reads as a catastrophic
+      # outage on panels even though the sink is simply quiet. We gate
+      # on total traffic > 0 so idle sinks drop out of the result
+      # (Grafana renders "no data" instead of a phantom red tile).
+      - record: sink:defenseclaw_audit_sink_drop_ratio:5m
+        expr: |
+          (
+            sum by (sink) (rate(defenseclaw_audit_sink_batches_dropped_total[5m]))
+            /
+            clamp_min(
+              sum by (sink) (
+                rate(defenseclaw_audit_sink_batches_delivered_total[5m])
+                + rate(defenseclaw_audit_sink_batches_dropped_total[5m])
+              ),
+              0.0001)
+          )
+          and
+          sum by (sink) (
+            rate(defenseclaw_audit_sink_batches_delivered_total[5m])
+            + rate(defenseclaw_audit_sink_batches_dropped_total[5m])
+          ) > 0
+
+  - name: defenseclaw.exporters
+    interval: 30s
+    rules:
+      - record: exporter:defenseclaw_otlp_freshness:seconds
+        expr: time() - max by (exporter) (defenseclaw_telemetry_exporter_last_export_ts_seconds)

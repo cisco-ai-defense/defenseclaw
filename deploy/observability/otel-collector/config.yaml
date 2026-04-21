@@ -1,0 +1,114 @@
+# DefenseClaw-facing OpenTelemetry Collector config.
+#
+# Pipelines:
+#   traces  -> tempo  (OTLP gRPC on tempo:4317)
+#   metrics -> prometheus (remote-write on prometheus:9090)
+#   logs    -> loki   (OTLP HTTP on loki:3100/otlp)
+#
+# Every signal is also fanned out to the built-in "debug" exporter so
+# operators can `docker logs defenseclaw-otel-collector` and see raw
+# OTLP payloads while iterating on the sidecar contract. Set the
+# verbosity to `basic` in production to avoid noise.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:*"
+            - "http://127.0.0.1:*"
+
+processors:
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 5s
+
+  # Defense-in-depth resource enrichment so every signal carries the
+  # service.namespace=defenseclaw label even if the sidecar forgets to
+  # set it. The `insert` action keeps the sidecar-supplied value when
+  # present.
+  resource:
+    attributes:
+      - key: service.namespace
+        value: defenseclaw
+        action: insert
+      - key: deployment.environment
+        value: local-dev
+        action: insert
+
+  # Drop payload bodies that downstream is too noisy to index — redaction
+  # is still the sidecar's responsibility, this is belt-and-braces.
+  attributes/strip-bodies:
+    actions:
+      - key: audit.details
+        action: delete
+
+exporters:
+  # Traces -> Tempo.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Metrics -> Prometheus remote write.
+  prometheusremotewrite/prometheus:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    resource_to_telemetry_conversion:
+      enabled: true
+    remote_write_queue:
+      enabled: true
+      queue_size: 10000
+
+  # Logs -> Loki via native OTLP.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # Local tap so operators can see raw OTLP frames while iterating.
+  # Switch to verbosity=basic to shrink the log volume.
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # Prometheus-format exporter so Prometheus can scrape the collector
+  # directly if remote_write is ever disabled.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [prometheusremotewrite/prometheus, prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [resource, attributes/strip-bodies, batch]
+      exporters: [otlphttp/loki, debug]
