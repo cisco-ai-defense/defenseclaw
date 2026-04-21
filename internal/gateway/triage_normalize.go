@@ -47,13 +47,34 @@ var forwardSlashRunRegex = regexp.MustCompile(`/{2,}`)
 var backSlashRunRegex = regexp.MustCompile(`\\{2,}`)
 
 // stripZeroWidth drops zero-width / format characters that a human
-// reader does not see but that break ASCII fast paths. Covers:
+// reader does not see but that break ASCII fast paths. Covers the
+// Unicode `Cf` format code points most commonly used for prompt-
+// injection evasion plus a few `Mn` mark helpers that are also
+// rendered as zero-width:
 //
+//   - U+00AD SOFT HYPHEN
+//   - U+034F COMBINING GRAPHEME JOINER
+//   - U+061C ARABIC LETTER MARK
+//   - U+115F HANGUL CHOSEONG FILLER
+//   - U+1160 HANGUL JUNGSEONG FILLER
+//   - U+17B4 KHMER VOWEL INHERENT AQ
+//   - U+17B5 KHMER VOWEL INHERENT AA
+//   - U+180E MONGOLIAN VOWEL SEPARATOR
 //   - U+200B ZERO WIDTH SPACE
 //   - U+200C ZERO WIDTH NON-JOINER
 //   - U+200D ZERO WIDTH JOINER
+//   - U+200E LEFT-TO-RIGHT MARK
+//   - U+200F RIGHT-TO-LEFT MARK
+//   - U+202A..U+202E bidi embedding/override controls
 //   - U+2060 WORD JOINER
+//   - U+2061..U+2064 invisible math operators
+//   - U+2066..U+2069 bidi isolate controls
+//   - U+206A..U+206F deprecated format controls (inhibit / activate
+//     symmetric swapping, inhibit / activate Arabic form shaping, etc.)
+//   - U+3164 HANGUL FILLER
 //   - U+FEFF BYTE ORDER MARK / ZERO WIDTH NO-BREAK SPACE
+//   - U+FFA0 HALFWIDTH HANGUL FILLER
+//   - U+FFF9..U+FFFB interlinear annotation anchors
 //
 // Implementation uses strings.Map so the scan is single-pass and
 // allocation-free when no zero-width chars are present (the common
@@ -62,8 +83,29 @@ var backSlashRunRegex = regexp.MustCompile(`\\{2,}`)
 // chars (Unicode classifies them as `Cf` format, not `Z` separator).
 func stripZeroWidth(s string) string {
 	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF':
+		switch {
+		case r == '\u00AD',
+			r == '\u034F',
+			r == '\u061C',
+			r == '\u115F',
+			r == '\u1160',
+			r == '\u17B4',
+			r == '\u17B5',
+			r == '\u180E',
+			r == '\u200B',
+			r == '\u200C',
+			r == '\u200D',
+			r == '\u200E',
+			r == '\u200F',
+			r >= '\u202A' && r <= '\u202E',
+			r == '\u2060',
+			r >= '\u2061' && r <= '\u2064',
+			r >= '\u2066' && r <= '\u2069',
+			r >= '\u206A' && r <= '\u206F',
+			r == '\u3164',
+			r == '\uFEFF',
+			r == '\uFFA0',
+			r >= '\uFFF9' && r <= '\uFFFB':
 			return -1
 		}
 		return r
@@ -79,9 +121,12 @@ func stripZeroWidth(s string) string {
 //     "se\u0301nsitive" with a combining mark slips past every regex
 //     scanning the ASCII fast path, even though a human reader treats
 //     the rendered string as "sensitive".
-//  2. Zero-width strip — removes U+200B/C/D, U+2060, U+FEFF which
-//     are invisible to the reader but break ASCII fast paths
-//     ("/et\u200Bc/passwd" → "/etc/passwd").
+//  2. Zero-width strip — removes common invisible format characters
+//     (soft hyphen, bidi controls, ZWSP/ZWJ/ZWNJ, word joiner, BOM,
+//     invisible math operators, deprecated format controls, etc.)
+//     which are invisible to the reader but break ASCII fast paths
+//     ("/et\u200Bc/pass\u00ADwd" → "/etc/passwd"). See stripZeroWidth
+//     for the exact code-point coverage.
 //  3. Lowercase via strings.ToLower. Substring scans with
 //     strings.Contains (case-sensitive) operate on the normalized
 //     string so a case-only mismatch does not leak past triage.

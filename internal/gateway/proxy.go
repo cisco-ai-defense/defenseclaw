@@ -2908,14 +2908,18 @@ const defenseClawBlockIDPrefix = "msg_blocked"
 // concatenates the text fields. Returns "" when content isn't an array
 // or contains no text parts.
 func responsesTextFromContent(content json.RawMessage) string {
-	if len(content) == 0 || content[0] != '[' {
+	// bytes.TrimSpace keeps this helper safe against pretty-printed
+	// RawMessage values that may carry incidental leading whitespace
+	// before the array bracket.
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return ""
 	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(content, &parts); err != nil {
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
 		return ""
 	}
 	var b strings.Builder
@@ -2955,16 +2959,24 @@ func launderChatCompletionsHistory(raw json.RawMessage) (json.RawMessage, int, e
 			Content json.RawMessage `json:"content"`
 		}
 		if json.Unmarshal(item, &probe) == nil && probe.Role == "assistant" && len(probe.Content) > 0 {
-			var text string
-			switch probe.Content[0] {
-			case '"':
-				_ = json.Unmarshal(probe.Content, &text)
-			case '[':
-				text = responsesTextFromContent(probe.Content)
-			}
-			if strings.HasPrefix(text, defenseClawBlockBanner) {
-				stripped++
-				continue
+			// bytes.TrimSpace tolerates pretty-printed bodies (e.g. jq-piped
+			// replays or LiteLLM debug mode) where the RawMessage payload
+			// has incidental leading whitespace — without it, a string
+			// content with leading space would fall through and never be
+			// probed for the banner, leaking into upstream.
+			contentTrim := bytes.TrimSpace(probe.Content)
+			if len(contentTrim) > 0 {
+				var text string
+				switch contentTrim[0] {
+				case '"':
+					_ = json.Unmarshal(contentTrim, &text)
+				case '[':
+					text = responsesTextFromContent(contentTrim)
+				}
+				if strings.HasPrefix(text, defenseClawBlockBanner) {
+					stripped++
+					continue
+				}
 			}
 		}
 		kept = append(kept, item)
@@ -2999,11 +3011,16 @@ func launderResponsesHistory(raw json.RawMessage) (json.RawMessage, int, error) 
 		return raw, 0, fmt.Errorf("proxy: launder responses history: unmarshal: %w", err)
 	}
 	inputBytes, ok := m["input"]
-	if !ok || len(inputBytes) == 0 || inputBytes[0] != '[' {
+	// bytes.TrimSpace tolerates pretty-printed bodies — a whitespace-
+	// prefixed JSON array would otherwise be misclassified as a plain
+	// string `input` and the body returned unchanged, leaking the
+	// banner'd item into upstream.
+	inputTrim := bytes.TrimSpace(inputBytes)
+	if !ok || len(inputTrim) == 0 || inputTrim[0] != '[' {
 		return raw, 0, nil
 	}
 	var items []json.RawMessage
-	if err := json.Unmarshal(inputBytes, &items); err != nil {
+	if err := json.Unmarshal(inputTrim, &items); err != nil {
 		return raw, 0, fmt.Errorf("proxy: launder responses history: unmarshal input: %w", err)
 	}
 	stripped := 0

@@ -3043,3 +3043,69 @@ func TestLaunderInboundHistory_Dispatch(t *testing.T) {
 		})
 	}
 }
+
+// TestLaunderChatCompletionsHistory_PrettyPrintedBody is a regression
+// guard for the bytes.TrimSpace shape-peek fix in
+// launderChatCompletionsHistory. A jq-piped replay or LiteLLM debug
+// dump pretty-prints JSON, which surfaces incidental leading
+// whitespace inside a RawMessage content slice. Without TrimSpace
+// the shape-peek would miss the '[' kind and leak the banner'd
+// assistant turn into upstream.
+func TestLaunderChatCompletionsHistory_PrettyPrintedBody(t *testing.T) {
+	body := "{\n  \"model\": \"gpt-4\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"try A\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\":    [\n        {\"type\": \"text\", \"text\": \"[DefenseClaw] blocked.\"}\n      ]\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"try B\"\n    }\n  ]\n}"
+	out, stripped, err := launderChatCompletionsHistory(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped != 1 {
+		t.Errorf("stripped = %d, want 1 (pretty-printed body leaked through shape-peek)", stripped)
+	}
+	var got struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("expected 2 messages after laundering, got %d", len(got.Messages))
+	}
+}
+
+// TestLaunderResponsesHistory_PrettyPrintedBody is a regression guard
+// for the bytes.TrimSpace fix on the responses-API input shape peek.
+// Same failure mode as the Chat Completions variant above.
+func TestLaunderResponsesHistory_PrettyPrintedBody(t *testing.T) {
+	body := "{\n  \"model\": \"gpt-5\",\n  \"input\":   [\n    {\n      \"type\": \"message\",\n      \"role\": \"assistant\",\n      \"id\": \"msg_blocked_xyz\",\n      \"content\": [\n        {\"type\": \"output_text\", \"text\": \"[DefenseClaw] blocked.\"}\n      ]\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"user\",\n      \"content\": [\n        {\"type\": \"input_text\", \"text\": \"hi\"}\n      ]\n    }\n  ]\n}"
+	out, stripped, err := launderResponsesHistory(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped != 1 {
+		t.Errorf("stripped = %d, want 1 (pretty-printed body leaked through shape-peek)", stripped)
+	}
+	var got struct {
+		Input []struct {
+			Role string `json:"role"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if len(got.Input) != 1 {
+		t.Fatalf("expected 1 input item after laundering, got %d", len(got.Input))
+	}
+}
+
+// TestResponsesTextFromContent_PrettyPrintedArray guards the
+// bytes.TrimSpace fix on the helper's shape peek. Without TrimSpace
+// a leading-whitespace content array would be treated as non-array
+// and return empty, causing banner detection to false-negative.
+func TestResponsesTextFromContent_PrettyPrintedArray(t *testing.T) {
+	content := json.RawMessage("  \n  [{\"type\":\"output_text\",\"text\":\"hello\"}]")
+	got := responsesTextFromContent(content)
+	if got != "hello" {
+		t.Errorf("responsesTextFromContent with leading whitespace = %q, want %q", got, "hello")
+	}
+}

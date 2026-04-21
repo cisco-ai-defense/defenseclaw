@@ -154,6 +154,58 @@ func TestNormalizeForTriage_Table(t *testing.T) {
 			in:   "/et\u2060c/passwd",
 			want: "/etc/passwd",
 		},
+		// Expanded zero-width / format character coverage. Each of the
+		// code points below renders as zero width to a human reader
+		// but would defeat ASCII-fast-path regexes without explicit
+		// stripping. See stripZeroWidth for the full set.
+		{
+			name: "soft_hyphen_inside_path",
+			// U+00AD SOFT HYPHEN — commonly used to split tokens
+			// invisibly in copy-paste evasion attacks.
+			in:   "/et\u00ADc/pass\u00ADwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "ltr_rtl_marks_inside_path",
+			// U+200E LTR mark + U+200F RTL mark — invisible bidi
+			// hints frequently weaponized for evasion.
+			in:   "/et\u200Ec/pass\u200Fwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "bidi_override_inside_path",
+			// U+202E RIGHT-TO-LEFT OVERRIDE — the "Trojan Source"
+			// evasion class. Strip it so downstream regexes see the
+			// logical (non-visual) byte order.
+			in:   "/et\u202Ec/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "invisible_times_inside_path",
+			// U+2062 INVISIBLE TIMES — zero-width math operator.
+			in:   "/et\u2062c/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "deprecated_format_control_inside_path",
+			// U+206E ACTIVATE NATIONAL DIGIT SHAPES — deprecated
+			// format control, still rendered invisibly.
+			in:   "/et\u206Ec/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "combining_grapheme_joiner_inside_path",
+			// U+034F COMBINING GRAPHEME JOINER.
+			in:   "/et\u034Fc/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "mongolian_vowel_separator_inside_path",
+			// U+180E MONGOLIAN VOWEL SEPARATOR — historically
+			// classified as a whitespace character, now Cf.
+			in:   "/et\u180Ec/passwd",
+			want: "/etc/passwd",
+		},
 	}
 
 	for _, tc := range cases {
@@ -256,6 +308,29 @@ func TestScanLocalPatterns_ZeroWidthEvasion_FlagsViaNormalization(t *testing.T) 
 	v := scanLocalPatterns("prompt", prompt)
 	if v == nil || v.Action == "allow" {
 		t.Errorf("expected triage to flag zero-width-evaded /etc/passwd, got %+v", v)
+	}
+}
+
+// TestScanLocalPatterns_SoftHyphenAndBidiEvasion_FlagsViaNormalization
+// guards the expanded zero-width coverage added to stripZeroWidth. Soft
+// hyphen (U+00AD) and bidi overrides (U+202x) are invisible to humans
+// but would previously leak past ASCII fast-path regexes.
+func TestScanLocalPatterns_SoftHyphenAndBidiEvasion_FlagsViaNormalization(t *testing.T) {
+	cases := []struct {
+		name   string
+		prompt string
+	}{
+		{"soft_hyphen_in_etc", "read /et\u00ADc/pass\u00ADwd please"},
+		{"rtl_override_in_etc", "read /et\u202Ec/passwd please"},
+		{"invisible_times_in_etc", "read /et\u2062c/passwd please"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := scanLocalPatterns("prompt", tc.prompt)
+			if v == nil || v.Action == "allow" {
+				t.Errorf("expected triage to flag evaded /etc/passwd, got %+v", v)
+			}
+		})
 	}
 }
 
