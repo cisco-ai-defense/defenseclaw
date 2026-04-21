@@ -15,6 +15,7 @@ DefenseClaw is the enterprise governance layer for [OpenClaw](https://github.com
 - [Splunk App Guide](SPLUNK_APP.md) — local Splunk app purpose, dashboards, signals, and investigation flow
 - [TUI Guide](TUI.md) — dashboard usage, keybindings, navigation
 - [OpenTelemetry](OTEL.md) — OTEL signal spec, Splunk mapping
+- [DefenseClaw Agent OTel](defenseclaw-agent-otel/README.md) — configure Claude Code and Codex desktop OTLP export
 - [Config Files](CONFIG_FILES.md) — config files and environment variables
 - [Plugin Development](PLUGINS.md) — custom scanner plugin interface
 - [Testing](TESTING.md) — multi-language test guide (Python, Go, TypeScript, Rego)

@@ -158,6 +158,88 @@ defenseclaw init --enable-guardrail
 
 For platform-specific instructions (DGX Spark, macOS, cross-compilation), see [docs/INSTALL.md](docs/INSTALL.md).
 
+### Claude Code / Codex Desktop OTel Setup
+
+Build the desktop config writer:
+
+```bash
+make agent-otel
+```
+
+Or directly:
+
+```bash
+go build -ldflags "-X main.version=0.2.0" -o defenseclaw-agent-otel ./cmd/agentotel
+```
+
+Configure both `Claude Code` and `Codex` to send telemetry directly to Splunk Observability Cloud:
+
+```bash
+export SPLUNK_OBSERVABILITY_TOKEN="your-token-here"
+
+./defenseclaw-agent-otel configure \
+  --tool all \
+  --splunk-host app.us1.observability.splunkcloud.com \
+  --token "$SPLUNK_OBSERVABILITY_TOKEN" \
+  --environment defenseclaw-direct-test
+```
+
+If you want extra resource tags:
+
+```bash
+export SPLUNK_OBSERVABILITY_TOKEN="your-token-here"
+
+./defenseclaw-agent-otel configure \
+  --tool all \
+  --splunk-host app.us1.observability.splunkcloud.com \
+  --token "$SPLUNK_OBSERVABILITY_TOKEN" \
+  --environment defenseclaw-direct-test \
+  --tenant-id demo-tenant \
+  --workspace-id defenseclaw \
+  --agent-name desktop-agents
+```
+
+If `Claude Code` and `Codex` should be tracked as distinct desktop agents, use
+tool-specific overrides:
+
+```bash
+export SPLUNK_OBSERVABILITY_TOKEN="your-token-here"
+
+./defenseclaw-agent-otel configure \
+  --tool all \
+  --splunk-host app.us1.observability.splunkcloud.com \
+  --token "$SPLUNK_OBSERVABILITY_TOKEN" \
+  --environment desktop \
+  --claude-agent-name claude-desktop \
+  --claude-environment claude-dev \
+  --codex-agent-name codex-desktop \
+  --codex-environment codex-dev
+```
+
+After the one-time setup, users run the normal tools:
+
+```bash
+codex exec --skip-git-repo-check --json "Reply with ok only"
+claude -p --model haiku --output-format json "Reply with ok only"
+```
+
+Remove the desktop config later with:
+
+```bash
+./defenseclaw-agent-otel unconfigure --tool all
+```
+
+This writes:
+
+- `~/.claude/settings.json`
+- `~/.codex/config.toml`
+
+Current caveat: direct `Codex` export is flowing, but Splunk O11y is still
+showing `deployment.environment` / `sf_environment` as `unknown` in live
+verification, even when `--environment` is written to `~/.codex/config.toml`.
+
+For the full desktop OTel details and caveats, see [docs/defenseclaw-agent-otel/README.md](docs/defenseclaw-agent-otel/README.md).
+
 ---
 
 ## Quick Start

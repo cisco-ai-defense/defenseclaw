@@ -11,7 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
 
-.PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
+.PHONY: build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install agent-otel \
         plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
@@ -85,6 +85,12 @@ gateway-cross:
 
 gateway-run: gateway
 	./$(GATEWAY)
+
+agent-otel:
+	go build $(GOFLAGS) -o defenseclaw-agent-otel ./cmd/agentotel
+	@echo "Built defenseclaw-agent-otel"
+	@echo "  Configure direct Splunk export: ./defenseclaw-agent-otel configure --tool all --splunk-host us1 --token \"\$$SPLUNK_OBSERVABILITY_TOKEN\""
+	@echo "  Configure generic OTLP export: ./defenseclaw-agent-otel configure --tool all --endpoint http://collector:4318 --token \"\$$OTLP_AUTH_TOKEN\""
 
 start: gateway
 	@./scripts/start.sh $(ARGS)
