@@ -7,6 +7,25 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "agent": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Logical agent identity for sidecar correlation (X-DefenseClaw-Agent-Id)",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable logical agent id; overrides the persisted extension id when set"
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional display name (X-DefenseClaw-Agent-Name)"
+          },
+          "policyId": {
+            "type": "string",
+            "description": "Optional policy id (X-DefenseClaw-Policy-Id)"
+          }
+        }
+      },
       "sidecarPort": {
         "type": "integer",
         "default": 18970,

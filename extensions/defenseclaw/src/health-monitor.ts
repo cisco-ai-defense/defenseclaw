@@ -23,18 +23,31 @@
  * The monitor does NOT block LLM calls — it only warns.
  */
 
+import type { OutboundSidecarRequestLog } from "./types.js";
+
 const POLL_INTERVAL_MS = 60_000;
 
 export interface HealthMonitorOptions {
   statusUrl: string;
   token?: string;
   pollIntervalMs?: number;
+  /** Correlation headers for sidecar observability (optional). */
+  buildSidecarHeaders?: () => Promise<Record<string, string>>;
+  /** Sticky echo headers from the sidecar (optional). */
+  onFetchResponse?: (res: Response) => void;
+  /** Structured outbound request logging (optional). */
+  logOutboundRequest?: (entry: OutboundSidecarRequestLog) => void;
+  getLogAgentId?: () => string;
 }
 
 export class HealthMonitor {
   private readonly statusUrl: string;
   private readonly token: string;
   private readonly pollIntervalMs: number;
+  private readonly buildSidecarHeaders?: () => Promise<Record<string, string>>;
+  private readonly onFetchResponse?: (res: Response) => void;
+  private readonly logOutboundRequest?: (entry: OutboundSidecarRequestLog) => void;
+  private readonly getLogAgentId?: () => string;
   private timer: ReturnType<typeof setInterval> | null = null;
   private _unprotected = false;
   private _wasUnprotected = false;
@@ -43,6 +56,10 @@ export class HealthMonitor {
     this.statusUrl = opts.statusUrl;
     this.token = opts.token ?? "";
     this.pollIntervalMs = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
+    this.buildSidecarHeaders = opts.buildSidecarHeaders;
+    this.onFetchResponse = opts.onFetchResponse;
+    this.logOutboundRequest = opts.logOutboundRequest;
+    this.getLogAgentId = opts.getLogAgentId;
   }
 
   get isUnprotected(): boolean {
@@ -66,10 +83,14 @@ export class HealthMonitor {
   }
 
   private async check(): Promise<void> {
+    const started = performance.now();
     try {
-      const headers: Record<string, string> = {};
-      if (this.token) {
-        headers["Authorization"] = `Bearer ${this.token}`;
+      const extra = this.buildSidecarHeaders
+        ? await this.buildSidecarHeaders()
+        : {};
+      const headers: Record<string, string> = { ...extra };
+      if (this.token && !headers.Authorization) {
+        headers.Authorization = `Bearer ${this.token}`;
       }
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5_000);
@@ -78,6 +99,15 @@ export class HealthMonitor {
         headers,
       });
       clearTimeout(timeout);
+
+      this.onFetchResponse?.(resp);
+
+      const duration_ms = Math.round(performance.now() - started);
+      this.logOutboundRequest?.({
+        agentId: this.getLogAgentId?.() ?? "unknown",
+        status_code: resp.status,
+        duration_ms,
+      });
 
       if (resp.ok) {
         const body = await resp.json();
@@ -95,6 +125,12 @@ export class HealthMonitor {
         this.markUnprotected();
       }
     } catch {
+      const duration_ms = Math.round(performance.now() - started);
+      this.logOutboundRequest?.({
+        agentId: this.getLogAgentId?.() ?? "unknown",
+        status_code: 0,
+        duration_ms,
+      });
       this.markUnprotected();
     }
   }

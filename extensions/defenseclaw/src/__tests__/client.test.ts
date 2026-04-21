@@ -17,8 +17,13 @@
  */
 
 import { EventEmitter } from "node:events";
+import type { IncomingHttpHeaders } from "node:http";
 import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it } from "vitest";
+import {
+  HEADER_DEFENSECLAW_AGENT_ID,
+  HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
+} from "../correlation-headers.js";
 import { DaemonClient } from "../client.js";
 
 type HeaderValue = string | number | string[] | undefined;
@@ -34,6 +39,7 @@ type MockResponse = {
   status: number;
   body?: string;
   requestError?: Error;
+  responseHeaders?: IncomingHttpHeaders;
 };
 
 let lastRequest: RecordedRequest;
@@ -120,8 +126,12 @@ function createRequestImpl(
           return;
         }
 
-        const res = new PassThrough() as PassThrough & { statusCode?: number };
+        const res = new PassThrough() as PassThrough & {
+          statusCode?: number;
+          headers: IncomingHttpHeaders;
+        };
         res.statusCode = response.status;
+        res.headers = response.responseHeaders ?? {};
         callback(res);
         if (response.body) {
           res.write(response.body);
@@ -136,10 +146,22 @@ function createRequestImpl(
 
 function makeClient(
   resolver?: (request: RecordedRequest) => MockResponse,
+  extra?: {
+    getCorrelation?: () => import("../types.js").CorrelationContext;
+    logOutboundRequest?: (e: import("../types.js").OutboundSidecarRequestLog) => void;
+  },
 ): DaemonClient {
   return new DaemonClient({
     baseUrl: "http://127.0.0.1:18970",
     requestImpl: createRequestImpl(resolver),
+    getCorrelation:
+      extra?.getCorrelation ??
+      (() => ({
+        agentId: "test-agent",
+        agentInstanceId: "session-instance-1",
+        traceId: "trace-fixed",
+      })),
+    logOutboundRequest: extra?.logOutboundRequest,
   });
 }
 
@@ -357,6 +379,59 @@ describe("DaemonClient", () => {
       expect(lastRequest.headers["X-DefenseClaw-Client"]).toBe(
         "openclaw-plugin",
       );
+    });
+
+    it("includes X-DefenseClaw-Agent-Id and instance id from correlation", async () => {
+      const client = makeClient();
+      await client.status();
+
+      expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_ID]).toBe("test-agent");
+      expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID]).toBe(
+        "session-instance-1",
+      );
+    });
+
+    it("uses sticky agent instance id from first response on subsequent requests", async () => {
+      let call = 0;
+      const client = makeClient((req) => {
+        call += 1;
+        if (call === 1) {
+          return {
+            status: 200,
+            body: JSON.stringify({ running: true }),
+            responseHeaders: {
+              "x-defenseclaw-agent-instance-id": "sidecar-echo-99",
+            },
+          };
+        }
+        return {
+          status: 200,
+          body: JSON.stringify({ running: true }),
+        };
+      });
+
+      await client.status();
+      expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID]).toBe(
+        "session-instance-1",
+      );
+
+      await client.status();
+      expect(lastRequest.headers[HEADER_DEFENSECLAW_AGENT_INSTANCE_ID]).toBe(
+        "sidecar-echo-99",
+      );
+    });
+
+    it("emits structured outbound log when logOutboundRequest is set", async () => {
+      const logs: import("../types.js").OutboundSidecarRequestLog[] = [];
+      const client = makeClient(undefined, {
+        logOutboundRequest: (e) => logs.push(e),
+      });
+      await client.status();
+
+      expect(logs).toHaveLength(1);
+      expect(logs[0].agentId).toBe("test-agent");
+      expect(logs[0].status_code).toBe(200);
+      expect(typeof logs[0].duration_ms).toBe("number");
     });
   });
 

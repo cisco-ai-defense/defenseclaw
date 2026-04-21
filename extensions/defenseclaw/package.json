@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": ["./dist/index.js"],
+    "pluginManifest": "./openclaw.plugin.json"
   },
   "scripts": {
     "build": "tsc",

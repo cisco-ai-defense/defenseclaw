@@ -35,18 +35,69 @@
  *  3. REST API to the Go sidecar for tool inspection and audit logging
  */
 
-import type { PluginApi } from "@openclaw/plugin-sdk";
+import { randomUUID } from "node:crypto";
+import type { PluginApi, ToolContext } from "@openclaw/plugin-sdk";
+import {
+  bootstrapPluginIdentity,
+  createGlobalStateStorage,
+  createInMemoryStorage,
+  type BootstrapPluginIdentityResult,
+  type KeyValueStorage,
+} from "./agent_identity.js";
+import { DaemonClient } from "./client.js";
+import { HEADER_HTTP_CONTENT_TYPE } from "./correlation-headers.js";
 import { PolicyEnforcer, runSkillScan, runPluginScan, runCodeScan } from "./policy/enforcer.js";
 import { scanMCPServer } from "./scanners/mcp-scanner.js";
 import type {
   ScanResult,
   Finding,
   InstallType,
+  OutboundSidecarRequestLog,
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
+
+async function readPluginAgentSection(api: PluginApi): Promise<{
+  id?: string;
+  name?: string;
+  policyId?: string;
+}> {
+  const ext = api as PluginApi & {
+    getPluginConfig?: () => Promise<Record<string, unknown>>;
+  };
+  if (typeof ext.getPluginConfig !== "function") return {};
+  try {
+    const c = await ext.getPluginConfig();
+    const agent = c?.agent as Record<string, unknown> | undefined;
+    if (!agent || typeof agent !== "object") return {};
+    const id = agent.id;
+    const name = agent.name;
+    const policyId = agent.policyId;
+    return {
+      id: typeof id === "string" && id.trim() ? id.trim() : undefined,
+      name: typeof name === "string" && name ? name : undefined,
+      policyId:
+        typeof policyId === "string" && policyId ? policyId : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function resolveIdentityStorage(api: PluginApi): KeyValueStorage {
+  const ext = api as PluginApi & {
+    globalState?: {
+      get(key: string): unknown;
+      update(key: string, value: unknown): Promise<void>;
+    };
+  };
+  if (ext.globalState && typeof ext.globalState.get === "function") {
+    return createGlobalStateStorage(ext.globalState);
+  }
+  return createInMemoryStorage();
+}
 
 function formatFindings(findings: Finding[], limit = 15): string[] {
   const lines: string[] = [];
@@ -67,8 +118,6 @@ function formatFindings(findings: Finding[], limit = 15): string[] {
 }
 
 export default function (api: PluginApi) {
-  const enforcer = new PolicyEnforcer();
-
   // ─── Runtime: tool call interception ───
 
   const sidecarConfig = loadSidecarConfig();
@@ -76,11 +125,57 @@ export default function (api: PluginApi) {
   const SIDECAR_TOKEN = sidecarConfig.token;
   const INSPECT_TIMEOUT_MS = 2_000;
 
+  let identityCache: BootstrapPluginIdentityResult | undefined;
+  let pluginAgentExtras: { name?: string; policyId?: string } = {};
+
+  const identityReady = (async () => {
+    const section = await readPluginAgentSection(api);
+    pluginAgentExtras = { name: section.name, policyId: section.policyId };
+    const result = await bootstrapPluginIdentity({
+      storage: resolveIdentityStorage(api),
+      getConfigAgentId: async () => section.id,
+    });
+    identityCache = result;
+    return result;
+  })();
+
+  const logOutboundRequest = (entry: OutboundSidecarRequestLog): void => {
+    console.log(
+      JSON.stringify({
+        message: "defenseclaw.plugin.sidecar_request",
+        ...entry,
+      }),
+    );
+  };
+
+  const daemonClient = new DaemonClient({
+    baseUrl: sidecarConfig.baseUrl,
+    token: sidecarConfig.token,
+    identityReady,
+    getCorrelation: () => ({
+      agentId: identityCache?.agentId ?? "unknown",
+      agentInstanceId: identityCache?.sessionAgentInstanceId,
+      agentName: pluginAgentExtras.name,
+      policyId: pluginAgentExtras.policyId,
+      traceId: randomUUID(),
+    }),
+    logOutboundRequest,
+  });
+
+  const enforcer = new PolicyEnforcer(
+    { daemonUrl: sidecarConfig.baseUrl },
+    daemonClient,
+  );
+
   // ─── Health monitor ───
   // Polls the sidecar /status endpoint and warns when protection is down.
   const healthMonitor = new HealthMonitor({
     statusUrl: `${SIDECAR_API}/status`,
     token: SIDECAR_TOKEN,
+    buildSidecarHeaders: () => daemonClient.buildOutboundHeaders(),
+    onFetchResponse: (res) => daemonClient.applyStickyFromHttpResponse(res),
+    logOutboundRequest,
+    getLogAgentId: () => identityCache?.agentId ?? "unknown",
   });
 
   // ─── LLM fetch interceptor ───
@@ -103,22 +198,34 @@ export default function (api: PluginApi) {
 
   async function inspectTool(
     payload: Record<string, unknown>,
+    toolCtx?: ToolContext,
   ): Promise<{ action: string; severity: string; reason: string; mode: string }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), INSPECT_TIMEOUT_MS);
+    const started = performance.now();
     try {
+      const base = await daemonClient.buildOutboundHeaders({
+        runId: toolCtx?.runId,
+        sessionId: toolCtx?.sessionId ?? toolCtx?.sessionKey,
+      });
       const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "X-DefenseClaw-Client": "openclaw-plugin",
+        ...base,
+        [HEADER_HTTP_CONTENT_TYPE]: "application/json",
       };
-      if (SIDECAR_TOKEN) {
-        headers["Authorization"] = `Bearer ${SIDECAR_TOKEN}`;
-      }
       const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
+      });
+      daemonClient.applyStickyFromHttpResponse(res);
+      const duration_ms = Math.round(performance.now() - started);
+      logOutboundRequest({
+        runId: toolCtx?.runId,
+        sessionId: toolCtx?.sessionId ?? toolCtx?.sessionKey,
+        agentId: identityCache?.agentId ?? "unknown",
+        status_code: res.status,
+        duration_ms,
       });
       if (!res.ok) {
         return { action: "allow", severity: "NONE", reason: `sidecar returned ${res.status}`, mode: "observe" };
@@ -130,24 +237,35 @@ export default function (api: PluginApi) {
         mode: string;
       };
     } catch {
+      const duration_ms = Math.round(performance.now() - started);
+      logOutboundRequest({
+        runId: toolCtx?.runId,
+        sessionId: toolCtx?.sessionId ?? toolCtx?.sessionKey,
+        agentId: identityCache?.agentId ?? "unknown",
+        status_code: 0,
+        duration_ms,
+      });
       return { action: "allow", severity: "NONE", reason: "sidecar unreachable", mode: "observe" };
     } finally {
       clearTimeout(timer);
     }
   }
 
-  api.on("before_tool_call", async (event) => {
+  api.on("before_tool_call", async (event, ctx) => {
     if (event.toolName === "message") {
       const content =
         (event.params?.content as string) || (event.params?.body as string) || "";
       if (!content) return;
 
-      const verdict = await inspectTool({
-        tool: "message",
-        args: event.params,
-        content,
-        direction: "outbound",
-      });
+      const verdict = await inspectTool(
+        {
+          tool: "message",
+          args: event.params,
+          content,
+          direction: "outbound",
+        },
+        ctx,
+      );
 
       console.log(
         `[defenseclaw] message-tool verdict:${verdict.action} severity:${verdict.severity}`,
@@ -159,10 +277,13 @@ export default function (api: PluginApi) {
       return;
     }
 
-    const verdict = await inspectTool({
-      tool: event.toolName,
-      args: event.params,
-    });
+    const verdict = await inspectTool(
+      {
+        tool: event.toolName,
+        args: event.params,
+      },
+      ctx,
+    );
 
     console.log(
       `[defenseclaw] tool:${event.toolName} verdict:${verdict.action} severity:${verdict.severity}`,
@@ -199,7 +320,14 @@ export default function (api: PluginApi) {
       }
 
       if (scanType === "code") {
-        return handleCodeScan(target, SIDECAR_API, SIDECAR_TOKEN);
+        return handleCodeScan(
+          target,
+          SIDECAR_API,
+          SIDECAR_TOKEN,
+          daemonClient,
+          logOutboundRequest,
+          () => identityCache?.agentId ?? "unknown",
+        );
       }
 
       return handleSkillScan(target);
@@ -285,9 +413,21 @@ async function handleMCPScan(target: string): Promise<{ text: string }> {
   }
 }
 
-async function handleCodeScan(target: string, sidecarApi: string, sidecarToken: string): Promise<{ text: string }> {
+async function handleCodeScan(
+  target: string,
+  sidecarApi: string,
+  sidecarToken: string,
+  client: DaemonClient,
+  logOutboundRequestFn: (entry: OutboundSidecarRequestLog) => void,
+  getLogAgentId: () => string,
+): Promise<{ text: string }> {
   try {
-    const result = await runCodeScan(target, sidecarApi, sidecarToken);
+    const result = await runCodeScan(target, sidecarApi, sidecarToken, {
+      buildSidecarHeaders: () => client.buildOutboundHeaders(),
+      onSidecarResponse: (res) => client.applyStickyFromHttpResponse(res),
+      logOutboundRequest: logOutboundRequestFn,
+      getLogAgentId,
+    });
     return { text: formatScanOutput("Code", target, result) };
   } catch (err) {
     return {

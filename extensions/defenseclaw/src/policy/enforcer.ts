@@ -17,6 +17,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { HEADER_DEFENSECLAW_CLIENT } from "../correlation-headers.js";
 import { DaemonClient } from "../client.js";
 import { scanMCPServer } from "../scanners/mcp-scanner.js";
 import type {
@@ -26,6 +27,7 @@ import type {
   AdmissionResult,
   InstallType,
   Severity,
+  OutboundSidecarRequestLog,
 } from "../types.js";
 import { compareSeverity, maxSeverity } from "../types.js";
 
@@ -135,24 +137,46 @@ export async function runRemotePluginScan(
   target: string,
   sidecarBaseUrl: string,
   sidecarToken = "",
-  timeoutMs = 120_000,
+  options?: {
+    timeoutMs?: number;
+    buildSidecarHeaders?: () => Promise<Record<string, string>>;
+    onSidecarResponse?: (res: Response) => void;
+    logOutboundRequest?: (entry: OutboundSidecarRequestLog) => void;
+    getLogAgentId?: () => string;
+  },
 ): Promise<ScanResult> {
+  const timeoutMs = options?.timeoutMs ?? 120_000;
+  const started = performance.now();
+  let responseLogged = false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const headers: Record<string, string> = {
+    const baseHeaders: Record<string, string> = {
       "Content-Type": "application/json",
-      "X-DefenseClaw-Client": "openclaw-plugin",
+      [HEADER_DEFENSECLAW_CLIENT]: "openclaw-plugin",
     };
     if (sidecarToken) {
-      headers.Authorization = `Bearer ${sidecarToken}`;
+      baseHeaders.Authorization = `Bearer ${sidecarToken}`;
     }
+    const merged = options?.buildSidecarHeaders
+      ? { ...baseHeaders, ...(await options.buildSidecarHeaders()) }
+      : baseHeaders;
 
     const res = await fetch(`${sidecarBaseUrl}/v1/plugin/scan`, {
       method: "POST",
-      headers,
+      headers: merged,
       body: JSON.stringify({ target }),
       signal: controller.signal,
+    });
+
+    options?.onSidecarResponse?.(res);
+
+    const duration_ms = Math.round(performance.now() - started);
+    responseLogged = true;
+    options?.logOutboundRequest?.({
+      agentId: options.getLogAgentId?.() ?? "unknown",
+      status_code: res.status,
+      duration_ms,
     });
 
     if (!res.ok) {
@@ -182,6 +206,14 @@ export async function runRemotePluginScan(
       findings,
     };
   } catch (err) {
+    if (!responseLogged) {
+      const duration_ms = Math.round(performance.now() - started);
+      options?.logOutboundRequest?.({
+        agentId: options?.getLogAgentId?.() ?? "unknown",
+        status_code: 0,
+        duration_ms,
+      });
+    }
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error("plugin scan timed out");
     }
@@ -199,24 +231,46 @@ export async function runCodeScan(
   target: string,
   sidecarBaseUrl: string,
   sidecarToken = "",
-  timeoutMs = 30_000,
+  options?: {
+    timeoutMs?: number;
+    buildSidecarHeaders?: () => Promise<Record<string, string>>;
+    onSidecarResponse?: (res: Response) => void;
+    logOutboundRequest?: (entry: OutboundSidecarRequestLog) => void;
+    getLogAgentId?: () => string;
+  },
 ): Promise<ScanResult> {
+  const timeoutMs = options?.timeoutMs ?? 30_000;
+  const started = performance.now();
+  let responseLogged = false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const headers: Record<string, string> = {
+    const baseHeaders: Record<string, string> = {
       "Content-Type": "application/json",
-      "X-DefenseClaw-Client": "openclaw-plugin",
+      [HEADER_DEFENSECLAW_CLIENT]: "openclaw-plugin",
     };
     if (sidecarToken) {
-      headers.Authorization = `Bearer ${sidecarToken}`;
+      baseHeaders.Authorization = `Bearer ${sidecarToken}`;
     }
+    const merged = options?.buildSidecarHeaders
+      ? { ...baseHeaders, ...(await options.buildSidecarHeaders()) }
+      : baseHeaders;
 
     const res = await fetch(`${sidecarBaseUrl}/api/v1/scan/code`, {
       method: "POST",
-      headers,
+      headers: merged,
       body: JSON.stringify({ path: target }),
       signal: controller.signal,
+    });
+
+    options?.onSidecarResponse?.(res);
+
+    const duration_ms = Math.round(performance.now() - started);
+    responseLogged = true;
+    options?.logOutboundRequest?.({
+      agentId: options.getLogAgentId?.() ?? "unknown",
+      status_code: res.status,
+      duration_ms,
     });
 
     if (!res.ok) {
@@ -246,6 +300,14 @@ export async function runCodeScan(
       findings,
     };
   } catch (err) {
+    if (!responseLogged) {
+      const duration_ms = Math.round(performance.now() - started);
+      options?.logOutboundRequest?.({
+        agentId: options?.getLogAgentId?.() ?? "unknown",
+        status_code: 0,
+        duration_ms,
+      });
+    }
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error("code scan timed out");
     }
