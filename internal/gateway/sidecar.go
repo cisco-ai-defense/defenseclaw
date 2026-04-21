@@ -70,6 +70,24 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 
+	// Mint a per-process agent instance id immediately so every
+	// audit row that fires during sidecar boot (device-identity
+	// load, guardrail init, WS client dial) carries the same
+	// stable id we later advertise on tool/approval events. The
+	// router also stamps a per-session id on conversation-scoped
+	// events; this one is the process-lifetime fallback.
+	agentInstanceID := uuid.New().String()
+	audit.SetProcessAgentInstanceID(agentInstanceID)
+	// Mirror the same UUID to gatewaylog so the Writer choke point
+	// can stamp sidecar_instance_id on events that were constructed
+	// outside a request context (boot/shutdown/lifecycle). Kept in
+	// lockstep with audit.SetProcessAgentInstanceID — the two setters
+	// live in separate packages only to avoid an import cycle.
+	gatewaylog.SetSidecarInstanceID(agentInstanceID)
+	if otel != nil {
+		otel.SetAgentInstanceID(agentInstanceID)
+	}
+
 	// Persist the retention flag before any goroutines start so the
 	// very first judge invocation sees the operator-configured value
 	// (otherwise the default atomic would race with early traffic).
@@ -102,6 +120,17 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
+	// Seed defaults for the observability contract so every span /
+	// audit row knows which agent (framework mode) and policy
+	// signed off on the event even when the incoming stream does
+	// not carry a hint.
+	router.SetDefaultAgentName(string(cfg.Claw.Mode))
+	// We use Guardrail.Mode ("default" | "strict" | "permissive") as
+	// the policy identifier because it is the only operator-selected,
+	// version-controlled handle on the guardrail configuration today.
+	// When a richer policy catalog exists (rule-pack id, Rego bundle
+	// digest) callers can override this via SetDefaultPolicyID.
+	router.SetDefaultPolicyID(cfg.Guardrail.Mode)
 
 	// Load guardrail rule pack for judge prompts, suppressions, etc.
 	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
@@ -133,14 +162,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	alertCtx, alertCancel := context.WithCancel(context.Background())
 
-	var webhooks *WebhookDispatcher
-	if len(cfg.Webhooks) > 0 {
-		webhooks = NewWebhookDispatcher(cfg.Webhooks)
-		if webhooks != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d endpoints)\n", len(webhooks.endpoints))
-		}
-	}
-
 	// DEFENSECLAW_JSONL_DISABLE lets operators opt the structured
 	// JSONL tier out at process start without editing config.yaml —
 	// useful for noisy dev loops, ephemeral CI debug shells, and
@@ -154,10 +175,37 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			"[sidecar] DEFENSECLAW_JSONL_DISABLE set — gateway.jsonl tier disabled (pretty + OTel still active)")
 		jsonlPath = ""
 	}
+	// v7 strict schema validation: the validator runs inside
+	// gatewaylog.Writer.Emit and drops any event that fails the
+	// envelope schema, surfacing a single EventError per drop so
+	// operators are never blind to contract regressions. Operators
+	// can disable the gate with DEFENSECLAW_SCHEMA_VALIDATION=off
+	// (breakglass for when a stale binary emits a new field the
+	// shipped schema doesn't know about). A failure to load the
+	// embedded schemas is *not* fatal: we fall back to a no-op
+	// validator and log the error so the sidecar still serves
+	// traffic — the Prometheus counter stays at zero, which is a
+	// visible signal that validation is off.
+	var schemaValidator *gatewaylog.Validator
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_SCHEMA_VALIDATION"))) {
+	case "off", "false", "0", "disabled":
+		fmt.Fprintln(os.Stderr,
+			"[sidecar] DEFENSECLAW_SCHEMA_VALIDATION=off — runtime schema gate disabled")
+	default:
+		sv, vErr := gatewaylog.NewDefaultValidator()
+		if vErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"[sidecar] schema validator init failed (%v) — runtime schema gate disabled\n", vErr)
+		} else {
+			schemaValidator = sv
+		}
+	}
+
 	events, err := gatewaylog.New(gatewaylog.Config{
 		JSONLPath: jsonlPath,
 		Pretty:    os.Stderr,
 		Compress:  true,
+		Validator: schemaValidator,
 	})
 	if err != nil {
 		// Release the alertCtx we just acquired so we don't leak a
@@ -172,8 +220,26 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// config required when telemetry.enabled is true.
 	if otel != nil && otel.Enabled() {
 		events.WithFanout(otel.EmitGatewayEvent)
+		// Route schema-violation drops into the Prometheus counter
+		// so operators can alert on the metric directly without
+		// scraping gateway.jsonl for EventError rows.
+		events.OnSchemaViolation(func(et gatewaylog.EventType, code, _ string) {
+			otel.RecordSchemaViolation(context.Background(), string(et), code)
+		})
 	}
 	SetEventWriter(events)
+
+	var webhooks *WebhookDispatcher
+	if len(cfg.Webhooks) > 0 {
+		webhooks = NewWebhookDispatcher(cfg.Webhooks)
+		if webhooks != nil {
+			webhooks.BindObservability(otel)
+			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d endpoints)\n", len(webhooks.endpoints))
+		}
+	}
+	if shell != nil {
+		shell.BindObservability(otel, events)
+	}
 
 	// Phase 1: bridge audit.Logger events into gateway.jsonl so every
 	// scan result, watcher transition, and enforcement action lands
@@ -182,6 +248,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// writer itself is the single choke point for JSONL retention.
 	if logger != nil {
 		logger.SetStructuredEmitter(newAuditBridge(events))
+		logger.SetGatewayLogWriter(events)
 	}
 
 	// Phase 3: persist judge bodies to the local SQLite audit store
@@ -233,7 +300,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		})
 	}
 
-	emitLifecycle("gateway", "init", map[string]string{
+	// Boot path — no request context exists yet. Writer.Emit stamps
+	// sidecar_instance_id; run_id is inherited from the env var via
+	// stampEventCorrelation.
+	emitLifecycle(context.Background(), "gateway", "init", map[string]string{
 		"host":         cfg.Gateway.Host,
 		"api_port":     fmt.Sprintf("%d", cfg.Gateway.APIPort),
 		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
@@ -263,7 +333,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	runID := os.Getenv("DEFENSECLAW_RUN_ID")
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
-	emitLifecycle("sidecar", "start", map[string]string{
+	emitLifecycle(ctx, "sidecar", "start", map[string]string{
 		"run_id":       runID,
 		"auto_approve": fmt.Sprintf("%v", s.cfg.Gateway.AutoApprove),
 		"watcher":      fmt.Sprintf("%v", s.cfg.Gateway.Watcher.Enabled),
@@ -289,14 +359,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.cfg.PolicyDir)
-				emitLifecycle("opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
+				emitLifecycle(ctx, "opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
-				emitError("opa", "compile-failed", "falling back to built-in policies", compileErr)
+				emitError(ctx, "opa", "compile-failed", "falling back to built-in policies", compileErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
-			emitError("opa", "init-failed", "falling back to built-in policies", err)
+			emitError(ctx, "opa", "init-failed", "falling back to built-in policies", err)
 		}
 	}
 
@@ -363,7 +433,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertCancel()
 	s.alertWg.Wait()
 
-	emitLifecycle("gateway", "stop", nil)
+	// Shutdown — ctx is already Done, but still carries correlation values.
+	emitLifecycle(ctx, "gateway", "stop", nil)
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
@@ -798,6 +869,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)
+	}
+	if err == nil && proxy != nil {
+		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
+		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)

@@ -75,6 +75,14 @@ type EventRouter struct {
 	activeSessions   map[string]time.Time // sessionKey → last seen
 
 	contextTracker *ContextTracker
+
+	// defaultAgentName is the fallback for agent_name when the
+	// incoming event doesn't supply one. Populated from
+	// cfg.Claw.Mode at sidecar bootstrap via SetDefaultAgentName.
+	defaultAgentName string
+	// defaultPolicyID is the identifier of the active guardrail /
+	// admission policy. Populated at bootstrap via SetDefaultPolicyID.
+	defaultPolicyID string
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
@@ -121,6 +129,25 @@ func (r *EventRouter) getToolParentCtx() context.Context {
 	return context.Background()
 }
 
+// activeAgentCorrelation returns session_id / run_id from the currently
+// active agent span, when exactly one is active. Approval events do not
+// carry correlation identifiers on the wire, so this is best-effort: if
+// no agent span is active, both return values are empty. When multiple
+// agents run concurrently (multi-tenant sidecar), we also return empty
+// rather than guess — downstream SIEMs should prefer trace_id for
+// correlation in that case.
+func (r *EventRouter) activeAgentCorrelation() (sessionID, runID string) {
+	r.spanMu.Lock()
+	defer r.spanMu.Unlock()
+	if len(r.activeAgentSpans) != 1 {
+		return "", ""
+	}
+	for rid, aa := range r.activeAgentSpans {
+		return aa.sessionKey, rid
+	}
+	return "", ""
+}
+
 // ActiveSessionKeys returns session keys seen in the last hour.
 func (r *EventRouter) ActiveSessionKeys() []string {
 	r.activeSessionsMu.RLock()
@@ -162,6 +189,29 @@ func (r *EventRouter) pruneSessionsLocked() {
 // SetJudge configures the LLM judge for tool call injection detection.
 func (r *EventRouter) SetJudge(j *LLMJudge) {
 	r.judge = j
+}
+
+// SetDefaultAgentName sets the agent name fallback used when incoming
+// events do not carry one (e.g. cfg.Claw.Mode = "openclaw").
+func (r *EventRouter) SetDefaultAgentName(name string) {
+	r.defaultAgentName = name
+}
+
+// SetDefaultPolicyID sets the identifier of the active guardrail /
+// admission policy. Threaded into tool and approval spans so downstream
+// SIEMs (Splunk Local Bridge, AgentWatch) can aggregate per-policy.
+func (r *EventRouter) SetDefaultPolicyID(id string) {
+	r.defaultPolicyID = id
+}
+
+// agentNameForStream picks the most specific agent name available.
+// Stream-provided hints win over the router default (claw mode) so
+// that multi-agent deployments can still distinguish per-agent events.
+func (r *EventRouter) agentNameForStream(hint string) string {
+	if strings.TrimSpace(hint) != "" {
+		return hint
+	}
+	return r.defaultAgentName
 }
 
 // SetRulePack configures the guardrail rule pack for tool result inspection.
@@ -226,6 +276,15 @@ type SessionToolPayload struct {
 	Status   string          `json:"status,omitempty"`
 	ExitCode *int            `json:"exit_code,omitempty"`
 	CallID   string          `json:"callId,omitempty"`
+
+	// SessionKey / RunID are included when the event was synthesized
+	// from an agent stream (which carries them as envelope fields).
+	// Direct session.tool frames from OpenClaw don't currently emit
+	// them at the top level; when missing we degrade gracefully and
+	// let downstream join on other identifiers.
+	SessionKey string `json:"sessionKey,omitempty"`
+	RunID      string `json:"runId,omitempty"`
+	AgentName  string `json:"agentName,omitempty"`
 
 	// OpenClaw stream format: {data: {phase, name, toolCallId, args, ...}}
 	Data *sessionToolData `json:"data,omitempty"`
@@ -306,10 +365,18 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 			args = payload.Input
 		}
 		syntheticEvt := EventFrame{
-			Type:    evt.Type,
-			Event:   "tool_call",
-			Payload: mustMarshal(ToolCallPayload{Tool: toolName, Args: args, Status: payload.Status}),
-			Seq:     evt.Seq,
+			Type:  evt.Type,
+			Event: "tool_call",
+			Payload: mustMarshal(ToolCallPayload{
+				Tool:      toolName,
+				Args:      args,
+				Status:    payload.Status,
+				ID:        payload.CallID,
+				SessionID: payload.SessionKey,
+				RunID:     payload.RunID,
+				AgentName: r.agentNameForStream(payload.AgentName),
+			}),
+			Seq: evt.Seq,
 		}
 		r.handleToolCall(syntheticEvt)
 
@@ -319,10 +386,18 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 			output = payload.Result
 		}
 		syntheticEvt := EventFrame{
-			Type:    evt.Type,
-			Event:   "tool_result",
-			Payload: mustMarshal(ToolResultPayload{Tool: toolName, Output: output, ExitCode: payload.ExitCode}),
-			Seq:     evt.Seq,
+			Type:  evt.Type,
+			Event: "tool_result",
+			Payload: mustMarshal(ToolResultPayload{
+				Tool:      toolName,
+				Output:    output,
+				ExitCode:  payload.ExitCode,
+				ID:        payload.CallID,
+				SessionID: payload.SessionKey,
+				RunID:     payload.RunID,
+				AgentName: r.agentNameForStream(payload.AgentName),
+			}),
+			Seq: evt.Seq,
 		}
 		r.handleToolResult(syntheticEvt)
 
@@ -465,7 +540,11 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")
-				emitVerdict("multi-turn", "prompt", "",
+				// Async read-loop context — stamp session_id so the
+				// verdict event carries the conversation identifier
+				// even though we're outside any HTTP request.
+				vctx := ContextWithSessionID(context.Background(), envelope.SessionKey)
+				emitVerdict(vctx, "multi-turn", "prompt", "",
 					"alert", "repeated injection patterns across user turns",
 					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
 				if r.otel != nil {
@@ -544,7 +623,8 @@ func (r *EventRouter) handleChatEvent(evt EventFrame, seqStr string) {
 		_ = r.logger.LogAction("gateway-chat-error", ce.SessionKey,
 			fmt.Sprintf("runId=%s error=%s", ce.RunID,
 				truncate(redaction.ForSinkString(ce.ErrorMessage), 200)))
-		emitError("chat", "chat-error",
+		ectx := ContextWithSessionID(context.Background(), ce.SessionKey)
+		emitError(ectx, "chat", "chat-error",
 			fmt.Sprintf("runId=%s session=%s", ce.RunID, ce.SessionKey),
 			fmt.Errorf("%s", redaction.ForSinkString(ce.ErrorMessage)))
 	}
@@ -629,10 +709,16 @@ func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 
 		readLoopLogf("[bifrost] agent event → tool_call tool=%s id=%s", toolName, tc.ID)
 		syntheticEvt := EventFrame{
-			Type:    evt.Type,
-			Event:   "tool_call",
-			Payload: mustMarshal(ToolCallPayload{Tool: toolName, Args: args, Status: tc.Status}),
-			Seq:     evt.Seq,
+			Type:  evt.Type,
+			Event: "tool_call",
+			Payload: mustMarshal(ToolCallPayload{
+				Tool:      toolName,
+				Args:      args,
+				Status:    tc.Status,
+				ID:        tc.ID,
+				AgentName: r.agentNameForStream(""),
+			}),
+			Seq: evt.Seq,
 		}
 		r.handleToolCall(syntheticEvt)
 	}
@@ -649,10 +735,16 @@ func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 
 		readLoopLogf("[bifrost] agent event → tool_result tool=%s id=%s", toolName, tr.ID)
 		syntheticEvt := EventFrame{
-			Type:    evt.Type,
-			Event:   "tool_result",
-			Payload: mustMarshal(ToolResultPayload{Tool: toolName, Output: tr.Output, ExitCode: tr.ExitCode}),
-			Seq:     evt.Seq,
+			Type:  evt.Type,
+			Event: "tool_result",
+			Payload: mustMarshal(ToolResultPayload{
+				Tool:      toolName,
+				Output:    tr.Output,
+				ExitCode:  tr.ExitCode,
+				ID:        tr.ID,
+				AgentName: r.agentNameForStream(""),
+			}),
+			Seq: evt.Seq,
 		}
 		r.handleToolResult(syntheticEvt)
 	}
@@ -704,9 +796,9 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 				}
 				agentCtx, agentSpan := r.otel.StartAgentSpan(
 					context.Background(),
-					conversationID, // conversation.id
-					"openclaw",     // agent name
-					"",             // provider filled on session.message
+					conversationID,           // conversation.id
+					r.agentNameForStream(""), // agent name (claw mode fallback)
+					"",                       // provider filled on session.message
 				)
 				r.spanMu.Lock()
 				r.activeAgentSpans[se.RunID] = &activeAgent{
@@ -729,7 +821,8 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 			_ = r.logger.LogAction("gateway-agent-error", se.SessionKey,
 				fmt.Sprintf("runId=%s error=%s", se.RunID,
 					truncate(redaction.ForSinkString(data.Error), 200)))
-			emitError("agent", "agent-error",
+			ectx := ContextWithSessionID(context.Background(), se.SessionKey)
+			emitError(ectx, "agent", "agent-error",
 				fmt.Sprintf("runId=%s session=%s", se.RunID, se.SessionKey),
 				fmt.Errorf("%s", redaction.ForSinkString(data.Error)))
 
@@ -772,10 +865,13 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 		readLoopLogf("[bifrost] agent tool stream: phase=%s name=%s toolCallId=%s",
 			data.Phase, data.Name, data.ToolCallID)
 		syntheticPayload := SessionToolPayload{
-			Tool:   data.Name,
-			CallID: data.ToolCallID,
-			Args:   data.Args,
-			Data:   &sessionToolData{Phase: data.Phase, Name: data.Name, ToolCallID: data.ToolCallID, Args: data.Args, IsError: data.IsError},
+			Tool:       data.Name,
+			CallID:     data.ToolCallID,
+			Args:       data.Args,
+			SessionKey: se.SessionKey,
+			RunID:      se.RunID,
+			AgentName:  r.agentNameForStream(""),
+			Data:       &sessionToolData{Phase: data.Phase, Name: data.Name, ToolCallID: data.ToolCallID, Args: data.Args, IsError: data.IsError},
 		}
 		toolEvt := EventFrame{
 			Type:    evt.Type,
@@ -808,7 +904,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
 			_ = r.logger.LogAction("gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
-			emitVerdict("policy", "tool_call", payload.Tool,
+			vctx := ContextWithSessionID(context.Background(), payload.SessionID)
+			emitVerdict(vctx, "policy", "tool_call", payload.Tool,
 				"block", "static block list",
 				gatewaylog.SeverityHigh, []string{"policy:block"}, 0)
 			if r.otel != nil {
@@ -876,10 +973,19 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	if r.otel != nil {
 		parentCtx := r.getToolParentCtx()
+		agentName := r.agentNameForStream(payload.AgentName)
 		ctx, span := r.otel.StartToolSpan(
 			parentCtx,
 			payload.Tool, payload.Status, payload.Args,
 			dangerous, flaggedPattern, "builtin", "",
+			telemetry.ToolSpanContext{
+				ToolID:         payload.ID,
+				SessionID:      payload.SessionID,
+				RunID:          payload.RunID,
+				DestinationApp: toolDestinationApp("builtin", ""),
+				PolicyID:       r.defaultPolicyID,
+				AgentName:      agentName,
+			},
 		)
 		r.spanMu.Lock()
 		r.activeToolSpans[payload.Tool] = append(r.activeToolSpans[payload.Tool], &activeSpan{
@@ -891,6 +997,27 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		})
 		r.spanMu.Unlock()
 	}
+}
+
+// toolDestinationApp formats the destination_app field for tool spans
+// using the tool provider convention:
+//
+//	builtin
+//	mcp:<server>
+//	skill:<key>
+//
+// The provider argument is "builtin" | "mcp" | "skill" (other values are
+// returned verbatim). The qualifier is the MCP server name or skill key;
+// it is omitted when empty so generic builtin tools don't get a trailing
+// colon.
+func toolDestinationApp(provider, qualifier string) string {
+	if provider == "" {
+		return ""
+	}
+	if qualifier == "" {
+		return provider
+	}
+	return provider + ":" + qualifier
 }
 
 func (r *EventRouter) handleToolResult(evt EventFrame) {
@@ -1050,7 +1177,17 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	var approvalSpan trace.Span
 	if r.otel != nil {
 		parentCtx := r.getToolParentCtx()
-		_, approvalSpan = r.otel.StartApprovalSpan(parentCtx, payload.ID, rawCmd, argv, cwd)
+		sessionID, runID := r.activeAgentCorrelation()
+		_, approvalSpan = r.otel.StartApprovalSpan(parentCtx, payload.ID, rawCmd, argv, cwd,
+			telemetry.ToolSpanContext{
+				ToolID:         payload.ID,
+				SessionID:      sessionID,
+				RunID:          runID,
+				DestinationApp: toolDestinationApp("builtin", ""),
+				PolicyID:       r.defaultPolicyID,
+				AgentName:      r.agentNameForStream(""),
+			},
+		)
 	}
 
 	cmdFindings := ScanAllRules(rawCmd, "shell")
@@ -1073,7 +1210,9 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	if dangerous {
 		_ = r.logger.LogAction("gateway-approval-denied", payload.ID,
 			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
-		emitVerdict("approval", "exec", cmdName,
+		sessionID, _ := r.activeAgentCorrelation()
+		vctx := ContextWithSessionID(context.Background(), sessionID)
+		emitVerdict(vctx, "approval", "exec", cmdName,
 			"block", fmt.Sprintf("%s: %s", topFinding.RuleID, topFinding.Title),
 			deriveSeverity(topFinding.Severity), []string{"approval:denied"}, 0)
 		fmt.Fprintf(os.Stderr, "[sidecar] DENIED exec approval: %s (%s)\n", cmdName, topFinding.Title)

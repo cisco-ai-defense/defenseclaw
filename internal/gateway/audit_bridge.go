@@ -60,6 +60,15 @@ func newAuditBridge(w *gatewaylog.Writer) *auditBridge {
 // of an Event. It never blocks the caller for longer than a single
 // Emit call — the underlying Writer fans out to disk + stderr
 // synchronously but OTel/sink callbacks run outside its mutex.
+// EmitGatewayEvent writes a pre-built gatewaylog event (v7 activity,
+// alerts, errors) without translating from audit.Event.
+func (b *auditBridge) EmitGatewayEvent(ev gatewaylog.Event) {
+	if b == nil || b.writer == nil {
+		return
+	}
+	b.writer.Emit(ev)
+}
+
 func (b *auditBridge) EmitAudit(e audit.Event) {
 	if b == nil || b.writer == nil {
 		return
@@ -67,13 +76,28 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 	if skipBridgeAction(e.Action) {
 		return
 	}
+	// v7: LogActivity mirrors a native EventActivity emission; skip the
+	// lifecycle translation so gateway.jsonl stays single-sourced.
+	if strings.Contains(e.Details, `"activity_id"`) {
+		return
+	}
 
 	ev := gatewaylog.Event{
-		Timestamp: e.Timestamp,
-		EventType: gatewaylog.EventLifecycle,
-		Severity:  normalizeAuditSeverity(e.Severity),
-		RunID:     e.RunID,
-		RequestID: e.RequestID,
+		Timestamp:         e.Timestamp,
+		EventType:         gatewaylog.EventLifecycle,
+		Severity:          normalizeAuditSeverity(e.Severity),
+		RunID:             e.RunID,
+		RequestID:         e.RequestID,
+		SessionID:         e.SessionID,
+		TraceID:           e.TraceID,
+		AgentID:           e.AgentID,
+		AgentName:         e.AgentName,
+		AgentInstanceID:   e.AgentInstanceID,
+		SidecarInstanceID: e.SidecarInstanceID,
+		PolicyID:          e.PolicyID,
+		DestinationApp:    e.DestinationApp,
+		ToolName:          e.ToolName,
+		ToolID:            e.ToolID,
 		Lifecycle: &gatewaylog.LifecyclePayload{
 			Subsystem:  subsystemForAction(e.Action),
 			Transition: transitionForAction(e.Action),
@@ -96,7 +120,16 @@ func skipBridgeAction(action string) bool {
 		// "llm-judge-response" audit event exists for SQLite/Splunk
 		// fan-out (see sidecar.go judgePersistor) and must not be
 		// re-translated into a Lifecycle JSONL row.
-		"llm-judge-response":
+		"llm-judge-response",
+		// LogScan already emits a native EventScan (and EventScanFinding
+		// per finding) via scanner.EmitScanResult; the "scan" audit twin
+		// exists for SQLite/Splunk fan-out and must not be re-translated
+		// into a Lifecycle JSONL row.
+		string(audit.ActionScan),
+		// LogAlert already emits a native EventLifecycle with
+		// transition="alert"; the "alert" audit twin exists for
+		// SQLite/Splunk fan-out and must not be re-translated again.
+		string(audit.ActionAlert):
 		return true
 	}
 	return false
@@ -133,10 +166,13 @@ func subsystemForAction(action string) string {
 	}
 }
 
-// transitionForAction extracts the transition verb. We prefer the
+// transitionForAction maps an audit Action onto the canonical
 // LifecyclePayload.Transition vocabulary (start | stop | ready |
-// degraded | restored | completed) but tolerate arbitrary verbs so
-// new audit actions don't require schema changes.
+// degraded | restored | alert | completed). Every audit row that
+// reaches the bridge represents a completed internal action, so
+// "completed" is the safe catch-all. This keeps gateway.jsonl
+// schema-valid without requiring the enum to track every possible
+// audit action verb.
 func transitionForAction(action string) string {
 	switch action {
 	case "sidecar-start", "watch-start":
@@ -145,15 +181,17 @@ func transitionForAction(action string) string {
 		return "stop"
 	case "sidecar-connected", "gateway-ready":
 		return "ready"
-	case "sidecar-disconnected":
+	case "sidecar-disconnected", string(audit.ActionSinkFailure):
 		return "degraded"
-	case "scan":
-		return "completed"
+	case string(audit.ActionSinkRestored):
+		return "restored"
 	}
-	// Fallback: use the raw action verb so the field is never empty.
-	// Action names are controlled by internal callers (no user input
-	// reaches here), so this is safe to forward verbatim.
-	return action
+	// Catch-all: every other audit action represents an internal
+	// operation that finished (install-blocked, policy-update,
+	// rescan-start, approval-granted, ...). Mapping them all to
+	// "completed" keeps the field within the schema enum while still
+	// carrying the originating action in LifecyclePayload.Details.
+	return "completed"
 }
 
 // auditDetailsToMap packages the audit Event's free-form fields into
@@ -162,13 +200,13 @@ func transitionForAction(action string) string {
 // content reaches here.
 //
 // Fields already surfaced by the gatewaylog.Event envelope (RequestID,
-// RunID, Severity, Timestamp) are deliberately *not* copied into the
-// details map — they would drift against the canonical envelope copy
-// if schema normalisation diverged, and downstream consumers already
-// key on the envelope. trace_id stays in details because the envelope
-// has no first-class field for it; audit_id and action stay so
-// operators can pivot from a JSONL row back to the SQLite row that
-// produced it.
+// RunID, SessionID, TraceID, AgentName, AgentInstanceID, PolicyID,
+// DestinationApp, ToolName, ToolID, Severity, Timestamp) are
+// deliberately *not* copied into the details map — they would drift
+// against the canonical envelope copy if schema normalisation
+// diverged, and downstream consumers already key on the envelope.
+// audit_id and action stay so operators can pivot from a JSONL row
+// back to the SQLite row that produced it.
 func auditDetailsToMap(e audit.Event) map[string]string {
 	out := map[string]string{}
 	if e.Target != "" {
@@ -179,9 +217,6 @@ func auditDetailsToMap(e audit.Event) map[string]string {
 	}
 	if e.Details != "" {
 		out["details"] = e.Details
-	}
-	if e.TraceID != "" {
-		out["trace_id"] = e.TraceID
 	}
 	if e.ID != "" {
 		out["audit_id"] = e.ID

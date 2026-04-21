@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -39,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -103,6 +105,35 @@ type GuardrailProxy struct {
 	rtMu         sync.RWMutex
 	mode         string
 	blockMessage string
+
+	// Observability defaults set at bootstrap. defaultAgentName
+	// falls back to cfg.Claw.Mode ("openclaw") when the request
+	// does not carry an agent identifier; defaultPolicyID is the
+	// active guardrail / admission policy identifier threaded into
+	// tool and approval spans so per-policy aggregations in the
+	// Splunk Local Bridge / AgentWatch summary work correctly.
+	defaultAgentName string
+	defaultPolicyID  string
+}
+
+// SetDefaultAgentName sets the agent name fallback for OTel spans when
+// the request does not carry an identifier (e.g. cfg.Claw.Mode).
+func (p *GuardrailProxy) SetDefaultAgentName(name string) {
+	p.defaultAgentName = name
+}
+
+// SetDefaultPolicyID sets the active guardrail / admission policy id.
+func (p *GuardrailProxy) SetDefaultPolicyID(id string) {
+	p.defaultPolicyID = id
+}
+
+// agentNameForRequest picks the most specific agent name available.
+// Stream-provided hints win over the router default.
+func (p *GuardrailProxy) agentNameForRequest(hint string) string {
+	if strings.TrimSpace(hint) != "" {
+		return hint
+	}
+	return p.defaultAgentName
 }
 
 // postCallContext returns a detached context for post-stream completion
@@ -140,6 +171,9 @@ func NewGuardrailProxy(
 	var cisco *CiscoInspectClient
 	if cfg.ScannerMode == "remote" || cfg.ScannerMode == "both" {
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
+		if cisco != nil {
+			cisco.SetTelemetry(otel)
+		}
 	}
 
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp)
@@ -232,14 +266,13 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/", p.handlePassthrough)
 
 	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
+	InstallSharedAgentRegistry("", strings.TrimSpace(p.defaultAgentName))
 	limited := p.rateLimitMiddleware(mux)
 	logged := p.requestLogger(limited)
-	// Phase 5: the request-ID middleware runs outermost so the
-	// correlation header is mint-and-echoed even for requests that
-	// get rejected by the rate limiter — operators still need a
-	// handle to trace 429s.
 	withRequestID := p.requestIDMiddleware(logged)
-	srv := &http.Server{Addr: addr, Handler: withRequestID}
+	withCorr := CorrelationMiddleware(SharedAgentRegistry())(withRequestID)
+	handler := otelHTTPServerMiddleware("guardrail-proxy", withCorr)
+	srv := &http.Server{Addr: addr, Handler: handler}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 		"port": p.cfg.Port,
@@ -250,7 +283,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		addr, p.mode, p.cfg.ModelName)
 	_ = p.logger.LogAction("guardrail-start", "",
 		fmt.Sprintf("port=%d mode=%s model=%s", p.cfg.Port, p.mode, p.cfg.ModelName))
-	emitLifecycle("guardrail", "start", map[string]string{
+	emitLifecycle(ctx, "guardrail", "start", map[string]string{
 		"port":  fmt.Sprintf("%d", p.cfg.Port),
 		"mode":  p.mode,
 		"model": p.cfg.ModelName,
@@ -275,7 +308,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
 		_ = p.logger.LogAction("guardrail-healthy", "", fmt.Sprintf("port=%d", p.cfg.Port))
-		emitLifecycle("guardrail", "ready", map[string]string{
+		emitLifecycle(ctx, "guardrail", "ready", map[string]string{
 			"port": fmt.Sprintf("%d", p.cfg.Port),
 		})
 	}
@@ -301,6 +334,13 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p.limiter != nil && !p.limiter.Allow() {
+			route := r.URL.Path
+			if r.Pattern != "" {
+				route = r.Pattern
+			}
+			if p.otel != nil {
+				p.otel.RecordHTTPRateLimitBreach(r.Context(), route, "global")
+			}
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, `{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`, http.StatusTooManyRequests)
 			return
@@ -342,7 +382,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if !p.authenticateRequest(r) {
+	if !p.authenticateRequest(w, r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
@@ -1010,7 +1050,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if !p.authenticateRequest(r) {
+	if !p.authenticateRequest(w, r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
@@ -1110,9 +1150,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if conversationID == "" {
 			conversationID = fmt.Sprintf("proxy-%d", time.Now().UnixNano())
 		}
+		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
 		agentCtx, agentSpan = p.otel.StartAgentSpan(
 			context.Background(),
-			conversationID, "openclaw", "",
+			conversationID, agentName, "",
 		)
 	}
 	if agentCtx == nil {
@@ -1328,7 +1369,9 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 
 	// --- Emit execute_tool spans for any tool_calls in the response ---
 	if p.otel != nil && llmCtx != nil && len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		p.emitToolCallSpans(r.Context(), llmCtx, resp.Choices[0].Message.ToolCalls, aliasModel, mode)
+		conversationID := r.Header.Get("X-Conversation-ID")
+		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
+		p.emitToolCallSpans(r.Context(), llmCtx, resp.Choices[0].Message.ToolCalls, aliasModel, mode, conversationID, agentName)
 	}
 
 	// End LLM span with response data.
@@ -1356,9 +1399,17 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 }
 
 func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.Request, req *ChatRequest, mode, customBlockMsg string, upstream LLMProvider, agentCtx context.Context) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	const sseRoute = "/v1/chat/completions"
+	var sseBytes int64
+	if _, ok := w.(http.Flusher); !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+	mw := &sseByteMeter{ResponseWriter: w, n: &sseBytes}
+	w = mw
+	flusher, ok := interface{}(mw).(http.Flusher)
+	if !ok {
+		writeOpenAIError(mw, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
 
@@ -1366,6 +1417,26 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+
+	sseStart := time.Now()
+	emitLifecycle(agentCtx, "stream", "stream.open", map[string]string{"route": sseRoute})
+	if p.otel != nil {
+		p.otel.RecordSSELifecycle(agentCtx, sseRoute, "open", "ok", 0, 0)
+	}
+	sseOutcome := "ok"
+	defer func() {
+		ms := time.Since(sseStart).Milliseconds()
+		bytes := atomic.LoadInt64(&sseBytes)
+		emitLifecycle(agentCtx, "stream", "stream.close", map[string]string{
+			"route":       sseRoute,
+			"duration_ms": fmt.Sprintf("%d", ms),
+			"bytes_sent":  fmt.Sprintf("%d", bytes),
+			"outcome":     sseOutcome,
+		})
+		if p.otel != nil {
+			p.otel.RecordSSELifecycle(agentCtx, sseRoute, "close", sseOutcome, float64(ms), bytes)
+		}
+	}()
 
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
@@ -1500,6 +1571,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 	}
 	if err != nil && !streamBlocked {
+		sseOutcome = "error"
+		emitGatewayError(agentCtx, gatewaylog.SubsystemStream, gatewaylog.ErrCodeUpstreamError,
+			fmt.Sprintf("upstream stream error: %v", err), err)
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
 			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, "openclaw")
@@ -1511,6 +1585,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	guardrailResult := ""
 
 	if streamBlocked {
+		sseOutcome = "blocked"
 		if p.otel != nil && llmSpan != nil {
 			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, "openclaw")
 		}
@@ -2000,7 +2075,7 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 //   - For non-loopback (sandbox / bridge deployments), authentication is always
 //     required via X-DC-Auth or the master key.
 
-func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
+func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Request) bool {
 	isLoopback := strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") || strings.HasPrefix(r.RemoteAddr, "[::1]:")
 
 	// Check X-DC-Auth token (set by the fetch interceptor).
@@ -2034,7 +2109,30 @@ func (p *GuardrailProxy) authenticateRequest(r *http.Request) bool {
 		return true
 	}
 
+	reason := "invalid_token"
+	if strings.TrimSpace(r.Header.Get("X-DC-Auth")) == "" && (p.masterKey == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+		reason = "missing_token"
+	}
+	p.emitProxyAuthFailure(r, reason)
 	return false
+}
+
+func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason string) {
+	ctx := r.Context()
+	route := r.URL.Path
+	if r.Pattern != "" {
+		route = r.Pattern
+	}
+	code := gatewaylog.ErrCodeAuthInvalidToken
+	if metricReason == "missing_token" {
+		code = gatewaylog.ErrCodeAuthMissingToken
+	}
+	msg := fmt.Sprintf("guardrail proxy auth failure (client_ip=%s ua=%q)",
+		ClientIPRedacted(r), TruncateUserAgent256(r.UserAgent()))
+	emitGatewayError(ctx, gatewaylog.SubsystemAuth, code, msg, nil)
+	if p.otel != nil {
+		p.otel.RecordHTTPAuthFailure(ctx, route, metricReason)
+	}
 }
 
 // deriveMasterKey produces a deterministic master key from the device key
@@ -2664,7 +2762,10 @@ func countToolCalls(raw json.RawMessage) int {
 // emitToolCallSpans creates execute_tool spans for each tool_call in the LLM
 // response, as children of the chat span context. Each tool call is also
 // inspected by the guardrail, producing a child apply_guardrail span.
-func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw json.RawMessage, model, mode string) {
+//
+// conversationID and agentName are threaded from the originating request so
+// downstream SIEMs can correlate tool_call rows with the parent agent run.
+func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw json.RawMessage, model, mode, conversationID, agentName string) {
 	if len(raw) == 0 {
 		return
 	}
@@ -2679,6 +2780,13 @@ func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw j
 		}
 		toolCtx, span := p.otel.StartToolSpan(
 			llmCtx, name, "pending", nil, false, "", "", "",
+			telemetry.ToolSpanContext{
+				ToolID:         tc.ID,
+				SessionID:      conversationID,
+				DestinationApp: "builtin",
+				PolicyID:       p.defaultPolicyID,
+				AgentName:      agentName,
+			},
 		)
 
 		// --- Guardrail inspection of tool call arguments ---
@@ -2702,5 +2810,25 @@ func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw j
 		}
 
 		p.otel.EndToolSpan(span, 0, 0, time.Now(), name, "")
+	}
+}
+
+// sseByteMeter counts bytes written to an SSE response for observability.
+type sseByteMeter struct {
+	http.ResponseWriter
+	n *int64
+}
+
+func (s *sseByteMeter) Write(b []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(b)
+	if s.n != nil {
+		atomic.AddInt64(s.n, int64(n))
+	}
+	return n, err
+}
+
+func (s *sseByteMeter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
 	}
 }

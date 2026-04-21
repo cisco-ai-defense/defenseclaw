@@ -37,13 +37,21 @@ import (
 // either the bridge's routing is wrong or your new category leaks
 // past the coverage matrix.
 //
-// guardrail-verdict and llm-judge-response are deliberately excluded:
-// the gateway hot path emits dedicated Verdict / Judge events via
-// emitVerdict / emitJudge, and the bridge's skipBridgeAction prevents
-// double-counting. Those invariants have their own dedicated tests
-// (TestAuditToJSONL_SkipsGuardrailVerdict and the
-// correlation_integration_test.go assertions that no lifecycle row
-// appears for llm-judge-response).
+// Four actions are deliberately excluded:
+//   - guardrail-verdict — emitVerdict writes a dedicated EventVerdict row
+//   - llm-judge-response — emitJudge writes a dedicated EventJudge row
+//   - scan — audit.Logger.LogScan emits a native EventScan + N EventScanFinding
+//     rows via scanner.EmitScanResult, so the bridge's audit-twin lifecycle
+//     row would duplicate them and violate the schema (Lifecycle.Transition
+//     enum has no "scan" value)
+//   - alert — audit.Logger.LogAlert emits a dedicated EventLifecycle row
+//     with transition="alert" (see logger.go), so the bridge-produced twin
+//     would be a redundant duplicate.
+//
+// Each of these has its own coverage assertion elsewhere:
+// TestAuditToJSONL_SkipsGuardrailVerdict, the judge correlation integration
+// tests, v7_observability_test.go surface tests for scan/finding, and
+// logger_v7_test.go for alerts.
 func TestAuditCoverage_EveryCategoryLandsInJSONL(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "audit.db")
@@ -75,7 +83,9 @@ func TestAuditCoverage_EveryCategoryLandsInJSONL(t *testing.T) {
 		action        string
 		wantSubsystem string
 	}{
-		{"scan", "scanner"},
+		// "scan" and "alert" are intentionally omitted — see the
+		// package-level comment above. Their native emitters are
+		// covered by v7_observability_test.go and logger_v7_test.go.
 		{"watch-start", "watcher"},
 		{"watcher-drain", "watcher"},
 		{"watch-stop", "watcher"},
@@ -193,19 +203,23 @@ func TestAuditCoverage_EveryCategoryLandsInJSONL(t *testing.T) {
 
 // TestAuditCoverage_SkipListIsMinimal guards against the obvious
 // regression where someone adds a new action to skipBridgeAction for
-// "cleanliness" and silently drops it from operator visibility.
-// guardrail-verdict is the ONLY action allowed in the skip list,
-// because it has a dedicated hot-path emission. Any new skip target
-// must be accompanied by an equivalent dedicated emission and an
-// update to this allowlist.
+// "cleanliness" and silently drops it from operator visibility. A
+// new skip target MUST be accompanied by an equivalent dedicated
+// emission and an update to the allowlist below.
 func TestAuditCoverage_SkipListIsMinimal(t *testing.T) {
-	// Both entries have a dedicated hot-path emitter upstream:
-	//   * guardrail-verdict → emitVerdict writes an EventVerdict row
+	// All four entries have a dedicated hot-path emitter upstream:
+	//   * guardrail-verdict  → emitVerdict writes an EventVerdict row
 	//   * llm-judge-response → emitJudge writes an EventJudge row
-	// Bridging either would duplicate rows in gateway.jsonl.
+	//   * scan               → LogScan → scanner.EmitScanResult writes
+	//                          EventScan + EventScanFinding rows
+	//   * alert              → LogAlert writes an EventLifecycle row
+	//                          with transition="alert"
+	// Bridging any of these would duplicate rows in gateway.jsonl.
 	allowed := map[string]struct{}{
 		"guardrail-verdict":  {},
 		"llm-judge-response": {},
+		"scan":               {},
+		"alert":              {},
 	}
 
 	// Probe a representative set of actions. If a caller adds a new
@@ -218,7 +232,8 @@ func TestAuditCoverage_SkipListIsMinimal(t *testing.T) {
 		"splunk-backoff", "otel-degraded", "telemetry-init",
 		"skill-install", "mcp-install", "block", "allow", "quarantine",
 		"llm-judge-response", "future-unknown-action",
-		"guardrail-verdict", // the sole allowed skip
+		"guardrail-verdict", // dedicated hot-path emission
+		"alert",             // dedicated hot-path emission via LogAlert
 	}
 
 	for _, action := range probes {

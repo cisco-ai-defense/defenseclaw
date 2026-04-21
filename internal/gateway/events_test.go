@@ -173,6 +173,7 @@ func TestEmitEvent_RedactsVerdictReasonAndJudgeBody(t *testing.T) {
 	}
 	for _, sc := range secrets {
 		emitVerdict(
+			t.Context(),
 			"regex",
 			gatewaylog.Direction("inbound"),
 			"claude-3-5-sonnet",
@@ -183,6 +184,7 @@ func TestEmitEvent_RedactsVerdictReasonAndJudgeBody(t *testing.T) {
 			42,
 		)
 		emitJudge(
+			t.Context(),
 			"injection",
 			"claude-3-5-sonnet",
 			gatewaylog.Direction("inbound"),
@@ -192,6 +194,7 @@ func TestEmitEvent_RedactsVerdictReasonAndJudgeBody(t *testing.T) {
 			gatewaylog.SeverityHigh,
 			"",
 			"the model echoed "+sc.secret+" back verbatim",
+			JudgeEmitOpts{},
 		)
 	}
 
@@ -250,12 +253,12 @@ func TestEmitEvent_RedactsVerdictReasonAndJudgeBody(t *testing.T) {
 func TestEmitEvent_PreservesLifecycleOperatorMetadata(t *testing.T) {
 	events := withCapturedEvents(t)
 
-	emitLifecycle("gateway", "ready", map[string]string{
+	emitLifecycle(t.Context(), "gateway", "ready", map[string]string{
 		"port":    "4001",
 		"policy":  "/etc/defenseclaw/policies",
 		"version": "v1.2.3",
 	})
-	emitDiagnostic("sinks", "pipeline initialised", map[string]string{
+	emitDiagnostic(t.Context(), "sinks", "pipeline initialised", map[string]string{
 		"splunk.endpoint": "https://splunk.example.com:8088",
 		"otel.endpoint":   "https://otlp.example.com:4318",
 	})
@@ -309,7 +312,7 @@ func TestEmitEvent_DoesNotMutateCallerPayloads(t *testing.T) {
 		Action: "block",
 		Reason: original,
 	}
-	emitEvent(gatewaylog.Event{
+	emitEvent(t.Context(), gatewaylog.Event{
 		EventType: gatewaylog.EventVerdict,
 		Severity:  gatewaylog.SeverityHigh,
 		Verdict:   payload,
@@ -344,5 +347,121 @@ func TestCategoriesOf(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEmit_StampsCorrelationFromContext is the regression that catches
+// the class of bug observed in the v7 review: hot-path emit helpers
+// silently dropped request_id / session_id / trace_id / agent_* when
+// the enclosing context carried them, because the helpers built an
+// Event literal without consulting ctx.
+//
+// The test exercises every helper (verdict, judge, lifecycle, error,
+// diagnostic) through a single ctx carrying a request_id, session_id,
+// agent id/name/instance, and sidecar id. Every emitted event must
+// carry the full quintuple. A missing field means we regressed the
+// stamping choke point.
+func TestEmit_StampsCorrelationFromContext(t *testing.T) {
+	events := withCapturedEvents(t)
+
+	// Pre-registering a process sidecar id keeps the Writer's
+	// defense-in-depth stamp out of the assertion path — the
+	// helper-level stamp from ctx has to win.
+	ctx := context.Background()
+	ctx = ContextWithRequestID(ctx, "req-abc")
+	ctx = ContextWithSessionID(ctx, "sess-xyz")
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
+		AgentID:           "agent-1",
+		AgentName:         "demo-agent",
+		AgentInstanceID:   "agent-inst-7",
+		SidecarInstanceID: "sidecar-9",
+	})
+
+	emitVerdict(ctx, "regex", gatewaylog.DirectionPrompt, "claude",
+		"allow", "no-op", gatewaylog.SeverityInfo, nil, 1)
+	emitJudge(ctx, "injection", "claude", gatewaylog.DirectionPrompt,
+		10, 5, "allow", gatewaylog.SeverityInfo, "", "", JudgeEmitOpts{})
+	emitLifecycle(ctx, "policy", "reload", map[string]string{"source": "api"})
+	emitError(ctx, "gateway", "test-code", "synthetic", nil)
+	emitDiagnostic(ctx, "test", "synthetic", nil)
+
+	if got := len(*events); got != 5 {
+		t.Fatalf("expected 5 events, got %d: %+v", got, *events)
+	}
+	for i, e := range *events {
+		if e.RequestID != "req-abc" {
+			t.Errorf("event[%d] RequestID=%q want %q (type=%s)", i, e.RequestID, "req-abc", e.EventType)
+		}
+		if e.SessionID != "sess-xyz" {
+			t.Errorf("event[%d] SessionID=%q want %q (type=%s)", i, e.SessionID, "sess-xyz", e.EventType)
+		}
+		if e.AgentID != "agent-1" {
+			t.Errorf("event[%d] AgentID=%q want %q (type=%s)", i, e.AgentID, "agent-1", e.EventType)
+		}
+		if e.AgentName != "demo-agent" {
+			t.Errorf("event[%d] AgentName=%q want %q (type=%s)", i, e.AgentName, "demo-agent", e.EventType)
+		}
+		if e.AgentInstanceID != "agent-inst-7" {
+			t.Errorf("event[%d] AgentInstanceID=%q want %q (type=%s)", i, e.AgentInstanceID, "agent-inst-7", e.EventType)
+		}
+		if e.SidecarInstanceID != "sidecar-9" {
+			t.Errorf("event[%d] SidecarInstanceID=%q want %q (type=%s)", i, e.SidecarInstanceID, "sidecar-9", e.EventType)
+		}
+	}
+}
+
+// TestEmit_CallerValuesWinOverContext proves the stamper is fill-only:
+// an explicit non-empty value on the Event must never be clobbered by
+// the context fallback. Tests and privileged callers (audit bridge)
+// rely on this to pin synthesized correlation.
+func TestEmit_CallerValuesWinOverContext(t *testing.T) {
+	events := withCapturedEvents(t)
+
+	ctx := ContextWithRequestID(context.Background(), "req-from-ctx")
+	ctx = ContextWithSessionID(ctx, "sess-from-ctx")
+
+	emitEvent(ctx, gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle,
+		RequestID: "req-explicit",
+		SessionID: "sess-explicit",
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem:  "test",
+			Transition: "ready",
+		},
+	})
+
+	if len(*events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(*events))
+	}
+	ev := (*events)[0]
+	if ev.RequestID != "req-explicit" {
+		t.Errorf("caller RequestID overwritten: got %q want req-explicit", ev.RequestID)
+	}
+	if ev.SessionID != "sess-explicit" {
+		t.Errorf("caller SessionID overwritten: got %q want sess-explicit", ev.SessionID)
+	}
+}
+
+// TestEmit_WriterStampsSidecarIdWhenCtxEmpty guarantees the defense-in-
+// depth layer: even if a caller forgets to pass ctx or ctx has no
+// identity, gatewaylog.Writer still stamps the process-wide
+// sidecar_instance_id via gatewaylog.SidecarInstanceID(). This closes
+// the gap where boot/shutdown emits from detached goroutines would
+// otherwise land without a sidecar id.
+func TestEmit_WriterStampsSidecarIdWhenCtxEmpty(t *testing.T) {
+	events := withCapturedEvents(t)
+
+	const sidecarID = "sidecar-fallback-uuid"
+	prev := gatewaylog.SidecarInstanceID()
+	gatewaylog.SetSidecarInstanceID(sidecarID)
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(prev) })
+
+	emitLifecycle(context.Background(), "gateway", "init", nil)
+
+	if len(*events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(*events))
+	}
+	if got := (*events)[0].SidecarInstanceID; got != sidecarID {
+		t.Fatalf("Writer did not stamp sidecar_instance_id fallback: got %q want %q", got, sidecarID)
 	}
 }

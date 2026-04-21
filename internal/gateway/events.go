@@ -17,8 +17,12 @@
 package gateway
 
 import (
+	"context"
+	"os"
 	"strings"
 	"sync"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -34,6 +38,12 @@ import (
 var (
 	gatewayEventsMu sync.RWMutex
 	gatewayEvents   *gatewaylog.Writer
+
+	// judgeResponseStore persists v7-correlated judge rows when set
+	// (tests, or sidecar wiring). When nil, legacy judgePersistor may
+	// still run for backward compatibility.
+	judgeResponseStoreMu sync.RWMutex
+	judgeResponseStore   *JudgeStore
 
 	// judgePersistor is an optional hook invoked for every Judge
 	// event when guardrail.retain_judge_bodies is on and the
@@ -58,6 +68,21 @@ func SetJudgePersistor(fn func(gatewaylog.JudgePayload, gatewaylog.Direction)) {
 	gatewayEventsMu.Lock()
 	defer gatewayEventsMu.Unlock()
 	judgePersistor = fn
+}
+
+// SetJudgeResponseStore installs the v7 SQLite writer for retained judge
+// bodies. When non-nil it takes precedence over SetJudgePersistor for
+// persistence (only one path runs per emit).
+func SetJudgeResponseStore(js *JudgeStore) {
+	judgeResponseStoreMu.Lock()
+	defer judgeResponseStoreMu.Unlock()
+	judgeResponseStore = js
+}
+
+func activeJudgeStore() *JudgeStore {
+	judgeResponseStoreMu.RLock()
+	defer judgeResponseStoreMu.RUnlock()
+	return judgeResponseStore
 }
 
 // judgePersist returns the currently installed persistor (may be nil).
@@ -106,11 +131,59 @@ func EventWriter() *gatewaylog.Writer {
 // lifecycle logs. If a caller ever needs to put user-provided
 // content into one of these fields they must run it through the
 // appropriate redaction helper before the emit.
-func emitEvent(e gatewaylog.Event) {
+// stampEventCorrelation populates the eight correlation / identity
+// fields of a gatewaylog.Event from a request context. Called by
+// every hot-path emit helper so the contract "verdict/judge/error
+// events carry run_id, request_id, session_id, trace_id, agent_id,
+// agent_name, agent_instance_id, sidecar_instance_id whenever the
+// enclosing request has them" is enforced at a single choke point
+// instead of at each call site.
+//
+// Nil ctx is tolerated (boot/shutdown emits) and leaves every field
+// at the caller-supplied value. Non-empty caller-supplied values
+// always win — this helper fills in blanks, never overwrites.
+func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
+	if ev == nil || ctx == nil {
+		return
+	}
+	if ev.RequestID == "" {
+		ev.RequestID = RequestIDFromContext(ctx)
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = SessionIDFromContext(ctx)
+	}
+	if ev.TraceID == "" {
+		ev.TraceID = TraceIDFromContext(ctx)
+		if ev.TraceID == "" {
+			if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+				ev.TraceID = sp.SpanContext().TraceID().String()
+			}
+		}
+	}
+	if ev.RunID == "" {
+		ev.RunID = strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	}
+	id := AgentIdentityFromContext(ctx)
+	if ev.AgentID == "" {
+		ev.AgentID = id.AgentID
+	}
+	if ev.AgentName == "" {
+		ev.AgentName = id.AgentName
+	}
+	if ev.AgentInstanceID == "" {
+		ev.AgentInstanceID = id.AgentInstanceID
+	}
+	if ev.SidecarInstanceID == "" {
+		ev.SidecarInstanceID = id.SidecarInstanceID
+	}
+}
+
+func emitEvent(ctx context.Context, e gatewaylog.Event) {
 	w := EventWriter()
 	if w == nil {
 		return
 	}
+	stampEventCorrelation(&e, ctx)
 	if v := e.Verdict; v != nil {
 		cp := *v
 		cp.Reason = redaction.ForSinkReason(cp.Reason)
@@ -137,7 +210,11 @@ func emitEvent(e gatewaylog.Event) {
 }
 
 // emitVerdict records a single guardrail-pipeline stage decision.
+// ctx carries the request correlation + agent identity that Gets
+// stamped onto the envelope. Pass context.Background() when emitting
+// outside a request (boot fall-backs, background self-tests).
 func emitVerdict(
+	ctx context.Context,
 	stage gatewaylog.Stage,
 	direction gatewaylog.Direction,
 	model string,
@@ -146,7 +223,7 @@ func emitVerdict(
 	categories []string,
 	latencyMs int64,
 ) {
-	emitEvent(gatewaylog.Event{
+	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventVerdict,
 		Severity:  severity,
 		Direction: direction,
@@ -161,11 +238,21 @@ func emitVerdict(
 	})
 }
 
+// JudgeEmitOpts carries optional correlation for judge persistence and payloads.
+type JudgeEmitOpts struct {
+	Findings       []gatewaylog.Finding
+	ToolName       string
+	ToolID         string
+	PolicyID       string
+	DestinationApp string
+}
+
 // emitJudge records a single LLM-judge invocation. raw may be empty
 // when guardrail.retain_judge_bodies is off — the writer still emits
 // the surrounding metadata (latency, model, verdict) so operators
 // can see judge health without inspecting PII-heavy bodies.
 func emitJudge(
+	ctx context.Context,
 	kind, model string,
 	direction gatewaylog.Direction,
 	inputBytes int,
@@ -174,7 +261,11 @@ func emitJudge(
 	severity gatewaylog.Severity,
 	parseError string,
 	raw string,
+	opts JudgeEmitOpts,
 ) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	payload := gatewaylog.JudgePayload{
 		Kind:        kind,
 		Model:       model,
@@ -184,6 +275,7 @@ func emitJudge(
 		Severity:    severity,
 		ParseError:  parseError,
 		RawResponse: raw,
+		Findings:    opts.Findings,
 	}
 
 	// SQLite persistence runs first because emitEvent mutates its own
@@ -193,11 +285,13 @@ func emitJudge(
 	// is explicit opt-in via guardrail.retain_judge_bodies and the SQLite
 	// file is already covered by the same filesystem ACLs as the rest
 	// of ~/.defenseclaw.
-	if persist := judgePersist(); persist != nil && raw != "" {
+	if js := activeJudgeStore(); js != nil && raw != "" {
+		_ = js.PersistJudgeEvent(ctx, direction, payload, opts.ToolName, opts.ToolID, opts.PolicyID, opts.DestinationApp)
+	} else if persist := judgePersist(); persist != nil && raw != "" {
 		persist(payload, direction)
 	}
 
-	emitEvent(gatewaylog.Event{
+	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventJudge,
 		Severity:  severity,
 		Direction: direction,
@@ -208,9 +302,11 @@ func emitJudge(
 
 // emitLifecycle records a sidecar state change. Details is free-form
 // caller-owned metadata — put path/port/version in here, not in the
-// message field.
-func emitLifecycle(subsystem, transition string, details map[string]string) {
-	emitEvent(gatewaylog.Event{
+// message field. ctx may be context.Background() for boot/shutdown
+// transitions; when available (reloads triggered from an HTTP call)
+// pass the request context so the envelope carries correlation.
+func emitLifecycle(ctx context.Context, subsystem, transition string, details map[string]string) {
+	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventLifecycle,
 		Lifecycle: &gatewaylog.LifecyclePayload{
 			Subsystem:  subsystem,
@@ -223,8 +319,8 @@ func emitLifecycle(subsystem, transition string, details map[string]string) {
 // emitError records a structured gateway error. Prefer this over
 // fmt.Fprintf(defaultLogWriter, ...) for anything that should surface
 // in /health or alerting — stderr-only diagnostics stay in the
-// legacy writer.
-func emitError(subsystem, code, message string, cause error) {
+// legacy writer. ctx supplies the correlation triplet when available.
+func emitError(ctx context.Context, subsystem, code, message string, cause error) {
 	payload := &gatewaylog.ErrorPayload{
 		Subsystem: subsystem,
 		Code:      code,
@@ -233,7 +329,7 @@ func emitError(subsystem, code, message string, cause error) {
 	if cause != nil {
 		payload.Cause = cause.Error()
 	}
-	emitEvent(gatewaylog.Event{
+	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventError,
 		Severity:  gatewaylog.SeverityHigh,
 		Error:     payload,
@@ -248,7 +344,7 @@ func emitError(subsystem, code, message string, cause error) {
 // The gatewaylog.DiagnosticPayload schema uses {Component, Fields}
 // (Fields is an open typed bag). Callers pass a simple string map
 // for ergonomics; we widen it to interface{} here.
-func emitDiagnostic(component, message string, details map[string]string) {
+func emitDiagnostic(ctx context.Context, component, message string, details map[string]string) {
 	var fields map[string]interface{}
 	if len(details) > 0 {
 		fields = make(map[string]interface{}, len(details))
@@ -256,7 +352,7 @@ func emitDiagnostic(component, message string, details map[string]string) {
 			fields[k] = v
 		}
 	}
-	emitEvent(gatewaylog.Event{
+	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventDiagnostic,
 		Severity:  gatewaylog.SeverityInfo,
 		Diagnostic: &gatewaylog.DiagnosticPayload{
