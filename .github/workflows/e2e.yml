@@ -441,6 +441,7 @@ jobs:
           path: /tmp/defenseclaw-logs-core/**
           if-no-files-found: ignore
           retention-days: 7
+          include-hidden-files: true
 
       - name: Post-run cleanup
         if: always()
@@ -1197,6 +1198,7 @@ jobs:
           path: /tmp/defenseclaw-logs-full-live/**
           if-no-files-found: ignore
           retention-days: 7
+          include-hidden-files: true
 
       - name: Restore OpenClaw Anthropic model
         if: always()
