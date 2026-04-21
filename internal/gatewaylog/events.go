@@ -202,6 +202,45 @@ type Event struct {
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
 
+	// Multi-tenant / fleet-scoping fields (v7 reserved, unpopulated).
+	//
+	// These are intentionally declared ahead of the code paths that
+	// will set them so the wire format is forward-stable: a rolling
+	// fleet upgrade can ship a new sidecar that emits these attributes
+	// without forcing every indexer/SIEM to relearn the schema. All
+	// five are `omitempty` — until the corresponding producer lights
+	// them up they stay off the wire and off the JSON line entirely.
+	//
+	//   - TenantID: logical tenancy boundary for hosted / SaaS
+	//     deployments. One DefenseClaw sidecar can front agents owned
+	//     by multiple tenants; this field makes per-tenant billing,
+	//     auth scoping, and SIEM routing deterministic.
+	//   - WorkspaceID: sub-tenant scope (Slack-style workspace,
+	//     organization, or team). Allows the TUI / Grafana to filter
+	//     down from a tenant to a single working group.
+	//   - Environment: deployment environment string
+	//     (dev | staging | prod | sandbox). Dashboards key off it
+	//     so SLO alerts for "prod" don't fire on dev noise.
+	//   - DeploymentMode: mode the sidecar is running in
+	//     (standalone | managed | edge | ci). Helps operators
+	//     distinguish between agent events emitted from developer
+	//     laptops vs production fleets vs ephemeral CI runs.
+	//   - DiscoverySource: how the sidecar learned about the
+	//     monitored agent/tool (registry | manual | scan | import).
+	//     Feeds asset-management systems without a separate discovery
+	//     table.
+	//
+	// NOTE: do NOT populate these until the matching producer lands.
+	// They are declared here so every downstream consumer (gateway.jsonl
+	// indexer, audit sinks, OTLP translator, TUI parser, Splunk HEC
+	// adapter) can safely pass them through today and start projecting
+	// them once a producer ships.
+	TenantID        string `json:"tenant_id,omitempty"`
+	WorkspaceID     string `json:"workspace_id,omitempty"`
+	Environment     string `json:"environment,omitempty"`
+	DeploymentMode  string `json:"deployment_mode,omitempty"`
+	DiscoverySource string `json:"discovery_source,omitempty"`
+
 	// Type-specific payloads — exactly one is populated.
 	Verdict     *VerdictPayload     `json:"verdict,omitempty"`
 	Judge       *JudgePayload       `json:"judge,omitempty"`

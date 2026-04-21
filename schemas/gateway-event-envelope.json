@@ -37,6 +37,12 @@
     "tool_name":       { "type": ["string", "null"] },
     "tool_id":         { "type": ["string", "null"] },
 
+    "tenant_id":        { "type": ["string", "null"], "description": "RESERVED (v7): logical tenancy boundary for hosted/SaaS deployments. Unpopulated until a matching producer ships." },
+    "workspace_id":     { "type": ["string", "null"], "description": "RESERVED (v7): sub-tenant workspace/organization/team scope. Unpopulated until a matching producer ships." },
+    "environment":      { "type": ["string", "null"], "description": "RESERVED (v7): deployment environment (dev|staging|prod|sandbox). Unpopulated until a matching producer ships." },
+    "deployment_mode":  { "type": ["string", "null"], "description": "RESERVED (v7): sidecar deployment mode (standalone|managed|edge|ci). Unpopulated until a matching producer ships." },
+    "discovery_source": { "type": ["string", "null"], "description": "RESERVED (v7): how the monitored agent/tool was discovered (registry|manual|scan|import). Unpopulated until a matching producer ships." },
+
     "verdict":      { "$ref": "#/$defs/VerdictPayload" },
     "judge":        { "$ref": "#/$defs/JudgePayload" },
     "lifecycle":    { "$ref": "#/$defs/LifecyclePayload" },
