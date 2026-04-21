@@ -808,7 +808,12 @@ var bulkAccessRegex = regexp.MustCompile(
 	`(?i)\b(?:users_list|contacts_list|mail_search|delegated_email_list_principals)\b.*\btop\s+\d{2,}\b`)
 
 func scanLocalPatterns(direction, content string) *ScanVerdict {
-	lower := strings.ToLower(content)
+	// normalized defeats whitespace/slash-run evasions (Phase 7 of the
+	// multi-provider-adapters PR). Substring and regex matches use the
+	// normalized string so "/ etc / passwd" and "/etc//passwd" still
+	// flag; the judge still receives `content` (the unmodified original)
+	// to avoid false-positive leakage from normalization.
+	lower := normalizeForTriage(content)
 	var flags []string
 	isHigh := false
 
@@ -952,7 +957,10 @@ var bare9DigitRegex = regexp.MustCompile(`\b\d{9}\b`)
 var creditCardRegex = regexp.MustCompile(`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
 
 func triagePatterns(direction, content string) []TriageSignal {
-	lower := strings.ToLower(content)
+	// See scanLocalPatterns for why we normalize for regex matching
+	// only — the original `content` is preserved for evidence
+	// extraction and for anything downstream that feeds the judge.
+	lower := normalizeForTriage(content)
 	var signals []TriageSignal
 
 	if direction == "prompt" {

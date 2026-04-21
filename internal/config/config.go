@@ -1712,6 +1712,17 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	// judge_sweep runs the full LLM judge on content the regex
+	// triager classified as no-signal. Flipped from false to true
+	// in the multi-provider-adapters PR after internal red-team
+	// runs found pure-regex triage missed enough whitespace-
+	// evasion ("/ etc / passwd") and typo-evasion ("passswd")
+	// variants that default-off was the dominant false-negative
+	// source. Operators who care about latency over recall can
+	// still opt out with `guardrail.judge_sweep: false` — viper
+	// honors explicit false values because BindEnv/SetDefault
+	// resolves in precedence order (explicit > env > default).
+	viper.SetDefault("guardrail.judge_sweep", true)
 	// Phase 3: retention defaults ON so every operator gets local
 	// judge-response forensics without explicit opt-in. The raw body
 	// is redacted by emitJudge before it leaves the process (Splunk /

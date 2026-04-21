@@ -767,7 +767,17 @@ class GuardrailConfig:
     detection_strategy_prompt: str = ""     # per-direction override
     detection_strategy_completion: str = "" # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
-    judge_sweep: bool = False               # run full judge on no-signal content (regex_judge mode)
+    # Run full judge classification on content with no regex signal
+    # (regex_judge mode). Flipped from False to True in the
+    # multi-provider-adapters PR: pure-regex triage misses enough
+    # semantic jailbreaks (e.g. "/ etc / passwd" whitespace evasion,
+    # "passswd" typo variants) that judge_sweep defaulting off was
+    # the dominant false-negative source in internal red-team runs.
+    # Operators who care about latency over recall can still set
+    # `judge_sweep: false` explicitly and the loader will honor it
+    # (the YAML parser below uses .get(key, <default>) so the presence
+    # of the key wins, and an explicit `false` round-trips as False).
+    judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
 
 
@@ -1329,7 +1339,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
-        judge_sweep=raw.get("judge_sweep", False),
+        judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
     )
 
