@@ -416,17 +416,29 @@ jobs:
               --no-require-verdict \
               "${MOCK_ARGS[@]}"
 
+      - name: Stage DefenseClaw logs for artifact upload
+        if: failure()
+        run: |
+          set -euo pipefail
+          STAGE=/tmp/defenseclaw-logs-core
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          if [ -d "$HOME/.defenseclaw" ]; then
+            for pat in '*.log' '*.jsonl' 'config.yaml' 'doctor_cache.json'; do
+              find "$HOME/.defenseclaw" -maxdepth 2 -type f -name "$pat" -exec cp --parents {} "$STAGE/" \; 2>/dev/null || true
+            done
+          fi
+          cp -v /tmp/splunk-mock-core.log "$STAGE/" 2>/dev/null || true
+          cp -v /tmp/splunk-mock.stdout "$STAGE/" 2>/dev/null || true
+          echo '--- staged files ---'
+          find "$STAGE" -type f | head -100 || true
+
       - name: Upload DefenseClaw logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: defenseclaw-logs-core
-          path: |
-            ~/.defenseclaw/*.log
-            ~/.defenseclaw/*.jsonl
-            ~/.defenseclaw/config.yaml
-            /tmp/splunk-mock-core.log
-            /tmp/splunk-mock.stdout
+          path: /tmp/defenseclaw-logs-core/**
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1160,17 +1172,29 @@ jobs:
               --no-require-verdict \
               "${MOCK_ARGS[@]}"
 
+      - name: Stage DefenseClaw logs for artifact upload
+        if: failure()
+        run: |
+          set -euo pipefail
+          STAGE=/tmp/defenseclaw-logs-full-live
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          if [ -d "$HOME/.defenseclaw" ]; then
+            for pat in '*.log' '*.jsonl' 'config.yaml' 'doctor_cache.json'; do
+              find "$HOME/.defenseclaw" -maxdepth 2 -type f -name "$pat" -exec cp --parents {} "$STAGE/" \; 2>/dev/null || true
+            done
+          fi
+          cp -v /tmp/splunk-mock-full-live.log "$STAGE/" 2>/dev/null || true
+          cp -v /tmp/splunk-mock.stdout "$STAGE/" 2>/dev/null || true
+          echo '--- staged files ---'
+          find "$STAGE" -type f | head -100 || true
+
       - name: Upload DefenseClaw logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: defenseclaw-logs-full-live
-          path: |
-            ~/.defenseclaw/*.log
-            ~/.defenseclaw/*.jsonl
-            ~/.defenseclaw/config.yaml
-            /tmp/splunk-mock-full-live.log
-            /tmp/splunk-mock.stdout
+          path: /tmp/defenseclaw-logs-full-live/**
           if-no-files-found: ignore
           retention-days: 7
 
