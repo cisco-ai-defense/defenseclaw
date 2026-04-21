@@ -1039,11 +1039,11 @@ func TestWebhookRedactsPIIFromAllChannels(t *testing.T) {
 // Python ↔ Go formatter parity (fixture emission)
 // ---------------------------------------------------------------------------
 
-// fixedParityEvent mirrors ``_fixed_event()`` in
-// ``cli/tests/test_webhooks.py`` down to the last byte — same ID,
+// fixedParityEvent mirrors “_fixed_event()“ in
+// “cli/tests/test_webhooks.py“ down to the last byte — same ID,
 // timestamp, severity, action, and details string. Any drift in
 // either formatter will trip this test AND the sibling Python
-// ``FormatterParityTests`` since both sides pin the same structural
+// “FormatterParityTests“ since both sides pin the same structural
 // invariants on the same input.
 func fixedParityEvent() audit.Event {
 	return audit.Event{
@@ -1060,12 +1060,12 @@ func fixedParityEvent() audit.Event {
 // TestFormatters_EmitCompactJSON asserts that every webhook formatter
 // emits compact JSON with no trailing whitespace — the byte-for-byte
 // requirement for HMAC parity between the Go dispatcher and the
-// Python ``dispatch.py`` fallback. We can't just search for ``": "``
-// because Slack/Webex bodies legitimately contain ``*Severity:* HIGH``
+// Python “dispatch.py“ fallback. We can't just search for “": "“
+// because Slack/Webex bodies legitimately contain “*Severity:* HIGH“
 // in their markdown fields. Instead we re-parse and re-dump with
 // compact separators and assert byte-equality with the original
 // formatter output. This mirrors
-// ``FormatterParityTests.test_compact_json_no_whitespace`` in Python.
+// “FormatterParityTests.test_compact_json_no_whitespace“ in Python.
 func TestFormatters_EmitCompactJSON(t *testing.T) {
 	evt := fixedParityEvent()
 	cases := []struct {
@@ -1136,10 +1136,10 @@ func TestFormatters_EmitCompactJSON(t *testing.T) {
 }
 
 // TestFormatters_ParityInvariants pins the same structural fields
-// the Python ``FormatterParityTests`` asserts. The Python and Go
+// the Python “FormatterParityTests“ asserts. The Python and Go
 // implementations are two parallel impls of the same spec — if they
 // drift, these invariants catch it on either side. Update the
-// ``_fixed_event()`` helper in test_webhooks.py in lockstep when
+// “_fixed_event()“ helper in test_webhooks.py in lockstep when
 // changing this fixture.
 func TestFormatters_ParityInvariants(t *testing.T) {
 	evt := fixedParityEvent()

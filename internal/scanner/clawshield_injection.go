@@ -38,7 +38,7 @@ func NewClawShieldInjectionScanner() *ClawShieldInjectionScanner {
 	return &ClawShieldInjectionScanner{}
 }
 
-func (s *ClawShieldInjectionScanner) Name() string              { return "clawshield-injection" }
+func (s *ClawShieldInjectionScanner) Name() string               { return "clawshield-injection" }
 func (s *ClawShieldInjectionScanner) Version() string            { return "1.0.0" }
 func (s *ClawShieldInjectionScanner) SupportedTargets() []string { return []string{"skill", "code"} }
 

@@ -24,23 +24,37 @@ import (
 )
 
 // ------------------------------------------------------------------
-// P2-#12 — Inspect LLM editor, Cisco AI Defense read-only, Firewall
+// P2-#12 — Unified LLM editor, Cisco AI Defense read-only, Firewall
 // read-only.
+//
+// Originally this covered the v4 inspect_llm: block; with the v5
+// migration the editable surface now lives under the top-level llm:
+// block (consumed by guardrail, MCP scanner, skill scanner, and
+// plugin scanner via Config.ResolveLLM). The legacy inspect_llm:
+// section is still rendered by the TUI but is read-only — writes are
+// routed through the applyConfigField llm.* keys and migrated on
+// load, so editing inspect_llm: directly would drift from the
+// resolver.
 // ------------------------------------------------------------------
 
-func TestApplyConfigField_InspectLLMFullSurface(t *testing.T) {
+// TestApplyConfigField_UnifiedLLMFullSurface covers the editable
+// surface of the unified llm: block. These are the keys the TUI
+// actually dispatches when the operator edits the "Unified LLM"
+// section; they must land on c.LLM so Config.ResolveLLM picks them
+// up.
+func TestApplyConfigField_UnifiedLLMFullSurface(t *testing.T) {
 	cases := []struct {
 		key    string
 		val    string
 		verify func(c *config.Config) bool
 	}{
-		{"inspect_llm.provider", "anthropic", func(c *config.Config) bool { return c.InspectLLM.Provider == "anthropic" }},
-		{"inspect_llm.model", "claude-opus", func(c *config.Config) bool { return c.InspectLLM.Model == "claude-opus" }},
-		{"inspect_llm.api_key", "sk-fake", func(c *config.Config) bool { return c.InspectLLM.APIKey == "sk-fake" }},
-		{"inspect_llm.api_key_env", "ANTHROPIC_API_KEY", func(c *config.Config) bool { return c.InspectLLM.APIKeyEnv == "ANTHROPIC_API_KEY" }},
-		{"inspect_llm.base_url", "https://api.example.com", func(c *config.Config) bool { return c.InspectLLM.BaseURL == "https://api.example.com" }},
-		{"inspect_llm.timeout", "30", func(c *config.Config) bool { return c.InspectLLM.Timeout == 30 }},
-		{"inspect_llm.max_retries", "5", func(c *config.Config) bool { return c.InspectLLM.MaxRetries == 5 }},
+		{"llm.provider", "anthropic", func(c *config.Config) bool { return c.LLM.Provider == "anthropic" }},
+		{"llm.model", "claude-3-5-sonnet-20241022", func(c *config.Config) bool { return c.LLM.Model == "claude-3-5-sonnet-20241022" }},
+		{"llm.api_key", "sk-fake", func(c *config.Config) bool { return c.LLM.APIKey == "sk-fake" }},
+		{"llm.api_key_env", "DEFENSECLAW_LLM_KEY", func(c *config.Config) bool { return c.LLM.APIKeyEnv == "DEFENSECLAW_LLM_KEY" }},
+		{"llm.base_url", "https://api.example.com", func(c *config.Config) bool { return c.LLM.BaseURL == "https://api.example.com" }},
+		{"llm.timeout", "30", func(c *config.Config) bool { return c.LLM.Timeout == 30 }},
+		{"llm.max_retries", "5", func(c *config.Config) bool { return c.LLM.MaxRetries == 5 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
@@ -53,52 +67,64 @@ func TestApplyConfigField_InspectLLMFullSurface(t *testing.T) {
 	}
 }
 
-// TestSetupSections_InspectLLMEditable guards the shape of the
-// Inspect LLM section: all rows must be editable kinds (not header)
+// TestApplyConfigField_LegacyInspectLLMStillWrites keeps the v4 path
+// alive during the migration window so older TUI snapshots (and any
+// `defenseclaw config set inspect_llm.* ...` muscle memory) still
+// work. The config.load() shim copies these into c.LLM, but the
+// setter itself must continue to populate c.InspectLLM for the
+// round-trip to succeed.
+func TestApplyConfigField_LegacyInspectLLMStillWrites(t *testing.T) {
+	c := &config.Config{}
+	applyConfigField(c, "inspect_llm.provider", "openai")
+	applyConfigField(c, "inspect_llm.model", "gpt-4o")
+	if c.InspectLLM.Provider != "openai" || c.InspectLLM.Model != "gpt-4o" {
+		t.Fatalf("legacy inspect_llm writes dropped: provider=%q model=%q", c.InspectLLM.Provider, c.InspectLLM.Model)
+	}
+}
+
+// TestSetupSections_UnifiedLLMEditable guards the shape of the
+// Unified LLM section: all rows must be editable kinds (not header)
 // so the operator can actually change them. The api_key must be
 // kind=password so the value is masked in View.
-func TestSetupSections_InspectLLMEditable(t *testing.T) {
+func TestSetupSections_UnifiedLLMEditable(t *testing.T) {
 	c := &config.Config{}
 	p := NewSetupPanel(nil, c, nil)
 	p.loadSections()
-	var llm *configSection
-	for i := range p.sections {
-		if p.sections[i].Name == "Inspect LLM" {
-			llm = &p.sections[i]
-			break
-		}
-	}
-	if llm == nil {
-		t.Fatal("Inspect LLM section missing")
-	}
+	// The unified llm.* fields live on the "General" section header
+	// under the "── Unified LLM ──" divider. Scan every section and
+	// collect the rows whose Key has the llm. prefix — this mirrors
+	// what the TUI actually dispatches to applyConfigField.
 	requiredEditableKeys := map[string]bool{
-		"inspect_llm.provider":    false,
-		"inspect_llm.model":       false,
-		"inspect_llm.api_key":     false,
-		"inspect_llm.api_key_env": false,
-		"inspect_llm.base_url":    false,
-		"inspect_llm.timeout":     false,
-		"inspect_llm.max_retries": false,
+		"llm.provider":    false,
+		"llm.model":       false,
+		"llm.api_key":     false,
+		"llm.api_key_env": false,
+		"llm.base_url":    false,
+		"llm.timeout":     false,
+		"llm.max_retries": false,
 	}
-	for _, f := range llm.Fields {
-		if _, ok := requiredEditableKeys[f.Key]; !ok {
-			continue
+	var apiKeyKind string
+	for si := range p.sections {
+		for _, f := range p.sections[si].Fields {
+			if _, ok := requiredEditableKeys[f.Key]; !ok {
+				continue
+			}
+			if f.Kind == "header" {
+				t.Errorf("%s must be editable, got kind=header (section=%s)", f.Key, p.sections[si].Name)
+			}
+			requiredEditableKeys[f.Key] = true
+			if f.Key == "llm.api_key" {
+				apiKeyKind = f.Kind
+			}
 		}
-		if f.Kind == "header" {
-			t.Errorf("%s must be editable, got kind=header", f.Key)
-		}
-		requiredEditableKeys[f.Key] = true
 	}
 	for k, seen := range requiredEditableKeys {
 		if !seen {
-			t.Errorf("Inspect LLM section missing editable key %q", k)
+			t.Errorf("Unified LLM section missing editable key %q", k)
 		}
 	}
-	// API key must be masked kind.
-	for _, f := range llm.Fields {
-		if f.Key == "inspect_llm.api_key" && f.Kind != "password" {
-			t.Errorf("inspect_llm.api_key Kind=%q, want password", f.Kind)
-		}
+	if apiKeyKind != "password" {
+		t.Errorf("llm.api_key Kind=%q, want password", apiKeyKind)
 	}
 }
 

@@ -24,9 +24,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.commands.cmd_doctor import (
     _ANTHROPIC_DEFAULT_PROBE_MODEL,
     _anthropic_probe_model,
+    _bedrock_region,
     _check_guardrail_proxy,
     _check_llm_api_key,
     _DoctorResult,
+    _verify_bedrock,
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
 
@@ -341,6 +343,146 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertEqual(d["failed"], 0)
         self.assertEqual(len(d["checks"]), 3)
         self.assertEqual(d["checks"][0]["label"], "Config")
+
+
+class VerifyBedrockTests(unittest.TestCase):
+    """Regression tests for :func:`_verify_bedrock` (M3).
+
+    Before the Bedrock verifier existed, ``_check_llm_api_key`` emitted
+    a generic ``pass`` with "cannot verify provider" for any Bedrock
+    config. That gave operators false confidence — a revoked ABSK
+    token looked healthy until a scan actually called LiteLLM. These
+    tests lock in the three shape branches and the HTTP response
+    matrix so a future refactor can't regress to the silent pass.
+    """
+
+    def test_sigv4_key_emits_warning(self):
+        # AWS long-term credentials start with AKIA (or ASIA for STS).
+        # We intentionally don't probe them — verifying SigV4 means
+        # pulling in botocore just for doctor, which we avoid.
+        r = _DoctorResult()
+        _verify_bedrock("AKIAEXAMPLEACCESSKEY", r)
+        self.assertEqual(r.warned, 1, r.checks)
+        self.assertEqual(r.failed, 0)
+        self.assertIn("sts get-caller-identity", r.checks[0]["detail"])
+
+    def test_sts_session_key_emits_warning(self):
+        # ASIA prefixes are STS session credentials — same SigV4 flow.
+        r = _DoctorResult()
+        _verify_bedrock("ASIAEXAMPLETEMPKEY", r)
+        self.assertEqual(r.warned, 1, r.checks)
+
+    def test_unrecognized_shape_passes_with_note(self):
+        # If the operator is running a custom gateway that accepts
+        # some other token format, we shouldn't block — just note
+        # the shape isn't one we can probe.
+        r = _DoctorResult()
+        _verify_bedrock("custom-gateway-token-xyz", r)
+        self.assertEqual(r.passed, 1, r.checks)
+        self.assertIn("shape not recognized", r.checks[0]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
+    def test_absk_200_is_pass(self, mock_probe):
+        r = _DoctorResult()
+        _verify_bedrock("ABSKexamplebearertoken==", r)
+        self.assertEqual(r.passed, 1, r.checks)
+        # Make sure we're hitting the Bedrock endpoint with a Bearer
+        # header, not SigV4.
+        args, kwargs = mock_probe.call_args
+        url = args[0] if args else kwargs["url"]
+        self.assertIn("bedrock.", url)
+        self.assertIn("amazonaws.com/foundation-models", url)
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer ABSKexamplebearertoken==")
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, ""))
+    def test_absk_401_is_fail(self, _mock_probe):
+        r = _DoctorResult()
+        _verify_bedrock("ABSKrevokedtoken==", r)
+        self.assertEqual(r.failed, 1, r.checks)
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(403, "access denied"))
+    def test_absk_403_is_warn_not_fail(self, _mock_probe):
+        # 403 from Bedrock = authenticated but lacks ListFoundationModels.
+        # Many production IAM policies grant only InvokeModel — we must
+        # not fail the doctor run in that case because scans will work.
+        r = _DoctorResult()
+        _verify_bedrock("ABSKvalidtokenbutscoped==", r)
+        self.assertEqual(r.warned, 1, r.checks)
+        self.assertEqual(r.failed, 0)
+        self.assertIn("InvokeModel", r.checks[0]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "DNS failure"))
+    def test_network_failure_is_warn(self, _mock_probe):
+        # Offline airgapped environments shouldn't fail the whole
+        # doctor check — emit a warn so the operator knows connectivity
+        # is the issue, not the key.
+        r = _DoctorResult()
+        _verify_bedrock("ABSKoffline==", r)
+        self.assertEqual(r.warned, 1, r.checks)
+
+    def test_region_override_from_environment(self):
+        # Operator pinned a GovCloud region via AWS_REGION; the probe
+        # URL must honor it instead of defaulting to us-east-1.
+        with patch.dict(os.environ, {"AWS_REGION": "us-gov-west-1"}, clear=False):
+            self.assertEqual(_bedrock_region(), "us-gov-west-1")
+
+    def test_region_defaults_to_us_east_1(self):
+        # Strip all the AWS region env vars we might inherit from the
+        # developer shell so the default kicks in deterministically.
+        env_copy = {k: v for k, v in os.environ.items()
+                    if not k.startswith("AWS_")}
+        with patch.dict(os.environ, env_copy, clear=True):
+            self.assertEqual(_bedrock_region(), "us-east-1")
+
+
+class BedrockRoutingTests(unittest.TestCase):
+    """Check ``_check_llm_api_key`` routes Bedrock configs to
+    :func:`_verify_bedrock` (M3 hook)."""
+
+    def _make_cfg(self, *, model: str, api_key_env: str) -> Config:
+        return Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True, model=model, port=4000, api_key_env=api_key_env,
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+
+    @patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": "ABSKtoken=="}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSKtoken==")
+    @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
+    @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
+    @patch("defenseclaw.commands.cmd_doctor._verify_openai")
+    def test_bedrock_prefix_routes_to_bedrock_verify(
+        self, mock_openai, mock_anthropic, mock_bedrock, _mock_resolve,
+    ):
+        cfg = self._make_cfg(
+            model="bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0",
+            api_key_env="AWS_BEARER_TOKEN_BEDROCK",
+        )
+        r = _DoctorResult()
+        _check_llm_api_key(cfg, r)
+        mock_bedrock.assert_called_once()
+        mock_anthropic.assert_not_called()
+        mock_openai.assert_not_called()
+
+    @patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": "ABSKtoken=="}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSKtoken==")
+    @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
+    def test_env_name_fallback_routes_when_model_empty(
+        self, mock_bedrock, _mock_resolve,
+    ):
+        # Model empty + api_key_env=AWS_BEARER_TOKEN_BEDROCK: the
+        # env-name fallback should still route to the bedrock verifier.
+        cfg = self._make_cfg(model="", api_key_env="AWS_BEARER_TOKEN_BEDROCK")
+        r = _DoctorResult()
+        _check_llm_api_key(cfg, r)
+        mock_bedrock.assert_called_once()
 
 
 if __name__ == "__main__":

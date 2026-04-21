@@ -1149,6 +1149,122 @@ func TestConfig_Save(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Config.ResolveLLM — unified LLM precedence (v5)
+// ---------------------------------------------------------------------------
+//
+// v5 collapses inspect_llm + default_llm_* + guardrail.model onto a single
+// top-level llm: block with per-component overrides. These tests pin the
+// merge semantics so a regression here would silently reroute an operator's
+// DEFENSECLAW_LLM_KEY to the wrong scanner.
+//
+// Precedence (high -> low) per field:
+//  1. component override (scanners.mcp.llm, guardrail.llm, ...)
+//  2. top-level c.LLM
+//  3. DEFENSECLAW_LLM_MODEL env (model only)
+//  4. legacy default_llm_* (temporary back-compat)
+func TestResolveLLM(t *testing.T) {
+	t.Run("empty path returns top-level as-is", func(t *testing.T) {
+		c := &Config{LLM: LLMConfig{Provider: "openai", Model: "gpt-4o"}}
+		got := c.ResolveLLM("")
+		if got.Model != "gpt-4o" || got.Provider != "openai" {
+			t.Fatalf("ResolveLLM(\"\") = %+v, want top-level echoed back", got)
+		}
+	})
+
+	t.Run("component override beats top-level", func(t *testing.T) {
+		c := &Config{
+			LLM: LLMConfig{Provider: "openai", Model: "gpt-4o", APIKeyEnv: "DEFENSECLAW_LLM_KEY"},
+		}
+		c.Scanners.MCPScanner.LLM = LLMConfig{Model: "gpt-4o-mini", APIKeyEnv: "MCP_KEY"}
+		got := c.ResolveLLM("scanners.mcp")
+		if got.Model != "gpt-4o-mini" {
+			t.Errorf("model: got %q, want gpt-4o-mini (override)", got.Model)
+		}
+		if got.Provider != "openai" {
+			t.Errorf("provider: got %q, want openai (inherited)", got.Provider)
+		}
+		if got.APIKeyEnv != "MCP_KEY" {
+			t.Errorf("api_key_env: got %q, want MCP_KEY (override)", got.APIKeyEnv)
+		}
+	})
+
+	t.Run("empty override field inherits top-level", func(t *testing.T) {
+		c := &Config{
+			LLM: LLMConfig{Provider: "anthropic", Model: "claude-3-5-sonnet", BaseURL: "https://top"},
+		}
+		// Only the model is overridden; provider and base_url must inherit.
+		c.Guardrail.LLM = LLMConfig{Model: "claude-3-5-haiku"}
+		got := c.ResolveLLM("guardrail")
+		if got.Provider != "anthropic" || got.BaseURL != "https://top" {
+			t.Errorf("inherit failed: got provider=%q base_url=%q", got.Provider, got.BaseURL)
+		}
+		if got.Model != "claude-3-5-haiku" {
+			t.Errorf("override failed: got model=%q", got.Model)
+		}
+	})
+
+	t.Run("unknown path warns and returns top-level", func(t *testing.T) {
+		c := &Config{LLM: LLMConfig{Model: "gpt-4o"}}
+		got := c.ResolveLLM("scanners.does_not_exist")
+		if got.Model != "gpt-4o" {
+			t.Errorf("unknown path should degrade to top-level, got %+v", got)
+		}
+	})
+
+	t.Run("env fallback fills empty model", func(t *testing.T) {
+		t.Setenv(DefenseClawLLMModelEnv, "openai/gpt-4o-from-env")
+		c := &Config{}
+		got := c.ResolveLLM("")
+		if got.Model != "openai/gpt-4o-from-env" {
+			t.Errorf("env fallback: got %q, want openai/gpt-4o-from-env", got.Model)
+		}
+	})
+
+	t.Run("legacy default_llm_model back-compat", func(t *testing.T) {
+		c := &Config{DefaultLLMModel: "openai/gpt-4o-legacy"}
+		got := c.ResolveLLM("")
+		if got.Model != "openai/gpt-4o-legacy" {
+			t.Errorf("legacy back-compat: got %q, want openai/gpt-4o-legacy", got.Model)
+		}
+	})
+
+	t.Run("legacy default_llm_api_key_env back-compat", func(t *testing.T) {
+		c := &Config{DefaultLLMAPIKeyEnv: "LEGACY_KEY_ENV"}
+		got := c.ResolveLLM("")
+		if got.APIKeyEnv != "LEGACY_KEY_ENV" {
+			t.Errorf("legacy api_key_env back-compat: got %q", got.APIKeyEnv)
+		}
+	})
+
+	t.Run("env beats legacy default_llm_model", func(t *testing.T) {
+		t.Setenv(DefenseClawLLMModelEnv, "env-wins")
+		c := &Config{DefaultLLMModel: "legacy-loses"}
+		got := c.ResolveLLM("")
+		if got.Model != "env-wins" {
+			t.Errorf("env should outrank legacy default_llm_model, got %q", got.Model)
+		}
+	})
+
+	t.Run("scanners.plugin path resolves", func(t *testing.T) {
+		c := &Config{LLM: LLMConfig{Model: "top"}}
+		c.Scanners.PluginScannerLLM = LLMConfig{Model: "plugin-override"}
+		got := c.ResolveLLM("scanners.plugin")
+		if got.Model != "plugin-override" {
+			t.Errorf("scanners.plugin: got %q, want plugin-override", got.Model)
+		}
+	})
+
+	t.Run("guardrail.judge path resolves", func(t *testing.T) {
+		c := &Config{LLM: LLMConfig{Model: "top"}}
+		c.Guardrail.Judge.LLM = LLMConfig{Model: "judge-override"}
+		got := c.ResolveLLM("guardrail.judge")
+		if got.Model != "judge-override" {
+			t.Errorf("guardrail.judge: got %q, want judge-override", got.Model)
+		}
+	})
+}
+
 func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {

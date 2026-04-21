@@ -178,7 +178,7 @@ func TestPfctlCompiler_Compile_DenyDefault(t *testing.T) {
 	cfg := &firewall.FirewallConfig{
 		DefaultAction: "deny",
 		Allowlist: firewall.AllowlistConfig{
-			IPs:  []string{"1.2.3.4"},
+			IPs:   []string{"1.2.3.4"},
 			Ports: []int{443},
 		},
 	}
@@ -262,7 +262,7 @@ func TestIPTablesCompiler_Compile_DenyDefault(t *testing.T) {
 	cfg := &firewall.FirewallConfig{
 		DefaultAction: "deny",
 		Allowlist: firewall.AllowlistConfig{
-			IPs:  []string{"1.2.3.4"},
+			IPs:   []string{"1.2.3.4"},
 			Ports: []int{443},
 		},
 	}

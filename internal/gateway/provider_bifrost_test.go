@@ -13,12 +13,12 @@ import (
 
 func TestBifrostProvider_Creation(t *testing.T) {
 	tests := []struct {
-		name        string
-		model       string
-		apiKey      string
-		baseURL     string
+		name         string
+		model        string
+		apiKey       string
+		baseURL      string
 		wantProvider schemas.ModelProvider
-		wantModel   string
+		wantModel    string
 	}{
 		{
 			name:         "bedrock_explicit",
@@ -419,9 +419,9 @@ func TestBifrostProvider_RawContentToBifrost(t *testing.T) {
 
 func TestBifrostProvider_ToolsConversion(t *testing.T) {
 	req := &ChatRequest{
-		Model:    "test-model",
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
-		Tools:    json.RawMessage(`[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]`),
+		Model:      "test-model",
+		Messages:   []ChatMessage{{Role: "user", Content: "hi"}},
+		Tools:      json.RawMessage(`[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]`),
 		ToolChoice: json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`),
 	}
 

@@ -40,16 +40,16 @@ type TargetSnapshot struct {
 }
 
 var dependencyFiles = map[string]bool{
-	"requirements.txt": true,
-	"package.json":     true,
+	"requirements.txt":  true,
+	"package.json":      true,
 	"package-lock.json": true,
-	"pyproject.toml":   true,
-	"go.mod":           true,
-	"go.sum":           true,
-	"Gemfile":          true,
-	"Gemfile.lock":     true,
-	"Cargo.toml":       true,
-	"Cargo.lock":       true,
+	"pyproject.toml":    true,
+	"go.mod":            true,
+	"go.sum":            true,
+	"Gemfile":           true,
+	"Gemfile.lock":      true,
+	"Cargo.toml":        true,
+	"Cargo.lock":        true,
 }
 
 var configFiles = map[string]bool{

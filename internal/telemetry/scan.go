@@ -30,14 +30,14 @@ import (
 
 // scanBody is the JSON structure embedded in the scan summary LogRecord body.
 type scanBody struct {
-	ScanID       string           `json:"scan_id"`
-	Scanner      string           `json:"scanner"`
-	Target       string           `json:"target"`
-	TargetType   string           `json:"target_type"`
-	Timestamp    string           `json:"timestamp"`
-	DurationMs   int64            `json:"duration_ms"`
-	FindingCount int              `json:"finding_count"`
-	MaxSeverity  string           `json:"max_severity"`
+	ScanID       string            `json:"scan_id"`
+	Scanner      string            `json:"scanner"`
+	Target       string            `json:"target"`
+	TargetType   string            `json:"target_type"`
+	Timestamp    string            `json:"timestamp"`
+	DurationMs   int64             `json:"duration_ms"`
+	FindingCount int               `json:"finding_count"`
+	MaxSeverity  string            `json:"max_severity"`
 	Findings     []scanBodyFinding `json:"findings"`
 }
 

@@ -24,10 +24,10 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/open-policy-agent/opa/ast"            //nolint:staticcheck // v0 compat; migrate to opa/v1 later
-	"github.com/open-policy-agent/opa/rego"           //nolint:staticcheck // v0 compat; migrate to opa/v1 later
-	"github.com/open-policy-agent/opa/storage"        //nolint:staticcheck // v0 compat; migrate to opa/v1 later
-	"github.com/open-policy-agent/opa/storage/inmem"  //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/ast"           //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/rego"          //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/storage"       //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/storage/inmem" //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 )
 
 // Engine evaluates OPA Rego policies for admission, guardrail, firewall,

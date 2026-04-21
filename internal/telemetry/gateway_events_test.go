@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/log"
-	metricdata "go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	metricdata "go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
@@ -270,10 +270,10 @@ func TestRecordGatewayEvent_UpdatesMetrics(t *testing.T) {
 
 	// 2 verdicts total, 2 judge invocations, 1 judge error, 1 gateway error.
 	expectations := map[string]int64{
-		"defenseclaw.gateway.verdicts":        2,
+		"defenseclaw.gateway.verdicts":          2,
 		"defenseclaw.gateway.judge.invocations": 2,
-		"defenseclaw.gateway.judge.errors":    1,
-		"defenseclaw.gateway.errors":          1,
+		"defenseclaw.gateway.judge.errors":      1,
+		"defenseclaw.gateway.errors":            1,
 	}
 	for name, want := range expectations {
 		if got, ok := counts[name]; !ok || got != want {

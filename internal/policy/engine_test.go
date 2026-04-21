@@ -202,7 +202,7 @@ runtime_action := "allow" if {
 	data := map[string]interface{}{
 		"config": map[string]interface{}{
 			"allow_list_bypass_scan": true,
-			"scan_on_install":       true,
+			"scan_on_install":        true,
 		},
 		"actions": map[string]interface{}{
 			"CRITICAL": map[string]string{"runtime": "block", "file": "quarantine", "install": "block"},

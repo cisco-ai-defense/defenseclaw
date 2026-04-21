@@ -133,7 +133,7 @@ func NewGuardrailProxy(
 	policyDir string,
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
-	sharedAPIKey string,
+	judgeLLM config.LLMConfig,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -142,7 +142,7 @@ func NewGuardrailProxy(
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
 	}
 
-	judge := NewLLMJudge(&cfg.Judge, dotenvPath, rp, sharedAPIKey)
+	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
 	inspector.SetDetectionStrategy(
@@ -2353,9 +2353,6 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
 	if requestID != "" {
-		// Append the correlation key so the human-readable gateway.log
-		// line (which skips structured sinks) is still searchable by
-		// operators who grep for a specific request ID.
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 

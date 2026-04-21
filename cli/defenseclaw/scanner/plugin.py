@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta, timezone
 
+from defenseclaw.config import LLMConfig
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import (
@@ -33,10 +34,51 @@ from defenseclaw.scanner.plugin_scanner.types import (
 SCANNER_NAME = "defenseclaw-plugin-scanner"
 
 
+def _llm_to_override(llm: LLMConfig | None) -> dict | None:
+    """Translate a resolved :class:`LLMConfig` into the dict shape
+    :class:`defenseclaw.scanner.plugin_scanner.policy.LLMPolicy`
+    consumes.
+
+    Returns ``None`` when the config is effectively empty (no model,
+    no key) so the scanner falls back to whatever the YAML policy
+    already had — this avoids accidentally wiping a policy-authored
+    ``model`` just because nobody set ``DEFENSECLAW_LLM_MODEL``.
+    """
+    if llm is None:
+        return None
+    model = llm.model
+    if model and llm.provider and "/" not in model:
+        model = f"{llm.provider}/{model}"
+    api_key = llm.resolved_api_key()
+    if not model and not api_key and not llm.base_url:
+        return None
+    override: dict = {}
+    if model:
+        override["model"] = model
+    if api_key:
+        override["api_key"] = api_key
+    if llm.base_url:
+        override["api_base"] = llm.base_url
+    if llm.provider:
+        override["provider"] = llm.provider
+    return override or None
+
+
 class PluginScannerWrapper:
-    def __init__(self, binary: str = SCANNER_NAME) -> None:
+    def __init__(
+        self,
+        binary: str = SCANNER_NAME,
+        *,
+        llm: LLMConfig | None = None,
+    ) -> None:
         # binary param kept for backward-compat but no longer used
         self._binary = binary
+        # Resolved unified LLM config for this wrapper. Threaded into
+        # ``PluginScanOptions.llm_override`` at scan time so the
+        # top-level ``llm:`` config (with ``scanners.plugin.llm:``
+        # overrides applied) reaches the plugin scanner without
+        # requiring callers to hand-author a YAML policy.
+        self._llm: LLMConfig | None = llm
 
     def name(self) -> str:
         return "plugin-scanner"
@@ -65,6 +107,26 @@ class PluginScannerWrapper:
             options.policy = "permissive"
         if profile:
             options.profile = profile
+
+        # Build the LLM override:
+        #   1. Start from the resolved unified LLM config (top-level
+        #      llm + scanners.plugin.llm overrides).
+        #   2. Layer the direct CLI kwargs on top — these are the
+        #      highest-precedence source because the operator is
+        #      pointing a specific flag at this one run.
+        override = _llm_to_override(self._llm) or {}
+        if use_llm:
+            override["enabled"] = True
+        if llm_model:
+            override["model"] = llm_model
+        if llm_api_key:
+            override["api_key"] = llm_api_key
+        if llm_provider:
+            override["provider"] = llm_provider
+        if llm_consensus_runs > 0:
+            override["consensus_runs"] = llm_consensus_runs
+        if override:
+            options.llm_override = override
 
         # Run the scanner
         result: PluginScanResult = scan_plugin(target, options)

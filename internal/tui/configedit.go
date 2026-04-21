@@ -43,6 +43,39 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.PolicyDir = val
 	case "environment":
 		c.Environment = val
+	// Unified top-level llm: block — the single source of truth
+	// consumed by guardrail (Bifrost), MCP scanner, skill scanner,
+	// and plugin scanner via Config.ResolveLLM(...). Writes here
+	// take effect on the next scanner/guardrail invocation that
+	// calls ResolveLLM; existing in-flight requests keep the values
+	// they were initialized with.
+	//
+	// The redacted llm.api_key field is accepted so operators can
+	// paste-then-persist a key when they'd rather not shell out to
+	// set an env var, but llm.api_key_env (pointing at
+	// DEFENSECLAW_LLM_KEY or a custom var in ~/.defenseclaw/.env)
+	// is strongly preferred so secrets never land in config.yaml.
+	case "llm.provider":
+		c.LLM.Provider = val
+	case "llm.model":
+		c.LLM.Model = val
+	case "llm.api_key":
+		c.LLM.APIKey = val
+	case "llm.api_key_env":
+		c.LLM.APIKeyEnv = val
+	case "llm.base_url":
+		c.LLM.BaseURL = val
+	case "llm.timeout":
+		c.LLM.Timeout = intVal
+	case "llm.max_retries":
+		c.LLM.MaxRetries = intVal
+
+	// Legacy v4 fallbacks. Still accepted from older TUI snapshots /
+	// config files; the load-time migration in config.load() copies
+	// them into c.LLM when the unified block is empty. We keep the
+	// setters alive so `defenseclaw config set default_llm_model ...`
+	// still works during the deprecation window, but the TUI now
+	// surfaces these as read-only.
 	case "default_llm_api_key_env":
 		c.DefaultLLMAPIKeyEnv = val
 	case "default_llm_model":

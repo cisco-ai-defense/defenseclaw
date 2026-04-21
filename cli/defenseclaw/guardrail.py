@@ -39,12 +39,20 @@ def patch_openclaw_config(
     master_key: str,  # kept for API compat — no longer used
     original_model: str,
     guardrail_host: str = "localhost",
+    data_dir: str = "",
 ) -> str | None:
     """Register the DefenseClaw plugin in openclaw.json.
 
     The fetch interceptor handles all traffic routing transparently —
     no provider entry or model redirection is needed. This function only
     registers the plugin so OpenClaw loads it on startup.
+
+    When ``data_dir`` is provided we write a *pristine* timestamped
+    backup to ``<data_dir>/backups/`` the very first time DefenseClaw
+    touches this ``openclaw.json`` and record it in
+    ``<data_dir>/openclaw-backups.json``. That gives ``uninstall`` and
+    ``doctor --fix`` a deterministic rollback target even after many
+    ``.bak.N`` rotations have occurred.
     """
     _ = model_name, proxy_port, master_key  # unused — fetch interceptor handles routing
     path = _expand(openclaw_config_file)
@@ -54,6 +62,14 @@ def patch_openclaw_config(
             cfg = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
+
+    # Record pristine backup BEFORE any writes so we always capture the
+    # untouched file. ``record_pristine_backup`` is idempotent — once a
+    # pristine copy exists for this config path it will not be
+    # overwritten on subsequent patches.
+    if data_dir:
+        with contextlib.suppress(OSError):
+            record_pristine_backup(path, data_dir)
 
     _backup(path)
 
@@ -306,8 +322,46 @@ def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
 
 
 def detect_api_key_env(model: str) -> str:
-    """Guess the API key env var from the model string."""
+    """Guess the API key env var from the model string.
+
+    Routing is prefix-first: a model written as ``"bedrock/us.anthropic.claude-…"``
+    must yield the *Bedrock* bearer env var, not ``ANTHROPIC_API_KEY``,
+    because that's the provider LiteLLM will actually call. Earlier
+    revisions substring-matched ``"claude"`` and got this wrong, so
+    every Bedrock Claude model silently wrote the key into the
+    Anthropic env var while the scanner read from ``AWS_BEARER_TOKEN_BEDROCK``
+    — i.e. an empty key. The prefix check runs before any substring
+    matching to prevent that regression.
+    """
     lower = model.lower()
+    # Prefix routing (strongest signal). Order matters only within this
+    # block: bedrock before anthropic because bedrock/claude-* is a
+    # *Bedrock* call, not an Anthropic call.
+    if "/" in lower:
+        prefix = lower.split("/", 1)[0]
+        if prefix == "bedrock":
+            # LiteLLM reads the Bedrock short-term bearer token (ABSK…)
+            # from AWS_BEARER_TOKEN_BEDROCK; AWS_ACCESS_KEY_ID is the
+            # SigV4 key-id pair, which is a different auth flow.
+            # Suggesting the bearer env var keeps setup, doctor, and
+            # the Python scanner bridge (_llm_env.py) in lockstep —
+            # otherwise `setup llm` writes one env var and the
+            # scanners read another. Operators using long-term SigV4
+            # creds should override api_key_env by hand.
+            return "AWS_BEARER_TOKEN_BEDROCK"
+        if prefix == "anthropic":
+            return "ANTHROPIC_API_KEY"
+        if prefix == "azure":
+            return "AZURE_OPENAI_API_KEY"
+        if prefix == "openrouter":
+            return "OPENROUTER_API_KEY"
+        if prefix == "openai":
+            return "OPENAI_API_KEY"
+        if prefix in ("gemini", "google", "vertex_ai"):
+            return "GOOGLE_API_KEY"
+    # Substring fallback for bare model names (``claude-3``, ``gpt-4o``)
+    # — same behavior as before so existing configs without provider
+    # prefixes still resolve.
     if "anthropic" in lower or "claude" in lower:
         return "ANTHROPIC_API_KEY"
     if "azure" in lower:
@@ -319,7 +373,7 @@ def detect_api_key_env(model: str) -> str:
     if "gemini" in lower or "google" in lower:
         return "GOOGLE_API_KEY"
     if "bedrock" in lower:
-        return "AWS_ACCESS_KEY_ID"
+        return "AWS_BEARER_TOKEN_BEDROCK"
     return "LLM_API_KEY"
 
 
@@ -526,6 +580,114 @@ def _preserve_ownership(path: str):
     if uid is not None:
         with contextlib.suppress(OSError):
             os.chown(path, uid, gid)
+
+
+BACKUP_INDEX_FILENAME = "openclaw-backups.json"
+BACKUP_SUBDIR = "backups"
+
+
+def _backup_index_path(data_dir: str) -> str:
+    return os.path.join(data_dir, BACKUP_INDEX_FILENAME)
+
+
+def _read_backup_index(data_dir: str) -> dict:
+    """Load the backup index, returning an empty doc on any failure.
+
+    Schema (v1)::
+
+        {
+          "version": 1,
+          "entries": {
+            "<abs openclaw.json path>": {
+              "pristine": "<abs path to timestamped copy>",
+              "captured_at": "<ISO-8601 UTC>"
+            }
+          }
+        }
+    """
+    path = _backup_index_path(data_dir)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"version": 1, "entries": {}}
+
+
+def _write_backup_index(data_dir: str, doc: dict) -> None:
+    """Atomically persist the backup index, creating *data_dir* as needed."""
+    os.makedirs(data_dir, exist_ok=True)
+    path = _backup_index_path(data_dir)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def record_pristine_backup(openclaw_config_file: str, data_dir: str) -> str | None:
+    """Capture a one-time pristine snapshot of *openclaw_config_file*.
+
+    This is idempotent: once an entry exists for this path in the
+    backup index, subsequent calls are no-ops. Returns the absolute
+    path to the pristine snapshot on first capture, or ``None`` when
+    no snapshot was taken (either no source file, already recorded,
+    or the copy failed).
+    """
+    src = _expand(openclaw_config_file)
+    if not os.path.isfile(src):
+        return None
+    if not data_dir:
+        return None
+
+    index = _read_backup_index(data_dir)
+    entries = index.setdefault("entries", {})
+    src_abs = os.path.abspath(src)
+    if src_abs in entries and os.path.isfile(entries[src_abs].get("pristine", "")):
+        return None  # already captured a valid snapshot
+
+    import datetime
+    backup_dir = os.path.join(data_dir, BACKUP_SUBDIR)
+    os.makedirs(backup_dir, exist_ok=True)
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    basename = os.path.basename(src) or "openclaw.json"
+    dest = os.path.join(backup_dir, f"{basename}.{stamp}.pristine")
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        return None
+
+    entries[src_abs] = {
+        "pristine": os.path.abspath(dest),
+        "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    }
+    index["version"] = 1
+    try:
+        _write_backup_index(data_dir, index)
+    except OSError:
+        # Best-effort: the snapshot exists on disk, but we couldn't
+        # index it. Uninstall will have to fall back to the .bak files.
+        with contextlib.suppress(OSError):
+            os.unlink(dest)
+        return None
+    return os.path.abspath(dest)
+
+
+def pristine_backup_path(openclaw_config_file: str, data_dir: str) -> str | None:
+    """Return the pristine snapshot path for *openclaw_config_file*, if any."""
+    if not data_dir:
+        return None
+    index = _read_backup_index(data_dir)
+    entry = index.get("entries", {}).get(os.path.abspath(_expand(openclaw_config_file)))
+    if not entry:
+        return None
+    pristine = entry.get("pristine", "")
+    return pristine if pristine and os.path.isfile(pristine) else None
 
 
 def _backup(path: str) -> None:

@@ -39,15 +39,22 @@ headers set by OpenClaw's provider SDKs (`Authorization`, `x-api-key`,
 does not need your upstream LLM key — OpenClaw manages that.
 
 **Judge LLM key (if enabling the judge):** The judge makes its own
-independent LLM calls. You need a key for the judge's model provider:
+independent LLM calls. Starting in v5, DefenseClaw uses a single
+top-level `llm:` block for every component (guardrail, judge, MCP
+scanner, skill scanner, plugin scanner). Set one key and one model in
+`.env` and every component picks them up:
 
 ```bash
-# Store the judge key in ~/.defenseclaw/.env
-echo "ANTHROPIC_API_KEY=sk-ant-your-key" >> ~/.defenseclaw/.env
+# ~/.defenseclaw/.env
+DEFENSECLAW_LLM_KEY=sk-ant-your-key
+DEFENSECLAW_LLM_MODEL=anthropic/claude-sonnet-4-20250514
 ```
 
-The setup wizard will ask for the env var name (default: `JUDGE_API_KEY`)
-and offer to share it across all LLM components via `default_llm_api_key_env`.
+Per-component overrides (e.g. a smaller/cheaper model for the judge)
+live under `guardrail.judge.llm`, `scanners.mcp_scanner.llm`, etc. and
+win over the top-level `llm:` field-by-field. The setup wizard writes
+to the unified block by default; `defenseclaw setup migrate-llm`
+converts pre-v5 configs in place (it backs up `config.yaml` first).
 
 ### Non-interactive
 

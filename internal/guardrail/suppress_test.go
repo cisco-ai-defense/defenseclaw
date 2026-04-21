@@ -139,10 +139,10 @@ func TestFilterPIIEntities(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		entities      []PIIEntity
-		wantKept      int
-		wantSuppID    string
+		name       string
+		entities   []PIIEntity
+		wantKept   int
+		wantSuppID string
 	}{
 		{
 			name: "cli username suppressed",

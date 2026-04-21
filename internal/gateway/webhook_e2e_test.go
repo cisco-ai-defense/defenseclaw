@@ -73,10 +73,16 @@ func newCollector() *webhookCollector {
 	return c
 }
 
-func (c *webhookCollector) Close()                 { c.srv.Close() }
-func (c *webhookCollector) URL() string            { return c.srv.URL }
-func (c *webhookCollector) get() []receivedPayload { c.mu.Lock(); defer c.mu.Unlock(); cp := make([]receivedPayload, len(c.payloads)); copy(cp, c.payloads); return cp }
-func (c *webhookCollector) count() int             { c.mu.Lock(); defer c.mu.Unlock(); return len(c.payloads) }
+func (c *webhookCollector) Close()      { c.srv.Close() }
+func (c *webhookCollector) URL() string { return c.srv.URL }
+func (c *webhookCollector) get() []receivedPayload {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := make([]receivedPayload, len(c.payloads))
+	copy(cp, c.payloads)
+	return cp
+}
+func (c *webhookCollector) count() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.payloads) }
 
 // newTestDispatcher creates a WebhookDispatcher with zero retry backoff for fast tests.
 // It sets DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 so that httptest servers on 127.0.0.1 are accepted.
@@ -141,7 +147,7 @@ func TestWebhookE2E_FullEnforcementPipeline(t *testing.T) {
 	skillBlockEvent := audit.Event{
 		ID: "evt-watcher-001", Timestamp: time.Now().UTC(),
 		Action: "block", Target: "crypto-miner-skill", Actor: "defenseclaw-watcher",
-		Details: "type=skill severity=CRITICAL findings=7 actions=quarantined,blocked,disabled reason=malware signature detected",
+		Details:  "type=skill severity=CRITICAL findings=7 actions=quarantined,blocked,disabled reason=malware signature detected",
 		Severity: "CRITICAL", RunID: "run-e2e-pipeline",
 	}
 	d.Dispatch(skillBlockEvent)
@@ -529,9 +535,9 @@ func TestWebhookE2E_ConcurrentDispatch(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			evt := audit.Event{
-				ID: time.Now().Format("20060102150405.000000") + "-" + string(rune('A'+i%26)),
+				ID:        time.Now().Format("20060102150405.000000") + "-" + string(rune('A'+i%26)),
 				Timestamp: time.Now().UTC(),
-				Action: "block", Target: "concurrent-skill", Actor: "test", Severity: "HIGH",
+				Action:    "block", Target: "concurrent-skill", Actor: "test", Severity: "HIGH",
 			}
 			d.Dispatch(evt)
 		}(i)

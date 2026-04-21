@@ -260,7 +260,18 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
     if scan_instructions:
         scan_cfg = replace(scan_cfg, scan_instructions=True)
 
-    scanner = MCPScannerWrapper(scan_cfg, app.cfg.effective_inspect_llm(), app.cfg.cisco_ai_defense)
+    # Route through the unified resolver so top-level ``llm:`` defaults
+    # flow into the MCP scanner with ``scanners.mcp.llm:`` overrides
+    # applied on top. ``effective_inspect_llm()`` is kept only for the
+    # back-compat signature; the ``llm=`` kwarg is what the wrapper
+    # actually uses internally.
+    resolved_llm = app.cfg.resolve_llm("scanners.mcp")
+    scanner = MCPScannerWrapper(
+        scan_cfg,
+        app.cfg.effective_inspect_llm(),
+        app.cfg.cisco_ai_defense,
+        llm=resolved_llm,
+    )
     if not quiet:
         click.echo(f"Scanning MCP server: {target}")
 

@@ -131,11 +131,11 @@ func DefaultConfig() *Config {
 			AnchorName: "com.defenseclaw",
 		},
 		Guardrail: GuardrailConfig{
-			Mode:                       "observe",
-			ScannerMode:                "both",
-			Host:                       "",
-			Port:                       4000,
-			DetectionStrategy:          "regex_judge",
+			Mode:                        "observe",
+			ScannerMode:                 "both",
+			Host:                        "",
+			Port:                        4000,
+			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
 			Judge: JudgeConfig{
 				Injection:     true,

@@ -83,10 +83,10 @@ func setupExtendedRegoDir(t *testing.T) string {
 			"log_scan_results": true,
 		},
 		"firewall": map[string]interface{}{
-			"default_action":      "deny",
+			"default_action":       "deny",
 			"blocked_destinations": []string{"169.254.169.254", "fd00:ec2::254"},
-			"allowed_domains":     []string{"api.github.com", "github.com", "pypi.org"},
-			"allowed_ports":       []int{443},
+			"allowed_domains":      []string{"api.github.com", "github.com", "pypi.org"},
+			"allowed_ports":        []int{443},
 		},
 		"sandbox": map[string]interface{}{
 			"update_policy":           true,

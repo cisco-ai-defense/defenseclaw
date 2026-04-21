@@ -54,7 +54,7 @@ func (s *CodeGuardScanner) allRules() []rule {
 	return all
 }
 
-func (s *CodeGuardScanner) Name() string              { return "codeguard" }
+func (s *CodeGuardScanner) Name() string               { return "codeguard" }
 func (s *CodeGuardScanner) Version() string            { return "1.0.0" }
 func (s *CodeGuardScanner) SupportedTargets() []string { return []string{"code"} }
 

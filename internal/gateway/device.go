@@ -182,20 +182,20 @@ func (d *DeviceIdentity) RepairPairing(sandboxHome string) error {
 	}
 
 	paired[d.DeviceID] = map[string]interface{}{
-		"deviceId":      d.DeviceID,
-		"publicKey":     d.PublicKeyBase64URL(),
-		"displayName":   "defenseclaw-sidecar",
-		"platform":      "linux",
-		"deviceFamily":  existing["deviceFamily"],
-		"clientId":      "gateway-client",
-		"clientMode":    "backend",
-		"role":          "operator",
-		"roles":         []string{"operator"},
-		"scopes":        scopes,
+		"deviceId":       d.DeviceID,
+		"publicKey":      d.PublicKeyBase64URL(),
+		"displayName":    "defenseclaw-sidecar",
+		"platform":       "linux",
+		"deviceFamily":   existing["deviceFamily"],
+		"clientId":       "gateway-client",
+		"clientMode":     "backend",
+		"role":           "operator",
+		"roles":          []string{"operator"},
+		"scopes":         scopes,
 		"approvedScopes": scopes,
-		"tokens":        tokens,
-		"createdAtMs":   createdAt,
-		"approvedAtMs":  nowMs,
+		"tokens":         tokens,
+		"createdAtMs":    createdAt,
+		"approvedAtMs":   nowMs,
 	}
 
 	if err := os.MkdirAll(devicesDir, 0o755); err != nil {

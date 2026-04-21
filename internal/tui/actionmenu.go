@@ -155,8 +155,8 @@ func (m *ActionMenu) View() string {
 // Branch rules:
 //   - "blocked":     unblock / allow to move out of the block list.
 //   - "allowed":     block / disable. Quarantine doesn't belong here
-//                    because an allow-listed skill is intentionally
-//                    kept around; quarantine implies "make it go away".
+//     because an allow-listed skill is intentionally
+//     kept around; quarantine implies "make it go away".
 //   - "quarantined": restore (only valid CLI path out of quarantine).
 //   - "disabled":    enable to re-arm at runtime.
 //   - default:       block / allow / disable / quarantine / install.

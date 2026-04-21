@@ -182,9 +182,157 @@ class ClawConfig:
     openclaw_home_original: str = ""
 
 
+# Canonical LLM environment variables. Mirrors internal/config/config.go.
+#
+# DEFENSECLAW_LLM_KEY is THE single env var users set to supply a shared
+# API key across the guardrail upstream, LLM judge, MCP scanner, skill
+# scanner, and plugin scanner. Per-component `llm:` blocks can override
+# the key with a different env var, but the default is this one.
+#
+# DEFENSECLAW_LLM_MODEL is the env-based default for llm.model when
+# config.yaml doesn't pin one (e.g. first-run after ``defenseclaw
+# setup``).
+DEFENSECLAW_LLM_KEY_ENV = "DEFENSECLAW_LLM_KEY"
+DEFENSECLAW_LLM_MODEL_ENV = "DEFENSECLAW_LLM_MODEL"
+
+_DEFAULT_LLM_TIMEOUT = 30
+_DEFAULT_LLM_MAX_RETRIES = 2
+
+# Recognized "provider/" prefixes understood by both the Go gateway
+# (Bifrost routes by the provider prefix) and by the Python scanners
+# (LiteLLM accepts the same "provider/model" shape). Anything outside
+# this set triggers a one-shot warning so typos surface early. Keep in
+# lockstep with recognizedLLMProviders in internal/config/config.go.
+_RECOGNIZED_LLM_PROVIDERS = frozenset({
+    "openai", "anthropic", "azure", "gemini", "vertex_ai", "bedrock",
+    "groq", "mistral", "cohere", "ollama", "vllm", "deepseek", "xai",
+    "fireworks_ai", "perplexity", "huggingface", "replicate",
+    "openrouter", "together_ai", "cerebras", "lm_studio", "lmstudio",
+    "local",
+})
+
+_LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
+
+_warned_llm_prefixes: set[tuple[str, str]] = set()
+
+
+def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
+    if not prefix or prefix in _RECOGNIZED_LLM_PROVIDERS:
+        return
+    key = (component_path, prefix)
+    if key in _warned_llm_prefixes:
+        return
+    _warned_llm_prefixes.add(key)
+    _log.warning(
+        "config: unknown LLM provider prefix %r for %s — expected one of "
+        "openai/anthropic/azure/gemini/vertex_ai/bedrock/groq/mistral/"
+        "cohere/ollama/vllm/deepseek/xai/fireworks_ai/perplexity/"
+        "huggingface/replicate/openrouter/together_ai/cerebras/lm_studio/"
+        "local. Gateway (Bifrost) and scanners (LiteLLM) may disagree "
+        "on how to route this model",
+        prefix, component_path,
+    )
+
+
+@dataclass
+class LLMConfig:
+    """Unified LLM configuration block.
+
+    Mirrors internal/config/config.go::LLMConfig. Used both at the top
+    level (``config.llm``) and as a per-component override under
+    ``scanners.*``, ``guardrail``, and ``guardrail.judge``. The resolver
+    ``Config.resolve_llm(path)`` merges the top-level defaults with the
+    per-component override and returns the effective settings.
+
+    Model string convention:
+
+    * Use ``"provider/model-id"`` — e.g. ``"openai/gpt-4o"``,
+      ``"anthropic/claude-3-5-sonnet-20241022"``,
+      ``"ollama/llama3.1"``, ``"azure/<deployment-name>"``,
+      ``"bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0"``.
+    * The prefix is shared by the Go gateway (Bifrost routes by the
+      ``provider/`` prefix) AND by the Python scanners (LiteLLM accepts
+      the same ``provider/model`` shape). A bare model id (no slash) is
+      allowed but emits an unknown-prefix warning.
+
+    ``api_key`` vs ``api_key_env``: prefer ``api_key_env`` so the secret
+    stays out of ``config.yaml``. An empty ``api_key_env`` falls back to
+    ``DEFENSECLAW_LLM_KEY`` — the canonical env var for the whole
+    product. Local providers (``ollama/``, ``vllm/``, ``lm_studio/``)
+    don't need a key; an empty resolved value is allowed.
+    """
+    model: str = ""
+    provider: str = ""
+    api_key: str = ""
+    api_key_env: str = ""
+    base_url: str = ""
+    timeout: int = 0
+    max_retries: int = 0
+
+    def resolved_api_key(self) -> str:
+        """Return the API key from env var first, then inline value.
+
+        Resolution order:
+
+        1. If ``api_key_env`` is explicitly set, read from that env var
+           and return it if non-empty.
+        2. Otherwise, if ``api_key`` is explicitly set inline, return
+           it — users who hard-code a key in config.yaml expect it to
+           win over the unified-key fallback.
+        3. Finally, fall back to the canonical ``DEFENSECLAW_LLM_KEY``
+           env var so operators can set exactly one env var and have
+           every LLM-using component inherit it.
+
+        Mirrors ``internal/config/config.go::LLMConfig.ResolvedAPIKey``
+        after its v5 refinement — keeping these in sync is required by
+        ``cli/tests/test_llm_env.py::ParityTests``.
+        """
+        if self.api_key_env:
+            val = os.environ.get(self.api_key_env, "").strip()
+            if val:
+                return val
+        if self.api_key:
+            return self.api_key
+        return os.environ.get(DEFENSECLAW_LLM_KEY_ENV, "").strip()
+
+    def effective_timeout(self) -> int:
+        return self.timeout if self.timeout > 0 else _DEFAULT_LLM_TIMEOUT
+
+    def effective_max_retries(self) -> int:
+        return self.max_retries if self.max_retries > 0 else _DEFAULT_LLM_MAX_RETRIES
+
+    def provider_prefix(self) -> str:
+        if self.provider:
+            return self.provider.strip().lower()
+        if "/" in self.model:
+            return self.model.split("/", 1)[0].strip().lower()
+        return ""
+
+    def is_local_provider(self) -> bool:
+        """Return True when the resolved provider runs on-box and
+        doesn't need an API key (ollama, vllm, lm_studio) or when the
+        base_url points at a loopback address."""
+        if self.provider_prefix() in _LOCAL_LLM_PROVIDERS:
+            return True
+        if self.base_url:
+            host = self.base_url.lower()
+            if "127.0.0.1" in host or "localhost" in host or "[::1]" in host or host.startswith("unix:"):
+                return True
+        return False
+
+
 @dataclass
 class InspectLLMConfig:
-    """Shared LLM configuration used by both skill-scanner and mcp-scanner."""
+    """DEPRECATED: pre-v5 Shared LLM configuration used by both
+    skill-scanner and mcp-scanner. The v5 replacement is :class:`LLMConfig`
+    at ``config.llm``; prefer ``Config.resolve_llm("scanners.skill")``
+    or ``Config.resolve_llm("scanners.mcp")`` over reading this.
+
+    This class remains for back-compat round-tripping and is populated
+    from the legacy ``inspect_llm:`` block. ``load()`` migrates the
+    values into ``config.llm`` so every new caller can go through
+    :meth:`Config.resolve_llm`.
+    """
     provider: str = ""
     model: str = ""
     api_key: str = ""
@@ -196,7 +344,6 @@ class InspectLLMConfig:
     def resolved_api_key(self) -> str:
         """Return api_key from env var (if set) or direct value."""
         if self.api_key_env:
-            import os
             val = os.environ.get(self.api_key_env, "")
             if val:
                 return val
@@ -234,6 +381,10 @@ class SkillScannerConfig:
     llm_consensus_runs: int = 0
     policy: str = "permissive"
     lenient: bool = True
+    # LLM overrides the top-level ``llm:`` block for the skill scanner.
+    # Unset fields inherit from ``Config.llm`` via
+    # ``Config.resolve_llm("scanners.skill")``.
+    llm: LLMConfig = field(default_factory=LLMConfig)
     virustotal_api_key: str = ""
     virustotal_api_key_env: str = ""
 
@@ -253,12 +404,19 @@ class MCPScannerConfig:
     scan_prompts: bool = False
     scan_resources: bool = False
     scan_instructions: bool = False
+    # LLM overrides the top-level ``llm:`` block for the MCP scanner.
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 @dataclass
 class ScannersConfig:
     skill_scanner: SkillScannerConfig = field(default_factory=SkillScannerConfig)
     mcp_scanner: MCPScannerConfig = field(default_factory=MCPScannerConfig)
+    # plugin_llm overrides the top-level ``llm:`` block for the plugin
+    # scanner, which uses LiteLLM directly (not Bifrost). Per the plan,
+    # plugin-scanner LLM calls intentionally bypass the guardrail to
+    # avoid burning tokens on 3rd-party plugin analysis.
+    plugin_llm: LLMConfig = field(default_factory=LLMConfig)
     codeguard: str = ""
 
 
@@ -529,10 +687,16 @@ class JudgeConfig:
     pii_prompt: bool = True
     pii_completion: bool = True
     tool_injection: bool = True
+    timeout: float = 30.0
+    # LLM overrides the top-level ``llm:`` block for the LLM judge.
+    # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
+    # directly; the legacy ``model``/``api_key_env``/``api_base`` fields
+    # below are kept only for pre-v5 round-tripping.
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    # DEPRECATED (v<5): migrated into ``llm`` at load time.
     model: str = ""
     api_key_env: str = ""
     api_base: str = ""
-    timeout: float = 30.0
     fallbacks: list[str] = field(default_factory=list)
     adjudication_timeout: float = 5.0
 
@@ -583,12 +747,21 @@ class GuardrailConfig:
     scanner_mode: str = "both"      # local | remote | both
     host: str = "localhost"         # host where guardrail proxy is reachable (bridge IP in sandbox mode)
     port: int = 4000
+    # LLM overrides the top-level ``llm:`` block for the guardrail
+    # upstream (the model DefenseClaw proxies client traffic to).
+    # Prefer ``Config.resolve_llm("guardrail")``.
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    # DEPRECATED (v<5): migrated into ``llm`` at load time. Kept for
+    # pre-v5 round-tripping only — new writers should emit ``llm:``.
     model: str = ""                 # upstream model, e.g. "anthropic/claude-opus-4-5"
     model_name: str = ""            # alias exposed to OpenClaw, e.g. "claude-opus"
     api_key_env: str = ""           # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
+    api_base: str = ""              # base URL override for Azure, custom endpoints
+    # OriginalModel is NOT a secret-bearing LLM config field — it just
+    # records the upstream model name the client sees rewritten onto
+    # outgoing requests (Bifrost model-routing). Orthogonal to ``llm``.
     original_model: str = ""        # original OpenClaw model (for revert)
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
-    api_base: str = ""              # base URL override for Azure, custom endpoints
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     detection_strategy: str = "regex_judge"  # regex_only | regex_judge | judge_first
     detection_strategy_prompt: str = ""     # per-direction override
@@ -601,6 +774,12 @@ class GuardrailConfig:
 @dataclass
 class Config:
     data_dir: str = ""
+    # Unified v5 LLM configuration. Every LLM-using component resolves
+    # its effective settings via :meth:`resolve_llm`. See
+    # :class:`LLMConfig` for the model-string conventions.
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    # DEPRECATED (v<5): migrated into ``llm`` at load time. Kept for
+    # back-compat round-tripping only.
     default_llm_api_key_env: str = ""
     default_llm_model: str = ""
     audit_db: str = ""
@@ -673,30 +852,106 @@ class Config:
         name = name.lstrip("@")
         return [os.path.join(d, name) for d in self.skill_dirs()]
 
-    def resolved_default_llm_api_key(self) -> str:
-        """Return the shared LLM API key from the configured env var.
+    def resolve_llm(self, path: str = "") -> LLMConfig:
+        """Return the effective LLMConfig for the given component path.
 
-        Mirrors Go's Config.ResolvedDefaultLLMAPIKey() so Python and Go
-        scanner invocations share the same fallback semantics.
+        Mirrors ``Config.ResolveLLM`` in internal/config/config.go. The
+        ``path`` selects which per-component override block to layer on
+        top of ``self.llm``. Supported paths:
+
+        * ``""``                 — the top-level block as-is
+        * ``"scanners.mcp"``     — ``scanners.mcp_scanner.llm``
+        * ``"scanners.skill"``   — ``scanners.skill_scanner.llm``
+        * ``"scanners.plugin"``  — ``scanners.plugin_llm``
+        * ``"guardrail"``        — ``guardrail.llm``
+        * ``"guardrail.judge"``  — ``guardrail.judge.llm``
+
+        Merge rules: every non-empty scalar on the override wins. An
+        empty ``model`` inherits from the top level, then from the
+        ``DEFENSECLAW_LLM_MODEL`` environment variable, then from the
+        legacy ``default_llm_model`` field. The returned
+        :class:`LLMConfig` is the single source of truth for LLM
+        settings — callers MUST NOT read the deprecated
+        ``inspect_llm``, ``default_llm_*``, or legacy
+        ``guardrail.model``/``guardrail.api_key_env`` directly.
         """
-        if self.default_llm_api_key_env:
-            return os.environ.get(self.default_llm_api_key_env, "")
-        return ""
+        out = replace(self.llm)
+        override: LLMConfig
+        if path == "":
+            override = LLMConfig()
+        elif path == "scanners.mcp":
+            override = self.scanners.mcp_scanner.llm
+        elif path == "scanners.skill":
+            override = self.scanners.skill_scanner.llm
+        elif path == "scanners.plugin":
+            override = self.scanners.plugin_llm
+        elif path == "guardrail":
+            override = self.guardrail.llm
+        elif path == "guardrail.judge":
+            override = self.guardrail.judge.llm
+        else:
+            _log.warning("config: resolve_llm called with unknown path %r", path)
+            override = LLMConfig()
+
+        if override.model:
+            out.model = override.model
+        if override.provider:
+            out.provider = override.provider
+        if override.api_key:
+            out.api_key = override.api_key
+        if override.api_key_env:
+            out.api_key_env = override.api_key_env
+        if override.base_url:
+            out.base_url = override.base_url
+        if override.timeout > 0:
+            out.timeout = override.timeout
+        if override.max_retries > 0:
+            out.max_retries = override.max_retries
+
+        if not out.model:
+            env_model = os.environ.get(DEFENSECLAW_LLM_MODEL_ENV, "").strip()
+            if env_model:
+                out.model = env_model
+
+        # Pre-v5 fallbacks (migration residue).
+        if not out.model and self.default_llm_model:
+            out.model = self.default_llm_model
+        if not out.api_key_env and self.default_llm_api_key_env:
+            out.api_key_env = self.default_llm_api_key_env
+
+        _maybe_warn_unknown_provider(out.provider_prefix(), path)
+        return out
+
+    def resolved_default_llm_api_key(self) -> str:
+        """DEPRECATED. Use ``Config.resolve_llm(path).resolved_api_key()``.
+
+        Retained for back-compat with pre-v5 callers; delegates to
+        :meth:`resolve_llm` so behavior stays in sync.
+        """
+        return self.resolve_llm("").resolved_api_key()
 
     def effective_inspect_llm(self) -> InspectLLMConfig:
-        """Return inspect_llm with the shared default key/model applied.
+        """DEPRECATED. Use ``Config.resolve_llm(path)`` directly.
 
-        Mirrors Go's Config.EffectiveInspectLLM(). When the dedicated
-        inspect_llm.api_key is empty, fall back to default_llm_api_key_env;
-        when inspect_llm.model is empty, fall back to default_llm_model.
+        Returns an :class:`InspectLLMConfig`-shaped object for legacy
+        callers that haven't migrated to :class:`LLMConfig` yet.
         """
+        base = self.resolve_llm("")
         llm = replace(self.inspect_llm)
-        if not llm.resolved_api_key() and not llm.api_key:
-            shared = self.resolved_default_llm_api_key()
-            if shared:
-                llm.api_key = shared
-        if not llm.model and self.default_llm_model:
-            llm.model = self.default_llm_model
+        if not llm.model:
+            llm.model = base.model
+        if not llm.provider:
+            llm.provider = base.provider
+        if not llm.api_key:
+            llm.api_key = base.api_key
+        if not llm.api_key_env:
+            llm.api_key_env = base.api_key_env
+        if not llm.base_url:
+            llm.base_url = base.base_url
+        if llm.timeout == 0 or llm.timeout == 30:
+            llm.timeout = base.effective_timeout()
+        if llm.max_retries == 0 or llm.max_retries == 3:
+            llm.max_retries = base.effective_max_retries()
         return llm
 
     def save(self) -> None:
@@ -803,6 +1058,25 @@ def _dedup(paths: list[str]) -> list[str]:
     return out
 
 
+def _llm_is_empty(d: dict[str, Any] | None) -> bool:
+    if not d:
+        return True
+    return not any((
+        d.get("model"), d.get("provider"), d.get("api_key"),
+        d.get("api_key_env"), d.get("base_url"),
+        d.get("timeout", 0), d.get("max_retries", 0),
+    ))
+
+
+def _strip_empty_llm(parent: dict[str, Any] | None, key: str = "llm") -> None:
+    """Drop an empty ``llm:`` sub-block so YAML stays minimal. Mirrors
+    Go's ``yaml:"llm,omitempty"`` for nested LLMConfig structs."""
+    if not parent:
+        return
+    if _llm_is_empty(parent.get(key)):
+        parent.pop(key, None)
+
+
 def _config_to_dict(cfg: Config) -> dict[str, Any]:
     """Serialize Config to a dict suitable for YAML."""
     from dataclasses import asdict
@@ -810,6 +1084,14 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
+    _strip_empty_llm(d, "llm")
+    scanners = d.get("scanners") or {}
+    _strip_empty_llm(scanners.get("skill_scanner"), "llm")
+    _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
+    _strip_empty_llm(scanners, "plugin_llm")
+    guardrail = d.get("guardrail") or {}
+    _strip_empty_llm(guardrail, "llm")
+    _strip_empty_llm(guardrail.get("judge"), "llm")
     # v4: the legacy top-level `splunk:` block is rejected by the Go
     # gateway at startup (see internal/config/config.go::detectLegacySplunk).
     # The Python dataclass retains a SplunkConfig for backwards-compatible
@@ -885,6 +1167,102 @@ def _merge_inspect_llm(raw: dict[str, Any] | None) -> InspectLLMConfig:
     )
 
 
+def _merge_llm(raw: dict[str, Any] | None) -> LLMConfig:
+    """Parse a unified llm: block. Mirrors Go's mapstructure decode.
+
+    Empty / missing blocks return a zero-value LLMConfig; per-component
+    overrides inherit from the top level via Config.resolve_llm.
+    """
+    if not raw:
+        return LLMConfig()
+    return LLMConfig(
+        model=str(raw.get("model", "") or ""),
+        provider=str(raw.get("provider", "") or ""),
+        api_key=str(raw.get("api_key", "") or ""),
+        api_key_env=str(raw.get("api_key_env", "") or ""),
+        base_url=str(raw.get("base_url", "") or ""),
+        timeout=int(raw.get("timeout", 0) or 0),
+        max_retries=int(raw.get("max_retries", 0) or 0),
+    )
+
+
+def _migrate_llm_fields(cfg: Config) -> None:
+    """v4→v5 migration: copy legacy LLM fields into the unified
+    :class:`LLMConfig` slots so :meth:`Config.resolve_llm` returns the
+    same answers as the pre-v5 functions.
+
+    Idempotent: already-populated v5 slots are left untouched. The
+    legacy fields are NOT cleared in-place — ``defenseclaw setup
+    migrate-llm`` is the tool that rewrites the on-disk YAML.
+
+    Emits a one-shot deprecation warning (via the standard ``logging``
+    module, which is wired up to stderr + audit pipeline in
+    cli/defenseclaw/__init__.py) when legacy LLM fields are detected
+    so operators notice the drift before v6 removes the fallbacks.
+    The warning is emitted at most once per Config instance via a
+    sentinel attribute so reloads don't spam.
+    """
+    legacy_fields: list[str] = []
+    if cfg.inspect_llm.model or cfg.inspect_llm.provider or cfg.inspect_llm.api_key_env:
+        legacy_fields.append("inspect_llm")
+    if cfg.default_llm_model:
+        legacy_fields.append("default_llm_model")
+    if cfg.default_llm_api_key_env:
+        legacy_fields.append("default_llm_api_key_env")
+    if cfg.guardrail.model or cfg.guardrail.api_key_env or cfg.guardrail.api_base:
+        legacy_fields.append("guardrail.{model,api_key_env,api_base}")
+    if cfg.guardrail.judge.model or cfg.guardrail.judge.api_key_env or cfg.guardrail.judge.api_base:
+        legacy_fields.append("guardrail.judge.{model,api_key_env,api_base}")
+
+    if legacy_fields and not getattr(cfg, "_llm_migration_warned", False):
+        _log.warning(
+            "config: deprecated v4 LLM fields detected (%s); values are still honored "
+            "but will be removed in a future release. Run `defenseclaw setup migrate-llm` "
+            "to rewrite config.yaml to the unified llm: block.",
+            ", ".join(legacy_fields),
+        )
+        # Stamped once per Config instance so reload()/save() round-trips
+        # don't spam stderr in long-running processes (gateway, TUI).
+        cfg._llm_migration_warned = True  # type: ignore[attr-defined]
+    # Top-level.
+    if not cfg.llm.api_key_env:
+        if cfg.default_llm_api_key_env:
+            cfg.llm.api_key_env = cfg.default_llm_api_key_env
+        elif cfg.inspect_llm.api_key_env:
+            cfg.llm.api_key_env = cfg.inspect_llm.api_key_env
+    if not cfg.llm.api_key and cfg.inspect_llm.api_key:
+        cfg.llm.api_key = cfg.inspect_llm.api_key
+    if not cfg.llm.model:
+        if cfg.default_llm_model:
+            cfg.llm.model = cfg.default_llm_model
+        elif cfg.inspect_llm.model:
+            cfg.llm.model = cfg.inspect_llm.model
+    if not cfg.llm.provider and cfg.inspect_llm.provider:
+        cfg.llm.provider = cfg.inspect_llm.provider
+    if not cfg.llm.base_url and cfg.inspect_llm.base_url:
+        cfg.llm.base_url = cfg.inspect_llm.base_url
+    if cfg.llm.timeout == 0 and cfg.inspect_llm.timeout > 0:
+        cfg.llm.timeout = cfg.inspect_llm.timeout
+    if cfg.llm.max_retries == 0 and cfg.inspect_llm.max_retries > 0:
+        cfg.llm.max_retries = cfg.inspect_llm.max_retries
+
+    # Guardrail upstream.
+    if not cfg.guardrail.llm.model and cfg.guardrail.model:
+        cfg.guardrail.llm.model = cfg.guardrail.model
+    if not cfg.guardrail.llm.api_key_env and cfg.guardrail.api_key_env:
+        cfg.guardrail.llm.api_key_env = cfg.guardrail.api_key_env
+    if not cfg.guardrail.llm.base_url and cfg.guardrail.api_base:
+        cfg.guardrail.llm.base_url = cfg.guardrail.api_base
+
+    # Judge.
+    if not cfg.guardrail.judge.llm.model and cfg.guardrail.judge.model:
+        cfg.guardrail.judge.llm.model = cfg.guardrail.judge.model
+    if not cfg.guardrail.judge.llm.api_key_env and cfg.guardrail.judge.api_key_env:
+        cfg.guardrail.judge.llm.api_key_env = cfg.guardrail.judge.api_key_env
+    if not cfg.guardrail.judge.llm.base_url and cfg.guardrail.judge.api_base:
+        cfg.guardrail.judge.llm.base_url = cfg.guardrail.judge.api_base
+
+
 def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
     defaults = PluginActionsConfig()
     if not raw:
@@ -920,10 +1298,11 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         pii_prompt=raw.get("pii_prompt", True),
         pii_completion=raw.get("pii_completion", True),
         tool_injection=raw.get("tool_injection", True),
+        timeout=raw.get("timeout", 30.0),
+        llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
         api_key_env=raw.get("api_key_env", ""),
         api_base=raw.get("api_base", ""),
-        timeout=raw.get("timeout", 30.0),
         fallbacks=raw.get("fallbacks", []),
         adjudication_timeout=raw.get("adjudication_timeout", 5.0),
     )
@@ -938,12 +1317,13 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         scanner_mode=raw.get("scanner_mode", "both"),
         host=raw.get("host", "localhost"),
         port=raw.get("port", 4000),
+        llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
         model_name=raw.get("model_name", ""),
         api_key_env=raw.get("api_key_env", ""),
+        api_base=raw.get("api_base", ""),
         original_model=raw.get("original_model", ""),
         block_message=raw.get("block_message", ""),
-        api_base=raw.get("api_base", ""),
         judge=_merge_judge(raw.get("judge")),
         detection_strategy=raw.get("detection_strategy", "regex_judge"),
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
@@ -967,6 +1347,7 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
             scan_prompts=raw.get("scan_prompts", False),
             scan_resources=raw.get("scan_resources", False),
             scan_instructions=raw.get("scan_instructions", False),
+            llm=_merge_llm(raw.get("llm")),
         )
     return MCPScannerConfig()
 
@@ -1131,6 +1512,8 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
             "migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
             section, field, env_default, section, field, env_default,
         )
+    if cfg.llm.api_key:
+        _warn("llm", "api_key", "DEFENSECLAW_LLM_KEY")
     if cfg.inspect_llm.api_key:
         _warn("inspect_llm", "api_key", "LLM_API_KEY")
     if cfg.cisco_ai_defense.api_key:
@@ -1193,6 +1576,7 @@ def load() -> Config:
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
+        llm=_merge_llm(raw.get("llm")),
         default_llm_api_key_env=raw.get("default_llm_api_key_env", ""),
         default_llm_model=raw.get("default_llm_model", ""),
         audit_db=raw.get("audit_db", os.path.join(data_dir, AUDIT_DB_NAME)),
@@ -1220,10 +1604,12 @@ def load() -> Config:
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
                 policy=ss_raw.get("policy", "permissive"),
                 lenient=ss_raw.get("lenient", True),
+                llm=_merge_llm(ss_raw.get("llm")),
                 virustotal_api_key=ss_raw.get("virustotal_api_key", ""),
                 virustotal_api_key_env=ss_raw.get("virustotal_api_key_env", ""),
             ),
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
+            plugin_llm=_merge_llm(scanners_raw.get("plugin_llm")),
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
         openshell=_merge_openshell(raw.get("openshell")),
@@ -1272,6 +1658,7 @@ def load() -> Config:
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
     )
+    _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     return cfg
 

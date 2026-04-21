@@ -288,24 +288,60 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
+    """Verify the unified LLM key used by the guardrail proxy.
+
+    In v5 the guardrail's LLM settings come from
+    ``Config.resolve_llm("guardrail")`` — which layers
+    ``guardrail.llm`` on top of the top-level ``llm:`` block. We
+    read from there rather than the legacy ``guardrail.api_key_env``/
+    ``guardrail.model`` fields so edits to the unified block are
+    honored without re-running ``setup``.
+
+    Local providers (Ollama, vLLM, LM Studio) and localhost base URLs
+    skip the API-key check entirely — these runtimes don't
+    authenticate incoming requests, so demanding a key would surface
+    a misleading failure. We still warn if the model string is
+    empty, because without it Bifrost has nothing to route to.
+    """
     gc = cfg.guardrail
     if not gc.enabled:
         _emit("skip", "LLM API key", "guardrail disabled", r=r)
         return
 
-    env_name = gc.api_key_env
-    if not env_name:
-        _emit("fail", "LLM API key", "api_key_env not configured", r=r)
+    llm = cfg.resolve_llm("guardrail")
+    model = llm.model or gc.model or ""
+
+    if llm.is_local_provider():
+        base = llm.base_url or "(default)"
+        if not model:
+            _emit(
+                "warn", "LLM API key",
+                f"local provider '{llm.provider}' configured (base_url={base}) but no model set",
+                r=r,
+            )
+        else:
+            _emit(
+                "skip", "LLM API key",
+                f"local provider '{llm.provider}' needs no key (base_url={base}, model={model})",
+                r=r,
+            )
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
-    api_key = _resolve_api_key(env_name, dotenv_path)
+    # Pre-v5 configs stash the env name on ``guardrail.api_key_env``;
+    # Config.load() migrates that into cfg.guardrail.llm.api_key_env
+    # so resolve_llm() picks it up, but tests (and any in-memory
+    # Config constructed without load()) may still rely on the
+    # legacy field. Fall back here so those paths don't spuriously
+    # report "api_key_env not configured".
+    env_name = llm.api_key_env or gc.api_key_env or "DEFENSECLAW_LLM_KEY"
+    api_key = llm.resolved_api_key()
+    if not api_key:
+        api_key = _resolve_api_key(env_name, dotenv_path)
 
     if not api_key:
         _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})", r=r)
         return
-
-    model = gc.model or ""
     # Route by *provider prefix* (the segment before the first "/"). The
     # env-name prefix is a last-resort fallback ONLY used when the model
     # string is empty or has no provider prefix — routing on env name can
@@ -322,11 +358,15 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         _verify_anthropic(api_key, r, model)
     elif provider == "openai":
         _verify_openai(api_key, r)
+    elif provider == "bedrock":
+        _verify_bedrock(api_key, r)
     elif provider == "" and env_name.startswith("ANTHROPIC"):
         # Model string missing — fall back to env name prefix.
         _verify_anthropic(api_key, r, model)
     elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
+    elif provider == "" and env_name.startswith("AWS_BEARER_TOKEN_BEDROCK"):
+        _verify_bedrock(api_key, r)
     else:
         _emit(
             "pass", "LLM API key",
@@ -409,6 +449,94 @@ def _verify_openai(api_key: str, r: _DoctorResult) -> None:
         _emit("warn", "LLM API key (OpenAI)", f"could not reach api.openai.com: {body}", r=r)
     else:
         _emit("fail", "LLM API key (OpenAI)", f"HTTP {code}", r=r)
+
+
+# Region used when we have to probe Bedrock but no region is pinned on
+# the resolved LLM config or in the environment. us-east-1 has the
+# broadest Bedrock foundation-model availability, which is what the
+# probe queries — a key that's valid in another region still returns
+# 200 here because the listFoundationModels endpoint is bearer-token
+# authed, not region-scoped auth. Operators running Bedrock in an
+# isolated partition (GovCloud etc.) should override via AWS_REGION.
+_BEDROCK_DEFAULT_REGION = "us-east-1"
+
+
+def _bedrock_region() -> str:
+    for env_var in ("AWS_REGION", "AWS_REGION_NAME", "AWS_DEFAULT_REGION"):
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            return val
+    return _BEDROCK_DEFAULT_REGION
+
+
+def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
+    """Verify an AWS Bedrock API key (short-term ABSK bearer token).
+
+    LiteLLM and the DefenseClaw scanner bridge authenticate to Bedrock
+    via ``Authorization: Bearer <ABSK…>`` — the short-term API key
+    format AWS introduced alongside GA of Bedrock. That's a different
+    auth path from the long-term SigV4 ``AKIA…`` key-id / secret pair:
+
+    * ``ABSK…``  → bearer token, verifiable with a single GET.
+    * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
+                  which would pull in botocore just for the doctor.
+                  Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
+    * anything else → shape we don't recognize; pass with a note, same
+                      as the generic fallback in ``_check_llm_api_key``.
+
+    The foundation-models list endpoint is a cheap GET that returns
+    the list of models enabled for the account. ``200`` confirms auth
+    is working end-to-end; ``401/403`` flags a bad or scoped-out key
+    before the operator discovers it at scan time.
+    """
+    if api_key.startswith("AKIA") or api_key.startswith("ASIA"):
+        _emit(
+            "warn", "LLM API key (Bedrock)",
+            "AWS SigV4 credentials detected — doctor skips signed probes; "
+            "run 'aws sts get-caller-identity' to verify.",
+            r=r,
+        )
+        return
+    if not api_key.startswith("ABSK"):
+        _emit(
+            "pass", "LLM API key (Bedrock)",
+            f"key is set ({len(api_key)} chars) but shape not recognized; "
+            "assuming operator knows what they're doing.",
+            r=r,
+        )
+        return
+    region = _bedrock_region()
+    url = f"https://bedrock.{region}.amazonaws.com/foundation-models"
+    code, body = _http_probe(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=10.0,
+    )
+    if code == 200:
+        _emit("pass", "LLM API key (Bedrock)", f"authenticated successfully ({region})", r=r)
+    elif code == 401:
+        _emit("fail", "LLM API key (Bedrock)", "invalid key (401 Unauthorized)", r=r)
+    elif code == 403:
+        # 403 from Bedrock usually means the token is valid but the
+        # IAM policy/resource doesn't grant bedrock:ListFoundationModels.
+        # That's a policy problem, not a key problem — downgrade to warn
+        # so the scan still runs (the scanner uses InvokeModel, which
+        # may be permitted even when List is not).
+        _emit(
+            "warn", "LLM API key (Bedrock)",
+            "403 Forbidden — key authenticates but lacks "
+            "bedrock:ListFoundationModels; InvokeModel may still work.",
+            r=r,
+        )
+    elif code == 0:
+        _emit(
+            "warn", "LLM API key (Bedrock)",
+            f"could not reach bedrock.{region}.amazonaws.com: {body}",
+            r=r,
+        )
+    else:
+        _emit("fail", "LLM API key (Bedrock)", f"HTTP {code}", r=r)
 
 
 def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
@@ -744,12 +872,20 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 
 @click.command()
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
+@click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
+@click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
 @pass_ctx
-def doctor(app: AppContext, json_out: bool) -> None:
+def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> None:
     """Verify credentials, endpoints, and connectivity.
 
     Runs a series of checks against every configured service and API key
     to catch problems before they surface at runtime.
+
+    Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
+    OpenClaw gateway token drift, missing .env file, and unpatched
+    openclaw.json when the guardrail is enabled). Destructive or
+    ambiguous fixes still require the operator to run the relevant
+    setup command explicitly.
 
     Exit codes: 0 = all pass, 1 = any failure.
     """
@@ -782,6 +918,7 @@ def doctor(app: AppContext, json_out: bool) -> None:
     _check_llm_api_key(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
+    _check_registry_credentials(cfg, r)
     if not json_out:
         click.echo()
         click.echo("  ── Observability ──")
@@ -790,6 +927,12 @@ def doctor(app: AppContext, json_out: bool) -> None:
         click.echo()
         click.echo("  ── Webhooks ──")
     _check_webhooks(cfg, r)
+
+    if do_fix:
+        if not json_out:
+            click.echo()
+            click.echo("  ── Auto-fix ──")
+        _run_fixers(cfg, r, assume_yes=assume_yes, json_out=json_out)
 
     # Persist the cached snapshot before exit so the Go TUI (and any
     # other cron-style caller) can pick it up without re-probing. We
@@ -834,3 +977,182 @@ def doctor(app: AppContext, json_out: bool) -> None:
 # helper also wrote a partial cache that would clobber a full-coverage
 # ``doctor_cache.json``. It has been removed to prevent the Overview
 # panel from silently reporting "3 pass" after a partial verify.
+
+
+# ---------------------------------------------------------------------------
+# Registry-driven credentials check
+# ---------------------------------------------------------------------------
+
+def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
+    """Report any REQUIRED credential the current config needs but is unset.
+
+    The per-feature ``_check_*`` helpers above do *connectivity* checks
+    against specific APIs (Cisco AI Defense, VirusTotal, etc.). This
+    extra pass is a belt-and-braces sweep using the credentials
+    registry: any REQUIRED entry that isn't set is flagged here so new
+    features automatically get coverage the moment they're added to
+    ``defenseclaw.credentials.CREDENTIALS``.
+    """
+    from defenseclaw.credentials import Requirement, classify
+
+    for status in classify(cfg):
+        if status.requirement is Requirement.REQUIRED and not status.resolution.is_set:
+            _emit(
+                "fail",
+                f"credential {status.resolution.env_name}",
+                detail=f"required by {status.spec.feature} — "
+                       f"set with 'defenseclaw keys set {status.resolution.env_name}'",
+                r=r,
+            )
+
+
+# ---------------------------------------------------------------------------
+# --fix auto-repair
+# ---------------------------------------------------------------------------
+
+def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> None:
+    """Run each fixer in sequence, narrating what changed.
+
+    Fixers are intentionally *small* and independent — none of them
+    restart the sidecar or mutate openclaw.json beyond what setup
+    already would. Anything that needs a full re-patch is deferred to
+    the human.
+    """
+    fixers = [
+        ("stale gateway PID file",   _fix_stale_pid),
+        ("OpenClaw gateway token",   _fix_openclaw_token),
+        ("defenseclaw dotenv perms", _fix_dotenv_perms),
+        ("pristine openclaw.json backup", _fix_pristine_backup),
+    ]
+
+    for title, fn in fixers:
+        try:
+            outcome = fn(cfg, assume_yes=assume_yes)
+        except Exception as exc:  # defensive — one fixer shouldn't abort the rest
+            outcome = ("error", f"{type(exc).__name__}: {exc}")
+
+        tag, detail = outcome
+        if json_out:
+            r.record(tag, f"fix: {title}", detail)
+        else:
+            _emit(tag, f"fix: {title}", detail=detail, r=r)
+
+
+def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Remove a ``gateway.pid`` file whose recorded PID is no longer alive."""
+    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    if not os.path.isfile(pid_file):
+        return ("skip", "no pid file")
+
+    try:
+        with open(pid_file, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError as exc:
+        return ("warn", f"unreadable: {exc}")
+
+    try:
+        pid = int(raw)
+    except ValueError:
+        try:
+            pid = int(json.loads(raw).get("pid", 0))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pid = 0
+    if pid <= 0:
+        return ("warn", "malformed pid file — leaving in place")
+
+    try:
+        os.kill(pid, 0)
+        return ("skip", f"pid {pid} still alive")
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    if not assume_yes and not click.confirm(
+        f"    Remove stale pid file {pid_file}?", default=True
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        os.unlink(pid_file)
+        return ("pass", f"removed {pid_file}")
+    except OSError as exc:
+        return ("fail", f"could not remove {pid_file}: {exc}")
+
+
+def _fix_openclaw_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Re-sync OPENCLAW_GATEWAY_TOKEN from openclaw.json."""
+    from defenseclaw.commands.cmd_setup import (
+        _detect_openclaw_gateway_token,
+        _save_secret_to_dotenv,
+    )
+
+    token = _detect_openclaw_gateway_token(cfg.claw.config_file)
+    if not token:
+        return ("skip", "no token in openclaw.json")
+
+    current = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    if current == token:
+        return ("skip", "token already in sync")
+
+    if not assume_yes and not click.confirm(
+        "    Update OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env from OpenClaw?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
+    return ("pass", "OPENCLAW_GATEWAY_TOKEN updated from openclaw.json")
+
+
+def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Ensure the dotenv file (which holds secrets) is not world-readable."""
+    path = os.path.join(cfg.data_dir, ".env")
+    if not os.path.isfile(path):
+        return ("skip", "no dotenv file")
+
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError as exc:
+        return ("warn", f"stat failed: {exc}")
+
+    if mode == 0o600:
+        return ("skip", "permissions already 0600")
+
+    if not assume_yes and not click.confirm(
+        f"    Tighten {path} permissions from {mode:04o} to 0600?", default=True
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        os.chmod(path, 0o600)
+        return ("pass", f"set {path} to 0600")
+    except OSError as exc:
+        return ("fail", f"chmod failed: {exc}")
+
+
+def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Capture a pristine backup of openclaw.json if one isn't recorded yet.
+
+    This runs on every ``doctor --fix`` so operators who installed
+    DefenseClaw before the backup index existed can retroactively
+    create one. It never *overwrites* an existing entry.
+    """
+    del assume_yes  # unused: capturing a snapshot is always safe
+    from defenseclaw.guardrail import (
+        pristine_backup_path,
+        record_pristine_backup,
+    )
+
+    oc_path = cfg.claw.config_file
+    if not oc_path:
+        return ("skip", "no openclaw.json configured")
+    if not os.path.isfile(os.path.expanduser(oc_path)):
+        return ("skip", "openclaw.json not present")
+
+    existing = pristine_backup_path(oc_path, cfg.data_dir)
+    if existing:
+        return ("skip", f"already captured at {existing}")
+
+    created = record_pristine_backup(oc_path, cfg.data_dir)
+    if created:
+        return ("pass", f"captured pristine backup at {created}")
+    return ("warn", "could not capture backup (permissions?)")

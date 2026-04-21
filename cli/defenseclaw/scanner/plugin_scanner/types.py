@@ -203,3 +203,11 @@ class PluginManifest:
 class PluginScanOptions:
     profile: str | None = None  # ScanProfile
     policy: str | None = None
+    # Optional LLM override that wins over ``PluginScanPolicy.llm``
+    # after the YAML policy is loaded. This is how the unified
+    # top-level ``llm:`` config (resolved for ``scanners.plugin``)
+    # reaches the plugin scanner without every caller needing to
+    # write a one-off YAML policy file. Shape is a dict so the types
+    # module can stay decoupled from ``policy.LLMPolicy``; the scanner
+    # applies it field-by-field to avoid clobbering unset fields.
+    llm_override: dict[str, Any] | None = None

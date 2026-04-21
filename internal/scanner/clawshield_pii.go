@@ -31,17 +31,17 @@ type ClawShieldPIIScanner struct{}
 
 func NewClawShieldPIIScanner() *ClawShieldPIIScanner { return &ClawShieldPIIScanner{} }
 
-func (s *ClawShieldPIIScanner) Name() string              { return "clawshield-pii" }
+func (s *ClawShieldPIIScanner) Name() string               { return "clawshield-pii" }
 func (s *ClawShieldPIIScanner) Version() string            { return "1.0.0" }
 func (s *ClawShieldPIIScanner) SupportedTargets() []string { return []string{"skill", "code"} }
 
 type csPIIRule struct {
-	id         string
-	category   string
-	pattern    *regexp.Regexp
-	severity   Severity
-	validator  func(string) bool
-	contextPat *regexp.Regexp
+	id          string
+	category    string
+	pattern     *regexp.Regexp
+	severity    Severity
+	validator   func(string) bool
+	contextPat  *regexp.Regexp
 	remediation string
 }
 

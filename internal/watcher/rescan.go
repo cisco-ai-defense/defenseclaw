@@ -555,7 +555,6 @@ func summarizeDrift(deltas []DriftDelta) string {
 	return strings.Join(parts, " ")
 }
 
-
 func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, error) {
 	switch evt.Type {
 	case InstallMCP:
