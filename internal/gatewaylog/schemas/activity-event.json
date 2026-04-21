@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/activity-event.json",
+  "title": "DefenseClaw Activity Event Payload (v7)",
+  "description": "Populates the `activity` sub-object on a gateway-event-envelope when event_type=\"activity\". Records operator-facing mutations: config save, policy reload, block/allow list update, skill approval, sink reconfiguration. Carries before/after snapshots plus a structured diff so compliance auditors can reconstruct every change without scraping CLI output.",
+  "$defs": {
+    "ActivityPayload": {
+      "type": "object",
+      "required": ["actor", "action", "target_type", "target_id"],
+      "properties": {
+        "actor":        { "type": "string", "description": "Principal who made the change. Format: '<subsystem>:<principal>'." },
+        "action":       {
+          "type": "string",
+          "description": "Mirrors audit.Action. Subset applicable to operator mutations.",
+          "enum": [
+            "config-update",
+            "policy-update",
+            "policy-reload",
+            "block",
+            "allow",
+            "quarantine",
+            "restore",
+            "disable",
+            "enable",
+            "action",
+            "acknowledge-alerts",
+            "dismiss-alerts",
+            "deploy",
+            "stop"
+          ]
+        },
+        "target_type":  { "type": "string", "enum": ["policy", "skill", "mcp", "config", "action", "sink", "alert", "plugin"] },
+        "target_id":    { "type": "string" },
+        "reason":       { "type": ["string", "null"], "description": "Operator-supplied free text." },
+        "before":       { "type": ["object", "null"], "description": "Compact snapshot of resource before change. null on create." },
+        "after":        { "type": ["object", "null"], "description": "Compact snapshot of resource after change. null on delete." },
+        "diff":         {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/DiffEntry" }
+        },
+        "version_from": { "type": ["string", "null"], "description": "Content hash / semver of resource before change." },
+        "version_to":   { "type": ["string", "null"], "description": "Content hash / semver of resource after change." }
+      }
+    },
+    "DiffEntry": {
+      "type": "object",
+      "required": ["path", "op"],
+      "properties": {
+        "path":   { "type": "string", "description": "JSON pointer / dotted path. Array indices rendered as 'field[n]'." },
+        "op":     { "type": "string", "enum": ["add", "remove", "replace"] },
+        "before": { "description": "Present for replace + remove. Redacted if sensitive." },
+        "after":  { "description": "Present for add + replace. Redacted if sensitive." }
+      }
+    }
+  },
+  "type": "object",
+  "$ref": "#/$defs/ActivityPayload"
+}

@@ -25,7 +25,12 @@
 // operators auditing guardrail decisions after the fact.
 package gatewaylog
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/version"
+)
 
 // EventType enumerates the five first-class categories of gateway
 // observability events. Sinks and filters key off this value.
@@ -58,6 +63,27 @@ const (
 	// guard fires, provider dial retries). Always ships to stderr
 	// but only to sinks when the operator opts in.
 	EventDiagnostic EventType = "diagnostic"
+
+	// EventScan [v7] is a per-scan completion summary emitted by
+	// skill / mcp / plugin / aibom / codeguard scanners. Carries
+	// scanner identity, target, duration, finding counts by
+	// severity, and the parent scan_id. One per scan invocation.
+	EventScan EventType = "scan"
+
+	// EventScanFinding [v7] is a per-finding event fanned out
+	// alongside EventScan so SIEM consumers can alert on a single
+	// critical finding without having to join against the scan
+	// summary. Emitted once per Finding; a scan that produces N
+	// findings therefore produces 1 EventScan + N EventScanFinding.
+	EventScanFinding EventType = "scan_finding"
+
+	// EventActivity [v7] records operator-facing mutations:
+	// config updates, policy reloads, block/allow list changes,
+	// skill approval, sink reconfiguration. Carries a full
+	// before/after snapshot plus a compact structured diff so
+	// compliance auditors can reconstruct every change without
+	// scraping CLI output.
+	EventActivity EventType = "activity"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -97,26 +123,131 @@ const (
 // Event is the single envelope type every gateway observability
 // emission serializes to. Unused fields are omitted to keep JSONL
 // lines compact; indexers then key on event_type to interpret the
-// type-specific payload in the `verdict`, `judge`, `lifecycle`, and
-// `error` sub-objects.
+// type-specific payload in the `verdict`, `judge`, `lifecycle`,
+// `error`, `scan`, `scan_finding`, and `activity` sub-objects.
+//
+// v7 additions:
+//   - Provenance (schema_version + content_hash + generation +
+//     binary_version) is stamped on EVERY event via StampProvenance
+//     at the writer choke point. Downstream consumers use it to
+//     distinguish between two events emitted by the same sidecar
+//     across a config reload, and to reject events they can't parse.
+//   - Agent identity is three-tiered: AgentID (logical, stable
+//     across restarts), AgentInstanceID (per agent session),
+//     SidecarInstanceID (per sidecar process, stable UUID minted
+//     at boot). All three coexist; aggregates key off different
+//     tiers for different questions.
+//   - EventScan/EventScanFinding/EventActivity expand the payload
+//     union with full scanner and operator-mutation coverage.
+//
+// Nullability:
+//   - Envelope fields marked `omitempty` are OPTIONAL per event type.
+//     Never assume a given event carries ToolName/PolicyID/etc.
+//     Consult docs/event-contracts.md for the field-presence matrix.
 type Event struct {
 	// Envelope fields — always populated.
 	Timestamp time.Time `json:"ts"`
 	EventType EventType `json:"event_type"`
 	Severity  Severity  `json:"severity"`
-	RunID     string    `json:"run_id,omitempty"`
-	RequestID string    `json:"request_id,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
+
+	// Provenance quartet (v7). Populated at the writer choke point
+	// via StampProvenance; callers should leave these zero and let
+	// the writer fill them so every event on a single wire reflects
+	// a consistent snapshot of config state. SchemaVersion is always
+	// emitted (current contract: 7) so consumers can branch on the
+	// envelope version without probing optional fields. Generation
+	// is likewise always emitted — a zero value is semantically
+	// meaningful ("no bumps observed yet"), not missing data.
+	SchemaVersion int    `json:"schema_version"`
+	ContentHash   string `json:"content_hash,omitempty"`
+	Generation    uint64 `json:"generation"`
+	BinaryVersion string `json:"binary_version,omitempty"`
+
+	// Correlation
+	RunID     string `json:"run_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	// TraceID mirrors the OTel span's trace id for cross-sink
+	// correlation. Optional — unset events are still valid.
+	TraceID   string    `json:"trace_id,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
 	Model     string    `json:"model,omitempty"`
 	Direction Direction `json:"direction,omitempty"`
 
+	// Agent/tool/policy correlation fields. All are optional
+	// because not every event type populates every field:
+	// guardrail verdicts carry Model+Provider but no ToolName,
+	// tool_call events carry ToolName+ToolID but no Model, etc.
+	// Downstream consumers must tolerate missing fields gracefully.
+	//
+	// Three-tier agent identity (v7):
+	//
+	//   - AgentID: logical agent name/ID. Stable across restarts,
+	//     across sidecar processes, and across agent instances.
+	//     Use this to group "all events for agent X" in dashboards.
+	//   - AgentInstanceID: a single agent execution / session.
+	//     Stable per conversation; changes when the agent is
+	//     re-invoked. Use this to group turns within one
+	//     conversation.
+	//   - SidecarInstanceID: the sidecar process. Stable for the
+	//     sidecar's lifetime; changes on every restart. Primarily
+	//     useful for operators debugging which sidecar emitted a
+	//     specific event.
+	AgentID           string `json:"agent_id,omitempty"`
+	AgentName         string `json:"agent_name,omitempty"`
+	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string `json:"policy_id,omitempty"`
+	DestinationApp    string `json:"destination_app,omitempty"`
+	ToolName          string `json:"tool_name,omitempty"`
+	ToolID            string `json:"tool_id,omitempty"`
+
 	// Type-specific payloads — exactly one is populated.
-	Verdict    *VerdictPayload    `json:"verdict,omitempty"`
-	Judge      *JudgePayload      `json:"judge,omitempty"`
-	Lifecycle  *LifecyclePayload  `json:"lifecycle,omitempty"`
-	Error      *ErrorPayload      `json:"error,omitempty"`
-	Diagnostic *DiagnosticPayload `json:"diagnostic,omitempty"`
+	Verdict     *VerdictPayload     `json:"verdict,omitempty"`
+	Judge       *JudgePayload       `json:"judge,omitempty"`
+	Lifecycle   *LifecyclePayload   `json:"lifecycle,omitempty"`
+	Error       *ErrorPayload       `json:"error,omitempty"`
+	Diagnostic  *DiagnosticPayload  `json:"diagnostic,omitempty"`
+	Scan        *ScanPayload        `json:"scan,omitempty"`
+	ScanFinding *ScanFindingPayload `json:"scan_finding,omitempty"`
+	Activity    *ActivityPayload    `json:"activity,omitempty"`
+}
+
+// StampProvenance fills the four v7 provenance fields from the
+// current process-wide snapshot. Safe to call more than once; later
+// calls override earlier values so the writer can stamp at the
+// final serialization hop without worrying about upstream staleness.
+// Intended to be invoked at the writer choke point, never at the
+// emission call site, so a single wire run shows consistent
+// schema/content/generation across all events.
+func (e *Event) StampProvenance() {
+	p := version.Current()
+	e.SchemaVersion = p.SchemaVersion
+	e.ContentHash = p.ContentHash
+	e.Generation = p.Generation
+	e.BinaryVersion = p.BinaryVersion
+}
+
+// sidecarInstanceID is the per-process stable identifier stamped on
+// every event whose caller did not set one. The sidecar boot path
+// populates it alongside audit.SetProcessAgentInstanceID; leaving it
+// unset is only expected in unit tests where the identifier is
+// irrelevant.
+var sidecarInstanceID atomic.Value
+
+// SetSidecarInstanceID installs the per-process sidecar UUID that
+// the writer will stamp on events lacking an explicit value. Pairs
+// with audit.SetProcessAgentInstanceID — kept in a separate package
+// to avoid a gateway → audit cycle at the writer level.
+func SetSidecarInstanceID(id string) {
+	sidecarInstanceID.Store(id)
+}
+
+// SidecarInstanceID returns the installed per-process sidecar UUID
+// or the empty string when boot hasn't set one yet.
+func SidecarInstanceID() string {
+	v, _ := sidecarInstanceID.Load().(string)
+	return v
 }
 
 // VerdictPayload describes a single pipeline stage decision.
@@ -135,13 +266,21 @@ type VerdictPayload struct {
 // Finding matches the shape guardrail scanners emit. Keep the field
 // set minimal — additional context belongs in the stage-specific
 // JudgePayload or VerdictPayload, not here.
+//
+// v7 additions: RuleID + LineNumber. Scanner-origin findings
+// (skill/plugin/mcp/aibom/codeguard) always populate RuleID so
+// downstream SIEM can group by detection rule without brittle
+// substring matches on Rule. LineNumber is the 1-based source line
+// or 0 when not meaningful (e.g. file-level findings).
 type Finding struct {
 	Category   string   `json:"category"`
 	Severity   Severity `json:"severity"`
 	Rule       string   `json:"rule,omitempty"`
+	RuleID     string   `json:"rule_id,omitempty"`
+	LineNumber int      `json:"line_number,omitempty"`
 	Evidence   string   `json:"evidence,omitempty"` // always redacted to a safe preview
 	Confidence float64  `json:"confidence,omitempty"`
-	Source     string   `json:"source,omitempty"` // regex | judge | cisco_aid
+	Source     string   `json:"source,omitempty"` // regex | judge | cisco_aid | skill | mcp | plugin | aibom | codeguard
 }
 
 // JudgePayload records a single LLM-judge call. RawResponse is only
@@ -163,7 +302,7 @@ type JudgePayload struct {
 // transitions. Details is free-form and always redacted.
 type LifecyclePayload struct {
 	Subsystem  string            `json:"subsystem"`  // gateway | watcher | sinks | telemetry | api
-	Transition string            `json:"transition"` // start | stop | ready | degraded | restored
+	Transition string            `json:"transition"` // start | stop | ready | degraded | restored | alert | completed
 	Details    map[string]string `json:"details,omitempty"`
 }
 
@@ -183,4 +322,76 @@ type DiagnosticPayload struct {
 	Component string                 `json:"component"`
 	Message   string                 `json:"message"`
 	Fields    map[string]interface{} `json:"fields,omitempty"`
+}
+
+// ScanPayload [v7] summarises a single scanner invocation.
+// Findings live on sibling EventScanFinding events for SIEM
+// per-row alerting; this payload carries the roll-up counts.
+//
+// ScanID correlates a ScanPayload to its children; every
+// ScanFindingPayload tied to the same scan shares a ScanID.
+type ScanPayload struct {
+	ScanID      string         `json:"scan_id"`
+	Scanner     string         `json:"scanner"` // skill | mcp | plugin | aibom | codeguard
+	Target      string         `json:"target"`  // file path | skill name | server URL
+	TargetType  string         `json:"target_type,omitempty"`
+	Verdict     string         `json:"verdict,omitempty"` // clean | warn | block
+	DurationMs  int64          `json:"duration_ms,omitempty"`
+	SeverityMax Severity       `json:"severity_max,omitempty"`
+	Counts      map[string]int `json:"counts,omitempty"` // severity -> count
+	TotalCount  int            `json:"total_count,omitempty"`
+	ExitCode    int            `json:"exit_code,omitempty"`
+	Error       string         `json:"error,omitempty"` // scanner execution error
+}
+
+// ScanFindingPayload [v7] records a single finding produced by a
+// scanner. Downstream SIEM can alert on severity/rule_id without
+// joining to the parent ScanPayload.
+type ScanFindingPayload struct {
+	ScanID      string   `json:"scan_id"`
+	Scanner     string   `json:"scanner"`
+	Target      string   `json:"target"`
+	FindingID   string   `json:"finding_id,omitempty"`
+	RuleID      string   `json:"rule_id,omitempty"`
+	Category    string   `json:"category,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Description string   `json:"description,omitempty"` // redacted
+	Severity    Severity `json:"severity,omitempty"`
+	Location    string   `json:"location,omitempty"` // redacted path + line
+	LineNumber  int      `json:"line_number,omitempty"`
+	Remediation string   `json:"remediation,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// ActivityPayload [v7] records an operator-facing mutation
+// (config save, policy reload, block/allow list update, skill
+// approval). Before/After are compact JSON snapshots of the changed
+// resource; Diff is a structured key-level diff so dashboards
+// don't have to diff blobs themselves.
+//
+// Actor is the principal who made the change (CLI user, automated
+// watcher, HTTP API client). Reason is operator-supplied free text.
+// TargetType + TargetID identify what changed (policy/skill/mcp/
+// config/action/sink).
+type ActivityPayload struct {
+	Actor       string         `json:"actor"`
+	Action      string         `json:"action"` // mirrors audit.Action
+	TargetType  string         `json:"target_type"`
+	TargetID    string         `json:"target_id"`
+	Reason      string         `json:"reason,omitempty"`
+	Before      map[string]any `json:"before,omitempty"` // nil on create
+	After       map[string]any `json:"after,omitempty"`  // nil on delete
+	Diff        []DiffEntry    `json:"diff,omitempty"`
+	VersionFrom string         `json:"version_from,omitempty"`
+	VersionTo   string         `json:"version_to,omitempty"`
+}
+
+// DiffEntry is a single added / removed / changed key within an
+// ActivityPayload. For array fields Path uses "field[index]"
+// notation; for nested maps a dotted path is used.
+type DiffEntry struct {
+	Path   string `json:"path"`
+	Op     string `json:"op"` // add | remove | replace
+	Before any    `json:"before,omitempty"`
+	After  any    `json:"after,omitempty"`
 }

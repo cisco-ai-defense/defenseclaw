@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/scan-event.json",
+  "title": "DefenseClaw Scan Event Payload (v7)",
+  "description": "Populates the `scan` sub-object on a gateway-event-envelope when event_type=\"scan\". Summarises one scanner invocation — findings are fanned out as sibling EventScanFinding events sharing the same scan_id.",
+  "$defs": {
+    "ScanPayload": {
+      "type": "object",
+      "required": ["scan_id", "scanner", "target"],
+      "properties": {
+        "scan_id":     { "type": "string", "description": "Correlation id shared by the roll-up EventScan and all child EventScanFinding events." },
+        "scanner":     { "type": "string", "enum": ["skill", "mcp", "plugin", "aibom", "codeguard"] },
+        "target":      { "type": "string", "description": "File path | skill name | server URL. Redacted when scanner contract requires." },
+        "target_type": { "type": ["string", "null"], "enum": ["file", "skill", "mcp", "plugin", "aibom", null] },
+        "verdict":     { "type": ["string", "null"], "enum": ["clean", "warn", "block", null] },
+        "duration_ms": { "type": ["integer", "null"] },
+        "severity_max":{ "type": ["string", "null"], "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", null] },
+        "counts":      {
+          "type": ["object", "null"],
+          "description": "Severity -> count. Keys are a subset of severity_max enum.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "total_count": { "type": ["integer", "null"], "minimum": 0 },
+        "exit_code":   { "type": ["integer", "null"] },
+        "error":       { "type": ["string", "null"], "description": "Scanner execution error. Present only when the wrapper failed (timeout, non-zero exit)." }
+      }
+    }
+  },
+  "type": "object",
+  "$ref": "#/$defs/ScanPayload"
+}
