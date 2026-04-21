@@ -13,6 +13,8 @@ package sinks
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +86,62 @@ func TestOTLPLogsSink_Forward_FilterSuppressesLowSeverity(t *testing.T) {
 		Event{ID: "hi", Severity: "HIGH",
 			Timestamp: time.Unix(1700000000, 0)}); err != nil {
 		t.Fatalf("Forward HIGH err=%v", err)
+	}
+}
+
+func TestOTLPLogsSink_HTTPURLFormEndpointFlushes(t *testing.T) {
+	type requestInfo struct {
+		path   string
+		header string
+	}
+	reqC := make(chan requestInfo, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqC <- requestInfo{
+			path:   r.URL.Path,
+			header: r.Header.Get("X-Test"),
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sink, err := NewOTLPLogsSink(context.Background(), OTLPLogsConfig{
+		Name:       "otlp",
+		Endpoint:   srv.URL,
+		Protocol:   "http",
+		Headers:    map[string]string{"X-Test": "sink-header"},
+		TimeoutS:   2,
+		LoggerName: "defenseclaw.audit.test",
+	})
+	if err != nil {
+		t.Fatalf("NewOTLPLogsSink err=%v", err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+
+	if err := sink.Forward(context.Background(), Event{
+		ID:        "evt-1",
+		Timestamp: time.Now().UTC(),
+		Action:    "guardrail-verdict",
+		Target:    "prompt",
+		Actor:     "defenseclaw",
+		Details:   "blocked",
+		Severity:  "HIGH",
+	}); err != nil {
+		t.Fatalf("Forward err=%v", err)
+	}
+	if err := sink.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush err=%v", err)
+	}
+
+	select {
+	case got := <-reqC:
+		if got.path != "/v1/logs" {
+			t.Fatalf("request path=%q want /v1/logs", got.path)
+		}
+		if got.header != "sink-header" {
+			t.Fatalf("X-Test header=%q want sink-header", got.header)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for OTLP logs request")
 	}
 }
 

@@ -78,6 +78,7 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 		column string
 	}{
 		{table: "audit_events", column: "run_id"},
+		{table: "audit_events", column: "trace_id"},
 		{table: "scan_results", column: "run_id"},
 	} {
 		ok, err := store.hasColumn(spec.table, spec.column)

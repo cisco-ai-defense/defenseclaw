@@ -448,6 +448,13 @@ def _anthropic_probe_model(configured_model: str) -> str:
         return override
     return _ANTHROPIC_DEFAULT_PROBE_MODEL
 
+# Default model used for the Anthropic auth probe when the configured model
+# is not an Anthropic model. The probe sends max_tokens=1 so cost is
+# negligible; any valid model id accepted by the account works. We pick a
+# stable identifier that the OpenClaw docs list as generally available.
+# Operators running against an older plan can override via
+# DEFENSECLAW_ANTHROPIC_PROBE_MODEL.
+_ANTHROPIC_DEFAULT_PROBE_MODEL = "claude-3-5-haiku-latest"
 
 def _verify_anthropic(api_key: str, r: _DoctorResult, configured_model: str = "") -> None:
     probe_model = _anthropic_probe_model(configured_model)

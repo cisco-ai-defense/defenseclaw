@@ -22,7 +22,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	otellog "go.opentelemetry.io/otel/log"
@@ -216,9 +218,19 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 
 	if cfg.Protocol == "http" {
 		opts := []loghttp.Option{
-			loghttp.WithEndpoint(cfg.Endpoint),
 			loghttp.WithHeaders(headers),
 			loghttp.WithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
+		}
+		if host, path, insecure, ok := splitEndpointURL(cfg.Endpoint); ok {
+			opts = append(opts, loghttp.WithEndpoint(host))
+			if insecure {
+				opts = append(opts, loghttp.WithInsecure())
+			}
+			if cfg.URLPath == "" && path != "" && path != "/" {
+				opts = append(opts, loghttp.WithURLPath(path))
+			}
+		} else {
+			opts = append(opts, loghttp.WithEndpoint(cfg.Endpoint))
 		}
 		if cfg.URLPath != "" {
 			opts = append(opts, loghttp.WithURLPath(cfg.URLPath))
@@ -237,9 +249,13 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 	}
 
 	opts := []loggrpc.Option{
-		loggrpc.WithEndpoint(cfg.Endpoint),
 		loggrpc.WithHeaders(headers),
 		loggrpc.WithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
+	}
+	if endpointLooksLikeURL(cfg.Endpoint) {
+		opts = append(opts, loggrpc.WithEndpointURL(cfg.Endpoint))
+	} else {
+		opts = append(opts, loggrpc.WithEndpoint(cfg.Endpoint))
 	}
 	if cfg.Insecure {
 		opts = append(opts, loggrpc.WithInsecure())
@@ -304,4 +320,27 @@ func buildBody(e Event) string {
 		"target": e.Target,
 	})
 	return string(buf)
+}
+
+// endpointLooksLikeURL returns true when the configured endpoint carries a
+// scheme (e.g. "http://host:4318/v1/logs"). Used to decide whether we should
+// route via WithEndpointURL (which parses the full URL) or WithEndpoint
+// (host:port only).
+func endpointLooksLikeURL(endpoint string) bool {
+	return strings.Contains(endpoint, "://")
+}
+
+// splitEndpointURL extracts host, path, and insecure (http scheme) from a
+// URL-form endpoint. Returns ok=false for non-URL inputs so callers can fall
+// back to treating the value as a bare host:port. Empty host is treated as
+// a parse failure because OTLP exporters require a host to dial.
+func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
+	if !endpointLooksLikeURL(endpoint) {
+		return "", "", false, false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", "", false, false
+	}
+	return u.Host, u.Path, strings.EqualFold(u.Scheme, "http"), true
 }

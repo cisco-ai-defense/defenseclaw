@@ -37,7 +37,7 @@ type CorrelationEnvelope struct {
 	AgentInstanceID   string
 	SidecarInstanceID string
 	PolicyID          string
-	DestinationApp   string
+	DestinationApp    string
 	ToolName          string
 	ToolID            string
 }

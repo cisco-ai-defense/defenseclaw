@@ -318,6 +318,23 @@ def setup_llm(app: AppContext, show: bool) -> None:
     click.echo("  Next: defenseclaw doctor       # verify the unified LLM is reachable")
 
 
+# Register `defenseclaw setup observability` (unified OTel + audit sinks).
+# Imported here rather than at module top so the subcommand surface can
+# grow without cluttering cmd_setup.py.
+from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
+
+setup.add_command(observability)
+
+# Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
+# notifiers). Distinct from `setup observability add webhook` (generic
+# HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
+# disambiguation.
+from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
+
+setup.add_command(webhook)
+
+
+
 @setup.command("skill-scanner")
 @click.option("--use-llm", is_flag=True, default=None, help="Enable LLM analyzer")
 @click.option("--use-behavioral", is_flag=True, default=None, help="Enable behavioral analyzer")

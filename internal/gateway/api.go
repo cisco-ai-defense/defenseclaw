@@ -777,7 +777,7 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	if event.Severity == "" {
 		event.Severity = "INFO"
 	}
-	if err := a.store.LogEvent(event); err != nil {
+	if err := persistAuditEvent(a.logger, a.store, event); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1316,6 +1316,17 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
 		_ = a.store.LogEvent(evt)
 	}
+	if a.logger != nil {
+		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
+	}
+	_ = persistAuditEvent(a.logger, a.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    req.Model,
+		Severity:  req.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if a.otel != nil {
 		ctx := r.Context()
@@ -1416,6 +1427,17 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
 		_ = a.store.LogEvent(evt)
 	}
+	if a.logger != nil {
+		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
+	}
+	_ = persistAuditEvent(a.logger, a.store, audit.Event{
+		Action:    "guardrail-opa-inspection",
+		Target:    req.Model,
+		Severity:  out.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if a.otel != nil {
 		ctx := r.Context()

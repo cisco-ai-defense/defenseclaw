@@ -2696,6 +2696,18 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		_ = p.store.LogEvent(evt)
 	}
 
+	if p.logger != nil {
+		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
+	}
+	_ = persistAuditEvent(p.logger, p.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    model,
+		Severity:  verdict.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
+
 	if p.otel != nil {
 		// v7: use the request's own ctx (carries the active trace
 		// span) so histograms get trace-exemplar links in Splunk.

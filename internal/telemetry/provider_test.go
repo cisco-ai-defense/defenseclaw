@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -176,6 +179,75 @@ func TestExpandHeaders_NoAutoInjection(t *testing.T) {
 	}
 	if len(expanded) != 0 {
 		t.Fatalf("expandHeaders should return empty map for empty input, got %v", expanded)
+	}
+}
+
+func TestNewProvider_StandardOTLPEnvHTTPLogs(t *testing.T) {
+	type requestInfo struct {
+		path   string
+		header string
+	}
+	reqC := make(chan requestInfo, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqC <- requestInfo{
+			path:   r.URL.Path,
+			header: r.Header.Get("X-Test"),
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-test=env-header")
+
+	cfg := disabledCfg()
+	cfg.OTel = config.OTelConfig{
+		Enabled: true,
+		Logs: config.OTelLogsConfig{
+			Enabled: true,
+		},
+		Traces: config.OTelTracesConfig{
+			Enabled: false,
+		},
+		Metrics: config.OTelMetricsConfig{
+			Enabled: false,
+		},
+		Batch: config.OTelBatchConfig{
+			MaxExportBatchSize: 1,
+			ScheduledDelayMs:   10,
+			MaxQueueSize:       8,
+		},
+	}
+
+	p, err := NewProvider(context.Background(), cfg, "test")
+	if err != nil {
+		t.Fatalf("NewProvider err=%v", err)
+	}
+
+	p.EmitGatewayEvent(gatewaylog.Event{
+		Timestamp: time.Now().UTC(),
+		EventType: gatewaylog.EventDiagnostic,
+		Severity:  gatewaylog.SeverityInfo,
+		Diagnostic: &gatewaylog.DiagnosticPayload{
+			Component: "telemetry-test",
+			Message:   "env-path",
+		},
+	})
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown err=%v", err)
+	}
+
+	select {
+	case got := <-reqC:
+		if got.path != "/v1/logs" {
+			t.Fatalf("request path=%q want /v1/logs", got.path)
+		}
+		if got.header != "env-header" {
+			t.Fatalf("X-Test header=%q want env-header", got.header)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for OTLP logs request")
 	}
 }
 
@@ -882,7 +954,6 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 		}
 	}
 }
-
 
 func TestRecordGuardrailEvaluation_DisabledProvider_NoOp(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")

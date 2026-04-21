@@ -67,11 +67,6 @@ const slowRefreshInterval = 30 * time.Second
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type refreshMsg struct{}
-
-// refreshTickMsg is an alias for the periodic refresh tick used by tests
-// and SLO instrumentation (same handler as refreshMsg).
-type refreshTickMsg = refreshMsg
-
 type slowRefreshMsg struct{}
 type spinTickMsg struct{}
 
@@ -100,6 +95,10 @@ type healthUpdateMsg struct {
 	Health *HealthSnapshot
 	Err    error
 }
+
+// refreshTickMsg is an alias for the periodic refresh tick used by tests
+// and SLO instrumentation (same handler as refreshMsg).
+type refreshTickMsg = refreshMsg
 
 // Model is the root Bubbletea model for the unified TUI.
 type Model struct {
@@ -491,30 +490,6 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	}
 	if m.detail.IsVisible() {
 		m.detail.Hide()
-		return m, nil
-	}
-
-	// Click on header row => tab switch
-	if y == 0 {
-		if panel := m.tabHitTest(x); panel >= 0 {
-			if cmd := m.switchPanel(panel); cmd != nil {
-				return m, cmd
-			}
-		}
-		return m, nil
-	}
-	// Click on input bar row
-	if y == m.height-3 {
-		if !m.cmdInputFocus {
-			m.cmdInputFocus = true
-			cmd := m.cmdInput.Focus()
-			m.palette.Open()
-			return m, cmd
-		}
-		return m, nil
-	}
-	// Click on status strip row
-	if y == m.height-1 {
 		return m, nil
 	}
 	// Click in panel area => unfocus input if focused
