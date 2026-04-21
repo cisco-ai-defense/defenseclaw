@@ -76,3 +76,10 @@ scripts/provision-*
 scripts/e2e-*-session*
 .worktrees/
 tmp/
+
+# Agent memory / context files — local-only, not versioned.
+# Each contributor's AI assistant (Claude, Codex, Cursor, etc.) loads
+# these from disk; keeping them out of git prevents cross-contamination
+# between personal workflow notes and the project's canonical docs.
+AGENTS.md
+CLAUDE.md
