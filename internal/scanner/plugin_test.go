@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -175,9 +176,17 @@ func TestPluginScanner_Integration(t *testing.T) {
 	binary := "defenseclaw"
 	if envBin := os.Getenv("DEFENSECLAW_BIN"); envBin != "" {
 		binary = envBin
+	} else {
+		// Prefer repo .venv so we don't invoke a stale global install.
+		cand := filepath.Join("..", "..", ".venv", "bin", "defenseclaw")
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			binary = cand
+		}
 	}
 	if _, err := exec.LookPath(binary); err != nil {
-		t.Skipf("skipping: %s not in PATH", binary)
+		if _, err2 := os.Stat(binary); err2 != nil {
+			t.Skipf("skipping: %s not found: %v", binary, err)
+		}
 	}
 
 	scanner := NewPluginScanner(binary)
