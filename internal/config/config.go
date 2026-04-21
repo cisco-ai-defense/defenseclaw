@@ -1441,7 +1441,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.debounce", 2)
 
 	viper.SetDefault("otel.enabled", false)
-	viper.SetDefault("otel.protocol", "grpc")
+	viper.SetDefault("otel.protocol", "")
 	viper.SetDefault("otel.endpoint", "")
 	viper.SetDefault("otel.tls.insecure", false)
 	viper.SetDefault("otel.tls.ca_cert", "")

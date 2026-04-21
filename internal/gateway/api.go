@@ -755,7 +755,7 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	if event.Severity == "" {
 		event.Severity = "INFO"
 	}
-	if err := a.store.LogEvent(event); err != nil {
+	if err := persistAuditEvent(a.logger, a.store, event); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -928,11 +928,6 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Route through the unified resolver so top-level ``llm:`` defaults
-	// flow into the skill scanner with ``scanners.skill.llm:`` overrides
-	// applied on top. ``NewSkillScannerFromLLM`` is the post-v5
-	// constructor; the legacy ``NewSkillScanner`` path is kept alive
-	// only for tests that still pass ``InspectLLMConfig``.
 	ss := scanner.NewSkillScannerFromLLM(
 		a.scannerCfg.Scanners.SkillScanner,
 		a.scannerCfg.ResolveLLM("scanners.skill"),
@@ -1244,17 +1239,14 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 	if a.logger != nil {
 		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
 	}
-	if a.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-inspection",
-			Target:    req.Model,
-			Severity:  req.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-		}
-		_ = a.store.LogEvent(evt)
-	}
+	_ = persistAuditEvent(a.logger, a.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    req.Model,
+		Severity:  req.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if a.otel != nil {
 		ctx := r.Context()
@@ -1343,17 +1335,14 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 	if a.logger != nil {
 		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
 	}
-	if a.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-opa-inspection",
-			Target:    req.Model,
-			Severity:  out.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-		}
-		_ = a.store.LogEvent(evt)
-	}
+	_ = persistAuditEvent(a.logger, a.store, audit.Event{
+		Action:    "guardrail-opa-inspection",
+		Target:    req.Model,
+		Severity:  out.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if a.otel != nil {
 		ctx := r.Context()

@@ -2353,26 +2353,20 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
 	if requestID != "" {
-		// Append the correlation key so the human-readable gateway.log
-		// line (which skips structured sinks) is still searchable by
-		// operators who grep for a specific request ID.
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 
 	if p.logger != nil {
 		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
 	}
-	if p.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-inspection",
-			Target:    model,
-			Severity:  verdict.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-		}
-		_ = p.store.LogEvent(evt)
-	}
+	_ = persistAuditEvent(p.logger, p.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    model,
+		Severity:  verdict.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if p.otel != nil {
 		ctx := context.Background()

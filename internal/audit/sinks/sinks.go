@@ -370,5 +370,8 @@ func defaultImmediateFlushActions() map[string]struct{} {
 		"sidecar-connected":    {},
 		"sidecar-disconnected": {},
 		"guardrail-verdict":    {},
+		"gateway-verdict":      {},
+		"gateway-lifecycle":    {},
+		"gateway-error":        {},
 	}
 }
