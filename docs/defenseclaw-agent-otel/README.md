@@ -178,6 +178,7 @@ You can also target one tool:
 - Codex one-shot `run` mode injects the same resource tags through
   `OTEL_RESOURCE_ATTRIBUTES` as best effort, but you should still verify which
   dimensions your backend actually receives
-- In live verification, `Codex Desktop` traces reached Splunk O11y but still
-  showed `deployment.environment` / `sf_environment` as `unknown`, so treat
-  `--environment` as best-effort for Codex direct mode today
+- Recent live verification showed the one-shot `run` flow publishing
+  trace-derived series for both `Codex Desktop` and `claude-code`, with the
+  requested `sf_environment` visible in Splunk O11y after a short ingestion
+  delay

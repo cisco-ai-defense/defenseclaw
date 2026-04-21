@@ -120,7 +120,6 @@ func TestBuildCodexRunSpecSetsRuntimeEnv(t *testing.T) {
 	args := strings.Join(spec.args, " ")
 	for _, want := range []string{
 		`exec -c otel.environment="codex-dev"`,
-		`-c otel.exporter={ "otlp-http" = { endpoint = "https://ingest.us1.signalfx.com/v1/logs", protocol = "binary", headers = { "X-SF-Token" = "splunk-token" } } }`,
 		`-c otel.metrics_exporter={ "otlp-http" = { endpoint = "https://ingest.us1.signalfx.com/v2/datapoint/otlp", protocol = "binary", headers = { "X-SF-Token" = "splunk-token" } } }`,
 		`-c otel.trace_exporter={ "otlp-http" = { endpoint = "https://ingest.us1.signalfx.com/v2/trace/otlp", protocol = "binary", headers = { "X-SF-Token" = "splunk-token" } } }`,
 		`--skip-git-repo-check --json Reply with ok only`,
@@ -139,11 +138,13 @@ func TestBuildCodexRunSpecSetsRuntimeEnv(t *testing.T) {
 	for _, want := range []string{
 		"https://ingest.us1.signalfx.com/v2/trace/otlp",
 		"https://ingest.us1.signalfx.com/v2/datapoint/otlp",
-		"https://ingest.us1.signalfx.com/v1/logs",
 	} {
 		if !strings.Contains(strings.Join(spec.env, "\n"), want) {
 			t.Fatalf("env missing %q in:\n%s", want, strings.Join(spec.env, "\n"))
 		}
+	}
+	if strings.Contains(strings.Join(spec.env, "\n"), "https://ingest.us1.signalfx.com/v1/logs") {
+		t.Fatalf("did not expect direct Codex logs endpoint in:\n%s", strings.Join(spec.env, "\n"))
 	}
 	attrs := env["OTEL_RESOURCE_ATTRIBUTES"]
 	for _, want := range []string{
@@ -199,7 +200,6 @@ func TestRunLaunchesBinaryWithInjectedTelemetry(t *testing.T) {
 	content := string(data)
 	for _, want := range []string{
 		`ARGS=exec -c otel.environment="codex-dev"`,
-		`otel.exporter={ "otlp-http" = { endpoint = "https://ingest.us1.signalfx.com/v1/logs", protocol = "binary", headers = { "X-SF-Token" = "splunk-token" } } }`,
 		`otel.metrics_exporter={ "otlp-http" = { endpoint = "https://ingest.us1.signalfx.com/v2/datapoint/otlp", protocol = "binary", headers = { "X-SF-Token" = "splunk-token" } } }`,
 		`otel.trace_exporter={ "otlp-http" = { endpoint = "https://ingest.us1.signalfx.com/v2/trace/otlp", protocol = "binary", headers = { "X-SF-Token" = "splunk-token" } } }`,
 		`--skip-git-repo-check --json Reply with ok only`,
@@ -211,11 +211,13 @@ func TestRunLaunchesBinaryWithInjectedTelemetry(t *testing.T) {
 	for _, want := range []string{
 		`TRACE=https://ingest.us1.signalfx.com/v2/trace/otlp`,
 		`METRICS=https://ingest.us1.signalfx.com/v2/datapoint/otlp`,
-		`LOGS=https://ingest.us1.signalfx.com/v1/logs`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("captured env missing %q:\n%s", want, content)
 		}
+	}
+	if strings.Contains(content, `LOGS=https://ingest.us1.signalfx.com/v1/logs`) {
+		t.Fatalf("did not expect direct Codex logs endpoint:\n%s", content)
 	}
 	for _, want := range []string{
 		"tenant_id=tenant-a",

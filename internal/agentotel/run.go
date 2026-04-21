@@ -191,7 +191,7 @@ func buildCodexRunSpec(opts ConfigureOpts, binary string, toolArgs []string, tar
 	env["OTEL_TRACES_EXPORTER"] = "otlp"
 	env["OTEL_METRIC_EXPORT_INTERVAL"] = "1000"
 	env["OTEL_TRACES_EXPORT_INTERVAL"] = "1000"
-	if target.logsEnabled || target.logBootstrapNeeded {
+	if target.logsEnabled {
 		env["OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"] = "http/protobuf"
 		env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = target.logEndpoint
 		if target.headerName != "" && target.headerValue != "" {
@@ -213,7 +213,7 @@ func buildCodexRunSpec(opts ConfigureOpts, binary string, toolArgs []string, tar
 	if strings.TrimSpace(opts.Environment) != "" {
 		overrides = append(overrides, "-c", fmt.Sprintf("otel.environment=%q", opts.Environment))
 	}
-	if target.logsEnabled || target.logBootstrapNeeded {
+	if target.logsEnabled {
 		overrides = append(overrides, "-c", "otel.exporter="+buildCodexExporterValue(target.logEndpoint, target))
 	}
 	overrides = append(overrides, "-c", "otel.metrics_exporter="+buildCodexExporterValue(target.metricEndpoint, target))
@@ -341,6 +341,9 @@ func printRunSummary(spec runSpec, target telemetryTarget, opts ConfigureOpts) {
 		fmt.Fprintf(os.Stderr, "[run] logs    → %s\n", target.logEndpoint)
 	}
 	for _, warning := range target.warnings {
+		if normalizedTool(opts.Tool) == ToolCodex && !target.logsEnabled && strings.Contains(warning, "OTLP logs") {
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "[run] warning: %s\n", warning)
 	}
 	if normalizedTool(opts.Tool) == ToolCodex && hasConfigTags(opts) {

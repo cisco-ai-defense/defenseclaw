@@ -32,15 +32,15 @@ type ConfigureOpts struct {
 }
 
 type telemetryTarget struct {
-	baseEndpoint             string
-	traceEndpoint            string
-	metricEndpoint           string
-	logEndpoint              string
-	logsEnabled              bool
-	logBootstrapNeeded       bool
-	headerName               string
-	headerValue              string
-	warnings                 []string
+	baseEndpoint       string
+	traceEndpoint      string
+	metricEndpoint     string
+	logEndpoint        string
+	logsEnabled        bool
+	logBootstrapNeeded bool
+	headerName         string
+	headerValue        string
+	warnings           []string
 }
 
 const (
@@ -320,6 +320,9 @@ func printConfigureSummary(tool string, target telemetryTarget) {
 	}
 
 	for _, warning := range target.warnings {
+		if normalizedTool(tool) == ToolCodex && !target.logsEnabled && strings.Contains(warning, "OTLP logs") {
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "[configure] warning: %s\n", warning)
 	}
 }
@@ -477,7 +480,7 @@ func configureCodex(opts ConfigureOpts, target telemetryTarget) error {
 	}
 	b.WriteString(codexManagedBeginMarker + "\n")
 	b.WriteString("[otel]\n")
-	if target.logsEnabled || target.logBootstrapNeeded {
+	if target.logsEnabled {
 		fmt.Fprintf(&b, "exporter = { \"otlp-http\" = { endpoint = %q, protocol = \"binary\"%s } }\n",
 			target.logEndpoint, formatTOMLHeaders(target))
 	} else {

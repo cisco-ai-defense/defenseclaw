@@ -272,9 +272,9 @@ This writes:
 - `~/.claude/settings.json`
 - `~/.codex/config.toml`
 
-Current caveat: direct `Codex` export is flowing, but Splunk O11y is still
-showing `deployment.environment` / `sf_environment` as `unknown` in live
-verification, even when `--environment` is written to `~/.codex/config.toml`.
+Recent live verification showed the one-shot `run` flow publishing trace-derived
+series for both `Codex Desktop` and `claude-code`, with the requested
+`sf_environment` visible in Splunk O11y after a short ingestion delay.
 
 For the full desktop OTel details and caveats, see [docs/defenseclaw-agent-otel/README.md](docs/defenseclaw-agent-otel/README.md).
 

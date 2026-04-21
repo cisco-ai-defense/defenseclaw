@@ -302,7 +302,7 @@ func TestConfigureCodexDirectWritesHeaders(t *testing.T) {
 	}
 }
 
-func TestConfigureCodexSplunkDirectBootstrapsLogs(t *testing.T) {
+func TestConfigureCodexSplunkDirectDisablesLogs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -321,8 +321,8 @@ func TestConfigureCodexSplunkDirectBootstrapsLogs(t *testing.T) {
 	}
 	content := string(data)
 
-	if !strings.Contains(content, `endpoint = "https://ingest.us1.signalfx.com/v1/logs"`) {
-		t.Fatal("logs exporter should bootstrap the shared OTEL provider in direct Splunk mode")
+	if !strings.Contains(content, `exporter = "none"`) {
+		t.Fatal("logs exporter should be disabled in direct Splunk mode")
 	}
 	for _, want := range []string{
 		`endpoint = "https://ingest.us1.signalfx.com/v2/datapoint/otlp"`,
