@@ -111,7 +111,8 @@ func TestDisabledProvider_EmitRuntimeAlert_NoPanic(t *testing.T) {
 func TestDisabledProvider_StartToolSpan_NoPanic(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
 	ctx, span := p.StartToolSpan(context.Background(), "shell", "running",
-		json.RawMessage(`{"cmd":"ls"}`), false, "", "builtin", "")
+		json.RawMessage(`{"cmd":"ls"}`), false, "", "builtin", "",
+		ToolSpanContext{})
 	if span != nil {
 		t.Error("span should be nil when disabled")
 	}

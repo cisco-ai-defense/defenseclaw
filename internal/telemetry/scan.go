@@ -69,6 +69,7 @@ func (p *Provider) EmitScanResult(result *scanner.ScanResult, scanID, targetType
 		findingCounts[string(f.Severity)]++
 	}
 
+	p.RecordScannerLatency(ctx, result.Scanner, durationMs)
 	p.RecordScan(ctx, result.Scanner, targetType, verdict, durationMs, findingCounts)
 
 	if !p.LogsEnabled() {

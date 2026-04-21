@@ -103,6 +103,12 @@ func (p *Provider) RecordGatewayEvent(e gatewaylog.Event) {
 // query the flat attributes for filtering and drill into body JSON
 // for details.
 func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
+	// Volume counter fires unconditionally (one observation per Emit)
+	// so dashboards can compare emission rate against sink throughput.
+	// This is the single production wiring of RecordGatewayEventEmitted
+	// — see gatewaylog.Writer.WithFanout in sidecar.go.
+	p.RecordGatewayEventEmitted(context.Background(), string(e.EventType), string(e.Severity))
+
 	if !p.Enabled() {
 		// Still record metrics even when log export is off — the meter
 		// may be a no-op but RecordGatewayEvent short-circuits cleanly.

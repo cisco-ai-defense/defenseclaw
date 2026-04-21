@@ -163,6 +163,14 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 
 // StartAgentSpan starts a new OTel span for an agent invocation session.
 // Follows OTel GenAI semconv: span name = "invoke_agent {agentName}".
+//
+// conversationID is mapped to both gen_ai.conversation.id (for OTel
+// semconv consumers) and defenseclaw.session.id (for our internal
+// SIEM dashboards which key on session_id across traces + logs).
+// agentInstanceID is additionally resolved from the process-level
+// default when the caller leaves it blank; this keeps every span
+// carrying a stable identifier even on the non-session code paths
+// (guardrail proxy bootstrap, diagnostic invocations).
 func (p *Provider) StartAgentSpan(
 	ctx context.Context,
 	conversationID, agentName, provider string,
@@ -185,9 +193,16 @@ func (p *Provider) StartAgentSpan(
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 		attribute.String("gen_ai.agent.name", agentName),
 		attribute.String("gen_ai.conversation.id", conversationID),
+		attribute.String("defenseclaw.session.id", conversationID),
 	)
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
+	}
+	if inst := p.AgentInstanceID(); inst != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.agent.id", inst),
+			attribute.String("defenseclaw.agent.instance_id", inst),
+		)
 	}
 
 	return ctx, span
@@ -206,16 +221,64 @@ func (p *Provider) EndAgentSpan(span trace.Span, errMsg string) {
 	span.End()
 }
 
+// ToolSpanContext bundles the correlation identifiers the tool-call
+// runtime (and the audit/sink emitters) need to stamp on every tool
+// span. Split out into a struct so adding a new field (policy_id,
+// destination_app, eventual transaction ids) does not churn every
+// call site's positional parameter list.
+//
+// Zero fields are safe — the span helper only sets attributes when
+// the corresponding string is non-empty. Callers that have richer
+// information (tool id from the LLM stream, active session key from
+// the router) fill what they have.
+type ToolSpanContext struct {
+	// ToolID is the provider-assigned identifier for this specific
+	// tool invocation (e.g. the OpenAI tool_call_id). Required for
+	// /v1/agentwatch/summary top_tools aggregation and for joining
+	// tool_call and tool_result rows in SQL.
+	ToolID string
+
+	// SessionID is the conversation / sessionKey this tool call
+	// belongs to. Mirrored to both the OTel conversation id and
+	// the DefenseClaw session id attributes.
+	SessionID string
+
+	// RunID is the sidecar-process run identifier (DEFENSECLAW_RUN_ID).
+	// Kept on the span so operators can filter a single sidecar
+	// lifetime's tool activity without a join.
+	RunID string
+
+	// DestinationApp identifies the upstream provider the tool call
+	// targets (builtin | mcp:<server> | skill:<key>). Populated by
+	// the router once it resolves the tool provider.
+	DestinationApp string
+
+	// PolicyID is the identifier of the policy that approved or
+	// blocked this tool invocation. Empty when no policy fired.
+	PolicyID string
+
+	// AgentName is the logical agent name driving the invocation.
+	// Derived from the incoming stream event (if present) or from
+	// cfg.Claw.Mode.
+	AgentName string
+}
+
 // StartToolSpan starts a new OTel span for a tool_call event.
 // Follows OTel GenAI semconv: span name = "execute_tool {toolName}".
 // Raw args are not exported to avoid leaking tokens, keys, or prompt content.
 // Metrics are always recorded when OTel is enabled, even if traces are off.
+//
+// cor carries optional correlation identifiers (tool id, session id,
+// policy id, destination app). Every field is optional — blank values
+// simply skip the corresponding attribute so older call sites keep
+// working without churn.
 func (p *Provider) StartToolSpan(
 	ctx context.Context,
 	tool, status string,
 	args json.RawMessage,
 	dangerous bool,
 	flaggedPattern, toolProvider, skillKey string,
+	cor ToolSpanContext,
 ) (context.Context, trace.Span) {
 	p.RecordToolCall(ctx, tool, toolProvider, dangerous)
 
@@ -241,6 +304,37 @@ func (p *Provider) StartToolSpan(
 
 	if skillKey != "" {
 		span.SetAttributes(attribute.String("defenseclaw.tool.skill_key", skillKey))
+	}
+
+	if cor.ToolID != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.tool.call.id", cor.ToolID),
+			attribute.String("defenseclaw.tool.id", cor.ToolID),
+		)
+	}
+	if cor.SessionID != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.conversation.id", cor.SessionID),
+			attribute.String("defenseclaw.session.id", cor.SessionID),
+		)
+	}
+	if cor.RunID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", cor.RunID))
+	}
+	if cor.DestinationApp != "" {
+		span.SetAttributes(attribute.String("defenseclaw.destination.app", cor.DestinationApp))
+	}
+	if cor.PolicyID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.policy.id", cor.PolicyID))
+	}
+	if cor.AgentName != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
+	}
+	if inst := p.AgentInstanceID(); inst != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.agent.id", inst),
+			attribute.String("defenseclaw.agent.instance_id", inst),
+		)
 	}
 
 	if flaggedPattern != "" {
@@ -286,11 +380,16 @@ func (p *Provider) EndToolSpan(span trace.Span, exitCode, outputLen int, startTi
 
 // StartApprovalSpan starts a new OTel span for an exec approval request.
 // Raw command strings and argv are not exported to avoid leaking tokens or secrets.
+//
+// cor carries optional correlation identifiers (session, run, policy,
+// destination). Empty fields are skipped; older callers that still
+// pass a zero ToolSpanContext see the pre-existing behavior.
 func (p *Provider) StartApprovalSpan(
 	ctx context.Context,
 	id, command string,
 	argv []string,
 	cwd string,
+	cor ToolSpanContext,
 ) (context.Context, trace.Span) {
 	if !p.TracesEnabled() {
 		return ctx, nil
@@ -306,6 +405,36 @@ func (p *Provider) StartApprovalSpan(
 		attribute.String("defenseclaw.approval.command_name", baseCommand(command)),
 		attribute.Int("defenseclaw.approval.argc", len(argv)),
 	)
+	if cor.ToolID != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.tool.call.id", cor.ToolID),
+			attribute.String("defenseclaw.tool.id", cor.ToolID),
+		)
+	}
+	if cor.SessionID != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.conversation.id", cor.SessionID),
+			attribute.String("defenseclaw.session.id", cor.SessionID),
+		)
+	}
+	if cor.RunID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", cor.RunID))
+	}
+	if cor.DestinationApp != "" {
+		span.SetAttributes(attribute.String("defenseclaw.destination.app", cor.DestinationApp))
+	}
+	if cor.PolicyID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.policy.id", cor.PolicyID))
+	}
+	if cor.AgentName != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
+	}
+	if inst := p.AgentInstanceID(); inst != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.agent.id", inst),
+			attribute.String("defenseclaw.agent.instance_id", inst),
+		)
+	}
 
 	return ctx, span
 }
@@ -411,6 +540,63 @@ func (p *Provider) EndLLMSpan(
 		span.SetStatus(codes.Ok, "")
 	}
 
+	span.End()
+}
+
+// StartJudgeSpan starts a span for one LLM judge ChatCompletion (Track 3).
+// Name: defenseclaw.guardrail.judge
+func (p *Provider) StartJudgeSpan(
+	ctx context.Context,
+	genAISystem, model string,
+	maxTokens int,
+	kind string,
+) (context.Context, trace.Span) {
+	if !p.TracesEnabled() {
+		return ctx, nil
+	}
+	ctx, span := p.tracer.Start(ctx, "defenseclaw.guardrail.judge",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(time.Now()),
+	)
+	span.SetAttributes(
+		attribute.String("gen_ai.system", genAISystem),
+		attribute.String("gen_ai.request.model", model),
+		attribute.Int("gen_ai.request.max_tokens", maxTokens),
+		attribute.String("judge.kind", kind),
+	)
+	return ctx, span
+}
+
+// EndJudgeSpan ends a judge span with GenAI usage + DefenseClaw attributes.
+// Callers record histograms via Provider.RecordJudgeLatency / RecordJudgeTokens.
+func (p *Provider) EndJudgeSpan(
+	span trace.Span,
+	responseModel string,
+	promptTokens, completionTokens int,
+	latencyMs int64,
+	verdictAction string,
+	cacheHit bool,
+	err error,
+) {
+	if span == nil {
+		return
+	}
+	if responseModel == "" {
+		responseModel = "unknown"
+	}
+	span.SetAttributes(
+		attribute.String("gen_ai.response.model", responseModel),
+		attribute.Int("gen_ai.usage.input_tokens", promptTokens),
+		attribute.Int("gen_ai.usage.output_tokens", completionTokens),
+		attribute.Int64("judge.latency_ms", latencyMs),
+		attribute.String("judge.verdict", verdictAction),
+		attribute.Bool("cache.hit", cacheHit),
+	)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
 	span.End()
 }
 
