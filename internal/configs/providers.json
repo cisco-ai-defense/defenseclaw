@@ -19,6 +19,60 @@
       "env_keys": ["OPENAI_API_KEY"]
     },
     {
+      "name": "openai-codex",
+      "domains": ["chatgpt.com/backend-api"],
+      "profile_id": null,
+      "env_keys": []
+    },
+    {
+      "name": "groq",
+      "domains": ["api.groq.com"],
+      "profile_id": "groq:default",
+      "env_keys": ["GROQ_API_KEY"]
+    },
+    {
+      "name": "mistral",
+      "domains": ["api.mistral.ai"],
+      "profile_id": "mistral:default",
+      "env_keys": ["MISTRAL_API_KEY"]
+    },
+    {
+      "name": "cohere",
+      "domains": ["api.cohere.com", "api.cohere.ai"],
+      "profile_id": "cohere:default",
+      "env_keys": ["COHERE_API_KEY"]
+    },
+    {
+      "name": "deepseek",
+      "domains": ["api.deepseek.com"],
+      "profile_id": "deepseek:default",
+      "env_keys": ["DEEPSEEK_API_KEY"]
+    },
+    {
+      "name": "perplexity",
+      "domains": ["api.perplexity.ai"],
+      "profile_id": "perplexity:default",
+      "env_keys": ["PERPLEXITY_API_KEY"]
+    },
+    {
+      "name": "together",
+      "domains": ["api.together.xyz"],
+      "profile_id": "together:default",
+      "env_keys": ["TOGETHER_API_KEY"]
+    },
+    {
+      "name": "xai",
+      "domains": ["api.x.ai"],
+      "profile_id": "xai:default",
+      "env_keys": ["XAI_API_KEY"]
+    },
+    {
+      "name": "vertex",
+      "domains": ["aiplatform.googleapis.com"],
+      "profile_id": null,
+      "env_keys": []
+    },
+    {
       "name": "azure",
       "domains": ["openai.azure.com"],
       "profile_id": "azure:default",

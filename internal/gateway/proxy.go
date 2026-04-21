@@ -404,10 +404,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The fetch interceptor sets X-DC-Target-URL to the request origin only
+	// (scheme://host). Rejoin the incoming request path so that path-prefixed
+	// provider entries in providers.json (e.g. "chatgpt.com/backend-api") can
+	// be matched correctly by the allowlist and the provider inference.
+	targetForMatch := targetOrigin + r.URL.Path
+
 	// SSRF protection: only forward to domains listed in providers.json
 	// or Ollama loopback.  Reject other internal hosts (e.g. cloud IMDS).
-	if !isKnownProviderDomain(targetOrigin) {
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s\n", targetOrigin)
+	if !isKnownProviderDomain(targetForMatch) {
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s (path=%s)\n", targetOrigin, r.URL.Path)
 		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
 		return
 	}
@@ -438,7 +444,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
 
-	provider := inferProviderFromURL(targetOrigin)
+	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
 	userText := lastUserText(partial.Messages)
@@ -494,11 +500,77 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, nil, nil)
 		if verdict.Action == "block" && mode == "action" {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			// Enqueue a notification BEFORE writing the block
+			// response so the next proxy call (this client's retry,
+			// or any other session) carries the authoritative
+			// `[DEFENSECLAW SECURITY ENFORCEMENT]` system message
+			// via FormatSystemMessage. Without this, only the fake
+			// assistant turn the client persists in its local
+			// history informs the LLM — which is (a) client-dependent
+			// and (b) semantically weaker than a system directive.
+			p.enqueueBlockNotification(verdict, "prompt", partial.Model)
 			// Return 200 with the block message as an assistant turn so
 			// openclaw surfaces it to the user rather than treating it as
 			// an error and retrying with a different provider.
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
 			return
+		}
+	}
+
+	// --- Launder prior DefenseClaw-generated assistant turns ---
+	//
+	// When a previous turn was blocked, we returned a synthetic
+	// assistant message starting with "[DefenseClaw] This request was
+	// blocked…" as the *response*. OpenAI-compatible clients typically
+	// persist that into their local conversation history and replay it
+	// back at us on the next turn. That's a problem because:
+	//   (a) the LLM sees its own prior "refusal" as immutable history
+	//       and may keep reinforcing it instead of following the
+	//       current system enforcement notice;
+	//   (b) it makes the conversation look cluttered and confusing;
+	//   (c) for OpenAI Responses API specifically, the persisted item
+	//       has an `id` we don't control on subsequent turns — see the
+	//       `msg_blocked` prefix fix in writeBlockedStreamOpenAIResponses.
+	//
+	// Strip them out before forwarding. The NotificationQueue (fed by
+	// enqueueBlockNotification above) is the canonical channel for
+	// informing the LLM about past enforcement actions, so we don't
+	// lose any security context by dropping these echo turns.
+	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); stripped > 0 {
+		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
+		body = []byte(launderedBody)
+		if p.logger != nil {
+			_ = p.logger.LogAction("guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
+		}
+	}
+
+	// --- Inject pending security notifications as a system-level prompt ---
+	//
+	// Mirrors the handleChatCompletion injection site (search
+	// "injecting security notification into LLM request"). Without this,
+	// proxy-originated blocks (step 1) push notifications onto the queue
+	// but the queue is only ever READ on the chat-completions code path,
+	// meaning OpenAI Responses API clients (e.g. openai-codex via
+	// chatgpt.com/backend-api/codex/responses) never see the enforcement
+	// notice on the next turn. With this block, every supported provider
+	// surface carries the notification forward as either a system
+	// message or merged instructions string.
+	if p.notify != nil {
+		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
+			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
+				body = []byte(patched)
+				if p.logger != nil {
+					_ = p.logger.LogAction("guardrail-notify-inject", site, "injected security notification into passthrough LLM request")
+				}
+			} else {
+				// Not a failure: some provider surfaces (Anthropic,
+				// Gemini) aren't wired for passthrough injection yet.
+				// Log at debug-level stderr so operators notice drift
+				// if a new provider appears, but never fail the
+				// request just because injection didn't fit.
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough notification injection skipped: %v\n", err)
+			}
 		}
 	}
 
@@ -539,15 +611,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
 		return
 	}
+	// Pin ContentLength to the (possibly-mutated) body size so the Go
+	// http client doesn't try to use the client-supplied length or fall
+	// back to chunked encoding. Needed because notification injection
+	// can change the body length; without this, some upstream providers
+	// (notably Anthropic) reject the request with 400 "unexpected EOF".
+	upstreamReq.ContentLength = int64(len(body))
 
 	// Copy all original headers except proxy-hop and auth headers.
 	// Auth headers (Authorization, x-api-key, api-key) are stripped to avoid
 	// duplicates — the resolved upstreamAuth is set as the single canonical
-	// Authorization header below.
+	// Authorization header below. Content-Length is also stripped because
+	// notification injection can change the body size; upstreamReq.ContentLength
+	// is the authoritative value (set above) and the Go http client writes
+	// the correct header automatically.
 	for k, vs := range r.Header {
 		switch strings.ToLower(k) {
 		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
-			"authorization", "x-api-key", "api-key":
+			"authorization", "x-api-key", "api-key", "content-length":
 			continue
 		}
 		for _, v := range vs {
@@ -601,6 +682,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 			if verdict.Action == "block" && mode == "action" {
 				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
+				p.enqueueBlockNotification(verdict, "completion", partial.Model)
 				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 				return
 			}
@@ -1016,7 +1098,7 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		return p.resolveConfiguredProvider(req)
 	}
 
-	prefix := inferProviderFromURL(req.TargetURL)
+	prefix := inferProviderFromURL(req.TargetURL + req.TargetPath)
 	if prefix == "" {
 		return nil
 	}
@@ -1088,7 +1170,11 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// X-DC-Target-URL is set by the plugin's fetch interceptor and tells the
 	// proxy the real upstream URL the request was originally destined for.
+	// The header carries the origin only (scheme://host); the path arrives on
+	// the incoming request URL. Keep them separate so Azure baseURL selection
+	// below keeps working, but combine them for provider inference.
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
+	req.TargetPath = r.URL.Path
 
 	// X-AI-Auth carries the real provider API key, normalized to
 	// "Bearer <key>" by the fetch interceptor regardless of which header
@@ -1117,6 +1203,34 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		http.Error(w, `{"error":{"message":"DefenseClaw guardrail is disabled","code":"guardrail_disabled"}}`,
 			http.StatusServiceUnavailable)
 		return
+	}
+
+	// --- Launder prior DefenseClaw-generated assistant turns ---
+	//
+	// See launderInboundHistory in handlePassthrough for the full
+	// rationale. Chat Completions clients (e.g. the LiteLLM bridge,
+	// openclaw plugins) hit this code path, and they suffer the same
+	// "replay stale refusal" pollution problem as Responses API clients.
+	// Keep the mutation in lockstep so Chat Completions and Responses
+	// API callers both get the cleanup.
+	if len(req.RawBody) > 0 {
+		if launderedBody, stripped := launderInboundHistory(req.RawBody, r.URL.Path); stripped > 0 {
+			fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from chat-completions history\n", stripped)
+			req.RawBody = launderedBody
+			// Rebuild req.Messages from the laundered body so the
+			// structured-path fallback stays consistent with RawBody.
+			// Safe to ignore the error: if laundering produced valid
+			// JSON, re-parsing it back will too.
+			var rebuilt struct {
+				Messages []ChatMessage `json:"messages"`
+			}
+			if json.Unmarshal(launderedBody, &rebuilt) == nil {
+				req.Messages = rebuilt.Messages
+			}
+			if p.logger != nil {
+				_ = p.logger.LogAction("guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
+			}
+		}
 	}
 
 	// --- Inject pending security notifications as a system message ---
@@ -1196,6 +1310,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				p.otel.EndAgentSpan(agentSpan, "guardrail blocked")
 			}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			if req.Stream {
 				p.writeBlockedStream(w, req.Model, msg)
 			} else {
@@ -1341,6 +1456,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, "openclaw")
 			}
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
+			p.enqueueBlockNotification(verdict, "completion", aliasModel)
 			p.writeBlockedResponse(w, aliasModel, msg)
 			return
 		}
@@ -1361,6 +1477,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 				}
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
+				p.enqueueBlockNotification(verdict, "completion", aliasModel)
 				p.writeBlockedResponse(w, aliasModel, msg)
 				return
 			}
@@ -1510,6 +1627,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
 					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
 				p.recordTelemetry(r.Context(), "completion", aliasModel, midVerdict, 0, nil, nil)
+				p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
 				streamBlocked = true
 				streamCancel()
 				return
@@ -1559,6 +1677,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
 					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
 				p.recordTelemetry(r.Context(), "completion", aliasModel, initVerdict, 0, nil, nil)
+				p.enqueueBlockNotification(initVerdict, "completion", aliasModel)
 				streamBlocked = true
 			}
 		}
@@ -1705,6 +1824,58 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 // Blocked response helpers
 // ---------------------------------------------------------------------------
 
+// enqueueBlockNotification pushes a SecurityNotification describing a
+// guardrail block onto the shared NotificationQueue so that subsequent
+// requests — from any session, via any provider surface — carry the
+// enforcement context as a `system` message via FormatSystemMessage.
+//
+// Rationale: the synchronous block response we return to the client
+// shows the `[DefenseClaw]` banner inline in the user's UI, but the
+// *LLM* doesn't see that banner on the next turn except as whatever
+// fragment the client chooses to replay in conversation history. By
+// enqueueing a notification on every block site, the next proxy call
+// prepends an authoritative `[DEFENSECLAW SECURITY ENFORCEMENT] …`
+// block to the request so the model acknowledges the enforcement
+// instead of silently retrying the refused request.
+//
+// Companion to blockMessage() — both should be called at every block
+// site. No-op when notify is nil or verdict is nil so callers don't
+// need a guard at each site.
+func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, direction, model string) {
+	if p.notify == nil || verdict == nil {
+		return
+	}
+	// SubjectType drives the "Skill"/"Plugin"/"MCP"/"Tool" label in
+	// FormatSystemMessage. "prompt" / "completion" aren't one of the
+	// recognized keys, so they fall through to the "Skill" label
+	// which renders fine — but we also pass them so downstream sinks
+	// can distinguish input-side vs. output-side blocks.
+	subject := direction
+	if subject != "prompt" && subject != "completion" {
+		subject = "prompt"
+	}
+	findings := 0
+	if verdict.Findings != nil {
+		findings = len(verdict.Findings)
+	}
+	p.notify.Push(SecurityNotification{
+		SubjectType: subject,
+		// SkillName is rendered verbatim in the enforcement notice.
+		// Use the model name so operators and the LLM both see which
+		// target the block applied to; not sensitive and always
+		// present at block time.
+		SkillName: model,
+		Severity:  verdict.Severity,
+		Findings:  findings,
+		Actions:   []string{"block"},
+		// verdict.Reason is minted from user content in the regex
+		// path and can carry literal secrets/PII. Always scrub
+		// before the text lands in a system message that gets
+		// shipped off-box to the LLM provider.
+		Reason: redaction.ForSinkReason(verdict.Reason),
+	})
+}
+
 func (p *GuardrailProxy) writeBlockedResponse(w http.ResponseWriter, model, msg string) {
 	finishReason := "content_filter"
 	blocked := true
@@ -1840,6 +2011,14 @@ func (p *GuardrailProxy) writeBlockedResponseGemini(w http.ResponseWriter, msg s
 
 // writeBlockedResponseOpenAIResponses returns a blocked response in OpenAI
 // Responses API format (non-streaming).
+//
+// Design note: we deliberately emit `status: "completed"` (not "incomplete"
+// with `incomplete_details.reason = "content_filter"`) because changing it
+// risks openai-codex CLI, ChatGPT, and other Responses API clients silently
+// discarding the `output[]` array — which would hide the `[DefenseClaw]`
+// banner the user needs to see. DefenseClaw-aware clients should instead
+// detect blocks via the `X-DefenseClaw-Blocked` header and the
+// `defenseclaw_blocked` / `defenseclaw_reason` payload fields.
 func (p *GuardrailProxy) writeBlockedResponseOpenAIResponses(w http.ResponseWriter, model, msg string) {
 	resp := map[string]interface{}{
 		"id":         "resp_blocked",
@@ -1894,7 +2073,21 @@ func (p *GuardrailProxy) writeBlockedStreamOpenAIResponses(w http.ResponseWriter
 	}
 
 	respID := "resp_blocked"
-	itemID := "item_blocked"
+	// IMPORTANT: the OpenAI Responses API (and the ChatGPT /backend-api
+	// Codex backend that ride on it) strictly validate item IDs in the
+	// conversation input array — assistant `message` items must have
+	// IDs starting with `msg`. Before this fix the stream emitted
+	// `item_blocked`, which the client happily persisted into its
+	// local history; on the *next* turn the Responses API rejected the
+	// whole conversation with `Invalid 'input[N].id': 'item_blocked'.
+	// Expected an ID that begins with 'msg'.`, wedging the TUI after
+	// any DefenseClaw block.
+	//
+	// Non-streaming siblings (writeBlockedResponseOpenAIResponses,
+	// writeBlockedResponseAnthropic) already use a `msg_*` prefix —
+	// keep the streaming path consistent with both the spec and the
+	// rest of the block surface.
+	itemID := "msg_blocked"
 
 	writeSSE("response.created", map[string]interface{}{
 		"type": "response.created",
@@ -1971,6 +2164,13 @@ func (p *GuardrailProxy) writeBlockedStreamOpenAIResponses(w http.ResponseWriter
 
 // writeBlockedResponseAnthropic returns a blocked response in Anthropic
 // Messages API format (non-streaming).
+//
+// Design note: we deliberately emit `stop_reason: "end_turn"` rather than
+// `"refusal"` for the same reason as writeBlockedResponseOpenAIResponses —
+// some Anthropic SDKs / agent stacks treat `refusal` as "no content" and
+// suppress the message body, which would hide the `[DefenseClaw]` banner.
+// DefenseClaw-aware clients should detect blocks via the
+// `X-DefenseClaw-Blocked` header and `defenseclaw_blocked` payload field.
 func (p *GuardrailProxy) writeBlockedResponseAnthropic(w http.ResponseWriter, model, msg string) {
 	resp := map[string]interface{}{
 		"id":          "msg_blocked",
@@ -2505,6 +2705,8 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 
 // injectSystemMessage prepends a system message to the "messages" array in
 // the raw JSON body. This preserves all other fields the client sent.
+// Works for OpenAI Chat Completions, Anthropic (also uses "messages"), and
+// any other API that mirrors the Chat Completions schema.
 func injectSystemMessage(raw json.RawMessage, content string) (json.RawMessage, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -2534,6 +2736,267 @@ func injectSystemMessage(raw json.RawMessage, content string) (json.RawMessage, 
 	}
 	m["messages"] = newMsgBytes
 	return json.Marshal(m)
+}
+
+// injectSystemMessageForResponsesAPI merges the notification content into the
+// top-level `instructions` string of an OpenAI Responses API request. This
+// is the canonical system-prompt slot for the Responses API (used by e.g.
+// ChatGPT's /backend-api/codex/responses endpoint, which openai-codex/gpt-5.x
+// targets).
+//
+// Why not prepend into `input[]` instead? The Responses API input items have
+// strict schema — assistant `message` items must have IDs starting with
+// `msg_`, system items have a different shape again, and the API rejects
+// unknown IDs in the conversation history. Mutating `input[]` is fragile;
+// `instructions` is documented as the system prompt and accepts arbitrary
+// text. See also handlePassthrough where we return `msg_blocked` as the
+// item ID for the same reason.
+//
+// The notification content is prepended (not appended) so it wins if the
+// caller's instructions otherwise contradict the enforcement notice.
+func injectSystemMessageForResponsesAPI(raw json.RawMessage, content string) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("proxy: inject responses instructions: unmarshal: %w", err)
+	}
+
+	existing := ""
+	if cur, ok := m["instructions"]; ok {
+		// Tolerate the field being a JSON string or missing.
+		if err := json.Unmarshal(cur, &existing); err != nil {
+			// If it's not a string we can't safely mutate it — skip.
+			return nil, fmt.Errorf("proxy: inject responses instructions: non-string instructions: %w", err)
+		}
+	}
+	merged := content
+	if existing != "" {
+		merged = content + "\n\n" + existing
+	}
+	mergedBytes, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: inject responses instructions: marshal: %w", err)
+	}
+	m["instructions"] = mergedBytes
+	return json.Marshal(m)
+}
+
+// defenseClawBlockBanner is the content prefix every synthetic
+// block message we emit starts with (see blockMessage in guardrail.go).
+// Used as the detection signal for laundering — any assistant turn in
+// an incoming request whose text starts with this prefix was generated
+// by DefenseClaw on a prior turn, persisted in the client's local
+// conversation history, and is being replayed back at us. We strip
+// those from the upstream body so the LLM isn't seeing stale fake
+// refusals alongside the current notification-queue system message.
+const defenseClawBlockBanner = "[DefenseClaw]"
+
+// defenseClawBlockIDPrefix is the item-ID prefix we emit for synthetic
+// assistant messages on OpenAI Responses API and Anthropic block paths.
+// Detected (in addition to the content prefix) so laundering still
+// catches a block message even if the client rewrote the content.
+const defenseClawBlockIDPrefix = "msg_blocked"
+
+// responsesTextFromContent walks the Responses API `content` array
+// (which is `[{type: "output_text" | "input_text", text: "..."}]`) and
+// concatenates the text fields. Returns "" when content isn't an array
+// or contains no text parts.
+func responsesTextFromContent(content json.RawMessage) string {
+	if len(content) == 0 || content[0] != '[' {
+		return ""
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(p.Text)
+	}
+	return b.String()
+}
+
+// launderChatCompletionsHistory removes assistant turns from the
+// `messages` array whose content begins with the DefenseClaw banner
+// prefix. Handles the Chat Completions / Anthropic Messages shape where
+// `content` is a plain string; assistant turns with structured content
+// (array of parts) are probed via their first `text` part. Returns the
+// mutated body, the count of stripped turns, and any parse error.
+//
+// No-op when the body has no `messages` field or no qualifying assistant
+// turns — in that case returns the original raw bytes.
+func launderChatCompletionsHistory(raw json.RawMessage) (json.RawMessage, int, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder chat history: unmarshal: %w", err)
+	}
+	msgBytes, ok := m["messages"]
+	if !ok {
+		return raw, 0, nil
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(msgBytes, &messages); err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder chat history: unmarshal messages: %w", err)
+	}
+	stripped := 0
+	kept := make([]json.RawMessage, 0, len(messages))
+	for _, item := range messages {
+		var probe struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(item, &probe) == nil && probe.Role == "assistant" && len(probe.Content) > 0 {
+			var text string
+			switch probe.Content[0] {
+			case '"':
+				_ = json.Unmarshal(probe.Content, &text)
+			case '[':
+				text = responsesTextFromContent(probe.Content)
+			}
+			if strings.HasPrefix(text, defenseClawBlockBanner) {
+				stripped++
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	if stripped == 0 {
+		return raw, 0, nil
+	}
+	newMsgBytes, err := json.Marshal(kept)
+	if err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder chat history: marshal messages: %w", err)
+	}
+	m["messages"] = newMsgBytes
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder chat history: marshal body: %w", err)
+	}
+	return out, stripped, nil
+}
+
+// launderResponsesHistory removes assistant items from the Responses
+// API `input` array whose id starts with `msg_blocked` OR whose
+// aggregated text begins with the DefenseClaw banner. Both signals are
+// checked because a cautious client may rewrite the ID (rare) and a
+// misbehaving client may rewrite the text (also rare) — catching either
+// makes laundering robust against both kinds of drift.
+//
+// When `input` is a plain string (not an array) or absent, the body
+// is returned unchanged.
+func launderResponsesHistory(raw json.RawMessage) (json.RawMessage, int, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder responses history: unmarshal: %w", err)
+	}
+	inputBytes, ok := m["input"]
+	if !ok || len(inputBytes) == 0 || inputBytes[0] != '[' {
+		return raw, 0, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(inputBytes, &items); err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder responses history: unmarshal input: %w", err)
+	}
+	stripped := 0
+	kept := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		var probe struct {
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			ID      string          `json:"id"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(item, &probe) == nil && probe.Role == "assistant" {
+			if strings.HasPrefix(probe.ID, defenseClawBlockIDPrefix) {
+				stripped++
+				continue
+			}
+			if strings.HasPrefix(responsesTextFromContent(probe.Content), defenseClawBlockBanner) {
+				stripped++
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	if stripped == 0 {
+		return raw, 0, nil
+	}
+	newInputBytes, err := json.Marshal(kept)
+	if err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder responses history: marshal input: %w", err)
+	}
+	m["input"] = newInputBytes
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw, 0, fmt.Errorf("proxy: launder responses history: marshal body: %w", err)
+	}
+	return out, stripped, nil
+}
+
+// launderInboundHistory dispatches to the correct format-specific
+// launderer based on the request path. Returns the (possibly mutated)
+// body and the count of stripped turns. Errors are logged at the call
+// site but never fail the request — a laundering failure should never
+// block a legitimate user.
+func launderInboundHistory(raw json.RawMessage, path string) (json.RawMessage, int) {
+	if strings.HasSuffix(path, "/responses") {
+		out, n, err := launderResponsesHistory(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] launder responses history: %v\n", err)
+			return raw, 0
+		}
+		return out, n
+	}
+	if strings.HasSuffix(path, "/chat/completions") || strings.Contains(path, "/messages") {
+		out, n, err := launderChatCompletionsHistory(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] launder chat history: %v\n", err)
+			return raw, 0
+		}
+		return out, n
+	}
+	return raw, 0
+}
+
+// injectNotificationForPassthrough dispatches to the correct format-aware
+// injector based on the provider/path the request is bound for. Returns
+// the mutated raw body and a label describing the injection site for
+// observability. When no known injection path applies, returns the
+// original bytes and the empty label with a non-nil error.
+//
+// Current coverage:
+//   - OpenAI Chat Completions (path ends in /chat/completions, or provider=openai
+//     with `messages` field) → inject into `messages[]`
+//   - OpenAI Responses API (path ends in /responses) → inject into `instructions`
+//
+// Deferred (follow-up): Anthropic top-level `system`, Gemini
+// `systemInstruction`. Those providers currently bypass notification
+// injection entirely in the passthrough path — they still get notifications
+// pushed onto the queue by enqueueBlockNotification, but the queue content
+// only reaches the LLM when the *next* request happens to go through
+// handleChatCompletion or hits one of the wired paths above. That gap is
+// acceptable for this PR because (a) notifications are TTL-bounded so
+// stale-ness is self-correcting, (b) most OSS agent stacks route through
+// OpenAI-compatible endpoints, and (c) adding Anthropic/Gemini injection
+// requires per-provider payload synthesis that would double PR scope.
+func injectNotificationForPassthrough(raw json.RawMessage, content, path string) (json.RawMessage, string, error) {
+	if strings.HasSuffix(path, "/responses") {
+		out, err := injectSystemMessageForResponsesAPI(raw, content)
+		if err != nil {
+			return raw, "", err
+		}
+		return out, "responses-api/instructions", nil
+	}
+	if strings.HasSuffix(path, "/chat/completions") || strings.Contains(path, "/messages") {
+		out, err := injectSystemMessage(raw, content)
+		if err != nil {
+			return raw, "", err
+		}
+		return out, "chat-completions/messages", nil
+	}
+	return raw, "", fmt.Errorf("proxy: inject passthrough: no known injection path for %q", path)
 }
 
 // ---------------------------------------------------------------------------

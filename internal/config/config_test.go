@@ -835,6 +835,43 @@ func TestOTelEnvVarTLSInsecure(t *testing.T) {
 	}
 }
 
+func TestLoadOTelResourceAttributesPreservesDottedKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", tmpDir)
+
+	configFile := filepath.Join(tmpDir, DefaultConfigName)
+	data := []byte(`otel:
+  enabled: true
+  resource:
+    attributes:
+      defenseclaw.preset: splunk-o11y
+      defenseclaw.preset_name: Splunk Observability Cloud
+      service.name: pr117
+`)
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	want := map[string]string{
+		"defenseclaw.preset":      "splunk-o11y",
+		"defenseclaw.preset_name": "Splunk Observability Cloud",
+		"service.name":            "pr117",
+	}
+	if len(cfg.OTel.Resource.Attributes) != len(want) {
+		t.Fatalf("OTel.Resource.Attributes len = %d, want %d (%v)", len(cfg.OTel.Resource.Attributes), len(want), cfg.OTel.Resource.Attributes)
+	}
+	for key, wantValue := range want {
+		if got := cfg.OTel.Resource.Attributes[key]; got != wantValue {
+			t.Errorf("OTel.Resource.Attributes[%q] = %q, want %q", key, got, wantValue)
+		}
+	}
+}
+
 func TestConfig_ClawHomeDir(t *testing.T) {
 	cfg := &Config{
 		Claw: ClawConfig{HomeDir: "/tmp/my-claw"},

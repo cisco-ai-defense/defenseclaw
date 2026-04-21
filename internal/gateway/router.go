@@ -536,6 +536,19 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			r.contextTracker.Record(envelope.SessionKey, msg.Role, contentStr)
 		}
 
+		// Best-effort prompt-direction guardrail scan for inbound user
+		// messages observed via the WebSocket. Unlike the proxy path
+		// this is observational — by the time we see session.message
+		// the prompt has already been sent to the LLM, so bad verdicts
+		// raise an audit row + notification but cannot block. Without
+		// this hook, prompts that bypass the guardrail HTTP proxy
+		// (e.g. OpenClaw shelling out to a separate CLI subprocess
+		// whose fetch is not monkey-patched) are logged to
+		// gateway.jsonl but never judged.
+		if msg.Role == "user" && contentStr != "" {
+			r.scanInboundPrompt(envelope.SessionKey, envelope.MessageID, msg.Model, contentStr)
+		}
+
 		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				_ = r.logger.LogAction("gateway-multi-turn-injection", envelope.SessionKey,
@@ -544,8 +557,8 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				// verdict event carries the conversation identifier
 				// even though we're outside any HTTP request.
 				vctx := ContextWithSessionID(context.Background(), envelope.SessionKey)
-				emitVerdict(vctx, "multi-turn", "prompt", "",
-					"alert", "repeated injection patterns across user turns",
+				emitVerdict(vctx, gatewaylog.StageMultiTurn, gatewaylog.DirectionPrompt, "",
+					"warn", "repeated injection patterns across user turns",
 					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
 				if r.otel != nil {
 					r.otel.EmitRuntimeAlert(
@@ -565,6 +578,109 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 	}
 
 	readLoopLogf("[bifrost] session.message SKIPPED: no message field, stream=%q", envelope.Stream)
+}
+
+// scanInboundPrompt runs a best-effort guardrail scan on a user prompt
+// observed via the session.message WebSocket stream. This is the
+// observational cousin of the proxy-path guardrail: the prompt has
+// already been dispatched to the LLM by the time we see the event, so
+// non-allow verdicts produce an audit row + operator notification but
+// cannot halt the in-flight request. Runs are bounded by judgeSem so
+// a burst of concurrent sessions cannot starve the tool-result judge.
+//
+// We deliberately do not unconditionally fire the LLM judge on every
+// benign user turn — the proxy path already judges every prompt that
+// flows through it, and running an LLM round-trip for every OpenClaw
+// chat turn would double-bill operators who have the proxy path wired.
+// Only prompts that light up the deterministic regex stage escalate
+// to the judge.
+func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content string) {
+	if content == "" {
+		return
+	}
+	start := time.Now()
+
+	verdict := scanLocalPatterns("prompt", content)
+
+	runJudge := r.judge != nil && verdict != nil && verdict.Severity == "HIGH"
+	if runJudge {
+		select {
+		case r.judgeSem <- struct{}{}:
+			func() {
+				defer func() { <-r.judgeSem }()
+				jctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				if jv := r.judge.RunJudges(jctx, "prompt", content, ""); jv != nil {
+					verdict = mergeWithJudge(verdict, jv)
+				}
+			}()
+		default:
+			fmt.Fprintf(os.Stderr,
+				"[sidecar] session.message prompt judge skipped (at capacity) session=%s msg=%s\n",
+				truncate(sessionKey, 32), truncate(messageID, 32))
+		}
+	}
+
+	if verdict == nil || verdict.Action == "" || verdict.Action == "allow" {
+		return
+	}
+
+	latencyMs := time.Since(start).Milliseconds()
+	severity := deriveSeverity(verdict.Severity)
+	categories := categoriesOf(verdict.Findings)
+
+	vctx := ContextWithSessionID(context.Background(), sessionKey)
+	emitVerdict(
+		vctx,
+		gatewaylog.StageSessionMessage,
+		gatewaylog.DirectionPrompt,
+		model,
+		verdict.Action,
+		verdict.Reason,
+		severity,
+		categories,
+		latencyMs,
+	)
+
+	// verdict.Findings / verdict.Reason are minted directly from user
+	// content and can carry literal PII (emails, SSNs, secrets) when
+	// the local-pattern scanner matches. Always redact before any
+	// sink, log line, or UI surface — same rules as handleSessionTool.
+	scrubbedReason := redaction.ForSinkReason(verdict.Reason)
+	_ = r.logger.LogAction("gateway-session-prompt-alert", sessionKey,
+		fmt.Sprintf("msgId=%s model=%s action=%s severity=%s findings=%d reason=%s",
+			messageID, model, verdict.Action, verdict.Severity,
+			len(verdict.Findings), scrubbedReason))
+
+	if r.notify != nil {
+		r.notify.Push(SecurityNotification{
+			SubjectType: "prompt",
+			SkillName:   truncate(sessionKey, 32),
+			Severity:    verdict.Severity,
+			Findings:    len(verdict.Findings),
+			Actions:     []string{"alert"},
+			Reason:      scrubbedReason,
+		})
+	}
+
+	if r.otel != nil {
+		r.otel.EmitRuntimeAlert(
+			telemetry.AlertPromptInjection, verdict.Severity, telemetry.SourceLocalPattern,
+			fmt.Sprintf("Inbound prompt flagged in session %s", truncate(sessionKey, 32)),
+			map[string]string{
+				"session":    sessionKey,
+				"message_id": messageID,
+				"model":      model,
+			},
+			map[string]string{"action_taken": "alert"},
+			"", "",
+		)
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"[sidecar] session.message prompt-scan session=%s msg=%s action=%s severity=%s findings=%d (%dms judge=%v)\n",
+		truncate(sessionKey, 32), truncate(messageID, 32),
+		verdict.Action, verdict.Severity, len(verdict.Findings), latencyMs, runJudge)
 }
 
 func (r *EventRouter) handleSessionsChanged(evt EventFrame, seqStr string) {
@@ -905,9 +1021,9 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
 			_ = r.logger.LogAction("gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
 			vctx := ContextWithSessionID(context.Background(), payload.SessionID)
-			emitVerdict(vctx, "policy", "tool_call", payload.Tool,
+			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", "static block list",
-				gatewaylog.SeverityHigh, []string{"policy:block"}, 0)
+				gatewaylog.SeverityHigh, []string{"policy:block", "surface:tool_call"}, 0)
 			if r.otel != nil {
 				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
 			}
@@ -1212,9 +1328,9 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
 		sessionID, _ := r.activeAgentCorrelation()
 		vctx := ContextWithSessionID(context.Background(), sessionID)
-		emitVerdict(vctx, "approval", "exec", cmdName,
+		emitVerdict(vctx, gatewaylog.StageApproval, gatewaylog.DirectionPrompt, cmdName,
 			"block", fmt.Sprintf("%s: %s", topFinding.RuleID, topFinding.Title),
-			deriveSeverity(topFinding.Severity), []string{"approval:denied"}, 0)
+			deriveSeverity(topFinding.Severity), []string{"approval:denied", "surface:exec"}, 0)
 		fmt.Fprintf(os.Stderr, "[sidecar] DENIED exec approval: %s (%s)\n", cmdName, topFinding.Title)
 
 		if r.otel != nil {

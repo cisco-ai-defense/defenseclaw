@@ -25,7 +25,7 @@
 
     "provider":  { "type": ["string", "null"] },
     "model":     { "type": ["string", "null"] },
-    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", null] },
+    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", "tool_call", null] },
 
     "agent_id":            { "type": ["string", "null"] },
     "agent_name":          { "type": ["string", "null"] },
@@ -67,7 +67,7 @@
       "type": "object",
       "required": ["stage", "action"],
       "properties": {
-        "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final"] },
+        "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final", "session_message", "multi_turn", "block_list", "approval"] },
         "action":     { "type": "string", "enum": ["allow", "warn", "block"] },
         "reason":     { "type": ["string", "null"] },
         "categories": { "type": ["array", "null"], "items": { "type": "string" } },

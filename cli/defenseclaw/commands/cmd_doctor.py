@@ -225,6 +225,34 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             _emit("fail", f"Scanner: {name}", f"'{binary}' not on PATH", r=r)
 
 
+def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
+    """Return whether a sidecar subsystem is *expected* to be enabled
+    based on the on-disk config, or ``None`` if the subsystem has no
+    meaningful off/on toggle in config.
+
+    The sidecar reads ``config.yaml`` only at startup, so this
+    predicate is used by :func:`_check_sidecar` to detect stale
+    sidecars: if a subsystem reports ``disabled`` but config says it
+    should be enabled, the running process is out of date and needs a
+    restart (most commonly after ``defenseclaw setup …``).
+    """
+    if sub == "telemetry":
+        return bool(getattr(getattr(cfg, "otel", None), "enabled", False))
+    if sub == "splunk":
+        return bool(getattr(getattr(cfg, "splunk", None), "enabled", False))
+    if sub == "guardrail":
+        return bool(getattr(getattr(cfg, "guardrail", None), "enabled", False))
+    if sub == "sandbox":
+        oc = getattr(cfg, "openshell", None)
+        if oc is None:
+            return False
+        is_standalone = getattr(oc, "is_standalone", None)
+        return bool(is_standalone()) if callable(is_standalone) else False
+    # gateway / watcher / api have no on/off switch — they are
+    # unconditionally wired up by the sidecar when it boots.
+    return None
+
+
 def _check_sidecar(cfg, r: _DoctorResult) -> None:
     bind = "127.0.0.1"
     if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
@@ -237,6 +265,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
         try:
             health = json.loads(body)
             subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"]
+            stale_hint_printed = False
             for sub in subsystems:
                 info = health.get(sub, {})
                 if not info:
@@ -248,7 +277,32 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                         detail += f" (mode={info['details'].get('mode', '?')})"
                     _emit("pass", f"  └─ {sub}", detail, r=r)
                 elif state.lower() in ("disabled", "stopped"):
-                    _emit("skip", f"  └─ {sub}", "disabled in config", r=r)
+                    # Cross-check the sidecar's view against on-disk
+                    # config. A divergence here is almost always a
+                    # stale sidecar — the operator ran `defenseclaw
+                    # setup …` but never restarted the gateway, so its
+                    # in-memory view is out of date. Surface this as a
+                    # WARN (not SKIP) so it doesn't get lost in the
+                    # noise.
+                    expected = _subsystem_expected_enabled(cfg, sub)
+                    if expected is True:
+                        _emit(
+                            "warn",
+                            f"  └─ {sub}",
+                            "disabled (reported by sidecar) but enabled in config "
+                            "— sidecar is stale, restart it",
+                            r=r,
+                        )
+                        if not stale_hint_printed:
+                            _emit(
+                                "warn",
+                                "  ",
+                                "Run: defenseclaw-gateway restart",
+                                r=r,
+                            )
+                            stale_hint_printed = True
+                    else:
+                        _emit("skip", f"  └─ {sub}", "disabled (reported by sidecar)", r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):

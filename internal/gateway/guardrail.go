@@ -276,7 +276,7 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	if verdict != nil && verdict.Severity != "" && verdict.Severity != "NONE" {
 		emitVerdict(
 			ctx,
-			gatewaylog.Stage("guardrail"),
+			gatewaylog.StageFinal,
 			gatewaylog.Direction(direction),
 			model,
 			verdict.Action,

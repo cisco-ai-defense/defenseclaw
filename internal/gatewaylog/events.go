@@ -109,6 +109,22 @@ const (
 	StageCiscoAID Stage = "cisco_ai_defense"
 	StageOPA      Stage = "opa"
 	StageFinal    Stage = "final"
+	// StageSessionMessage marks the observational WebSocket
+	// session.message scan path. The prompt has already been sent
+	// to the LLM by the time this stage fires, so verdicts here
+	// produce audit + notification but not block.
+	StageSessionMessage Stage = "session_message"
+	// StageMultiTurn marks verdicts emitted by the cross-turn
+	// injection tracker when repeated injection patterns are
+	// detected across user turns in the same session.
+	StageMultiTurn Stage = "multi_turn"
+	// StageBlockList marks verdicts emitted when a tool call is
+	// rejected by the static block list (skills/MCP/tool names
+	// enumerated by the operator), prior to any content scan.
+	StageBlockList Stage = "block_list"
+	// StageApproval marks verdicts emitted by the exec-approval
+	// pipeline when a dangerous command is denied before running.
+	StageApproval Stage = "approval"
 )
 
 // Direction is request-layer (user -> model) vs completion-layer
@@ -118,6 +134,11 @@ type Direction string
 const (
 	DirectionPrompt     Direction = "prompt"
 	DirectionCompletion Direction = "completion"
+	// DirectionToolCall marks guardrail inspections of tool-call
+	// arguments (skill/MCP tool invocations). Distinct from prompt/
+	// completion so dashboards can split out MCP-tool risk from
+	// user-facing chat risk.
+	DirectionToolCall Direction = "tool_call"
 )
 
 // Event is the single envelope type every gateway observability

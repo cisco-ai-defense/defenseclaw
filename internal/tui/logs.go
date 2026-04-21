@@ -867,6 +867,7 @@ func (p *LogsPanel) View() string {
 	// there.
 	b.WriteString("\n")
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Italic(true)
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	if p.source == logSourceVerdicts {
 		b.WriteString(hint.Render(fmt.Sprintf(
 			"  Streaming %s. Space pause, / search, a action, t type, s severity, Enter detail, J judge history.",
@@ -874,6 +875,18 @@ func (p *LogsPanel) View() string {
 	} else {
 		b.WriteString(hint.Render(fmt.Sprintf("  Streaming %s. Space to pause, / to search, e for errors, w for warnings.",
 			logSourceNames[p.source])))
+		// Gateway / Watchdog tabs tail free-form stderr logs that
+		// mostly carry startup chatter. Operators looking for
+		// guardrail verdicts, judge responses, scan findings, or
+		// activity mutations land here first, see a mostly-idle
+		// stream, and assume the gateway is silent. Point them at
+		// the Verdicts tab so the next arrow keypress finds the
+		// structured events they're actually looking for.
+		if p.source == logSourceGateway {
+			b.WriteString("\n")
+			b.WriteString(dim.Render(
+				"  (Runtime events live in gateway.jsonl — press → or l to switch to Verdicts.)"))
+		}
 	}
 
 	return b.String()
@@ -889,6 +902,13 @@ func (p *LogsPanel) visibleLines() int {
 		// showed up as "the detail modal doesn't match the row
 		// I selected" after a chip was added.
 		v -= 3
+	}
+	if p.source == logSourceGateway {
+		// Gateway tab renders an extra "runtime events live in
+		// gateway.jsonl — press → for Verdicts" hint line under
+		// the primary hint bar. Claim one row back so the log
+		// body keeps its full height.
+		v--
 	}
 	if p.searching {
 		v--

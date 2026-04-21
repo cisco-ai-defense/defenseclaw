@@ -33,10 +33,58 @@ from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
+# Key used to stash the pre-invocation config.yaml mtime in the Click
+# context so the post-invocation hook can tell whether a `setup`
+# subcommand actually mutated config on disk. Using ``ctx.meta``
+# (Click's per-context scratchpad) keeps this out of the shared
+# ``AppContext`` object so unrelated command modules don't accidentally
+# collide with it.
+_SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
+
+# Set by :func:`_restart_defense_gateway` when a subcommand has
+# already restarted the sidecar explicitly (e.g.
+# ``setup guardrail --restart``); the auto-restart result callback
+# below honors this flag and becomes a no-op to avoid a double bounce.
+_SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
+
+
+def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
+    """Return ``<data_dir>/config.yaml`` when the AppContext is loaded.
+
+    Some setup subcommands (notably ``setup migrate-llm``) are invoked
+    before :func:`defenseclaw.main.cli` populates ``app.cfg``; in that
+    case the mtime-snapshot hook silently skips and the result callback
+    will also skip the restart. That's fine — those commands manage
+    their own restart prompts.
+    """
+    app = ctx.find_object(AppContext)
+    if app is None or app.cfg is None:
+        return None
+    data_dir = getattr(app.cfg, "data_dir", None)
+    if not data_dir:
+        return None
+    return os.path.join(data_dir, "config.yaml")
+
+
+def _safe_mtime(path: str | None) -> float | None:
+    if not path:
+        return None
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
 
 @click.group()
-def setup() -> None:
+@click.pass_context
+def setup(ctx: click.Context) -> None:
     """Configure DefenseClaw components."""
+    # Snapshot config.yaml's mtime before the subcommand runs. The
+    # result callback below (``_auto_restart_sidecar_after_setup``)
+    # compares this to the post-invocation mtime and only restarts the
+    # sidecar when the file actually changed — so read-only subcommands
+    # like ``setup llm --show`` don't bounce a running gateway.
+    ctx.meta[_SETUP_CFG_MTIME_KEY] = _safe_mtime(_config_yaml_path_from_ctx(ctx))
 
 
 # Register `defenseclaw setup observability` (unified OTel + audit sinks).
@@ -479,7 +527,7 @@ def _configure_llm(cfg, data_dir: str) -> None:
     llm.model = click.prompt(
         "  LLM model id (e.g. 'claude-3-5-sonnet-20241022', 'gpt-4o', 'llama3.1')",
         default=llm.model or "",
-        show_default=False,
+        show_default=bool(llm.model),
     )
 
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
@@ -525,7 +573,7 @@ def _configure_llm(cfg, data_dir: str) -> None:
         llm.api_key_env = env_name
         llm.base_url = click.prompt(
             "  LLM base URL (leave blank to use provider default)",
-            default=llm.base_url or "", show_default=False,
+            default=llm.base_url or "", show_default=bool(llm.base_url),
         )
 
     llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
@@ -578,7 +626,7 @@ def _configure_inspect_llm(llm, data_dir: str) -> None:  # pragma: no cover
         type=click.Choice(_WIZARD_LLM_PROVIDERS),
         default=default_provider,
     )
-    llm.model = click.prompt("  LLM model name", default=llm.model or "", show_default=False)
+    llm.model = click.prompt("  LLM model name", default=llm.model or "", show_default=bool(llm.model))
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         default_base = llm.base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
         llm.base_url = click.prompt(f"  {llm.provider} base URL", default=default_base)
@@ -591,7 +639,7 @@ def _configure_inspect_llm(llm, data_dir: str) -> None:  # pragma: no cover
         llm.api_key_env = env_name
         llm.base_url = click.prompt(
             "  LLM base URL (leave blank to use provider default)",
-            default=llm.base_url or "", show_default=False,
+            default=llm.base_url or "", show_default=bool(llm.base_url),
         )
     llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
     llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries or 2)
@@ -1826,9 +1874,24 @@ def _restart_services(data_dir: str, oc_host: str = "127.0.0.1", oc_port: int = 
     click.echo()
 
 
-def _restart_defense_gateway(data_dir: str) -> None:
+def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> None:
+    # Mark the current Click context as "restart handled" so the
+    # `setup` group's auto-restart result callback doesn't bounce the
+    # gateway a second time on its way out. Safe to call outside Click
+    # (returns None).
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is not None:
+        ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+
     pid_file = os.path.join(data_dir, "gateway.pid")
     was_running = _is_pid_alive(pid_file)
+    if not was_running and not start_if_stopped:
+        click.echo("  defenseclaw-gateway: not running — skipping restart.")
+        click.echo("    Start it with: defenseclaw-gateway start")
+        return
 
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
@@ -1849,6 +1912,59 @@ def _restart_defense_gateway(data_dir: str) -> None:
         click.echo("    Build with: make gateway")
     except subprocess.TimeoutExpired:
         click.echo(" ✗ (timed out)")
+
+
+@setup.result_callback()
+@click.pass_context
+def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> None:
+    """Auto-restart the defenseclaw-gateway after any ``setup`` subcommand
+    that mutates config.yaml.
+
+    Motivation: the running gateway reads ``config.yaml`` at startup
+    only. Before this hook, operators could run e.g.
+    ``defenseclaw setup splunk`` and still see ``telemetry — disabled in
+    config`` from ``defenseclaw doctor`` because the sidecar was
+    reporting its stale in-memory view. We now trigger a restart
+    automatically whenever a setup subcommand actually writes to
+    config.yaml (detected via mtime delta captured in the group
+    callback above).
+
+    Skip conditions:
+      * ``app.cfg`` isn't loaded (e.g. ``setup --help``, or a recovery
+        invocation that bypassed the loader) — nothing to do.
+      * config.yaml mtime unchanged — the subcommand was read-only
+        (``setup llm --show``, etc.).
+      * Gateway PID file shows the process is not running — we don't
+        auto-start a sidecar an operator deliberately stopped. A hint
+        is printed so they can start it manually if desired.
+    """
+    app = ctx.find_object(AppContext)
+    if app is None or app.cfg is None:
+        return
+
+    # Subcommand already handled the restart itself (e.g. `setup
+    # guardrail --restart`) — don't bounce the gateway a second time.
+    if ctx.meta.get(_SETUP_RESTART_HANDLED_KEY):
+        return
+
+    cfg_path = _config_yaml_path_from_ctx(ctx)
+    before = ctx.meta.get(_SETUP_CFG_MTIME_KEY)
+    after = _safe_mtime(cfg_path)
+    if cfg_path is None or after is None or before == after:
+        return
+
+    data_dir = app.cfg.data_dir
+    pid_file = os.path.join(data_dir, "gateway.pid")
+    if not _is_pid_alive(pid_file):
+        click.echo("")
+        click.echo("  Config updated. Gateway is not running — "
+                   "changes will take effect on next start.")
+        click.echo("    Start it with: defenseclaw-gateway start")
+        return
+
+    click.echo("")
+    click.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
+    _restart_defense_gateway(data_dir, start_if_stopped=False)
 
 
 def _openclaw_gateway_healthy(host: str, port: int, timeout: float = 5.0) -> bool:

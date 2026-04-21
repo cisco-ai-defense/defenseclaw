@@ -1821,11 +1821,41 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"invalid url", "://bad-url", false},
 		{"ollama loopback", "http://localhost:11434/api/chat", true},
 		{"ollama 127.0.0.1", "http://127.0.0.1:11434/v1/chat/completions", true},
+		// Path-prefixed provider entries (e.g. "chatgpt.com/backend-api"):
+		// the matcher requires both the host and the path prefix. Origin-only
+		// URLs must fail closed; URLs with the right path prefix must pass.
+		{"chatgpt backend-api full", "https://chatgpt.com/backend-api/codex/responses", true},
+		{"chatgpt backend-api origin only", "https://chatgpt.com/", false},
+		{"chatgpt wrong path", "https://chatgpt.com/static/app.js", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isKnownProviderDomain(tt.url); got != tt.want {
 				t.Errorf("isKnownProviderDomain(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInferProviderFromURL_PathPrefixed verifies that providers identified by
+// a host+path prefix in providers.json (e.g. "chatgpt.com/backend-api" for
+// openai-codex) are only inferred when the full URL carries the expected path.
+// This mirrors the combined-URL fix in handlePassthrough which reunites the
+// origin-only X-DC-Target-URL header with the incoming request path.
+func TestInferProviderFromURL_PathPrefixed(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"openai-codex with path", "https://chatgpt.com/backend-api/codex/responses", "openai-codex"},
+		{"openai-codex origin only", "https://chatgpt.com", ""},
+		{"openai-codex wrong path", "https://chatgpt.com/static/app.js", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inferProviderFromURL(tt.url); got != tt.want {
+				t.Errorf("inferProviderFromURL(%q) = %q, want %q", tt.url, got, tt.want)
 			}
 		})
 	}
@@ -2177,6 +2207,116 @@ func TestStreamBufferingPassthroughFlushesBufferedEOF(t *testing.T) {
 	}
 }
 
+// TestBlockedResponseOpenAIResponses_ItemIDPrefix locks the invariant
+// that every assistant `message` output-item emitted by a DefenseClaw
+// block on the OpenAI Responses API uses an ID prefixed with `msg_`.
+//
+// Regression context: the ChatGPT `/backend-api/codex/responses` backend
+// (used by openai-codex models via `openclaw-tui`) strictly validates
+// item IDs in the conversation `input[]` array. When our streaming
+// block path emitted `item_blocked`, the client happily persisted that
+// ID into its local conversation history; the *next* user turn then
+// re-sent the history and upstream rejected the whole request with
+// `Invalid 'input[N].id': 'item_blocked'. Expected an ID that begins
+// with 'msg'.`, wedging the TUI after any block. Keep the assertions
+// here exhaustive (all streamed events + the non-streaming sibling) so
+// nobody reintroduces a non-`msg_` id on a future code path.
+func TestBlockedResponseOpenAIResponses_ItemIDPrefix(t *testing.T) {
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+
+	t.Run("non_streaming", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		proxy.writeBlockedResponseOpenAIResponses(rec, "gpt-5.4", "[DefenseClaw] blocked")
+
+		var body struct {
+			Output []struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("json.Unmarshal: %v\nbody=%s", err, rec.Body.String())
+		}
+		if len(body.Output) == 0 {
+			t.Fatal("expected at least one output item")
+		}
+		for i, it := range body.Output {
+			if it.Type != "message" {
+				continue
+			}
+			if !strings.HasPrefix(it.ID, "msg_") {
+				t.Fatalf("output[%d] id must start with 'msg_', got %q", i, it.ID)
+			}
+		}
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		proxy.writeBlockedStreamOpenAIResponses(rec, "gpt-5.4", "[DefenseClaw] blocked")
+		raw := rec.Body.String()
+
+		// Every SSE event that carries an `item_id` or nested
+		// `item.id` (output_item.added/done, content_part.added/done,
+		// output_text.delta/done, response.completed) must use the
+		// `msg_*` prefix. A single violation would repro the wedge.
+		scanner := bufio.NewScanner(strings.NewReader(raw))
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		sawItemID := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			var obj map[string]interface{}
+			if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+				continue
+			}
+			if v, ok := obj["item_id"].(string); ok && v != "" {
+				sawItemID = true
+				if !strings.HasPrefix(v, "msg_") {
+					t.Fatalf("SSE event item_id must start with 'msg_', got %q (event=%v)",
+						v, obj["type"])
+				}
+			}
+			if item, ok := obj["item"].(map[string]interface{}); ok {
+				if v, ok := item["id"].(string); ok && v != "" {
+					sawItemID = true
+					if !strings.HasPrefix(v, "msg_") {
+						t.Fatalf("SSE event item.id must start with 'msg_', got %q (event=%v)",
+							v, obj["type"])
+					}
+				}
+			}
+			if resp, ok := obj["response"].(map[string]interface{}); ok {
+				if outputs, ok := resp["output"].([]interface{}); ok {
+					for i, raw := range outputs {
+						itMap, ok := raw.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if itMap["type"] != "message" {
+							continue
+						}
+						v, _ := itMap["id"].(string)
+						if !strings.HasPrefix(v, "msg_") {
+							t.Fatalf("response.output[%d].id must start with 'msg_', got %q (event=%v)",
+								i, v, obj["type"])
+						}
+						sawItemID = true
+					}
+				}
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("scan SSE: %v", err)
+		}
+		if !sawItemID {
+			t.Fatal("expected at least one SSE event to carry an item_id or item.id")
+		}
+	})
+}
+
 func TestBlockedResponseAnthropicMetadata(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
@@ -2475,6 +2615,344 @@ func TestHeaderInjectionRejection(t *testing.T) {
 			blocked := rec.Code == http.StatusForbidden || rec.Code == http.StatusBadRequest
 			if tt.wantBlock && !blocked {
 				t.Errorf("expected blocked response, got %d", rec.Code)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Notification pipeline: block-site push + injection + laundering
+// ---------------------------------------------------------------------------
+
+// TestEnqueueBlockNotification_PushesToQueue verifies that every wired
+// block site enqueues a SecurityNotification such that the NEXT proxy
+// call carries the enforcement system message. This is the end-to-end
+// contract for the "notification queue is the canonical channel for
+// blocked turns" design.
+func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
+	q := NewNotificationQueue()
+	proxy := &GuardrailProxy{notify: q}
+
+	verdict := &ScanVerdict{
+		Action:   "block",
+		Severity: "HIGH",
+		Reason:   "regex matched 'password=hunter2'",
+		Findings: []string{"secret in prompt"},
+	}
+	proxy.enqueueBlockNotification(verdict, "prompt", "gpt-4")
+
+	sysMsg := q.FormatSystemMessage()
+	if sysMsg == "" {
+		t.Fatal("expected non-empty system message after enqueue")
+	}
+	if !strings.Contains(sysMsg, "DEFENSECLAW") {
+		t.Errorf("system message missing DEFENSECLAW header; got %q", sysMsg)
+	}
+	if !strings.Contains(sysMsg, "HIGH") {
+		t.Errorf("system message missing severity %q; got %q", "HIGH", sysMsg)
+	}
+	// Critical: the verdict reason contains a literal secret the
+	// regex matched on. redaction.ForSinkReason must have scrubbed
+	// it before the reason landed in the system message.
+	if strings.Contains(sysMsg, "hunter2") {
+		t.Errorf("notification leaked raw secret text into system message: %q", sysMsg)
+	}
+}
+
+// TestEnqueueBlockNotification_NilGuards covers the no-op paths so the
+// helper is safe to call from every block site unconditionally.
+func TestEnqueueBlockNotification_NilGuards(t *testing.T) {
+	t.Run("nil notify queue", func(t *testing.T) {
+		proxy := &GuardrailProxy{notify: nil}
+		proxy.enqueueBlockNotification(&ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
+	})
+	t.Run("nil verdict", func(t *testing.T) {
+		proxy := &GuardrailProxy{notify: NewNotificationQueue()}
+		proxy.enqueueBlockNotification(nil, "prompt", "m")
+		if proxy.notify.FormatSystemMessage() != "" {
+			t.Error("expected queue to remain empty on nil verdict")
+		}
+	})
+}
+
+// TestInjectSystemMessageForResponsesAPI_MergesInstructions verifies the
+// Responses-API-specific injection path used by openai-codex. The merge
+// prepends to existing instructions so enforcement wins on conflict.
+func TestInjectSystemMessageForResponsesAPI_MergesInstructions(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		content string
+		want    string
+	}{
+		{
+			name:    "no existing instructions",
+			in:      `{"model":"gpt-5","input":[]}`,
+			content: "[DEFENSECLAW] block notice",
+			want:    "[DEFENSECLAW] block notice",
+		},
+		{
+			name:    "existing instructions get appended after notice",
+			in:      `{"model":"gpt-5","input":[],"instructions":"Be terse."}`,
+			content: "[DEFENSECLAW] block notice",
+			want:    "[DEFENSECLAW] block notice\n\nBe terse.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := injectSystemMessageForResponsesAPI(json.RawMessage(tt.in), tt.content)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("result is not valid JSON: %v", err)
+			}
+			if got["instructions"] != tt.want {
+				t.Errorf("instructions = %q, want %q", got["instructions"], tt.want)
+			}
+			if got["model"] != "gpt-5" {
+				t.Errorf("model lost during injection: %v", got["model"])
+			}
+		})
+	}
+}
+
+// TestInjectNotificationForPassthrough_Dispatch verifies the format
+// dispatcher picks the correct injector for each supported path.
+func TestInjectNotificationForPassthrough_Dispatch(t *testing.T) {
+	notice := "[DEFENSECLAW] enforcement"
+	tests := []struct {
+		name     string
+		path     string
+		in       string
+		wantSite string
+		check    func(t *testing.T, out []byte)
+	}{
+		{
+			name:     "chat completions injects into messages[]",
+			path:     "/v1/chat/completions",
+			in:       `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`,
+			wantSite: "chat-completions/messages",
+			check: func(t *testing.T, out []byte) {
+				var got struct {
+					Messages []struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					} `json:"messages"`
+				}
+				_ = json.Unmarshal(out, &got)
+				if len(got.Messages) < 2 {
+					t.Fatalf("expected injected system + original user, got %d msgs", len(got.Messages))
+				}
+				if got.Messages[0].Role != "system" || got.Messages[0].Content != notice {
+					t.Errorf("first message not system notice: %+v", got.Messages[0])
+				}
+			},
+		},
+		{
+			name:     "responses api injects into instructions",
+			path:     "/v1/responses",
+			in:       `{"model":"gpt-5","input":[]}`,
+			wantSite: "responses-api/instructions",
+			check: func(t *testing.T, out []byte) {
+				var got map[string]interface{}
+				_ = json.Unmarshal(out, &got)
+				if got["instructions"] != notice {
+					t.Errorf("instructions not set: %v", got["instructions"])
+				}
+			},
+		},
+		{
+			name:     "codex backend path injects into instructions",
+			path:     "/backend-api/codex/responses",
+			in:       `{"model":"gpt-5","input":[]}`,
+			wantSite: "responses-api/instructions",
+			check: func(t *testing.T, out []byte) {
+				var got map[string]interface{}
+				_ = json.Unmarshal(out, &got)
+				if got["instructions"] != notice {
+					t.Errorf("instructions not set: %v", got["instructions"])
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, site, err := injectNotificationForPassthrough(json.RawMessage(tt.in), notice, tt.path)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if site != tt.wantSite {
+				t.Errorf("site = %q, want %q", site, tt.wantSite)
+			}
+			tt.check(t, out)
+		})
+	}
+}
+
+// TestInjectNotificationForPassthrough_UnknownPath returns an error
+// (non-fatal at call site — just logs and forwards unchanged) when the
+// provider surface isn't one we know how to inject into.
+func TestInjectNotificationForPassthrough_UnknownPath(t *testing.T) {
+	in := json.RawMessage(`{"prompt":"hi"}`)
+	out, site, err := injectNotificationForPassthrough(in, "notice", "/some/legacy/endpoint")
+	if err == nil {
+		t.Fatal("expected error for unknown path")
+	}
+	if site != "" {
+		t.Errorf("site = %q, want empty", site)
+	}
+	if string(out) != string(in) {
+		t.Errorf("body mutated on unknown path; got %s want %s", out, in)
+	}
+}
+
+// TestLaunderChatCompletionsHistory_StripsBlockTurns verifies the
+// Chat Completions launderer strips assistant turns whose content
+// begins with the DefenseClaw banner while preserving the rest of the
+// conversation and any non-assistant turns.
+func TestLaunderChatCompletionsHistory_StripsBlockTurns(t *testing.T) {
+	body := `{
+		"model": "gpt-4",
+		"messages": [
+			{"role": "system", "content": "you are helpful"},
+			{"role": "user", "content": "try A"},
+			{"role": "assistant", "content": "[DefenseClaw] This request was blocked."},
+			{"role": "user", "content": "try B"},
+			{"role": "assistant", "content": "[DefenseClaw] This request was blocked (again)."},
+			{"role": "user", "content": "try C"}
+		]
+	}`
+	out, stripped, err := launderChatCompletionsHistory(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped != 2 {
+		t.Errorf("stripped = %d, want 2", stripped)
+	}
+	var got struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if len(got.Messages) != 4 {
+		t.Fatalf("expected 4 messages after laundering, got %d: %+v", len(got.Messages), got.Messages)
+	}
+	for _, m := range got.Messages {
+		if m.Role == "assistant" && strings.HasPrefix(m.Content, "[DefenseClaw]") {
+			t.Errorf("DefenseClaw turn survived laundering: %+v", m)
+		}
+	}
+}
+
+// TestLaunderChatCompletionsHistory_PreservesCleanBodies verifies that
+// bodies with no DefenseClaw turns are returned byte-for-byte unchanged
+// so we don't pay a rebuild cost on every turn of a conversation that
+// has never been blocked.
+func TestLaunderChatCompletionsHistory_PreservesCleanBodies(t *testing.T) {
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
+	out, stripped, err := launderChatCompletionsHistory(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped != 0 {
+		t.Errorf("stripped = %d, want 0", stripped)
+	}
+	if string(out) != body {
+		t.Errorf("clean body was mutated; got %s want %s", out, body)
+	}
+}
+
+// TestLaunderResponsesHistory_StripsByIDAndContent verifies both
+// detection signals for Responses API laundering: ID-prefix match and
+// content-prefix match.
+func TestLaunderResponsesHistory_StripsByIDAndContent(t *testing.T) {
+	body := `{
+		"model": "gpt-5",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"try A"}]},
+			{"type":"message","role":"assistant","id":"msg_blocked_xyz","content":[{"type":"output_text","text":"[DefenseClaw] blocked."}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"try B"}]},
+			{"type":"message","role":"assistant","id":"msg_abc","content":[{"type":"output_text","text":"[DefenseClaw] content-only detection."}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"try C"}]}
+		]
+	}`
+	out, stripped, err := launderResponsesHistory(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped != 2 {
+		t.Errorf("stripped = %d, want 2 (one by ID, one by content)", stripped)
+	}
+	var got struct {
+		Input []struct {
+			Role string `json:"role"`
+			ID   string `json:"id"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v", err)
+	}
+	if len(got.Input) != 3 {
+		t.Fatalf("expected 3 input items after laundering, got %d", len(got.Input))
+	}
+	for _, item := range got.Input {
+		if item.Role == "assistant" {
+			t.Errorf("assistant item survived laundering: %+v", item)
+		}
+	}
+}
+
+// TestLaunderResponsesHistory_PreservesStringInput verifies that when
+// `input` is a plain string (not an array) the launderer is a no-op
+// rather than corrupting the body.
+func TestLaunderResponsesHistory_PreservesStringInput(t *testing.T) {
+	body := `{"model":"gpt-5","input":"hello"}`
+	out, stripped, err := launderResponsesHistory(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped != 0 {
+		t.Errorf("stripped = %d, want 0 for string input", stripped)
+	}
+	if string(out) != body {
+		t.Errorf("string-input body was mutated; got %s want %s", out, body)
+	}
+}
+
+// TestLaunderInboundHistory_Dispatch verifies the path dispatcher
+// picks the right launderer for each provider surface.
+func TestLaunderInboundHistory_Dispatch(t *testing.T) {
+	chatBody := `{"messages":[{"role":"assistant","content":"[DefenseClaw] x"}]}`
+	respBody := `{"input":[{"type":"message","role":"assistant","id":"msg_blocked_x","content":[{"type":"output_text","text":"[DefenseClaw] x"}]}]}`
+
+	tests := []struct {
+		name    string
+		path    string
+		in      string
+		wantN   int
+		wantMut bool
+	}{
+		{"chat completions", "/v1/chat/completions", chatBody, 1, true},
+		{"anthropic messages", "/v1/messages", chatBody, 1, true},
+		{"responses api", "/v1/responses", respBody, 1, true},
+		{"codex backend", "/backend-api/codex/responses", respBody, 1, true},
+		{"unknown path is no-op", "/v1/completions", chatBody, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, n := launderInboundHistory(json.RawMessage(tt.in), tt.path)
+			if n != tt.wantN {
+				t.Errorf("stripped = %d, want %d", n, tt.wantN)
+			}
+			mutated := string(out) != tt.in
+			if mutated != tt.wantMut {
+				t.Errorf("mutated = %v, want %v", mutated, tt.wantMut)
 			}
 		})
 	}

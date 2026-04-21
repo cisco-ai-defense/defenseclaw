@@ -17,6 +17,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -1051,7 +1052,30 @@ func Load() (*Config, error) {
 
 	setDefaults(dataDir)
 
-	if err := viper.ReadInConfig(); err != nil {
+	// Pre-extract otel.resource.attributes from the raw YAML. OTel
+	// semconv keys are dotted (service.name, defenseclaw.preset, …)
+	// and Viper interprets "." as a path separator, which silently
+	// nests them into map[string]map[string]… and then fails to
+	// unmarshal back into map[string]string. We parse that block with
+	// yaml.v3 (literal keys), then strip it from the bytes we feed to
+	// Viper so Viper never sees the problematic shape, and reinstate
+	// it on the decoded Config afterwards.
+	otelAttrs, cleanedBytes, err := extractOTelResourceAttributes(configFile)
+	if err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "otel_attrs_parse")
+		}
+		return nil, fmt.Errorf("config: parse otel.resource.attributes: %w", err)
+	}
+
+	if cleanedBytes != nil {
+		if err := viper.ReadConfig(bytes.NewReader(cleanedBytes)); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "read_config")
+			}
+			return nil, fmt.Errorf("config: read %s: %w", configFile, err)
+		}
+	} else if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			if !os.IsNotExist(err) {
 				if ReportConfigLoadError != nil {
@@ -1093,6 +1117,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 
+	// Reinstate the dot-preserving OTel resource attributes that we
+	// stripped before handing bytes to Viper.
+	if otelAttrs != nil {
+		cfg.OTel.Resource.Attributes = otelAttrs
+	}
+
 	migrateConfig(&cfg)
 
 	for i := range cfg.AuditSinks {
@@ -1132,6 +1162,168 @@ func Load() (*Config, error) {
 
 	warnPlaintextSecrets(&cfg)
 	return &cfg, nil
+}
+
+// extractOTelResourceAttributes reads the config file with yaml.v3
+// (which preserves dotted map keys verbatim), pulls the
+// otel.resource.attributes block out as a flat map[string]string, and
+// returns the remaining YAML bytes with that block removed. The caller
+// feeds the cleaned bytes to Viper (whose "." key separator would
+// otherwise nest "service.name" into map[service][name] and break the
+// mapstructure unmarshal into map[string]string) and re-attaches the
+// returned attributes to the decoded Config afterwards.
+//
+// Returns:
+//   - (attrs, cleanedBytes, nil) when the file exists and the block was
+//     present (attrs may be empty if `attributes: {}` was set).
+//   - (nil, cleanedBytes, nil) when the file exists but has no
+//     otel.resource.attributes; caller should still use the cleaned
+//     bytes (which are just the original bytes in that case) for
+//     deterministic behavior.
+//   - (nil, nil, nil) when the config file does not exist — caller
+//     should fall back to viper.ReadInConfig's normal not-found path.
+//   - (nil, nil, err) when the YAML is malformed or an attribute has a
+//     non-scalar value.
+func extractOTelResourceAttributes(configFile string) (map[string]string, []byte, error) {
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("read %s: %w", configFile, err)
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, nil, fmt.Errorf("yaml unmarshal: %w", err)
+	}
+
+	doc := firstDocumentNode(&root)
+	if doc == nil || doc.Kind != yaml.MappingNode {
+		// Empty or non-mapping YAML (e.g. only comments). Nothing to
+		// strip; pass original bytes back so Viper behavior is
+		// unchanged.
+		return nil, data, nil
+	}
+
+	otelNode := mappingChild(doc, "otel")
+	if otelNode == nil || otelNode.Kind != yaml.MappingNode {
+		return nil, data, nil
+	}
+	resourceNode := mappingChild(otelNode, "resource")
+	if resourceNode == nil || resourceNode.Kind != yaml.MappingNode {
+		return nil, data, nil
+	}
+	attrsNode := mappingChild(resourceNode, "attributes")
+	if attrsNode == nil {
+		return nil, data, nil
+	}
+	// Support explicit null (`attributes: ~`) by treating it as absent.
+	if attrsNode.Kind == yaml.ScalarNode && attrsNode.Tag == "!!null" {
+		removeMappingChild(resourceNode, "attributes")
+		cleaned, marshalErr := yaml.Marshal(&root)
+		if marshalErr != nil {
+			return nil, nil, fmt.Errorf("yaml re-marshal: %w", marshalErr)
+		}
+		return map[string]string{}, cleaned, nil
+	}
+	if attrsNode.Kind != yaml.MappingNode {
+		return nil, nil, fmt.Errorf("otel.resource.attributes must be a mapping, got %v", yamlKindName(attrsNode.Kind))
+	}
+
+	attrs := make(map[string]string, len(attrsNode.Content)/2)
+	for i := 0; i+1 < len(attrsNode.Content); i += 2 {
+		keyNode := attrsNode.Content[i]
+		valNode := attrsNode.Content[i+1]
+		if keyNode.Kind != yaml.ScalarNode {
+			return nil, nil, fmt.Errorf("otel.resource.attributes: non-scalar key at line %d", keyNode.Line)
+		}
+		key := keyNode.Value
+		switch valNode.Kind {
+		case yaml.ScalarNode:
+			if valNode.Tag == "!!null" {
+				// Skip: operator explicitly cleared this attribute.
+				continue
+			}
+			attrs[key] = valNode.Value
+		default:
+			return nil, nil, fmt.Errorf("otel.resource.attributes[%q]: expected scalar, got %v", key, yamlKindName(valNode.Kind))
+		}
+	}
+
+	// Strip otel.resource.attributes from the tree before feeding to
+	// Viper. We keep the surrounding otel.resource scaffolding so
+	// anything else under `resource:` (future fields) still loads
+	// normally.
+	removeMappingChild(resourceNode, "attributes")
+
+	cleaned, err := yaml.Marshal(&root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("yaml re-marshal: %w", err)
+	}
+	return attrs, cleaned, nil
+}
+
+// firstDocumentNode unwraps a DocumentNode root produced by
+// yaml.Unmarshal into *yaml.Node. Returns nil if the document is empty.
+func firstDocumentNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Kind == yaml.DocumentNode {
+		if len(n.Content) == 0 {
+			return nil
+		}
+		return n.Content[0]
+	}
+	return n
+}
+
+// mappingChild returns the value node for `key` inside a mapping node,
+// or nil if the key is absent or the parent isn't a mapping.
+func mappingChild(m *yaml.Node, key string) *yaml.Node {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if k.Kind == yaml.ScalarNode && k.Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// removeMappingChild deletes the (key, value) pair for `key` from a
+// mapping node in place. No-op if `key` is absent.
+func removeMappingChild(m *yaml.Node, key string) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if k.Kind == yaml.ScalarNode && k.Value == key {
+			m.Content = append(m.Content[:i], m.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+func yamlKindName(k yaml.Kind) string {
+	switch k {
+	case yaml.DocumentNode:
+		return "document"
+	case yaml.SequenceNode:
+		return "sequence"
+	case yaml.MappingNode:
+		return "mapping"
+	case yaml.ScalarNode:
+		return "scalar"
+	case yaml.AliasNode:
+		return "alias"
+	default:
+		return fmt.Sprintf("unknown(%d)", k)
+	}
 }
 
 // migrateConfig applies forward migrations when config_version is behind
