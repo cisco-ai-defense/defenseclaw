@@ -483,8 +483,27 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 
 		hello := s.client.Hello()
 		s.logHello(hello)
-		_ = s.logger.LogAction("sidecar-connected", "",
-			fmt.Sprintf("protocol=%d", hello.Protocol))
+		// Mirror the "gateway is ready to serve" event on both
+		// structured (gateway.jsonl / OTel fanout) and audit paths
+		// (SQLite / Splunk HEC / HTTP JSONL sinks). The structured
+		// emit is synchronous and independent of the audit DB, so
+		// operators still see the transition on the observability
+		// bus even if the SQLite write later fails. Pairing the two
+		// emissions is the v7 contract — a ready gateway must be
+		// visible on every surface, not just the audit row.
+		emitLifecycle(ctx, "gateway", "ready", map[string]string{
+			"protocol": fmt.Sprintf("%d", hello.Protocol),
+		})
+		if err := s.logger.LogAction("sidecar-connected", "",
+			fmt.Sprintf("protocol=%d", hello.Protocol)); err != nil {
+			// Never silent: surface both on stderr (so operators see
+			// it in gateway.log) and as a structured error event
+			// (so SIEMs can alert on missing-ready-event incidents).
+			fmt.Fprintf(os.Stderr,
+				"[sidecar] WARN: sidecar-connected audit persist failed: %v\n", err)
+			emitError(ctx, "gateway", "audit-persist-failed",
+				"sidecar-connected audit event did not persist", err)
+		}
 		s.health.SetGateway(StateRunning, "", map[string]interface{}{
 			"protocol": hello.Protocol,
 		})

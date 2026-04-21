@@ -336,11 +336,32 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 		RequestID:         requestID,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
-	if err := l.store.LogEvent(event); err != nil {
+	storeErr := l.store.LogEvent(event)
+	if storeErr != nil {
 		if otel != nil {
 			otel.RecordAuditDBError(context.Background(), "insert_event")
 		}
-		return err
+		// v7 contract: lifecycle/alert/block signals must surface on
+		// every observability surface (gateway.jsonl + audit_sinks +
+		// OTel) even when the local SQLite audit row fails to persist.
+		// Dropping the event entirely would produce silent blind spots
+		// in Splunk dashboards and in the TUI — which is exactly what
+		// #127 uncovered for the `sidecar-connected` transition. When
+		// we can tolerate a missing DB row, we still fan out so the
+		// operator receives the signal, and we record the failure
+		// explicitly on stderr + OTel for correlation.
+		if !mustPersistAction(event.Action) {
+			fmt.Fprintf(os.Stderr,
+				"[audit] WARN: LogEvent failed for action=%s (forwarding to sinks anyway): %v\n",
+				event.Action, storeErr)
+			l.forwardToSinksSnapshot(sinksMgr, event)
+			l.emitStructuredSnapshot(structured, event)
+			if otel != nil {
+				assetType := inferAssetTypeFromAction(action, details)
+				otel.EmitLifecycleEvent(action, target, assetType, details, event.Severity, nil)
+			}
+		}
+		return storeErr
 	}
 	if otel != nil {
 		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
@@ -354,6 +375,25 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 	}
 
 	return nil
+}
+
+// mustPersistAction returns true for a small set of high-integrity
+// audit actions where a SQLite write failure must NOT be masked by
+// forwarding the event to external sinks. For those actions the
+// canonical source of truth is the local database (block/allow list
+// decisions, quarantine journal entries) and leaking a partial signal
+// to Splunk without the on-disk twin would produce inconsistent state
+// across the admission gate. For all other actions we prefer "at least
+// one surface received the event" over strict atomicity — see
+// LogActionWithCorrelation for the rationale.
+func mustPersistAction(action string) bool {
+	switch action {
+	case "block", "allow", "quarantine",
+		"block-add", "block-remove",
+		"allow-add", "allow-remove":
+		return true
+	}
+	return false
 }
 
 // LogActionWithEnforcement persists an action event with enforcement metadata
