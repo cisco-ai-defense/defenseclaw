@@ -17,15 +17,19 @@
 package audit
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
+
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 type Event struct {
@@ -43,6 +47,56 @@ type Event struct {
 	// gateway context threading; older call sites may leave it
 	// empty, in which case the column stays NULL in SQLite.
 	RequestID string `json:"request_id,omitempty"`
+
+	// SessionID ties every event produced during a single
+	// OpenClaw agent session (derived from the WebSocket
+	// sessionKey or from the guardrail-proxy conversation id)
+	// so downstream consumers can fold tool-call, approval,
+	// and verdict events into one row per session.
+	SessionID string `json:"session_id,omitempty"`
+
+	// AgentName is the logical name of the agent producing the
+	// event (e.g. "openclaw", "nemoclaw", or a caller-supplied
+	// name from the incoming stream envelope). Falls back to
+	// cfg.Claw.Mode at the router boundary when the stream does
+	// not supply one.
+	AgentName string `json:"agent_name,omitempty"`
+
+	// AgentInstanceID identifies a single agent SESSION (v7 clean
+	// break from v6). It is populated when the event has session
+	// anchoring — i.e. deterministic hash of the session key so
+	// multi-turn conversations cluster correctly. For events with
+	// no session context (watcher admission, operator mutations,
+	// scanner results fired outside a request), this stays empty.
+	// The process-scoped identifier lives on SidecarInstanceID.
+	AgentInstanceID string `json:"agent_instance_id,omitempty"`
+
+	// PolicyID is the identifier of the policy that produced the
+	// verdict / enforcement decision recorded by this event.
+	// Required by downstream Splunk dashboards (see
+	// splunk/apps/defenseclaw_local_mode/default/macros.conf)
+	// which previously defaulted to "(none)" for every row.
+	PolicyID string `json:"policy_id,omitempty"`
+
+	// DestinationApp is the upstream system the event targets.
+	// For tool events this is the tool provider (builtin |
+	// mcp:<server> | skill:<key>); for LLM events this is the
+	// gen_ai.system identifier (openai | anthropic | …).
+	DestinationApp string `json:"destination_app,omitempty"`
+
+	// ToolName / ToolID are populated on tool-runtime and
+	// approval-flow events so /v1/agentwatch/summary can render
+	// top_tools without re-parsing Details strings.
+	ToolName string `json:"tool_name,omitempty"`
+	ToolID   string `json:"tool_id,omitempty"`
+
+	// v7 provenance + identity (SQLite columns from migration 10).
+	SchemaVersion     int    `json:"schema_version,omitempty"`
+	ContentHash       string `json:"content_hash,omitempty"`
+	Generation        uint64 `json:"generation,omitempty"`
+	BinaryVersion     string `json:"binary_version,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.
@@ -107,7 +161,49 @@ func NewStore(dbPath string) (*Store, error) {
 		}
 	}
 
-	return &Store{db: db}, nil
+	st := &Store{db: db}
+	telemetry.RegisterAuditDB(db)
+	return st, nil
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "database is locked") || strings.Contains(s, "SQLITE_BUSY")
+}
+
+func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if isSQLiteBusy(err) {
+		telemetry.RecordSQLiteBusy(ctx, op)
+	}
+	return res, err
+}
+
+func (s *Store) queryDB(ctx context.Context, op string, query string, args ...any) (*sql.Rows, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if isSQLiteBusy(err) {
+		telemetry.RecordSQLiteBusy(ctx, op)
+	}
+	return rows, err
+}
+
+func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...any) error {
+	err := row.Scan(dest...)
+	if isSQLiteBusy(err) {
+		telemetry.RecordSQLiteBusy(ctx, op)
+	}
+	return err
+}
+
+func txExec(tx *sql.Tx, op string, query string, args ...any) (sql.Result, error) {
+	res, err := tx.Exec(query, args...)
+	if isSQLiteBusy(err) {
+		telemetry.RecordSQLiteBusy(context.Background(), op)
+	}
+	return res, err
 }
 
 // ---------------------------------------------------------------------------
@@ -352,11 +448,413 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Observability Phase 6: surface agent/tool/policy context
+		// on every audit row so downstream aggregators (top_tools
+		// in /v1/agentwatch/summary, Splunk dashboards keyed on
+		// policy_id, per-agent incident timelines) can key off
+		// first-class columns instead of parsing the free-form
+		// details blob.
+		description: "add session_id/agent/policy/destination/tool correlation columns",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "session_id", `ALTER TABLE audit_events ADD COLUMN session_id TEXT`},
+				{"audit_events", "agent_name", `ALTER TABLE audit_events ADD COLUMN agent_name TEXT`},
+				{"audit_events", "agent_instance_id", `ALTER TABLE audit_events ADD COLUMN agent_instance_id TEXT`},
+				{"audit_events", "policy_id", `ALTER TABLE audit_events ADD COLUMN policy_id TEXT`},
+				{"audit_events", "destination_app", `ALTER TABLE audit_events ADD COLUMN destination_app TEXT`},
+				{"audit_events", "tool_name", `ALTER TABLE audit_events ADD COLUMN tool_name TEXT`},
+				{"audit_events", "tool_id", `ALTER TABLE audit_events ADD COLUMN tool_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			for _, idx := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_audit_session_id ON audit_events(session_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_agent_instance_id ON audit_events(agent_instance_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`,
+			} {
+				if _, err := ex.Exec(idx); err != nil {
+					return fmt.Errorf("create correlation index: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// v7 observability Phase 1 (Track 0 pre-allocation):
+		// stamp provenance + three-tier agent identity onto every
+		// audit row and judge response. Parallel work tracks (1-10)
+		// land the *writers* for these columns; Track 0 only
+		// declares the schema so no downstream migration is needed
+		// when each track merges.
+		description: "v7: add provenance + agent_id + sidecar_instance_id columns",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "schema_version", `ALTER TABLE audit_events ADD COLUMN schema_version INTEGER`},
+				{"audit_events", "content_hash", `ALTER TABLE audit_events ADD COLUMN content_hash TEXT`},
+				{"audit_events", "generation", `ALTER TABLE audit_events ADD COLUMN generation INTEGER`},
+				{"audit_events", "binary_version", `ALTER TABLE audit_events ADD COLUMN binary_version TEXT`},
+				{"audit_events", "agent_id", `ALTER TABLE audit_events ADD COLUMN agent_id TEXT`},
+				{"audit_events", "sidecar_instance_id", `ALTER TABLE audit_events ADD COLUMN sidecar_instance_id TEXT`},
+				{"judge_responses", "schema_version", `ALTER TABLE judge_responses ADD COLUMN schema_version INTEGER`},
+				{"judge_responses", "content_hash", `ALTER TABLE judge_responses ADD COLUMN content_hash TEXT`},
+				{"judge_responses", "generation", `ALTER TABLE judge_responses ADD COLUMN generation INTEGER`},
+				{"judge_responses", "binary_version", `ALTER TABLE judge_responses ADD COLUMN binary_version TEXT`},
+				{"judge_responses", "agent_id", `ALTER TABLE judge_responses ADD COLUMN agent_id TEXT`},
+				{"judge_responses", "sidecar_instance_id", `ALTER TABLE judge_responses ADD COLUMN sidecar_instance_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			for _, idx := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_audit_agent_id ON audit_events(agent_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`,
+			} {
+				if _, err := ex.Exec(idx); err != nil {
+					return fmt.Errorf("create v7 index: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// v7 observability Phase 2 (Track 0 pre-allocation):
+		// scan_findings table is the per-finding row store that
+		// backs EventScanFinding. scan_results becomes the summary
+		// table (1 row per scan); scan_findings becomes a 1:N
+		// detail table (N rows per scan). Tracks 1/2/3 (skill,
+		// plugin, mcp scanners) insert into both tables.
+		//
+		// rule_id + line_number are added to findings (legacy
+		// table) so downstream dashboards don't have to special-
+		// case old vs new scans.
+		description: "v7: add scan_findings detail table + rule_id/line_number on findings",
+		apply: func(ex dbExecer) error {
+			if _, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS scan_findings (
+				id TEXT PRIMARY KEY,
+				scan_id TEXT NOT NULL,
+				scanner TEXT NOT NULL,
+				target TEXT NOT NULL,
+				rule_id TEXT,
+				category TEXT,
+				severity TEXT NOT NULL,
+				title TEXT,
+				description TEXT,
+				location TEXT,
+				line_number INTEGER,
+				remediation TEXT,
+				tags TEXT,
+				timestamp DATETIME NOT NULL,
+				run_id TEXT,
+				request_id TEXT,
+				session_id TEXT,
+				agent_id TEXT,
+				agent_instance_id TEXT,
+				sidecar_instance_id TEXT,
+				schema_version INTEGER,
+				content_hash TEXT,
+				generation INTEGER,
+				binary_version TEXT
+			);
+			CREATE INDEX IF NOT EXISTS idx_scan_findings_scan_id ON scan_findings(scan_id);
+			CREATE INDEX IF NOT EXISTS idx_scan_findings_scanner ON scan_findings(scanner);
+			CREATE INDEX IF NOT EXISTS idx_scan_findings_severity ON scan_findings(severity);
+			CREATE INDEX IF NOT EXISTS idx_scan_findings_rule_id ON scan_findings(rule_id);
+			CREATE INDEX IF NOT EXISTS idx_scan_findings_timestamp ON scan_findings(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_scan_findings_agent_id ON scan_findings(agent_id);
+			`); err != nil {
+				return fmt.Errorf("create scan_findings: %w", err)
+			}
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"findings", "rule_id", `ALTER TABLE findings ADD COLUMN rule_id TEXT`},
+				{"findings", "line_number", `ALTER TABLE findings ADD COLUMN line_number INTEGER`},
+				{"scan_results", "verdict", `ALTER TABLE scan_results ADD COLUMN verdict TEXT`},
+				{"scan_results", "exit_code", `ALTER TABLE scan_results ADD COLUMN exit_code INTEGER`},
+				{"scan_results", "error", `ALTER TABLE scan_results ADD COLUMN error TEXT`},
+			} {
+				// Some upgrade paths (pre-migration-1 databases)
+				// never created the legacy `findings` table; skip
+				// the alter if the table simply doesn't exist.
+				present, err := tableExists(ex, spec.table)
+				if err != nil {
+					return err
+				}
+				if !present {
+					continue
+				}
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// v7 observability Phase 3 (Track 0 pre-allocation):
+		// activity_events is the SQLite store for EventActivity.
+		// Every operator mutation (policy reload, config save,
+		// block/allow change, skill approval, sink update) lands
+		// here with a full before/after JSON snapshot + structured
+		// diff. Track 6 (activity tracking) is the primary writer;
+		// other tracks emit via audit.Logger.LogActivity.
+		description: "v7: add activity_events table for operator mutations",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS activity_events (
+				id TEXT PRIMARY KEY,
+				timestamp DATETIME NOT NULL,
+				actor TEXT NOT NULL,
+				action TEXT NOT NULL,
+				target_type TEXT NOT NULL,
+				target_id TEXT NOT NULL,
+				reason TEXT,
+				before_json TEXT,
+				after_json TEXT,
+				diff_json TEXT,
+				version_from TEXT,
+				version_to TEXT,
+				request_id TEXT,
+				trace_id TEXT,
+				run_id TEXT,
+				schema_version INTEGER,
+				content_hash TEXT,
+				generation INTEGER,
+				binary_version TEXT,
+				agent_id TEXT,
+				sidecar_instance_id TEXT
+			);
+			CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_events(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_activity_actor ON activity_events(actor);
+			CREATE INDEX IF NOT EXISTS idx_activity_action ON activity_events(action);
+			CREATE INDEX IF NOT EXISTS idx_activity_target ON activity_events(target_type, target_id);
+			CREATE INDEX IF NOT EXISTS idx_activity_generation ON activity_events(generation);
+			`)
+			return err
+		},
+	},
+	{
+		// v7 observability Phase 4 (Track 0 pre-allocation):
+		// sink_health is an audit store of every audit sink
+		// delivery attempt outcome — batches delivered, batches
+		// dropped, circuit breaker transitions, queue full events.
+		// Track 7 (external integrations) is the primary writer.
+		// The table intentionally keeps per-attempt rows so
+		// on-call can see the exact batch that tripped a sink
+		// into failing rather than rolled-up counters.
+		description: "v7: add sink_health table for audit_sink delivery telemetry",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS sink_health (
+				id TEXT PRIMARY KEY,
+				timestamp DATETIME NOT NULL,
+				sink_name TEXT NOT NULL,
+				sink_kind TEXT NOT NULL,
+				outcome TEXT NOT NULL,
+				status_code INTEGER,
+				latency_ms INTEGER,
+				batch_size INTEGER,
+				error TEXT,
+				queue_depth INTEGER,
+				dropped_count INTEGER,
+				schema_version INTEGER,
+				content_hash TEXT,
+				generation INTEGER,
+				binary_version TEXT,
+				sidecar_instance_id TEXT
+			);
+			CREATE INDEX IF NOT EXISTS idx_sink_health_timestamp ON sink_health(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_sink_health_sink ON sink_health(sink_name);
+			CREATE INDEX IF NOT EXISTS idx_sink_health_outcome ON sink_health(outcome);
+			`)
+			return err
+		},
+	},
+	{
+		// v7 observability Phase 5 (Track 0 pre-allocation):
+		// lift schema_version / content_hash / generation /
+		// binary_version onto the remaining correlated tables so
+		// the whole audit database snapshots provenance
+		// consistently. Actions + snapshots get them so a config
+		// mutation and its resulting scans can be joined by
+		// content_hash even if run_id was missed.
+		description: "v7: extend actions, snapshots, network_egress with provenance",
+		apply: func(ex dbExecer) error {
+			tables := []string{"actions", "target_snapshots", "network_egress_events"}
+			cols := []struct {
+				name, typ string
+			}{
+				{"schema_version", "INTEGER"},
+				{"content_hash", "TEXT"},
+				{"generation", "INTEGER"},
+				{"binary_version", "TEXT"},
+				{"sidecar_instance_id", "TEXT"},
+			}
+			for _, t := range tables {
+				present, err := tableExists(ex, t)
+				if err != nil {
+					return err
+				}
+				if !present {
+					continue
+				}
+				for _, c := range cols {
+					exists, err := hasColumnDB(ex, t, c.name)
+					if err != nil {
+						return err
+					}
+					if !exists {
+						stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", t, c.name, c.typ)
+						if _, err := ex.Exec(stmt); err != nil {
+							return fmt.Errorf("alter %s.%s: %w", t, c.name, err)
+						}
+					}
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// v7 observability Phase 6 (Track 0 pre-allocation):
+		// scan_results gets the same provenance quartet +
+		// agent_id / sidecar_instance_id so a per-scan aggregate
+		// can be drawn up in SQL without joining back to
+		// audit_events just to find which sidecar emitted the
+		// scan.
+		description: "v7: extend scan_results + findings with provenance + agent identity",
+		apply: func(ex dbExecer) error {
+			extras := []struct {
+				table, column, typ string
+			}{
+				{"scan_results", "schema_version", "INTEGER"},
+				{"scan_results", "content_hash", "TEXT"},
+				{"scan_results", "generation", "INTEGER"},
+				{"scan_results", "binary_version", "TEXT"},
+				{"scan_results", "agent_id", "TEXT"},
+				{"scan_results", "agent_instance_id", "TEXT"},
+				{"scan_results", "sidecar_instance_id", "TEXT"},
+				{"scan_results", "session_id", "TEXT"},
+				{"scan_results", "request_id", "TEXT"},
+				{"scan_results", "trace_id", "TEXT"},
+				{"findings", "schema_version", "INTEGER"},
+				{"findings", "content_hash", "TEXT"},
+				{"findings", "generation", "INTEGER"},
+				{"findings", "binary_version", "TEXT"},
+				{"findings", "agent_id", "TEXT"},
+				{"findings", "sidecar_instance_id", "TEXT"},
+			}
+			for _, c := range extras {
+				present, err := tableExists(ex, c.table)
+				if err != nil {
+					return err
+				}
+				if !present {
+					continue
+				}
+				exists, err := hasColumnDB(ex, c.table, c.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.typ)
+					if _, err := ex.Exec(stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", c.table, c.column, err)
+					}
+				}
+			}
+			for _, idx := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_scan_agent_id ON scan_results(agent_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_scan_generation ON scan_results(generation)`,
+			} {
+				if _, err := ex.Exec(idx); err != nil {
+					return fmt.Errorf("create v7 scan index: %w", err)
+				}
+			}
+			// findings table may not exist in pre-migration-1 upgrades.
+			if ok, _ := tableExists(ex, "findings"); ok {
+				if _, err := ex.Exec(`CREATE INDEX IF NOT EXISTS idx_findings_agent_id ON findings(agent_id)`); err != nil {
+					return fmt.Errorf("create findings.agent_id index: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		// Track 3: complete judge_responses correlation for v7 SIEM joins
+		// (session, policy, tool context, full three-tier identity).
+		description: "v7: extend judge_responses with session/policy/tool/agent_instance",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"judge_responses", "session_id", `ALTER TABLE judge_responses ADD COLUMN session_id TEXT`},
+				{"judge_responses", "agent_instance_id", `ALTER TABLE judge_responses ADD COLUMN agent_instance_id TEXT`},
+				{"judge_responses", "policy_id", `ALTER TABLE judge_responses ADD COLUMN policy_id TEXT`},
+				{"judge_responses", "destination_app", `ALTER TABLE judge_responses ADD COLUMN destination_app TEXT`},
+				{"judge_responses", "tool_name", `ALTER TABLE judge_responses ADD COLUMN tool_name TEXT`},
+				{"judge_responses", "tool_id", `ALTER TABLE judge_responses ADD COLUMN tool_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			return nil
+		},
+	},
+}
+
+// tableExists reports whether the given SQLite table is present.
+// Safe to call inside a migration transaction; the query targets
+// sqlite_master so it reflects changes made earlier in the same tx.
+func tableExists(ex dbExecer, table string) (bool, error) {
+	var count int
+	err := ex.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("audit: sqlite_master lookup for %q: %w", table, err)
+	}
+	return count > 0, nil
 }
 
 func (s *Store) Init() error {
 	// Ensure the schema_version tracking table exists.
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (
+	if _, err := s.execDB(context.Background(), "audit", `CREATE TABLE IF NOT EXISTS schema_version (
 		version INTEGER PRIMARY KEY,
 		applied_at DATETIME NOT NULL
 	)`); err != nil {
@@ -364,8 +862,8 @@ func (s *Store) Init() error {
 	}
 
 	current := 0
-	row := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`)
-	if err := row.Scan(&current); err != nil {
+	row := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_version`)
+	if err := s.scanRow(context.Background(), "schema_version_peek", row, &current); err != nil {
 		return fmt.Errorf("audit: read schema version: %w", err)
 	}
 
@@ -394,7 +892,7 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	if err := m.apply(tx); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
-	if _, err := tx.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+	if _, err := txExec(tx, "migration_version_insert", `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		ver, time.Now().UTC()); err != nil {
 		return fmt.Errorf("audit: record migration %d: %w", ver, err)
 	}
@@ -407,7 +905,8 @@ func (s *Store) applyMigration(ver int, m migration) error {
 // SchemaVersion returns the current schema version number.
 func (s *Store) SchemaVersion() (int, error) {
 	var v int
-	err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v)
+	err := s.scanRow(context.Background(), "schema_version",
+		s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_version`), &v)
 	return v, err
 }
 
@@ -445,18 +944,23 @@ func hasColumnDB(ex dbExecer, table, column string) (bool, error) {
 var knownTables = map[string]bool{
 	"audit_events":          true,
 	"scan_results":          true,
+	"findings":              true,
 	"actions":               true,
 	"target_snapshots":      true,
 	"network_egress_events": true,
 	"judge_responses":       true,
 	"schema_version":        true,
+	// v7 additions
+	"scan_findings":   true,
+	"activity_events": true,
+	"sink_health":     true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {
 	if !knownTables[table] {
 		return false, fmt.Errorf("audit: hasColumn called with unknown table %q", table)
 	}
-	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	rows, err := s.queryDB(context.Background(), "audit", fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false, fmt.Errorf("audit: pragma table_info(%s): %w", table, err)
 	}
@@ -498,16 +1002,182 @@ func (s *Store) LogEvent(e Event) error {
 	}
 
 	ts := e.Timestamp.Format(time.RFC3339Nano)
-	_, err := s.db.Exec(
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.execDB(context.Background(), "audit",
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity,
+			run_id, trace_id, request_id,
+			session_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
+			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
+		nullStr(e.SessionID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
+		nullStr(e.PolicyID), nullStr(e.DestinationApp), nullStr(e.ToolName), nullStr(e.ToolID),
+		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
+		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
 	}
 	return nil
+}
+
+// ActivityEventRow is the SQLite shape for migration #8 activity_events.
+type ActivityEventRow struct {
+	ID                string    `json:"id"`
+	Timestamp         time.Time `json:"timestamp"`
+	Actor             string    `json:"actor"`
+	Action            string    `json:"action"`
+	TargetType        string    `json:"target_type"`
+	TargetID          string    `json:"target_id"`
+	Reason            string    `json:"reason,omitempty"`
+	BeforeJSON        string    `json:"before_json,omitempty"`
+	AfterJSON         string    `json:"after_json,omitempty"`
+	DiffJSON          string    `json:"diff_json,omitempty"`
+	VersionFrom       string    `json:"version_from,omitempty"`
+	VersionTo         string    `json:"version_to,omitempty"`
+	RequestID         string    `json:"request_id,omitempty"`
+	TraceID           string    `json:"trace_id,omitempty"`
+	RunID             string    `json:"run_id,omitempty"`
+	SchemaVersion     int       `json:"schema_version,omitempty"`
+	ContentHash       string    `json:"content_hash,omitempty"`
+	Generation        uint64    `json:"generation,omitempty"`
+	BinaryVersion     string    `json:"binary_version,omitempty"`
+	AgentID           string    `json:"agent_id,omitempty"`
+	SidecarInstanceID string    `json:"sidecar_instance_id,omitempty"`
+}
+
+// InsertActivityEvent persists a full operator mutation row (no redaction).
+func (s *Store) InsertActivityEvent(a ActivityEventRow) error {
+	if a.ID == "" {
+		return fmt.Errorf("audit: activity id required")
+	}
+	if a.Timestamp.IsZero() {
+		a.Timestamp = time.Now().UTC()
+	}
+	if a.RunID == "" {
+		a.RunID = currentRunID()
+	}
+	_, err := s.execDB(context.Background(), "audit",
+		`INSERT INTO activity_events (
+			id, timestamp, actor, action, target_type, target_id, reason,
+			before_json, after_json, diff_json, version_from, version_to,
+			request_id, trace_id, run_id,
+			schema_version, content_hash, generation, binary_version,
+			agent_id, sidecar_instance_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.Timestamp.Format(time.RFC3339Nano),
+		a.Actor, a.Action, a.TargetType, a.TargetID, anyString(a.Reason),
+		anyString(a.BeforeJSON), anyString(a.AfterJSON), anyString(a.DiffJSON),
+		anyString(a.VersionFrom), anyString(a.VersionTo),
+		anyString(a.RequestID), anyString(a.TraceID), anyString(a.RunID),
+		nullInt(a.SchemaVersion), anyString(a.ContentHash), nullUint64(a.Generation),
+		anyString(a.BinaryVersion), anyString(a.AgentID), anyString(a.SidecarInstanceID),
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert activity event: %w", err)
+	}
+	return nil
+}
+
+// SinkHealthInput is one row in sink_health (migration #9).
+type SinkHealthInput struct {
+	ID                string
+	Timestamp         time.Time
+	SinkName          string
+	SinkKind          string
+	Outcome           string // delivered | failed | dropped_queue | dropped_circuit
+	StatusCode        int    // HTTP status; 0 → NULL
+	LatencyMs         int64
+	BatchSize         int
+	Error             string
+	QueueDepth        int
+	DroppedCount      int
+	SchemaVersion     int
+	ContentHash       string
+	Generation        uint64
+	BinaryVersion     string
+	SidecarInstanceID string
+}
+
+// InsertSinkHealth records a single sink delivery attempt outcome.
+func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
+	if h.ID == "" {
+		h.ID = uuid.New().String()
+	}
+	if h.Timestamp.IsZero() {
+		h.Timestamp = time.Now().UTC()
+	}
+	var status sql.NullInt64
+	if h.StatusCode > 0 {
+		status = sql.NullInt64{Int64: int64(h.StatusCode), Valid: true}
+	}
+	_, err := s.execDB(context.Background(), "audit",
+		`INSERT INTO sink_health (
+			id, timestamp, sink_name, sink_kind, outcome,
+			status_code, latency_ms, batch_size, error,
+			queue_depth, dropped_count,
+			schema_version, content_hash, generation, binary_version,
+			sidecar_instance_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.ID, h.Timestamp.Format(time.RFC3339Nano),
+		h.SinkName, h.SinkKind, h.Outcome,
+		status, h.LatencyMs, h.BatchSize, anyString(h.Error),
+		nullInt(h.QueueDepth), nullInt(h.DroppedCount),
+		nullInt(h.SchemaVersion), nullStr(h.ContentHash).String, nullUint64(h.Generation),
+		nullStr(h.BinaryVersion).String, nullStr(h.SidecarInstanceID).String,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert sink health: %w", err)
+	}
+	return nil
+}
+
+// ListActivityEvents returns recent activity rows, newest first.
+func (s *Store) ListActivityEvents(limit int) ([]ActivityEventRow, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.queryDB(context.Background(), "audit", `
+		SELECT id, timestamp, actor, action, target_type, target_id, COALESCE(reason,''),
+			COALESCE(before_json,''), COALESCE(after_json,''), COALESCE(diff_json,''),
+			COALESCE(version_from,''), COALESCE(version_to,''),
+			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
+			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0),
+			COALESCE(binary_version,''), COALESCE(agent_id,''), COALESCE(sidecar_instance_id,'')
+		FROM activity_events ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list activity events: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ActivityEventRow
+	for rows.Next() {
+		var a ActivityEventRow
+		var ts string
+		var gen sql.NullInt64
+		var schema sql.NullInt64
+		if err := rows.Scan(
+			&a.ID, &ts, &a.Actor, &a.Action, &a.TargetType, &a.TargetID, &a.Reason,
+			&a.BeforeJSON, &a.AfterJSON, &a.DiffJSON,
+			&a.VersionFrom, &a.VersionTo,
+			&a.RequestID, &a.TraceID, &a.RunID,
+			&schema, &a.ContentHash, &gen,
+			&a.BinaryVersion, &a.AgentID, &a.SidecarInstanceID,
+		); err != nil {
+			return nil, fmt.Errorf("audit: scan activity: %w", err)
+		}
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			a.Timestamp = t
+		}
+		if schema.Valid {
+			a.SchemaVersion = int(schema.Int64)
+		}
+		if gen.Valid {
+			a.Generation = uint64(gen.Int64)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // JudgeResponse is the persisted shape of a single LLM-judge call
@@ -534,11 +1204,25 @@ type JudgeResponse struct {
 	RequestID         string
 	TraceID           string
 	RunID             string
+	SessionID         string
 	InputHash         string  // sha256 of the judge input, never the raw input
 	Confidence        float64 // 0–1 score, 0 when the judge did not return one
 	FailClosedApplied bool    // set when a judge parse/timeout error forced a block
 	InspectedModel    string  // the upstream model whose traffic we judged
 	PromptTemplateID  string  // optional template identifier for drift diagnosis
+
+	// v7 provenance + identity (Track 3 writer)
+	SchemaVersion     int
+	ContentHash       string
+	Generation        uint64
+	BinaryVersion     string
+	AgentID           string
+	AgentInstanceID   string
+	SidecarInstanceID string
+	PolicyID          string
+	DestinationApp    string
+	ToolName          string
+	ToolID            string
 }
 
 // MaxJudgeRawBytes is the upper bound on the raw_response body
@@ -576,12 +1260,15 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 	if e.FailClosedApplied {
 		failClosed = 1
 	}
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO judge_responses
 			(id, timestamp, kind, direction, model, action, severity, latency_ms,
-			 parse_error, raw_response, request_id, trace_id, run_id, input_hash,
-			 confidence, fail_closed_applied, inspected_model, prompt_template_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
+			 confidence, fail_closed_applied, inspected_model, prompt_template_id,
+			 schema_version, content_hash, generation, binary_version,
+			 agent_id, agent_instance_id, sidecar_instance_id,
+			 policy_id, destination_app, tool_name, tool_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID,
 		e.Timestamp.Format(time.RFC3339Nano),
 		e.Kind,
@@ -595,11 +1282,23 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		nullStr(e.RequestID),
 		nullStr(e.TraceID),
 		nullStr(e.RunID),
+		nullStr(e.SessionID),
 		nullStr(e.InputHash),
 		e.Confidence,
 		failClosed,
 		nullStr(e.InspectedModel),
 		nullStr(e.PromptTemplateID),
+		nullInt(e.SchemaVersion),
+		nullStr(e.ContentHash),
+		int64(e.Generation),
+		nullStr(e.BinaryVersion),
+		nullStr(e.AgentID),
+		nullStr(e.AgentInstanceID),
+		nullStr(e.SidecarInstanceID),
+		nullStr(e.PolicyID),
+		nullStr(e.DestinationApp),
+		nullStr(e.ToolName),
+		nullStr(e.ToolID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert judge response: %w", err)
@@ -632,14 +1331,17 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.queryDB(context.Background(), "audit", `
 		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
 			COALESCE(parse_error,''), raw_response,
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
-			COALESCE(input_hash,''), COALESCE(confidence,0),
+			COALESCE(session_id,''), COALESCE(input_hash,''), COALESCE(confidence,0),
 			COALESCE(fail_closed_applied,0),
-			COALESCE(inspected_model,''), COALESCE(prompt_template_id,'')
+			COALESCE(inspected_model,''), COALESCE(prompt_template_id,''),
+			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0), COALESCE(binary_version,''),
+			COALESCE(agent_id,''), COALESCE(agent_instance_id,''), COALESCE(sidecar_instance_id,''),
+			COALESCE(policy_id,''), COALESCE(destination_app,''), COALESCE(tool_name,''), COALESCE(tool_id,'')
 		FROM judge_responses ORDER BY timestamp DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list judge responses: %w", err)
@@ -651,12 +1353,17 @@ func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
 		var r JudgeResponse
 		var ts string
 		var failClosed int
+		var gen int64
 		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
 			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
-			&r.RequestID, &r.TraceID, &r.RunID, &r.InputHash, &r.Confidence,
-			&failClosed, &r.InspectedModel, &r.PromptTemplateID); err != nil {
+			&r.RequestID, &r.TraceID, &r.RunID, &r.SessionID, &r.InputHash, &r.Confidence,
+			&failClosed, &r.InspectedModel, &r.PromptTemplateID,
+			&r.SchemaVersion, &r.ContentHash, &gen, &r.BinaryVersion,
+			&r.AgentID, &r.AgentInstanceID, &r.SidecarInstanceID,
+			&r.PolicyID, &r.DestinationApp, &r.ToolName, &r.ToolID); err != nil {
 			return nil, fmt.Errorf("audit: scan judge response: %w", err)
 		}
+		r.Generation = uint64(gen)
 		r.FailClosedApplied = failClosed != 0
 		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 			r.Timestamp = t
@@ -677,14 +1384,17 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 	if requestID == "" {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.queryDB(context.Background(), "audit", `
 		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
 			COALESCE(parse_error,''), raw_response,
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
-			COALESCE(input_hash,''), COALESCE(confidence,0),
+			COALESCE(session_id,''), COALESCE(input_hash,''), COALESCE(confidence,0),
 			COALESCE(fail_closed_applied,0),
-			COALESCE(inspected_model,''), COALESCE(prompt_template_id,'')
+			COALESCE(inspected_model,''), COALESCE(prompt_template_id,''),
+			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0), COALESCE(binary_version,''),
+			COALESCE(agent_id,''), COALESCE(agent_instance_id,''), COALESCE(sidecar_instance_id,''),
+			COALESCE(policy_id,''), COALESCE(destination_app,''), COALESCE(tool_name,''), COALESCE(tool_id,'')
 		FROM judge_responses WHERE request_id = ? ORDER BY timestamp DESC`, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("audit: judge by request_id: %w", err)
@@ -696,12 +1406,17 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 		var r JudgeResponse
 		var ts string
 		var failClosed int
+		var gen int64
 		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
 			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
-			&r.RequestID, &r.TraceID, &r.RunID, &r.InputHash, &r.Confidence,
-			&failClosed, &r.InspectedModel, &r.PromptTemplateID); err != nil {
+			&r.RequestID, &r.TraceID, &r.RunID, &r.SessionID, &r.InputHash, &r.Confidence,
+			&failClosed, &r.InspectedModel, &r.PromptTemplateID,
+			&r.SchemaVersion, &r.ContentHash, &gen, &r.BinaryVersion,
+			&r.AgentID, &r.AgentInstanceID, &r.SidecarInstanceID,
+			&r.PolicyID, &r.DestinationApp, &r.ToolName, &r.ToolID); err != nil {
 			return nil, fmt.Errorf("audit: scan judge row: %w", err)
 		}
+		r.Generation = uint64(gen)
 		r.FailClosedApplied = failClosed != 0
 		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 			r.Timestamp = t
@@ -713,7 +1428,7 @@ func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse,
 
 func (s *Store) InsertScanResult(id, scannerName, target string, ts time.Time, durationMs int64, findingCount int, maxSeverity, rawJSON string) error {
 	runID := currentRunID()
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO scan_results (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, scannerName, target, ts, durationMs, findingCount, maxSeverity, rawJSON, nullStr(runID),
@@ -725,7 +1440,7 @@ func (s *Store) InsertScanResult(id, scannerName, target string, ts time.Time, d
 }
 
 func (s *Store) InsertFinding(id, scanID, severity, title, description, location, remediation, scannerName, tags string) error {
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO findings (id, scan_id, severity, title, description, location, remediation, scanner, tags)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, scanID, severity, title, description, location, remediation, scannerName, tags,
@@ -741,8 +1456,13 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 		limit = 100
 	}
 
-	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
+	rows, err := s.queryDB(context.Background(), "audit",
+		`SELECT id, timestamp, action, target, actor, details, severity,
+		        run_id, trace_id, request_id,
+		        session_id, agent_name, agent_instance_id, policy_id,
+		        destination_app, tool_name, tool_id,
+		        schema_version, content_hash, generation, binary_version,
+		        agent_id, sidecar_instance_id
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -752,20 +1472,81 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 
 	var events []Event
 	for rows.Next() {
-		var e Event
-		var target, details, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
-			return nil, fmt.Errorf("audit: scan row: %w", err)
+		e, err := scanAuditEventRow(rows)
+		if err != nil {
+			return nil, err
 		}
-		e.Target = target.String
-		e.Details = details.String
-		e.Severity = severity.String
-		e.RunID = runID.String
-		e.TraceID = traceID.String
-		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// scanAuditEventRow centralises the column-scan logic for ListEvents
+// and ListEventsByTarget so the Observability Phase 6 columns
+// (session_id, agent_name, agent_instance_id, policy_id,
+// destination_app, tool_name, tool_id) only have to be threaded
+// through the struct in a single place.
+func scanAuditEventRow(rows rowScanner) (Event, error) {
+	var e Event
+	var (
+		target, details, severity                       sql.NullString
+		runID, traceID, requestID                       sql.NullString
+		sessionID, agentName, agentInstanceID, policyID sql.NullString
+		destinationApp, toolName, toolID                sql.NullString
+		schemaVerI                                      sql.NullInt64
+		contentHashStr, binaryVerStr                    sql.NullString
+		generation                                      sql.NullInt64
+		agentID, sidecarInst                            sql.NullString
+	)
+	if err := rows.Scan(
+		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity,
+		&runID, &traceID, &requestID,
+		&sessionID, &agentName, &agentInstanceID, &policyID,
+		&destinationApp, &toolName, &toolID,
+		&schemaVerI, &contentHashStr, &generation, &binaryVerStr,
+		&agentID, &sidecarInst,
+	); err != nil {
+		return Event{}, fmt.Errorf("audit: scan row: %w", err)
+	}
+	e.Target = target.String
+	e.Details = details.String
+	e.Severity = severity.String
+	e.RunID = runID.String
+	e.TraceID = traceID.String
+	e.RequestID = requestID.String
+	e.SessionID = sessionID.String
+	e.AgentName = agentName.String
+	e.AgentInstanceID = agentInstanceID.String
+	e.PolicyID = policyID.String
+	e.DestinationApp = destinationApp.String
+	e.ToolName = toolName.String
+	e.ToolID = toolID.String
+	if schemaVerI.Valid {
+		e.SchemaVersion = int(schemaVerI.Int64)
+	}
+	if contentHashStr.Valid {
+		e.ContentHash = contentHashStr.String
+	}
+	if generation.Valid {
+		e.Generation = uint64(generation.Int64)
+	}
+	if binaryVerStr.Valid {
+		e.BinaryVersion = binaryVerStr.String
+	}
+	if agentID.Valid {
+		e.AgentID = agentID.String
+	}
+	if sidecarInst.Valid {
+		e.SidecarInstanceID = sidecarInst.String
+	}
+	return e, nil
+}
+
+// rowScanner lets scanAuditEventRow accept *sql.Rows from either
+// ListEvents or ListEventsByTarget without importing database/sql at
+// the call site.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
 }
 
 // --- Actions ---
@@ -778,7 +1559,7 @@ func (s *Store) SetAction(targetType, targetName, sourcePath string, state Actio
 	}
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	_, err = s.db.Exec(
+	_, err = s.execDB(context.Background(), "audit",
 		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(target_type, target_name) DO UPDATE SET
@@ -818,7 +1599,7 @@ func (s *Store) SetActionField(targetType, targetName, field, value, reason stri
 		   actions_json = json_set(actions_json, ?, ?),
 		   reason = excluded.reason,
 		   updated_at = excluded.updated_at`
-	_, err := s.db.Exec(query, id, targetType, targetName, initJSON, reason, now, path, value)
+	_, err := s.execDB(context.Background(), "audit", query, id, targetType, targetName, initJSON, reason, now, path, value)
 	if err != nil {
 		return fmt.Errorf("audit: set action field %s: %w", field, err)
 	}
@@ -827,7 +1608,7 @@ func (s *Store) SetActionField(targetType, targetName, field, value, reason stri
 
 // SetSourcePath updates just the source_path for an existing action row.
 func (s *Store) SetSourcePath(targetType, targetName, path string) error {
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`UPDATE actions SET source_path = ? WHERE target_type = ? AND target_name = ?`,
 		path, targetType, targetName,
 	)
@@ -844,7 +1625,7 @@ func (s *Store) ClearActionField(targetType, targetName, field string) error {
 		return err
 	}
 	path := "$." + field
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`UPDATE actions SET actions_json = json_remove(actions_json, ?), updated_at = ?
 		 WHERE target_type = ? AND target_name = ?`,
 		path, time.Now().UTC(), targetType, targetName,
@@ -853,7 +1634,7 @@ func (s *Store) ClearActionField(targetType, targetName, field string) error {
 		return fmt.Errorf("audit: clear action field %s: %w", field, err)
 	}
 	// Clean up rows with no active actions
-	_, _ = s.db.Exec(
+	_, _ = s.execDB(context.Background(), "audit",
 		`DELETE FROM actions WHERE target_type = ? AND target_name = ? AND actions_json IN ('{}', 'null', '')`,
 		targetType, targetName,
 	)
@@ -862,7 +1643,7 @@ func (s *Store) ClearActionField(targetType, targetName, field string) error {
 
 // RemoveAction deletes the entire action row for a target.
 func (s *Store) RemoveAction(targetType, targetName string) error {
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`DELETE FROM actions WHERE target_type = ? AND target_name = ?`,
 		targetType, targetName,
 	)
@@ -876,11 +1657,12 @@ func (s *Store) RemoveAction(targetType, targetName string) error {
 func (s *Store) GetAction(targetType, targetName string) (*ActionEntry, error) {
 	var e ActionEntry
 	var sourcePath, reason, actionsJSON sql.NullString
-	err := s.db.QueryRow(
-		`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
+	err := s.scanRow(context.Background(), "get_action",
+		s.db.QueryRowContext(context.Background(),
+			`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at
 		 FROM actions WHERE target_type = ? AND target_name = ?`,
-		targetType, targetName,
-	).Scan(&e.ID, &e.TargetType, &e.TargetName, &sourcePath, &actionsJSON, &reason, &e.UpdatedAt)
+			targetType, targetName,
+		), &e.ID, &e.TargetType, &e.TargetName, &sourcePath, &actionsJSON, &reason, &e.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -904,7 +1686,8 @@ func (s *Store) HasAction(targetType, targetName, field, value string) (bool, er
 	query := fmt.Sprintf(
 		`SELECT COUNT(*) FROM actions WHERE target_type = ? AND target_name = ? AND json_extract(actions_json, '$.%s') = ?`,
 		field)
-	err := s.db.QueryRow(query, targetType, targetName, value).Scan(&count)
+	err := s.scanRow(context.Background(), "has_action",
+		s.db.QueryRowContext(context.Background(), query, targetType, targetName, value), &count)
 	if err != nil {
 		return false, fmt.Errorf("audit: has action: %w", err)
 	}
@@ -950,7 +1733,7 @@ func (s *Store) ListAllActions() ([]ActionEntry, error) {
 }
 
 func (s *Store) queryActions(query string, args ...any) ([]ActionEntry, error) {
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.queryDB(context.Background(), "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query actions: %w", err)
 	}
@@ -978,6 +1761,27 @@ func nullStr(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+func nullInt(v int) sql.NullInt64 {
+	if v == 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(v), Valid: true}
+}
+
+func nullUint64(v uint64) sql.NullInt64 {
+	if v == 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(v), Valid: true}
+}
+
+func anyString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func validateActionFieldAndValue(field, value string) error {
@@ -1035,7 +1839,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(
+	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
 		 FROM audit_events
 		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
@@ -1071,11 +1875,11 @@ func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
 	var res sql.Result
 	var err error
 	if severityFilter == "" || severityFilter == "all" {
-		res, err = s.db.Exec(
+		res, err = s.execDB(context.Background(), "audit",
 			`UPDATE audit_events SET severity = 'ACK'
 			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`)
 	} else {
-		res, err = s.db.Exec(
+		res, err = s.execDB(context.Background(), "audit",
 			`UPDATE audit_events SET severity = 'ACK'
 			 WHERE severity = ?`, severityFilter)
 	}
@@ -1108,7 +1912,7 @@ func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
 	query := fmt.Sprintf(
 		`UPDATE audit_events SET severity = 'ACK' WHERE id IN (%s) AND severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`,
 		strings.Join(placeholders, ","))
-	res, err := s.db.Exec(query, args...)
+	res, err := s.execDB(context.Background(), "audit", query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("audit: acknowledge by IDs: %w", err)
 	}
@@ -1128,8 +1932,13 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
+	rows, err := s.queryDB(context.Background(), "audit",
+		`SELECT id, timestamp, action, target, actor, details, severity,
+		        run_id, trace_id, request_id,
+		        session_id, agent_name, agent_instance_id, policy_id,
+		        destination_app, tool_name, tool_id,
+		        schema_version, content_hash, generation, binary_version,
+		        agent_id, sidecar_instance_id
 		 FROM audit_events
 		 WHERE target = ?
 		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
@@ -1141,17 +1950,10 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 
 	var events []Event
 	for rows.Next() {
-		var e Event
-		var tgt, details, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &tgt, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
-			return nil, fmt.Errorf("audit: scan event row: %w", err)
+		e, err := scanAuditEventRow(rows)
+		if err != nil {
+			return nil, err
 		}
-		e.Target = tgt.String
-		e.Details = details.String
-		e.Severity = severity.String
-		e.RunID = runID.String
-		e.TraceID = traceID.String
-		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -1169,7 +1971,7 @@ func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(
+	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, scanner, target, timestamp, duration_ms, finding_count, max_severity
 		 FROM scan_results ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
@@ -1192,7 +1994,7 @@ func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {
 }
 
 func (s *Store) ListFindingsByScan(scanID string) ([]FindingRow, error) {
-	rows, err := s.db.Query(
+	rows, err := s.queryDB(context.Background(), "audit",
 		`SELECT id, scan_id, severity, title, description, location, remediation, scanner
 		 FROM findings WHERE scan_id = ? ORDER BY severity DESC`, scanID,
 	)
@@ -1241,7 +2043,8 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, &c.BlockedEgressCalls},
 	}
 	for _, q := range queries {
-		if err := s.db.QueryRow(q.sql).Scan(q.dest); err != nil {
+		if err := s.scanRow(context.Background(), "get_counts",
+			s.db.QueryRowContext(context.Background(), q.sql), q.dest); err != nil {
 			return c, fmt.Errorf("audit: count query: %w", err)
 		}
 	}
@@ -1293,7 +2096,7 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 	query += " ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.queryDB(context.Background(), "audit", query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query network egress events: %w", err)
 	}
@@ -1332,7 +2135,7 @@ type LatestScanInfo struct {
 }
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.queryDB(context.Background(), "audit", `
 		SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
 		FROM scan_results sr
 		INNER JOIN (
@@ -1396,7 +2199,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 	if e.Blocked {
 		blocked = 1
 	}
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO network_egress_events
 		 (id, timestamp, session_id, hostname, url, http_method, protocol, policy_outcome, decision_code, blocked, severity, details)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1413,7 +2216,8 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 // GetScanRawJSON returns the raw JSON blob for a scan result by ID.
 func (s *Store) GetScanRawJSON(scanID string) (string, error) {
 	var raw string
-	err := s.db.QueryRow("SELECT raw_json FROM scan_results WHERE id = ?", scanID).Scan(&raw)
+	err := s.scanRow(context.Background(), "scan_raw_json",
+		s.db.QueryRowContext(context.Background(), "SELECT raw_json FROM scan_results WHERE id = ?", scanID), &raw)
 	if err != nil {
 		return "", fmt.Errorf("audit: get scan raw json: %w", err)
 	}
@@ -1437,7 +2241,7 @@ type SnapshotRow struct {
 func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID string) error {
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	_, err := s.db.Exec(
+	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(target_type, target_path) DO UPDATE SET
@@ -1467,14 +2271,14 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 		err  error
 	)
 	if hostname == "" {
-		rows, err = s.db.Query(
+		rows, err = s.queryDB(context.Background(), "audit",
 			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events
 			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
 		)
 	} else {
-		rows, err = s.db.Query(
+		rows, err = s.queryDB(context.Background(), "audit",
 			`SELECT id, timestamp, session_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
@@ -1512,7 +2316,8 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 // CountBlockedEgress returns the total number of blocked egress events.
 func (s *Store) CountBlockedEgress() (int, error) {
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`).Scan(&count)
+	err := s.scanRow(context.Background(), "count_blocked_egress",
+		s.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`), &count)
 	if err != nil {
 		return 0, fmt.Errorf("audit: count blocked egress: %w", err)
 	}
@@ -1521,14 +2326,14 @@ func (s *Store) CountBlockedEgress() (int, error) {
 
 // GetTargetSnapshot loads the stored baseline snapshot for a target.
 func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, error) {
-	row := s.db.QueryRow(
-		`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at
-		 FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
-		targetType, targetPath,
-	)
 	var r SnapshotRow
 	var ts string
-	err := row.Scan(&r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts)
+	err := s.scanRow(context.Background(), "get_target_snapshot",
+		s.db.QueryRowContext(context.Background(),
+			`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at
+		 FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
+			targetType, targetPath,
+		), &r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts)
 	if err != nil {
 		return nil, fmt.Errorf("audit: get target snapshot: %w", err)
 	}
@@ -1540,9 +2345,37 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 }
 
 func (s *Store) Close() error {
+	telemetry.RegisterAuditDB(nil)
 	return s.db.Close()
 }
 
 func currentRunID() string {
 	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+}
+
+// processAgentInstanceID holds the per-process agent instance ID that
+// the sidecar installs at startup via SetProcessAgentInstanceID. It
+// is the stable fallback every audit row receives when the caller
+// doesn't already carry a session-scoped instance id.
+//
+// We keep it as a package-level atomic string behind a setter rather
+// than an env var (unlike currentRunID) because the sidecar mints a
+// fresh UUID per process lifetime — there's no operator-facing
+// configuration surface for it, and env vars propagate to child
+// processes which would accidentally share instance ids.
+var processAgentInstanceID atomic.Value
+
+// SetProcessAgentInstanceID installs the per-process stable agent
+// instance id. Intended to be called exactly once during sidecar
+// boot, before the audit Logger starts receiving traffic. An empty
+// value clears it.
+func SetProcessAgentInstanceID(id string) {
+	processAgentInstanceID.Store(strings.TrimSpace(id))
+}
+
+// ProcessAgentInstanceID returns the currently registered
+// per-process agent instance id, or empty string if none was set.
+func ProcessAgentInstanceID() string {
+	v, _ := processAgentInstanceID.Load().(string)
+	return v
 }

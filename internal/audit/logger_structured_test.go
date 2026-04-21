@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -38,6 +39,8 @@ func (c *captureEmitter) EmitAudit(e Event) {
 	defer c.mu.Unlock()
 	c.events = append(c.events, e)
 }
+
+func (c *captureEmitter) EmitGatewayEvent(_ gatewaylog.Event) {}
 
 func (c *captureEmitter) snapshot() []Event {
 	c.mu.Lock()

@@ -88,6 +88,153 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 	}
 }
 
+// TestStoreObservabilityPhase6ColumnsPresent asserts that the
+// Phase 6 migration added the v6 observability columns (session_id,
+// agent_name, agent_instance_id, policy_id, destination_app,
+// tool_name, tool_id) to audit_events. Without these, the
+// gatewaylog → audit → SIEM pipeline silently drops the fields used
+// by /v1/agentwatch/summary top_tools + per-agent aggregations.
+func TestStoreObservabilityPhase6ColumnsPresent(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	expected := []string{
+		"session_id",
+		"agent_name",
+		"agent_instance_id",
+		"policy_id",
+		"destination_app",
+		"tool_name",
+		"tool_id",
+	}
+	for _, col := range expected {
+		ok, err := store.hasColumn("audit_events", col)
+		if err != nil {
+			t.Fatalf("hasColumn(audit_events, %s): %v", col, err)
+		}
+		if !ok {
+			t.Fatalf("audit_events.%s missing — Phase 6 migration did not run", col)
+		}
+	}
+}
+
+// TestStoreLogEventRoundTripsPhase6Fields writes an Event with every
+// Phase 6 field populated and reads it back via ListEvents. All
+// fields must survive the sqlite round-trip unchanged — this is the
+// contract the audit bridge, Splunk HEC, and OTLP log sinks all rely
+// on.
+func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	in := Event{
+		Action:          "gateway-tool-call",
+		Target:          "github.create_pr",
+		Severity:        "INFO",
+		RunID:           "run-42",
+		TraceID:         "trace-42",
+		RequestID:       "req-42",
+		SessionID:       "sess-42",
+		AgentName:       "openclaw",
+		AgentInstanceID: "instance-42",
+		PolicyID:        "strict",
+		DestinationApp:  "mcp:github",
+		ToolName:        "github.create_pr",
+		ToolID:          "call_xyz",
+	}
+	if err := store.LogEvent(in); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	got := events[0]
+
+	cases := []struct {
+		name, got, want string
+	}{
+		{"RunID", got.RunID, in.RunID},
+		{"TraceID", got.TraceID, in.TraceID},
+		{"RequestID", got.RequestID, in.RequestID},
+		{"SessionID", got.SessionID, in.SessionID},
+		{"AgentName", got.AgentName, in.AgentName},
+		{"AgentInstanceID", got.AgentInstanceID, in.AgentInstanceID},
+		{"PolicyID", got.PolicyID, in.PolicyID},
+		{"DestinationApp", got.DestinationApp, in.DestinationApp},
+		{"ToolName", got.ToolName, in.ToolName},
+		{"ToolID", got.ToolID, in.ToolID},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s roundtrip: got %q want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestStoreLogEventAutoPopulatesSidecarInstanceID pins the v7 identity
+// contract: when a caller leaves SidecarInstanceID empty, the Logger
+// fills it from the process-wide value so every audit row carries a
+// stable per-sidecar identity. AgentInstanceID, by contrast, stays
+// empty — it is a per-SESSION identifier and must never be backfilled
+// from the process UUID (that was the v6 pitfall: session aggregates
+// collapsed under a single sidecar instance).
+func TestStoreLogEventAutoPopulatesSidecarInstanceID(t *testing.T) {
+	// Remember the process-wide value so we don't pollute other tests
+	// in this package (it's global state).
+	prev := ProcessAgentInstanceID()
+	t.Cleanup(func() { SetProcessAgentInstanceID(prev) })
+	SetProcessAgentInstanceID("proc-instance-id-abc")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	if err := logger.LogEvent(Event{
+		Action:   "gateway-tool-call",
+		Target:   "shell",
+		Severity: "INFO",
+	}); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	if got := events[0].SidecarInstanceID; got != "proc-instance-id-abc" {
+		t.Errorf("SidecarInstanceID auto-fill = %q, want %q", got, "proc-instance-id-abc")
+	}
+	if got := events[0].AgentInstanceID; got != "" {
+		t.Errorf("AgentInstanceID leaked process id = %q (v6 regression: per-session must not inherit per-process)", got)
+	}
+}
+
 func TestStoreLogEventUsesEnvRunID(t *testing.T) {
 	t.Setenv("DEFENSECLAW_RUN_ID", "unit-run-store")
 

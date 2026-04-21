@@ -511,24 +511,31 @@ func TestLoggerRedactsFindingFieldsBeforeSQLite(t *testing.T) {
 	if len(scans) == 0 {
 		t.Fatal("expected a scan row")
 	}
-	findings, err := store.ListFindingsByScan(scans[0].ID)
+	findings, err := store.ListScanFindings(scans[0].ID)
 	if err != nil {
-		t.Fatalf("ListFindingsByScan: %v", err)
+		t.Fatalf("ListScanFindings: %v", err)
 	}
 	if len(findings) == 0 {
 		t.Fatal("expected a finding row")
 	}
 	f := findings[0]
+	desc := f.Description.String
+	loc := f.Location.String
+	rem := f.Remediation.String
+	title := ""
+	if f.Title.Valid {
+		title = f.Title.String
+	}
 	for _, needle := range []string{"123-45-6789", "4155551234", "alice@example.com"} {
-		if strings.Contains(f.Description, needle) ||
-			strings.Contains(f.Location, needle) ||
-			strings.Contains(f.Remediation, needle) {
+		if strings.Contains(desc, needle) ||
+			strings.Contains(loc, needle) ||
+			strings.Contains(rem, needle) {
 			t.Fatalf("SQLite finding leaked %q: desc=%q loc=%q rem=%q",
-				needle, f.Description, f.Location, f.Remediation)
+				needle, desc, loc, rem)
 		}
 	}
-	if f.Title != "PII detected" {
-		t.Fatalf("Title should be preserved verbatim; got %q", f.Title)
+	if title != "PII detected" {
+		t.Fatalf("Title should be preserved verbatim; got %q", title)
 	}
 }
 

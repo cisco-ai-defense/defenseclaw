@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -63,6 +64,10 @@ func sanitizeEvent(e Event) Event {
 // Logger invokes Emit on the hot path and will not retry on failure.
 type StructuredEmitter interface {
 	EmitAudit(event Event)
+	// EmitGatewayEvent writes a fully-formed gatewaylog event (activity,
+	// structured errors) to gateway.jsonl. Optional — no-op when nil
+	// emitter or bridge stub.
+	EmitGatewayEvent(ev gatewaylog.Event)
 }
 
 // Logger is the audit choke point: every caller routes through
@@ -90,6 +95,9 @@ type Logger struct {
 	sinks      *sinks.Manager
 	otel       *telemetry.Provider
 	structured StructuredEmitter
+	// gwWriter is optional: when set, scan completions emit EventScan /
+	// EventScanFinding rows through the gateway JSONL choke point.
+	gwWriter *gatewaylog.Writer
 }
 
 func NewLogger(store *Store) *Logger {
@@ -103,6 +111,10 @@ func (l *Logger) SetSinks(m *sinks.Manager) {
 	l.mu.Lock()
 	l.sinks = m
 	l.mu.Unlock()
+	if m != nil {
+		m.SetDeliveryHook(l.sinkDeliveryHook)
+		m.SetCircuitCallbacks(l.onCircuitTripActivity, l.onCircuitRecoverActivity)
+	}
 }
 
 func (l *Logger) SetOTelProvider(p *telemetry.Provider) {
@@ -118,6 +130,21 @@ func (l *Logger) SetStructuredEmitter(e StructuredEmitter) {
 	l.mu.Lock()
 	l.structured = e
 	l.mu.Unlock()
+}
+
+// SetGatewayLogWriter installs the gateway JSONL writer used for v7
+// EventScan / EventScanFinding emissions. Pass nil to disable.
+func (l *Logger) SetGatewayLogWriter(w *gatewaylog.Writer) {
+	l.mu.Lock()
+	l.gwWriter = w
+	l.mu.Unlock()
+}
+
+func (l *Logger) gatewayWriterSnapshot() *gatewaylog.Writer {
+	l.mu.RLock()
+	w := l.gwWriter
+	l.mu.RUnlock()
+	return w
 }
 
 // snapshot returns a consistent view of the collaborator pointers
@@ -143,6 +170,33 @@ func (l *Logger) emitStructuredSnapshot(emitter StructuredEmitter, e Event) {
 	emitter.EmitAudit(e)
 }
 
+func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Event) {
+	if emitter == nil {
+		return
+	}
+	emitter.EmitGatewayEvent(ev)
+}
+
+// ScanCorrelation threads per-request correlation identifiers and
+// agent identity down into the scan emission pipeline (EventScan,
+// EventScanFinding, scan_results and scan_findings SQLite rows).
+//
+// All fields are optional; the empty value is legal at every call
+// site (watcher admission happens pre-session, CLI scans have no
+// request/session context). The audit package cannot import
+// internal/gateway to pull these out of context itself — callers
+// who have the values populate the struct and pass it in.
+type ScanCorrelation struct {
+	RunID     string
+	RequestID string
+	SessionID string
+	TraceID   string
+
+	AgentID         string
+	AgentName       string
+	AgentInstanceID string
+}
+
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
 // and emits OTel log/metric signals.
 func (l *Logger) LogScan(result *scanner.ScanResult) error {
@@ -151,44 +205,61 @@ func (l *Logger) LogScan(result *scanner.ScanResult) error {
 
 // LogScanWithVerdict persists a scan result with an explicit admission verdict.
 func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) error {
+	return l.LogScanWithCorrelation(context.Background(), result, verdict, ScanCorrelation{})
+}
+
+// LogScanWithCorrelation is the v7 entry point for scan emission
+// with explicit correlation + identity. Threads run_id / request_id
+// / session_id / trace_id and the three-tier agent identity onto
+// EventScan, EventScanFinding, the scan_results / scan_findings
+// rows, and the matching audit.Event so every surface agrees.
+//
+// ctx is passed through to scanner.EmitScanResult for tracing
+// attachments; correlation IDs are taken from the corr parameter
+// (not the context) so there is a single typed contract.
+func (l *Logger) LogScanWithCorrelation(
+	ctx context.Context,
+	result *scanner.ScanResult,
+	verdict string,
+	corr ScanCorrelation,
+) error {
 	sinksMgr, otel, structured := l.snapshot()
 
-	scanID := uuid.New().String()
-	raw, _ := result.JSON()
-
-	if err := l.store.InsertScanResult(
-		scanID, result.Scanner, result.Target, result.Timestamp,
-		result.Duration.Milliseconds(), len(result.Findings),
-		string(result.MaxSeverity()), string(raw),
-	); err != nil {
-		if otel != nil {
-			otel.RecordAuditDBError(context.Background(), "insert_scan_result")
-		}
-		return err
+	if verdict != "" {
+		result.Verdict = verdict
 	}
 
-	for _, f := range result.Findings {
-		tagsJSON, _ := json.Marshal(f.Tags)
-		findingID := uuid.New().String()
-		// Redact free-form finding text before it lands in SQLite.
-		// Description frequently contains the matched literal
-		// (e.g. "detected SSN 123-45-6789"); Location is a file
-		// path that can include usernames; Remediation text is
-		// sometimes templated with the offending value. Title is
-		// authored from static rule metadata and is safe.
-		safeDescription := redaction.ForSinkString(f.Description)
-		safeLocation := redaction.ForSinkString(f.Location)
-		safeRemediation := redaction.ForSinkString(f.Remediation)
-		if err := l.store.InsertFinding(
-			findingID, scanID, string(f.Severity), f.Title,
-			safeDescription, safeLocation, safeRemediation, f.Scanner,
-			string(tagsJSON),
-		); err != nil {
-			if otel != nil {
-				otel.RecordAuditDBError(context.Background(), "insert_finding")
-			}
-			return err
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var tel scanner.ScanTelemetry
+	if otel != nil {
+		tel = otel
+	}
+	runID := corr.RunID
+	if runID == "" {
+		runID = currentRunID()
+	}
+	// v7 clean break: AgentInstanceID is per-session (empty when no
+	// session context is known, e.g. watcher admission); the process
+	// UUID goes on SidecarInstanceID only. Consumers must not group
+	// sessions by sidecar identity — that was the v6 pitfall.
+	agent := scanner.AgentIdentity{
+		AgentID:           corr.AgentID,
+		AgentName:         corr.AgentName,
+		AgentInstanceID:   corr.AgentInstanceID,
+		SidecarInstanceID: ProcessAgentInstanceID(),
+		RunID:             runID,
+		RequestID:         corr.RequestID,
+		SessionID:         corr.SessionID,
+		TraceID:           corr.TraceID,
+	}
+	scanID, err := scanner.EmitScanResult(ctx, l.gatewayWriterSnapshot(), l.store, tel, result, agent)
+	if err != nil {
+		if otel != nil {
+			otel.RecordAuditDBError(ctx, "emit_scan_result")
 		}
+		return err
 	}
 
 	event := sanitizeEvent(Event{
@@ -199,8 +270,15 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
 			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
-		Severity: string(result.MaxSeverity()),
-		RunID:    currentRunID(),
+		Severity:          string(result.MaxSeverity()),
+		RunID:             runID,
+		RequestID:         corr.RequestID,
+		SessionID:         corr.SessionID,
+		TraceID:           corr.TraceID,
+		AgentID:           corr.AgentID,
+		AgentName:         corr.AgentName,
+		AgentInstanceID:   corr.AgentInstanceID,
+		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
 
 	if err := l.store.LogEvent(event); err != nil {
@@ -246,16 +324,17 @@ func (l *Logger) LogActionWithTrace(action, target, details, traceID string) err
 func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requestID string) error {
 	sinksMgr, otel, structured := l.snapshot()
 	event := sanitizeEvent(Event{
-		ID:        uuid.New().String(),
-		Timestamp: time.Now().UTC(),
-		Action:    action,
-		Target:    target,
-		Actor:     "defenseclaw",
-		Details:   details,
-		Severity:  "INFO",
-		RunID:     currentRunID(),
-		TraceID:   traceID,
-		RequestID: requestID,
+		ID:                uuid.New().String(),
+		Timestamp:         time.Now().UTC(),
+		Action:            action,
+		Target:            target,
+		Actor:             "defenseclaw",
+		Details:           details,
+		Severity:          "INFO",
+		RunID:             currentRunID(),
+		TraceID:           traceID,
+		RequestID:         requestID,
+		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -283,14 +362,15 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
 	sinksMgr, otel, structured := l.snapshot()
 	event := sanitizeEvent(Event{
-		ID:        uuid.New().String(),
-		Timestamp: time.Now().UTC(),
-		Action:    action,
-		Target:    target,
-		Actor:     "defenseclaw",
-		Details:   details,
-		Severity:  "INFO",
-		RunID:     currentRunID(),
+		ID:                uuid.New().String(),
+		Timestamp:         time.Now().UTC(),
+		Action:            action,
+		Target:            target,
+		Actor:             "defenseclaw",
+		Details:           details,
+		Severity:          "INFO",
+		RunID:             currentRunID(),
+		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -326,6 +406,16 @@ func (l *Logger) LogEvent(event Event) error {
 	if event.RunID == "" {
 		event.RunID = currentRunID()
 	}
+	// v7 clean break: AgentInstanceID is per-SESSION. Callers that
+	// carry a session context (the router, proxy session resolver)
+	// stamp it explicitly. Absence is meaningful — "no session
+	// anchor for this event" — and must round-trip as empty.
+	// The process-scoped identifier lives on SidecarInstanceID;
+	// we auto-fill that one so every row has a stable sidecar
+	// identity without burdening callers.
+	if event.SidecarInstanceID == "" {
+		event.SidecarInstanceID = ProcessAgentInstanceID()
+	}
 	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -357,17 +447,146 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = mgr.Forward(ctx, sinks.Event{
-		ID:        e.ID,
-		Timestamp: e.Timestamp,
-		Action:    e.Action,
-		Target:    e.Target,
-		Actor:     e.Actor,
-		Details:   e.Details,
-		Severity:  e.Severity,
-		RunID:     e.RunID,
-		TraceID:   e.TraceID,
-		RequestID: e.RequestID,
+	l.forwardSinkEventCtx(ctx, mgr, sinks.Event{
+		ID:                e.ID,
+		Timestamp:         e.Timestamp,
+		Action:            e.Action,
+		Target:            e.Target,
+		Actor:             e.Actor,
+		Details:           e.Details,
+		Severity:          e.Severity,
+		RunID:             e.RunID,
+		TraceID:           e.TraceID,
+		RequestID:         e.RequestID,
+		SessionID:         e.SessionID,
+		AgentName:         e.AgentName,
+		AgentID:           e.AgentID,
+		AgentInstanceID:   e.AgentInstanceID,
+		SidecarInstanceID: e.SidecarInstanceID,
+		PolicyID:          e.PolicyID,
+		DestinationApp:    e.DestinationApp,
+		ToolName:          e.ToolName,
+		ToolID:            e.ToolID,
+	})
+}
+
+func (l *Logger) forwardSinkEvent(mgr *sinks.Manager, se sinks.Event) {
+	if mgr == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	l.forwardSinkEventCtx(ctx, mgr, se)
+}
+
+func (l *Logger) forwardSinkEventCtx(ctx context.Context, mgr *sinks.Manager, se sinks.Event) {
+	_ = mgr.Forward(ctx, se)
+}
+
+// LogActivity [v7, Track 0 stub] records an operator-facing
+// mutation — config save, policy reload, block/allow change,
+// skill approval, sink change. The activity is persisted to
+// activity_events (migration #8) and mirrored onto structured
+// emitters as an EventActivity.
+//
+// This is the Track 0 stub: it accepts the full ActivityInput and
+// delegates to LogEvent for the audit_events row. The native
+// activity_events write + diff computation land in Track 6 and
+// will override this implementation. Parallel tracks may call
+// LogActivity today — the audit_events row is still produced, so
+// historical queries keep working across the transition.
+//
+// Callers populate every field; Actor defaults to "system" if
+// empty and TargetType / TargetID default to "unknown".
+type ActivityInput struct {
+	Actor       string
+	Action      Action
+	TargetType  string
+	TargetID    string
+	Reason      string
+	Before      map[string]any
+	After       map[string]any
+	Diff        []ActivityDiffEntry
+	VersionFrom string
+	VersionTo   string
+	Severity    string
+	RunID       string
+	RequestID   string
+	TraceID     string
+	// SkipSinkFanout avoids re-entrant audit→sink delivery (e.g. circuit-breaker callbacks).
+	SkipSinkFanout bool
+}
+
+// ActivityDiffEntry mirrors gatewaylog.DiffEntry — kept here so
+// audit callers can record diffs without depending on gatewaylog.
+type ActivityDiffEntry struct {
+	Path   string
+	Op     string // add | remove | replace
+	Before any
+	After  any
+}
+
+// LogActivity persists an operator mutation to activity_events (full
+// snapshot) and a redacted audit_events summary sharing activity_id.
+func (l *Logger) LogActivity(in ActivityInput) error {
+	if l == nil {
+		return nil
+	}
+	return l.logActivityImpl(in)
+}
+
+// LogAlert [v7, Track 0 stub] records a runtime alert. Alerts are
+// the operator-facing signal for "something requires human
+// attention" — block lists triggered, scanner crashes, sink
+// circuit breaker trips. Backed by audit_events today; parallel
+// tracks will tee to OTel event logs and the TUI Alerts panel.
+//
+// Severity should be one of INFO / WARN / HIGH / CRITICAL. Source
+// is a short subsystem name ("admission", "scanner", "sink", etc).
+// Summary is a single-line human string; Details is an arbitrary
+// map that becomes the details blob.
+func (l *Logger) LogAlert(source, severity, summary string, details map[string]any) error {
+	if l == nil {
+		return nil
+	}
+	if severity == "" {
+		severity = "WARN"
+	}
+	payload := map[string]any{
+		"source":  source,
+		"summary": summary,
+	}
+	for k, v := range details {
+		payload[k] = v
+	}
+	blob, _ := json.Marshal(payload)
+
+	_, otel, emitter := l.snapshot()
+	if otel != nil {
+		otel.RecordAlert(context.Background(), "runtime", severity, source)
+	}
+	gwEv := gatewaylog.Event{
+		Timestamp: time.Now().UTC(),
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  parseGatewaySeverity(severity),
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem:  source,
+			Transition: "alert",
+			Details:    map[string]string{"summary": redaction.ForSinkReason(summary)},
+		},
+	}
+	gwEv.StampProvenance()
+	if otel != nil {
+		otel.RecordGatewayEvent(gwEv)
+	}
+	l.emitGatewaySnapshot(emitter, gwEv)
+
+	return l.LogEvent(Event{
+		Action:   string(ActionAlert),
+		Target:   source,
+		Actor:    "defenseclaw",
+		Details:  string(blob),
+		Severity: severity,
 	})
 }
 

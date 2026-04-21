@@ -160,6 +160,30 @@ func (s *OTLPLogsSink) Forward(ctx context.Context, e Event) error {
 	if e.Details != "" {
 		record.AddAttributes(otellog.String("audit.details", e.Details))
 	}
+	// Extended correlation fields — only added when non-empty so
+	// downstream query layers (Grafana/OTel Cloud) don't get a flood
+	// of empty attribute rows on events that predate the v6 contract.
+	if e.SessionID != "" {
+		record.AddAttributes(otellog.String("audit.session_id", e.SessionID))
+	}
+	if e.AgentName != "" {
+		record.AddAttributes(otellog.String("audit.agent_name", e.AgentName))
+	}
+	if e.AgentInstanceID != "" {
+		record.AddAttributes(otellog.String("audit.agent_instance_id", e.AgentInstanceID))
+	}
+	if e.PolicyID != "" {
+		record.AddAttributes(otellog.String("audit.policy_id", e.PolicyID))
+	}
+	if e.DestinationApp != "" {
+		record.AddAttributes(otellog.String("audit.destination_app", e.DestinationApp))
+	}
+	if e.ToolName != "" {
+		record.AddAttributes(otellog.String("audit.tool_name", e.ToolName))
+	}
+	if e.ToolID != "" {
+		record.AddAttributes(otellog.String("audit.tool_id", e.ToolID))
+	}
 
 	s.logger.Emit(ctx, record)
 	return nil
