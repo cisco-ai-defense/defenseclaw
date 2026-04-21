@@ -590,11 +590,12 @@ func toVerdict(s string) Verdict {
 }
 
 func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
+	llm := w.cfg.EffectiveInspectLLM()
 	switch evt.Type {
 	case InstallSkill:
-		return scanner.NewSkillScanner(w.cfg.Scanners.SkillScanner, w.cfg.InspectLLM, w.cfg.CiscoAIDefense)
+		return scanner.NewSkillScanner(w.cfg.Scanners.SkillScanner, llm, w.cfg.CiscoAIDefense)
 	case InstallMCP:
-		return scanner.NewMCPScanner(w.cfg.Scanners.MCPScanner, w.cfg.InspectLLM, w.cfg.CiscoAIDefense)
+		return scanner.NewMCPScanner(w.cfg.Scanners.MCPScanner, llm, w.cfg.CiscoAIDefense)
 
 	case InstallPlugin:
 		return scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner)
@@ -610,6 +611,10 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 	switch evt.Type {
 	case InstallSkill:
 		return w.cfg.Gateway.Watcher.Skill.TakeAction
+	case InstallPlugin:
+		return w.cfg.Gateway.Watcher.Plugin.TakeAction
+	case InstallMCP:
+		return w.cfg.Gateway.Watcher.MCP.TakeAction
 	default:
 		return w.cfg.Watch.AutoBlock
 	}
@@ -618,14 +623,10 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 func (w *InstallWatcher) enforceBlock(evt InstallEvent) {
 	switch evt.Type {
 	case InstallSkill:
-		se := enforce.NewSkillEnforcer(w.cfg.QuarantineDir, w.shell)
+		se := enforce.NewSkillEnforcer(w.cfg.QuarantineDir)
 		if _, err := se.Quarantine(evt.Path); err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 		}
-		// TODO: re-enable once sandbox policy sync is wired end-to-end
-		// if w.cfg.OpenShell.IsStandalone() {
-		// 	_ = se.UpdateSandboxPolicy(evt.Name, true)
-		// }
 	case InstallMCP:
 		me := enforce.NewMCPEnforcer(w.shell)
 		_ = me.BlockEndpoint(evt.Name)

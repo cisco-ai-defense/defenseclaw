@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/log"
+
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // EmitPolicyDecision emits an OTel LogRecord for a security-relevant policy
@@ -36,6 +38,13 @@ func (p *Provider) EmitPolicyDecision(
 	}
 
 	sevText, sevNum := policyVerdictSeverity(verdict)
+	// OTel is a persistent sink. Reasons are the most
+	// frequent leak vector because they routinely embed the
+	// matched literal ("blocked secret sk-ant-api03-...").
+	// Run reason + any extra attributes through the sink
+	// redactor before export. Verdict/target/type are
+	// short enums, safe as-is.
+	safeReason := redaction.ForSinkReason(reason)
 	body := domain + " policy: " + verdict + " " + targetType + " " + target
 
 	now := time.Now()
@@ -53,12 +62,12 @@ func (p *Provider) EmitPolicyDecision(
 		log.String("defenseclaw.policy.verdict", verdict),
 		log.String("defenseclaw.policy.target", target),
 		log.String("defenseclaw.policy.target_type", targetType),
-		log.String("defenseclaw.policy.reason", reason),
+		log.String("defenseclaw.policy.reason", safeReason),
 	}
 
 	for k, v := range extra {
 		if v != "" {
-			attrs = append(attrs, log.String("defenseclaw.policy."+k, v))
+			attrs = append(attrs, log.String("defenseclaw.policy."+k, redaction.ForSinkString(v)))
 		}
 	}
 

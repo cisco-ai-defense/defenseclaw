@@ -22,6 +22,8 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/log"
+
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // AlertType constants for defenseclaw.alert.type.
@@ -73,13 +75,21 @@ func (p *Provider) EmitRuntimeAlert(
 	sevText, sevNum := alertSeverityToOTel(severity)
 	alertID := uuid.New().String()
 
+	// Alert bodies are built from reason strings that
+	// commonly embed the matched literal (e.g. the full
+	// prompt that triggered a prompt-injection block, or
+	// the scanned secret). OTel is a persistent sink, so
+	// always redact via ForSinkReason (preserves rule IDs
+	// while scrubbing PII/secret content).
+	safeBody := redaction.ForSinkReason(body)
+
 	now := time.Now()
 	rec := log.Record{}
 	rec.SetTimestamp(now)
 	rec.SetObservedTimestamp(now)
 	rec.SetSeverity(log.Severity(sevNum))
 	rec.SetSeverityText(sevText)
-	rec.SetBody(log.StringValue(body))
+	rec.SetBody(log.StringValue(safeBody))
 
 	attrs := []log.KeyValue{
 		log.String("event.name", "runtime.alert"),

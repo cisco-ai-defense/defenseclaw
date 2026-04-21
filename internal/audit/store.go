@@ -38,6 +38,11 @@ type Event struct {
 	Severity  string    `json:"severity"`
 	RunID     string    `json:"run_id,omitempty"`
 	TraceID   string    `json:"trace_id,omitempty"`
+	// RequestID is the per-request correlation key minted at the
+	// top of every proxy path. Populated in Phase 5 via the
+	// gateway context threading; older call sites may leave it
+	// empty, in which case the column stays NULL in SQLite.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.
@@ -261,6 +266,92 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Phase 2.3 of the observability refactor: when
+		// guardrail.retain_judge_bodies is on, the sidecar mirrors
+		// every LLM-judge response body to this table so operators
+		// can later reconstruct why the judge returned a given
+		// verdict (parse failures, model drift, prompt regressions).
+		//
+		// The table is separate from audit_events because (a)
+		// bodies can be kilobytes, (b) it makes per-sink retention
+		// policies trivial (drop the whole table without touching
+		// verdict history), and (c) schema drift is cheaper when
+		// bodies and verdicts live on different migration tracks.
+		description: "add judge_responses table for retained LLM-judge bodies",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS judge_responses (
+				id TEXT PRIMARY KEY,
+				timestamp DATETIME NOT NULL,
+				kind TEXT NOT NULL,
+				direction TEXT,
+				model TEXT,
+				action TEXT,
+				severity TEXT,
+				latency_ms INTEGER,
+				parse_error TEXT,
+				raw_response TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_judge_timestamp ON judge_responses(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_judge_kind ON judge_responses(kind);
+			CREATE INDEX IF NOT EXISTS idx_judge_severity ON judge_responses(severity);
+			`)
+			return err
+		},
+	},
+	{
+		// Phase 3 of the observability refactor: land correlation
+		// identifiers (request_id + trace_id) on audit_events so
+		// operators can pivot between gateway.jsonl, SQLite, Splunk,
+		// and OTel without a separate join table. request_id is
+		// minted at the top of every proxy request in Phase 5;
+		// trace_id mirrors the OTel span id the audit.Logger
+		// already stamps onto emitted spans.
+		//
+		// The same correlation keys are mirrored onto judge_responses
+		// so a single request_id lookup reveals every verdict and
+		// every judge response tied to that request.
+		description: "add trace_id/request_id columns for end-to-end correlation",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "trace_id", `ALTER TABLE audit_events ADD COLUMN trace_id TEXT`},
+				{"audit_events", "request_id", `ALTER TABLE audit_events ADD COLUMN request_id TEXT`},
+				{"judge_responses", "request_id", `ALTER TABLE judge_responses ADD COLUMN request_id TEXT`},
+				{"judge_responses", "trace_id", `ALTER TABLE judge_responses ADD COLUMN trace_id TEXT`},
+				{"judge_responses", "run_id", `ALTER TABLE judge_responses ADD COLUMN run_id TEXT`},
+				{"judge_responses", "input_hash", `ALTER TABLE judge_responses ADD COLUMN input_hash TEXT`},
+				{"judge_responses", "confidence", `ALTER TABLE judge_responses ADD COLUMN confidence REAL`},
+				{"judge_responses", "fail_closed_applied", `ALTER TABLE judge_responses ADD COLUMN fail_closed_applied INTEGER NOT NULL DEFAULT 0`},
+				{"judge_responses", "inspected_model", `ALTER TABLE judge_responses ADD COLUMN inspected_model TEXT`},
+				{"judge_responses", "prompt_template_id", `ALTER TABLE judge_responses ADD COLUMN prompt_template_id TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			for _, idx := range []string{
+				`CREATE INDEX IF NOT EXISTS idx_audit_trace_id ON audit_events(trace_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_events(request_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_judge_request_id ON judge_responses(request_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_judge_trace_id ON judge_responses(trace_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_judge_run_id ON judge_responses(run_id)`,
+			} {
+				if _, err := ex.Exec(idx); err != nil {
+					return fmt.Errorf("create correlation index: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 func (s *Store) Init() error {
@@ -357,6 +448,7 @@ var knownTables = map[string]bool{
 	"actions":               true,
 	"target_snapshots":      true,
 	"network_egress_events": true,
+	"judge_responses":       true,
 	"schema_version":        true,
 }
 
@@ -407,14 +499,216 @@ func (s *Store) LogEvent(e Event) error {
 
 	ts := e.Timestamp.Format(time.RFC3339Nano)
 	_, err := s.db.Exec(
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity, nullStr(e.RunID),
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity,
+		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
 	}
 	return nil
+}
+
+// JudgeResponse is the persisted shape of a single LLM-judge call
+// (prompt-injection or PII detector). Rows are only written when
+// guardrail.retain_judge_bodies is true — without that flag the sink
+// pipeline receives a redacted placeholder and SQLite stores
+// nothing, which is the safer default for PII.
+type JudgeResponse struct {
+	ID         string
+	Timestamp  time.Time
+	Kind       string
+	Direction  string
+	Model      string
+	Action     string
+	Severity   string
+	LatencyMs  int64
+	ParseError string
+	Raw        string
+
+	// Correlation + forensics fields (Phase 3/5). All are optional
+	// at the call site — empty values persist as NULL so the audit
+	// store stays usable for older callers (migration tests, ad-hoc
+	// scripts) that haven't been updated yet.
+	RequestID         string
+	TraceID           string
+	RunID             string
+	InputHash         string  // sha256 of the judge input, never the raw input
+	Confidence        float64 // 0–1 score, 0 when the judge did not return one
+	FailClosedApplied bool    // set when a judge parse/timeout error forced a block
+	InspectedModel    string  // the upstream model whose traffic we judged
+	PromptTemplateID  string  // optional template identifier for drift diagnosis
+}
+
+// MaxJudgeRawBytes is the upper bound on the raw_response body
+// stored in SQLite. Judge models occasionally echo entire
+// conversation histories (we've seen >1MB); without a cap, a
+// runaway response can bloat the audit DB by gigabytes and
+// degrade query performance. 64KiB keeps every realistic
+// detection trace intact while preventing pathological blowup.
+const MaxJudgeRawBytes = 64 * 1024
+
+// InsertJudgeResponse persists a single judge body. The caller is
+// expected to supply a non-empty Raw; an empty body is treated as a
+// no-op so the "retain off" path does not waste a row per request.
+//
+// Large raw_response payloads are truncated to MaxJudgeRawBytes with
+// a terminal "…[truncated N bytes]" marker preserved so operators
+// can see exactly how much was clipped. Truncation is UTF-8 safe —
+// we rewind to the last codepoint boundary before appending the
+// marker so downstream JSON decoders don't trip on partial runes.
+func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
+	if e.Raw == "" {
+		return nil
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
+	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
+	failClosed := 0
+	if e.FailClosedApplied {
+		failClosed = 1
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO judge_responses
+			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			 parse_error, raw_response, request_id, trace_id, run_id, input_hash,
+			 confidence, fail_closed_applied, inspected_model, prompt_template_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID,
+		e.Timestamp.Format(time.RFC3339Nano),
+		e.Kind,
+		nullStr(e.Direction),
+		nullStr(e.Model),
+		nullStr(e.Action),
+		nullStr(e.Severity),
+		e.LatencyMs,
+		nullStr(e.ParseError),
+		raw,
+		nullStr(e.RequestID),
+		nullStr(e.TraceID),
+		nullStr(e.RunID),
+		nullStr(e.InputHash),
+		e.Confidence,
+		failClosed,
+		nullStr(e.InspectedModel),
+		nullStr(e.PromptTemplateID),
+	)
+	if err != nil {
+		return fmt.Errorf("audit: insert judge response: %w", err)
+	}
+	return nil
+}
+
+// truncateJudgeRaw clips raw at maxBytes codepoint-safely and
+// appends a marker so operators can see how much was dropped.
+// Exported via test-internal access; kept lowercase to discourage
+// callers outside the audit store.
+func truncateJudgeRaw(raw string, maxBytes int) string {
+	if maxBytes <= 0 || len(raw) <= maxBytes {
+		return raw
+	}
+	// Walk back to the start of the last complete UTF-8 rune so
+	// we do not slice inside a multi-byte codepoint.
+	cut := maxBytes
+	for cut > 0 && raw[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	dropped := len(raw) - cut
+	return raw[:cut] + fmt.Sprintf("…[truncated %d bytes]", dropped)
+}
+
+// ListJudgeResponses returns the most recent N persisted judge bodies,
+// newest first. Intended for operator review via the CLI / TUI once
+// retention is turned on during an incident.
+func (s *Store) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
+			COALESCE(parse_error,''), raw_response,
+			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
+			COALESCE(input_hash,''), COALESCE(confidence,0),
+			COALESCE(fail_closed_applied,0),
+			COALESCE(inspected_model,''), COALESCE(prompt_template_id,'')
+		FROM judge_responses ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list judge responses: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]JudgeResponse, 0, limit)
+	for rows.Next() {
+		var r JudgeResponse
+		var ts string
+		var failClosed int
+		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
+			&r.RequestID, &r.TraceID, &r.RunID, &r.InputHash, &r.Confidence,
+			&failClosed, &r.InspectedModel, &r.PromptTemplateID); err != nil {
+			return nil, fmt.Errorf("audit: scan judge response: %w", err)
+		}
+		r.FailClosedApplied = failClosed != 0
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			r.Timestamp = t
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("audit: iterate judge responses: %w", err)
+	}
+	return out, nil
+}
+
+// GetJudgeResponsesByRequestID returns every judge row tied to the
+// supplied correlation ID, newest first. Used by the TUI Judge panel
+// (Phase 4) to pivot from a verdict row into all the judge calls
+// that contributed to it.
+func (s *Store) GetJudgeResponsesByRequestID(requestID string) ([]JudgeResponse, error) {
+	if requestID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
+			COALESCE(parse_error,''), raw_response,
+			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
+			COALESCE(input_hash,''), COALESCE(confidence,0),
+			COALESCE(fail_closed_applied,0),
+			COALESCE(inspected_model,''), COALESCE(prompt_template_id,'')
+		FROM judge_responses WHERE request_id = ? ORDER BY timestamp DESC`, requestID)
+	if err != nil {
+		return nil, fmt.Errorf("audit: judge by request_id: %w", err)
+	}
+	defer rows.Close()
+
+	var out []JudgeResponse
+	for rows.Next() {
+		var r JudgeResponse
+		var ts string
+		var failClosed int
+		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
+			&r.RequestID, &r.TraceID, &r.RunID, &r.InputHash, &r.Confidence,
+			&failClosed, &r.InspectedModel, &r.PromptTemplateID); err != nil {
+			return nil, fmt.Errorf("audit: scan judge row: %w", err)
+		}
+		r.FailClosedApplied = failClosed != 0
+		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			r.Timestamp = t
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) InsertScanResult(id, scannerName, target string, ts time.Time, durationMs int64, findingCount int, maxSeverity, rawJSON string) error {
@@ -448,7 +742,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -459,14 +753,16 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
+		var target, details, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
 		e.RunID = runID.String
+		e.TraceID = traceID.String
+		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -740,7 +1036,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
 		 FROM audit_events
 		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
 		   AND action NOT LIKE 'dismiss%'
@@ -754,17 +1050,119 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID); err != nil {
+		var target, details, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
 		e.Severity = severity.String
 		e.RunID = runID.String
+		e.TraceID = traceID.String
+		e.RequestID = requestID.String
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// AcknowledgeAlerts clears alerts by downgrading their severity to ACK.
+// Returns the number of alerts acknowledged.
+func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
+	var res sql.Result
+	var err error
+	if severityFilter == "" || severityFilter == "all" {
+		res, err = s.db.Exec(
+			`UPDATE audit_events SET severity = 'ACK'
+			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`)
+	} else {
+		res, err = s.db.Exec(
+			`UPDATE audit_events SET severity = 'ACK'
+			 WHERE severity = ?`, severityFilter)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("audit: acknowledge alerts: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	_ = s.LogEvent(Event{
+		Action:   "acknowledge-alerts",
+		Target:   severityFilter,
+		Details:  fmt.Sprintf("acknowledged %d alerts", n),
+		Severity: "ACK",
+	})
+
+	return n, nil
+}
+
+// AcknowledgeByIDs clears specific alerts by their event IDs.
+func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(
+		`UPDATE audit_events SET severity = 'ACK' WHERE id IN (%s) AND severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`,
+		strings.Join(placeholders, ","))
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("audit: acknowledge by IDs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	_ = s.LogEvent(Event{
+		Action:   "acknowledge-alerts",
+		Details:  fmt.Sprintf("acknowledged %d selected alerts", n),
+		Severity: "ACK",
+	})
+
+	return n, nil
+}
+
+// ListEventsByTarget returns recent audit events for a given target path.
+func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
+		 FROM audit_events
+		 WHERE target = ?
+		 ORDER BY timestamp DESC LIMIT ?`, target, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list events by target: %w", err)
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var tgt, details, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &tgt, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
+			return nil, fmt.Errorf("audit: scan event row: %w", err)
+		}
+		e.Target = tgt.String
+		e.Details = details.String
+		e.Severity = severity.String
+		e.RunID = runID.String
+		e.TraceID = traceID.String
+		e.RequestID = requestID.String
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// ListFindingsByRunID returns findings from the scan whose ID matches the run_id.
+func (s *Store) ListFindingsByRunID(runID string) ([]FindingRow, error) {
+	if runID == "" {
+		return nil, nil
+	}
+	return s.ListFindingsByScan(runID)
 }
 
 func (s *Store) ListScanResults(limit int) ([]ScanResultRow, error) {

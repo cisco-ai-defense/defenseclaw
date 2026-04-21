@@ -34,10 +34,13 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
@@ -64,6 +67,7 @@ func guardrailListenAddr(port int, effectiveHost string) string {
 // tested with a mock inspector.
 type ContentInspector interface {
 	Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
+	InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
 	SetScannerMode(mode string)
 }
 
@@ -89,12 +93,31 @@ type GuardrailProxy struct {
 	// Tests can override this to inject a mock provider.
 	resolveProviderFn func(req *ChatRequest) LLMProvider
 
+	// limiter caps the overall request rate to the proxy (all clients).
+	// Defaults to 100 req/s with a burst of 200.
+	limiter *rate.Limiter
+
 	// Runtime config protected by rtMu. The PATCH /v1/guardrail/config
 	// endpoint on the API server writes guardrail_runtime.json; the proxy
 	// reads it with a TTL cache.
 	rtMu         sync.RWMutex
 	mode         string
 	blockMessage string
+}
+
+// postCallContext returns a detached context for post-stream completion
+// inspection. The HTTP request context may already be cancelled by the time
+// the final POST-CALL inspection runs, which would kill in-flight LLM judge
+// calls. We use context.WithoutCancel to preserve request-scoped values
+// (tracing, correlation IDs) while disconnecting from the request lifecycle,
+// then layer a timeout on top.
+func (p *GuardrailProxy) postCallContext(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := 30 * time.Second
+	if p.cfg != nil && p.cfg.Judge.Timeout > 0 {
+		timeout = time.Duration(p.cfg.Judge.Timeout * float64(time.Second))
+	}
+	detached := context.WithoutCancel(parent)
+	return context.WithTimeout(detached, timeout)
 }
 
 // NewGuardrailProxy constructs and wires a proxy. All provider routing is
@@ -109,6 +132,8 @@ func NewGuardrailProxy(
 	dataDir string,
 	policyDir string,
 	notify *NotificationQueue,
+	rp *guardrail.RulePack,
+	sharedAPIKey string,
 ) (*GuardrailProxy, error) {
 	dotenvPath := filepath.Join(dataDir, ".env")
 
@@ -117,9 +142,36 @@ func NewGuardrailProxy(
 		cisco = NewCiscoInspectClient(ciscoAID, dotenvPath)
 	}
 
-	judge := NewLLMJudge(&cfg.Judge, dotenvPath)
+	judge := NewLLMJudge(&cfg.Judge, dotenvPath, rp, sharedAPIKey)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
+	inspector.SetDetectionStrategy(
+		cfg.DetectionStrategy,
+		cfg.DetectionStrategyPrompt,
+		cfg.DetectionStrategyCompletion,
+		cfg.DetectionStrategyToolCall,
+		cfg.JudgeSweep,
+	)
+	// Wire OTel span emission when telemetry is enabled. The
+	// inspector only sees a closure, so the telemetry dep stays
+	// localized to the proxy wiring layer.
+	if otel != nil && otel.TracesEnabled() {
+		inspector.SetTracerFunc(func(ctx context.Context, stage, direction, model string) (context.Context, func(action, severity, reason string, latencyMs int64)) {
+			ctx, span := otel.StartGuardrailStageSpan(ctx, stage, direction, model)
+			return ctx, func(action, severity, reason string, latencyMs int64) {
+				otel.EndGuardrailStageSpan(span, action, severity, reason, latencyMs)
+			}
+		})
+		// Phase 2: child spans for each sub-stage so operators can
+		// drill into latency per phase (regex, cisco_ai_defense,
+		// judge.*, opa) without sampling every span at the same depth.
+		inspector.SetPhaseTracerFunc(func(ctx context.Context, phase string) (context.Context, func(action, severity string, latencyMs int64)) {
+			ctx, span := otel.StartGuardrailPhaseSpan(ctx, phase)
+			return ctx, func(action, severity string, latencyMs int64) {
+				otel.EndGuardrailPhaseSpan(span, action, severity, latencyMs)
+			}
+		})
+	}
 
 	masterKey := deriveMasterKey(dataDir)
 	gatewayToken := ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
@@ -142,6 +194,7 @@ func NewGuardrailProxy(
 		masterKey:    masterKey,
 		gatewayToken: gatewayToken,
 		notify:       notify,
+		limiter:      rate.NewLimiter(rate.Limit(100), 200),
 		mode:         cfg.Mode,
 		blockMessage: cfg.BlockMessage,
 	}
@@ -168,7 +221,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/chat/completions", p.handleChatCompletion)
 	mux.HandleFunc("/v1/models", p.handleModels)
 	mux.HandleFunc("/models", p.handleModels)
-	mux.HandleFunc("/health/liveliness", p.handleHealth)
+	mux.HandleFunc("/health/liveness", p.handleHealth)
+	mux.HandleFunc("/health/liveliness", p.handleHealth) // backward compat
 	mux.HandleFunc("/health/readiness", p.handleHealth)
 	mux.HandleFunc("/health", p.handleHealth)
 	// Catch-all for provider-native paths (e.g. /v1/messages for Anthropic,
@@ -178,8 +232,14 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/", p.handlePassthrough)
 
 	addr := guardrailListenAddr(p.cfg.Port, p.cfg.EffectiveHost())
-	logged := p.requestLogger(mux)
-	srv := &http.Server{Addr: addr, Handler: logged}
+	limited := p.rateLimitMiddleware(mux)
+	logged := p.requestLogger(limited)
+	// Phase 5: the request-ID middleware runs outermost so the
+	// correlation header is mint-and-echoed even for requests that
+	// get rejected by the rate limiter — operators still need a
+	// handle to trace 429s.
+	withRequestID := p.requestIDMiddleware(logged)
+	srv := &http.Server{Addr: addr, Handler: withRequestID}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 		"port": p.cfg.Port,
@@ -190,6 +250,12 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		addr, p.mode, p.cfg.ModelName)
 	_ = p.logger.LogAction("guardrail-start", "",
 		fmt.Sprintf("port=%d mode=%s model=%s", p.cfg.Port, p.mode, p.cfg.ModelName))
+	emitLifecycle("guardrail", "start", map[string]string{
+		"port":  fmt.Sprintf("%d", p.cfg.Port),
+		"mode":  p.mode,
+		"model": p.cfg.ModelName,
+		"addr":  addr,
+	})
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -209,6 +275,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
 		_ = p.logger.LogAction("guardrail-healthy", "", fmt.Sprintf("port=%d", p.cfg.Port))
+		emitLifecycle("guardrail", "ready", map[string]string{
+			"port": fmt.Sprintf("%d", p.cfg.Port),
+		})
 	}
 
 	select {
@@ -226,6 +295,19 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------
+
+// rateLimitMiddleware rejects requests that exceed the proxy-wide rate limit
+// with HTTP 429 to prevent upstream provider saturation and LLM judge overload.
+func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p.limiter != nil && !p.limiter.Allow() {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, `{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`, http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // requestLogger wraps a handler and logs every incoming request so we can
 // diagnose 404s and unexpected paths from upstream callers.
@@ -364,12 +446,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		userText = partial.Instructions
 	}
 
-	if userText != "" {
+	if userText != "" && !isHeartbeatMessage(userText, partial.Messages) {
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
-		p.recordTelemetry("prompt", label, verdict, elapsed, nil, nil)
+		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, nil, nil)
 		if verdict.Action == "block" && mode == "action" {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			// Return 200 with the block message as an assistant turn so
@@ -468,12 +550,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		content := extractPassthroughResponseContent(respBody, provider)
 
 		if content != "" {
+			postCtx, postCancel := p.postCallContext(r.Context())
 			t0 := time.Now()
 			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-			verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, label, mode)
+			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
 			elapsed := time.Since(t0)
+			postCancel()
 			p.logPostCall(label, content, verdict, elapsed, nil)
-			p.recordTelemetry("completion", label, verdict, elapsed, nil, nil)
+			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, nil, nil)
 
 			if verdict.Action == "block" && mode == "action" {
 				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
@@ -518,12 +602,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				return true
 			}
 			if accumulated.Len() > 0 {
-				initVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+				initVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 					[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
 				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
-						initVerdict.Severity, initVerdict.Reason)
-					p.recordTelemetry("completion", label, initVerdict, 0, nil, nil)
+						initVerdict.Severity, redaction.Reason(initVerdict.Reason))
+					p.recordTelemetry(r.Context(), "completion", label, initVerdict, 0, nil, nil)
 					preblocked = true
 					return false
 				}
@@ -585,12 +669,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 
 					if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
-						midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+						midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 							[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
 						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-								midVerdict.Severity, midVerdict.Reason, lastScanLen+len(chunk))
-							p.recordTelemetry("completion", label, midVerdict, 0, nil, nil)
+								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
+							p.recordTelemetry(r.Context(), "completion", label, midVerdict, 0, nil, nil)
 							break
 						}
 						lastScanLen = accumulated.Len()
@@ -611,14 +695,17 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Final post-stream inspection on the full accumulated content.
+		// Use a detached context — the request context may be cancelled after streaming.
 		if accumulated.Len() > 0 {
 			content := accumulated.String()
+			postCtx, postCancel := p.postCallContext(r.Context())
 			t0 := time.Now()
 			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-			verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, label, mode)
+			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
 			elapsed := time.Since(t0)
+			postCancel()
 			p.logPostCall(label, content, verdict, elapsed, nil)
-			p.recordTelemetry("completion", label, verdict, elapsed, nil, nil)
+			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, nil, nil)
 			if verdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (stream already delivered %d bytes to client — cannot retract)\n",
 					verdict.Severity, verdict.Reason, accumulated.Len())
@@ -909,7 +996,12 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		baseURL = req.TargetURL
 	}
 
-	return NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, baseURL)
+	provider, err := NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, baseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] provider error: %v\n", err)
+		return nil
+	}
+	return provider
 }
 
 func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
@@ -936,7 +1028,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		truncateLog(r.Header.Get("Authorization"), 20),
 		truncateLog(r.Header.Get("api-key"), 20),
 		r.Header.Get("X-DC-Target-URL"))
-	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n", len(body), truncateLog(string(body), 2000))
+	// The raw LLM request body frequently contains user prompts
+	// (SSNs, emails, passwords, API keys). Stderr is operator-
+	// facing, so we honor DEFENSECLAW_REVEAL_PII via
+	// redaction.MessageContent: set DEFENSECLAW_REVEAL_PII=1 to
+	// get the raw body back for live debugging. Every persistent
+	// sink (audit store, webhooks, OTel) already redacts further
+	// downstream and never consults this flag.
+	fmt.Fprintf(os.Stderr, "[guardrail] raw body (%d bytes): %s\n",
+		len(body), truncateLog(redaction.MessageContent(string(body)), 2000))
 
 	var req ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -1021,7 +1121,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
-	if userText != "" {
+	if userText != "" && !isHeartbeatMessage(userText, req.Messages) {
 		t0 := time.Now()
 
 		// Start guardrail span for input inspection.
@@ -1048,7 +1148,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		p.logPreCall(req.Model, req.Messages, verdict, elapsed)
-		p.recordTelemetry("prompt", req.Model, verdict, elapsed, nil, nil)
+		p.recordTelemetry(r.Context(), "prompt", req.Model, verdict, elapsed, nil, nil)
 
 		if verdict.Action == "block" && mode == "action" {
 			if p.otel != nil && agentSpan != nil {
@@ -1160,9 +1260,11 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			_, grSpan = p.otel.StartGuardrailSpan(parentCtx, "defenseclaw", "output", aliasModel)
 		}
 
+		postCtx, postCancel := p.postCallContext(r.Context())
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, aliasModel, mode)
+		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
 		elapsed := time.Since(t0)
+		postCancel()
 
 		// End guardrail span with decision.
 		if p.otel != nil && grSpan != nil {
@@ -1181,7 +1283,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			tokOut = &resp.Usage.CompletionTokens
 		}
 		p.logPostCall(aliasModel, content, verdict, elapsed, resp.Usage)
-		p.recordTelemetry("completion", aliasModel, verdict, elapsed, tokIn, tokOut)
+		p.recordTelemetry(r.Context(), "completion", aliasModel, verdict, elapsed, tokIn, tokOut)
 
 		if verdict.Severity != "NONE" {
 			guardrail = "local"
@@ -1206,7 +1308,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	// --- Post-call inspection: tool call arguments ---
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		if verdict := p.inspectToolCalls(resp.Choices[0].Message.ToolCalls); verdict != nil {
-			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
+			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				if p.otel != nil && llmSpan != nil {
 					promptTok, completionTok := 0, 0
@@ -1329,13 +1431,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 
-		if accumulated.Len() > lastScanLen && mode == "action" {
-			midVerdict := p.inspector.Inspect(r.Context(), "completion", accumulated.String(),
+		const midStreamScanInterval = 500
+		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
+			midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
-					midVerdict.Severity, midVerdict.Reason)
-				p.recordTelemetry("completion", aliasModel, midVerdict, 0, nil, nil)
+					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
+				p.recordTelemetry(r.Context(), "completion", aliasModel, midVerdict, 0, nil, nil)
 				streamBlocked = true
 				streamCancel()
 				return
@@ -1376,13 +1479,25 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		flusher.Flush()
 	})
 	// Flush any remaining initial buffer (short streams that completed
-	// before reaching the buffer threshold).
+	// before reaching the buffer threshold). Run a guardrail check first.
 	if !initialBufFlushed && !streamBlocked && len(initialChunkBuf) > 0 {
-		for _, buffered := range initialChunkBuf {
-			fmt.Fprintf(w, "data: %s\n\n", buffered)
+		if accumulated.Len() > 0 && mode == "action" {
+			initVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
+				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
+				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
+					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
+				p.recordTelemetry(r.Context(), "completion", aliasModel, initVerdict, 0, nil, nil)
+				streamBlocked = true
+			}
 		}
-		flusher.Flush()
-		initialBufFlushed = true
+		if !streamBlocked {
+			for _, buffered := range initialChunkBuf {
+				fmt.Fprintf(w, "data: %s\n\n", buffered)
+			}
+			flusher.Flush()
+			initialBufFlushed = true
+		}
 	}
 	if err != nil && !streamBlocked {
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
@@ -1429,9 +1544,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			_, grSpan = p.otel.StartGuardrailSpan(parentCtx, "defenseclaw", "output", aliasModel)
 		}
 
+		postCtx, postCancel := p.postCallContext(r.Context())
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-		verdict := p.inspector.Inspect(r.Context(), "completion", content, respMessages, aliasModel, mode)
+		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
 		elapsed := time.Since(t0)
+		postCancel()
 
 		// End guardrail span with decision.
 		if p.otel != nil && grSpan != nil {
@@ -1452,7 +1569,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		p.logPostCall(aliasModel, content, verdict, elapsed, &ChatUsage{
 			PromptTokens: ptrOr(tokIn, 0), CompletionTokens: ptrOr(tokOut, 0),
 		})
-		p.recordTelemetry("completion", aliasModel, verdict, elapsed, tokIn, tokOut)
+		p.recordTelemetry(r.Context(), "completion", aliasModel, verdict, elapsed, tokIn, tokOut)
 
 		if verdict.Severity != "NONE" {
 			guardrail = "local"
@@ -1467,7 +1584,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	toolCallCount := countToolCalls(assembledTC)
 	if len(assembledTC) > 0 {
 		if verdict := p.inspectToolCalls(assembledTC); verdict != nil {
-			p.recordTelemetry("tool-call", aliasModel, verdict, 0, nil, nil)
+			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				tcBlocked = true
 				guardrail = "local"
@@ -2007,15 +2124,16 @@ func (p *GuardrailProxy) logPreCall(model string, messages []ChatMessage, verdic
 		ts, model, len(messages), float64(elapsed.Milliseconds()))
 
 	for i, msg := range messages {
-		preview := truncateLog(msg.Content, 500)
+		// Message bodies are verbatim user/assistant text. The
+		// original length is preserved in the log so operators
+		// can still see whether a payload was trimmed by the
+		// caller; only the preview itself is masked when
+		// Reveal is off.
+		preview := truncateLog(redaction.MessageContent(msg.Content), 500)
 		fmt.Fprintf(os.Stderr, "  \033[2m[%d]\033[0m %s (%d chars): %s\n", i, msg.Role, len(msg.Content), preview)
 	}
 
-	if severity == "NONE" {
-		fmt.Fprintf(os.Stderr, "  verdict: \033[92m%s\033[0m\n", severity)
-	} else {
-		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s  %s\n", severity, action, verdict.Reason)
-	}
+	logVerdict(severity, action, verdict, elapsed)
 	fmt.Fprintf(os.Stderr, "\033[94m%s\033[0m\n", strings.Repeat("─", 60))
 }
 
@@ -2032,15 +2150,47 @@ func (p *GuardrailProxy) logPostCall(model, content string, verdict *ScanVerdict
 	}
 	fmt.Fprintf(os.Stderr, "\033[92m[%s]\033[0m \033[1mPOST-CALL\033[0m  model=%s%s  \033[2m%.0fms\033[0m\n",
 		ts, model, tokStr, float64(elapsed.Milliseconds()))
-	preview := truncateLog(content, 800)
+	// LLM responses can echo user PII (the model re-emits
+	// personal data verbatim in summaries, translations, etc.)
+	// or surface new secrets authored by the model itself. Both
+	// flows are operator-facing; the Reveal flag gates
+	// unredacted output for live debugging.
+	preview := truncateLog(redaction.MessageContent(content), 800)
 	fmt.Fprintf(os.Stderr, "  response (%d chars): %s\n", len(content), preview)
 
-	if severity == "NONE" {
-		fmt.Fprintf(os.Stderr, "  verdict: \033[92m%s\033[0m\n", severity)
-	} else {
-		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s  %s\n", severity, action, verdict.Reason)
-	}
+	logVerdict(severity, action, verdict, elapsed)
 	fmt.Fprintf(os.Stderr, "\033[92m%s\033[0m\n", strings.Repeat("─", 60))
+}
+
+func logVerdict(severity, action string, verdict *ScanVerdict, elapsed time.Duration) {
+	scannerStr := ""
+	if verdict.Scanner != "" {
+		scannerStr = "  scanner=" + verdict.Scanner
+	}
+	if severity == "NONE" {
+		fmt.Fprintf(os.Stderr, "  verdict: \033[92m%s\033[0m%s\n", severity, scannerStr)
+	} else {
+		// verdict.Reason and verdict.Findings originate from
+		// scanners that may include the matched literal
+		// ("detected SSN 123-45-6789", "ghp_abc..."). Run both
+		// through redaction.Reason so rule-IDs pass verbatim
+		// but raw literals are masked unless Reveal is set.
+		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s%s  %s\n",
+			severity, action, scannerStr, redaction.Reason(verdict.Reason))
+		if len(verdict.Findings) > 0 {
+			scrubbed := make([]string, len(verdict.Findings))
+			for i, f := range verdict.Findings {
+				scrubbed[i] = redaction.Reason(f)
+			}
+			fmt.Fprintf(os.Stderr, "  findings: %s\n", strings.Join(scrubbed, ", "))
+		}
+		if len(verdict.ScannerSources) > 0 {
+			// ScannerSources is a fixed enum
+			// (local-pattern, cisco-ai-defense, judge-gpt4,
+			// etc.) — authored metadata only, never PII.
+			fmt.Fprintf(os.Stderr, "  sources: %s\n", strings.Join(verdict.ScannerSources, ", "))
+		}
+	}
 }
 
 // llmSystemAndProvider derives gen_ai.system and provider name from the model string.
@@ -2169,7 +2319,8 @@ func patchRawResponseModel(raw json.RawMessage, model string) ([]byte, error) {
 // Telemetry
 // ---------------------------------------------------------------------------
 
-func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanVerdict, elapsed time.Duration, tokIn, tokOut *int64) {
+func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model string, verdict *ScanVerdict, elapsed time.Duration, tokIn, tokOut *int64) {
+	requestID := RequestIDFromContext(ctx)
 	elapsedMs := float64(elapsed.Milliseconds())
 
 	details := fmt.Sprintf("direction=%s action=%s severity=%s findings=%d elapsed_ms=%.1f",
@@ -2182,19 +2333,43 @@ func (p *GuardrailProxy) recordTelemetry(direction, model string, verdict *ScanV
 		details += fmt.Sprintf(" reason=%s", reason)
 	}
 
-	if p.logger != nil {
-		_ = p.logger.LogAction("guardrail-verdict", model, details)
-	}
-	if p.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-inspection",
-			Target:    model,
-			Severity:  verdict.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
+	// Emit canonical finding IDs for cross-scanner correlation. The scanner
+	// (local-pattern / CiscoAID / judge) produces raw finding strings; the
+	// normalizer maps them to a stable ID scheme so downstream tooling can
+	// match findings across scanners without parsing scanner-specific formats.
+	if nfs := NormalizeScanVerdict(verdict); len(nfs) > 0 {
+		ids := make([]string, 0, len(nfs))
+		seen := make(map[string]bool, len(nfs))
+		for _, nf := range nfs {
+			if seen[nf.CanonicalID] {
+				continue
+			}
+			seen[nf.CanonicalID] = true
+			ids = append(ids, nf.CanonicalID)
+			if len(ids) >= 8 {
+				break
+			}
 		}
-		_ = p.store.LogEvent(evt)
+		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
+	if requestID != "" {
+		// Append the correlation key so the human-readable gateway.log
+		// line (which skips structured sinks) is still searchable by
+		// operators who grep for a specific request ID.
+		details += fmt.Sprintf(" request_id=%s", requestID)
+	}
+
+	if p.logger != nil {
+		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
+	}
+	_ = persistAuditEvent(p.logger, p.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    model,
+		Severity:  verdict.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if p.otel != nil {
 		ctx := context.Background()

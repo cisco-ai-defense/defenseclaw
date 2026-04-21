@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -132,6 +133,12 @@ func (a *APIServer) Run(ctx context.Context) error {
 	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
 		handler = a.tokenAuth(handler)
 	}
+	// Phase 5: request-ID middleware runs outermost so every audit
+	// entry coming out of the API server — including auth failures
+	// and rate-limited requests — carries a correlation key. Clients
+	// that already mint their own trace id can pass it in via any
+	// of the recognised request-id headers and we honour it verbatim.
+	handler = requestIDMiddleware(handler)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -748,7 +755,7 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	if event.Severity == "" {
 		event.Severity = "INFO"
 	}
-	if err := a.store.LogEvent(event); err != nil {
+	if err := persistAuditEvent(a.logger, a.store, event); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -921,7 +928,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner, a.scannerCfg.InspectLLM, a.scannerCfg.CiscoAIDefense)
+	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner, a.scannerCfg.EffectiveInspectLLM(), a.scannerCfg.CiscoAIDefense)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -1020,7 +1027,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ms := scanner.NewMCPScanner(a.scannerCfg.Scanners.MCPScanner, a.scannerCfg.InspectLLM, a.scannerCfg.CiscoAIDefense)
+	ms := scanner.NewMCPScanner(a.scannerCfg.Scanners.MCPScanner, a.scannerCfg.EffectiveInspectLLM(), a.scannerCfg.CiscoAIDefense)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -1171,31 +1178,67 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		details += fmt.Sprintf(" reason=%s", truncate(req.Reason, 120))
 	}
 
+	if nfs := NormalizeScanVerdict(&ScanVerdict{
+		Severity: req.Severity,
+		Findings: req.Findings,
+	}); len(nfs) > 0 {
+		ids := make([]string, 0, len(nfs))
+		seen := make(map[string]bool, len(nfs))
+		for _, nf := range nfs {
+			if seen[nf.CanonicalID] {
+				continue
+			}
+			seen[nf.CanonicalID] = true
+			ids = append(ids, nf.CanonicalID)
+			if len(ids) >= 8 {
+				break
+			}
+		}
+		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
+	}
+
+	// Both Reason and Findings are composed upstream by the
+	// guardrail proxy and routinely embed the matched literal
+	// in RULE-ID:description form. Redact both for the
+	// operator-facing stderr lines (Reveal flag can unmask
+	// locally if needed); rule IDs survive intact.
+	redactedReason := redaction.Reason(req.Reason)
+	redactedFindings := make([]string, len(req.Findings))
+	for i, f := range req.Findings {
+		redactedFindings[i] = redaction.Reason(f)
+	}
 	switch req.Action {
 	case "block":
 		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s: model=%s severity=%s reason=%q findings=%v\n",
-			req.Direction, req.Model, req.Severity, req.Reason, req.Findings)
+			req.Direction, req.Model, req.Severity, redactedReason, redactedFindings)
 	case "alert":
 		fmt.Fprintf(os.Stderr, "[guardrail] ALERT %s: model=%s severity=%s reason=%q findings=%v\n",
-			req.Direction, req.Model, req.Severity, req.Reason, req.Findings)
+			req.Direction, req.Model, req.Severity, redactedReason, redactedFindings)
 	default:
 		fmt.Fprintf(os.Stderr, "[guardrail] OK %s: model=%s severity=%s elapsed=%.0fms\n",
 			req.Direction, req.Model, req.Severity, req.ElapsedMs)
 	}
 
+	requestID := RequestIDFromContext(r.Context())
+	if requestID != "" {
+		// Append the correlation key so the human-readable
+		// gateway.log line (which still routes through LogAction
+		// and does not carry structured fields) is also searchable
+		// by request_id. Structured sinks pick it up from the
+		// dedicated Event.RequestID column below.
+		details += fmt.Sprintf(" request_id=%s", requestID)
+	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("guardrail-verdict", req.Model, details)
+		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
 	}
-	if a.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-inspection",
-			Target:    req.Model,
-			Severity:  req.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-		}
-		_ = a.store.LogEvent(evt)
-	}
+	_ = persistAuditEvent(a.logger, a.store, audit.Event{
+		Action:    "guardrail-inspection",
+		Target:    req.Model,
+		Severity:  req.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if a.otel != nil {
 		ctx := r.Context()
@@ -1274,21 +1317,24 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] evaluate <<< action=%s severity=%s sources=%v reason=%q\n",
-		out.Action, out.Severity, out.ScannerSources, truncate(out.Reason, 120))
+		out.Action, out.Severity, out.ScannerSources,
+		redaction.Reason(truncate(out.Reason, 120)))
 
+	requestID := RequestIDFromContext(r.Context())
+	if requestID != "" {
+		details += fmt.Sprintf(" request_id=%s", requestID)
+	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("guardrail-opa-verdict", req.Model, details)
+		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
 	}
-	if a.store != nil {
-		evt := audit.Event{
-			Action:    "guardrail-opa-inspection",
-			Target:    req.Model,
-			Severity:  out.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-		}
-		_ = a.store.LogEvent(evt)
-	}
+	_ = persistAuditEvent(a.logger, a.store, audit.Event{
+		Action:    "guardrail-opa-inspection",
+		Target:    req.Model,
+		Severity:  out.Severity,
+		Details:   details,
+		Timestamp: time.Now().UTC(),
+		RequestID: requestID,
+	})
 
 	if a.otel != nil {
 		ctx := r.Context()
@@ -1843,6 +1889,10 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	if a.logger != nil {
 		_ = a.logger.LogAction("policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
 	}
+	emitLifecycle("policy", "reload", map[string]string{
+		"policy_dir": a.scannerCfg.PolicyDir,
+		"source":     "api",
+	})
 
 	a.writeJSON(w, http.StatusOK, map[string]string{
 		"status":     "reloaded",

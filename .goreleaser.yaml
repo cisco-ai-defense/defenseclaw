@@ -56,7 +56,7 @@ homebrew_casks:
       owner: cisco-ai-defense
       name: homebrew-tap
       token: "{{ .Env.GITHUB_TOKEN }}"
-    skip_upload: true  # TODO: remove once cisco-ai-defense/homebrew-tap repo is created
+    skip_upload: auto
     name: defenseclaw
     homepage: "https://github.com/cisco-ai-defense/defenseclaw"
     description: "Enterprise governance layer for OpenClaw"

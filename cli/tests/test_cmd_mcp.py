@@ -128,6 +128,23 @@ class TestMCPUnblock(MCPCommandTestBase):
 
 
 class TestMCPScan(MCPCommandTestBase):
+    @patch("defenseclaw.commands.cmd_mcp._run_scan")
+    def test_scan_all_flag_without_target(self, mock_run_scan):
+        self.app.cfg.mcp_servers = MagicMock(return_value=[
+            MCPServerEntry(name="context7", url="http://localhost:3000", transport="sse"),
+        ])
+        mock_run_scan.return_value = ScanResult(
+            scanner="mcp-scanner",
+            target="http://localhost:3000",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_run_scan.assert_called_once()
+
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):
         mock_scan.return_value = ScanResult(
@@ -190,7 +207,7 @@ class TestMCPScan(MCPCommandTestBase):
         pe.block("mcp", "http://evil.com", "unsafe")
 
         result = self.invoke(["scan", "http://evil.com"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("BLOCKED", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")

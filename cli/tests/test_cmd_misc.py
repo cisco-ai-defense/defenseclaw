@@ -729,10 +729,11 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
-        self.assertIn("Web login: not required", result.output)
-        self.assertNotIn("Username:", result.output)
+        self.assertIn("Splunk Web login:", result.output)
+        self.assertIn("Username:  admin", result.output)
+        self.assertIn("Password:", result.output)
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
-        self.assertIn("Free mode is active, so no local Splunk login is required.", result.output)
+        self.assertIn("Log in with admin", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
@@ -861,6 +862,37 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertTrue(self.app.cfg.otel.enabled)
         self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
         self.assertFalse(self.app.cfg.otel.logs.enabled)
+
+    def test_setup_splunk_show_credentials_no_env_file(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--show-credentials"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Splunk credentials not found", result.output)
+
+    def test_setup_splunk_show_credentials_with_env_file(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        env_dir = os.path.join(self.tmp_dir, "splunk-bridge", "env")
+        os.makedirs(env_dir)
+        with open(os.path.join(env_dir, ".env"), "w") as f:
+            f.write("SPLUNK_PASSWORD=test-splunk-pass\n")
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--show-credentials"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Splunk Web Credentials", result.output)
+        self.assertIn("Username:  admin", result.output)
+        self.assertIn("Password:  test-splunk-pass", result.output)
 
 
 if __name__ == "__main__":

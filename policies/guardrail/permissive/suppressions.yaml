@@ -1,0 +1,56 @@
+version: 1
+
+# Permissive profile: broader suppressions for development/testing environments.
+# Includes all default suppressions plus additional noise reduction.
+
+pre_judge_strips:
+  - id: STRIP-SYSTEM-SENDER
+    pattern: '\b(cli|system|bot|admin)\b'
+    context: "System sender metadata injected by agent framework"
+    applies_to: [pii]
+
+  - id: STRIP-LOCALHOST-URLS
+    pattern: 'https?://(?:localhost|127\.0\.0\.1)(?::\d+)?[/\w]*'
+    context: "Local development URLs are not exfiltration targets"
+    applies_to: [pii, injection]
+
+finding_suppressions:
+  - id: SUPP-USERNAME-METADATA
+    finding_pattern: JUDGE-PII-USER
+    entity_pattern: '^(cli|system|bot|admin|root|19:[a-f0-9\-]+@.*)$'
+    reason: "System metadata, not real username"
+
+  - id: SUPP-IP-PRIVATE
+    finding_pattern: JUDGE-PII-IP
+    entity_pattern: '^(127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|0\.0\.0\.|::1|localhost)'
+    reason: "Private/loopback IP address"
+
+  - id: SUPP-PHONE-EPOCH
+    finding_pattern: JUDGE-PII-PHONE
+    entity_pattern: '^\d{10}$'
+    condition: is_epoch
+    reason: "Unix timestamp, not phone number"
+
+  - id: SUPP-EMAIL-CHATID
+    finding_pattern: JUDGE-PII-EMAIL
+    entity_pattern: '^19:[a-f0-9\-]+@unq\.gbl\.spaces$'
+    reason: "Teams chatId format, not email address"
+
+  - id: SUPP-EMAIL-NOREPLY
+    finding_pattern: JUDGE-PII-EMAIL
+    entity_pattern: '^(noreply|no-reply|donotreply)@'
+    reason: "Automated system email, not personal PII"
+
+  - id: SUPP-IP-ANY
+    finding_pattern: JUDGE-PII-IP
+    entity_pattern: '.*'
+    reason: "Permissive profile: IP addresses suppressed in dev environments"
+
+tool_suppressions:
+  - tool_pattern: '^(graph_auth_status|session_status|get_status)$'
+    suppress_findings: [JUDGE-PII-USER]
+    reason: "Status check tools return expected system metadata"
+
+  - tool_pattern: '^(read_file|list_directory|search_files|grep_search)$'
+    suppress_findings: [JUDGE-PII-EMAIL, JUDGE-PII-USER]
+    reason: "Permissive profile: file inspection tools suppressed in dev"

@@ -16,7 +16,11 @@
 
 package main
 
-import "github.com/defenseclaw/defenseclaw/internal/cli"
+import (
+	"os"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli"
+)
 
 var (
 	version = "dev"
@@ -27,5 +31,5 @@ var (
 func main() {
 	cli.SetVersion(version)
 	cli.SetBuildInfo(commit, date)
-	cli.Execute()
+	os.Exit(cli.Execute())
 }

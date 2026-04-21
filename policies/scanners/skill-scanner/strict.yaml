@@ -1,0 +1,25 @@
+# DefenseClaw-curated skill scanner policy: strict
+# Compatible with cisco-ai-skill-scanner ScanPolicy.from_file()
+version: 1
+name: strict
+description: "High-sensitivity detection — flags all potential risks, higher false-positive rate"
+
+thresholds:
+  permission_risk: 0.3
+  data_access_risk: 0.3
+  code_quality_risk: 0.4
+
+analyzers:
+  static:
+    enabled: true
+    max_file_size_kb: 1024
+  behavioral:
+    enabled: true
+    trace_depth: 5
+  llm:
+    enabled: false
+
+severity_overrides:
+  MEDIUM: HIGH
+
+disabled_rules: []

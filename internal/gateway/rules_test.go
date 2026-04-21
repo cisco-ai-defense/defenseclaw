@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // ---------------------------------------------------------------------------
@@ -627,4 +629,133 @@ func filterBySeverity(findings []RuleFinding, severity string) []RuleFinding {
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// ApplyRulePackOverrides
+// ---------------------------------------------------------------------------
+
+// TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults verifies that a
+// rule pack introducing a previously-unknown category appends it to the
+// active set without removing any of the compiled-in defaults. The previous
+// implementation wholesale-replaced allRuleCategories, which silently
+// dropped whole detection surfaces whenever a pack was deployed.
+func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	rp := &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "test-override",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: "TEST-1", Pattern: `test_secret_[a-f0-9]+`, Severity: "HIGH", Confidence: 0.95},
+				},
+			},
+		},
+	}
+
+	ApplyRulePackOverrides(rp)
+
+	if got, want := len(allRuleCategories), len(defaultRuleCategories)+1; got != want {
+		t.Fatalf("expected %d categories (defaults + new), got %d", want, got)
+	}
+	names := map[string]bool{}
+	for _, c := range allRuleCategories {
+		names[c.Name] = true
+	}
+	for _, dc := range defaultRuleCategories {
+		if !names[dc.Name] {
+			t.Errorf("default category %q dropped after override", dc.Name)
+		}
+	}
+	if !names["test-override"] {
+		t.Error("new category test-override not present after override")
+	}
+
+	findings := ScanAllRules("found test_secret_deadbeef here", "exec")
+	if len(findings) == 0 {
+		t.Error("ScanAllRules should find the overridden pattern")
+	}
+}
+
+// TestApplyRulePackOverrides_ReplacesNamedCategoryOnly verifies that a pack
+// with category="secret" replaces the compiled-in secret rules but leaves
+// the other default categories untouched.
+func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	rp := &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "secret",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: "CUSTOM-SECRET", Pattern: `custom_secret_[a-f0-9]+`, Severity: "HIGH", Confidence: 0.99},
+				},
+			},
+		},
+	}
+
+	ApplyRulePackOverrides(rp)
+
+	if got, want := len(allRuleCategories), len(defaultRuleCategories); got != want {
+		t.Fatalf("expected %d categories, got %d", want, got)
+	}
+
+	var secretCat *ruleCategory
+	for i := range allRuleCategories {
+		if allRuleCategories[i].Name == "secret" {
+			secretCat = &allRuleCategories[i]
+			break
+		}
+	}
+	if secretCat == nil {
+		t.Fatal("secret category missing after override")
+	}
+	if len(secretCat.Rules) != 1 || secretCat.Rules[0].ID != "CUSTOM-SECRET" {
+		t.Errorf("secret rules = %+v, want exactly CUSTOM-SECRET", secretCat.Rules)
+	}
+
+	// Other defaults must be intact: command rules should still fire.
+	findings := ScanAllRules("custom_secret_deadbeef", "exec")
+	if len(findings) == 0 || findings[0].RuleID != "CUSTOM-SECRET" {
+		t.Errorf("custom secret not detected: %+v", findings)
+	}
+}
+
+func TestApplyRulePackOverrides_NilRulePack(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	originalLen := len(allRuleCategories)
+	ApplyRulePackOverrides(nil)
+	if len(allRuleCategories) != originalLen {
+		t.Error("nil rule pack should not change allRuleCategories")
+	}
+}
+
+func TestApplyRulePackOverrides_InvalidRegexSkipped(t *testing.T) {
+	savedCategories := allRuleCategories
+	defer func() { allRuleCategories = savedCategories }()
+
+	rp := &guardrail.RulePack{
+		RuleFiles: []*guardrail.RulesFileYAML{
+			{
+				Version:  1,
+				Category: "bad-regex",
+				Rules: []guardrail.RuleDefYAML{
+					{ID: "BAD-1", Pattern: `[invalid`, Severity: "HIGH", Confidence: 0.9},
+				},
+			},
+		},
+	}
+
+	ApplyRulePackOverrides(rp)
+
+	if len(allRuleCategories) != len(savedCategories) {
+		t.Error("category with only invalid regexes should be skipped, leaving originals unchanged")
+	}
 }

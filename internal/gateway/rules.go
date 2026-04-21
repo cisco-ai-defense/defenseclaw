@@ -17,8 +17,14 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // PatternRule is a single detection rule with a compiled regex, severity,
@@ -239,17 +245,128 @@ var trustExploitRules = []PatternRule{
 // Scan engine — runs all rules against input, no tool-name gating
 // ---------------------------------------------------------------------------
 
-// allRuleCategories groups all rule slices for iteration.
-var allRuleCategories = []struct {
+// ruleCategoriesMu guards reads and writes to allRuleCategories.
+// ApplyRulePackOverrides writes at startup; ScanAllRules reads on every request.
+var ruleCategoriesMu sync.RWMutex
+
+// ruleCategory is one named group of detection rules.
+type ruleCategory struct {
 	Name  string
 	Rules []PatternRule
-}{
+}
+
+// defaultRuleCategories is the pristine compiled-in set, used as the baseline
+// that ApplyRulePackOverrides merges against. It must never be mutated.
+var defaultRuleCategories = []ruleCategory{
 	{"secret", secretRules},
 	{"command", commandRules},
 	{"sensitive-path", sensitivePathRules},
 	{"c2", c2Rules},
 	{"cognitive-file", cognitiveFileRules},
 	{"trust-exploit", trustExploitRules},
+}
+
+// allRuleCategories groups all rule slices for iteration. Seeded from the
+// compiled-in defaults; a rule pack can override individual categories by
+// name via ApplyRulePackOverrides without removing the others.
+var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
+
+// ApplyRulePackOverrides replaces the hardcoded rule categories with rules
+// loaded from the rule-pack's rules/*.yaml files. Each YAML file becomes
+// one category entry. Invalid regex patterns are logged and skipped.
+// If the rule pack has no rule files, the hardcoded defaults remain active.
+// maxRegexCompileTime caps how long a single user-supplied regex may take to
+// compile, guarding against ReDoS-style patterns in rule pack YAML files.
+const maxRegexCompileTime = 2 * time.Second
+
+func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
+	if len(pattern) > 2048 {
+		return nil, fmt.Errorf("pattern too long (%d chars)", len(pattern))
+	}
+	type result struct {
+		re  *regexp.Regexp
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		re, err := regexp.Compile(pattern)
+		ch <- result{re, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.re, r.err
+	case <-time.After(maxRegexCompileTime):
+		return nil, fmt.Errorf("compile timed out after %v", maxRegexCompileTime)
+	}
+}
+
+// ApplyRulePackOverrides merges rule-pack rule files into the compiled-in
+// defaults. For each rules/*.yaml in the pack, the category named by
+// `category:` replaces the same-named compiled-in category. Categories not
+// mentioned by the pack keep their compiled-in defaults, so a partial or
+// corrupt deployment cannot silently drop whole detection categories — the
+// previous implementation wholesale-replaced allRuleCategories, which meant
+// one valid rules/commands.yaml on disk would delete secret/sensitive-path/
+// c2/cognitive-file/trust-exploit enforcement.
+//
+// Unknown category names (not in the compiled-in set) are appended so rule
+// packs can add new categories without modifying Go source.
+//
+// This function is idempotent: it always starts from defaultRuleCategories,
+// so repeated calls (config reload, tests) converge on the same state.
+func ApplyRulePackOverrides(rp *guardrail.RulePack) {
+	if rp == nil || len(rp.RuleFiles) == 0 {
+		return
+	}
+
+	merged := make([]ruleCategory, len(defaultRuleCategories))
+	copy(merged, defaultRuleCategories)
+
+	idx := make(map[string]int, len(merged))
+	for i, c := range merged {
+		idx[c.Name] = i
+	}
+
+	overridden := 0
+	added := 0
+	for _, rf := range rp.RuleFiles {
+		if rf == nil || rf.Category == "" {
+			continue
+		}
+		var compiled []PatternRule
+		for _, r := range rf.Rules {
+			re, err := compileRegexSafe(r.Pattern)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] skip rule %s: bad pattern: %v\n", r.ID, err)
+				continue
+			}
+			compiled = append(compiled, PatternRule{
+				ID:         r.ID,
+				Pattern:    re,
+				Title:      r.Title,
+				Severity:   r.Severity,
+				Confidence: r.Confidence,
+				Tags:       r.Tags,
+			})
+		}
+		if len(compiled) == 0 {
+			continue
+		}
+		if i, ok := idx[rf.Category]; ok {
+			merged[i].Rules = compiled
+			overridden++
+		} else {
+			merged = append(merged, ruleCategory{Name: rf.Category, Rules: compiled})
+			idx[rf.Category] = len(merged) - 1
+			added++
+		}
+	}
+
+	ruleCategoriesMu.Lock()
+	allRuleCategories = merged
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
+		overridden, added, len(defaultRuleCategories)-overridden)
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.
@@ -335,11 +452,15 @@ func adjustConfidence(toolName string, f RuleFinding) RuleFinding {
 // variable-like constructions). This defeats path obfuscation tricks
 // like /etc/sha""dow, /etc/sha\dow, ${P}/shadow, and /etc/shad?w.
 func ScanAllRules(text string, toolName string) []RuleFinding {
+	ruleCategoriesMu.RLock()
+	cats := allRuleCategories
+	ruleCategoriesMu.RUnlock()
+
 	var findings []RuleFinding
 	seen := make(map[string]bool)
 
 	// Scan raw text first
-	for _, cat := range allRuleCategories {
+	for _, cat := range cats {
 		for _, rule := range cat.Rules {
 			loc := rule.Pattern.FindStringIndex(text)
 			if loc == nil {
@@ -366,7 +487,7 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
-		for _, cat := range allRuleCategories {
+		for _, cat := range cats {
 			for _, rule := range cat.Rules {
 				if seen[rule.ID] {
 					continue // already found on raw pass

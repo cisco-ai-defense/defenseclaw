@@ -323,6 +323,7 @@ def setup_sandbox(
         click.echo("  Logs:")
         click.echo("       sudo journalctl -u openshell-sandbox -f")
         click.echo(f"       {data_dir}/gateway.log")
+        click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     elif has_systemd:
         click.echo("  ⚠ Systemd units were generated but could not be installed automatically.")
         click.echo(f"    Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
@@ -348,6 +349,7 @@ def setup_sandbox(
         click.echo("  Logs:")
         click.echo("       sudo journalctl -u openshell-sandbox -f")
         click.echo(f"       {data_dir}/gateway.log")
+        click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     else:
         click.echo("  ℹ No systemd detected (container/minimal environment).")
         click.echo()
@@ -360,6 +362,7 @@ def setup_sandbox(
         click.echo()
         click.echo("  Logs:")
         click.echo(f"       {data_dir}/gateway.log")
+        click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     click.echo()
 
 

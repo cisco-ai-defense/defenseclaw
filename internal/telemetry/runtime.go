@@ -43,6 +43,99 @@ func (p *Provider) EmitStartupSpan(ctx context.Context) {
 	span.End()
 }
 
+// StartGuardrailStageSpan begins a span covering one guardrail
+// pipeline stage (regex_only, regex_judge, judge_first, etc.).
+// Callers must End the returned span via EndGuardrailStageSpan —
+// Start/End are split so the inspector can attach the final verdict
+// action/severity/latency once scan+judge+OPA have all resolved.
+//
+// Nil span is safely returned when traces are disabled; consumers
+// can call End on nil spans per the OTel SDK contract.
+func (p *Provider) StartGuardrailStageSpan(ctx context.Context, stage, direction, model string) (context.Context, trace.Span) {
+	if !p.TracesEnabled() {
+		return ctx, nil
+	}
+	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail/%s", stage),
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.guardrail.stage", stage),
+		attribute.String("defenseclaw.guardrail.direction", direction),
+		attribute.String("defenseclaw.guardrail.model", model),
+	)
+	return ctx, span
+}
+
+// EndGuardrailStageSpan attaches the final verdict attributes and
+// closes the span. action=block maps to OTel Error status; anything
+// else is Ok so block-rate can be queried directly from span status
+// in Tempo/Jaeger without a custom filter expression.
+func (p *Provider) EndGuardrailStageSpan(span trace.Span, action, severity, reason string, latencyMs int64) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("defenseclaw.guardrail.action", action),
+		attribute.String("defenseclaw.guardrail.severity", severity),
+		attribute.String("defenseclaw.guardrail.reason", truncateStr(reason, 256)),
+		attribute.Int64("defenseclaw.guardrail.latency_ms", latencyMs),
+	)
+	if action == "block" {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
+// StartGuardrailPhaseSpan opens a child span for one sub-stage of a
+// guardrail inspection — e.g. "regex", "cisco_ai_defense", "judge.pii",
+// "judge.prompt_injection", "opa", "finalize". Phase spans nest under
+// the Stage span opened by StartGuardrailStageSpan so operators can
+// pivot on stage (regex_only vs regex_judge vs judge_first) AND drill
+// into phase-level latency (which phase ate the P99 budget) in a
+// single trace waterfall.
+//
+// Nil span is returned when traces are disabled; End is a safe no-op
+// per the OTel SDK contract.
+func (p *Provider) StartGuardrailPhaseSpan(ctx context.Context, phase string) (context.Context, trace.Span) {
+	if p == nil || !p.TracesEnabled() {
+		return ctx, nil
+	}
+	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail.%s", phase),
+		trace.WithSpanKind(trace.SpanKindInternal),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.guardrail.phase", phase),
+	)
+	return ctx, span
+}
+
+// EndGuardrailPhaseSpan attaches the phase outcome (action + severity
+// + latency) and closes the span. Action may be empty for phases that
+// don't produce a verdict directly (e.g. "regex" when there are no
+// matches); we still record latency so phase timing is always queryable.
+func (p *Provider) EndGuardrailPhaseSpan(span trace.Span, action, severity string, latencyMs int64) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.Int64("defenseclaw.guardrail.latency_ms", latencyMs),
+	)
+	if action != "" {
+		span.SetAttributes(attribute.String("defenseclaw.guardrail.action", action))
+	}
+	if severity != "" {
+		span.SetAttributes(attribute.String("defenseclaw.guardrail.severity", severity))
+	}
+	if action == "block" {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
 // EmitInspectSpan creates a span for a tool/message inspection evaluation.
 func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity string, durationMs float64) string {
 	if !p.TracesEnabled() {

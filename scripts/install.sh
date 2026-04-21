@@ -248,6 +248,39 @@ fetch_artifact() {
     fi
 }
 
+# Download and verify checksums.txt, then validate a file against it.
+# Skipped for --local installs (assumes the user built locally).
+verify_checksum() {
+    local file="$1" filename="$2"
+    if [[ -n "${LOCAL_DIR}" ]]; then
+        return 0
+    fi
+    if [[ -z "${CHECKSUMS_FILE:-}" ]]; then
+        local checksums_url
+        checksums_url="$(artifact_path "checksums.txt")"
+        CHECKSUMS_FILE="$(mktemp)"
+        curl -sSfL "${checksums_url}" -o "${CHECKSUMS_FILE}" \
+            || { warn "Could not download checksums.txt — skipping verification"; return 0; }
+    fi
+    local expected actual
+    expected="$(grep "  ${filename}" "${CHECKSUMS_FILE}" | awk '{print $1}')"
+    if [[ -z "${expected}" ]]; then
+        warn "No checksum entry for ${filename} — skipping verification"
+        return 0
+    fi
+    if command -v sha256sum &>/dev/null; then
+        actual="$(sha256sum "${file}" | awk '{print $1}')"
+    elif command -v shasum &>/dev/null; then
+        actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
+    else
+        warn "Neither sha256sum nor shasum found — skipping verification"
+        return 0
+    fi
+    if [[ "${expected}" != "${actual}" ]]; then
+        die "Checksum mismatch for ${filename}: expected ${expected}, got ${actual}"
+    fi
+}
+
 # ── Install: Gateway binary ──────────────────────────────────────────────────
 
 install_gateway() {
@@ -262,9 +295,11 @@ install_gateway() {
         chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
     else
         local url tmp
-        url="$(artifact_path "defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz")"
+        local tarball_name="defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz"
+        url="$(artifact_path "${tarball_name}")"
         tmp="$(mktemp -d)"
         fetch_artifact "${url}" "${tmp}/gateway.tar.gz"
+        verify_checksum "${tmp}/gateway.tar.gz" "${tarball_name}"
         tar -xzf "${tmp}/gateway.tar.gz" -C "${tmp}"
         cp "${tmp}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
         chmod +x "${INSTALL_DIR}/defenseclaw-gateway"

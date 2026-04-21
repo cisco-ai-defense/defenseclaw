@@ -250,11 +250,15 @@ var policyReloadCmd = &cobra.Command{
 	Short: "Tell the running sidecar daemon to reload OPA policies",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		port := 18790
+		bind := "127.0.0.1"
 		if cfg != nil {
 			port = cfg.Gateway.APIPort
+			if cfg.Gateway.APIBind != "" {
+				bind = cfg.Gateway.APIBind
+			}
 		}
 
-		url := fmt.Sprintf("http://127.0.0.1:%d/policy/reload", port)
+		url := fmt.Sprintf("http://%s:%d/policy/reload", bind, port)
 
 		req, err := http.NewRequest(http.MethodPost, url, nil)
 		if err != nil {

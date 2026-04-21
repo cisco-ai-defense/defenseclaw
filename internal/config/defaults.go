@@ -131,10 +131,12 @@ func DefaultConfig() *Config {
 			AnchorName: "com.defenseclaw",
 		},
 		Guardrail: GuardrailConfig{
-			Mode:        "observe",
-			ScannerMode: "both",
-			Host:        "",
-			Port:        4000,
+			Mode:                       "observe",
+			ScannerMode:                "both",
+			Host:                       "",
+			Port:                       4000,
+			DetectionStrategy:          "regex_judge",
+			DetectionStrategyCompletion: "regex_only",
 			Judge: JudgeConfig{
 				Injection:     true,
 				PII:           true,
@@ -144,16 +146,10 @@ func DefaultConfig() *Config {
 				Timeout:       30.0,
 			},
 		},
-		Splunk: SplunkConfig{
-			HECEndpoint:   "https://localhost:8088/services/collector/event",
-			Index:         "defenseclaw",
-			Source:        "defenseclaw",
-			SourceType:    "_json",
-			VerifyTLS:     false,
-			Enabled:       false,
-			BatchSize:     50,
-			FlushInterval: 5,
-		},
+		// AuditSinks is empty by default — operators opt in to forwarding
+		// by adding entries (splunk_hec / otlp_logs / http_jsonl). The
+		// local SQLite store always receives every event.
+		AuditSinks: nil,
 		Gateway: GatewayConfig{
 			Host:            "127.0.0.1",
 			Port:            18789,

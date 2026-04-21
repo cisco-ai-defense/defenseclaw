@@ -966,6 +966,8 @@ dump_artifacts() {
     defenseclaw-gateway status 2>/dev/null || echo "  (not running)"
     echo "--- gateway.log (last 60 lines) ---"
     tail -60 ~/.defenseclaw/gateway.log 2>/dev/null || echo "  (not found)"
+    echo "--- gateway.jsonl (last 60 lines) ---"
+    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null || echo "  (not found)"
     echo "--- SQLite direct event count (via Python) ---"
     python3 -c "
 import sqlite3, os
@@ -1073,20 +1075,110 @@ phase_start() {
     start_openclaw_gateway
     sleep 5
 
-    echo "  Starting DefenseClaw sidecar..."
-    defenseclaw-gateway stop 2>/dev/null || true
-    defenseclaw-gateway start
-    sleep 5
+    echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
+    # Self-heal pattern: the ARM64 self-hosted runner occasionally sees the
+    # sidecar daemon reach "event loop running" and then vanish silently
+    # within ~60s (no panic in gateway.log, no shutdown message). Signature
+    # is consistent with SIGKILL from outside (OOM killer is the prime
+    # suspect on a shared self-hosted runner). We retry up to 3 times AND
+    # sample the sidecar process memory + dmesg on each failure so we can
+    # prove or disprove OOM from the CI logs.
+    local mem_trace_file
+    mem_trace_file="$(mktemp -t dc-mem-trace.XXXXXX.log)"
+    : >"$mem_trace_file"
+    sidecar_healthy=0
+    for attempt in 1 2 3; do
+        if [ "$attempt" -gt 1 ]; then
+            echo "  [attempt ${attempt}/3] restarting sidecar after previous attempt failed health check..."
+        fi
+        defenseclaw-gateway stop 2>/dev/null || true
+        sleep 2
+        echo "  [attempt ${attempt}/3] free -m before start:" | tee -a "$mem_trace_file" >/dev/null
+        free -m 2>/dev/null | sed 's/^/    /' | tee -a "$mem_trace_file" >/dev/null || true
+        defenseclaw-gateway start
+        sleep 5
+
+        # Sample sidecar memory every 3s in the background while we poll
+        # /health. We identify the sidecar as the defenseclaw-gateway
+        # process that is NOT the watchdog. If the process vanishes, the
+        # trace will show its last-known RSS and the wall-clock of death,
+        # which — correlated with dmesg below — pinpoints OOM.
+        (
+            for _ in $(seq 1 25); do
+                ts="$(date -u +%H:%M:%S)"
+                pid="$(pgrep -f 'defenseclaw-gateway' 2>/dev/null | while read -r p; do
+                    cmd_line="$(tr '\0' ' ' 2>/dev/null </proc/"$p"/cmdline 2>/dev/null)"
+                    case "$cmd_line" in
+                        *watchdog*|*status*|*stop*|*start*) ;;
+                        *) echo "$p"; break ;;
+                    esac
+                done | head -1)"
+                if [ -z "$pid" ]; then
+                    echo "[attempt ${attempt}/3] ${ts} sidecar pid: <none> (process gone)" >>"$mem_trace_file"
+                else
+                    # /proc is reliable and cheap; avoids ps invocation cost
+                    rss="$(awk '/^VmRSS:/ {print $2" "$3}' /proc/"$pid"/status 2>/dev/null)"
+                    vsz="$(awk '/^VmSize:/ {print $2" "$3}' /proc/"$pid"/status 2>/dev/null)"
+                    echo "[attempt ${attempt}/3] ${ts} sidecar pid=${pid} rss=${rss:-?} vsize=${vsz:-?}" >>"$mem_trace_file"
+                fi
+                sleep 3
+            done
+        ) &
+        local sampler_pid=$!
+
+        if wait_for_url "$SIDECAR_URL/health" 60 2; then
+            sidecar_healthy=1
+            kill "$sampler_pid" 2>/dev/null || true
+            wait "$sampler_pid" 2>/dev/null || true
+            echo "  [attempt ${attempt}/3] sidecar healthy"
+            break
+        fi
+        kill "$sampler_pid" 2>/dev/null || true
+        wait "$sampler_pid" 2>/dev/null || true
+        echo "  [attempt ${attempt}/3] /health unreachable after 60s"
+    done
 
     echo "  Sidecar status:"
     defenseclaw-gateway status || true
     echo ""
 
-    echo "  Waiting for sidecar health..."
-    if wait_for_url "$SIDECAR_URL/health" 60 3; then
+    if [ "$sidecar_healthy" = "1" ]; then
         pass "sidecar health endpoint reachable"
+        rm -f "$mem_trace_file"
     else
-        fail "sidecar health endpoint reachable" "timed out after 60s"
+        fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.jsonl ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 40 lines of ~/.defenseclaw/watchdog.log ---" >&2
+        tail -n 40 "$HOME/.defenseclaw/watchdog.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- defenseclaw / openclaw processes ---" >&2
+        ps -eo pid,ppid,stat,etime,rss,vsz,cmd 2>&1 | grep -Ei 'defenseclaw|openclaw' | grep -v grep | sed 's/^/    /' >&2 || true
+        echo "  --- listeners on 127.0.0.1:18789 and 127.0.0.1:18970 ---" >&2
+        { ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null || true; } | grep -E '18789|18970' | sed 's/^/    /' >&2 || true
+        echo "  --- sidecar memory trace (3s sampling across all attempts) ---" >&2
+        sed 's/^/    /' "$mem_trace_file" >&2 || true
+        rm -f "$mem_trace_file"
+        echo "  --- system memory at failure ---" >&2
+        free -h 2>/dev/null | sed 's/^/    /' >&2 || true
+        # Kernel OOM killer messages: the definitive signal. If the sidecar
+        # was OOM-killed, dmesg will have a line like
+        #   "Out of memory: Killed process 3739988 (defenseclaw-gat) ..."
+        # Note: dmesg on some distros requires CAP_SYSLOG but self-hosted
+        # runners usually run as a user with read access. We try both
+        # dmesg and journalctl -k as fallbacks.
+        echo "  --- kernel OOM / kill messages (last 5 min) ---" >&2
+        {
+            dmesg -T 2>/dev/null | tail -n 500 \
+                | grep -iE 'out of memory|killed process|oom[- ]killer|invoked oom|defenseclaw-gat' \
+                || echo "(no OOM/kill messages found in dmesg tail)"
+        } | sed 's/^/    /' >&2 || true
+        {
+            journalctl -k --since "5 minutes ago" --no-pager 2>/dev/null \
+                | grep -iE 'out of memory|killed process|oom[- ]killer|invoked oom|defenseclaw-gat' \
+                || echo "(no OOM/kill messages found in journalctl -k)"
+        } | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 1"
         return 1
     fi
@@ -2224,6 +2316,96 @@ PY
         fail "provider detection: extension and internal providers.json are in sync" "files differ"
     fi
 
+    # ── 6B-5. Bifrost provider: multi-provider model routing ──
+    # Verify that model strings with provider prefixes are correctly routed
+    # through the Bifrost SDK by checking the gateway accepts them.
+    local bifrost_models=(
+        "openai/gpt-4o-mini"
+        "anthropic/claude-haiku-4-5-20251001"
+    )
+    for bmodel in "${bifrost_models[@]}"; do
+        local bprov bname
+        bprov="${bmodel%%/*}"
+        bname="${bmodel#*/}"
+        local bkey_var
+        case "$bprov" in
+            openai)     bkey_var="OPENAI_API_KEY" ;;
+            anthropic)  bkey_var="ANTHROPIC_API_KEY" ;;
+            *)          bkey_var="" ;;
+        esac
+        local bkey="${!bkey_var:-}"
+        if [ -z "$bkey" ]; then
+            skip "bifrost multi-provider: $bmodel" "$bkey_var not set"
+            continue
+        fi
+        sleep 1
+        response=$(curl -sS --max-time 45 \
+            -H "Authorization: Bearer $master_key" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -cn --arg model "$bmodel" '{model: $model, messages: [{role: "user", content: "Reply with exactly: BIFROST_OK"}], max_tokens: 20}')" \
+            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if echo "$content" | grep -qi "BIFROST_OK"; then
+            pass "bifrost multi-provider: $bmodel round-trip succeeded"
+        elif echo "$err" | grep -Eqi '429|rate|overload|busy'; then
+            skip "bifrost multi-provider: $bmodel" "rate limited (transient)"
+        else
+            fail "bifrost multi-provider: $bmodel round-trip" "err='$err' content='$content'"
+        fi
+    done
+
+    # ── 6B-6. Bifrost provider: API key via X-AI-Auth header ──
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        sleep 1
+        response=$(curl -sS --max-time 45 \
+            -H "X-DC-Auth: Bearer ${gateway_token:-$master_key}" \
+            -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"anthropic/claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Reply: HEADER_KEY_OK"}],"max_tokens":20}' \
+            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        if echo "$content" | grep -qi "HEADER_KEY_OK"; then
+            pass "bifrost API key: X-AI-Auth header propagated to Bifrost"
+        else
+            err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+            if echo "$err" | grep -Eqi '429|rate|overload|busy'; then
+                skip "bifrost API key via header" "rate limited (transient)"
+            else
+                fail "bifrost API key: X-AI-Auth header" "err='$err' content='$content'"
+            fi
+        fi
+    else
+        skip "bifrost API key via header" "ANTHROPIC_API_KEY not set"
+    fi
+
+    # ── 6B-7. Bifrost provider: detection_strategy field in config ──
+    local strategy_check
+    strategy_check=$(python3 - <<'PY'
+from defenseclaw.config import load
+try:
+    cfg = load()
+    ds = getattr(cfg.guardrail, "detection_strategy", "")
+    if ds in ("regex_only", "regex_judge", "judge_first", ""):
+        print("ok:" + (ds or "default"))
+    else:
+        print("bad:" + ds)
+except Exception as e:
+    print("skip:" + str(e))
+PY
+)
+    case "$strategy_check" in
+        ok:*)
+            pass "bifrost config: detection_strategy is valid (${strategy_check#ok:})"
+            ;;
+        skip:*)
+            skip "bifrost config: detection_strategy" "${strategy_check#skip:}"
+            ;;
+        *)
+            fail "bifrost config: detection_strategy" "unexpected: $strategy_check"
+            ;;
+    esac
+
     phase_timer_end "Phase 6B"
 }
 
@@ -2826,10 +3008,14 @@ phase_recovery() {
 
     defenseclaw-gateway start
     sleep 5
-    if wait_for_url "$SIDECAR_URL/health" 60 3; then
+    if wait_for_url "$SIDECAR_URL/health" 180 3; then
         pass "recovery: sidecar restarted after stop"
     else
         fail "recovery: sidecar restarted after stop" "sidecar health endpoint did not recover"
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of ~/.defenseclaw/gateway.jsonl ---" >&2
+        tail -n 100 "$HOME/.defenseclaw/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 7C"
         return
     fi

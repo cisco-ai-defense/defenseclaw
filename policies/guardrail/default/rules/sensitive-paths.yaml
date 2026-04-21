@@ -1,0 +1,105 @@
+version: 1
+category: sensitive-path
+rules:
+  - id: PATH-SSH-DIR
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.ssh/'
+    title: "SSH directory access"
+    severity: HIGH
+    confidence: 0.95
+    tags: [credential, file-sensitive]
+  - id: PATH-SSH-KEY
+    pattern: '(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?\b'
+    title: "SSH key file path"
+    severity: HIGH
+    confidence: 0.90
+    tags: [credential, file-sensitive]
+  - id: PATH-AWS-CREDS
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.aws/credentials'
+    title: "AWS credentials file"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [credential, file-sensitive]
+  - id: PATH-AWS-CONFIG
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.aws/config'
+    title: "AWS config file"
+    severity: HIGH
+    confidence: 0.85
+    tags: [credential, file-sensitive]
+  - id: PATH-KUBE
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.kube/config'
+    title: "Kubernetes config"
+    severity: HIGH
+    confidence: 0.90
+    tags: [credential, file-sensitive]
+  - id: PATH-DOCKER
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.docker/config\.json'
+    title: "Docker config"
+    severity: HIGH
+    confidence: 0.90
+    tags: [credential, file-sensitive]
+  - id: PATH-GNUPG
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.gnupg/'
+    title: "GPG keyring access"
+    severity: HIGH
+    confidence: 0.95
+    tags: [credential, file-sensitive]
+  - id: PATH-NPMRC
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.npmrc'
+    title: "npm config (may contain tokens)"
+    severity: MEDIUM
+    confidence: 0.80
+    tags: [credential, file-sensitive]
+  - id: PATH-PYPIRC
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.pypirc'
+    title: "PyPI config (may contain tokens)"
+    severity: MEDIUM
+    confidence: 0.80
+    tags: [credential, file-sensitive]
+  - id: PATH-GIT-CREDS
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.git-credentials'
+    title: "Git credentials file"
+    severity: HIGH
+    confidence: 0.95
+    tags: [credential, file-sensitive]
+  - id: PATH-NETRC
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.netrc'
+    title: "netrc credentials file"
+    severity: HIGH
+    confidence: 0.90
+    tags: [credential, file-sensitive]
+  - id: PATH-ENV-FILE
+    pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,\]})]'
+    title: "Environment file"
+    severity: HIGH
+    confidence: 0.85
+    tags: [credential, file-sensitive]
+  - id: PATH-ETC-PASSWD
+    pattern: '/etc/passwd\b'
+    title: "/etc/passwd access"
+    severity: HIGH
+    confidence: 0.90
+    tags: [system-file]
+  - id: PATH-ETC-SHADOW
+    pattern: '/etc/shadow\b'
+    title: "/etc/shadow access"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [system-file, credential]
+  - id: PATH-ETC-SUDOERS
+    pattern: '/etc/sudoers\b'
+    title: "/etc/sudoers access"
+    severity: HIGH
+    confidence: 0.90
+    tags: [system-file, privilege]
+  - id: PATH-PROC-ENVIRON
+    pattern: '/proc/(?:\d+|self)/environ'
+    title: "/proc environ access"
+    severity: HIGH
+    confidence: 0.90
+    tags: [credential]
+  - id: PATH-HISTORY
+    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)'
+    title: "Shell history file"
+    severity: MEDIUM
+    confidence: 0.80
+    tags: [credential, file-sensitive]

@@ -39,28 +39,71 @@ type ClawConfig struct {
 	ConfigFile string   `mapstructure:"config_file" yaml:"config_file"`
 }
 
+// CurrentConfigVersion is bumped when the config schema changes in a way
+// that requires migration (new required fields, renamed keys, etc.).
+//
+// v4: replaces the legacy `splunk:` block with a generic `audit_sinks:`
+// list; decouples OTel from any vendor-specific auto-injection. There is
+// no in-process migration shim — the v3→v4 step requires operator action,
+// and Load() emits a hard error when a legacy `splunk:` block is found.
+const CurrentConfigVersion = 4
+
 type Config struct {
-	DataDir        string               `mapstructure:"data_dir"         yaml:"data_dir"`
-	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string               `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
-	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Splunk         SplunkConfig         `mapstructure:"splunk"           yaml:"splunk"`
-	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
-	Webhooks       []WebhookConfig      `mapstructure:"webhooks"         yaml:"webhooks"`
+	ConfigVersion       int                  `mapstructure:"config_version"        yaml:"config_version"`
+	DefaultLLMAPIKeyEnv string               `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
+	DefaultLLMModel     string               `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
+	DataDir             string               `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB             string               `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir       string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir           string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir           string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment         string               `mapstructure:"environment"      yaml:"environment"`
+	Claw                ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	InspectLLM          InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm"`
+	CiscoAIDefense      CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners            ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell           OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch               WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall            FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail           GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway             GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions        SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions          MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions       PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	OTel                OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
+	// It supports an arbitrary number of named sinks of any registered
+	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
+	// detected at Load() and emit a hard migration error.
+	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+}
+
+// ResolvedDefaultLLMAPIKey returns the shared LLM API key from the configured
+// env var. Components (judge, scanners) fall back to this when they have no
+// component-specific key configured.
+func (c *Config) ResolvedDefaultLLMAPIKey() string {
+	if c.DefaultLLMAPIKeyEnv != "" {
+		if v := os.Getenv(c.DefaultLLMAPIKeyEnv); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// EffectiveInspectLLM returns InspectLLM with the shared default key applied
+// as a fallback so callers don't need to wire the fallback themselves.
+func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
+	llm := c.InspectLLM
+	if llm.ResolvedAPIKey() == "" {
+		if sharedKey := c.ResolvedDefaultLLMAPIKey(); sharedKey != "" && llm.APIKey == "" {
+			llm.APIKey = sharedKey
+		}
+	}
+	if llm.Model == "" && c.DefaultLLMModel != "" {
+		llm.Model = c.DefaultLLMModel
+	}
+	return llm
 }
 
 type OTelConfig struct {
@@ -123,30 +166,34 @@ type FirewallConfig struct {
 	AnchorName string `mapstructure:"anchor_name" yaml:"anchor_name"`
 }
 
-type SplunkConfig struct {
-	HECEndpoint   string `mapstructure:"hec_endpoint"    yaml:"hec_endpoint"`
-	HECToken      string `mapstructure:"hec_token"       yaml:"hec_token"`
-	HECTokenEnv   string `mapstructure:"hec_token_env"   yaml:"hec_token_env"`
-	Index         string `mapstructure:"index"            yaml:"index"`
-	Source        string `mapstructure:"source"           yaml:"source"`
-	SourceType    string `mapstructure:"sourcetype"       yaml:"sourcetype"`
-	VerifyTLS     bool   `mapstructure:"verify_tls"       yaml:"verify_tls"`
-	Enabled       bool   `mapstructure:"enabled"          yaml:"enabled"`
-	BatchSize     int    `mapstructure:"batch_size"       yaml:"batch_size"`
-	FlushInterval int    `mapstructure:"flush_interval_s" yaml:"flush_interval_s"`
-}
-
-// ResolvedHECToken returns the HEC token from the env var (if set) or the direct value.
-func (c *SplunkConfig) ResolvedHECToken() string {
-	if c.HECTokenEnv != "" {
-		if v := os.Getenv(c.HECTokenEnv); v != "" {
-			return v
-		}
-	}
-	return c.HECToken
-}
-
+// WebhookConfig is one entry in the top-level ``webhooks[]`` list. These
+// are notifier webhooks (chat/incident), NOT audit sinks — audit
+// forwarding lives in ``audit_sinks[]``. See docs/OBSERVABILITY.md §7.
+//
+// CooldownSeconds is a tri-state on purpose (see webhook.go
+// ``webhookDefaultCooldown = 300s``):
+//
+//   - nil (YAML key absent / null): "use the dispatcher default"
+//     (``webhookDefaultCooldown``, currently 300s). This is what
+//     ``setup webhook add`` writes when the operator omits --cooldown.
+//   - *v == 0: explicit "dispatch every event" (debounce disabled).
+//     Stored so round-tripping the YAML doesn't silently re-introduce
+//     the 300s default.
+//   - *v > 0: minimum seconds between dispatches per
+//     (webhook, event_category) pair. Enforced by the gateway
+//     WebhookDispatcher.
+//
+// The Python writer (cli/defenseclaw/webhooks/writer.py) preserves the
+// same nil-vs-zero distinction end-to-end.
+//
+// Name is the CLI-visible identifier (``defenseclaw setup webhook
+// enable <name>`` etc.). The runtime dispatcher itself identifies
+// webhooks by URL, but Name is round-tripped through Load/Save so
+// saving the config via Config.Save() or the TUI doesn't silently
+// strip the operator's chosen name. ``omitempty`` keeps legacy files
+// that never set ``name:`` identical after load-save.
 type WebhookConfig struct {
+	Name            string   `mapstructure:"name"             yaml:"name,omitempty"`
 	URL             string   `mapstructure:"url"              yaml:"url"`
 	Type            string   `mapstructure:"type"             yaml:"type"`
 	SecretEnv       string   `mapstructure:"secret_env"       yaml:"secret_env"`
@@ -342,7 +389,51 @@ type GuardrailConfig struct {
 	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
 	APIBase           string      `mapstructure:"api_base"             yaml:"api_base"`
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+
+	// Detection strategy: "regex_only" (default), "regex_judge", "judge_first".
+	// Per-direction overrides take precedence over the global setting.
+	DetectionStrategy           string `mapstructure:"detection_strategy"            yaml:"detection_strategy,omitempty"`
+	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
+	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
+	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
+	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+
+	// RetainJudgeBodies controls whether raw LLM-judge responses are
+	// persisted to the local SQLite audit store for later forensics.
+	// The default is ON (see viper.SetDefault in defaultsFor) so every
+	// operator gets judge-response history out of the box. The raw body
+	// only ever lands on the local disk; the sink-forwarded copy (Splunk,
+	// OTLP) is redacted by emitJudge before it leaves the process.
+	//
+	// Operators who prefer not to store judge bodies can opt out via
+	// `guardrail.retain_judge_bodies: false` in config.yaml or the
+	// DEFENSECLAW_PERSIST_JUDGE=0 environment override. Redaction is
+	// the safety mechanism for downstream sinks; retention is a
+	// local-only decision.
+	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
+}
+
+// EffectiveStrategy returns the detection strategy for the given direction,
+// falling back to the global DetectionStrategy (default: "regex_only").
+func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
+	var override string
+	switch direction {
+	case "prompt":
+		override = g.DetectionStrategyPrompt
+	case "completion":
+		override = g.DetectionStrategyCompletion
+	case "tool_call":
+		override = g.DetectionStrategyToolCall
+	}
+	if override != "" {
+		return override
+	}
+	if g.DetectionStrategy != "" {
+		return g.DetectionStrategy
+	}
+	return "regex_judge"
 }
 
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
@@ -358,14 +449,28 @@ type JudgeConfig struct {
 	APIKeyEnv     string  `mapstructure:"api_key_env"     yaml:"api_key_env"`
 	APIBase       string  `mapstructure:"api_base"        yaml:"api_base"`
 	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
+
+	Fallbacks           []string `mapstructure:"fallbacks"            yaml:"fallbacks,omitempty"`
+	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
 }
 
 // ResolvedJudgeAPIKey returns the judge API key from the env var.
 func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
 	if c.APIKeyEnv != "" {
-		return os.Getenv(c.APIKeyEnv)
+		if v := os.Getenv(c.APIKeyEnv); v != "" {
+			return v
+		}
 	}
 	return ""
+}
+
+// ResolvedJudgeAPIKeyWithFallback returns the judge key, falling back to the
+// shared default LLM key when none is configured.
+func (c *JudgeConfig) ResolvedJudgeAPIKeyWithFallback(sharedKey string) string {
+	if k := c.ResolvedJudgeAPIKey(); k != "" {
+		return k
+	}
+	return sharedKey
 }
 
 // EffectiveHost returns the hostname clients (e.g. OpenClaw) use to reach the
@@ -513,6 +618,14 @@ type PluginActionsConfig struct {
 }
 
 func Load() (*Config, error) {
+	// viper holds a process-global keystore. Without resetting it, a
+	// previous Load() (e.g. from another binary path or test case)
+	// leaves stale keys behind — including a legacy `splunk.*` block
+	// that detectLegacySplunk() would then flag forever. Reset gives
+	// us a clean slate per Load(); setDefaults() re-installs defaults
+	// and BindEnv() bindings immediately after.
+	viper.Reset()
+
 	dataDir := DefaultDataPath()
 	configFile := filepath.Join(dataDir, DefaultConfigName)
 
@@ -538,10 +651,30 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// v3 → v4 hard migration: the `splunk:` block was removed in favor
+	// of audit_sinks. Detect any populated legacy keys and refuse to
+	// start so operators don't silently lose Splunk forwarding.
+	if legacy := detectLegacySplunk(); legacy != "" {
+		return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
+			"DefenseClaw v4 replaced it with `audit_sinks:`. "+
+			"Run `defenseclaw setup observability migrate-splunk --apply` "+
+			"or see docs/OBSERVABILITY.md for the new schema",
+			configFile, legacy)
+	}
+
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
+
+	migrateConfig(&cfg)
+
+	for i := range cfg.AuditSinks {
+		if err := cfg.AuditSinks[i].Validate(); err != nil {
+			return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
+		}
+	}
+
 	if err := cfg.SkillActions.Validate(); err != nil {
 		return nil, err
 	}
@@ -563,6 +696,81 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
+// migrateConfig applies forward migrations when config_version is behind
+// CurrentConfigVersion. Each migration step is idempotent.
+func migrateConfig(cfg *Config) {
+	if cfg.ConfigVersion >= CurrentConfigVersion {
+		return
+	}
+
+	oldVersion := cfg.ConfigVersion
+
+	// v0/v1 → v2: ensure detection_strategy defaults are populated
+	if cfg.ConfigVersion < 2 {
+		if cfg.Guardrail.DetectionStrategy == "" {
+			cfg.Guardrail.DetectionStrategy = "regex_only"
+		}
+		if cfg.Guardrail.Mode == "" {
+			cfg.Guardrail.Mode = "observe"
+		}
+		if cfg.Guardrail.RulePackDir == "" {
+			cfg.Guardrail.RulePackDir = filepath.Join(cfg.DataDir, "policies", "guardrail", "default")
+		}
+		if cfg.Guardrail.StreamBufferBytes == 0 {
+			cfg.Guardrail.StreamBufferBytes = 1024
+		}
+	}
+
+	// v2 → v3: upgrade detection_strategy to regex_judge when judge is
+	// enabled, add completion-specific strategy, wire shared LLM key
+	if cfg.ConfigVersion < 3 {
+		if cfg.Guardrail.Judge.Enabled && cfg.Guardrail.DetectionStrategy == "regex_only" {
+			cfg.Guardrail.DetectionStrategy = "regex_judge"
+		}
+		if cfg.Guardrail.DetectionStrategyCompletion == "" {
+			cfg.Guardrail.DetectionStrategyCompletion = "regex_only"
+		}
+	}
+
+	// v3 → v4: there is no in-process upgrade. The legacy `splunk:` block
+	// is detected in Load() before unmarshal and produces a hard error,
+	// so reaching this branch with v<4 simply means the file was created
+	// without a splunk block at all — safe to bump the version stamp.
+	if cfg.ConfigVersion < 4 {
+		// no-op: hard migration is enforced at file-load time.
+	}
+
+	cfg.ConfigVersion = CurrentConfigVersion
+	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
+}
+
+// detectLegacySplunk returns the first populated splunk.* key found in the
+// already-loaded viper state, or "" when none are present. Callers use a
+// non-empty result to fail fast with a migration error rather than
+// silently dropping the legacy block.
+//
+// We probe a small set of meaningful keys instead of `viper.IsSet("splunk")`
+// because viper treats default values as "set" and all `splunk.*` defaults
+// were removed; the only way a key shows up here now is if the operator's
+// config file (or env var) populated it.
+func detectLegacySplunk() string {
+	keys := []string{
+		"splunk.hec_endpoint",
+		"splunk.hec_token",
+		"splunk.hec_token_env",
+		"splunk.enabled",
+		"splunk.index",
+		"splunk.source",
+		"splunk.sourcetype",
+	}
+	for _, k := range keys {
+		if viper.IsSet(k) {
+			return k
+		}
+	}
+	return ""
+}
+
 // warnPlaintextSecrets logs a deprecation warning for each secret stored as
 // plain text in config.yaml instead of via an env-var indirection.
 func warnPlaintextSecrets(cfg *Config) {
@@ -580,8 +788,15 @@ func warnPlaintextSecrets(cfg *Config) {
 	if cfg.Scanners.SkillScanner.VirusTotalKey != "" {
 		warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
 	}
-	if cfg.Splunk.HECToken != "" {
-		warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+	for _, s := range cfg.AuditSinks {
+		if s.SplunkHEC != nil && s.SplunkHEC.Token != "" {
+			log.Printf("WARNING: audit_sinks[%q].splunk_hec.token is set inline — "+
+				"prefer token_env to keep secrets out of config.yaml", s.Name)
+		}
+		if s.HTTPJSONL != nil && s.HTTPJSONL.BearerToken != "" {
+			log.Printf("WARNING: audit_sinks[%q].http_jsonl.bearer_token is set inline — "+
+				"prefer bearer_env to keep secrets out of config.yaml", s.Name)
+		}
 	}
 }
 
@@ -651,16 +866,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
 
-	viper.SetDefault("splunk.hec_endpoint", "https://localhost:8088/services/collector/event")
-	viper.SetDefault("splunk.hec_token", "")
-	viper.SetDefault("splunk.hec_token_env", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
-	viper.SetDefault("splunk.index", "defenseclaw")
-	viper.SetDefault("splunk.source", "defenseclaw")
-	viper.SetDefault("splunk.sourcetype", "_json")
-	viper.SetDefault("splunk.verify_tls", false)
-	viper.SetDefault("splunk.enabled", false)
-	viper.SetDefault("splunk.batch_size", 50)
-	viper.SetDefault("splunk.flush_interval_s", 5)
+	viper.SetDefault("audit_sinks", []AuditSink{})
 
 	viper.SetDefault("skill_actions.critical.file", string(FileActionQuarantine))
 	viper.SetDefault("skill_actions.critical.runtime", string(RuntimeDisable))
@@ -717,6 +923,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
+	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)
@@ -724,6 +931,18 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.pii_completion", true)
 	viper.SetDefault("guardrail.judge.tool_injection", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
+	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
+	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
+	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	// Phase 3: retention defaults ON so every operator gets local
+	// judge-response forensics without explicit opt-in. The raw body
+	// is redacted by emitJudge before it leaves the process (Splunk /
+	// OTel see the masked payload); the un-redacted copy lives only
+	// in ~/.defenseclaw/audit.db, which is already covered by the
+	// same filesystem ACLs as the rest of the data directory. Operators
+	// with strict storage or privacy constraints can still opt out with
+	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
+	viper.SetDefault("guardrail.retain_judge_bodies", true)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
@@ -748,7 +967,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.debounce", 2)
 
 	viper.SetDefault("otel.enabled", false)
-	viper.SetDefault("otel.protocol", "grpc")
+	viper.SetDefault("otel.protocol", "")
 	viper.SetDefault("otel.endpoint", "")
 	viper.SetDefault("otel.tls.insecure", false)
 	viper.SetDefault("otel.tls.ca_cert", "")

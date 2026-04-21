@@ -14,8 +14,10 @@ dependencies = [
     "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
 ]
 
-[project.optional-dependencies]
-tui = ["textual>=0.50"]
+# P3-#20: the legacy Textual TUI (`defenseclaw alerts --tui`) was
+# retired in favour of the Go-based TUI launched via `defenseclaw tui`.
+# No Python-side TUI extra is shipped anymore; the alerts command now
+# renders a plain Rich table.
 
 [dependency-groups]
 dev = [
@@ -25,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-defenseclaw = "defenseclaw.main:cli"
+defenseclaw = "defenseclaw.main:main"
 
 [build-system]
 requires = ["setuptools==82.0.1"]
@@ -57,6 +59,15 @@ defenseclaw = [
     "_data/scripts/*.sh",
     "_data/policies/openshell/*.rego",
     "_data/policies/openshell/*.yaml",
+    "_data/policies/guardrail/default/*.yaml",
+    "_data/policies/guardrail/default/judge/*.yaml",
+    "_data/policies/guardrail/default/rules/*.yaml",
+    "_data/policies/guardrail/strict/*.yaml",
+    "_data/policies/guardrail/strict/judge/*.yaml",
+    "_data/policies/guardrail/strict/rules/*.yaml",
+    "_data/policies/guardrail/permissive/*.yaml",
+    "_data/policies/guardrail/permissive/judge/*.yaml",
+    "_data/policies/guardrail/permissive/rules/*.yaml",
 ]
 
 [tool.uv]
@@ -66,6 +77,7 @@ override-dependencies = [
     "rich>=13.7.1,<14.0.0",
     "cryptography>=46.0.7",   # CVE-2026-39892 fixed in 46.0.7
     "litellm==1.83.0",        # CVE-2026-35029, CVE-2026-35030
+    "python-multipart>=0.0.26", # CVE-2026-40347 fixed in 0.0.26
 ]
 
 [tool.ruff]

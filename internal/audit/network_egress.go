@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // truncateUTF8 truncates s to at most maxBytes without splitting a UTF-8 code point.
@@ -137,7 +139,9 @@ func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
 // row. For blocked calls it additionally:
 //   - writes a HIGH-severity entry to audit_events so the alert panel and
 //     /alerts endpoint surface it without a separate query;
-//   - forwards that alert to the Splunk HEC sink when configured;
+//   - forwards that alert to every configured audit sink;
+//   - mirrors that alert into the structured audit bridge so gateway.jsonl
+//     stays in sync with the SQLite/TUI alert surfaces;
 //   - emits an OTel alert counter.
 //
 // OTel audit-event counters are recorded for every call (allowed or blocked).
@@ -149,17 +153,23 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 		e.Timestamp = time.Now().UTC()
 	}
 
+	// Snapshot the collaborator graph once at entry so a concurrent
+	// SetOTelProvider / SetSinks during shutdown cannot tear the
+	// interface reads below (L1 finding: writes to interface fields
+	// are two-word stores and are not atomic on most architectures).
+	sinksMgr, otel, structured := l.snapshot()
+
 	row := e.toRow()
 	if err := l.store.InsertNetworkEgressEvent(row); err != nil {
-		if l.otel != nil {
-			l.otel.RecordAuditDBError(ctx, "insert_network_egress")
+		if otel != nil {
+			otel.RecordAuditDBError(ctx, "insert_network_egress")
 		}
 		return err
 	}
 
 	// Record OTel audit-event counter for every egress observation.
-	if l.otel != nil {
-		l.otel.RecordAuditEvent(ctx, "network-egress", e.effectiveSeverity())
+	if otel != nil {
+		otel.RecordAuditEvent(ctx, "network-egress", e.effectiveSeverity())
 	}
 
 	if !e.Blocked {
@@ -168,25 +178,31 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 
 	// Blocked call: raise an audit_events alert so the TUI and /alerts
 	// endpoint surface it without requiring a separate egress query.
-	alert := Event{
+	alert := sanitizeEvent(Event{
+		ID:        uuid.New().String(),
 		Timestamp: e.Timestamp,
 		Action:    "network-egress-blocked",
 		Target:    e.Hostname,
+		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",
 			truncateStr(e.URL, 200), e.HTTPMethod, e.DecisionCode, e.PolicyOutcome),
 		Severity: "HIGH",
-	}
+		RunID:    currentRunID(),
+	})
 	if err := l.store.LogEvent(alert); err != nil {
 		// Non-fatal: the primary egress row is already persisted.
 		fmt.Fprintf(os.Stderr, "[audit] network egress: alert event write failed: %v\n", err)
+	} else {
+		// Mirror the same sink + structured-emitter contract used by the
+		// main Logger paths so blocked egress alerts land in downstream
+		// fan-out with stable IDs/correlation metadata.
+		l.forwardToSinksSnapshot(sinksMgr, alert)
+		l.emitStructuredSnapshot(structured, alert)
 	}
 
-	// Forward to Splunk HEC when configured.
-	l.forwardToSplunk(alert)
-
 	// Emit OTel alert counter.
-	if l.otel != nil {
-		l.otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy")
+	if otel != nil {
+		otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy")
 	}
 
 	return nil

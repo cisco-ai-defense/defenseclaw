@@ -14,7 +14,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw alerts — View and manage security alerts."""
+"""defenseclaw alerts — View and manage security alerts.
+
+P3-#20 collapsed the legacy Textual TUI here in favour of the Go-based
+panel shipped with ``defenseclaw tui`` (internal/tui/alerts.go). This
+module now renders a plain, pipe-friendly table by default and supports
+``--show N`` for scripted deep dives. The ``--tui`` flag is retained as
+a no-op for backward compatibility with muscle memory and older docs;
+it prints a deprecation notice and falls through to the table so
+existing aliases/scripts keep working.
+"""
 
 from __future__ import annotations
 
@@ -118,213 +127,61 @@ def _kv(details: str) -> dict[str, str]:
     return dict(tok.split("=", 1) for tok in (details or "").split() if "=" in tok)
 
 
-# ---------------------------------------------------------------------------
-# TUI
-# ---------------------------------------------------------------------------
+def _render_table(alert_list: list, store) -> None:
+    """Plain Rich table — the single renderer since the Textual TUI
+    was retired in P3-#20. Kept in a helper so the deprecated
+    ``--tui`` flag can fall through here without duplicating the
+    column/width logic."""
+    from rich.console import Console
+    from rich.markup import escape
+    from rich.table import Table
 
-_SEV_COLOR = {
-    "CRITICAL": "bold red",
-    "HIGH":     "red",
-    "MEDIUM":   "yellow",
-    "LOW":      "cyan",
-    "INFO":     "dim",
-    "ERROR":    "red",
-}
+    console = Console()
+    term_width = console.size.width
+    w_details = max(11, term_width - _OVERHEAD - _W_FIXED)
 
-_FILTER_CYCLE = ["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    table = Table(
+        title=f"Security Alerts (last {len(alert_list)})",
+        caption=(
+            "Run [bold]defenseclaw alerts --show #[/bold] for full details, "
+            "or [bold]defenseclaw tui[/bold] for the interactive Alerts panel."
+        ),
+        show_lines=False,
+    )
+    table.add_column("#",         no_wrap=True)
+    table.add_column("Severity",  style="bold", no_wrap=True)
+    table.add_column("Time",      no_wrap=True)
+    table.add_column("Action",    no_wrap=True)
+    table.add_column("Target",    no_wrap=True)
+    table.add_column("Details [--show #]", no_wrap=True)
 
+    sev_styles = {
+        "CRITICAL": "bold red",
+        "HIGH":     "red",
+        "MEDIUM":   "yellow",
+        "LOW":      "cyan",
+    }
 
-def _build_tui_app(store, limit: int):
-    """Construct and return the Textual AlertsApp bound to *store*."""
-    from textual.app import App, ComposeResult
-    from textual.binding import Binding
-    from textual.containers import ScrollableContainer
-    from textual.widget import Widget
-    from textual.widgets import Footer, Header, Static
+    for idx, e in enumerate(alert_list, 1):
+        sev_style = sev_styles.get(e.severity, "")
+        sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
+        ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
+        action = _trunc(e.action or "", _W_ACTION)
+        target = _trunc_path(e.target or "", _W_TARGET)
+        kv_map = _kv(e.details or "")
+        scanner_name = kv_map.get("scanner", "")
+        if e.action == "scan" and scanner_name and e.target:
+            findings = store.get_findings_for_target(e.target, scanner_name)
+            raw_details = _findings_json(findings, w_details) if findings else _humanize_details(e.details or "")
+        else:
+            raw_details = _humanize_details(e.details or "")
+        details = _trunc(raw_details, w_details)
+        table.add_row(
+            escape(str(idx)), sev_cell, ts,
+            escape(action), escape(target), escape(details),
+        )
 
-    # ------------------------------------------------------------------ #
-    # AlertRow — focusable accordion row                                   #
-    # ------------------------------------------------------------------ #
-    class AlertRow(Widget):
-        """Single alert row.  Collapsed = 1 line header.  Focused = full detail."""
-
-        can_focus = True
-
-        DEFAULT_CSS = """
-        AlertRow {
-            height: auto;
-            border-left: tall transparent;
-            padding: 0 1;
-        }
-        AlertRow:focus {
-            border-left: tall $accent;
-            background: $boost;
-        }
-        AlertRow .detail {
-            display: none;
-            padding: 0 2;
-            color: $text;
-        }
-        AlertRow:focus .detail {
-            display: block;
-        }
-        """
-
-        def __init__(self, event, idx: int) -> None:
-            super().__init__(classes="alert-row")
-            self.event = event
-            self.idx = idx
-            self._detail_cache: str | None = None
-
-        def _header(self) -> str:
-            e = self.event
-            sev = e.severity or "INFO"
-            color = _SEV_COLOR.get(sev, "")
-            action = (e.action or "")[:17]
-            target = _trunc_path(e.target or "", 40)
-            ts = e.timestamp.strftime("%H:%M") if e.timestamp else ""
-            return (
-                f"[{color}]{sev:<8}[/{color}]  "
-                f"{action:<17}  {target:<40}  [dim]{ts}[/dim]"
-            )
-
-        def _detail(self) -> str:
-            if self._detail_cache is not None:
-                return self._detail_cache
-            e = self.event
-            ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
-            lines = [
-                "",
-                f"  [dim]Time   :[/dim]  {ts}",
-                f"  [dim]Target :[/dim]  {e.target or '—'}",
-            ]
-            human = _humanize_details(e.details or "")
-            if human:
-                lines.append(f"  [dim]Details:[/dim]  {human}")
-            kv_map = _kv(e.details or "")
-            scanner_name = kv_map.get("scanner", "")
-            if e.action == "scan" and scanner_name and e.target:
-                try:
-                    findings = store.get_findings_for_target(e.target, scanner_name)
-                except Exception:
-                    findings = []
-                if findings:
-                    lines += ["", f"  [bold]Findings ({len(findings)}):[/bold]"]
-                    for f in findings:
-                        fc = _SEV_COLOR.get(f["severity"], "")
-                        loc = f"  [dim]{f['location']}[/dim]" if f.get("location") else ""
-                        lines.append(f"    [{fc}][{f['severity']}][/{fc}] {f['title']}{loc}")
-                else:
-                    lines += ["", "  [green]✓ clean — no findings[/green]"]
-            lines.append("")
-            self._detail_cache = "\n".join(lines)
-            return self._detail_cache
-
-        def compose(self) -> ComposeResult:
-            yield Static(self._header(), markup=True, classes="header")
-            yield Static(self._detail(), markup=True, classes="detail")
-
-        def on_focus(self) -> None:
-            self.scroll_visible(animate=False)
-
-        def on_key(self, event) -> None:
-            if event.key in ("j", "down"):
-                event.stop()
-                self.screen.focus_next("AlertRow")
-            elif event.key in ("k", "up"):
-                event.stop()
-                self.screen.focus_previous("AlertRow")
-
-    # ------------------------------------------------------------------ #
-    # AlertsApp                                                            #
-    # ------------------------------------------------------------------ #
-    class AlertsApp(App):
-        CSS = """
-        Screen { layout: vertical; }
-
-        #filter-bar {
-            height: 1;
-            background: $surface;
-            padding: 0 1;
-        }
-
-        #scroll {
-            height: 1fr;
-            border: solid $primary;
-            padding: 0;
-        }
-
-        AlertRow {
-            margin-bottom: 1;
-        }
-        """
-
-        BINDINGS = [
-            Binding("q,escape", "quit", "Quit"),
-            Binding("r", "refresh", "Refresh"),
-            Binding("f", "cycle_filter", "Filter severity"),
-        ]
-
-        def __init__(self, events: list, **kwargs):
-            super().__init__(**kwargs)
-            self._all_events = events
-            self._filter_idx = 0
-
-        def compose(self) -> ComposeResult:
-            yield Header(show_clock=True)
-            yield Static(self._filter_label(), id="filter-bar", markup=True)
-            with ScrollableContainer(id="scroll"):
-                yield from self._make_rows()
-            yield Footer()
-
-        def on_mount(self) -> None:
-            self.title = f"DefenseClaw — Security Alerts (last {limit})"
-            rows = list(self.query("AlertRow"))
-            if rows:
-                rows[0].focus()
-
-        def _filter_label(self) -> str:
-            sev = _FILTER_CYCLE[self._filter_idx]
-            options = "  ".join(
-                f"[bold underline]{f}[/]" if f == sev else f"[dim]{f}[/dim]"
-                for f in _FILTER_CYCLE
-            )
-            return f" Filter: {options}   [dim]j/k ↑↓ navigate · f filter · r refresh · q quit[/dim]"
-
-        def _filtered_events(self) -> list:
-            sev = _FILTER_CYCLE[self._filter_idx]
-            return self._all_events if sev == "ALL" else [
-                e for e in self._all_events if e.severity == sev
-            ]
-
-        def _make_rows(self):
-            for idx, e in enumerate(self._filtered_events(), 1):
-                yield AlertRow(e, idx)
-
-        def action_refresh(self) -> None:
-            try:
-                self._all_events = store.list_alerts(limit)
-            except Exception:
-                pass
-            self._rebuild()
-            self.query_one("#filter-bar").update(self._filter_label())
-            self.notify("Alerts refreshed", timeout=2)
-
-        def action_cycle_filter(self) -> None:
-            self._filter_idx = (self._filter_idx + 1) % len(_FILTER_CYCLE)
-            self._rebuild()
-            self.query_one("#filter-bar").update(self._filter_label())
-
-        def _rebuild(self) -> None:
-            scroll = self.query_one("#scroll")
-            scroll.remove_children()
-            for row in self._make_rows():
-                scroll.mount(row)
-            rows = list(self.query("AlertRow"))
-            if rows:
-                rows[0].focus()
-
-    return AlertsApp
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------
@@ -335,14 +192,21 @@ def _build_tui_app(store, limit: int):
 @click.option("-n", "--limit", default=25, help="Number of alerts to load")
 @click.option("--show", "show_idx", default=None, type=int,
               help="Print full details for alert # and exit (non-interactive)")
-@click.option("--tui/--no-tui", default=True,
-              help="Launch interactive TUI (default). Use --no-tui for plain table.")
+@click.option(
+    "--tui/--no-tui",
+    default=False,
+    help=(
+        "Deprecated: the interactive TUI moved to `defenseclaw tui` in P3-#20. "
+        "This flag now prints a deprecation notice and falls back to the table."
+    ),
+)
 @pass_ctx
 def alerts(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None:
-    """View security alerts (interactive TUI by default).
+    """View security alerts as a table.
 
-    Navigate with ↑↓ / j k, filter severity with f, refresh with r, quit with q.
-    Use --no-tui for the plain table, --show N for a single alert detail.
+    The interactive alerts view now lives in the Go-based TUI — launch
+    it with ``defenseclaw tui`` and press ``2`` to open the Alerts
+    panel. Use ``--show N`` for a scripted single-alert dump.
     """
     if not app.store:
         click.echo("No audit store available. Run 'defenseclaw init' first.")
@@ -386,57 +250,14 @@ def alerts(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None
                     click.echo(f" {f['title']}{loc}")
         return
 
-    # ---- TUI (default) ----
+    # --tui is a no-op retained for backward-compat; emit a single-line
+    # deprecation notice on stderr so wrapper scripts still work but
+    # operators learn where the TUI moved.
     if tui:
-        alerts_app = _build_tui_app(app.store, limit)
-        alerts_app(alert_list).run()
-        return
-
-    # ---- plain table (--no-tui) ----
-    from rich.console import Console
-    from rich.markup import escape
-    from rich.table import Table
-
-    console = Console()
-    term_width = console.size.width
-    w_details = max(11, term_width - _OVERHEAD - _W_FIXED)
-
-    table = Table(
-        title=f"Security Alerts (last {limit})",
-        caption="Run [bold]defenseclaw alerts --show #[/bold] for full details on any row.",
-        show_lines=False,
-    )
-    table.add_column("#",         no_wrap=True)
-    table.add_column("Severity",  style="bold", no_wrap=True)
-    table.add_column("Time",      no_wrap=True)
-    table.add_column("Action",    no_wrap=True)
-    table.add_column("Target",    no_wrap=True)
-    table.add_column("Details [--show #]", no_wrap=True)
-
-    sev_styles = {
-        "CRITICAL": "bold red",
-        "HIGH":     "red",
-        "MEDIUM":   "yellow",
-        "LOW":      "cyan",
-    }
-
-    for idx, e in enumerate(alert_list, 1):
-        sev_style = sev_styles.get(e.severity, "")
-        sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
-        ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
-        action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(e.target or "", _W_TARGET)
-        kv_map = _kv(e.details or "")
-        scanner_name = kv_map.get("scanner", "")
-        if e.action == "scan" and scanner_name and e.target:
-            findings = app.store.get_findings_for_target(e.target, scanner_name)
-            raw_details = _findings_json(findings, w_details) if findings else _humanize_details(e.details or "")
-        else:
-            raw_details = _humanize_details(e.details or "")
-        details = _trunc(raw_details, w_details)
-        table.add_row(
-            escape(str(idx)), sev_cell, ts,
-            escape(action), escape(target), escape(details),
+        click.echo(
+            "note: `defenseclaw alerts --tui` has been retired. "
+            "Launch `defenseclaw tui` and press 2 for the Alerts panel.",
+            err=True,
         )
 
-    console.print(table)
+    _render_table(alert_list, app.store)

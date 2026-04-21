@@ -85,8 +85,8 @@ def status(app: AppContext) -> None:
         except Exception:
             pass
 
-    # Splunk integration
-    _print_splunk_integration_status(cfg)
+    # Observability destinations (OTel exporter + audit sinks)
+    _print_observability_status(cfg)
 
     # Sidecar status
     click.echo()
@@ -99,37 +99,57 @@ def status(app: AppContext) -> None:
         port=cfg.gateway.api_port,
         token=cfg.gateway.resolved_token(),
     )
+    from defenseclaw.commands import hint
     if client.is_running():
         click.secho("  Sidecar:      running", fg="green")
+        hint(
+            "Dashboard:     defenseclaw alerts",
+            "Health check:  defenseclaw doctor",
+        )
     else:
         click.echo("  Sidecar:      not running")
+        hint("Start sidecar:  defenseclaw-gateway start")
 
 
-def _print_splunk_integration_status(cfg) -> None:
-    otel = cfg.otel
-    sc = cfg.splunk
-    has_splunk = otel.enabled or sc.enabled
+def _print_observability_status(cfg) -> None:
+    """Enumerate every observability destination — gateway OTel exporter
+    plus every ``audit_sinks`` entry — in a single section.
 
-    if not has_splunk:
-        click.echo()
-        click.echo("  Splunk:       not configured")
-        return
+    The old ``_print_splunk_integration_status`` was hard-coded to the
+    legacy ``cfg.splunk`` hydration and the single ``otel:`` block and
+    so couldn't see Datadog, Honeycomb, New Relic, or extra Splunk HEC
+    sinks configured via ``setup observability``. This walks the YAML
+    via the observability writer so whatever ``setup observability add``
+    writes shows up here for free.
+    """
+    # Lazy import so ``status`` stays fast on systems that never
+    # configured observability (avoids the YAML read when possible).
+    from defenseclaw.observability import list_destinations
+    from defenseclaw.observability.presets import PRESETS
+
+    try:
+        destinations = list_destinations(cfg.data_dir)
+    except Exception:
+        destinations = []
 
     click.echo()
-    click.echo("  Splunk:")
+    click.echo("  Observability:")
 
-    if otel.enabled:
-        click.echo("    O11y (OTLP):    enabled")
-        if otel.traces.enabled and otel.traces.endpoint:
-            click.echo(f"      Traces:       {otel.traces.endpoint}{otel.traces.url_path}")
-        if otel.metrics.enabled and otel.metrics.endpoint:
-            click.echo(f"      Metrics:      {otel.metrics.endpoint}{otel.metrics.url_path}")
-        if otel.logs.enabled and otel.logs.endpoint:
-            click.echo(f"      Logs:         {otel.logs.endpoint}{otel.logs.url_path}")
-    else:
-        click.echo("    O11y (OTLP):    disabled")
+    if not destinations:
+        click.echo("    (none configured — run `defenseclaw setup observability add <preset>`)")
+        return
 
-    if sc.enabled:
-        click.echo(f"    HEC (logs):     enabled → {sc.hec_endpoint}")
-    else:
-        click.echo("    HEC (logs):     disabled")
+    for d in destinations:
+        label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
+        state = click.style("enabled", fg="green") if d.enabled else click.style("disabled", fg="bright_black")
+        target_tag = "otel" if d.target == "otel" else "sink"
+        click.echo(f"    {d.name:<26s} [{target_tag}] {state}  — {label}")
+
+        if d.target == "otel" and d.enabled:
+            enabled_signals = [s for s, on in d.signals.items() if on]
+            if enabled_signals:
+                click.echo(f"      signals: {', '.join(sorted(enabled_signals))}")
+            if d.endpoint:
+                click.echo(f"      endpoint: {d.endpoint}")
+        elif d.enabled and d.endpoint:
+            click.echo(f"      endpoint: {d.endpoint}")

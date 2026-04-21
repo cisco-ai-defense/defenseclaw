@@ -40,10 +40,11 @@ from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
+from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.context import AppContext
 
-SKIP_LOAD_COMMANDS = {"init", "sandbox"}
+SKIP_LOAD_COMMANDS = {"init", "sandbox", "tui"}
 
 
 def _is_help_invocation(ctx: click.Context) -> bool:
@@ -118,6 +119,7 @@ cli.add_command(status)
 cli.add_command(alerts)
 cli.add_command(codeguard)
 cli.add_command(tool)
+cli.add_command(tui)
 cli.add_command(doctor)
 cli.add_command(sandbox)
 cli.add_command(upgrade)
@@ -133,5 +135,33 @@ def _ensure_codeguard_skill(cfg) -> None:
         pass
 
 
+def _try_launch_tui() -> bool:
+    """When invoked with no subcommand on a TTY, hand off to the Go TUI."""
+    import os
+    import shutil
+
+    if not sys.stdin.isatty():
+        return False
+
+    argv = sys.argv[1:]
+    if argv and not all(a.startswith("-") for a in argv):
+        return False
+    if any(a in {"-h", "--help", "--version"} for a in argv):
+        return False
+
+    gateway = shutil.which("defenseclaw-gateway")
+    if gateway is None:
+        return False
+
+    os.execvp(gateway, [gateway, "tui"])
+    return True  # unreachable
+
+
+def main() -> None:
+    """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    if not _try_launch_tui():
+        cli()
+
+
 if __name__ == "__main__":
-    cli()
+    main()

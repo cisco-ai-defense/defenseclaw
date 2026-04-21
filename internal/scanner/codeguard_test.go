@@ -251,3 +251,72 @@ func assertFindingID(t *testing.T, findings []Finding, wantID string) {
 	}
 	t.Errorf("expected finding %s, got %v", wantID, ids)
 }
+
+func TestCodeGuardCustomRules(t *testing.T) {
+	dir := t.TempDir()
+
+	ruleContent := `version: 1
+rules:
+  - id: CUSTOM-001
+    severity: high
+    title: Custom test rule
+    pattern: 'TODO_FIXME_HACK'
+    remediation: Fix the hack
+`
+	if err := os.WriteFile(filepath.Join(dir, "custom.yaml"), []byte(ruleContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := NewCodeGuardScanner(dir)
+	if len(cg.customRules) != 1 {
+		t.Fatalf("expected 1 custom rule, got %d", len(cg.customRules))
+	}
+	if cg.customRules[0].id != "CUSTOM-001" {
+		t.Errorf("custom rule id = %q, want CUSTOM-001", cg.customRules[0].id)
+	}
+
+	findings := cg.ScanContent("test.py", "# TODO_FIXME_HACK: fix this\nprint('hello')\n")
+	found := false
+	for _, f := range findings {
+		if f.ID == "CUSTOM-001" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected CUSTOM-001 finding from custom rule")
+	}
+}
+
+func TestCodeGuardCustomRules_InvalidRegex(t *testing.T) {
+	dir := t.TempDir()
+
+	ruleContent := `version: 1
+rules:
+  - id: BAD-001
+    severity: high
+    title: Bad regex rule
+    pattern: '[invalid'
+    remediation: Fix
+`
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(ruleContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := NewCodeGuardScanner(dir)
+	if len(cg.customRules) != 0 {
+		t.Errorf("expected 0 custom rules for invalid regex, got %d", len(cg.customRules))
+	}
+}
+
+func TestCodeGuardCustomRules_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	cg := NewCodeGuardScanner(dir)
+	if len(cg.customRules) != 0 {
+		t.Errorf("expected 0 custom rules for empty dir, got %d", len(cg.customRules))
+	}
+	all := cg.allRules()
+	if len(all) != len(builtinRules) {
+		t.Errorf("allRules should equal builtinRules when no custom rules, got %d vs %d", len(all), len(builtinRules))
+	}
+}

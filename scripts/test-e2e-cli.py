@@ -42,7 +42,14 @@ from pathlib import Path
 
 API_BASE = "http://127.0.0.1:18970"
 CSRF_HEADER = "X-DefenseClaw-Client"
+# gateway.log keeps the pretty human-readable sidecar output (stderr
+# mirror). gateway.jsonl is the new structured stream written by
+# internal/gatewaylog.Writer and is the source of truth for
+# dashboards + the TUI Verdicts tab. E2E probes should consult both
+# when asserting behavior — legacy tests that only read gateway.log
+# still work, but new assertions should prefer gateway.jsonl.
 GATEWAY_LOG = os.path.expanduser("~/.defenseclaw/gateway.log")
+GATEWAY_JSONL = os.path.expanduser("~/.defenseclaw/gateway.jsonl")
 SPLUNK_BRIDGE_DIR = os.path.expanduser("~/.defenseclaw/splunk-bridge")
 
 
@@ -168,6 +175,65 @@ class TestRunner:
                 return sum(1 for _ in f)
         except Exception:
             return 0
+
+    def jsonl_event_contains(
+        self,
+        name: str,
+        event_type: str,
+        field_path: str,
+        expected: str,
+    ) -> bool:
+        """Scan gateway.jsonl for at least one event whose event_type
+        matches and whose `<payload-key>.<field>` equals (or contains)
+        `expected`. field_path is a dotted path like "verdict.action"
+        or "lifecycle.transition" — matches the JSON shape emitted by
+        internal/gatewaylog."""
+        try:
+            with open(GATEWAY_JSONL) as f:
+                raw_lines = f.readlines()
+        except FileNotFoundError:
+            self._record(name, False, "", f"{GATEWAY_JSONL} not found")
+            return False
+        except OSError as e:
+            self._record(name, False, "", f"read gateway.jsonl: {e}")
+            return False
+
+        parts = field_path.split(".")
+        if not parts:
+            self._record(name, False, "", "field_path must not be empty")
+            return False
+
+        import json as _json
+
+        total = 0
+        for raw in raw_lines:
+            raw = raw.strip()
+            if not raw or not raw.startswith("{"):
+                continue
+            total += 1
+            try:
+                obj = _json.loads(raw)
+            except _json.JSONDecodeError:
+                continue
+            if obj.get("event_type") != event_type:
+                continue
+            cursor = obj
+            ok = True
+            for part in parts:
+                if not isinstance(cursor, dict) or part not in cursor:
+                    ok = False
+                    break
+                cursor = cursor[part]
+            if ok and expected.lower() in str(cursor).lower():
+                self._record(name, True, f"matched {event_type}.{field_path}={cursor!r}")
+                return True
+
+        self._record(
+            name, False, "",
+            f"no {event_type} event with {field_path} containing {expected!r} "
+            f"(searched {total} events in {GATEWAY_JSONL})",
+        )
+        return False
 
     def _record(self, name: str, passed: bool, output: str, error: str = ""):
         tag = "\033[92mPASS\033[0m" if passed else "\033[91mFAIL\033[0m"

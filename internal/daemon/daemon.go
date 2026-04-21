@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
@@ -57,6 +60,17 @@ func New(dataDir string) *Daemon {
 
 func (d *Daemon) PIDFile() string { return d.pidFile }
 func (d *Daemon) LogFile() string { return d.logFile }
+
+// newLogWriter returns a size-rotated log writer. Old files are compressed
+// and kept in the same directory. At most 3 backups of 50 MB each.
+func (d *Daemon) newLogWriter() io.WriteCloser {
+	return &lumberjack.Logger{
+		Filename:   d.logFile,
+		MaxSize:    50, // megabytes
+		MaxBackups: 3,
+		Compress:   true,
+	}
+}
 
 type pidInfo struct {
 	PID        int    `json:"pid"`
@@ -141,10 +155,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 		return 0, fmt.Errorf("daemon: create data dir: %w", err)
 	}
 
-	logWriter, err := os.OpenFile(d.logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return 0, fmt.Errorf("daemon: open log file: %w", err)
-	}
+	logWriter := d.newLogWriter()
 
 	executable, err := os.Executable()
 	if err != nil {

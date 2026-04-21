@@ -28,7 +28,11 @@ import subprocess
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.paths import bundled_rego_dir, bundled_splunk_bridge_dir
+from defenseclaw.paths import (
+    bundled_guardrail_profiles_dir,
+    bundled_rego_dir,
+    bundled_splunk_bridge_dir,
+)
 
 
 @click.command("init")
@@ -58,6 +62,14 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     click.echo()
     click.echo("  ── Environment ───────────────────────────────────────")
     click.echo()
+
+    from defenseclaw import __version__
+    click.echo(f"  DefenseClaw:   v{__version__}")
+    gw_version = _get_gateway_version()
+    if gw_version:
+        click.echo(f"  Gateway:       {gw_version}")
+    else:
+        click.echo("  Gateway:       not found")
 
     env = detect_environment()
     click.echo(f"  Platform:      {env}")
@@ -92,6 +104,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     click.echo("  Directories:   created")
 
     _seed_rego_policies(cfg.policy_dir)
+    _seed_guardrail_profiles(cfg.policy_dir)
     _seed_splunk_bridge(cfg.data_dir)
 
     cfg.save()
@@ -164,11 +177,17 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
                            policy="default", no_auto_pair=False, disable=False,
                            non_interactive=True)
 
+    sidecar_started = False
     if not sandbox:
         click.echo()
         click.echo("  ── Sidecar ───────────────────────────────────────────")
         click.echo()
         _start_gateway(cfg, logger)
+        sidecar_started = True
+
+        if guardrail_ok and sidecar_started:
+            click.echo("  Restarting sidecar to apply guardrail config...")
+            _restart_gateway_quiet()
 
     click.echo()
     click.echo("  ──────────────────────────────────────────────────────")
@@ -176,15 +195,16 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     click.echo("  DefenseClaw initialized.")
     click.echo()
     click.echo("  Next steps:")
-    if sandbox:
+    if sandbox and not guardrail_ok:
         click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
-    elif guardrail_ok:
-        click.echo("    defenseclaw setup guardrail   Customize guardrail settings")
-    else:
+    elif not guardrail_ok:
         click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
+    if not sidecar_started and not sandbox:
+        click.echo("    defenseclaw-gateway start     Start the sidecar")
     click.echo("    defenseclaw setup            Customize scanners and policies")
-    click.echo("    defenseclaw skill            Manage and scan OpenClaw skills")
-    click.echo("    defenseclaw mcp              Manage and scan MCP servers")
+    click.echo("    defenseclaw doctor           Verify connectivity and credentials")
+    click.echo("    defenseclaw skill scan all   Scan installed OpenClaw skills")
+    click.echo("    defenseclaw mcp scan --all   Scan configured MCP servers")
 
     store.close()
 
@@ -205,6 +225,36 @@ def _seed_rego_policies(policy_dir: str) -> None:
                 shutil.copy2(str(src), dst)
 
     click.echo(f"  Rego policies: {dest_rego}")
+
+
+def _seed_guardrail_profiles(policy_dir: str) -> None:
+    """Copy bundled guardrail rule-pack profiles (default/strict/permissive) into
+    the user's policy_dir if not already present. Operators can then edit the
+    YAML in place and `defenseclaw policy reload` will pick up the changes.
+    """
+    bundled = bundled_guardrail_profiles_dir()
+    if bundled is None:
+        return
+
+    dest_root = os.path.join(policy_dir, "guardrail")
+    os.makedirs(dest_root, exist_ok=True)
+
+    seeded: list[str] = []
+    preserved: list[str] = []
+    for profile_dir in bundled.iterdir():
+        if not profile_dir.is_dir() or profile_dir.name.startswith("."):
+            continue
+        dst = os.path.join(dest_root, profile_dir.name)
+        if os.path.isdir(dst):
+            preserved.append(profile_dir.name)
+            continue
+        shutil.copytree(str(profile_dir), dst)
+        seeded.append(profile_dir.name)
+
+    if seeded:
+        click.echo(f"  Guardrail rule packs: seeded {', '.join(sorted(seeded))} in {dest_root}")
+    if preserved:
+        click.echo(f"  Guardrail rule packs: preserved existing ({', '.join(sorted(preserved))})")
 
 
 def _seed_splunk_bridge(data_dir: str) -> None:
@@ -548,6 +598,35 @@ def _start_gateway(cfg, logger) -> None:
         _check_sidecar_health(cfg.gateway.api_port, bind=bind)
 
 
+def _get_gateway_version() -> str | None:
+    """Try to get the gateway binary version."""
+    gw = shutil.which("defenseclaw-gateway")
+    if not gw:
+        return None
+    try:
+        result = subprocess.run(
+            [gw, "--version"], capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().split()[-1] if result.stdout.strip() else None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def _restart_gateway_quiet() -> None:
+    """Restart the gateway sidecar silently (used after guardrail setup during init)."""
+    gw = shutil.which("defenseclaw-gateway")
+    if not gw:
+        return
+    try:
+        subprocess.run(
+            [gw, "restart"], capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def _is_sidecar_running(pid_file: str) -> bool:
     """Check if the gateway sidecar process is alive."""
     pid = _read_pid(pid_file)
@@ -574,8 +653,9 @@ def _read_pid(pid_file: str) -> int | None:
         return None
 
 
-def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.1") -> None:
-    """Briefly poll the sidecar REST API to confirm it started."""
+def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.1") -> dict | None:
+    """Poll the sidecar REST API and return parsed health JSON (or None)."""
+    import json as _json
     import time
     import urllib.error
     import urllib.request
@@ -587,11 +667,43 @@ def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status == 200:
-                    click.echo("  Health:        ok ✓")
-                    return
+                    body = resp.read().decode("utf-8", errors="replace")
+                    try:
+                        health = _json.loads(body)
+                    except (_json.JSONDecodeError, TypeError):
+                        health = None
+                    _print_health_summary(health)
+                    return health
         except (urllib.error.URLError, OSError, ValueError):
             pass
 
     click.echo("  Health:        not responding")
     click.echo("                 check: defenseclaw-gateway status")
+    return None
+
+
+def _print_health_summary(health: dict | None) -> None:
+    """Render a compact health summary from /health JSON."""
+    if not health:
+        click.echo("  Health:        ok ✓")
+        return
+
+    subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"]
+    parts = []
+    for sub in subsystems:
+        info = health.get(sub, {})
+        if not info:
+            continue
+        state = info.get("state", info.get("status", "unknown"))
+        if state.lower() in ("running", "healthy"):
+            parts.append(f"{sub}:ok")
+        elif state.lower() in ("disabled", "stopped"):
+            parts.append(f"{sub}:off")
+        else:
+            parts.append(f"{sub}:{state}")
+
+    if parts:
+        click.echo(f"  Health:        {', '.join(parts)}")
+    else:
+        click.echo("  Health:        ok ✓")
 

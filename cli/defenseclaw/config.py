@@ -27,7 +27,7 @@ import logging
 import os
 import platform
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -533,10 +533,32 @@ class JudgeConfig:
     api_key_env: str = ""
     api_base: str = ""
     timeout: float = 30.0
+    fallbacks: list[str] = field(default_factory=list)
+    adjudication_timeout: float = 5.0
 
 
 @dataclass
 class WebhookConfig:
+    # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
+    # audit sink — see docs/OBSERVABILITY.md §7).
+    #
+    # ``name`` is the CLI-visible identifier used by
+    # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
+    # It is round-tripped through load/save so that ``config.save()``
+    # doesn't silently drop the operator's chosen name. Empty values
+    # are stripped in ``_config_to_dict`` to mirror Go's ``omitempty``.
+    #
+    # ``cooldown_seconds`` is tri-state to match the Go pointer
+    # (``*int``) — see ``internal/gateway/webhook.go``
+    # ``webhookDefaultCooldown = 300s``:
+    #   * ``None``  → YAML key absent / null; dispatcher applies its
+    #                 default cooldown (currently 300s).
+    #   * ``0``     → explicit "dispatch every matching event"; kept
+    #                 verbatim on round-trip so the YAML ``0`` doesn't
+    #                 silently collapse back to "default 300s".
+    #   * ``> 0``   → explicit minimum seconds between dispatches per
+    #                 (webhook, event_category) pair.
+    name: str = ""
     url: str = ""
     type: str = "generic"
     secret_env: str = ""
@@ -544,7 +566,7 @@ class WebhookConfig:
     min_severity: str = "HIGH"
     events: list[str] = field(default_factory=list)
     timeout_seconds: int = 10
-    cooldown_seconds: int = 300
+    cooldown_seconds: int | None = None
     enabled: bool = False
 
     def resolved_secret(self) -> str:
@@ -568,11 +590,19 @@ class GuardrailConfig:
     block_message: str = ""         # custom message shown when a request is blocked (empty = default)
     api_base: str = ""              # base URL override for Azure, custom endpoints
     judge: JudgeConfig = field(default_factory=JudgeConfig)
+    detection_strategy: str = "regex_judge"  # regex_only | regex_judge | judge_first
+    detection_strategy_prompt: str = ""     # per-direction override
+    detection_strategy_completion: str = "" # per-direction override
+    detection_strategy_tool_call: str = ""  # per-direction override
+    judge_sweep: bool = False               # run full judge on no-signal content (regex_judge mode)
+    rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
 
 
 @dataclass
 class Config:
     data_dir: str = ""
+    default_llm_api_key_env: str = ""
+    default_llm_model: str = ""
     audit_db: str = ""
     quarantine_dir: str = ""
     plugin_dir: str = ""
@@ -642,6 +672,32 @@ class Config:
             name = name.rsplit("/", 1)[-1]
         name = name.lstrip("@")
         return [os.path.join(d, name) for d in self.skill_dirs()]
+
+    def resolved_default_llm_api_key(self) -> str:
+        """Return the shared LLM API key from the configured env var.
+
+        Mirrors Go's Config.ResolvedDefaultLLMAPIKey() so Python and Go
+        scanner invocations share the same fallback semantics.
+        """
+        if self.default_llm_api_key_env:
+            return os.environ.get(self.default_llm_api_key_env, "")
+        return ""
+
+    def effective_inspect_llm(self) -> InspectLLMConfig:
+        """Return inspect_llm with the shared default key/model applied.
+
+        Mirrors Go's Config.EffectiveInspectLLM(). When the dedicated
+        inspect_llm.api_key is empty, fall back to default_llm_api_key_env;
+        when inspect_llm.model is empty, fall back to default_llm_model.
+        """
+        llm = replace(self.inspect_llm)
+        if not llm.resolved_api_key() and not llm.api_key:
+            shared = self.resolved_default_llm_api_key()
+            if shared:
+                llm.api_key = shared
+        if not llm.model and self.default_llm_model:
+            llm.model = self.default_llm_model
+        return llm
 
     def save(self) -> None:
         path = os.path.join(self.data_dir, CONFIG_FILE_NAME)
@@ -754,6 +810,28 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
+    # v4: the legacy top-level `splunk:` block is rejected by the Go
+    # gateway at startup (see internal/config/config.go::detectLegacySplunk).
+    # The Python dataclass retains a SplunkConfig for backwards-compatible
+    # reads, but we must never *write* the key to disk — even with
+    # default values — or the sidecar will refuse to start with a v4
+    # migration error. Splunk forwarding lives under audit_sinks now.
+    d.pop("splunk", None)
+    # Mirror the Go `yaml:"cooldown_seconds,omitempty"` tag: when the
+    # operator hasn't set a cooldown (tri-state None), drop the key so
+    # the YAML stays minimal and the gateway falls back to
+    # ``webhookDefaultCooldown``. An explicit ``0`` or positive int is
+    # kept verbatim.
+    for wh in d.get("webhooks") or []:
+        if not isinstance(wh, dict):
+            continue
+        if wh.get("cooldown_seconds", None) is None:
+            wh.pop("cooldown_seconds", None)
+        # Mirror Go's ``yaml:"name,omitempty"`` — drop empty-string names
+        # so legacy files that never set ``name:`` stay byte-identical
+        # after a load/save cycle.
+        if wh.get("name", "") == "":
+            wh.pop("name", None)
     return d
 
 
@@ -846,6 +924,8 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         api_key_env=raw.get("api_key_env", ""),
         api_base=raw.get("api_base", ""),
         timeout=raw.get("timeout", 30.0),
+        fallbacks=raw.get("fallbacks", []),
+        adjudication_timeout=raw.get("adjudication_timeout", 5.0),
     )
 
 
@@ -865,6 +945,12 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         block_message=raw.get("block_message", ""),
         api_base=raw.get("api_base", ""),
         judge=_merge_judge(raw.get("judge")),
+        detection_strategy=raw.get("detection_strategy", "regex_judge"),
+        detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
+        detection_strategy_completion=raw.get("detection_strategy_completion", ""),
+        detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
+        judge_sweep=raw.get("judge_sweep", False),
+        rule_pack_dir=raw.get("rule_pack_dir", ""),
     )
 
 
@@ -943,7 +1029,21 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
     for entry in raw:
         if not isinstance(entry, dict):
             continue
+        # Preserve nil-vs-zero for cooldown_seconds so round-tripping the
+        # YAML matches Go's ``*int`` semantics (see WebhookConfig
+        # docstring above).
+        cd_raw = entry.get("cooldown_seconds", None)
+        if cd_raw is None:
+            cooldown: int | None = None
+        else:
+            try:
+                cooldown = int(cd_raw)
+            except (TypeError, ValueError):
+                cooldown = None
+            if cooldown is not None and cooldown < 0:
+                cooldown = None
         webhooks.append(WebhookConfig(
+            name=str(entry.get("name", "") or ""),
             url=entry.get("url", ""),
             type=entry.get("type", "generic"),
             secret_env=entry.get("secret_env", ""),
@@ -951,7 +1051,7 @@ def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
             min_severity=entry.get("min_severity", "HIGH"),
             events=entry.get("events", []),
             timeout_seconds=entry.get("timeout_seconds", 10),
-            cooldown_seconds=entry.get("cooldown_seconds", 300),
+            cooldown_seconds=cooldown,
             enabled=entry.get("enabled", False),
         ))
     return webhooks
@@ -1057,10 +1157,44 @@ def load() -> Config:
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
-    splunk_raw = raw.get("splunk", {})
+    splunk_raw = raw.get("splunk", {}) or {}
+
+    # v4 compatibility: the Go gateway routes Splunk forwarding through
+    # the generic `audit_sinks:` list. The Python CLI still has its own
+    # fire-and-forget Splunk forwarder for events raised in process
+    # (aibom scan, skill quarantine, plugin disable, etc.), so mirror
+    # the first enabled `splunk_hec` sink into the legacy SplunkConfig
+    # shape *in memory only* — we never write the legacy block back to
+    # disk (see _config_to_dict). This preserves parallel Python → HEC
+    # forwarding without reintroducing the migration tripwire in
+    # internal/config/config.go::detectLegacySplunk.
+    if not splunk_raw:
+        for sink in raw.get("audit_sinks") or []:
+            if not isinstance(sink, dict):
+                continue
+            if sink.get("kind") != "splunk_hec":
+                continue
+            if sink.get("enabled") is False:
+                continue
+            hec = sink.get("splunk_hec") or {}
+            if not isinstance(hec, dict) or not hec.get("endpoint"):
+                continue
+            splunk_raw = {
+                "enabled": True,
+                "hec_endpoint": hec.get("endpoint", ""),
+                "hec_token": hec.get("token", ""),
+                "hec_token_env": hec.get("token_env", ""),
+                "index": hec.get("index", "defenseclaw"),
+                "source": hec.get("source", "defenseclaw"),
+                "sourcetype": hec.get("sourcetype", "_json"),
+                "verify_tls": bool(hec.get("verify_tls", False)),
+            }
+            break
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
+        default_llm_api_key_env=raw.get("default_llm_api_key_env", ""),
+        default_llm_model=raw.get("default_llm_model", ""),
         audit_db=raw.get("audit_db", os.path.join(data_dir, AUDIT_DB_NAME)),
         quarantine_dir=raw.get("quarantine_dir", os.path.join(data_dir, "quarantine")),
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),

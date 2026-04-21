@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -50,7 +51,15 @@ The sidecar must be running for this command to work.`,
 }
 
 func init() {
-	rootCmd.Flags().StringVar(&sidecarToken, "token", "", "Gateway auth token (overrides config)")
+	rootCmd.Flags().StringVar(&sidecarToken, "token", "",
+		"DEPRECATED: gateway auth token. Passing secrets on the command line exposes them to ps/procfs. "+
+			"Use OPENCLAW_GATEWAY_TOKEN env or gateway.token in config instead.")
+	// Hide from default help so we don't advertise the insecure path, but
+	// keep it working so existing scripts don't break. We emit a one-line
+	// deprecation warning at runtime when it's actually used.
+	if f := rootCmd.Flags().Lookup("token"); f != nil {
+		f.Hidden = true
+	}
 	rootCmd.Flags().StringVar(&sidecarHost, "host", "", "Gateway host (default: from config)")
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
 	rootCmd.AddCommand(statusCmd)
@@ -58,6 +67,10 @@ func init() {
 
 func runSidecar(_ *cobra.Command, _ []string) error {
 	if sidecarToken != "" {
+		fmt.Fprintln(os.Stderr,
+			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
+				"Secrets on argv are visible to any local user via ps(1) / /proc/<pid>/cmdline. "+
+				"Set OPENCLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
 		cfg.Gateway.Token = sidecarToken
 	}
 	if sidecarHost != "" {
@@ -109,15 +122,112 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Always capture the common shutdown signals so we can cancel ctx
+	// cleanly. Previously this function also installed wide signal
+	// capture, a 5s heartbeat ticker, and verbose defer/return diagnostics
+	// to chase a CI-only ARM64 flake (see PR #111). That telemetry is
+	// now gated behind DEFENSECLAW_SIDECAR_DIAG=1 so it doesn't ship as
+	// default operator-visible log noise.
+	//
+	// SIGPIPE is also always registered here: without it, Go's default
+	// handler terminates the process when a client disconnects on a
+	// non-TTY fd. We want to swallow that regardless of trace flag.
+	sigCh := make(chan os.Signal, 8)
+	diag := sidecarDiagEnabled()
+	if diag {
+		signal.Notify(sigCh,
+			syscall.SIGINT, syscall.SIGTERM,
+			syscall.SIGHUP, syscall.SIGQUIT,
+			syscall.SIGPIPE, syscall.SIGUSR1, syscall.SIGUSR2)
+	} else {
+		signal.Notify(sigCh,
+			syscall.SIGINT, syscall.SIGTERM,
+			syscall.SIGHUP, syscall.SIGQUIT,
+			syscall.SIGPIPE)
+	}
 	go func() {
-		<-sigCh
-		fmt.Println("\n[sidecar] shutting down...")
-		cancel()
+		for sig := range sigCh {
+			// SIGPIPE is a normal condition when a client disconnects on
+			// a non-TTY fd; don't treat it as a shutdown trigger.
+			sysSig, ok := sig.(syscall.Signal)
+			if ok && sysSig == syscall.SIGPIPE {
+				if diag {
+					fmt.Fprintf(os.Stderr,
+						"[sidecar][diag] ignoring SIGPIPE at %s pid=%d\n",
+						time.Now().UTC().Format(time.RFC3339Nano),
+						os.Getpid())
+				}
+				continue
+			}
+			if diag {
+				sigNum := -1
+				if ok {
+					sigNum = int(sysSig)
+				}
+				fmt.Fprintf(os.Stderr,
+					"[sidecar][diag] received signal %v (%d) at %s; pid=%d cancelling ctx\n",
+					sig, sigNum,
+					time.Now().UTC().Format(time.RFC3339Nano),
+					os.Getpid())
+			}
+			cancel()
+			return
+		}
 	}()
 
-	return sc.Run(ctx)
+	if diag {
+		// Heartbeat ticker + return diagnostics are only emitted when
+		// DEFENSECLAW_SIDECAR_DIAG=1. Keep this cheap path off by
+		// default — the 5s tick writes to stderr which can flood CI
+		// runners and disk on long-lived sidecars.
+		go func() {
+			tick := time.NewTicker(5 * time.Second)
+			defer tick.Stop()
+			start := time.Now()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t := <-tick.C:
+					fmt.Fprintf(os.Stderr,
+						"[sidecar][diag][heartbeat] alive at %s pid=%d uptime=%s\n",
+						t.UTC().Format("15:04:05.000"),
+						os.Getpid(),
+						t.Sub(start).Truncate(time.Second))
+				}
+			}
+		}()
+
+		defer func() {
+			fmt.Fprintf(os.Stderr,
+				"[sidecar][diag] runSidecar defer: ctxErr=%v at %s pid=%d\n",
+				ctx.Err(),
+				time.Now().UTC().Format(time.RFC3339Nano),
+				os.Getpid())
+		}()
+	}
+
+	runErr := sc.Run(ctx)
+	if diag {
+		fmt.Fprintf(os.Stderr,
+			"[sidecar][diag] sc.Run returned: err=%v ctxErr=%v at %s pid=%d\n",
+			runErr, ctx.Err(),
+			time.Now().UTC().Format(time.RFC3339Nano),
+			os.Getpid())
+	}
+	return runErr
+}
+
+// sidecarDiagEnabled reports whether DEFENSECLAW_SIDECAR_DIAG is set to a
+// truthy value. When enabled, the sidecar emits a 5s heartbeat, wide
+// signal capture, and defer/return diagnostics to stderr. These are
+// intended for CI troubleshooting only — never enable in production.
+func sidecarDiagEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
@@ -134,8 +244,8 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		fmt.Println("Sidecar Status: NOT RUNNING")
 		fmt.Printf("  Could not reach %s\n", addr)
-		fmt.Println("  Start the sidecar with: defenseclaw sidecar")
-		return nil
+		fmt.Println("  Start the sidecar with: defenseclaw-gateway start")
+		return fmt.Errorf("sidecar unreachable")
 	}
 	defer resp.Body.Close()
 
@@ -157,7 +267,7 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printSubsystem("API", snap.API)
 	printSubsystem("Guardrail", snap.Guardrail)
 	printSubsystem("Telemetry", snap.Telemetry)
-	printSubsystem("Splunk", snap.Splunk)
+	printSubsystem("Sinks", snap.Sinks)
 	if snap.Sandbox != nil {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
@@ -177,11 +287,16 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 		fmt.Printf("             last error: %s\n", h.LastError)
 	}
 	if len(h.Details) > 0 {
-		for k, v := range h.Details {
+		keys := make([]string, 0, len(h.Details))
+		for k := range h.Details {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
-			fmt.Printf("             %s: %v\n", k, v)
+			fmt.Printf("             %s: %v\n", k, h.Details[k])
 		}
 	}
 	fmt.Println()

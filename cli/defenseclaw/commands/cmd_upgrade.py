@@ -86,9 +86,9 @@ def upgrade(
 
     # ── Early exit if already at latest ──────────────────────────────────────
 
-    if target_version == current_version and not yes:
+    if target_version == current_version:
         click.echo()
-        click.echo("  Already at the latest version. Nothing to do.")
+        click.echo(f"  Already at version {current_version}. Nothing to do.")
         return
 
     # ── Platform detection ───────────────────────────────────────────────────
@@ -378,7 +378,7 @@ def _poll_health(cfg, timeout_seconds: int = 60) -> None:
         time.sleep(2)
 
     click.echo(f"  ⚠ Gateway did not become healthy within {timeout_seconds}s", err=True)
-    click.echo("    Check logs: ~/.defenseclaw/gateway.log")
+    click.echo("    Check logs: ~/.defenseclaw/gateway.log (pretty) / ~/.defenseclaw/gateway.jsonl (structured)")
     click.echo("    Run:  defenseclaw-gateway status")
 
 

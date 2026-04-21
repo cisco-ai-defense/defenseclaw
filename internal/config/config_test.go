@@ -691,6 +691,18 @@ func TestDefaultConfig_OTelPerSignalFields(t *testing.T) {
 	})
 }
 
+func TestLoad_DefaultOTelProtocolEmpty(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.OTel.Protocol != "" {
+		t.Fatalf("otel.protocol default=%q want empty for SDK env fallback", cfg.OTel.Protocol)
+	}
+}
+
 func TestOTelConfig_PerSignalOverride(t *testing.T) {
 	cfg := OTelConfig{
 		Endpoint: "global:4317",
@@ -790,6 +802,11 @@ func TestOTelEnvVarBindings(t *testing.T) {
 
 	for _, tt := range envTests {
 		t.Run(tt.envKey, func(t *testing.T) {
+			// Isolate Load() from the developer's real ~/.defenseclaw/
+			// config.yaml. Without this, a stale legacy `splunk:` block
+			// in the host config trips detectLegacySplunk() and the test
+			// fails for reasons unrelated to env var binding.
+			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 			t.Setenv(tt.envKey, tt.value)
 
 			cfg, err := Load()
@@ -805,6 +822,7 @@ func TestOTelEnvVarBindings(t *testing.T) {
 }
 
 func TestOTelEnvVarEnabled(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
 
 	cfg, err := Load()
@@ -817,6 +835,7 @@ func TestOTelEnvVarEnabled(t *testing.T) {
 }
 
 func TestOTelEnvVarTLSInsecure(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
 
 	cfg, err := Load()

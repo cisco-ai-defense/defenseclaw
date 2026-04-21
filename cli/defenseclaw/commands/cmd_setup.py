@@ -38,6 +38,22 @@ def setup() -> None:
     """Configure DefenseClaw components."""
 
 
+# Register `defenseclaw setup observability` (unified OTel + audit sinks).
+# Imported here rather than at module top so the subcommand surface can
+# grow without cluttering cmd_setup.py.
+from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
+
+setup.add_command(observability)
+
+# Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
+# notifiers). Distinct from `setup observability add webhook` (generic
+# HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
+# disambiguation.
+from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
+
+setup.add_command(webhook)
+
+
 @setup.command("skill-scanner")
 @click.option("--use-llm", is_flag=True, default=None, help="Enable LLM analyzer")
 @click.option("--use-behavioral", is_flag=True, default=None, help="Enable behavioral analyzer")
@@ -162,15 +178,14 @@ def _interactive_setup(sc, llm, aid, data_dir: str) -> None:
         aid.api_key_env = ""
 
     click.echo()
-    choices = ["strict", "balanced", "permissive"]
+    valid_policies = ["strict", "balanced", "permissive", "none"]
     val = click.prompt(
-        f"  Scan policy preset ({'/'.join(choices)})",
-        default=sc.policy or "none", show_default=True,
+        "  Scan policy preset",
+        type=click.Choice(valid_policies),
+        default=sc.policy if sc.policy in valid_policies else "none",
+        show_default=True,
     )
-    if val in choices:
-        sc.policy = val
-    elif val == "none":
-        sc.policy = ""
+    sc.policy = "" if val == "none" else val
 
     sc.lenient = click.confirm("  Lenient mode (tolerate malformed skills)?", default=sc.lenient)
 
@@ -320,6 +335,7 @@ def _print_summary(sc, llm, aid) -> None:
 @click.option("--scan-prompts", is_flag=True, default=None, help="Scan MCP prompts")
 @click.option("--scan-resources", is_flag=True, default=None, help="Scan MCP resources")
 @click.option("--scan-instructions", is_flag=True, default=None, help="Scan server instructions")
+@click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
 def setup_mcp_scanner(
@@ -327,6 +343,7 @@ def setup_mcp_scanner(
     analyzers,
     llm_provider, llm_model,
     scan_prompts, scan_resources, scan_instructions,
+    verify: bool,
     non_interactive,
 ) -> None:
     """Configure mcp-scanner analyzers and scan options.
@@ -361,6 +378,16 @@ def setup_mcp_scanner(
 
     app.cfg.save()
     _print_mcp_summary(mc, llm, aid)
+
+    if verify:
+        from defenseclaw.commands.cmd_doctor import _check_scanners, _DoctorResult
+        click.echo("  ── Verifying scanner configuration ──")
+        r = _DoctorResult()
+        _check_scanners(app.cfg, r)
+        click.echo()
+        if r.failed:
+            click.echo("  Tip: fix the issues above, then run 'defenseclaw doctor' to re-check.")
+            click.echo()
 
     if app.logger:
         parts = [f"analyzers={mc.analyzers or 'default'}"]
@@ -419,9 +446,8 @@ def _print_mcp_summary(mc, llm, aid) -> None:
         rows.append(("inspect_llm", "provider", llm.provider))
     if llm.model:
         rows.append(("inspect_llm", "model", llm.model))
-        api_key = llm.resolved_api_key()
-        if api_key:
-            rows.append(("inspect_llm", "api_key", _mask(api_key)))
+        if llm.api_key_env:
+            rows.append(("inspect_llm", "api_key_env", llm.api_key_env))
     if aid.endpoint:
         rows.append(("cisco_ai_defense", "endpoint", aid.endpoint))
     if mc.scan_prompts:
@@ -491,6 +517,9 @@ def setup_gateway(
             else:
                 click.echo("error: failed to fetch token from SSM", err=True)
                 raise SystemExit(1)
+        elif remote and not gw.resolved_token():
+            click.echo("  ⚠ --remote specified but no auth token configured", err=True)
+            click.echo("    Provide --token or --ssm-param, or set OPENCLAW_GATEWAY_TOKEN", err=True)
         elif not gw.resolved_token():
             detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file)
             if detected:
@@ -640,9 +669,18 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 @click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port")
 @click.option("--block-message", default=None,
               help="Custom message shown when a request is blocked (empty = default)")
-@click.option("--restart", is_flag=True, help="Restart defenseclaw-gateway and openclaw gateway after setup")
-@click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
-@click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
+@click.option("--detection-strategy",
+              type=click.Choice(["regex_only", "regex_judge", "judge_first"]), default=None,
+              help="Detection strategy (regex_only, regex_judge, judge_first)")
+@click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
+@click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
+@click.option("--judge-api-key-env", default=None, help="Env var name for judge API key")
+@click.option("--restart/--no-restart", default=True,
+              help="Restart gateway and openclaw after setup (default: on)")
+@click.option("--verify/--no-verify", default=True,
+              help="Run connectivity checks after setup (default: on)")
+@click.option("--non-interactive", "--accept-defaults", is_flag=True,
+              help="Use flags instead of prompts (alias: --accept-defaults)")
 @pass_ctx
 def setup_guardrail(
     app: AppContext,
@@ -650,6 +688,7 @@ def setup_guardrail(
     guard_mode, guard_port,
     scanner_mode, cisco_endpoint, cisco_api_key_env, cisco_timeout_ms,
     block_message,
+    detection_strategy, judge_model, judge_api_base, judge_api_key_env,
     restart: bool,
     verify: bool,
     non_interactive: bool,
@@ -679,21 +718,49 @@ def setup_guardrail(
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
-        if guard_mode is not None:
-            gc.mode = guard_mode
-        if scanner_mode is not None:
-            gc.scanner_mode = scanner_mode
+        gc.mode = guard_mode or gc.mode or "observe"
+        gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
             aid.endpoint = cisco_endpoint
         if cisco_api_key_env is not None:
             aid.api_key_env = cisco_api_key_env
         if cisco_timeout_ms is not None:
             aid.timeout_ms = cisco_timeout_ms
-        if guard_port is not None:
-            gc.port = guard_port
+        gc.port = guard_port or gc.port or 4000
         if block_message is not None:
             gc.block_message = block_message
+        if detection_strategy is not None:
+            gc.detection_strategy = detection_strategy
+        if judge_model is not None:
+            gc.judge.model = judge_model
+            gc.judge.enabled = True
+        if judge_api_base is not None:
+            gc.judge.api_base = judge_api_base
+        if judge_api_key_env is not None:
+            gc.judge.api_key_env = judge_api_key_env
+            if not app.cfg.default_llm_api_key_env:
+                app.cfg.default_llm_api_key_env = judge_api_key_env
         gc.enabled = True
+
+        # Apply sensible strategy defaults when judge is enabled
+        if gc.judge.enabled:
+            if not gc.detection_strategy or gc.detection_strategy == "regex_only":
+                gc.detection_strategy = "regex_judge"
+            if not getattr(gc, "detection_strategy_completion", None):
+                gc.detection_strategy_completion = "regex_only"
+
+        if gc.scanner_mode in ("remote", "both"):
+            key_env = aid.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
+            if scanner_mode:
+                if not aid.endpoint:
+                    click.echo("  ✗ --scanner-mode=remote requires --cisco-endpoint or a configured endpoint", err=True)
+                    raise SystemExit(1)
+                if not os.environ.get(key_env):
+                    click.echo(f"  ✗ --scanner-mode=remote but ${key_env} is not set", err=True)
+                    raise SystemExit(1)
+            elif not aid.endpoint or not os.environ.get(key_env):
+                gc.scanner_mode = "local"
+                click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         _interactive_guardrail_setup(app, gc)
 
@@ -715,12 +782,24 @@ def setup_guardrail(
         ("guardrail.model", gc.model),
         ("guardrail.model_name", gc.model_name),
         ("guardrail.api_key_env", gc.api_key_env),
+        ("guardrail.detection_strategy", gc.detection_strategy),
     ]
     if gc.api_base:
         rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     if gc.block_message:
         truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
         rows.append(("guardrail.block_message", truncated))
+    if gc.judge.enabled:
+        rows.append(("guardrail.judge.enabled", "true"))
+        rows.append(("guardrail.judge.model", gc.judge.model))
+        if gc.judge.api_base:
+            judge_api_base = gc.judge.api_base
+            if len(judge_api_base) > 60:
+                judge_api_base = judge_api_base[:60] + "..."
+            rows.append(("guardrail.judge.api_base", judge_api_base))
+        rows.append(("guardrail.judge.api_key_env", gc.judge.api_key_env))
+        if gc.judge.fallbacks:
+            rows.append(("guardrail.judge.fallbacks", ", ".join(gc.judge.fallbacks)))
     if gc.scanner_mode in ("remote", "both"):
         rows.append(("cisco_ai_defense.endpoint", aid.endpoint))
         rows.append(("cisco_ai_defense.api_key_env", aid.api_key_env))
@@ -739,11 +818,8 @@ def setup_guardrail(
         _restart_services(app.cfg.data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
     else:
         click.echo("  Next steps:")
-        click.echo("    1. Restart the defenseclaw sidecar:")
+        click.echo("    Restart the defenseclaw sidecar for changes to take effect:")
         click.echo("       defenseclaw-gateway restart")
-        click.echo("       (openclaw gateway auto-reloads — no restart needed)")
-        click.echo("    2. Or re-run with --restart:")
-        click.echo("       defenseclaw setup guardrail --restart")
         click.echo()
 
     click.echo("  To disable and revert:")
@@ -899,51 +975,52 @@ def execute_guardrail_setup(
 def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
     click.echo()
-    click.echo("  LLM Guardrail Configuration")
-    click.echo("  ────────────────────────────")
+    click.echo("  LLM Guardrail Setup")
+    click.echo("  ────────────────────")
     click.echo()
-    click.echo("  Routes all LLM traffic through a local inspection proxy.")
-    click.echo("  Every prompt and response is scanned for security issues.")
+    click.echo("  Scans every LLM prompt and response for:")
+    click.echo("    • Prompt injection and jailbreak attempts")
+    click.echo("    • Secrets, API keys, and credentials")
+    click.echo("    • PII leakage (names, emails, SSNs, credit cards)")
+    click.echo("    • Data exfiltration patterns")
     click.echo()
 
-    if not click.confirm("  Enable LLM guardrail?", default=True):
+    model_name = gc.model_name or gc.model or ""
+    if model_name:
+        click.echo(f"  Detected LLM:  {model_name}")
+    proxy_port = gc.port or 4000
+    click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
+    click.echo()
+
+    if not click.confirm("  Enable guardrail?", default=True):
         gc.enabled = False
         return
 
     gc.enabled = True
 
     click.echo()
-    click.echo("  Modes:")
-    click.echo("    observe — log and alert only, never block (recommended to start)")
-    click.echo("    action  — block prompts/responses that match security policies")
-    gc.mode = click.prompt(
-        "  Mode", type=click.Choice(["observe", "action"]), default=gc.mode or "observe",
+    click.echo("  Enforcement mode:")
+    click.echo("    [1] observe — log and alert only, never block (recommended to start)")
+    click.echo("    [2] action  — block requests that match security policies")
+    current_mode = gc.mode or "observe"
+    mode_default = "1" if current_mode == "observe" else "2"
+    mode_choice = click.prompt(
+        "  Select mode", type=click.Choice(["1", "2"]), default=mode_default,
     )
-
-    if gc.mode == "action":
-        click.echo()
-        click.echo("  When mode is 'action', blocked requests show a message to the user.")
-        if gc.block_message:
-            preview = gc.block_message[:80] + ("..." if len(gc.block_message) > 80 else "")
-            click.echo(f"  Current: \"{preview}\"")
-        else:
-            click.echo("  Default: \"I'm unable to process this request. DefenseClaw detected...\"")
-        if click.confirm("  Use a custom block message?", default=bool(gc.block_message)):
-            gc.block_message = click.prompt("  Block message", default=gc.block_message or "")
-        else:
-            gc.block_message = ""
+    gc.mode = "observe" if mode_choice == "1" else "action"
 
     click.echo()
-    click.echo("  Scanner modes:")
-    click.echo("    local  — pattern matching only, no network calls (fastest)")
-    click.echo("    remote — Cisco AI Defense cloud API only")
-    sm_default = gc.scanner_mode or "local"
-    if sm_default == "both":
-        sm_default = "local"
-    gc.scanner_mode = click.prompt(
-        "  Scanner mode", type=click.Choice(["local", "remote"]),
-        default=sm_default,
+    click.echo("  Scanner engine:")
+    click.echo("    [1] local  — built-in pattern matching, no network calls (fastest)")
+    click.echo("    [2] remote — Cisco AI Defense cloud API (higher accuracy, requires API key)")
+    sm_current = gc.scanner_mode or "local"
+    if sm_current == "both":
+        sm_current = "local"
+    sm_default = "1" if sm_current == "local" else "2"
+    sm_choice = click.prompt(
+        "  Select engine", type=click.Choice(["1", "2"]), default=sm_default,
     )
+    gc.scanner_mode = "local" if sm_choice == "1" else "remote"
 
     if gc.scanner_mode in ("remote", "both"):
         click.echo()
@@ -967,7 +1044,100 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
             "  Timeout (ms)", default=aid.timeout_ms, type=int,
         )
 
-    gc.port = click.prompt("  Guardrail proxy port", default=gc.port or 4000, type=int)
+    gc.port = proxy_port
+
+    # --- LLM Judge section ---
+    click.echo()
+    click.echo("  LLM Judge (reduces false positives)")
+    click.echo("  ────────────────────────────────────")
+    click.echo("  Uses an LLM to verify detections and catch novel attacks.")
+    click.echo("  Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
+    click.echo()
+
+    enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
+    gc.judge.enabled = enable_judge
+
+    if enable_judge:
+        click.echo()
+        click.echo("  Detection strategy:")
+        click.echo("    [1] regex_only  — regex patterns only, no LLM calls (fastest)")
+        click.echo("    [2] regex_judge — regex triages, LLM verifies ambiguous matches (recommended)")
+        click.echo("    [3] judge_first — LLM runs primary detection, regex as safety net (most accurate)")
+        strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
+        current_strat = gc.detection_strategy or "regex_judge"
+        strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")
+        strat_choice = click.prompt(
+            "  Select strategy", type=click.Choice(["1", "2", "3"]), default=strat_default,
+        )
+        gc.detection_strategy = strategy_map[strat_choice]
+
+        click.echo()
+        gc.judge.api_base = click.prompt(
+            "  LLM API base URL (e.g. http://localhost:8080/v1 for Bifrost)",
+            default=gc.judge.api_base or "", show_default=False,
+        )
+        gc.judge.model = click.prompt(
+            "  Model (e.g. anthropic/claude-sonnet-4-20250514)",
+            default=gc.judge.model or "", show_default=False,
+        )
+
+        default_key_env = gc.judge.api_key_env or "JUDGE_API_KEY"
+        gc.judge.api_key_env = click.prompt(
+            "  API key env var name", default=default_key_env,
+        )
+        env_val = os.environ.get(gc.judge.api_key_env, "")
+        if env_val:
+            click.echo(f"    Current value: {_mask(env_val)} (set)")
+        else:
+            click.echo(f"    {gc.judge.api_key_env} is not set in environment")
+        _prompt_and_save_secret(gc.judge.api_key_env, "", app.cfg.data_dir)
+
+        click.echo()
+        if click.confirm("  Configure fallback models?", default=bool(gc.judge.fallbacks)):
+            fallbacks: list[str] = []
+            for i in range(1, 6):
+                fb = click.prompt(f"    Fallback model {i} (blank to finish)", default="", show_default=False)
+                if not fb:
+                    break
+                fallbacks.append(fb)
+            gc.judge.fallbacks = fallbacks
+        else:
+            gc.judge.fallbacks = []
+
+        gc.judge.injection = True
+        gc.judge.pii = True
+        gc.judge.pii_prompt = True
+        gc.judge.pii_completion = True
+
+        # Completion-side strategy defaults to regex_only (no judge latency)
+        if not getattr(gc, "detection_strategy_completion", None):
+            gc.detection_strategy_completion = "regex_only"
+
+        # If no component-specific judge key was configured, offer to share it
+        # across all LLM components via default_llm_api_key_env.
+        if gc.judge.api_key_env:
+            if click.confirm(
+                f"  Use {gc.judge.api_key_env} as the shared LLM key for all scanners too?",
+                default=True,
+            ):
+                app.cfg.default_llm_api_key_env = gc.judge.api_key_env
+    else:
+        gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
+
+    if click.confirm("  Configure advanced options?", default=False):
+        gc.port = click.prompt("  Guardrail proxy port", default=gc.port, type=int)
+        if gc.mode == "action":
+            click.echo()
+            if gc.block_message:
+                preview = gc.block_message[:80] + ("..." if len(gc.block_message) > 80 else "")
+                click.echo(f"  Current block message: \"{preview}\"")
+            else:
+                click.echo("  Default block message: \"I'm unable to process this request. DefenseClaw detected...\"")
+            if click.confirm("  Use a custom block message?", default=bool(gc.block_message)):
+                gc.block_message = click.prompt("  Block message", default=gc.block_message or "")
+            else:
+                gc.block_message = ""
 
 
 
@@ -1043,10 +1213,6 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
         click.echo("    Run manually: openclaw gateway restart")
-        click.echo("    (openclaw gateway auto-reloads — no restart needed)")
-        click.echo()
-        click.echo("  Or re-run with --restart:")
-        click.echo("    defenseclaw setup guardrail --disable --restart")
     click.echo()
 
     if app.logger:
@@ -1342,9 +1508,20 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
 @click.option("--access-token", default=None, help="Splunk O11y access token")
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
+@click.option("--index", "logs_index", default=None, help="HEC index for --logs (default: defenseclaw_local)")
+@click.option("--source", "logs_source", default=None, help="HEC source for --logs (default: defenseclaw)")
+@click.option("--sourcetype", "logs_sourcetype", default=None,
+              help="HEC sourcetype for --logs (default: defenseclaw:json)")
+@click.option("--traces/--no-traces", "enable_traces", default=None,
+              help="Enable/disable trace export (O11y)")
+@click.option("--metrics/--no-metrics", "enable_metrics", default=None,
+              help="Enable/disable metrics export (O11y)")
+@click.option("--logs-export/--no-logs-export", "enable_logs_export",
+              default=None, help="Enable/disable logs export (O11y)")
 @click.option("--disable", is_flag=True, help="Disable Splunk integration(s)")
 @click.option("--accept-splunk-license", is_flag=True,
               help="Acknowledge the Splunk General Terms for local Splunk enablement")
+@click.option("--show-credentials", is_flag=True, help="Show Splunk Web login credentials")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
 def setup_splunk(
@@ -1354,8 +1531,15 @@ def setup_splunk(
     realm: str | None,
     access_token: str | None,
     app_name: str | None,
+    logs_index: str | None,
+    logs_source: str | None,
+    logs_sourcetype: str | None,
+    enable_traces: bool | None,
+    enable_metrics: bool | None,
+    enable_logs_export: bool | None,
     disable: bool,
     accept_splunk_license: bool,
+    show_credentials: bool,
     non_interactive: bool,
 ) -> None:
     """Configure Splunk integration for DefenseClaw.
@@ -1372,6 +1556,10 @@ def setup_splunk(
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
+    if show_credentials:
+        _show_splunk_credentials(app.cfg.data_dir)
+        return
+
     if disable:
         _disable_splunk(app, enable_o11y, enable_logs, non_interactive)
         return
@@ -1389,7 +1577,9 @@ def setup_splunk(
 
     if enable_o11y:
         _setup_o11y(app, realm or "us1", access_token, app_name or "defenseclaw",
-                    non_interactive=non_interactive)
+                    non_interactive=non_interactive,
+                    traces=enable_traces, metrics=enable_metrics,
+                    logs_export=enable_logs_export)
         did_o11y = True
 
     if enable_logs:
@@ -1397,12 +1587,19 @@ def setup_splunk(
             app,
             non_interactive=non_interactive,
             accept_splunk_license=accept_splunk_license,
+            index=logs_index,
+            source=logs_source,
+            sourcetype=logs_sourcetype,
         )
 
     if not did_o11y and not did_logs:
         return
 
-    app.cfg.save()
+    # Note: no app.cfg.save() here — the observability writer invoked
+    # from _apply_o11y_config / _apply_logs_config already persists to
+    # config.yaml atomically while preserving unmodeled sections
+    # (audit_sinks, otel.resource.attributes). Calling cfg.save() again
+    # would serialize the dataclass only and drop those sections.
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
@@ -1459,7 +1656,9 @@ def _interactive_splunk_setup(
         click.echo("  No Splunk pipelines enabled. Run again to configure.")
         return
 
-    app.cfg.save()
+    # observability.apply_preset() already persisted to config.yaml;
+    # calling cfg.save() here would drop audit_sinks (see note in
+    # setup_splunk()).
     click.echo()
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -1553,6 +1752,9 @@ def _setup_o11y(
     app_name: str,
     *,
     non_interactive: bool,
+    traces: bool | None = None,
+    metrics: bool | None = None,
+    logs_export: bool | None = None,
 ) -> None:
     token = access_token or os.environ.get("SPLUNK_ACCESS_TOKEN", "")
     if not token and non_interactive:
@@ -1566,9 +1768,9 @@ def _setup_o11y(
 
     _apply_o11y_config(
         app, realm, token, app_name,
-        enable_traces=True,
-        enable_metrics=True,
-        enable_logs=False,
+        enable_traces=traces if traces is not None else True,
+        enable_metrics=metrics if metrics is not None else True,
+        enable_logs=logs_export if logs_export is not None else False,
     )
     click.echo(f"  Splunk O11y configured (realm={realm})")
 
@@ -1578,6 +1780,9 @@ def _setup_logs(
     *,
     non_interactive: bool,
     accept_splunk_license: bool,
+    index: str | None = None,
+    source: str | None = None,
+    sourcetype: str | None = None,
 ) -> bool:
     if not _ensure_splunk_license_acceptance(
         accept_splunk_license=accept_splunk_license,
@@ -1594,9 +1799,9 @@ def _setup_logs(
 
     _apply_logs_config(
         app,
-        index="defenseclaw_local",
-        source="defenseclaw",
-        sourcetype="defenseclaw:json",
+        index=index or "defenseclaw_local",
+        source=source or "defenseclaw",
+        sourcetype=sourcetype or "defenseclaw:json",
         bootstrap_bridge=True,
     )
     click.echo("  Local Splunk configured (Free mode from day 1)")
@@ -1652,32 +1857,42 @@ def _apply_o11y_config(
     enable_metrics: bool,
     enable_logs: bool,
 ) -> None:
-    ingest = _SPLUNK_O11Y_INGEST_TEMPLATE.format(realm=realm)
-    otel = app.cfg.otel
+    """Thin alias over ``observability.apply_preset("splunk-o11y", ...)``.
 
-    otel.enabled = True
-    otel.headers["X-SF-Token"] = "${SPLUNK_ACCESS_TOKEN}"
+    Kept for flag-level back-compat with ``setup splunk --o11y``. The
+    single writer lives in ``defenseclaw.observability.writer``.
+    """
+    from defenseclaw.observability import apply_preset
 
-    otel.traces.enabled = enable_traces
-    if enable_traces:
-        otel.traces.endpoint = ingest
-        otel.traces.protocol = "http"
-        otel.traces.url_path = "/v2/trace/otlp"
-
-    otel.metrics.enabled = enable_metrics
-    if enable_metrics:
-        otel.metrics.endpoint = ingest
-        otel.metrics.protocol = "http"
-        otel.metrics.url_path = "/v2/datapoint/otlp"
-
-    otel.logs.enabled = enable_logs
-    if enable_logs:
-        otel.logs.endpoint = ingest
-        otel.logs.protocol = "http"
-        otel.logs.url_path = "/v1/log/otlp"
-
-    _save_secret_to_dotenv("SPLUNK_ACCESS_TOKEN", access_token, app.cfg.data_dir)
+    signals = tuple(
+        s for s, on in (
+            ("traces", enable_traces),
+            ("metrics", enable_metrics),
+            ("logs", enable_logs),
+        ) if on
+    )
+    apply_preset(
+        "splunk-o11y",
+        {"realm": realm},
+        app.cfg.data_dir,
+        # Use app_name for service.name in otel.resource.attributes so
+        # operators see the expected name in Splunk O11y UI. The writer
+        # also stamps preset_id / preset_name alongside.
+        name=app_name,
+        enabled=True,
+        signals=signals or ("traces",),
+        secret_value=access_token or None,
+    )
+    # OTEL_SERVICE_NAME stays a sibling env var: the OTel SDK env takes
+    # precedence over resource.attributes.service.name, so this keeps the
+    # effective service name even if the user later edits the YAML.
     _save_secret_to_dotenv("OTEL_SERVICE_NAME", app_name, app.cfg.data_dir)
+    # Reload config so cfg.otel reflects the YAML we just wrote. Pin the
+    # reload to app.cfg.data_dir (not the default ~/.defenseclaw) so
+    # unit tests that point at a temp dir see their own writes — the
+    # CLI path always matches because production callers set
+    # DEFENSECLAW_HOME to the same dir.
+    _reload_cfg_from_data_dir(app)
 
 
 def _apply_logs_config(
@@ -1688,27 +1903,79 @@ def _apply_logs_config(
     sourcetype: str,
     bootstrap_bridge: bool,
 ) -> None:
+    """Thin alias over ``observability.apply_preset("splunk-hec", ...)``.
+
+    For local-Splunk the bridge is still launched here because it's a
+    *deploy* step (docker-compose up) not a config write. The returned
+    contract (HEC URL + token) is then funneled into the observability
+    writer so it lands in ``audit_sinks[]`` in the same shape as any
+    other HEC destination.
+    """
     contract: dict[str, str] | None = None
     if bootstrap_bridge:
         contract = _bootstrap_bridge(app.cfg.data_dir)
         if not contract:
             raise SystemExit(1)
 
-    sc = app.cfg.splunk
-    sc.enabled = True
-    sc.hec_endpoint = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
-    sc.index = index
-    sc.source = source
-    sc.sourcetype = sourcetype
-    sc.verify_tls = False
-    sc.batch_size = 50
-    sc.flush_interval_s = 5
-
+    hec_url = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
     hec_token = (contract or {}).get("hec_token", "")
-    if hec_token:
-        _save_secret_to_dotenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", hec_token, app.cfg.data_dir)
-        sc.hec_token = ""
-        sc.hec_token_env = "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+
+    # Pull host/port from the contract URL so the preset writer derives a
+    # stable name ("splunk-hec-127-0-0-1") and the endpoint matches exactly.
+    from urllib.parse import urlparse
+
+    parsed = urlparse(hec_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = str(parsed.port or 8088)
+
+    from defenseclaw.observability import apply_preset
+
+    apply_preset(
+        "splunk-hec",
+        {
+            "host": host,
+            "port": port,
+            # Pass the bootstrap URL verbatim so the bridge's chosen
+            # scheme (http for local docker-compose free-mode, https
+            # otherwise) survives into config.yaml unchanged.
+            "endpoint": hec_url,
+            "index": index,
+            "source": source,
+            "sourcetype": sourcetype,
+            "verify_tls": "false",
+        },
+        app.cfg.data_dir,
+        enabled=True,
+        secret_value=hec_token or None,
+    )
+    _reload_cfg_from_data_dir(app)
+
+
+def _reload_cfg_from_data_dir(app: AppContext) -> None:
+    """Reload ``app.cfg`` from ``app.cfg.data_dir``.
+
+    ``config.load()`` only reads from ``DEFENSECLAW_HOME`` (or the
+    default ``~/.defenseclaw``). Tests build the ``Config`` directly
+    with a temp ``data_dir`` and never set the env var, so a bare
+    ``config.load()`` call would read the user's real home and
+    overwrite the test's in-memory state. We temporarily pin
+    ``DEFENSECLAW_HOME`` to ``app.cfg.data_dir`` across the reload so
+    the writer's atomic YAML update is the only input. Production
+    callers already set ``DEFENSECLAW_HOME`` to ``data_dir`` so this
+    is a no-op there.
+    """
+    from defenseclaw import config as cfg_mod
+
+    data_dir = app.cfg.data_dir
+    previous = os.environ.get("DEFENSECLAW_HOME")
+    os.environ["DEFENSECLAW_HOME"] = data_dir
+    try:
+        app.cfg = cfg_mod.load()
+    finally:
+        if previous is None:
+            os.environ.pop("DEFENSECLAW_HOME", None)
+        else:
+            os.environ["DEFENSECLAW_HOME"] = previous
 
 
 # ---------------------------------------------------------------------------
@@ -1748,8 +2015,12 @@ def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:
         click.echo(f"    Web UI: {web_url}")
         if str(contract.get("license_group", "")).lower() == "free":
             click.echo("    License: Free")
-        if contract.get("web_login_required") is False:
-            click.echo("    Web login: not required")
+        click.echo()
+        click.echo("  Splunk Web login:")
+        click.echo("    Username:  admin")
+        env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
+        click.echo(f"    Password:  (stored in {env_file})")
+        click.echo("    Note: Free mode may still show a login page — use these credentials")
         return contract
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 5 minutes")
@@ -1816,16 +2087,44 @@ def _disable_splunk(
     click.echo()
     click.echo("  Disabling Splunk integration...")
 
+    from defenseclaw.observability import list_destinations, set_destination_enabled
+
     if disable_both or o11y_only:
-        app.cfg.otel.enabled = False
+        # Flip otel.enabled via the observability writer so unmodeled
+        # fields (resource.attributes, etc.) are preserved.
+        try:
+            set_destination_enabled("otel", False, app.cfg.data_dir)
+        except ValueError:
+            # No otel: block — nothing to disable.
+            pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
     if disable_both or logs_only:
-        app.cfg.splunk.enabled = False
-        click.echo("    Splunk Enterprise (HEC): disabled")
+        # Find every splunk_hec audit sink and flip enabled=false. The
+        # legacy Config.splunk dataclass hydrates from the first enabled
+        # one, so the gateway will see it as disabled on next load.
+        dests = list_destinations(app.cfg.data_dir)
+        disabled_any = False
+        for d in dests:
+            if d.kind == "splunk_hec" and d.enabled:
+                try:
+                    set_destination_enabled(d.name, False, app.cfg.data_dir)
+                    disabled_any = True
+                except ValueError:
+                    continue
+        if disabled_any:
+            click.echo("    Splunk Enterprise (HEC): disabled")
+        else:
+            # Still report a "disabled" status so operators (and CI
+            # smoke-tests) can grep for it; the parenthetical clarifies
+            # there was nothing to flip.
+            click.echo("    Splunk Enterprise (HEC): disabled (no active sinks found)")
         _stop_bridge(app.cfg.data_dir)
 
-    app.cfg.save()
+    # Refresh in-memory cfg so callers (and tests) see the YAML state
+    # the writer just produced.
+    _reload_cfg_from_data_dir(app)
+
     click.echo("  Config saved")
     click.echo()
 
@@ -1923,8 +2222,8 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
-        click.echo("       Free mode is active, so no local Splunk login is required.")
-        click.echo("       A browser might briefly load Splunk's account page before it auto-enters Web.")
+        click.echo("       Log in with admin / the password from setup output above.")
+        click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
     click.echo()
     click.echo("  To disable:")
@@ -1936,3 +2235,33 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
         click.echo("    defenseclaw setup splunk --disable --o11y")
     elif did_logs:
         click.echo("    defenseclaw setup splunk --disable --logs")
+
+
+def _show_splunk_credentials(data_dir: str) -> None:
+    """Display Splunk Web login credentials from the bridge .env file."""
+    env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
+    password = None
+    if os.path.isfile(env_file):
+        try:
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("SPLUNK_PASSWORD="):
+                        password = line.split("=", 1)[1]
+                        break
+        except OSError:
+            pass
+
+    if not password:
+        click.echo("  Splunk credentials not found.")
+        click.echo(f"  Expected env file: {env_file}")
+        click.echo("  Run 'defenseclaw setup splunk --logs' to start local Splunk.")
+        return
+
+    click.echo()
+    click.echo("  Splunk Web Credentials")
+    click.echo("  ──────────────────────")
+    click.echo("    URL:       http://127.0.0.1:8000")
+    click.echo("    Username:  admin")
+    click.echo(f"    Password:  {password}")
+    click.echo()

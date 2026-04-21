@@ -76,6 +76,7 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 		column string
 	}{
 		{table: "audit_events", column: "run_id"},
+		{table: "audit_events", column: "trace_id"},
 		{table: "scan_results", column: "run_id"},
 	} {
 		ok, err := store.hasColumn(spec.table, spec.column)
@@ -85,6 +86,38 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected %s.%s to exist after migration", spec.table, spec.column)
 		}
+	}
+}
+
+func TestLogEventRoundTripIncludesTraceID(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	if err := store.LogEvent(Event{
+		Action:   "guardrail-inspection",
+		Target:   "gpt-4",
+		Details:  "trace-bearing event",
+		Severity: "HIGH",
+		TraceID:  "trace-123",
+	}); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ListEvents returned %d rows, want 1", len(events))
+	}
+	if got := events[0].TraceID; got != "trace-123" {
+		t.Fatalf("TraceID = %q, want %q", got, "trace-123")
 	}
 }
 
@@ -236,6 +269,63 @@ func TestInitIdempotent(t *testing.T) {
 	}
 	if rowCount != want {
 		t.Errorf("schema_version rows after Init x2 = %d, want %d (not duplicated)", rowCount, want)
+	}
+}
+
+func TestAcknowledgeAlertsRemainInAuditHistoryButNotAlerts(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	if err := store.LogEvent(Event{
+		Action:   "scan",
+		Target:   "skill/test-skill",
+		Details:  "found suspicious behavior",
+		Severity: "HIGH",
+	}); err != nil {
+		t.Fatalf("LogEvent alert: %v", err)
+	}
+
+	n, err := store.AcknowledgeAlerts("all")
+	if err != nil {
+		t.Fatalf("AcknowledgeAlerts: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RowsAffected = %d, want 1", n)
+	}
+
+	alerts, err := store.ListAlerts(10)
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("ListAlerts returned %d rows after acknowledgement, want 0", len(alerts))
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("ListEvents returned %d rows, want 2", len(events))
+	}
+
+	foundAck := false
+	for _, event := range events {
+		if event.Action == "acknowledge-alerts" {
+			foundAck = true
+			if event.Severity != "ACK" {
+				t.Fatalf("acknowledge-alerts severity = %q, want ACK", event.Severity)
+			}
+		}
+	}
+	if !foundAck {
+		t.Fatal("expected acknowledge-alerts event to remain in audit history")
 	}
 }
 

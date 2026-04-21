@@ -22,17 +22,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 )
 
 type SkillEnforcer struct {
 	quarantineDir string
-	shell         *sandbox.OpenShell
 }
 
-func NewSkillEnforcer(quarantineDir string, shell *sandbox.OpenShell) *SkillEnforcer {
-	return &SkillEnforcer{quarantineDir: quarantineDir, shell: shell}
+func NewSkillEnforcer(quarantineDir string) *SkillEnforcer {
+	return &SkillEnforcer{quarantineDir: quarantineDir}
 }
 
 func (e *SkillEnforcer) Quarantine(skillPath string) (string, error) {
@@ -90,30 +87,6 @@ func (e *SkillEnforcer) Restore(skillName, originalPath string) error {
 		return fmt.Errorf("enforce: restore skill: %w", err)
 	}
 	return os.Remove(src)
-}
-
-func (e *SkillEnforcer) UpdateSandboxPolicy(skillName string, block bool) error {
-	policy, err := e.shell.LoadPolicy()
-	if err != nil {
-		return fmt.Errorf("enforce: load sandbox policy: %w", err)
-	}
-
-	if block {
-		policy.DenySkill(skillName)
-	} else {
-		policy.AllowSkill(skillName)
-	}
-
-	if err := e.shell.SavePolicy(policy); err != nil {
-		return fmt.Errorf("enforce: save sandbox policy: %w", err)
-	}
-
-	if e.shell.IsAvailable() {
-		if err := e.shell.ReloadPolicy(); err != nil {
-			return fmt.Errorf("enforce: reload sandbox policy: %w", err)
-		}
-	}
-	return nil
 }
 
 func (e *SkillEnforcer) IsQuarantined(skillName string) bool {

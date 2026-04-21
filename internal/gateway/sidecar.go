@@ -29,7 +29,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -54,12 +57,34 @@ type Sidecar struct {
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
 	alertWg     sync.WaitGroup
+
+	// events is the structured gatewaylog.Writer (gateway.jsonl +
+	// stderr pretty-print). Installed during NewSidecar so every
+	// verdict/judge/lifecycle emission lands here without plumbing
+	// the writer through every call site.
+	events *gatewaylog.Writer
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, otel *telemetry.Provider) (*Sidecar, error) {
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+
+	// Persist the retention flag before any goroutines start so the
+	// very first judge invocation sees the operator-configured value
+	// (otherwise the default atomic would race with early traffic).
+	//
+	// Phase 3 flips the default to on. DEFENSECLAW_PERSIST_JUDGE is an
+	// operator-facing kill-switch for environments with strict storage
+	// or privacy constraints: setting it to 0/false/no forces retention
+	// off regardless of config.yaml. Any other value (or leaving it
+	// unset) respects the config/default.
+	retainJudge := cfg.Guardrail.RetainJudgeBodies
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_PERSIST_JUDGE"))) {
+	case "0", "false", "no", "off":
+		retainJudge = false
+	}
+	SetRetainJudgeBodies(retainJudge)
 
 	// In standalone sandbox mode the veth link is point-to-point;
 	// TLS is not needed and OpenClaw serves plain WS.
@@ -78,17 +103,30 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
 
-	// Wire LLM judge for tool call injection detection if configured.
-	if cfg.Guardrail.Judge.Enabled && cfg.Guardrail.Judge.ToolInjection {
+	// Load guardrail rule pack for judge prompts, suppressions, etc.
+	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
+	rp.Validate()
+	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
+	router.SetRulePack(rp)
+	ApplyRulePackOverrides(rp)
+
+	// Wire LLM judge when enabled. The judge handles tool-call injection
+	// detection AND tool-result PII inspection (via inspectToolResult),
+	// so it must be initialized whenever judge is enabled — not only when
+	// tool_injection is on.
+	if cfg.Guardrail.Judge.Enabled {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
-		judge := NewLLMJudge(&cfg.Guardrail.Judge, dotenvPath)
+		judge := NewLLMJudge(&cfg.Guardrail.Judge, dotenvPath, rp, cfg.ResolvedDefaultLLMAPIKey())
 		if judge != nil {
 			router.SetJudge(judge)
-			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled for tool call inspection (model=%s)\n",
-				cfg.Guardrail.Judge.Model)
+			features := "tool-result-pii"
+			if cfg.Guardrail.Judge.ToolInjection {
+				features += ", tool-injection"
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge enabled (%s) (model=%s)\n",
+				features, cfg.Guardrail.Judge.Model)
 		}
 	}
-
 
 	client.OnEvent = router.Route
 
@@ -101,6 +139,104 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			fmt.Fprintf(os.Stderr, "[sidecar] webhook dispatcher initialized (%d endpoints)\n", len(webhooks.endpoints))
 		}
 	}
+
+	// DEFENSECLAW_JSONL_DISABLE lets operators opt the structured
+	// JSONL tier out at process start without editing config.yaml —
+	// useful for noisy dev loops, ephemeral CI debug shells, and
+	// privacy-sensitive environments where the pretty stderr stream
+	// is enough. An empty JSONLPath disables the file tier cleanly;
+	// pretty logging to stderr and OTel fan-out continue unchanged.
+	// See docs/OBSERVABILITY.md#kill-switch for runbook guidance.
+	jsonlPath := filepath.Join(cfg.DataDir, "gateway.jsonl")
+	if jsonlKillSwitchEnabled(os.Getenv("DEFENSECLAW_JSONL_DISABLE")) {
+		fmt.Fprintln(os.Stderr,
+			"[sidecar] DEFENSECLAW_JSONL_DISABLE set — gateway.jsonl tier disabled (pretty + OTel still active)")
+		jsonlPath = ""
+	}
+	events, err := gatewaylog.New(gatewaylog.Config{
+		JSONLPath: jsonlPath,
+		Pretty:    os.Stderr,
+		Compress:  true,
+	})
+	if err != nil {
+		// Release the alertCtx we just acquired so we don't leak a
+		// goroutine-waiting context when boot fails before Run() picks
+		// up alertCancel.
+		alertCancel()
+		return nil, fmt.Errorf("sidecar: init gateway event writer: %w", err)
+	}
+	// Mirror every structured event onto the OTel pipeline so
+	// operators with an OTLP collector already deployed pick up
+	// verdicts / judge latency / errors for free — no extra
+	// config required when telemetry.enabled is true.
+	if otel != nil && otel.Enabled() {
+		events.WithFanout(otel.EmitGatewayEvent)
+	}
+	SetEventWriter(events)
+
+	// Phase 1: bridge audit.Logger events into gateway.jsonl so every
+	// scan result, watcher transition, and enforcement action lands
+	// in the single structured stream the TUI/SIEM consume. We install
+	// the bridge unconditionally — it is a cheap fanout and the
+	// writer itself is the single choke point for JSONL retention.
+	if logger != nil {
+		logger.SetStructuredEmitter(newAuditBridge(events))
+	}
+
+	// Phase 3: persist judge bodies to the local SQLite audit store
+	// AND emit a structured audit event so every configured sink
+	// (Splunk HEC, OTLP logs, webhook JSONL) sees a redacted summary.
+	//
+	// Retention defaults to on (see viper.SetDefault); operators who
+	// opt out via config or DEFENSECLAW_PERSIST_JUDGE=0 get neither the
+	// SQLite row nor the audit fan-out. The raw body is only touched
+	// inside this process — emitJudge redacts RawResponse before it
+	// flows into gateway.jsonl / sinks, and the InsertJudgeResponse
+	// body stays on disk under the same ACLs as the rest of the data
+	// directory.
+	if retainJudge && store != nil {
+		SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
+			if err := store.InsertJudgeResponse(audit.JudgeResponse{
+				Kind:       p.Kind,
+				Direction:  string(dir),
+				Model:      p.Model,
+				Action:     p.Action,
+				Severity:   string(p.Severity),
+				LatencyMs:  p.LatencyMs,
+				ParseError: p.ParseError,
+				Raw:        p.RawResponse,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
+			}
+
+			// Fan out a redacted summary through the audit pipeline.
+			// Using logger.LogEvent keeps the sink filters, run_id
+			// stamping, and OTel emission consistent with every
+			// other audit event — no bespoke Splunk/OTLP wiring here.
+			// RawResponse is intentionally NOT included in Details;
+			// the sinks see only the structured metadata (kind,
+			// model, latency, verdict, parse error). The full body
+			// lives only in SQLite for local forensics.
+			if logger != nil {
+				_ = logger.LogEvent(audit.Event{
+					Action:   "llm-judge-response",
+					Target:   p.Model,
+					Actor:    "defenseclaw-gateway",
+					Severity: string(p.Severity),
+					Details: fmt.Sprintf(
+						"kind=%s direction=%s action=%s latency_ms=%d input_bytes=%d parse_error=%q",
+						p.Kind, dir, p.Action, p.LatencyMs, p.InputBytes, p.ParseError,
+					),
+				})
+			}
+		})
+	}
+
+	emitLifecycle("gateway", "init", map[string]string{
+		"host":         cfg.Gateway.Host,
+		"api_port":     fmt.Sprintf("%d", cfg.Gateway.APIPort),
+		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
+	})
 
 	return &Sidecar{
 		cfg:         cfg,
@@ -115,6 +251,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		webhooks:    webhooks,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
+		events:      events,
 	}, nil
 }
 
@@ -125,6 +262,13 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	runID := os.Getenv("DEFENSECLAW_RUN_ID")
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
 		s.cfg.Gateway.AutoApprove, s.cfg.Gateway.Watcher.Enabled, s.cfg.Gateway.APIPort, s.cfg.Guardrail.Enabled, runID)
+	emitLifecycle("sidecar", "start", map[string]string{
+		"run_id":       runID,
+		"auto_approve": fmt.Sprintf("%v", s.cfg.Gateway.AutoApprove),
+		"watcher":      fmt.Sprintf("%v", s.cfg.Gateway.Watcher.Enabled),
+		"api_port":     fmt.Sprintf("%d", s.cfg.Gateway.APIPort),
+		"guardrail":    fmt.Sprintf("%v", s.cfg.Guardrail.Enabled),
+	})
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
 	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" {
@@ -144,11 +288,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			if compileErr := engine.Compile(); compileErr == nil {
 				s.opa = engine
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.cfg.PolicyDir)
+				emitLifecycle("opa", "ready", map[string]string{"policy_dir": s.cfg.PolicyDir})
 			} else {
 				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
+				emitError("opa", "compile-failed", "falling back to built-in policies", compileErr)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
+			emitError("opa", "init-failed", "falling back to built-in policies", err)
 		}
 	}
 
@@ -201,8 +348,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		s.otel.EmitStartupSpan(ctx)
 	}
 
-	// Report Splunk HEC health — not a goroutine, just state
-	s.reportSplunkHealth()
+	// Report aggregate audit-sink health — not a goroutine, just state
+	s.reportSinksHealth()
 
 	// Report sandbox health — only present when standalone mode is active
 	s.reportSandboxHealth(ctx)
@@ -215,12 +362,25 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	s.alertCancel()
 	s.alertWg.Wait()
 
+	emitLifecycle("gateway", "stop", nil)
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
 	}
 	s.logger.Close()
 	_ = s.client.Close()
+	if s.events != nil {
+		// Detach the audit bridge BEFORE closing the writer so any
+		// final audit.Logger emission during shutdown either goes
+		// through cleanly or is dropped — never writes into a closed
+		// lumberjack handle.
+		if s.logger != nil {
+			s.logger.SetStructuredEmitter(nil)
+		}
+		_ = s.events.Close()
+		SetEventWriter(nil)
+		SetJudgePersistor(nil)
+	}
 
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
@@ -429,14 +589,27 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
-	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, reason)
+	// The watcher builds `reason` from admission findings; it
+	// can embed the matched literal (e.g. the actual secret
+	// that tripped the scanner). All three downstream
+	// consumers below are externally visible:
+	//   * the enforcement message is injected into the LLM
+	//     system prompt, so leaking the raw literal there
+	//     sends PII straight to the model provider,
+	//   * the in-process NotificationQueue is later
+	//     rendered back into the LLM conversation,
+	//   * the webhook event flows to third-party sinks.
+	// We redact once at the boundary (ForSinkReason keeps
+	// rule IDs, scrubs literals) so every path is safe.
+	safeReason := redaction.ForSinkReason(reason)
+	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, safeReason)
 	notification := SecurityNotification{
 		SubjectType: subjectType,
 		SkillName:   subjectName,
 		Severity:    severity,
 		Findings:    findings,
 		Actions:     actions,
-		Reason:      reason,
+		Reason:      safeReason,
 	}
 	if s.notify != nil {
 		s.notify.Push(notification)
@@ -449,7 +622,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 			Action:    "block",
 			Target:    subjectName,
 			Actor:     "defenseclaw-watcher",
-			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), reason),
+			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), safeReason),
 			Severity:  severity,
 		}
 		s.webhooks.Dispatch(event)
@@ -600,6 +773,15 @@ func (s *Sidecar) activeSessionKeys() []string {
 
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
+	// Reuse the rule pack already loaded by NewSidecar and stored on the
+	// router, avoiding a redundant disk/embed read and potential drift.
+	rp := s.router.rp
+	if rp == nil {
+		rp = guardrail.LoadRulePack(s.cfg.Guardrail.RulePackDir)
+		rp.Validate()
+		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
+	}
+
 	proxy, err := NewGuardrailProxy(
 		&s.cfg.Guardrail,
 		&s.cfg.CiscoAIDefense,
@@ -610,6 +792,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.cfg.DataDir,
 		s.cfg.PolicyDir,
 		s.notify,
+		rp,
+		s.cfg.ResolvedDefaultLLMAPIKey(),
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)
@@ -795,66 +979,61 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 	s.health.SetSandbox(StateError, fmt.Sprintf("sandbox unreachable after %d probes (%s)", maxAttempts, addr), details)
 }
 
-// reportSplunkHealth sets the Splunk HEC subsystem health based on config.
-func (s *Sidecar) reportSplunkHealth() {
-	if !s.cfg.Splunk.Enabled {
-		s.health.SetSplunk(StateDisabled, "", nil)
+// reportSinksHealth aggregates the configured audit-sink declarations
+// into the sidecar health snapshot. Per-sink Forward/Flush errors are
+// surfaced separately on the sinks.Manager itself; this function only
+// reports static configuration health (count, kinds, names) so the TUI
+// can render a "Sinks: 2 enabled (splunk_hec, otlp_logs)" row.
+//
+// The legacy splunk-bridge auto-generated credentials surface (Splunk
+// Web URL, local user/password) is intentionally dropped — the v4
+// audit_sinks model is provider-agnostic and operators bring their own
+// collector/SIEM credentials.
+func (s *Sidecar) reportSinksHealth() {
+	enabled := 0
+	kinds := make([]string, 0, len(s.cfg.AuditSinks))
+	rows := make([]map[string]interface{}, 0, len(s.cfg.AuditSinks))
+	for _, sink := range s.cfg.AuditSinks {
+		if !sink.Enabled {
+			continue
+		}
+		enabled++
+		kinds = append(kinds, string(sink.Kind))
+		row := map[string]interface{}{
+			"name":    sink.Name,
+			"kind":    string(sink.Kind),
+			"enabled": true,
+		}
+		switch sink.Kind {
+		case config.SinkKindSplunkHEC:
+			if sink.SplunkHEC != nil {
+				row["endpoint"] = sink.SplunkHEC.Endpoint
+				row["index"] = sink.SplunkHEC.Index
+			}
+		case config.SinkKindOTLPLogs:
+			if sink.OTLPLogs != nil {
+				row["endpoint"] = sink.OTLPLogs.Endpoint
+				row["protocol"] = sink.OTLPLogs.Protocol
+			}
+		case config.SinkKindHTTPJSONL:
+			if sink.HTTPJSONL != nil {
+				row["url"] = sink.HTTPJSONL.URL
+			}
+		}
+		rows = append(rows, row)
+	}
+
+	if enabled == 0 {
+		s.health.SetSinks(StateDisabled, "", nil)
 		return
 	}
 
 	details := map[string]interface{}{
-		"hec_endpoint": s.cfg.Splunk.HECEndpoint,
-		"index":        s.cfg.Splunk.Index,
+		"count": enabled,
+		"kinds": kinds,
+		"sinks": rows,
 	}
-
-	bridgeEnv := readDotEnvFile(filepath.Join(s.cfg.DataDir, "splunk-bridge", "env"))
-	if bridgeEnv == nil {
-		bridgeEnv = readDotEnvFile(s.cfg.DataDir)
-	}
-	if bridgeEnv["SPLUNK_PASSWORD"] != "" {
-		details["web_url"] = "http://127.0.0.1:8000"
-		details["web_user"] = "admin"
-		details["web_password_set"] = true
-	}
-	if user := bridgeEnv["DEFENSECLAW_LOCAL_USERNAME"]; user != "" {
-		details["username"] = user
-	}
-	if bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"] != "" {
-		details["password_set"] = true
-	}
-
-	s.health.SetSplunk(StateRunning, "", details)
-}
-
-// readDotEnvFile reads KEY=VALUE pairs from the .env (or .env.example) file in dataDir.
-func readDotEnvFile(dataDir string) map[string]string {
-	path := filepath.Join(dataDir, ".env")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		path = filepath.Join(dataDir, ".env.example")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-	}
-	env := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line[0] == '#' {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
-			v = v[1 : len(v)-1]
-		}
-		env[k] = v
-	}
-	return env
+	s.health.SetSinks(StateRunning, "", details)
 }
 
 // Client returns the underlying gateway client for direct RPC calls.

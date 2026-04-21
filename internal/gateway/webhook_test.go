@@ -947,3 +947,349 @@ func TestCooldownNotBurnedOnFailedSend(t *testing.T) {
 		t.Fatalf("expected 8 HTTP attempts (2 full retry cycles), got %d", got)
 	}
 }
+
+// TestWebhookRedactsPIIFromAllChannels proves that every webhook
+// payload formatter (Slack, PagerDuty, Webex, generic) emits
+// redacted content instead of raw PII. The dispatcher must scrub
+// Details before calling any formatter — this test brackets all
+// four paths because each builds the payload differently (Slack
+// fields, PD custom_details map, Webex markdown, generic mirror).
+//
+// We drive the formatters via the Dispatch() entrypoint rather
+// than calling them directly so the test also covers the
+// belt-and-braces redaction we added at the Dispatch boundary.
+func TestWebhookRedactsPIIFromAllChannels(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+
+	type capture struct {
+		mu     sync.Mutex
+		bodies []string
+	}
+	caps := map[string]*capture{
+		"slack":     {},
+		"pagerduty": {},
+		"webex":     {},
+		"generic":   {},
+	}
+	mkSrv := func(key string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			caps[key].mu.Lock()
+			caps[key].bodies = append(caps[key].bodies, string(body))
+			caps[key].mu.Unlock()
+			w.WriteHeader(200)
+		}))
+	}
+	slack := mkSrv("slack")
+	pd := mkSrv("pagerduty")
+	webex := mkSrv("webex")
+	generic := mkSrv("generic")
+	defer slack.Close()
+	defer pd.Close()
+	defer webex.Close()
+	defer generic.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: slack.URL, Type: "slack", Enabled: true, CooldownSeconds: intPtr(0)},
+		{URL: pd.URL, Type: "pagerduty", Enabled: true, CooldownSeconds: intPtr(0)},
+		{URL: webex.URL, Type: "webex", Enabled: true, CooldownSeconds: intPtr(0)},
+		{URL: generic.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(0)},
+	})
+
+	evt := audit.Event{
+		ID:        "evt-pii",
+		Timestamp: time.Now().UTC(),
+		Action:    "block",
+		Target:    "sms-tool",
+		Actor:     "defenseclaw",
+		// Mix of PII shapes: phone, email, SSN.
+		Details:  "reason=matched secrets phone=4155551234 email=foo@example.com ssn=123-45-6789",
+		Severity: "HIGH",
+		RunID:    "run-pii",
+	}
+	d.Dispatch(evt)
+	d.Close()
+
+	pii := []string{"4155551234", "foo@example.com", "123-45-6789"}
+	for channel, c := range caps {
+		c.mu.Lock()
+		if len(c.bodies) == 0 {
+			c.mu.Unlock()
+			t.Errorf("%s: no payload received", channel)
+			continue
+		}
+		body := c.bodies[0]
+		c.mu.Unlock()
+		for _, needle := range pii {
+			if strings.Contains(body, needle) {
+				t.Errorf("%s payload leaked PII %q: %s", channel, needle, body)
+			}
+		}
+		// A redacted payload carries "<redacted" in its Details
+		// field; JSON-encoded as "\u003credacted" inside string
+		// values or as "<redacted" inside Webex markdown.
+		if !strings.Contains(body, "redacted len=") && !strings.Contains(body, "u003credacted") {
+			t.Errorf("%s payload missing redaction marker: %s", channel, body)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Python ↔ Go formatter parity (fixture emission)
+// ---------------------------------------------------------------------------
+
+// fixedParityEvent mirrors ``_fixed_event()`` in
+// ``cli/tests/test_webhooks.py`` down to the last byte — same ID,
+// timestamp, severity, action, and details string. Any drift in
+// either formatter will trip this test AND the sibling Python
+// ``FormatterParityTests`` since both sides pin the same structural
+// invariants on the same input.
+func fixedParityEvent() audit.Event {
+	return audit.Event{
+		ID:        "synthetic-test-fixture",
+		Timestamp: time.Date(2026, 4, 14, 0, 0, 0, 0, time.UTC),
+		Action:    "webhook.test",
+		Target:    "synthetic-webhook",
+		Actor:     "defenseclaw-cli",
+		Details:   "Synthetic test event",
+		Severity:  "HIGH",
+	}
+}
+
+// TestFormatters_EmitCompactJSON asserts that every webhook formatter
+// emits compact JSON with no trailing whitespace — the byte-for-byte
+// requirement for HMAC parity between the Go dispatcher and the
+// Python ``dispatch.py`` fallback. We can't just search for ``": "``
+// because Slack/Webex bodies legitimately contain ``*Severity:* HIGH``
+// in their markdown fields. Instead we re-parse and re-dump with
+// compact separators and assert byte-equality with the original
+// formatter output. This mirrors
+// ``FormatterParityTests.test_compact_json_no_whitespace`` in Python.
+func TestFormatters_EmitCompactJSON(t *testing.T) {
+	evt := fixedParityEvent()
+	cases := []struct {
+		name    string
+		payload []byte
+		err     error
+	}{}
+
+	slackPayload, slackErr := formatSlackPayload(evt)
+	cases = append(cases, struct {
+		name    string
+		payload []byte
+		err     error
+	}{"slack", slackPayload, slackErr})
+
+	pdPayload, pdErr := formatPagerDutyPayload(evt, "routing-key")
+	cases = append(cases, struct {
+		name    string
+		payload []byte
+		err     error
+	}{"pagerduty", pdPayload, pdErr})
+
+	webexPayload, webexErr := formatWebexPayload(evt, "room-id")
+	cases = append(cases, struct {
+		name    string
+		payload []byte
+		err     error
+	}{"webex", webexPayload, webexErr})
+
+	genericPayload, genericErr := formatGenericPayload(evt)
+	cases = append(cases, struct {
+		name    string
+		payload []byte
+		err     error
+	}{"generic", genericPayload, genericErr})
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.err != nil {
+				t.Fatalf("formatter error: %v", tc.err)
+			}
+			if len(tc.payload) == 0 {
+				t.Fatal("empty payload")
+			}
+			// Go's encoding/json never appends a trailing newline
+			// from Marshal, but pin it anyway in case we ever switch
+			// to Encoder.Encode (which does).
+			if strings.HasSuffix(string(tc.payload), "\n") {
+				t.Errorf("payload has trailing newline: %q", tc.payload)
+			}
+
+			// Round-trip parse + compact-dump must equal the
+			// original bytes — this is the compact-JSON invariant.
+			var v interface{}
+			if err := json.Unmarshal(tc.payload, &v); err != nil {
+				t.Fatalf("unmarshal: %v\npayload=%s", err, tc.payload)
+			}
+			roundtrip, err := json.Marshal(v)
+			if err != nil {
+				t.Fatalf("remarshal: %v", err)
+			}
+			if string(roundtrip) != string(tc.payload) {
+				t.Errorf("payload is not compact JSON\n  got:     %s\n  compact: %s",
+					tc.payload, roundtrip)
+			}
+		})
+	}
+}
+
+// TestFormatters_ParityInvariants pins the same structural fields
+// the Python ``FormatterParityTests`` asserts. The Python and Go
+// implementations are two parallel impls of the same spec — if they
+// drift, these invariants catch it on either side. Update the
+// ``_fixed_event()`` helper in test_webhooks.py in lockstep when
+// changing this fixture.
+func TestFormatters_ParityInvariants(t *testing.T) {
+	evt := fixedParityEvent()
+
+	t.Run("slack", func(t *testing.T) {
+		raw, err := formatSlackPayload(evt)
+		if err != nil {
+			t.Fatalf("formatSlackPayload: %v", err)
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		attachments, ok := p["attachments"].([]interface{})
+		if !ok || len(attachments) == 0 {
+			t.Fatal("expected attachments[]")
+		}
+		att := attachments[0].(map[string]interface{})
+		// HIGH → #FF6600 — must match the Python ``_SEVERITY_COLORS``.
+		if att["color"] != "#FF6600" {
+			t.Errorf("HIGH color=%v want #FF6600", att["color"])
+		}
+		blocks, ok := att["blocks"].([]interface{})
+		if !ok || len(blocks) == 0 {
+			t.Fatal("expected attachment.blocks[]")
+		}
+		header := blocks[0].(map[string]interface{})
+		if header["type"] != "header" {
+			t.Errorf("block[0].type=%v want header", header["type"])
+		}
+		hdrText := header["text"].(map[string]interface{})["text"].(string)
+		if !strings.Contains(hdrText, "webhook.test") {
+			t.Errorf("header text %q missing action", hdrText)
+		}
+	})
+
+	t.Run("pagerduty", func(t *testing.T) {
+		raw, err := formatPagerDutyPayload(evt, "routing-xyz")
+		if err != nil {
+			t.Fatalf("formatPagerDutyPayload: %v", err)
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p["routing_key"] != "routing-xyz" {
+			t.Errorf("routing_key=%v", p["routing_key"])
+		}
+		if p["event_action"] != "trigger" {
+			t.Errorf("event_action=%v want trigger", p["event_action"])
+		}
+		if _, ok := p["dedup_key"]; !ok {
+			t.Error("missing dedup_key")
+		}
+		pd := p["payload"].(map[string]interface{})
+		// HIGH maps to PD "error"; CRITICAL maps to "critical".
+		if pd["severity"] != "error" {
+			t.Errorf("pd severity=%v want error (HIGH)", pd["severity"])
+		}
+	})
+
+	t.Run("webex", func(t *testing.T) {
+		raw, err := formatWebexPayload(evt, "room-id-abc")
+		if err != nil {
+			t.Fatalf("formatWebexPayload: %v", err)
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p["roomId"] != "room-id-abc" {
+			t.Errorf("roomId=%v", p["roomId"])
+		}
+		md := p["markdown"].(string)
+		if !strings.Contains(md, "DefenseClaw: webhook.test") {
+			t.Errorf("markdown %q missing action header", md)
+		}
+	})
+
+	t.Run("generic_wrapper", func(t *testing.T) {
+		raw, err := formatGenericPayload(evt)
+		if err != nil {
+			t.Fatalf("formatGenericPayload: %v", err)
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p["webhook_type"] != "defenseclaw_enforcement" {
+			t.Errorf("webhook_type=%v", p["webhook_type"])
+		}
+		if p["defenseclaw_version"] != "1.0" {
+			t.Errorf("defenseclaw_version=%v", p["defenseclaw_version"])
+		}
+		inner := p["event"].(map[string]interface{})
+		if inner["id"] != "synthetic-test-fixture" {
+			t.Errorf("event.id=%v", inner["id"])
+		}
+		if inner["severity"] != "HIGH" {
+			t.Errorf("event.severity=%v", inner["severity"])
+		}
+	})
+
+	t.Run("hmac_known_vector", func(t *testing.T) {
+		// Same vector as ``test_hmac_matches_known_vector`` in
+		// test_webhooks.py. Any conforming HMAC-SHA256 impl converges
+		// on this hex, so a mismatch means Go or Python is broken.
+		got := computeHMAC([]byte("hello world"), "k")
+		const want = "67eedc5d50852aacd055cc940b52edde89eba69b15902b2a9a82483eab70d12d"
+		if got != want {
+			t.Errorf("computeHMAC mismatch\n  got:  %s\n  want: %s", got, want)
+		}
+	})
+}
+
+// TestWebhookRevealFlagDoesNotUnmaskPayloads confirms that webhooks,
+// being persistent remote sinks, never honor DEFENSECLAW_REVEAL_PII.
+// The reveal flag is stderr-only; anything crossing the network
+// boundary must stay redacted.
+func TestWebhookRevealFlagDoesNotUnmaskPayloads(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+
+	var body string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(buf)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(0)},
+	})
+	evt := audit.Event{
+		Action:   "block",
+		Target:   "t",
+		Actor:    "defenseclaw",
+		Details:  "phone=4155551234",
+		Severity: "HIGH",
+	}
+	d.Dispatch(evt)
+	d.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(body, "4155551234") {
+		t.Fatalf("webhook unmasked under reveal flag: %s", body)
+	}
+}

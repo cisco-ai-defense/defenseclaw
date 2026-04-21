@@ -1,0 +1,25 @@
+version: 1
+tools:
+  - name: users_list
+    result_inspection: true
+    judge_result: true
+    min_entities_for_alert: 3
+  - name: users_search
+    result_inspection: true
+    judge_result: true
+    min_entities_for_alert: 3
+  - name: users_org_info
+    result_inspection: true
+    judge_result: false
+  - name: delegated_email_list_principals
+    result_inspection: true
+    judge_result: true
+    min_entities_for_alert: 2
+  - name: contacts_list
+    result_inspection: true
+    judge_result: true
+    min_entities_for_alert: 3
+  - name: mail_search
+    result_inspection: true
+    judge_result: true
+    min_entities_for_alert: 2
