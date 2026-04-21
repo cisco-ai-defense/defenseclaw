@@ -83,6 +83,87 @@ class Logger:
         self.store.log_event(event)
         self._splunk.forward_event(event)
 
+    def log_activity(
+        self,
+        *,
+        actor: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        before: Any | None = None,
+        after: Any | None = None,
+        diff: list[dict[str, Any]] | None = None,
+        version_from: str = "",
+        version_to: str = "",
+        severity: str = "INFO",
+    ) -> None:
+        activity_id = str(uuid.uuid4())
+        before_json = json.dumps(before, default=str, sort_keys=True) if before is not None else ""
+        after_json = json.dumps(after, default=str, sort_keys=True) if after is not None else ""
+        diff_json = json.dumps(diff or [], default=str, sort_keys=True)
+        tt = target_type or "unknown"
+        tid = target_id or "unknown"
+        self.store.insert_activity_event(
+            activity_id,
+            actor=actor or "system",
+            action=action,
+            target_type=tt,
+            target_id=tid,
+            before_json=before_json,
+            after_json=after_json,
+            diff_json=diff_json,
+            version_from=version_from,
+            version_to=version_to,
+        )
+        # Redacted summary for audit_events / alerts (mirrors Go sanitize path).
+        payload = {
+            "activity_id": activity_id,
+            "actor": actor,
+            "action": action,
+            "target_type": tt,
+            "target_id": tid,
+            "reason": "",
+            "before": before,
+            "after": after,
+            "diff": diff or [],
+            "version_from": version_from,
+            "version_to": version_to,
+        }
+        target = f"{tt}:{tid}"
+        event = Event(
+            timestamp=datetime.now(timezone.utc),
+            action=action,
+            actor=actor,
+            target=target,
+            details=json.dumps(payload, default=str, sort_keys=True),
+            severity=severity or "INFO",
+            run_id=_current_run_id(),
+        )
+        self.store.log_event(event)
+        self._splunk.forward_event(event)
+
+    def log_alert(
+        self,
+        source: str,
+        severity: str,
+        summary: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {"source": source, "summary": summary}
+        if details:
+            payload["details"] = details
+        event = Event(
+            timestamp=datetime.now(timezone.utc),
+            action="alert",
+            target=source,
+            actor="defenseclaw",
+            details=json.dumps(payload, default=str, sort_keys=True),
+            severity=severity or "WARN",
+            run_id=_current_run_id(),
+        )
+        self.store.log_event(event)
+        self._splunk.forward_event(event)
+
     def close(self) -> None:
         self._splunk.close()
 

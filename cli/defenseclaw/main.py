@@ -29,6 +29,7 @@ import click
 from defenseclaw import __version__
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
+from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_doctor import doctor
@@ -39,6 +40,7 @@ from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.commands.cmd_sandbox import sandbox
+from defenseclaw.commands.cmd_settings import settings_cmd
 from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.commands.cmd_status import status
@@ -146,6 +148,7 @@ cli.add_command(mcp)
 cli.add_command(aibom)
 cli.add_command(status)
 cli.add_command(alerts)
+cli.add_command(audit)
 cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(tui)
@@ -154,6 +157,7 @@ cli.add_command(sandbox)
 cli.add_command(upgrade)
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
+cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")
 cli.add_command(version_cmd, "version")

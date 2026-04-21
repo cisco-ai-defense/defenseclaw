@@ -26,6 +26,7 @@ import json
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.provenance import stamp_aibom_inventory
 
 
 @click.group()
@@ -84,6 +85,7 @@ def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | N
         click.echo(f"Warning: {len(errors)} openclaw command(s) failed", err=True)
 
     if as_json:
+        stamp_aibom_inventory(inv, app.cfg)
         click.echo(json.dumps(inv, indent=2))
         return
 

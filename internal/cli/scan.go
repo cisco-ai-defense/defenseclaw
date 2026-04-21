@@ -18,7 +18,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -28,7 +27,8 @@ import (
 )
 
 var (
-	scanOutputJSON bool
+	scanOutputJSON  bool
+	scanPrintSchema bool
 )
 
 var scanCmd = &cobra.Command{
@@ -50,12 +50,21 @@ YAML, JSON, XML, C/C++, and Rust files.`,
 }
 
 func init() {
-	scanCodeCmd.Flags().BoolVar(&scanOutputJSON, "json", false, "Output results as JSON")
+	scanCodeCmd.Flags().BoolVar(&scanOutputJSON, "json", false, "Output results as JSON (v7 scan-result contract)")
+	scanCodeCmd.Flags().BoolVar(&scanPrintSchema, "schema", false, "Print scan-result.json schema (for downstream validators) and exit")
 	scanCmd.AddCommand(scanCodeCmd)
 	rootCmd.AddCommand(scanCmd)
 }
 
 func runScanCode(_ *cobra.Command, args []string) error {
+	if scanPrintSchema {
+		if _, err := os.Stdout.Write(scanResultSchemaJSON); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(os.Stdout)
+		return nil
+	}
+
 	target := args[0]
 
 	if _, err := os.Stat(target); err != nil {
@@ -78,9 +87,16 @@ func runScanCode(_ *cobra.Command, args []string) error {
 	}
 
 	if scanOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		b, err := marshalScanResultV7(result, appVersion)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(b)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(os.Stdout)
+		return err
 	}
 
 	printCodeScanResults(result)
