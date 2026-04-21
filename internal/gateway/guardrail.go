@@ -848,9 +848,21 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 
+	// PII and secret regexes run against BOTH `content` (byte-aligned,
+	// case-preserved) AND `lower` (the normalizeForTriage output) via
+	// findRegexMatch so zero-width / Unicode-whitespace evasions
+	// ("1234\u200B5678\u200B9012\u200B3456" for credit card,
+	// "token\u00A0=\u00A0<secret>" for the token regex) still surface
+	// here. Without the normalized fallback the docstring above would
+	// be a lie: PII/secret regexes are exactly the surfaces an attacker
+	// would target with invisible-character splicing.
 	for _, re := range piiDataRegexes {
-		if re.MatchString(content) {
-			flags = append(flags, "pii-data:"+re.FindString(content))
+		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+			flag := "pii-data:" + match
+			if norm {
+				flag = "pii-data:[normalized] " + match
+			}
+			flags = append(flags, flag)
 			isHigh = true
 		}
 	}
@@ -861,8 +873,12 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 	for _, re := range secretPatternRegexes {
-		if re.MatchString(content) {
-			flags = append(flags, re.FindString(content))
+		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+			flag := match
+			if norm {
+				flag = "[normalized] " + match
+			}
+			flags = append(flags, flag)
 		}
 	}
 
@@ -1036,26 +1052,41 @@ func triagePatterns(direction, content string) []TriageSignal {
 		}
 	}
 
-	// PII data patterns (direction-independent).
-	if loc := ssnDashRegex.FindStringIndex(content); loc != nil {
+	// PII data patterns (direction-independent). Matched against both
+	// `content` and `lower` via findRegexLoc so zero-width / Unicode-
+	// whitespace splicing ("123-45\u200B-6789", "4111\u00A04111…")
+	// cannot slip past SSN / 9-digit / credit-card triage.
+	if loc, src, norm, ok := findRegexLoc(content, lower, ssnDashRegex); ok {
+		ev := extractEvidenceAt(src, loc[0], loc[1])
+		if norm {
+			ev = "[normalized] " + ev
+		}
 		signals = append(signals, TriageSignal{
 			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-PII-SSN",
 			Category: "pii", Pattern: "SSN (xxx-xx-xxxx)",
-			Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.90,
+			Evidence: ev, Confidence: 0.90,
 		})
 	}
-	if loc := bare9DigitRegex.FindStringIndex(content); loc != nil {
+	if loc, src, norm, ok := findRegexLoc(content, lower, bare9DigitRegex); ok {
+		ev := extractEvidenceAt(src, loc[0], loc[1])
+		if norm {
+			ev = "[normalized] " + ev
+		}
 		signals = append(signals, TriageSignal{
 			Level: "NEEDS_REVIEW", FindingID: "TRIAGE-PII-9DIGIT",
 			Category: "pii", Pattern: "9-digit number",
-			Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.30,
+			Evidence: ev, Confidence: 0.30,
 		})
 	}
-	if loc := creditCardRegex.FindStringIndex(content); loc != nil {
+	if loc, src, norm, ok := findRegexLoc(content, lower, creditCardRegex); ok {
+		ev := extractEvidenceAt(src, loc[0], loc[1])
+		if norm {
+			ev = "[normalized] " + ev
+		}
 		signals = append(signals, TriageSignal{
 			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-PII-CC",
 			Category: "pii", Pattern: "credit card number",
-			Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.95,
+			Evidence: ev, Confidence: 0.95,
 		})
 	}
 
@@ -1074,12 +1105,22 @@ func triagePatterns(direction, content string) []TriageSignal {
 			})
 		}
 	}
+	// Secret regex: tries `content` first (case/whitespace preserved
+	// for audit context) and falls back to `lower` so evasions like
+	// "token\u200B=\u200B<60-char key>" still fire. Without the
+	// fallback the docstring on scanLocalPatterns above — which
+	// promises normalization defeats whitespace/slash-run evasions —
+	// would not hold for secrets.
 	for _, re := range secretPatternRegexes {
-		if loc := re.FindStringIndex(content); loc != nil {
+		if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
+			ev := extractEvidenceAt(src, loc[0], loc[1])
+			if norm {
+				ev = "[normalized] " + ev
+			}
 			signals = append(signals, TriageSignal{
 				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
 				Category: "secret", Pattern: re.String(),
-				Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.75,
+				Evidence: ev, Confidence: 0.75,
 			})
 		}
 	}
@@ -1195,6 +1236,47 @@ func extractEvidenceRegex(original, normalized string, re *regexp.Regexp) string
 		return "[normalized] " + extractEvidenceAt(normalized, loc[0], loc[1])
 	}
 	return ""
+}
+
+// findRegexLoc locates the first match of `re` in `original`; when
+// `original` has no match, it falls back to `normalized` (the
+// normalizeForTriage output: NFC-composed, zero-width-stripped,
+// lowercased, slash-collapsed) so evasions that splice invisible or
+// Unicode-whitespace characters between otherwise-matching bytes —
+// "4111\u200B1111\u200B1111\u200B1111" for credit card,
+// "token\u00A0=\u00A0<key>" for the token secret regex — still fire.
+//
+// Returns the location, the string the location indexes into (so
+// callers can extractEvidenceAt it without tracking which path was
+// taken), wasNormalized telling callers to prefix operator-visible
+// evidence with "[normalized] ", and ok = whether any match was found.
+// The fallback is only consulted when `original` misses, so in the
+// common non-evasion case we preserve byte-aligned original-text
+// offsets and avoid extra regex work.
+func findRegexLoc(original, normalized string, re *regexp.Regexp) (loc []int, source string, wasNormalized, ok bool) {
+	if l := re.FindStringIndex(original); l != nil {
+		return l, original, false, true
+	}
+	if l := re.FindStringIndex(normalized); l != nil {
+		return l, normalized, true, true
+	}
+	return nil, "", false, false
+}
+
+// findRegexMatch is the FindString sibling of findRegexLoc. Used by
+// scanLocalPatterns where callers record the matched substring rather
+// than slicing a ±window around it. Same original-first / normalized-
+// fallback contract; wasNormalized tells the caller to tag the flag
+// with "[normalized] " so operators grepping audit logs can see which
+// evasion path fired.
+func findRegexMatch(original, normalized string, re *regexp.Regexp) (match string, wasNormalized, ok bool) {
+	if m := re.FindString(original); m != "" {
+		return m, false, true
+	}
+	if m := re.FindString(normalized); m != "" {
+		return m, true, true
+	}
+	return "", false, false
 }
 
 func extractEvidenceAt(content string, matchStart, matchEnd int) string {
