@@ -19,11 +19,12 @@ import (
 
 // slashWhitespaceRegex matches a `/` or `\` together with any
 // whitespace immediately surrounding it on EITHER side in a single
-// match. `\s*` on both sides is fine — for the common no-whitespace
-// case (e.g. `/etc/passwd`) the zero-width match replaces the slash
-// with itself and the scan advances a byte at a time. Non-overlapping
-// scan from the engine guarantees we handle each slash exactly once,
-// which is what makes normalization idempotent even with runs like
+// match. The character class combines Go's `\s` (ASCII whitespace)
+// with `\p{Z}` (Unicode whitespace property: NBSP, ideographic space,
+// line/paragraph separators, etc.) so attacks substituting U+00A0
+// for ASCII space still collapse. Non-overlapping scan from the
+// engine guarantees we handle each slash exactly once, which is
+// what makes normalization idempotent even with runs like
 // "   /   etc   /   passwd   ".
 //
 // Side-effect on benign prose: "I love / hate" collapses to
@@ -31,7 +32,7 @@ import (
 // preserved for the judge, and (b) any path-rooted triage regex that
 // cared about the collapse would also have cared about the original
 // form anyway.
-var slashWhitespaceRegex = regexp.MustCompile(`\s*([/\\])\s*`)
+var slashWhitespaceRegex = regexp.MustCompile(`[\s\p{Z}]*([/\\])[\s\p{Z}]*`)
 
 // forwardSlashRunRegex and backSlashRunRegex collapse runs of 2+
 // forward OR back slashes down to a single slash of the SAME kind.
@@ -45,25 +46,66 @@ var slashWhitespaceRegex = regexp.MustCompile(`\s*([/\\])\s*`)
 var forwardSlashRunRegex = regexp.MustCompile(`/{2,}`)
 var backSlashRunRegex = regexp.MustCompile(`\\{2,}`)
 
+// stripZeroWidth drops zero-width / format characters that a human
+// reader does not see but that break ASCII fast paths. Covers:
+//
+//   - U+200B ZERO WIDTH SPACE
+//   - U+200C ZERO WIDTH NON-JOINER
+//   - U+200D ZERO WIDTH JOINER
+//   - U+2060 WORD JOINER
+//   - U+FEFF BYTE ORDER MARK / ZERO WIDTH NO-BREAK SPACE
+//
+// Implementation uses strings.Map so the scan is single-pass and
+// allocation-free when no zero-width chars are present (the common
+// case). These are stripped before the slash-adjacent whitespace
+// collapse because `\p{Z}` deliberately does NOT cover zero-width
+// chars (Unicode classifies them as `Cf` format, not `Z` separator).
+func stripZeroWidth(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF':
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // normalizeForTriage returns a canonicalized form of content suitable
 // for running whole-word and path-anchored regexes against. The
 // normalizations applied, in order:
 //
 //  1. Unicode NFC composition so that pre-composed "é" and
 //     decomposed "e\u0301" are treated identically. Without this,
-//     "sén̈sitivie" with a combining mark slips past every regex
+//     "se\u0301nsitive" with a combining mark slips past every regex
 //     scanning the ASCII fast path, even though a human reader treats
 //     the rendered string as "sensitive".
-//  2. Lowercase via strings.ToLower. All triage regexes are already
-//     `(?i)` but the cheap lowercase makes follow-on substring
-//     scans with strings.Contains (which is case-sensitive) work
-//     correctly too.
-//  3. Whitespace-around-slash collapse — removes spaces/tabs/newlines
-//     on either side of `/` or `\`. This defeats the "/ etc / passwd"
-//     visual evasion.
-//  4. Duplicate-slash collapse — collapses `//…//` and `\\…\\` runs
+//  2. Zero-width strip — removes U+200B/C/D, U+2060, U+FEFF which
+//     are invisible to the reader but break ASCII fast paths
+//     ("/et\u200Bc/passwd" → "/etc/passwd").
+//  3. Lowercase via strings.ToLower. Substring scans with
+//     strings.Contains (case-sensitive) operate on the normalized
+//     string so a case-only mismatch does not leak past triage.
+//  4. Whitespace-around-slash collapse — removes any ASCII whitespace
+//     OR Unicode-Z whitespace (NBSP, ideographic space, etc.) on
+//     either side of `/` or `\`. Defeats the "/ etc / passwd" visual
+//     evasion and its NBSP variant.
+//  5. Duplicate-slash collapse — collapses `//…//` and `\\…\\` runs
 //     down to a single separator of the same kind, preserving the
 //     distinction between POSIX and Windows paths.
+//
+// NOT covered (explicit non-goals — documented so operators know
+// what to expect when choosing between relying on normalization and
+// relying on the LLM judge as defense-in-depth):
+//
+//   - Homoglyph folding (Cyrillic/Greek lookalikes, full-width Latin).
+//     An attacker can still send Cyrillic `еtc/passwd` (first byte
+//     U+0435) and miss the regex. Mitigation is the LLM judge via
+//     judge_sweep, not this helper.
+//   - Case-folding beyond strings.ToLower. Unicode full case-folding
+//     (e.g. German ß → ss) is not applied because it breaks round-
+//     tripping for token-level evidence extraction.
+//   - Diacritic stripping. "é" stays "é"; only decomposed forms are
+//     composed.
 //
 // IMPORTANT: this function is intended for triage regex matching ONLY.
 // The guardrail deliberately does NOT pass the normalized string to
@@ -85,13 +127,16 @@ func normalizeForTriage(content string) string {
 	// ASCII-only inputs returns the original string unchanged (the
 	// x/text package fast-paths the common case).
 	s := norm.NFC.String(content)
-	// Step 2: lowercase.
+	// Step 2: strip zero-width / format characters. Allocation-free
+	// when none are present.
+	s = stripZeroWidth(s)
+	// Step 3: lowercase.
 	s = strings.ToLower(s)
-	// Step 3: collapse whitespace adjacent to slashes. $1 is the
-	// captured slash character so a run like "   /   " collapses to
-	// just "/" while preserving `/` vs `\` distinction.
+	// Step 4: collapse whitespace (ASCII and Unicode-Z) adjacent to
+	// slashes. $1 is the captured slash character so a run like
+	// "   /\u00A0" collapses to just "/" while preserving `/` vs `\`.
 	s = slashWhitespaceRegex.ReplaceAllString(s, "$1")
-	// Step 4: collapse duplicate slashes of the same kind.
+	// Step 5: collapse duplicate slashes of the same kind.
 	s = forwardSlashRunRegex.ReplaceAllString(s, `/`)
 	s = backSlashRunRegex.ReplaceAllString(s, `\`)
 	return s

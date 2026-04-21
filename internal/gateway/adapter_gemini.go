@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -115,7 +116,11 @@ func injectSystemInstructionGemini(raw json.RawMessage, content string) (json.Ra
 	notePart := map[string]string{"text": content}
 
 	cur, has := m["systemInstruction"]
-	if !has || len(cur) == 0 || string(cur) == "null" {
+	// TrimSpace-then-peek: pretty-printed source JSON leaves
+	// whitespace inside json.RawMessage values, which breaks a raw
+	// cur[0] shape check.
+	trimmed := bytes.TrimSpace(cur)
+	if !has || len(trimmed) == 0 || string(trimmed) == "null" {
 		obj := map[string]interface{}{
 			"role":  "system",
 			"parts": []map[string]string{notePart},
@@ -128,7 +133,7 @@ func injectSystemInstructionGemini(raw json.RawMessage, content string) (json.Ra
 		return json.Marshal(m)
 	}
 
-	switch cur[0] {
+	switch trimmed[0] {
 	case '"':
 		var existing string
 		if err := json.Unmarshal(cur, &existing); err != nil {
@@ -154,9 +159,12 @@ func injectSystemInstructionGemini(raw json.RawMessage, content string) (json.Ra
 			return nil, fmt.Errorf("proxy: inject gemini systemInstruction: unmarshal object: %w", err)
 		}
 		var parts []json.RawMessage
-		if pb, ok := obj["parts"]; ok && len(pb) > 0 && pb[0] == '[' {
-			if err := json.Unmarshal(pb, &parts); err != nil {
-				return nil, fmt.Errorf("proxy: inject gemini systemInstruction: unmarshal parts: %w", err)
+		if pb, ok := obj["parts"]; ok {
+			pbTrim := bytes.TrimSpace(pb)
+			if len(pbTrim) > 0 && pbTrim[0] == '[' {
+				if err := json.Unmarshal(pb, &parts); err != nil {
+					return nil, fmt.Errorf("proxy: inject gemini systemInstruction: unmarshal parts: %w", err)
+				}
 			}
 		}
 		noteBytes, err := json.Marshal(notePart)
@@ -182,16 +190,29 @@ func injectSystemInstructionGemini(raw json.RawMessage, content string) (json.Ra
 		}
 		m["systemInstruction"] = out
 	default:
-		return nil, fmt.Errorf("proxy: inject gemini systemInstruction: unexpected shape %q", string(cur[:1]))
+		return nil, fmt.Errorf("proxy: inject gemini systemInstruction: unexpected shape %q", string(trimmed[:1]))
 	}
 	return json.Marshal(m)
 }
 
 // launderGeminiHistory removes model turns from the `contents` array
-// whose concatenated parts[].text begins with the DefenseClaw banner.
-// Gemini's assistant role is called "model"; matching on "assistant"
-// would silently leak stale DefenseClaw refusals into every Vertex
+// whose FIRST text part begins with the DefenseClaw banner. Gemini's
+// assistant role is called "model"; matching on "assistant" would
+// silently leak stale DefenseClaw refusals into every Vertex
 // conversation that has ever been blocked.
+//
+// We check only the first non-empty text part (rather than the
+// concatenation of all parts[].text) for two reasons:
+//
+//  1. DefenseClaw emits its block banner as the first part of a
+//     single-part model turn — that is the only shape the proxy
+//     writes, so concatenation would never help us detect legitimate
+//     blocks that concatenation wouldn't also detect.
+//  2. Concatenation risks false positives: a model turn with a
+//     legitimate text prelude followed by a functionCall whose
+//     echoed arguments happen to re-emit the banner would be
+//     stripped. Authentic upstream assistant content must be
+//     preserved — we are laundering DefenseClaw-shaped turns only.
 //
 // No-op when `contents` is absent or not an array (request is malformed
 // and upstream will reject it anyway; better than corrupting the body).
@@ -201,7 +222,8 @@ func launderGeminiHistory(raw json.RawMessage) (json.RawMessage, int, error) {
 		return raw, 0, fmt.Errorf("proxy: launder gemini history: unmarshal: %w", err)
 	}
 	contentsBytes, ok := m["contents"]
-	if !ok || len(contentsBytes) == 0 || contentsBytes[0] != '[' {
+	contentsTrim := bytes.TrimSpace(contentsBytes)
+	if !ok || len(contentsTrim) == 0 || contentsTrim[0] != '[' {
 		return raw, 0, nil
 	}
 	var turns []json.RawMessage
@@ -218,11 +240,18 @@ func launderGeminiHistory(raw json.RawMessage) (json.RawMessage, int, error) {
 			} `json:"parts"`
 		}
 		if json.Unmarshal(item, &probe) == nil && probe.Role == "model" && len(probe.Parts) > 0 {
-			var b strings.Builder
+			// Find the first part that carries any text. Parts with
+			// empty text (e.g. functionCall blocks) are skipped so a
+			// leading tool-call block does not hide the banner from
+			// the check.
+			var firstText string
 			for _, p := range probe.Parts {
-				b.WriteString(p.Text)
+				if p.Text != "" {
+					firstText = p.Text
+					break
+				}
 			}
-			if strings.HasPrefix(b.String(), defenseClawBlockBanner) {
+			if strings.HasPrefix(firstText, defenseClawBlockBanner) {
 				stripped++
 				continue
 			}

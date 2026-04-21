@@ -11,7 +11,10 @@
 package gateway
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -32,6 +35,43 @@ func TestAdapterRegistry_PriorityForMessagesPath(t *testing.T) {
 	}
 	if got := a.Name(); got != "anthropic" {
 		t.Errorf("adapter for /v1/messages = %q, want %q", got, "anthropic")
+	}
+}
+
+// TestAdapterRegistry_FullOrder pins the complete registry order. The
+// priority-for-messages-path test above only catches one specific
+// misordering (anthropic vs openai-chat). This test catches any
+// reorder, insertion, or deletion in buildAdapterRegistry(), so a PR
+// that e.g. moves ollama above openai-chat or drops the bedrock
+// adapter entirely fails the suite with a clear diff rather than
+// surfacing as mysterious 400s at runtime.
+//
+// When intentionally adding a new adapter, update this test's want
+// slice in the SAME commit as the buildAdapterRegistry change — that
+// paired diff is the review gate that makes sure adapter priority is
+// a considered decision rather than an alphabetical accident.
+func TestAdapterRegistry_FullOrder(t *testing.T) {
+	got := make([]string, 0, len(adapterRegistry))
+	for _, a := range adapterRegistry {
+		got = append(got, a.Name())
+	}
+	want := []string{
+		"openai-responses",
+		"anthropic",
+		"gemini",
+		"bedrock-converse",
+		"ollama",
+		"openai-chat", // catch-all — must stay last
+	}
+	if len(got) != len(want) {
+		t.Fatalf("adapterRegistry length = %d, want %d\ngot : %v\nwant: %v",
+			len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("adapterRegistry[%d] = %q, want %q\nfull got : %v\nfull want: %v",
+				i, got[i], want[i], got, want)
+		}
 	}
 }
 
@@ -290,5 +330,195 @@ func TestOllamaAdapter_DispatchesToChatCompletionsShape(t *testing.T) {
 	}
 	if len(got.Messages) < 2 || got.Messages[0].Role != "system" || got.Messages[0].Content != notice {
 		t.Errorf("messages[0] = %+v, want leading system notice", got.Messages[0])
+	}
+}
+
+// TestOllamaAdapter_BlockResponseIsValidNDJSON parses the block
+// response byte-for-byte and verifies it is a single valid NDJSON
+// frame carrying the shape Ollama clients expect: `done:true`,
+// `done_reason`, and `message.content` = the banner. This is the
+// regression test for (a) the duplicated-reason field that was
+// previously in the payload and (b) the streaming UX concern that
+// clients behind buffering proxies wouldn't see the frame.
+func TestOllamaAdapter_BlockResponseIsValidNDJSON(t *testing.T) {
+	rec := httptest.NewRecorder()
+	p := &GuardrailProxy{}
+	const msg = "[DEFENSECLAW] blocked: prompt injection"
+	p.writeBlockedResponseOllama(rec, "llama3.1", msg)
+
+	// Headers — X-Accel-Buffering:no tells nginx/HAProxy to forward
+	// chunks immediately. If this regresses, streaming clients behind
+	// a reverse proxy will see the block with a multi-second latency.
+	if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("X-Accel-Buffering = %q, want \"no\"", got)
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Errorf("X-DefenseClaw-Blocked = %q, want \"true\"", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/x-ndjson" {
+		t.Errorf("Content-Type = %q, want application/x-ndjson", got)
+	}
+
+	// Parse the body as NDJSON (one JSON object per line). A single
+	// terminal frame is the current contract, but using bufio.Scanner
+	// future-proofs the test if we ever split the block into a
+	// partial-content chunk + terminal-done chunk.
+	scanner := bufio.NewScanner(bytes.NewReader(rec.Body.Bytes()))
+	var frames []map[string]any
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(line, &frame); err != nil {
+			t.Fatalf("block response line %q not valid JSON: %v", string(line), err)
+		}
+		frames = append(frames, frame)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scanner error: %v", err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("expected exactly 1 NDJSON frame, got %d: %v", len(frames), frames)
+	}
+
+	frame := frames[0]
+	if done, _ := frame["done"].(bool); !done {
+		t.Errorf("frame.done = %v, want true", frame["done"])
+	}
+	if dr, _ := frame["done_reason"].(string); dr != "guardrail_intervened" {
+		t.Errorf("frame.done_reason = %q, want guardrail_intervened", dr)
+	}
+	if blocked, _ := frame["defenseclaw_blocked"].(bool); !blocked {
+		t.Errorf("frame.defenseclaw_blocked = %v, want true", frame["defenseclaw_blocked"])
+	}
+	// Regression: defenseclaw_reason must NOT be present. It used to
+	// duplicate the banner, inflating payload size and leaking an
+	// internal-only field surface.
+	if _, has := frame["defenseclaw_reason"]; has {
+		t.Errorf("frame.defenseclaw_reason must be absent; got %v", frame["defenseclaw_reason"])
+	}
+	msgObj, ok := frame["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("frame.message is not an object: %T", frame["message"])
+	}
+	if role, _ := msgObj["role"].(string); role != "assistant" {
+		t.Errorf("frame.message.role = %q, want assistant", role)
+	}
+	if content, _ := msgObj["content"].(string); content != msg {
+		t.Errorf("frame.message.content = %q, want %q", content, msg)
+	}
+}
+
+// TestGeminiAdapter_StreamBlockWritesSingleSSEFrame covers the
+// streaming block writer: Gemini's streamGenerateContent clients
+// expect `data:` SSE frames whose payload is a candidates[] envelope
+// identical to the non-stream shape. We assert the frame is valid
+// SSE, parses as JSON, and carries finishReason=SAFETY so the client
+// library closes the stream cleanly rather than hanging waiting for
+// more chunks.
+func TestGeminiAdapter_StreamBlockWritesSingleSSEFrame(t *testing.T) {
+	rec := httptest.NewRecorder()
+	p := &GuardrailProxy{}
+	const msg = "[DEFENSECLAW] blocked: policy violation"
+	p.writeBlockedStreamGemini(rec, msg)
+
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", got)
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Errorf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+
+	body := rec.Body.String()
+	if !strings.HasPrefix(body, "data: ") {
+		t.Fatalf("expected SSE `data:` prefix, got %q", body)
+	}
+	// Strip `data: ` prefix and trailing `\n\n` to recover the JSON.
+	payload := strings.TrimPrefix(body, "data: ")
+	payload = strings.TrimRight(payload, "\n")
+	var frame struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+				Role string `json:"role"`
+			} `json:"content"`
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+		DefenseClawBlocked bool `json:"defenseclaw_blocked"`
+	}
+	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+		t.Fatalf("SSE frame payload is not valid JSON (%v): %q", err, payload)
+	}
+	if len(frame.Candidates) != 1 {
+		t.Fatalf("expected exactly 1 candidate, got %d", len(frame.Candidates))
+	}
+	c := frame.Candidates[0]
+	if c.FinishReason != "SAFETY" {
+		t.Errorf("candidate.finishReason = %q, want SAFETY", c.FinishReason)
+	}
+	if c.Content.Role != "model" {
+		t.Errorf("candidate.content.role = %q, want model", c.Content.Role)
+	}
+	if len(c.Content.Parts) != 1 || c.Content.Parts[0].Text != msg {
+		t.Errorf("candidate.content.parts = %+v, want single text part with banner",
+			c.Content.Parts)
+	}
+	if !frame.DefenseClawBlocked {
+		t.Error("frame.defenseclaw_blocked must be true for downstream auditability")
+	}
+}
+
+// TestGeminiAdapter_LaunderHistory_FirstPartOnlyCheck pins the
+// first-part-only semantics for model-turn laundering. Previously the
+// code concatenated all parts[].text and prefix-matched the banner —
+// meaning an authentic upstream model turn with a toolCall block
+// preceding a banner-echoing text block would have been stripped.
+// After the fix, only the first TEXT-carrying part is checked, and
+// non-text parts are skipped.
+func TestGeminiAdapter_LaunderHistory_FirstPartOnlyCheck(t *testing.T) {
+	// This turn has an empty-text part (simulating a functionCall
+	// wrapper) followed by an authentic text part that happens to
+	// start with the banner. Under the new semantics we DO strip
+	// this turn because the banner is the first text part — that is
+	// the DefenseClaw emission shape. Under the OLD concat semantics
+	// we would have also stripped it (the concat also starts with
+	// the banner), so this case alone doesn't discriminate; include
+	// it for parity.
+	body := json.RawMessage(`{"contents":[
+		{"role":"model","parts":[
+			{"functionCall":{"name":"tool","args":{}}},
+			{"text":"` + defenseClawBlockBanner + ` blocked"}
+		]}
+	]}`)
+	out, stripped, err := launderGeminiHistory(body)
+	if err != nil {
+		t.Fatalf("launder error: %v", err)
+	}
+	if stripped != 1 {
+		t.Errorf("expected 1 turn stripped, got %d", stripped)
+	}
+	_ = out
+
+	// This turn exercises the FIX: first text part is authentic
+	// upstream content, a LATER text part happens to start with the
+	// banner (an attacker echoing it, or a model quoting audit logs).
+	// The concat semantics would have stripped this turn; the fix
+	// keeps it.
+	body2 := json.RawMessage(`{"contents":[
+		{"role":"model","parts":[
+			{"text":"Here is the weather forecast."},
+			{"text":"` + defenseClawBlockBanner + ` example"}
+		]}
+	]}`)
+	_, stripped2, err := launderGeminiHistory(body2)
+	if err != nil {
+		t.Fatalf("launder error: %v", err)
+	}
+	if stripped2 != 0 {
+		t.Errorf("expected 0 turns stripped when banner is NOT in first text part, got %d", stripped2)
 	}
 }

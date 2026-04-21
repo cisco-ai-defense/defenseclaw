@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -63,13 +64,21 @@ func (bedrockConverseAdapter) InjectionSite() string { return "bedrock-converse/
 // /invoke-with-response-stream because those use per-model-family
 // bodies that require separate adapters (deferred to a follow-up).
 //
+// Path discipline: the canonical AWS path is `/model/<modelId>/converse`.
+// Some reverse-proxy setups prepend a service segment (`/bedrock-runtime/`
+// on AWS API Gateway Private Integration). We accept either a top-level
+// `/model/` prefix OR a `/bedrock-runtime/model/` segment, but deliberately
+// reject generic substring matches so unrelated `/foo/model/bar/converse`
+// paths on other APIs do not misroute through this adapter.
+//
 // The matcher ignores the provider argument because the Bedrock branch
 // in writeBlockedPassthrough fires before the registry lookup (see
 // proxy.go:writeBlockedPassthrough godoc for why) — so the `provider`
 // hint is only relevant for the injectNotificationForPassthrough /
 // launderInboundHistory paths, which route solely by path.
 func (bedrockConverseAdapter) Matches(path, _provider string) bool {
-	if !strings.Contains(path, "/model/") {
+	if !strings.HasPrefix(path, "/model/") &&
+		!strings.Contains(path, "/bedrock-runtime/model/") {
 		return false
 	}
 	return strings.HasSuffix(path, "/"+bedrockActionConverse) ||
@@ -98,8 +107,11 @@ func (bedrockConverseAdapter) LaunderHistory(raw json.RawMessage) (json.RawMessa
 // method exists so the FormatAdapter interface is uniform; in practice
 // writeBlockedPassthrough short-circuits on provider=="bedrock" and
 // calls writeBlockedPassthroughBedrock directly without consulting the
-// registry. Kept here so direct adapter callers (tests, future
-// registry refactors) still get the correct writer.
+// registry (see proxy.go:writeBlockedPassthrough for the rationale —
+// the binary eventstream cannot share a code path with JSON/SSE block
+// writers, so the dispatcher runs before any adapter lookup). Kept
+// here so direct adapter callers (tests, future registry refactors)
+// still get the correct writer if they bypass writeBlockedPassthrough.
 func (bedrockConverseAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter, path, model string, _stream bool, msg string) {
 	p.writeBlockedPassthroughBedrock(w, path, model, msg)
 }
@@ -125,7 +137,10 @@ func injectSystemBedrockConverse(raw json.RawMessage, content string) (json.RawM
 	noteBlock := map[string]string{"text": content}
 
 	cur, has := m["system"]
-	if !has || len(cur) == 0 || string(cur) == "null" {
+	// Shape peek after TrimSpace so pretty-printed bodies with
+	// whitespace inside the raw value still dispatch correctly.
+	trimmed := bytes.TrimSpace(cur)
+	if !has || len(trimmed) == 0 || string(trimmed) == "null" {
 		blocks := []map[string]string{noteBlock}
 		b, err := json.Marshal(blocks)
 		if err != nil {
@@ -135,7 +150,7 @@ func injectSystemBedrockConverse(raw json.RawMessage, content string) (json.RawM
 		return json.Marshal(m)
 	}
 
-	switch cur[0] {
+	switch trimmed[0] {
 	case '[':
 		var blocks []json.RawMessage
 		if err := json.Unmarshal(cur, &blocks); err != nil {
@@ -167,27 +182,32 @@ func injectSystemBedrockConverse(raw json.RawMessage, content string) (json.RawM
 		}
 		m["system"] = b
 	default:
-		return nil, fmt.Errorf("proxy: inject bedrock system: unexpected shape %q", string(cur[:1]))
+		return nil, fmt.Errorf("proxy: inject bedrock system: unexpected shape %q", string(trimmed[:1]))
 	}
 	return json.Marshal(m)
 }
 
 // launderBedrockConverseHistory removes assistant turns from the
-// `messages` array whose concatenated content[].text begins with the
-// DefenseClaw banner. Converse's message shape is:
+// `messages` array whose FIRST text block begins with the DefenseClaw
+// banner. Converse's message shape is:
 //
 //	{"role":"assistant","content":[{"text":"..."}, {"toolUse":{...}}, ...]}
 //
-// We only inspect {text:"..."} blocks because DefenseClaw synthesis
-// never emits tool_use / image blocks — any such blocks imply a real
-// model turn that must not be stripped.
+// We check only the first non-empty text block (rather than the
+// concatenation of all content[].text) so that authentic model turns
+// carrying a toolUse/toolResult/image block before an adversary-echoed
+// banner are preserved. DefenseClaw synthesis always writes a single
+// leading text block, so concatenation would not improve recall on
+// our own emissions while it would meaningfully increase false
+// positives on benign model output.
 func launderBedrockConverseHistory(raw json.RawMessage) (json.RawMessage, int, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return raw, 0, fmt.Errorf("proxy: launder bedrock history: unmarshal: %w", err)
 	}
 	msgBytes, ok := m["messages"]
-	if !ok || len(msgBytes) == 0 || msgBytes[0] != '[' {
+	msgTrim := bytes.TrimSpace(msgBytes)
+	if !ok || len(msgTrim) == 0 || msgTrim[0] != '[' {
 		return raw, 0, nil
 	}
 	var messages []json.RawMessage
@@ -204,11 +224,17 @@ func launderBedrockConverseHistory(raw json.RawMessage) (json.RawMessage, int, e
 			} `json:"content"`
 		}
 		if json.Unmarshal(item, &probe) == nil && probe.Role == "assistant" && len(probe.Content) > 0 {
-			var b strings.Builder
+			// Pick the first text-carrying block. Blocks with empty
+			// `.text` (toolUse, toolResult, image) are skipped so a
+			// leading tool block does not hide the banner.
+			var firstText string
 			for _, c := range probe.Content {
-				b.WriteString(c.Text)
+				if c.Text != "" {
+					firstText = c.Text
+					break
+				}
 			}
-			if strings.HasPrefix(b.String(), defenseClawBlockBanner) {
+			if strings.HasPrefix(firstText, defenseClawBlockBanner) {
 				stripped++
 				continue
 			}

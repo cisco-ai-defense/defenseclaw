@@ -44,14 +44,19 @@ import (
 //	  "created_at": "2026-04-21T17:32:00Z",
 //	  "message": {"role":"assistant", "content": "<block banner + message>"},
 //	  "done": true,
-//	  "done_reason": "guardrail_intervened"
+//	  "done_reason": "guardrail_intervened",
+//	  "defenseclaw_blocked": true
 //	}
 //
 // The /api/chat stream mode is newline-delimited JSON objects rather
 // than SSE `data:` frames, but since the sole block message is a
 // single terminal chunk the non-stream writer serves both — Ollama
 // clients happily accept a single `done:true` JSON object in place of
-// a multi-chunk stream.
+// a multi-chunk stream. We still set `X-Accel-Buffering: no` and
+// call http.Flusher.Flush so streaming clients sitting behind a
+// buffering reverse proxy (nginx with default buffering, HAProxy
+// without `option http-buffer-request`, etc.) see the chunk
+// immediately rather than when the proxy's buffer fills.
 type ollamaAdapter struct{}
 
 // Name implements FormatAdapter.
@@ -106,6 +111,13 @@ func (ollamaAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter
 // banner in their chat UI). Lives on *GuardrailProxy for symmetry
 // with the other writeBlockedResponse* helpers even though the
 // current implementation has no proxy-state dependency.
+//
+// The message content is carried in exactly one place (`message.content`).
+// We do NOT duplicate it into a `defenseclaw_reason` field — the
+// duplicate bloated payloads and invited consumers to latch onto a
+// non-standard field. `defenseclaw_blocked:true` remains as a one-bit
+// signal so operators grep-ping NDJSON can filter block responses
+// without parsing the banner out of the content.
 func (p *GuardrailProxy) writeBlockedResponseOllama(w http.ResponseWriter, model, msg string) {
 	resp := map[string]any{
 		"model":      model,
@@ -117,10 +129,13 @@ func (p *GuardrailProxy) writeBlockedResponseOllama(w http.ResponseWriter, model
 		"done":                true,
 		"done_reason":         "guardrail_intervened",
 		"defenseclaw_blocked": true,
-		"defenseclaw_reason":  msg,
 	}
+	// Disable nginx/HAProxy response buffering so streaming clients
+	// see the terminal chunk immediately instead of after the proxy's
+	// internal buffer fills. Must be set before WriteHeader.
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	body, err := json.Marshal(resp)
 	if err != nil {
@@ -128,8 +143,16 @@ func (p *GuardrailProxy) writeBlockedResponseOllama(w http.ResponseWriter, model
 		// fall back to a minimal hand-encoded NDJSON line so clients
 		// still see *something* rather than a truncated stream.
 		fmt.Fprintf(w, "{\"done\":true,\"done_reason\":\"guardrail_intervened\"}\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 		return
 	}
 	_, _ = w.Write(body)
 	_, _ = w.Write([]byte("\n"))
+	// Flush the single NDJSON frame so the reverse proxy forwards it
+	// immediately even if it buffers until content-length is known.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }

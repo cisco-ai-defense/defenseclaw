@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -98,6 +99,14 @@ func (anthropicAdapter) LaunderHistory(raw json.RawMessage) (json.RawMessage, in
 // WriteBlockResponse emits the block in Anthropic-native format.
 // Delegates to the existing helpers (proxy.go:writeBlockedResponseAnthropic
 // and writeBlockedStreamAnthropic) to keep golden-event byte parity.
+//
+// Streaming dispatch note: we route on the body-level `stream` flag
+// rather than the URL path because Anthropic's Messages API — unlike
+// Bedrock Converse — has a single endpoint (`/v1/messages`) and the
+// client signals streaming via the request body. The caller parses
+// that flag in handlePassthrough before invoking this writer, so by
+// the time we get here `stream` is authoritative. Do NOT normalize
+// this to path-based dispatch: there is no URL distinction to key on.
 func (anthropicAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter, _path, model string, stream bool, msg string) {
 	if stream {
 		p.writeBlockedStreamAnthropic(w, model, msg)
@@ -122,7 +131,12 @@ func injectSystemMessageAnthropic(raw json.RawMessage, content string) (json.Raw
 	}
 
 	cur, has := m["system"]
-	if !has || len(cur) == 0 || string(cur) == "null" {
+	// json.RawMessage preserves source whitespace, so pretty-printed
+	// bodies can have leading whitespace before the shape character.
+	// TrimSpace before the shape peek so `{"system" : [...]}` with a
+	// leading space inside the raw bytes is still recognized.
+	trimmed := bytes.TrimSpace(cur)
+	if !has || len(trimmed) == 0 || string(trimmed) == "null" {
 		// No existing system — write a plain string.
 		b, err := json.Marshal(content)
 		if err != nil {
@@ -132,7 +146,7 @@ func injectSystemMessageAnthropic(raw json.RawMessage, content string) (json.Raw
 		return json.Marshal(m)
 	}
 
-	switch cur[0] {
+	switch trimmed[0] {
 	case '"':
 		var existing string
 		if err := json.Unmarshal(cur, &existing); err != nil {
@@ -167,7 +181,7 @@ func injectSystemMessageAnthropic(raw json.RawMessage, content string) (json.Raw
 		m["system"] = out
 	default:
 		// Unknown shape — refuse to silently corrupt the payload.
-		return nil, fmt.Errorf("proxy: inject anthropic system: unexpected system shape %q", string(cur[:1]))
+		return nil, fmt.Errorf("proxy: inject anthropic system: unexpected system shape %q", string(trimmed[:1]))
 	}
 	return json.Marshal(m)
 }

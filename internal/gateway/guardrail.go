@@ -975,11 +975,11 @@ func triagePatterns(direction, content string) []TriageSignal {
 			}
 		}
 		for _, re := range highSignalInjectionRegexes {
-			if loc := re.FindStringIndex(lower); loc != nil {
+			if re.MatchString(lower) {
 				signals = append(signals, TriageSignal{
 					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-INJ-REGEX",
 					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.90,
+					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.90,
 				})
 			}
 		}
@@ -995,11 +995,11 @@ func triagePatterns(direction, content string) []TriageSignal {
 			}
 		}
 		for _, re := range reviewInjectionRegexes {
-			if loc := re.FindStringIndex(lower); loc != nil {
+			if re.MatchString(lower) {
 				signals = append(signals, TriageSignal{
 					Level: "NEEDS_REVIEW", FindingID: "TRIAGE-INJ-REVIEW",
 					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.50,
+					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.50,
 				})
 			}
 		}
@@ -1027,11 +1027,11 @@ func triagePatterns(direction, content string) []TriageSignal {
 		}
 
 		// Bulk data access (NEEDS_REVIEW — judge decides if intent is benign).
-		if loc := bulkAccessRegex.FindStringIndex(lower); loc != nil {
+		if bulkAccessRegex.MatchString(lower) {
 			signals = append(signals, TriageSignal{
 				Level: "NEEDS_REVIEW", FindingID: "TRIAGE-BULK-ACCESS",
 				Category: "data-access", Pattern: "sensitive tool bulk access",
-				Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.60,
+				Evidence: extractEvidenceRegex(content, lower, bulkAccessRegex), Confidence: 0.60,
 			})
 		}
 	}
@@ -1144,30 +1144,57 @@ func signalsToVerdict(signals []TriageSignal, scanner string) *ScanVerdict {
 }
 
 // extractEvidence returns ~200 chars of context around the first occurrence
-// of pattern in the lowercase content, but returns the original-case text.
+// of pattern in original (case-insensitively). The `normalized` argument is
+// the output of normalizeForTriage(original) and is used ONLY as a
+// fallback when the pattern required normalization to match (e.g. the
+// pattern is "/etc/passwd" and original was "/ etc / passwd"): in that
+// case the literal pattern does not exist as contiguous bytes in original,
+// so we extract the window from the normalized string instead and prefix
+// the returned snippet with "[normalized]" so log consumers can tell.
 //
-// This is UTF-8-safe in the common case: strings.ToLower preserves byte
-// length for all ASCII and for the BMP letters we care about (Latin, Greek,
-// Cyrillic). When length drift does occur (e.g. "İ" 0x130 → "i̇" 2 bytes
-// mapped to "i" 1 byte in some locales), the byte offset from lower may
-// fall mid-rune in original; extractEvidenceAt clamps both ends to the
-// nearest rune boundary to avoid emitting invalid UTF-8 to logs.
-func extractEvidence(original, lower, pattern string) string {
-	idx := strings.Index(lower, pattern)
-	if idx < 0 {
-		return ""
+// Rationale: before Phase 7, `lower` was just strings.ToLower(original)
+// and its byte offsets aligned 1:1 with original for the ASCII+BMP fast
+// path. After Phase 7, `normalized` can be shorter than original (whitespace-
+// around-slash collapse, duplicate-slash collapse, NFC composition), so
+// using a normalized offset as an index into original produces a window
+// pointing at the wrong bytes. Re-locating against strings.ToLower(original)
+// restores byte alignment in the common case.
+//
+// UTF-8 safety: extractEvidenceAt clamps both ends to the nearest rune
+// boundary so we never emit invalid UTF-8 to logs, audit records, or
+// downstream sinks.
+func extractEvidence(original, normalized, pattern string) string {
+	lowerOrig := strings.ToLower(original)
+	if idx := strings.Index(lowerOrig, pattern); idx >= 0 {
+		return extractEvidenceAt(original, idx, idx+len(pattern))
 	}
-	// Guard against exotic cases where ToLower changed byte length and the
-	// idx now exceeds original's length. Fall back to a plain search on
-	// original for a best-effort window.
-	if idx > len(original) {
-		if orig := strings.Index(strings.ToLower(original), pattern); orig >= 0 {
-			idx = orig
-		} else {
-			return ""
-		}
+	// Fast path missed: normalization was load-bearing for the match.
+	// Return the normalized window so logs still carry useful context,
+	// prefixed with a marker so operators know the bytes are post-
+	// normalization (the original may have had whitespace evasion,
+	// NFC-decomposed characters, or duplicate slashes).
+	if idx := strings.Index(normalized, pattern); idx >= 0 {
+		return "[normalized] " + extractEvidenceAt(normalized, idx, idx+len(pattern))
 	}
-	return extractEvidenceAt(original, idx, idx+len(pattern))
+	return ""
+}
+
+// extractEvidenceRegex returns a ±window snippet around the first match of
+// `re` in original. Like extractEvidence, it prefers the original-bytes
+// path and falls back to the normalized string when normalization was
+// required for the regex to hit.
+//
+// Assumes `re` is pre-lowercased (all triage regexes in this file are);
+// case-insensitivity is handled by lowercasing original rather than by
+// a `(?i)` flag, matching how the rest of this file dispatches.
+func extractEvidenceRegex(original, normalized string, re *regexp.Regexp) string {
+	if loc := re.FindStringIndex(strings.ToLower(original)); loc != nil {
+		return extractEvidenceAt(original, loc[0], loc[1])
+	}
+	if loc := re.FindStringIndex(normalized); loc != nil {
+		return "[normalized] " + extractEvidenceAt(normalized, loc[0], loc[1])
+	}
+	return ""
 }
 
 func extractEvidenceAt(content string, matchStart, matchEnd int) string {

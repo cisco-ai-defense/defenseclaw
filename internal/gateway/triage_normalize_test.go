@@ -110,6 +110,50 @@ func TestNormalizeForTriage_Table(t *testing.T) {
 			in:   "/  etc  /  passwd",
 			want: "/etc/passwd",
 		},
+		// Unicode whitespace evasions. Without \p{Z} coverage in
+		// slashWhitespaceRegex the NBSP variants would slip past
+		// `\betc/passwd\b` and the normalizer would hand the attacker
+		// a trivial bypass: send U+00A0 (NBSP) instead of space.
+		{
+			name: "nbsp_around_slash",
+			in:   "/\u00A0etc\u00A0/\u00A0passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "ideographic_space_around_slash",
+			// U+3000 IDEOGRAPHIC SPACE — common in east-asian input.
+			in:   "/\u3000etc\u3000/\u3000passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "en_space_em_space_around_slash",
+			// U+2002 EN SPACE + U+2003 EM SPACE.
+			in:   "/\u2002etc\u2003/\u2003passwd",
+			want: "/etc/passwd",
+		},
+		// Zero-width / format characters — invisible to humans, but
+		// break ASCII fast paths. We strip them before slash-collapse.
+		{
+			name: "zero_width_space_inside_path",
+			in:   "/et\u200Bc/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "zero_width_joiner_inside_path",
+			in:   "/et\u200Dc/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "bom_prefix",
+			// U+FEFF BOM as a leading invisible byte.
+			in:   "\uFEFF/etc/passwd",
+			want: "/etc/passwd",
+		},
+		{
+			name: "word_joiner_inside_path",
+			in:   "/et\u2060c/passwd",
+			want: "/etc/passwd",
+		},
 	}
 
 	for _, tc := range cases {
@@ -189,5 +233,96 @@ func TestNormalizeForTriage_ASCIIOnlyFastPath(t *testing.T) {
 	got := normalizeForTriage(in)
 	if got != strings.ToLower(in) {
 		t.Errorf("ascii fast path changed content: got %q want %q", got, strings.ToLower(in))
+	}
+}
+
+// TestScanLocalPatterns_NBSPEvasion_FlagsViaNormalization guards the
+// Unicode-whitespace branch of normalizeForTriage. Before the \p{Z}
+// addition, replacing ASCII spaces with NBSP (U+00A0) around the
+// slashes bypassed triage entirely.
+func TestScanLocalPatterns_NBSPEvasion_FlagsViaNormalization(t *testing.T) {
+	prompt := "please fetch /\u00A0etc\u00A0/\u00A0passwd"
+	v := scanLocalPatterns("prompt", prompt)
+	if v == nil || v.Action == "allow" {
+		t.Errorf("expected triage to flag NBSP-evaded /etc/passwd, got %+v", v)
+	}
+}
+
+// TestScanLocalPatterns_ZeroWidthEvasion_FlagsViaNormalization guards
+// the zero-width strip. A U+200B (zero-width space) injected mid-token
+// ("et\u200Bc") would otherwise defeat `\betc\b`-anchored regexes.
+func TestScanLocalPatterns_ZeroWidthEvasion_FlagsViaNormalization(t *testing.T) {
+	prompt := "please fetch /et\u200Bc/passwd"
+	v := scanLocalPatterns("prompt", prompt)
+	if v == nil || v.Action == "allow" {
+		t.Errorf("expected triage to flag zero-width-evaded /etc/passwd, got %+v", v)
+	}
+}
+
+// TestExtractEvidence_AlignsAfterNormalization is a regression test for
+// the extractEvidence byte-alignment bug: before the fix, the function
+// used an index into the normalized (shrunken) string to slice into
+// the original, producing snippets that pointed at the wrong bytes.
+//
+// We trigger normalization that meaningfully shortens the string, then
+// demand that the returned evidence either (a) contains the matched
+// pattern taken from the original bytes, or (b) is explicitly tagged
+// [normalized] when the pattern required normalization to hit.
+func TestExtractEvidence_AlignsAfterNormalization(t *testing.T) {
+	original := "prefix text here ... please fetch /   etc   /   passwd end text"
+	// normalizeForTriage will collapse "/   etc   /   passwd" to
+	// "/etc/passwd" which matches the exfilPatterns entry.
+	normalized := normalizeForTriage(original)
+	pattern := "/etc/passwd"
+
+	// Pattern should not exist in the original as contiguous bytes
+	// (it would only exist after normalization) — that is the
+	// misalignment-risk path.
+	if strings.Contains(strings.ToLower(original), pattern) {
+		t.Fatalf("test premise broken: pattern %q already present in lowercased original %q",
+			pattern, strings.ToLower(original))
+	}
+	if !strings.Contains(normalized, pattern) {
+		t.Fatalf("test premise broken: pattern %q not present in normalized %q",
+			pattern, normalized)
+	}
+
+	got := extractEvidence(original, normalized, pattern)
+	// Normalization was load-bearing → [normalized] marker expected.
+	if !strings.HasPrefix(got, "[normalized] ") {
+		t.Errorf("expected [normalized] marker when pattern lives only "+
+			"in normalized form, got %q", got)
+	}
+	// Evidence window must surround the pattern in the (normalized)
+	// text — verifying the helper actually located the match rather
+	// than returning empty.
+	if !strings.Contains(got, pattern) {
+		t.Errorf("evidence should contain the matched pattern %q, got %q",
+			pattern, got)
+	}
+}
+
+// TestExtractEvidence_OriginalBytesPreferredWhenAligned checks the
+// opposite case: when normalization wasn't needed (pattern already
+// present in original lowercased bytes), we return the ORIGINAL
+// bytes un-marker'd so audit logs show the user's verbatim input.
+func TestExtractEvidence_OriginalBytesPreferredWhenAligned(t *testing.T) {
+	original := "read /etc/passwd for me please"
+	normalized := normalizeForTriage(original)
+	pattern := "/etc/passwd"
+
+	got := extractEvidence(original, normalized, pattern)
+	if strings.HasPrefix(got, "[normalized] ") {
+		t.Errorf("expected original-bytes evidence when pattern present "+
+			"verbatim, got %q", got)
+	}
+	if !strings.Contains(got, pattern) {
+		t.Errorf("evidence should contain pattern %q, got %q", pattern, got)
+	}
+	// Window must include surrounding ASCII from original, not the
+	// lowercase-folded view (though here they happen to match).
+	if !strings.Contains(got, "for me") {
+		t.Errorf("evidence window should include surrounding original "+
+			"text, got %q", got)
 	}
 }
