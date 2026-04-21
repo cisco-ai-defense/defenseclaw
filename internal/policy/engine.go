@@ -18,16 +18,27 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/open-policy-agent/opa/ast"           //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 	"github.com/open-policy-agent/opa/rego"          //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 	"github.com/open-policy-agent/opa/storage"       //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 	"github.com/open-policy-agent/opa/storage/inmem" //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // Engine evaluates OPA Rego policies for admission, guardrail, firewall,
@@ -36,6 +47,7 @@ type Engine struct {
 	mu      sync.RWMutex
 	regoDir string
 	store   storage.Store
+	otel    *telemetry.Provider
 }
 
 // New creates an Engine. regoDir is the path to the directory containing
@@ -49,6 +61,17 @@ func New(regoDir string) (*Engine, error) {
 		return nil, err
 	}
 	return &Engine{regoDir: regoDir, store: store}, nil
+}
+
+// SetOTelProvider attaches the shared telemetry provider for policy.evaluate
+// spans and RecordPolicyEvaluation metrics. Safe to call with nil.
+func (e *Engine) SetOTelProvider(p *telemetry.Provider) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.otel = p
+	e.mu.Unlock()
 }
 
 // resolveRegoDir returns regoDir if it contains .rego files or data.json,
@@ -81,7 +104,7 @@ func (e *Engine) Reload() error {
 		return err
 	}
 
-	modules, err := readModules(e.regoDir)
+	modules, err := readModules(e.regoDir, e)
 	if err != nil {
 		return err
 	}
@@ -109,7 +132,14 @@ func (e *Engine) RegoDir() string {
 func (e *Engine) Evaluate(ctx context.Context, input AdmissionInput) (*AdmissionOutput, error) {
 	result, err := e.eval(ctx, "data.defenseclaw.admission", input)
 	if err != nil {
-		return nil, fmt.Errorf("policy: admission eval: %w", err)
+		e.emitPolicyLoadOrEvalError(ctx, err)
+		return &AdmissionOutput{
+			Verdict:       "rejected",
+			Reason:        "policy evaluation failed — denied by default",
+			FileAction:    "quarantine",
+			InstallAction: "block",
+			RuntimeAction: "block",
+		}, nil
 	}
 	return &AdmissionOutput{
 		Verdict:       stringVal(result, "verdict"),
@@ -217,7 +247,7 @@ func (e *Engine) EvaluateSkillActions(ctx context.Context, input SkillActionsInp
 // Compile performs a one-time compilation check of the Rego modules,
 // useful for fast-failing at startup.
 func (e *Engine) Compile() error {
-	modules, err := readModules(e.regoDir)
+	modules, err := readModules(e.regoDir, e)
 	if err != nil {
 		return err
 	}
@@ -229,19 +259,36 @@ func (e *Engine) Compile() error {
 // ---------------------------------------------------------------------------
 
 func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map[string]interface{}, error) {
+	start := time.Now()
 	e.mu.RLock()
 	store := e.store
+	otelProv := e.otel
 	e.mu.RUnlock()
-
-	modules, err := readModules(e.regoDir)
-	if err != nil {
-		return nil, err
-	}
 
 	inputMap, err := toMap(input)
 	if err != nil {
 		return nil, fmt.Errorf("marshal input: %w", err)
 	}
+	rawIn, _ := json.Marshal(inputMap)
+	sum := sha256.Sum256(rawIn)
+	inputHash := hex.EncodeToString(sum[:16])
+	policyID := e.policyStableID()
+
+	ctx, span := otel.Tracer("defenseclaw").Start(ctx, "defenseclaw.policy.evaluate", trace.WithSpanKind(trace.SpanKindInternal))
+	span.SetAttributes(
+		attribute.String("policy_id", policyID),
+		attribute.String("input_hash", inputHash),
+		attribute.String("policy.query", query),
+	)
+
+	modules, err := readModules(e.regoDir, e)
+	if err != nil {
+		durationMs := float64(time.Since(start).Milliseconds())
+		e.finishPolicyEvalSpan(span, policyID, inputHash, "error", durationMs, err)
+		e.recordPolicyEvalMetrics(ctx, otelProv, policyID, "error", durationMs)
+		return nil, err
+	}
+	span.SetAttributes(attribute.Int("policy.module_count", len(modules)))
 
 	opts := []func(*rego.Rego){
 		rego.Query(query),
@@ -254,18 +301,90 @@ func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map
 
 	rs, err := rego.New(opts...).Eval(ctx)
 	if err != nil {
+		durationMs := float64(time.Since(start).Milliseconds())
+		e.finishPolicyEvalSpan(span, policyID, inputHash, "error", durationMs, err)
+		e.recordPolicyEvalMetrics(ctx, otelProv, policyID, "error", durationMs)
 		return nil, err
 	}
 
 	if len(rs) == 0 || len(rs[0].Expressions) == 0 {
-		return nil, fmt.Errorf("empty result set")
+		err := fmt.Errorf("empty result set")
+		durationMs := float64(time.Since(start).Milliseconds())
+		e.finishPolicyEvalSpan(span, policyID, inputHash, "empty", durationMs, err)
+		e.recordPolicyEvalMetrics(ctx, otelProv, policyID, "empty", durationMs)
+		return nil, err
 	}
 
 	result, ok := rs[0].Expressions[0].Value.(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("unexpected result type %T", rs[0].Expressions[0].Value)
+		err := fmt.Errorf("unexpected result type %T", rs[0].Expressions[0].Value)
+		durationMs := float64(time.Since(start).Milliseconds())
+		e.finishPolicyEvalSpan(span, policyID, inputHash, "error", durationMs, err)
+		e.recordPolicyEvalMetrics(ctx, otelProv, policyID, "error", durationMs)
+		return nil, err
 	}
+
+	resultStr := stringVal(result, "verdict")
+	if resultStr == "" {
+		resultStr = "ok"
+	}
+	durationMs := float64(time.Since(start).Milliseconds())
+	e.finishPolicyEvalSpan(span, policyID, inputHash, resultStr, durationMs, nil)
+	e.recordPolicyEvalMetrics(ctx, otelProv, policyID, resultStr, durationMs)
 	return result, nil
+}
+
+func (e *Engine) policyStableID() string {
+	sum := sha256.Sum256([]byte(e.regoDir))
+	return hex.EncodeToString(sum[:6])
+}
+
+func (e *Engine) finishPolicyEvalSpan(span trace.Span, policyID, inputHash, result string, durationMs float64, err error) {
+	if span == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.Float64("duration_ms", durationMs),
+		attribute.String("result", result),
+		attribute.String("policy_id", policyID),
+		attribute.String("input_hash", inputHash),
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
+func (e *Engine) recordPolicyEvalMetrics(ctx context.Context, otel *telemetry.Provider, policyID, verdict string, durationMs float64) {
+	if otel == nil {
+		return
+	}
+	otel.RecordPolicyEvaluation(ctx, policyID, verdict)
+	otel.RecordPolicyLatency(ctx, policyID, durationMs)
+}
+
+func (e *Engine) emitPolicyLoadOrEvalError(ctx context.Context, err error) {
+	e.mu.RLock()
+	otel := e.otel
+	e.mu.RUnlock()
+	if otel == nil || !otel.Enabled() {
+		return
+	}
+	msg := err.Error()
+	otel.EmitGatewayEvent(gatewaylog.Event{
+		Timestamp: time.Now().UTC(),
+		EventType: gatewaylog.EventError,
+		Severity:  gatewaylog.SeverityHigh,
+		Error: &gatewaylog.ErrorPayload{
+			Subsystem: string(gatewaylog.SubsystemPolicy),
+			Code:      string(gatewaylog.ErrCodePolicyLoadFailed),
+			Message:   "OPA policy evaluation failed",
+			Cause:     msg,
+		},
+	})
 }
 
 func loadStore(regoDir string) (storage.Store, error) {
@@ -301,7 +420,7 @@ func mergeSupplementalData(regoDir string, data map[string]interface{}, filename
 	}
 }
 
-func readModules(regoDir string) (map[string]string, error) {
+func readModules(regoDir string, eng *Engine) (map[string]string, error) {
 	pattern := filepath.Join(regoDir, "*.rego")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -317,9 +436,28 @@ func readModules(regoDir string) (map[string]string, error) {
 		if readErr != nil {
 			return nil, fmt.Errorf("policy: read %s: %w", path, readErr)
 		}
-		modules[filepath.Base(path)] = string(raw)
+		base := filepath.Base(path)
+		if _, parseErr := ast.ParseModuleWithOpts(base, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1}); parseErr != nil {
+			if eng != nil {
+				_ = eng.quarantineBadRegoModule(path, raw)
+			}
+			return nil, fmt.Errorf("policy: parse %s: %w", path, parseErr)
+		}
+		modules[base] = string(raw)
 	}
 	return modules, nil
+}
+
+func (e *Engine) quarantineBadRegoModule(srcPath string, raw []byte) error {
+	destDir := filepath.Join(e.regoDir, ".policy_quarantine")
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return err
+	}
+	dest := filepath.Join(destDir, fmt.Sprintf("%s.%d.bak", filepath.Base(srcPath), time.Now().UnixNano()))
+	if err := os.WriteFile(dest, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Remove(srcPath)
 }
 
 func compileModules(modules map[string]string) error {

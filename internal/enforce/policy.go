@@ -17,7 +17,15 @@
 package enforce
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
@@ -169,4 +177,57 @@ func (e *PolicyEngine) RemoveAction(targetType, name string) error {
 		return nil
 	}
 	return e.store.RemoveAction(targetType, name)
+}
+
+// PolicyStableID returns a short stable identifier for the policy bundle
+// rooted at policyDir (used in OTel spans and metrics).
+func PolicyStableID(policyDir string) string {
+	if policyDir == "" {
+		return "none"
+	}
+	sum := sha256.Sum256([]byte(policyDir))
+	return hex.EncodeToString(sum[:8])
+}
+
+// StartAdmissionDecideSpan opens span defenseclaw.admission.decide (child of any
+// active span in ctx). Every runAdmission / admission gate path should pair
+// this with EndAdmissionDecideSpan.
+func StartAdmissionDecideSpan(ctx context.Context, targetType, targetID, policyID string) (context.Context, trace.Span) {
+	tr := otel.Tracer("defenseclaw")
+	ctx, span := tr.Start(ctx, "defenseclaw.admission.decide", trace.WithSpanKind(trace.SpanKindInternal))
+	span.SetAttributes(
+		attribute.String("target_type", targetType),
+		attribute.String("target_id", targetID),
+		attribute.String("policy_id", policyID),
+	)
+	return ctx, span
+}
+
+// EndAdmissionDecideSpan completes the admission.decide span with verdict fields.
+func EndAdmissionDecideSpan(span trace.Span, verdict, reason, policyID string, err error) {
+	if span == nil {
+		return
+	}
+	if policyID != "" {
+		span.SetAttributes(attribute.String("policy_id", policyID))
+	}
+	span.SetAttributes(
+		attribute.String("verdict", verdict),
+		attribute.String("reason", truncateAdmissionReason(reason)),
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
+func truncateAdmissionReason(s string) string {
+	const max = 512
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
