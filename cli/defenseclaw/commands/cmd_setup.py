@@ -94,6 +94,16 @@ from defenseclaw.commands.cmd_setup_observability import observability  # noqa: 
 
 setup.add_command(observability)
 
+# Register `defenseclaw setup local-observability` (bundled
+# Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
+# --logs` pattern: preflights Docker, drives a docker-compose bridge,
+# and wires config.yaml to point the gateway at the local collector.
+from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
+    local_observability,
+)
+
+setup.add_command(local_observability)
+
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic
 # HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
@@ -324,6 +334,16 @@ def setup_llm(app: AppContext, show: bool) -> None:
 from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
 
 setup.add_command(observability)
+
+# Register `defenseclaw setup local-observability` (bundled
+# Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
+# --logs` pattern: preflights Docker, drives a docker-compose bridge,
+# and wires config.yaml to point the gateway at the local collector.
+from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
+    local_observability,
+)
+
+setup.add_command(local_observability)
 
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic

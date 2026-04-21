@@ -1200,7 +1200,7 @@ func (p *Provider) RecordActivity(ctx context.Context, action, targetType, actor
 // emits the same counters with attributes sink / kind / status_code /
 // retry_count. If both coexisted the metrics backend would split into
 // two incompatible label shapes for a single counter, which breaks
-// recording rules in deploy/observability/prometheus/rules/recording.yml
+// recording rules in bundles/local_observability_stack/prometheus/rules/recording.yml
 // (sink:defenseclaw_audit_sink_drop_ratio:5m groups by `sink`, not
 // `sink_kind` / `sink_name`).
 //

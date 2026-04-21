@@ -347,9 +347,9 @@ via single-key form fields).
 
 ## 8. Local OTLP + schema validation stack
 
-`deploy/observability/` ships a one-shot docker-compose stack you can
-point a local sidecar at to see every span / metric / log flowing
-end-to-end in Grafana. It bundles:
+`bundles/local_observability_stack/` ships a one-shot docker-compose
+stack you can point a local sidecar at to see every span / metric / log
+flowing end-to-end in Grafana. It bundles:
 
 - `otel-collector` on `127.0.0.1:4317` (gRPC) + `4318` (HTTP)
 - `prometheus` (metrics) on `127.0.0.1:9090`
@@ -358,14 +358,26 @@ end-to-end in Grafana. It bundles:
 - `grafana` (UI + provisioned DefenseClaw dashboard) on
   `http://127.0.0.1:3000`
 
-Quick start:
+Quick start (recommended — preflights Docker, waits for readiness, and
+writes the `otel:` block in `~/.defenseclaw/config.yaml` automatically):
 
 ```bash
-cd deploy/observability
-./run.sh up
-eval "$(./run.sh env)"        # exports OTEL_EXPORTER_OTLP_ENDPOINT etc.
+defenseclaw setup local-observability up
+defenseclaw gateway                            # start sidecar; it reads config.yaml
+defenseclaw setup local-observability status   # compose ps + reachability probes
+defenseclaw setup local-observability down     # stop (volumes preserved)
+defenseclaw setup local-observability reset    # stop + wipe data volumes
+```
+
+Manual compose access (no CLI side-effects on `config.yaml`) still
+works for CI / scripted environments:
+
+```bash
+cd bundles/local_observability_stack
+./bin/openclaw-observability-bridge up         # or ./run.sh up (compat shim)
+eval "$(./bin/openclaw-observability-bridge env)"
 go run ./cmd/defenseclaw gateway
-./run.sh down                 # or ./run.sh reset to wipe volumes
+./bin/openclaw-observability-bridge down
 ```
 
 The provisioned dashboard pulls straight from the live Prometheus

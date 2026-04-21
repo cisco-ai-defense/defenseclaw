@@ -403,6 +403,7 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
+	@rm -rf cli/defenseclaw/_data/local_observability_stack
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
@@ -415,6 +416,7 @@ _bundle-data:
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
+	cp -r bundles/local_observability_stack cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:

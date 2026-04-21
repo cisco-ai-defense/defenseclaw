@@ -30,6 +30,7 @@ import click
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
+    bundled_local_observability_dir,
     bundled_rego_dir,
     bundled_splunk_bridge_dir,
 )
@@ -106,6 +107,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     _seed_rego_policies(cfg.policy_dir)
     _seed_guardrail_profiles(cfg.policy_dir)
     _seed_splunk_bridge(cfg.data_dir)
+    _seed_local_observability_stack(cfg.data_dir)
 
     cfg.save()
     click.echo(f"  Config file:   {cfg_file}")
@@ -278,6 +280,34 @@ def _seed_splunk_bridge(data_dir: str) -> None:
 def _resolve_splunk_bridge_bundle():
     """Resolve the vendored local Splunk runtime from package data or source tree."""
     return bundled_splunk_bridge_dir()
+
+
+def _seed_local_observability_stack(data_dir: str) -> None:
+    """Copy bundled Prom/Loki/Tempo/Grafana stack into ~/.defenseclaw/observability-stack/.
+
+    Mirrors _seed_splunk_bridge so ``defenseclaw setup
+    local-observability`` can drive a user-editable copy of the stack
+    (dashboards, alert rules, prom config) without requiring the
+    operator to unpack the wheel. Preserves an existing seeded copy so
+    operator edits survive subsequent ``init`` runs.
+    """
+    bundled = bundled_local_observability_dir()
+    if not bundled.is_dir():
+        return
+
+    dest = os.path.join(data_dir, "observability-stack")
+    if os.path.isdir(dest):
+        click.echo(f"  Observability stack: preserved existing ({dest})")
+        return
+
+    shutil.copytree(str(bundled), dest)
+    bridge_bin = os.path.join(dest, "bin", "openclaw-observability-bridge")
+    if os.path.isfile(bridge_bin):
+        os.chmod(bridge_bin, 0o755)
+    shim = os.path.join(dest, "run.sh")
+    if os.path.isfile(shim):
+        os.chmod(shim, 0o755)
+    click.echo(f"  Observability stack: seeded in {dest}")
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:

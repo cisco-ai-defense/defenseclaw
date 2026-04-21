@@ -71,6 +71,18 @@ defenseclaw = [
     "_data/policies/guardrail/permissive/*.yaml",
     "_data/policies/guardrail/permissive/judge/*.yaml",
     "_data/policies/guardrail/permissive/rules/*.yaml",
+    "_data/local_observability_stack/*.md",
+    "_data/local_observability_stack/*.yml",
+    "_data/local_observability_stack/*.sh",
+    "_data/local_observability_stack/bin/*",
+    "_data/local_observability_stack/otel-collector/*.yaml",
+    "_data/local_observability_stack/prometheus/*.yml",
+    "_data/local_observability_stack/prometheus/rules/*.yml",
+    "_data/local_observability_stack/loki/*.yaml",
+    "_data/local_observability_stack/tempo/*.yaml",
+    "_data/local_observability_stack/grafana/dashboards/*.json",
+    "_data/local_observability_stack/grafana/provisioning/dashboards/*.yml",
+    "_data/local_observability_stack/grafana/provisioning/datasources/*.yml",
 ]
 
 [tool.uv]

@@ -6,7 +6,12 @@
 # queryable from a pre-provisioned Grafana at http://localhost:3000.
 #
 # Usage:
-#   cd deploy/observability
+#   # Preferred — boots the stack, waits for readiness, and wires
+#   # ~/.defenseclaw/config.yaml to point at the local collector:
+#   defenseclaw setup local-observability up
+#
+#   # Manual compose access (no CLI side-effects on config.yaml):
+#   cd bundles/local_observability_stack
 #   docker compose up -d
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317 \
 #     DEFENSECLAW_TELEMETRY_ENABLED=1 \

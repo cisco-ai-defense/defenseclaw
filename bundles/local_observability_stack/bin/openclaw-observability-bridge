@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# openclaw-observability-bridge — uniform entry point to the local
+# DefenseClaw observability stack (otel-collector + prometheus + loki +
+# tempo + grafana). Mirrors the shape of bin/splunk-claw-bridge so
+# `defenseclaw setup local-observability` can shell out to it with a
+# stable contract.
+#
+# Usage:
+#   openclaw-observability-bridge <action> [options]
+#
+# Actions:
+#   up        Start the stack, wait for readiness, print URLs (+ optional JSON contract)
+#   down      Stop containers, keep volumes
+#   reset     Stop containers, drop volumes (wipes TSDB / logs / traces)
+#   status    Print compose ps + per-service readiness
+#   logs      Tail logs (optionally for a single service)
+#   url       Print the Grafana / Prometheus / Tempo / Loki URLs
+#   env       Print shell env-vars that point a local gateway at the stack
+#   help      Show this help
+#
+# Options:
+#   --output FORMAT    text | json (default: text). `up` in json mode emits
+#                      a single-line contract suitable for machine parsing.
+#   --service NAME     Target service for `logs` (default: tail all)
+#   --follow           `logs` follows instead of dumping the tail
+#   --timeout SECONDS  Readiness wait budget for `up` (default: 180)
+#   --no-wait          Skip readiness wait on `up` (not recommended)
+#   --                 Pass remaining args through to `docker compose`
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="${ROOT_DIR}/docker-compose.yml"
+
+ACTION="${1:-up}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+OUTPUT="text"
+SERVICE=""
+FOLLOW="false"
+WAIT_BUDGET="180"
+DO_WAIT="true"
+PASSTHROUGH=()
+
+fail() {
+  printf 'error: %s\n' "$1" >&2
+  exit 1
+}
+
+usage() {
+  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      [[ $# -ge 2 ]] || fail "--output requires a value"
+      OUTPUT="$2"
+      shift 2
+      ;;
+    --service)
+      [[ $# -ge 2 ]] || fail "--service requires a value"
+      SERVICE="$2"
+      shift 2
+      ;;
+    --follow)
+      FOLLOW="true"
+      shift
+      ;;
+    --timeout)
+      [[ $# -ge 2 ]] || fail "--timeout requires a value"
+      WAIT_BUDGET="$2"
+      shift 2
+      ;;
+    --no-wait)
+      DO_WAIT="false"
+      shift
+      ;;
+    --)
+      shift
+      PASSTHROUGH=("$@")
+      break
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      PASSTHROUGH+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "${OUTPUT}" in
+  text|json) ;;
+  *) fail "--output must be text or json (got ${OUTPUT})" ;;
+esac
+
+require_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    fail "docker not found on PATH (install Docker Desktop or the Docker Engine)"
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    fail "docker daemon is not reachable (is Docker Desktop / the engine running?)"
+  fi
+  if ! docker compose version >/dev/null 2>&1; then
+    fail "'docker compose' plugin not available (legacy docker-compose binary is not supported)"
+  fi
+}
+
+compose() {
+  docker compose --project-directory "${ROOT_DIR}" -f "${COMPOSE_FILE}" "$@"
+}
+
+# Probe a TCP endpoint, returns 0 on reachable.
+tcp_probe() {
+  local host="$1"
+  local port="$2"
+  # Avoid /dev/tcp bashism on shells where it is restricted: prefer
+  # nc when available, fall back to bash.
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 1 "${host}" "${port}" >/dev/null 2>&1
+  else
+    (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1
+  fi
+}
+
+# Probe an HTTP endpoint, returns 0 on 2xx/3xx.
+http_probe() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS -o /dev/null --max-time 2 "${url}" >/dev/null 2>&1
+  else
+    # busybox wget is broadly available where curl is not
+    wget -q -T 2 -O /dev/null "${url}" >/dev/null 2>&1
+  fi
+}
+
+wait_for_ready() {
+  local deadline=$(( SECONDS + WAIT_BUDGET ))
+  local otlp_ok="false"
+  local grafana_ok="false"
+  local prom_ok="false"
+  while (( SECONDS < deadline )); do
+    if [[ "${otlp_ok}" != "true" ]] && tcp_probe "127.0.0.1" 4317; then
+      otlp_ok="true"
+    fi
+    if [[ "${grafana_ok}" != "true" ]] && http_probe "http://127.0.0.1:3000/api/health"; then
+      grafana_ok="true"
+    fi
+    if [[ "${prom_ok}" != "true" ]] && http_probe "http://127.0.0.1:9090/-/ready"; then
+      prom_ok="true"
+    fi
+    if [[ "${otlp_ok}" == "true" && "${grafana_ok}" == "true" && "${prom_ok}" == "true" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'readiness timeout after %ss: otlp=%s grafana=%s prometheus=%s\n' \
+    "${WAIT_BUDGET}" "${otlp_ok}" "${grafana_ok}" "${prom_ok}" >&2
+  return 1
+}
+
+emit_contract() {
+  # Single-line JSON so the Python caller can `json.loads(line)`.
+  # Any additive fields MUST preserve backward compatibility — the
+  # Python side treats unknown keys as optional.
+  cat <<EOF
+{"otlp_endpoint":"127.0.0.1:4317","otlp_protocol":"grpc","otlp_http_endpoint":"127.0.0.1:4318","grafana_url":"http://localhost:3000","prometheus_url":"http://localhost:9090","tempo_url":"http://localhost:3200","loki_url":"http://localhost:3100","collector_metrics_url":"http://localhost:8888/metrics"}
+EOF
+}
+
+print_text_banner() {
+  cat <<'EOF'
+DefenseClaw local observability stack is up.
+  Grafana:    http://localhost:3000  (admin / admin)
+  Prometheus: http://localhost:9090
+  Tempo API:  http://localhost:3200
+  Loki API:   http://localhost:3100
+  OTLP gRPC:  127.0.0.1:4317
+  OTLP HTTP:  127.0.0.1:4318
+EOF
+}
+
+case "${ACTION}" in
+  up)
+    require_docker
+    compose up -d "${PASSTHROUGH[@]}"
+    if [[ "${DO_WAIT}" == "true" ]]; then
+      if ! wait_for_ready; then
+        if [[ "${OUTPUT}" == "json" ]]; then
+          printf '{"error":"readiness timeout","timeout_seconds":%s}\n' "${WAIT_BUDGET}"
+        fi
+        exit 1
+      fi
+    fi
+    if [[ "${OUTPUT}" == "json" ]]; then
+      emit_contract
+    else
+      print_text_banner
+    fi
+    ;;
+  down)
+    require_docker
+    compose down "${PASSTHROUGH[@]}"
+    ;;
+  reset)
+    require_docker
+    compose down -v "${PASSTHROUGH[@]}"
+    ;;
+  status)
+    require_docker
+    compose ps
+    printf '\nReadiness:\n'
+    for probe in \
+      "otlp-grpc  127.0.0.1:4317:tcp" \
+      "otlp-http  127.0.0.1:4318:tcp" \
+      "prometheus http://127.0.0.1:9090/-/ready:http" \
+      "grafana    http://127.0.0.1:3000/api/health:http" \
+      "tempo      http://127.0.0.1:3200/ready:http" \
+      "loki       http://127.0.0.1:3100/ready:http"; do
+      label="${probe%% *}"
+      rest="${probe#* }"
+      rest="${rest#"${rest%%[![:space:]]*}"}"
+      target="${rest%:*}"
+      kind="${rest##*:}"
+      ok="fail"
+      case "${kind}" in
+        tcp)
+          host="${target%:*}"; port="${target##*:}"
+          if tcp_probe "${host}" "${port}"; then ok="ready"; fi
+          ;;
+        http)
+          if http_probe "${target}"; then ok="ready"; fi
+          ;;
+      esac
+      printf '  %-10s %-7s %s\n' "${label}" "${ok}" "${target}"
+    done
+    ;;
+  logs)
+    require_docker
+    args=()
+    if [[ "${FOLLOW}" == "true" ]]; then
+      args+=(-f)
+    fi
+    if [[ -n "${SERVICE}" ]]; then
+      compose logs "${args[@]}" "${SERVICE}" "${PASSTHROUGH[@]}"
+    else
+      compose logs "${args[@]}" "${PASSTHROUGH[@]}"
+    fi
+    ;;
+  url)
+    if [[ "${OUTPUT}" == "json" ]]; then
+      emit_contract
+    else
+      cat <<'EOF'
+Grafana:    http://localhost:3000
+Prometheus: http://localhost:9090
+Tempo API:  http://localhost:3200
+Loki API:   http://localhost:3100
+OTLP gRPC:  127.0.0.1:4317
+OTLP HTTP:  127.0.0.1:4318
+EOF
+    fi
+    ;;
+  env)
+    cat <<'EOF'
+export DEFENSECLAW_TELEMETRY_ENABLED=1
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_SERVICE_NAME=defenseclaw
+export OTEL_RESOURCE_ATTRIBUTES=service.namespace=defenseclaw,deployment.environment=local-dev
+EOF
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    # Fall through to docker compose for unrecognised verbs so power
+    # users retain the original "pass-through to compose" behaviour
+    # they had with run.sh.
+    require_docker
+    compose "${ACTION}" "${PASSTHROUGH[@]}"
+    ;;
+esac
