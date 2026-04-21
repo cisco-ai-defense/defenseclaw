@@ -133,6 +133,7 @@ var observabilityPresets = [][2]string{
 	{"honeycomb", "Honeycomb"},
 	{"newrelic", "New Relic"},
 	{"grafana-cloud", "Grafana Cloud"},
+	{"local-otlp", "Local Observability Stack"},
 	{"otlp", "Generic OTLP"},
 	{"webhook", "Generic HTTP JSONL"},
 }
