@@ -82,7 +82,7 @@ func (p *Provider) RecordGatewayEvent(e gatewaylog.Event) {
 		verdictAttrs := []attribute.KeyValue{
 			attribute.String("verdict.stage", string(e.Verdict.Stage)),
 			attribute.String("verdict.action", e.Verdict.Action),
-			attribute.String("verdict.severity", strings.ToUpper(string(e.Severity))),
+			attribute.String("verdict.severity", normalizeSeverityLabel(string(e.Severity))),
 		}
 		if e.PolicyID != "" {
 			verdictAttrs = append(verdictAttrs, attribute.String("policy_id", e.PolicyID))
@@ -90,16 +90,35 @@ func (p *Provider) RecordGatewayEvent(e gatewaylog.Event) {
 		if e.DestinationApp != "" {
 			verdictAttrs = append(verdictAttrs, attribute.String("destination_app", e.DestinationApp))
 		}
+		if e.AgentName != "" {
+			verdictAttrs = append(verdictAttrs, attribute.String("agent_name", e.AgentName))
+		}
+		if e.AgentInstanceID != "" {
+			verdictAttrs = append(verdictAttrs, attribute.String("agent_instance_id", e.AgentInstanceID))
+		}
+		if e.SidecarInstanceID != "" {
+			verdictAttrs = append(verdictAttrs, attribute.String("sidecar_instance_id", e.SidecarInstanceID))
+		}
 		p.metrics.verdictsTotal.Add(ctx, 1, metric.WithAttributes(verdictAttrs...))
 	case gatewaylog.EventJudge:
 		if e.Judge == nil {
 			return
 		}
-		p.metrics.judgeInvocations.Add(ctx, 1, metric.WithAttributes(
+		judgeAttrs := []attribute.KeyValue{
 			attribute.String("judge.kind", e.Judge.Kind),
 			attribute.String("judge.action", e.Judge.Action),
-			attribute.String("judge.severity", strings.ToUpper(string(e.Severity))),
-		))
+			attribute.String("judge.severity", normalizeSeverityLabel(string(e.Severity))),
+		}
+		if e.AgentName != "" {
+			judgeAttrs = append(judgeAttrs, attribute.String("agent_name", e.AgentName))
+		}
+		if e.AgentInstanceID != "" {
+			judgeAttrs = append(judgeAttrs, attribute.String("agent_instance_id", e.AgentInstanceID))
+		}
+		if e.SidecarInstanceID != "" {
+			judgeAttrs = append(judgeAttrs, attribute.String("sidecar_instance_id", e.SidecarInstanceID))
+		}
+		p.metrics.judgeInvocations.Add(ctx, 1, metric.WithAttributes(judgeAttrs...))
 		p.metrics.judgeLatency.Record(ctx, float64(e.Judge.LatencyMs),
 			metric.WithAttributes(attribute.String("judge.kind", e.Judge.Kind)))
 		if e.Judge.Action == "error" || e.Judge.ParseError != "" {

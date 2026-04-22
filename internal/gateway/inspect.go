@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -308,15 +309,25 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
-		a.otel.RecordInspectEvaluation(context.Background(), req.Tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), req.Tool, elapsedMs)
-		a.otel.RecordGuardrailEvaluation(context.Background(), "policy-rules", verdict.Action)
-		a.otel.RecordGuardrailLatency(context.Background(), "policy-rules", elapsedMs)
+		ctx := r.Context()
+		env := audit.EnvelopeFromContext(ctx)
+		meta := telemetry.MetricEnvelope{
+			PolicyID:          env.PolicyID,
+			DestinationApp:    env.DestinationApp,
+			AgentName:         env.AgentName,
+			AgentInstanceID:   env.AgentInstanceID,
+			SidecarInstanceID: env.SidecarInstanceID,
+			Result:            verdict.Action,
+		}
+		a.otel.RecordInspectEvaluation(ctx, req.Tool, verdict.Action, verdict.Severity, meta)
+		a.otel.RecordInspectLatency(ctx, req.Tool, elapsedMs)
+		a.otel.RecordGuardrailEvaluation(ctx, "policy-rules", verdict.Action, meta)
+		a.otel.RecordGuardrailLatency(ctx, "policy-rules", elapsedMs)
 		// Inspect span is emitted for its side effect on the span
 		// exporter — trace_id is now pulled from r.Context() by
 		// LogActionCtx (the gateway CorrelationMiddleware seeded
 		// the same trace id into both).
-		_ = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
+		_ = a.otel.EmitInspectSpan(ctx, req.Tool, verdict.Action, verdict.Severity, elapsedMs)
 	}
 
 	requestID := RequestIDFromContext(r.Context())
@@ -394,7 +405,9 @@ func (a *APIServer) emitCodeGuardOTel(req *ToolInspectRequest, verdict *ToolInsp
 
 	elapsedMs := float64(elapsed.Milliseconds())
 
-	a.otel.RecordGuardrailEvaluation(context.Background(), "codeguard", verdict.Action)
+	a.otel.RecordGuardrailEvaluation(context.Background(), "codeguard", verdict.Action, telemetry.MetricEnvelope{
+		Result: verdict.Action,
+	})
 	a.otel.RecordGuardrailLatency(context.Background(), "codeguard", elapsedMs)
 
 	hasCodeGuardFinding := false

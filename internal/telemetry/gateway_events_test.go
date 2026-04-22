@@ -373,7 +373,12 @@ func TestRecordGatewayEvent_UpdatesMetrics(t *testing.T) {
 	// one judge-error, one gateway error.
 	p.RecordGatewayEvent(gatewaylog.Event{
 		EventType: gatewaylog.EventVerdict, Severity: gatewaylog.SeverityHigh,
-		Verdict: &gatewaylog.VerdictPayload{Stage: gatewaylog.StageFinal, Action: "block"},
+		PolicyID:          "policy-1",
+		DestinationApp:    "builtin",
+		AgentName:         "pr127",
+		AgentInstanceID:   "agent-instance-1",
+		SidecarInstanceID: "sidecar-1",
+		Verdict:           &gatewaylog.VerdictPayload{Stage: gatewaylog.StageFinal, Action: "block"},
 	})
 	p.RecordGatewayEvent(gatewaylog.Event{
 		EventType: gatewaylog.EventVerdict, Severity: gatewaylog.SeverityInfo,
@@ -429,6 +434,33 @@ func TestRecordGatewayEvent_UpdatesMetrics(t *testing.T) {
 	if counts["defenseclaw.gateway.judge.latency"] == 0 {
 		t.Errorf("judge.latency histogram never observed: %+v", counts)
 	}
+
+	found := findCounter(rm, "defenseclaw.gateway.verdicts")
+	if found == nil {
+		t.Fatal("expected defenseclaw.gateway.verdicts metric")
+	}
+	sum, ok := found.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", found.Data)
+	}
+	for _, dp := range sum.DataPoints {
+		if hasAttribute(dp.Attributes, "policy_id", "policy-1") {
+			if !hasAttribute(dp.Attributes, "verdict.severity", "high") {
+				t.Error("verdict severity should be normalized to lowercase")
+			}
+			if !hasAttribute(dp.Attributes, "agent_name", "pr127") {
+				t.Error("verdict metric missing agent_name attribute")
+			}
+			if !hasAttribute(dp.Attributes, "agent_instance_id", "agent-instance-1") {
+				t.Error("verdict metric missing agent_instance_id attribute")
+			}
+			if !hasAttribute(dp.Attributes, "sidecar_instance_id", "sidecar-1") {
+				t.Error("verdict metric missing sidecar_instance_id attribute")
+			}
+			return
+		}
+	}
+	t.Fatal("verdict metric data point with policy_id not found")
 }
 
 func TestRecordGatewayEvent_IsNoopWhenDisabled(t *testing.T) {

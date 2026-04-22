@@ -324,7 +324,13 @@ func (l *Logger) LogScanWithCorrelation(
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, telemetry.MetricEnvelope{
+			PolicyID:          event.PolicyID,
+			DestinationApp:    event.DestinationApp,
+			AgentName:         event.AgentName,
+			AgentInstanceID:   event.AgentInstanceID,
+			SidecarInstanceID: event.SidecarInstanceID,
+		})
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -432,7 +438,13 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		return storeErr
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, telemetry.MetricEnvelope{
+			PolicyID:          event.PolicyID,
+			DestinationApp:    event.DestinationApp,
+			AgentName:         event.AgentName,
+			AgentInstanceID:   event.AgentInstanceID,
+			SidecarInstanceID: event.SidecarInstanceID,
+		})
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -487,7 +499,13 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, telemetry.MetricEnvelope{
+			PolicyID:          event.PolicyID,
+			DestinationApp:    event.DestinationApp,
+			AgentName:         event.AgentName,
+			AgentInstanceID:   event.AgentInstanceID,
+			SidecarInstanceID: event.SidecarInstanceID,
+		})
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -550,7 +568,13 @@ func (l *Logger) LogEvent(event Event) error {
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, telemetry.MetricEnvelope{
+			PolicyID:          event.PolicyID,
+			DestinationApp:    event.DestinationApp,
+			AgentName:         event.AgentName,
+			AgentInstanceID:   event.AgentInstanceID,
+			SidecarInstanceID: event.SidecarInstanceID,
+		})
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)

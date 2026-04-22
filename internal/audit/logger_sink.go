@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -151,7 +152,13 @@ func (l *Logger) emitSinkFailureAuditAndGateway(ctx context.Context, sinkName, k
 		return
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(ctx, ae.Action, ae.Severity)
+		otel.RecordAuditEvent(ctx, ae.Action, ae.Severity, telemetry.MetricEnvelope{
+			PolicyID:          ae.PolicyID,
+			DestinationApp:    ae.DestinationApp,
+			AgentName:         ae.AgentName,
+			AgentInstanceID:   ae.AgentInstanceID,
+			SidecarInstanceID: ae.SidecarInstanceID,
+		})
 	}
 	l.emitStructuredSnapshot(emitter, ae)
 }

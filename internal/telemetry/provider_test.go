@@ -128,14 +128,14 @@ func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
 	ctx := context.Background()
 	p.RecordScan(ctx, "test", "skill", "clean", 100, map[string]int{"HIGH": 1})
-	p.RecordToolCall(ctx, "shell", "builtin", false)
+	p.RecordToolCall(ctx, "shell", "builtin", false, MetricEnvelope{})
 	p.RecordToolDuration(ctx, "shell", "builtin", 50)
 	p.RecordToolError(ctx, "shell", 1)
 	p.RecordApproval(ctx, "approved", true, false)
 	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "", "", 100, 200)
 	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", "", "", 0.5)
 	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern")
-	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block")
+	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block", MetricEnvelope{})
 	p.RecordGuardrailLatency(ctx, "ai-defense", 100)
 }
 
@@ -816,9 +816,14 @@ func TestRecordGuardrailEvaluation_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "block")
-	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "allow")
-	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "block")
+	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "block", MetricEnvelope{
+		PolicyID:       "policy-1",
+		AgentName:      "pr127",
+		DestinationApp: "builtin",
+		Result:         "block",
+	})
+	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "allow", MetricEnvelope{})
+	p.RecordGuardrailEvaluation(ctx, "guardrail-proxy", "block", MetricEnvelope{})
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -835,14 +840,82 @@ func TestRecordGuardrailEvaluation_EmitsMetric(t *testing.T) {
 		t.Fatalf("expected Sum[int64], got %T", found.Data)
 	}
 
-	blockCount := counterValueByAttr(sum, "guardrail.action_taken", "block")
-	allowCount := counterValueByAttr(sum, "guardrail.action_taken", "allow")
+	blockCount := counterValueByAttr(sum, "guardrail.action_taken", "blocked")
+	allowCount := counterValueByAttr(sum, "guardrail.action_taken", "allowed")
 
 	if blockCount != 2 {
 		t.Errorf("block count = %d, want 2", blockCount)
 	}
 	if allowCount != 1 {
 		t.Errorf("allow count = %d, want 1", allowCount)
+	}
+	for _, dp := range sum.DataPoints {
+		if hasAttribute(dp.Attributes, "policy_id", "policy-1") {
+			if !hasAttribute(dp.Attributes, "agent_name", "pr127") {
+				t.Error("guardrail evaluation missing agent_name attribute")
+			}
+			if !hasAttribute(dp.Attributes, "destination_app", "builtin") {
+				t.Error("guardrail evaluation missing destination_app attribute")
+			}
+			if !hasAttribute(dp.Attributes, "result", "blocked") {
+				t.Error("guardrail evaluation missing normalized result attribute")
+			}
+			return
+		}
+	}
+	t.Fatal("guardrail evaluation data point with policy_id not found")
+}
+
+func TestRecordToolCall_EmitsEnvelopeDims(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordToolCall(ctx, "shell", "builtin", true, MetricEnvelope{
+		PolicyID:       "policy-tool",
+		DestinationApp: "builtin",
+		AgentName:      "pr127",
+		Result:         "observe",
+	})
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	found := findCounter(rm, "defenseclaw.tool.calls")
+	if found == nil {
+		t.Fatal("metric defenseclaw.tool.calls not found")
+	}
+	sum, ok := found.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", found.Data)
+	}
+	if len(sum.DataPoints) == 0 {
+		t.Fatal("expected at least one tool.calls data point")
+	}
+	dp := sum.DataPoints[0]
+	if !hasAttribute(dp.Attributes, "tool.name", "shell") {
+		t.Error("tool.name attribute missing")
+	}
+	if !hasAttribute(dp.Attributes, "tool.provider", "builtin") {
+		t.Error("tool.provider attribute missing")
+	}
+	if !hasAttribute(dp.Attributes, "policy_id", "policy-tool") {
+		t.Error("policy_id attribute missing")
+	}
+	if !hasAttribute(dp.Attributes, "destination_app", "builtin") {
+		t.Error("destination_app attribute missing")
+	}
+	if !hasAttribute(dp.Attributes, "agent_name", "pr127") {
+		t.Error("agent_name attribute missing")
+	}
+	if !hasAttribute(dp.Attributes, "result", "observed") {
+		t.Error("result attribute missing or not normalized")
 	}
 }
 
@@ -957,7 +1030,7 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 
 func TestRecordGuardrailEvaluation_DisabledProvider_NoOp(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
-	p.RecordGuardrailEvaluation(context.Background(), "test", "block")
+	p.RecordGuardrailEvaluation(context.Background(), "test", "block", MetricEnvelope{})
 }
 
 func TestDisabledProvider_RecordPolicyEvaluation_NoPanic(t *testing.T) {
@@ -1322,12 +1395,13 @@ func findHistogram(rm metricdata.ResourceMetrics, name string) *metricdata.Metri
 }
 
 func counterValueByAttr(sum metricdata.Sum[int64], key, val string) int64 {
+	var total int64
 	for _, dp := range sum.DataPoints {
 		if hasAttribute(dp.Attributes, key, val) {
-			return dp.Value
+			total += dp.Value
 		}
 	}
-	return 0
+	return total
 }
 
 func hasAttribute(attrs attribute.Set, key, val string) bool {

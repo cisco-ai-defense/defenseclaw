@@ -280,7 +280,12 @@ func (p *Provider) StartToolSpan(
 	flaggedPattern, toolProvider, skillKey string,
 	cor ToolSpanContext,
 ) (context.Context, trace.Span) {
-	p.RecordToolCall(ctx, tool, toolProvider, dangerous)
+	p.RecordToolCall(ctx, tool, toolProvider, dangerous, MetricEnvelope{
+		PolicyID:       cor.PolicyID,
+		DestinationApp: cor.DestinationApp,
+		AgentName:      cor.AgentName,
+		Result:         status,
+	})
 
 	if !p.TracesEnabled() {
 		return ctx, nil

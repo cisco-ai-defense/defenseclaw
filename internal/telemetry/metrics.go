@@ -18,6 +18,7 @@ package telemetry
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -25,6 +26,79 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
+
+// MetricEnvelope carries low-cardinality dimensions that are useful
+// for downstream aggregation and safe to attach to metrics.
+type MetricEnvelope struct {
+	PolicyID          string
+	DestinationApp    string
+	AgentName         string
+	AgentInstanceID   string
+	SidecarInstanceID string
+	Result            string
+}
+
+func normalizeSeverityLabel(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "critical", "fatal":
+		return "critical"
+	case "high", "error":
+		return "high"
+	case "medium", "warn", "warning":
+		return "medium"
+	case "low":
+		return "low"
+	case "info", "informational":
+		return "info"
+	case "none", "":
+		return "none"
+	default:
+		return strings.ToLower(strings.TrimSpace(severity))
+	}
+}
+
+func normalizeStatusLabel(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "allow", "allowed", "approve", "approved", "clean", "success":
+		return "allowed"
+	case "block", "blocked", "deny", "denied":
+		return "blocked"
+	case "quarantine", "quarantined":
+		return "quarantined"
+	case "active":
+		return "active"
+	case "alert", "observe", "observed":
+		return "observed"
+	case "error", "failed", "failure":
+		return "error"
+	case "":
+		return ""
+	default:
+		return strings.ToLower(strings.TrimSpace(status))
+	}
+}
+
+func appendMetricEnvelopeAttrs(attrs []attribute.KeyValue, env MetricEnvelope) []attribute.KeyValue {
+	if env.PolicyID != "" {
+		attrs = append(attrs, attribute.String("policy_id", env.PolicyID))
+	}
+	if env.DestinationApp != "" {
+		attrs = append(attrs, attribute.String("destination_app", env.DestinationApp))
+	}
+	if env.AgentName != "" {
+		attrs = append(attrs, attribute.String("agent_name", env.AgentName))
+	}
+	if env.AgentInstanceID != "" {
+		attrs = append(attrs, attribute.String("agent_instance_id", env.AgentInstanceID))
+	}
+	if env.SidecarInstanceID != "" {
+		attrs = append(attrs, attribute.String("sidecar_instance_id", env.SidecarInstanceID))
+	}
+	if env.Result != "" {
+		attrs = append(attrs, attribute.String("result", normalizeStatusLabel(env.Result)))
+	}
+	return attrs
+}
 
 // metricsSet holds all registered OTel instruments.
 type metricsSet struct {
@@ -804,15 +878,17 @@ func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict 
 }
 
 // RecordToolCall records a tool call metric.
-func (p *Provider) RecordToolCall(ctx context.Context, tool, provider string, dangerous bool) {
+func (p *Provider) RecordToolCall(ctx context.Context, tool, provider string, dangerous bool, env MetricEnvelope) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.toolCalls.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("tool.name", tool),
 		attribute.String("tool.provider", provider),
 		attribute.Bool("dangerous", dangerous),
-	))
+	}
+	attrs = appendMetricEnvelopeAttrs(attrs, env)
+	p.metrics.toolCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordToolDuration records a tool call duration metric.
@@ -917,14 +993,16 @@ func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source 
 }
 
 // RecordGuardrailEvaluation records a guardrail evaluation metric.
-func (p *Provider) RecordGuardrailEvaluation(ctx context.Context, scanner, actionTaken string) {
+func (p *Provider) RecordGuardrailEvaluation(ctx context.Context, scanner, actionTaken string, env MetricEnvelope) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
-		attribute.String("guardrail.action_taken", actionTaken),
-	))
+		attribute.String("guardrail.action_taken", normalizeStatusLabel(actionTaken)),
+	}
+	attrs = appendMetricEnvelopeAttrs(attrs, env)
+	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordGuardrailLatency records guardrail evaluation latency.
@@ -1003,15 +1081,17 @@ func (p *Provider) RecordWatcherRestart(ctx context.Context) {
 }
 
 // RecordInspectEvaluation records a tool/message inspect evaluation.
-func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, severity string) {
+func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, severity string, env MetricEnvelope) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("tool", tool),
-		attribute.String("action", action),
-		attribute.String("severity", severity),
-	))
+		attribute.String("action", normalizeStatusLabel(action)),
+		attribute.String("severity", normalizeSeverityLabel(severity)),
+	}
+	attrs = appendMetricEnvelopeAttrs(attrs, env)
+	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordInspectLatency records tool/message inspect latency.
@@ -1035,14 +1115,16 @@ func (p *Provider) RecordAuditDBError(ctx context.Context, operation string) {
 }
 
 // RecordAuditEvent records that an audit event was persisted.
-func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string) {
+func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string, env MetricEnvelope) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("action", action),
-		attribute.String("severity", severity),
-	))
+		attribute.String("severity", normalizeSeverityLabel(severity)),
+	}
+	attrs = appendMetricEnvelopeAttrs(attrs, env)
+	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordConfigLoadError records a config load or validation error and emits
@@ -1651,7 +1733,7 @@ func (p *Provider) RecordGatewayEventEmitted(ctx context.Context, eventType, sev
 	}
 	p.metrics.gatewayEventsEmitted.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventType),
-		attribute.String("severity", severity),
+		attribute.String("severity", normalizeSeverityLabel(severity)),
 	))
 }
 

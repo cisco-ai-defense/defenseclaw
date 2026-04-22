@@ -25,6 +25,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // truncateUTF8 truncates s to at most maxBytes without splitting a UTF-8 code point.
@@ -169,7 +171,10 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 
 	// Record OTel audit-event counter for every egress observation.
 	if otel != nil {
-		otel.RecordAuditEvent(ctx, "network-egress", e.effectiveSeverity())
+		otel.RecordAuditEvent(ctx, "network-egress", e.effectiveSeverity(), telemetry.MetricEnvelope{
+			DestinationApp: e.Hostname,
+			Result:         map[bool]string{true: "blocked", false: "allowed"}[e.Blocked],
+		})
 	}
 
 	if !e.Blocked {

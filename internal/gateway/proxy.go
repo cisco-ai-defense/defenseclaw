@@ -2958,17 +2958,32 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 	})
 
 	if p.otel != nil {
+		env := audit.EnvelopeFromContext(ctx)
 		// v7: use the request's own ctx (carries the active trace
 		// span) so histograms get trace-exemplar links in Splunk.
 		// The previous context.Background() shadow broke the
 		// metrics→traces join for every guardrail observation —
 		// operators following a span from traces could not see
 		// the accompanying latency / token histogram data points.
-		p.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", verdict.Action)
+		p.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", verdict.Action, telemetry.MetricEnvelope{
+			PolicyID:          env.PolicyID,
+			DestinationApp:    env.DestinationApp,
+			AgentName:         env.AgentName,
+			AgentInstanceID:   env.AgentInstanceID,
+			SidecarInstanceID: env.SidecarInstanceID,
+			Result:            verdict.Action,
+		})
 		p.otel.RecordGuardrailLatency(ctx, "guardrail-proxy", elapsedMs)
 		if verdict.CiscoElapsedMs > 0 {
 			p.otel.RecordGuardrailLatency(ctx, "cisco-ai-defense", verdict.CiscoElapsedMs)
-			p.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", verdict.Action)
+			p.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", verdict.Action, telemetry.MetricEnvelope{
+				PolicyID:          env.PolicyID,
+				DestinationApp:    env.DestinationApp,
+				AgentName:         env.AgentName,
+				AgentInstanceID:   env.AgentInstanceID,
+				SidecarInstanceID: env.SidecarInstanceID,
+				Result:            verdict.Action,
+			})
 		}
 		if tokIn != nil || tokOut != nil {
 			p.otel.RecordLLMTokens(ctx, "apply_guardrail", "defenseclaw", model, "openclaw", p.agentIDForRequest(), ptrOr(tokIn, 0), ptrOr(tokOut, 0))
@@ -3377,7 +3392,15 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	}
 
 	if p.otel != nil {
-		p.otel.RecordGuardrailEvaluation(ctx, "tool-call-inspect", action)
+		env := audit.EnvelopeFromContext(ctx)
+		p.otel.RecordGuardrailEvaluation(ctx, "tool-call-inspect", action, telemetry.MetricEnvelope{
+			PolicyID:          env.PolicyID,
+			DestinationApp:    env.DestinationApp,
+			AgentName:         env.AgentName,
+			AgentInstanceID:   env.AgentInstanceID,
+			SidecarInstanceID: env.SidecarInstanceID,
+			Result:            action,
+		})
 	}
 
 	return &ScanVerdict{

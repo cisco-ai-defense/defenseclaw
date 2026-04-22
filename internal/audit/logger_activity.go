@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -183,7 +184,13 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 
 	sinksMgr, otel, structured := l.snapshot()
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), auditEv.Action, auditEv.Severity)
+		otel.RecordAuditEvent(context.Background(), auditEv.Action, auditEv.Severity, telemetry.MetricEnvelope{
+			PolicyID:          auditEv.PolicyID,
+			DestinationApp:    auditEv.DestinationApp,
+			AgentName:         auditEv.AgentName,
+			AgentInstanceID:   auditEv.AgentInstanceID,
+			SidecarInstanceID: auditEv.SidecarInstanceID,
+		})
 		otel.RecordActivityTotal(context.Background(), action, targetType, actor, len(in.Diff))
 	}
 	l.emitStructuredSnapshot(structured, auditEv)

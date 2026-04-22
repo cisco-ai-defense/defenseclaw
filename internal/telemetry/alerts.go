@@ -65,7 +65,9 @@ func (p *Provider) EmitRuntimeAlert(
 
 	if guardrailScanner, ok := guardrail["scanner"]; ok {
 		actionTaken := guardrail["action_taken"]
-		p.RecordGuardrailEvaluation(ctx, guardrailScanner, actionTaken)
+		p.RecordGuardrailEvaluation(ctx, guardrailScanner, actionTaken, MetricEnvelope{
+			Result: actionTaken,
+		})
 	}
 
 	if !p.LogsEnabled() {

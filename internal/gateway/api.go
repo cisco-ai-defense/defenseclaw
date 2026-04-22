@@ -1327,11 +1327,26 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 
 	if a.otel != nil {
 		ctx := r.Context()
-		a.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", req.Action)
+		env := audit.EnvelopeFromContext(ctx)
+		a.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", req.Action, telemetry.MetricEnvelope{
+			PolicyID:          env.PolicyID,
+			DestinationApp:    env.DestinationApp,
+			AgentName:         env.AgentName,
+			AgentInstanceID:   env.AgentInstanceID,
+			SidecarInstanceID: env.SidecarInstanceID,
+			Result:            req.Action,
+		})
 		a.otel.RecordGuardrailLatency(ctx, "guardrail-proxy", req.ElapsedMs)
 		if req.CiscoElapsedMs > 0 {
 			a.otel.RecordGuardrailLatency(ctx, "cisco-ai-defense", req.CiscoElapsedMs)
-			a.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", req.Action)
+			a.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", req.Action, telemetry.MetricEnvelope{
+				PolicyID:          env.PolicyID,
+				DestinationApp:    env.DestinationApp,
+				AgentName:         env.AgentName,
+				AgentInstanceID:   env.AgentInstanceID,
+				SidecarInstanceID: env.SidecarInstanceID,
+				Result:            req.Action,
+			})
 		}
 		if req.TokensIn != nil || req.TokensOut != nil {
 			var tIn, tOut int64
@@ -1435,8 +1450,16 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 
 	if a.otel != nil {
 		ctx := r.Context()
+		env := audit.EnvelopeFromContext(ctx)
 		for _, src := range out.ScannerSources {
-			a.otel.RecordGuardrailEvaluation(ctx, src, out.Action)
+			a.otel.RecordGuardrailEvaluation(ctx, src, out.Action, telemetry.MetricEnvelope{
+				PolicyID:          env.PolicyID,
+				DestinationApp:    env.DestinationApp,
+				AgentName:         env.AgentName,
+				AgentInstanceID:   env.AgentInstanceID,
+				SidecarInstanceID: env.SidecarInstanceID,
+				Result:            out.Action,
+			})
 		}
 		a.otel.RecordGuardrailLatency(ctx, "opa-guardrail", req.ElapsedMs)
 	}
