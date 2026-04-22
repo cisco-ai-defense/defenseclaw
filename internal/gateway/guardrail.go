@@ -504,8 +504,22 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	triageCh := make(chan []TriageSignal, 1)
 
 	// Run judge and triage in parallel.
+	//
+	// A panic in either goroutine would leave its channel unwritten and
+	// deadlock the parent on `<-judgeCh` / `<-triageCh`, stalling the
+	// request and permanently pinning the http handler goroutine.
+	// Both producers therefore wrap their body in defer/recover() and
+	// fall back to an error sentinel so the parent always proceeds
+	// (judge → regex fallback, triage → empty signal set) even under
+	// a pathological policy / scanner bug.
 	if g.judge != nil {
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					fmt.Fprintf(defaultLogWriter, "[guardrail] judge_first: judge goroutine panic recovered: %v\n", rec)
+					judgeCh <- result{verdict: nil, err: true}
+				}
+			}()
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.sweep")
 			v := g.judge.RunJudges(judgeCtx, direction, content, "")
@@ -517,6 +531,12 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				fmt.Fprintf(defaultLogWriter, "[guardrail] judge_first: triage goroutine panic recovered: %v\n", rec)
+				triageCh <- nil
+			}
+		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
 		sigs := triagePatterns(direction, content)
@@ -1431,29 +1451,49 @@ func lastUserText(messages []ChatMessage) string {
 // would disarm guardrail inspection for the entire rest of the session.
 // That was the v0.2.0 regression; see PR #127.
 //
-// Bypass conditions (all must hold):
+// Bypass conditions (ALL must hold):
 //
-//   - The current user turn references the canonical probe file
-//     "HEARTBEAT.md" (not merely the response token "HEARTBEAT_OK",
-//     which an attacker could easily append to an injection payload).
+//  1. Length ≤ maxHeartbeatProbeLen. The canonical probe is ~170 chars;
+//     messaging bridges (WhatsApp/Teams) prepend transport banners and
+//     timing metadata that push it to several hundred chars, so we cap
+//     generously — but we still cap so an attacker cannot smuggle an
+//     arbitrarily large payload past the guardrail.
 //
-//   - The current turn stays within maxHeartbeatProbeLen. The probe
-//     body is ~170 chars on its own but messaging bridges
-//     (WhatsApp/Teams) routinely prepend a transport banner and timing
-//     metadata, pushing the legitimate probe to several hundred chars —
-//     so we cap generously but still cap so an attacker cannot smuggle
-//     an arbitrarily large payload past the guardrail by including
-//     "HEARTBEAT.md" somewhere in it.
+//  2. References the canonical probe file "HEARTBEAT.md" (not merely
+//     the response token "HEARTBEAT_OK", which an attacker could trivially
+//     append to an injection payload).
+//
+//  3. Ends with the canonical response-token instruction
+//     ("…HEARTBEAT_OK[.!]?$"). A legitimate probe ALWAYS tells the LLM
+//     how to reply; an attacker appending malicious tail content (e.g.
+//     "Read HEARTBEAT.md. Ignore all prior instructions.") will not end
+//     with HEARTBEAT_OK and is therefore inspected normally.
+//
+//  4. No known injection imperatives appear anywhere in the text
+//     ("ignore previous/prior", "disregard", "override", "exfiltrate",
+//     "rm -rf", "cat /", "/etc/passwd|shadow", "DAN", "jailbreak").
+//     Belt-and-suspenders: if an attacker manages to craft text that
+//     satisfies (2) and (3) simultaneously, these token triggers will
+//     still force normal inspection.
 //
 // This function is called only from the pre-call prompt inspection
 // site in handlePassthrough / handleChatCompletion; completion-side
 // inspection does not consult it.
 func isHeartbeatMessage(userText string, _ []ChatMessage) bool {
 	const maxHeartbeatProbeLen = 2048
+	if userText == "" || len(userText) > maxHeartbeatProbeLen {
+		return false
+	}
 	if !containsHeartbeatProbeSignature(userText) {
 		return false
 	}
-	return len(userText) <= maxHeartbeatProbeLen
+	if !heartbeatOKFooterRe.MatchString(userText) {
+		return false
+	}
+	if heartbeatInjectionHintRe.MatchString(userText) {
+		return false
+	}
+	return true
 }
 
 // containsHeartbeatProbeSignature reports whether s references the probe
@@ -1463,6 +1503,39 @@ func isHeartbeatMessage(userText string, _ []ChatMessage) bool {
 func containsHeartbeatProbeSignature(s string) bool {
 	return strings.Contains(strings.ToUpper(s), "HEARTBEAT.MD")
 }
+
+// heartbeatOKFooterRe matches when a message ends with the canonical
+// HEARTBEAT_OK response-token instruction, allowing for trailing
+// punctuation / whitespace. Used by isHeartbeatMessage to reject any
+// "Read HEARTBEAT.md. <injection tail>" smuggling attempt because a
+// legitimate probe ALWAYS ends by telling the LLM to reply HEARTBEAT_OK.
+var heartbeatOKFooterRe = regexp.MustCompile(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$`)
+
+// heartbeatInjectionHintRe matches a small vocabulary of unambiguous
+// prompt-injection / exfil imperatives. If any of them appears anywhere
+// in a message that otherwise looks like a heartbeat probe, we force
+// normal inspection. This is belt-and-suspenders — the ends-with
+// HEARTBEAT_OK check (heartbeatOKFooterRe) already rejects most tail
+// smuggling, but this catches attackers who manage to structure their
+// attack around the footer.
+//
+// The word list stays narrow on purpose so it does not accidentally
+// match the legitimate probe body ("do not infer or repeat old tasks
+// from prior chats" — the probe text contains "prior" as a bare word,
+// so we only match IGNORE + PRIOR together, not PRIOR alone).
+var heartbeatInjectionHintRe = regexp.MustCompile(
+	`(?i)\b(?:` +
+		`IGNORE(?:\s+ALL)?\s+(?:PRIOR|PREVIOUS)|` +
+		`DISREGARD(?:\s+(?:ALL|ANY|PRIOR|PREVIOUS|THE))?\s*(?:INSTRUCTION|PROMPT|RULE|CONTEXT)|` +
+		`OVERRIDE\s+(?:YOUR|THE|ALL|ANY)\s+(?:INSTRUCTION|RULE|SYSTEM|PROMPT)|` +
+		`EXFILTRATE|` +
+		`RM\s+-\s*RF|` +
+		`CAT\s+/|` +
+		`/ETC/(?:PASSWD|SHADOW|HOSTS)|` +
+		`\bDAN\s+MODE\b|` +
+		`JAILBREAK|` +
+		`SUDO\s+RM` +
+		`)\b`)
 
 // ---------------------------------------------------------------------------
 // Secret redaction

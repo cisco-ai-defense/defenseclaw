@@ -440,14 +440,24 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	case p.Branch == "shape" && p.Decision == "allow":
 		sev = gatewaylog.SeverityMedium
 	}
-	// Truncate string fields to keep a single event below the
-	// 4 KiB JSONL comfort ceiling even when a caller supplies a
-	// pathological URL or reason string. TargetPath retains enough
-	// to identify the endpoint (/chat/completions or
-	// :generateContent) without echoing user-supplied path
-	// parameters. TargetHost is a FQDN so 253 is the DNS ceiling.
-	// Reason is operator-facing; 512 keeps it useful without
-	// letting a misbehaving TS caller bloat gateway.jsonl.
+	// TargetPath is sanitized before truncation so query strings and
+	// fragments never reach gateway.jsonl. Providers routinely
+	// smuggle tokens / session IDs / tenant hints through the
+	// query string (OpenAI-compat proxies use ?api-key=, Anthropic
+	// compat uses ?token=, vendor SDKs append ?key=, Gemini uses
+	// ?key=<API key>). We keep only the URL path component for
+	// routing observability and drop everything after the first
+	// '?' or '#' unconditionally. Callers that want to preserve a
+	// specific path suffix for endpoint detection (e.g.
+	// ":generateContent") are unaffected because the colon is a
+	// path-valid character. TargetHost is a FQDN so 253 is the DNS
+	// ceiling. Reason is operator-facing; 512 keeps it useful
+	// without letting a misbehaving TS caller bloat gateway.jsonl.
+	if p.TargetPath != "" {
+		if i := strings.IndexAny(p.TargetPath, "?#"); i >= 0 {
+			p.TargetPath = p.TargetPath[:i]
+		}
+	}
 	if len(p.TargetPath) > 256 {
 		p.TargetPath = p.TargetPath[:256]
 	}

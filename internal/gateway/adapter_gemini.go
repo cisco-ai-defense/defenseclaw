@@ -94,6 +94,98 @@ func (geminiAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter
 	p.writeBlockedResponseGemini(w, msg)
 }
 
+// geminiTurn is the flattened view of one Gemini contents[] turn used
+// by the passthrough prompt extractor. All text parts in the turn are
+// joined with "\n" so a turn with both text and function_call parts
+// still contributes its text payload to inspection.
+type geminiTurn struct {
+	Role string
+	Text string
+}
+
+// extractGeminiContentsText flattens a Gemini-shaped `contents[]` JSON
+// array into per-turn role+text tuples for guardrail inspection.
+// Non-text parts (inlineData, fileData, functionCall, functionResponse)
+// are ignored — their text analog is synthesized only when an attacker
+// supplies an unusual shape; for normal LLM traffic, the text parts are
+// the whole user-controlled payload.
+//
+// Returns nil on malformed input (never errors up — the caller will
+// fall back to systemInstruction / other extractors and inspection
+// will still run on whatever text is available).
+func extractGeminiContentsText(raw json.RawMessage) []geminiTurn {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var rawTurns []json.RawMessage
+	if err := json.Unmarshal(raw, &rawTurns); err != nil {
+		return nil
+	}
+	out := make([]geminiTurn, 0, len(rawTurns))
+	for _, r := range rawTurns {
+		var turn struct {
+			Role  string            `json:"role"`
+			Parts []json.RawMessage `json:"parts"`
+		}
+		if err := json.Unmarshal(r, &turn); err != nil {
+			continue
+		}
+		var sb strings.Builder
+		for _, p := range turn.Parts {
+			var part struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(p, &part); err == nil && part.Text != "" {
+				if sb.Len() > 0 {
+					sb.WriteByte('\n')
+				}
+				sb.WriteString(part.Text)
+			}
+		}
+		if sb.Len() > 0 {
+			out = append(out, geminiTurn{Role: turn.Role, Text: sb.String()})
+		}
+	}
+	return out
+}
+
+// extractGeminiSystemInstructionText pulls the text out of a Gemini
+// `systemInstruction` field, which accepts either a plain string
+// shorthand OR a {role,parts[]} object. Returns "" on unknown shapes.
+func extractGeminiSystemInstructionText(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return ""
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	case '{':
+		var obj struct {
+			Parts []json.RawMessage `json:"parts"`
+		}
+		if err := json.Unmarshal(raw, &obj); err == nil {
+			var sb strings.Builder
+			for _, p := range obj.Parts {
+				var part struct {
+					Text string `json:"text"`
+				}
+				if err := json.Unmarshal(p, &part); err == nil && part.Text != "" {
+					if sb.Len() > 0 {
+						sb.WriteByte('\n')
+					}
+					sb.WriteString(part.Text)
+				}
+			}
+			return sb.String()
+		}
+	}
+	return ""
+}
+
 // injectSystemInstructionGemini merges the notification content into
 // the top-level `systemInstruction` field of a Gemini request.
 // Gemini accepts either a plain-string shorthand OR the documented

@@ -2071,6 +2071,11 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Any cached LLM-judge verdict was rendered under the previous
+	// policy; drop it in O(1) so the next call re-evaluates under
+	// the fresh rulepack. Safe no-op when the cache is unset.
+	InvalidateJudgeVerdictCache()
+
 	if a.otel != nil {
 		a.otel.RecordPolicyReload(r.Context(), "success")
 		a.otel.EmitPolicyDecision("reload", "success", a.scannerCfg.PolicyDir, "", "OPA policy reloaded via API", nil)

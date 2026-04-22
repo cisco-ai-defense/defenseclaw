@@ -616,6 +616,17 @@ func judgeVerdictCache() *guardrail.VerdictCache {
 	return verdictCache.Load()
 }
 
+// InvalidateJudgeVerdictCache bumps the cache generation so every
+// currently-held entry becomes a miss on next lookup. Called from the
+// OPA policy reload handler so a verdict rendered under the old
+// policy is never served once the policy has changed. Safe to call
+// when the cache is unset (no-op).
+func InvalidateJudgeVerdictCache() {
+	if c := verdictCache.Load(); c != nil {
+		c.Invalidate()
+	}
+}
+
 func judgeGenAISystem(model string) string {
 	if i := strings.Index(model, "/"); i > 0 {
 		return strings.ToLower(model[:i])

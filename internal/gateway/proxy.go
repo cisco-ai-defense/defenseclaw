@@ -525,13 +525,18 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	//  - Chat Completions: {"messages": [...]}
 	//  - Anthropic Messages: {"messages": [...], "system": "..."}
 	//  - OpenAI/Azure Responses API: {"input": [...] | "string", "instructions": "..."}
+	//  - Gemini generateContent: {"contents": [{"role": "user", "parts": [{"text": "..."}]}], "systemInstruction": {...}}
+	//  - Ollama /api/generate: {"prompt": "...", "system": "..."}
 	var partial struct {
-		Model        string          `json:"model"`
-		Messages     []ChatMessage   `json:"messages"`
-		System       string          `json:"system,omitempty"`
-		Instructions string          `json:"instructions,omitempty"` // Responses API system prompt
-		Input        json.RawMessage `json:"input,omitempty"`        // Responses API
-		Stream       bool            `json:"stream,omitempty"`
+		Model             string          `json:"model"`
+		Messages          []ChatMessage   `json:"messages"`
+		System            string          `json:"system,omitempty"`
+		Instructions      string          `json:"instructions,omitempty"` // Responses API system prompt
+		Input             json.RawMessage `json:"input,omitempty"`        // Responses API
+		Contents          json.RawMessage `json:"contents,omitempty"`     // Gemini native
+		SystemInstruction json.RawMessage `json:"systemInstruction,omitempty"`
+		Prompt            string          `json:"prompt,omitempty"` // Ollama /api/generate + legacy completion APIs
+		Stream            bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
 
@@ -583,6 +588,46 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
+	// Gemini native (generateContent / streamGenerateContent): top-level
+	// `contents[]` is an array of turns, each with `parts[]` holding the
+	// actual text. Prior to this, Gemini-shaped bodies reached
+	// handlePassthrough with userText == "" and bypassed pre-call
+	// inspection entirely — a full policy bypass on Gemini's wire format.
+	// Also pull systemInstruction as a fallback so Vertex flows that
+	// only set a system prompt are still inspected.
+	if userText == "" && len(partial.Contents) > 0 {
+		if turns := extractGeminiContentsText(partial.Contents); len(turns) > 0 {
+			// Build synthetic ChatMessages so downstream scanners
+			// (Cisco AI Defense, judge) see realistic conversation
+			// shape instead of a single blob.
+			geminiMsgs := make([]ChatMessage, 0, len(turns))
+			for _, t := range turns {
+				role := t.Role
+				if role == "model" {
+					role = "assistant"
+				}
+				if role == "" {
+					role = "user"
+				}
+				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
+			}
+			userText = lastUserText(geminiMsgs)
+			if len(partial.Messages) == 0 {
+				partial.Messages = geminiMsgs
+			}
+		}
+	}
+	if userText == "" && len(partial.SystemInstruction) > 0 {
+		userText = extractGeminiSystemInstructionText(partial.SystemInstruction)
+	}
+
+	// Ollama /api/generate + legacy completion endpoints: top-level
+	// `prompt` is a single string. Inspect it like any user turn so
+	// direct Ollama clients are not a bypass route.
+	if userText == "" && partial.Prompt != "" {
+		userText = partial.Prompt
+	}
+
 	// Responses API: fall back to instructions (system-level prompt) if no
 	// user turn was found — still worth inspecting for prompt injection.
 	if userText == "" && partial.Instructions != "" {
@@ -715,17 +760,33 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// (notably Anthropic) reject the request with 400 "unexpected EOF".
 	upstreamReq.ContentLength = int64(len(body))
 
-	// Copy all original headers except proxy-hop and auth headers.
-	// Auth headers (Authorization, x-api-key, api-key) are stripped to avoid
-	// duplicates — the resolved upstreamAuth is set as the single canonical
-	// Authorization header below. Content-Length is also stripped because
-	// notification injection can change the body size; upstreamReq.ContentLength
-	// is the authoritative value (set above) and the Go http client writes
-	// the correct header automatically.
+	// Copy all original headers except proxy-hop, auth, and internal
+	// DefenseClaw correlation headers.
+	//
+	//   - Auth headers (Authorization, x-api-key, api-key) are stripped to
+	//     avoid duplicates — the resolved upstreamAuth is set as the single
+	//     canonical Authorization header below.
+	//   - Content-Length is stripped because notification injection can
+	//     change the body size; upstreamReq.ContentLength is the
+	//     authoritative value (set above) and the Go http client writes
+	//     the correct header automatically.
+	//   - Internal DefenseClaw correlation headers (x-dc-*, x-defenseclaw-*)
+	//     MUST NOT leak to third-party LLM providers — they carry session,
+	//     agent, policy, and destination identifiers that are internal
+	//     metadata, and echoing them in provider logs creates a privacy
+	//     and operational-security regression.
+	//   - W3C trace context (traceparent/tracestate) is also internal and
+	//     not meaningful to upstream providers; strip to avoid cross-tenant
+	//     trace correlation leakage.
 	for k, vs := range r.Header {
-		switch strings.ToLower(k) {
+		lk := strings.ToLower(k)
+		switch lk {
 		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
-			"authorization", "x-api-key", "api-key", "content-length":
+			"authorization", "x-api-key", "api-key", "content-length",
+			"traceparent", "tracestate":
+			continue
+		}
+		if strings.HasPrefix(lk, "x-dc-") || strings.HasPrefix(lk, "x-defenseclaw-") {
 			continue
 		}
 		for _, v := range vs {
