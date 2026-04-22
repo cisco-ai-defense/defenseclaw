@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 const (
@@ -137,7 +138,26 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	runWatchdogLoop(ctx, healthURL, interval, debounce, webhooks)
+	// The watchdog subcommand overrides rootCmd.PersistentPreRunE (see the
+	// empty stub on watchdogCmd) so the shared otelProvider is never
+	// initialized on this code path. Bring up a local provider here so the
+	// defenseclaw.watcher.restarts counter fires on recovery. NewProvider
+	// returns a disabled no-op when cfg.OTel.Enabled is false, keeping this
+	// safe for users who haven't opted into telemetry.
+	tel, telErr := telemetry.NewProvider(ctx, cfg, appVersion)
+	if telErr != nil {
+		fmt.Fprintf(os.Stderr, "[watchdog] warn: otel init failed: %v\n", telErr)
+		tel = nil
+	}
+	defer func() {
+		if tel != nil {
+			if err := tel.Shutdown(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "[watchdog] warn: otel shutdown: %v\n", err)
+			}
+		}
+	}()
+
+	runWatchdogLoop(ctx, healthURL, interval, debounce, webhooks, tel)
 	if webhooks != nil {
 		webhooks.Close()
 	}
@@ -163,7 +183,7 @@ func watchdogHealthURL(cfg *config.Config) string {
 	return fmt.Sprintf("http://%s:%d/health", apiBind, apiPort)
 }
 
-func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher) {
+func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, webhooks *gateway.WebhookDispatcher, tel *telemetry.Provider) {
 	dataDir := config.DefaultDataPath()
 	current := loadWatchdogState(dataDir)
 	failCount := 0
@@ -189,6 +209,15 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
 					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
 					dispatchHealthEvent(webhooks, "gateway-recovered", "INFO", "Gateway recovered from "+current.String())
+					// The watchdog is the only surface that observes the
+					// full "down → healthy" transition from outside the
+					// sidecar process, so this is where the reconnection
+					// counter must fire. It complements the in-process
+					// bump on sidecar WS reconnects and gives operators a
+					// metric even when the sidecar itself was restarted.
+					if tel != nil {
+						tel.RecordWatcherRestart(ctx)
+					}
 				}
 				current = stateHealthy
 				saveWatchdogState(dataDir, current)
