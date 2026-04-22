@@ -17,6 +17,8 @@
 package config
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -25,7 +27,13 @@ import (
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
+// Nil in binaries/tests that do not install the hook.
+var ReportConfigLoadError func(ctx context.Context, reason string)
 
 // DefenseClawLLMKeyEnv is the canonical environment variable holding the
 // unified LLM API key that powers every LLM-using component in DefenseClaw
@@ -58,6 +66,39 @@ type ClawConfig struct {
 	Mode       ClawMode `mapstructure:"mode"        yaml:"mode"`
 	HomeDir    string   `mapstructure:"home_dir"    yaml:"home_dir"`
 	ConfigFile string   `mapstructure:"config_file" yaml:"config_file"`
+}
+
+// AgentConfig [v7] pins the logical agent identity for this
+// sidecar deployment. The three-tier identity model distinguishes:
+//
+//   - AgentID (this field): logical, stable across restarts &
+//     instances. Operators set this in config.yaml; it is what
+//     aggregates like /v1/agentwatch/agents, /v1/events, /summary,
+//     and /risk-summary key off. Blank means "no agent identity
+//     pinned" — downstream consumers must tolerate that.
+//   - AgentInstanceID: per-session, assigned by the gateway's
+//     agent registry at session start; never configured.
+//   - SidecarInstanceID: per-process, minted at sidecar boot; never
+//     configured.
+//
+// Keeping this at the top level (not nested under `claw:`) means it
+// survives future multi-agent-framework expansions without schema
+// churn.
+type AgentConfig struct {
+	// ID is the stable logical agent identifier. If empty, the
+	// sidecar runs without a pinned agent identity — all events
+	// still carry AgentInstanceID & SidecarInstanceID so they
+	// correlate within a session, but cross-session aggregation
+	// by agent is not possible.
+	//
+	// Convention: lower-kebab-case, globally unique within a
+	// tenant (e.g. "code-review-bot", "triage-agent-prod").
+	ID string `mapstructure:"id" yaml:"id,omitempty"`
+
+	// Name is a human-readable display name surfaced in the TUI,
+	// webhook notifications, and event.agent_name. Blank falls
+	// back to ID. Never used for aggregation.
+	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
 // CurrentConfigVersion is bumped when the config schema changes in a way
@@ -110,6 +151,7 @@ type Config struct {
 	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
 	Environment    string               `mapstructure:"environment"      yaml:"environment"`
 	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	Agent          AgentConfig          `mapstructure:"agent"            yaml:"agent,omitempty"`
 	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
 	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
 	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
@@ -777,6 +819,14 @@ type GuardrailConfig struct {
 	// the safety mechanism for downstream sinks; retention is a
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
+
+	// AllowUnknownLLMDomains, when true, permits passthrough to hosts
+	// that are NOT listed in providers.json — provided the request
+	// body still classifies as an LLM shape (messages/contents/input/
+	// prompt). The default is false; unknown hosts are rejected so the
+	// proxy never fails open. The request is still inspected, audited,
+	// and emitted as an EventEgress with branch="shape".
+	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -1012,9 +1062,35 @@ func Load() (*Config, error) {
 
 	setDefaults(dataDir)
 
-	if err := viper.ReadInConfig(); err != nil {
+	// Pre-extract otel.resource.attributes from the raw YAML. OTel
+	// semconv keys are dotted (service.name, defenseclaw.preset, …)
+	// and Viper interprets "." as a path separator, which silently
+	// nests them into map[string]map[string]… and then fails to
+	// unmarshal back into map[string]string. We parse that block with
+	// yaml.v3 (literal keys), then strip it from the bytes we feed to
+	// Viper so Viper never sees the problematic shape, and reinstate
+	// it on the decoded Config afterwards.
+	otelAttrs, cleanedBytes, err := extractOTelResourceAttributes(configFile)
+	if err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "otel_attrs_parse")
+		}
+		return nil, fmt.Errorf("config: parse otel.resource.attributes: %w", err)
+	}
+
+	if cleanedBytes != nil {
+		if err := viper.ReadConfig(bytes.NewReader(cleanedBytes)); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "read_config")
+			}
+			return nil, fmt.Errorf("config: read %s: %w", configFile, err)
+		}
+	} else if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			if !os.IsNotExist(err) {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "read_config")
+				}
 				return nil, fmt.Errorf("config: read %s: %w", configFile, err)
 			}
 		}
@@ -1033,6 +1109,9 @@ func Load() (*Config, error) {
 	// of audit_sinks. Detect any populated legacy keys and refuse to
 	// start so operators don't silently lose Splunk forwarding.
 	if legacy := detectLegacySplunk(); legacy != "" {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "legacy_splunk")
+		}
 		return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
 			"DefenseClaw v4 replaced it with `audit_sinks:`. "+
 			"Run `defenseclaw setup observability migrate-splunk --apply` "+
@@ -1042,24 +1121,45 @@ func Load() (*Config, error) {
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "unmarshal")
+		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
+	}
+
+	// Reinstate the dot-preserving OTel resource attributes that we
+	// stripped before handing bytes to Viper.
+	if otelAttrs != nil {
+		cfg.OTel.Resource.Attributes = otelAttrs
 	}
 
 	migrateConfig(&cfg)
 
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+			}
 			return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
 		}
 	}
 
 	if err := cfg.SkillActions.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "skill_actions_invalid")
+		}
 		return nil, err
 	}
 	if err := cfg.MCPActions.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "mcp_actions_invalid")
+		}
 		return nil, err
 	}
 	if err := cfg.PluginActions.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "plugin_actions_invalid")
+		}
 		return nil, err
 	}
 	if cfg.OpenShell.IsStandalone() {
@@ -1071,7 +1171,201 @@ func Load() (*Config, error) {
 	}
 
 	warnPlaintextSecrets(&cfg)
+
+	// v7 provenance: seed the content_hash from the on-disk config
+	// bytes at load time so events emitted between sidecar boot and
+	// the first Save() already carry a meaningful fingerprint.
+	// Without this, dashboards would see `content_hash=""` for every
+	// event until someone explicitly saves the config through the
+	// CLI/TUI, which hides genuine drift across restarts. Prefer
+	// the original (dot-preserving) bytes read by
+	// extractOTelResourceAttributes; fall back to a re-marshal when
+	// the file did not exist (first boot / default config) so the
+	// hash is still stable across identical in-memory configs.
+	seedProvenanceOnLoad(configFile, &cfg)
+
 	return &cfg, nil
+}
+
+// seedProvenanceOnLoad stamps the process-wide content hash from the
+// config we just loaded. Separated from Load() so the branching stays
+// readable and so tests can bypass it by not calling Load(). A hash
+// failure is non-fatal — we just leave the prior value in place, which
+// is the correct behavior for transient read races (editor saving
+// in-place under us) where the next successful Load() will re-seed.
+func seedProvenanceOnLoad(configFile string, cfg *Config) {
+	if data, err := os.ReadFile(configFile); err == nil && len(data) > 0 {
+		version.SetContentHash(data)
+		return
+	}
+	// File not found or empty — fall back to a canonical re-marshal
+	// of the in-memory Config so first-boot events still carry a
+	// non-empty, deterministic fingerprint of the default config.
+	if data, err := yaml.Marshal(cfg); err == nil && len(data) > 0 {
+		version.SetContentHash(data)
+	}
+}
+
+// extractOTelResourceAttributes reads the config file with yaml.v3
+// (which preserves dotted map keys verbatim), pulls the
+// otel.resource.attributes block out as a flat map[string]string, and
+// returns the remaining YAML bytes with that block removed. The caller
+// feeds the cleaned bytes to Viper (whose "." key separator would
+// otherwise nest "service.name" into map[service][name] and break the
+// mapstructure unmarshal into map[string]string) and re-attaches the
+// returned attributes to the decoded Config afterwards.
+//
+// Returns:
+//   - (attrs, cleanedBytes, nil) when the file exists and the block was
+//     present (attrs may be empty if `attributes: {}` was set).
+//   - (nil, cleanedBytes, nil) when the file exists but has no
+//     otel.resource.attributes; caller should still use the cleaned
+//     bytes (which are just the original bytes in that case) for
+//     deterministic behavior.
+//   - (nil, nil, nil) when the config file does not exist — caller
+//     should fall back to viper.ReadInConfig's normal not-found path.
+//   - (nil, nil, err) when the YAML is malformed or an attribute has a
+//     non-scalar value.
+func extractOTelResourceAttributes(configFile string) (map[string]string, []byte, error) {
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("read %s: %w", configFile, err)
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, nil, fmt.Errorf("yaml unmarshal: %w", err)
+	}
+
+	doc := firstDocumentNode(&root)
+	if doc == nil || doc.Kind != yaml.MappingNode {
+		// Empty or non-mapping YAML (e.g. only comments). Nothing to
+		// strip; pass original bytes back so Viper behavior is
+		// unchanged.
+		return nil, data, nil
+	}
+
+	otelNode := mappingChild(doc, "otel")
+	if otelNode == nil || otelNode.Kind != yaml.MappingNode {
+		return nil, data, nil
+	}
+	resourceNode := mappingChild(otelNode, "resource")
+	if resourceNode == nil || resourceNode.Kind != yaml.MappingNode {
+		return nil, data, nil
+	}
+	attrsNode := mappingChild(resourceNode, "attributes")
+	if attrsNode == nil {
+		return nil, data, nil
+	}
+	// Support explicit null (`attributes: ~`) by treating it as absent.
+	if attrsNode.Kind == yaml.ScalarNode && attrsNode.Tag == "!!null" {
+		removeMappingChild(resourceNode, "attributes")
+		cleaned, marshalErr := yaml.Marshal(&root)
+		if marshalErr != nil {
+			return nil, nil, fmt.Errorf("yaml re-marshal: %w", marshalErr)
+		}
+		return map[string]string{}, cleaned, nil
+	}
+	if attrsNode.Kind != yaml.MappingNode {
+		return nil, nil, fmt.Errorf("otel.resource.attributes must be a mapping, got %v", yamlKindName(attrsNode.Kind))
+	}
+
+	attrs := make(map[string]string, len(attrsNode.Content)/2)
+	for i := 0; i+1 < len(attrsNode.Content); i += 2 {
+		keyNode := attrsNode.Content[i]
+		valNode := attrsNode.Content[i+1]
+		if keyNode.Kind != yaml.ScalarNode {
+			return nil, nil, fmt.Errorf("otel.resource.attributes: non-scalar key at line %d", keyNode.Line)
+		}
+		key := keyNode.Value
+		switch valNode.Kind {
+		case yaml.ScalarNode:
+			if valNode.Tag == "!!null" {
+				// Skip: operator explicitly cleared this attribute.
+				continue
+			}
+			attrs[key] = valNode.Value
+		default:
+			return nil, nil, fmt.Errorf("otel.resource.attributes[%q]: expected scalar, got %v", key, yamlKindName(valNode.Kind))
+		}
+	}
+
+	// Strip otel.resource.attributes from the tree before feeding to
+	// Viper. We keep the surrounding otel.resource scaffolding so
+	// anything else under `resource:` (future fields) still loads
+	// normally.
+	removeMappingChild(resourceNode, "attributes")
+
+	cleaned, err := yaml.Marshal(&root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("yaml re-marshal: %w", err)
+	}
+	return attrs, cleaned, nil
+}
+
+// firstDocumentNode unwraps a DocumentNode root produced by
+// yaml.Unmarshal into *yaml.Node. Returns nil if the document is empty.
+func firstDocumentNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Kind == yaml.DocumentNode {
+		if len(n.Content) == 0 {
+			return nil
+		}
+		return n.Content[0]
+	}
+	return n
+}
+
+// mappingChild returns the value node for `key` inside a mapping node,
+// or nil if the key is absent or the parent isn't a mapping.
+func mappingChild(m *yaml.Node, key string) *yaml.Node {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if k.Kind == yaml.ScalarNode && k.Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// removeMappingChild deletes the (key, value) pair for `key` from a
+// mapping node in place. No-op if `key` is absent.
+func removeMappingChild(m *yaml.Node, key string) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if k.Kind == yaml.ScalarNode && k.Value == key {
+			m.Content = append(m.Content[:i], m.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+func yamlKindName(k yaml.Kind) string {
+	switch k {
+	case yaml.DocumentNode:
+		return "document"
+	case yaml.SequenceNode:
+		return "sequence"
+	case yaml.MappingNode:
+		return "mapping"
+	case yaml.ScalarNode:
+		return "scalar"
+	case yaml.AliasNode:
+		return "alias"
+	default:
+		return fmt.Sprintf("unknown(%d)", k)
+	}
 }
 
 // migrateConfig applies forward migrations when config_version is behind
@@ -1267,7 +1561,25 @@ func (c *Config) Save() error {
 		return fmt.Errorf("config: marshal: %w", err)
 	}
 
-	return os.WriteFile(configFile, data, 0o600)
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		return err
+	}
+
+	// v7 provenance: every successful config save updates the
+	// content_hash (so downstream events carry a fingerprint of
+	// exactly which config shape produced them) and bumps the
+	// monotonic generation counter (so dashboards can detect churn
+	// without diffing hashes). A failed Save() never reaches this
+	// line — a stale generation would fire spurious "config
+	// changed" alerts. Hash the marshaled YAML bytes directly; they
+	// are already deterministic per (Config struct, yaml.Marshal
+	// impl) and any Load() reading the same file will compute the
+	// same fingerprint, which is the property needed for content
+	// hash stability across save↔load round-trips.
+	version.SetContentHash(data)
+	version.BumpGeneration()
+
+	return nil
 }
 
 func setDefaults(dataDir string) {
@@ -1408,6 +1720,17 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	// judge_sweep runs the full LLM judge on content the regex
+	// triager classified as no-signal. Flipped from false to true
+	// in the multi-provider-adapters PR after internal red-team
+	// runs found pure-regex triage missed enough whitespace-
+	// evasion ("/ etc / passwd") and typo-evasion ("passswd")
+	// variants that default-off was the dominant false-negative
+	// source. Operators who care about latency over recall can
+	// still opt out with `guardrail.judge_sweep: false` — viper
+	// honors explicit false values because BindEnv/SetDefault
+	// resolves in precedence order (explicit > env > default).
+	viper.SetDefault("guardrail.judge_sweep", true)
 	// Phase 3: retention defaults ON so every operator gets local
 	// judge-response forensics without explicit opt-in. The raw body
 	// is redacted by emitJudge before it leaves the process (Splunk /

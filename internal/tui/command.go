@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,106 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/creack/pty"
 )
+
+// resolveDefenseclawBin returns a best-effort absolute path to the
+// `defenseclaw` CLI binary, with defensive fallbacks. TUI subprocess
+// calls used to hardcode the literal "defenseclaw" string and relied
+// on $PATH resolution, which quietly misbehaves when the TUI is
+// launched from (a) a systemd unit with an empty PATH, (b) a shell
+// with a stale PATH after an in-place install, or (c) a user with
+// two `defenseclaw` binaries on PATH (e.g. `pipx` vs system package).
+//
+// Resolution order:
+//  1. `os.Executable()` basename match — if the TUI was itself
+//     launched as `defenseclaw tui`, reuse the exact same binary
+//     so sibling commands match the running version.
+//  2. sibling binary next to `os.Executable()` — supports installs
+//     that symlink `defenseclaw-gateway` and `defenseclaw` into the
+//     same directory.
+//  3. `exec.LookPath("defenseclaw")` — classic PATH lookup.
+//  4. literal "defenseclaw" string — last-resort fallback so tests
+//     and minimal environments keep working; os/exec will surface
+//     the same error the TUI used to.
+//
+// Callers get an absolute path when one is available so `exec.Command`
+// never walks PATH again at spawn time. Always returns a non-empty
+// string; errors are intentionally swallowed because all three
+// fallbacks are advisory, not authoritative.
+func resolveDefenseclawBin() string {
+	return resolveSiblingBin("defenseclaw")
+}
+
+// resolveRegistryBinary maps a registry-stored logical binary name
+// ("defenseclaw" or "defenseclaw-gateway") to an actual absolute path
+// using the same sibling/PATH resolution as resolveDefenseclawBin.
+// Anything else is returned verbatim — that keeps future extensions
+// (e.g. a third `defenseclaw-xyz` helper) from silently breaking just
+// because the resolver doesn't know about them yet.
+func resolveRegistryBinary(binary string) string {
+	switch binary {
+	case "defenseclaw":
+		return resolveDefenseclawBin()
+	case "defenseclaw-gateway":
+		return resolveDefenseclawGatewayBin()
+	default:
+		return binary
+	}
+}
+
+// resolveDefenseclawGatewayBin resolves the `defenseclaw-gateway` binary
+// using the same heuristics as resolveDefenseclawBin. The registry uses
+// both binaries, so gateway commands (policy evaluate, policy reload,
+// scan code, …) benefit from the same hardening against empty/stale
+// PATH environments.
+func resolveDefenseclawGatewayBin() string {
+	return resolveSiblingBin("defenseclaw-gateway")
+}
+
+// resolveSiblingBin implements the shared lookup logic documented on
+// resolveDefenseclawBin. The same resolution order applies regardless
+// of which DefenseClaw binary we're targeting:
+//  1. os.Executable basename match (process is already this binary).
+//  2. sibling in os.Executable dir.
+//  3. exec.LookPath.
+//  4. literal name (fall through to os/exec's NotFound error).
+func resolveSiblingBin(name string) string {
+	self, err := os.Executable()
+	if err == nil {
+		// Clean up /proc/self/exe-style symlink chains so sibling
+		// resolution lines up with what the user sees on disk.
+		if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+			self = resolved
+		}
+
+		// 1. Same binary — re-launching ourselves.
+		if filepath.Base(self) == name {
+			return self
+		}
+
+		// 2. Sibling binary in the same directory. This is how
+		//    the Makefile's `cli-install` lays things out
+		//    (defenseclaw and defenseclaw-gateway next to each
+		//    other).
+		sibling := filepath.Join(filepath.Dir(self), name)
+		if info, statErr := os.Stat(sibling); statErr == nil {
+			mode := info.Mode()
+			if !mode.IsDir() && mode&0o111 != 0 {
+				return sibling
+			}
+		}
+	}
+
+	// 3. Classic PATH lookup. Common case on developer machines
+	//    where the binary lives in a venv's /bin directory.
+	if p, lerr := exec.LookPath(name); lerr == nil {
+		return p
+	}
+
+	// 4. Fallback. os/exec will produce the same "<name>: not
+	//    found" error the pre-refactor code did, so behaviour is
+	//    a strict superset of the old path.
+	return name
+}
 
 // CmdEntry describes a TUI command that maps to a CLI invocation.
 type CmdEntry struct {
@@ -224,7 +325,7 @@ func (e *CommandExecutor) ExecuteInteractive(binary string, args []string, displ
 		}
 
 		start := time.Now()
-		cmd := exec.Command(binary, args...)
+		cmd := exec.Command(resolveRegistryBinary(binary), args...)
 		cmd.Env = os.Environ()
 
 		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 120})
@@ -354,7 +455,7 @@ func (e *CommandExecutor) Execute(binary string, args []string, displayName stri
 		}
 
 		start := time.Now()
-		cmd := exec.Command(binary, args...)
+		cmd := exec.Command(resolveRegistryBinary(binary), args...)
 		cmd.Env = os.Environ()
 
 		stdout, err := cmd.StdoutPipe()
@@ -430,6 +531,10 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup splunk", CLIBinary: dc, CLIArgs: []string{"setup", "splunk"}, Description: "Configure Splunk / O11y", Category: "setup"},
 		{TUIName: "setup observability list", CLIBinary: dc, CLIArgs: []string{"setup", "observability", "list"}, Description: "List configured observability destinations", Category: "setup"},
 		{TUIName: "setup observability migrate-splunk", CLIBinary: dc, CLIArgs: []string{"setup", "observability", "migrate-splunk", "--apply"}, Description: "Migrate legacy splunk: block into audit_sinks[]", Category: "setup"},
+		{TUIName: "setup provider add", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "add"}, Description: "Add a custom LLM provider to the overlay", Category: "setup"},
+		{TUIName: "setup provider remove", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "remove"}, Description: "Remove a custom LLM provider from the overlay", Category: "setup"},
+		{TUIName: "setup provider list", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "list"}, Description: "List overlay provider entries", Category: "setup"},
+		{TUIName: "setup provider show", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "show"}, Description: "Show merged provider registry", Category: "setup"},
 
 		// Scan
 		{TUIName: "scan skill", CLIBinary: dc, CLIArgs: []string{"skill", "scan"}, Description: "Scan a skill", Category: "scan", NeedsArg: true, ArgHint: "<skill-name>"},
@@ -541,6 +646,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "plugins", CLIBinary: dc, CLIArgs: []string{"plugin", "list"}, Description: "List plugins", Category: "info"},
 		{TUIName: "tools", CLIBinary: dc, CLIArgs: []string{"tool", "list"}, Description: "List tools", Category: "info"},
 		{TUIName: "alerts", CLIBinary: dc, CLIArgs: []string{"alerts", "--no-tui"}, Description: "List alerts", Category: "info"},
+		{TUIName: "audit log-activity", CLIBinary: dc, CLIArgs: []string{"audit", "log-activity"}, Description: "Log operator activity (payload via --payload-file)", Category: "other", NeedsArg: true, ArgHint: "--payload-file <path>"},
 		{TUIName: "help", CLIBinary: dc, CLIArgs: []string{"--help"}, Description: "Show CLI help", Category: "info"},
 	}
 }

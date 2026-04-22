@@ -10,6 +10,11 @@ pre_judge_strips:
     context: "System sender metadata injected by agent framework"
     applies_to: [pii]
 
+  - id: STRIP-MESSAGING-BRIDGE-STATUS
+    pattern: '(?im)^[ \t]*System:[ \t]*\[[^\]\n]+\][ \t]+[^\n]*?\b(?:connected|disconnected|reconnected|linked|unlinked|online|offline)\b[^\n]*$'
+    context: "Messaging bridge status banners (WhatsApp/Telegram/Slack/Discord gateway connect/disconnect lines) embed channel IDs or phone numbers that are transport metadata, not user-provided PII"
+    applies_to: [pii]
+
 finding_suppressions:
   - id: SUPP-USERNAME-METADATA
     finding_pattern: JUDGE-PII-USER

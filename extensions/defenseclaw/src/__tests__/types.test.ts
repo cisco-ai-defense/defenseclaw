@@ -18,7 +18,7 @@
 
 import { describe, it, expect } from "vitest";
 import { compareSeverity, maxSeverity } from "../types.js";
-import type { Severity } from "../types.js";
+import type { CorrelationContext, Severity } from "../types.js";
 
 describe("compareSeverity", () => {
   it("returns 0 for equal severities", () => {
@@ -81,5 +81,21 @@ describe("maxSeverity", () => {
 
   it("handles duplicates correctly", () => {
     expect(maxSeverity(["HIGH", "HIGH", "HIGH"])).toBe("HIGH");
+  });
+});
+
+describe("CorrelationContext", () => {
+  it("accepts the documented shape", () => {
+    const ctx: CorrelationContext = {
+      agentId: "a1",
+      runId: "r1",
+      sessionId: "s1",
+      agentInstanceId: "i1",
+      sidecarInstanceId: "sc1",
+      traceId: "t1",
+      agentName: "n1",
+      policyId: "p1",
+    };
+    expect(ctx.agentId).toBe("a1");
   });
 });

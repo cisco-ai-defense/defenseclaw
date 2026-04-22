@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 var (
@@ -72,6 +73,7 @@ Run without arguments to start the sidecar daemon.`,
 		if err != nil {
 			return fmt.Errorf("failed to load config — run 'defenseclaw init' first: %w", err)
 		}
+		version.SetBinaryVersion(appVersion)
 
 		auditStore, err = audit.NewStore(cfg.AuditDB)
 		if err != nil {

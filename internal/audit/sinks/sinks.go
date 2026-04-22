@@ -54,6 +54,26 @@ type Event struct {
 	// threads it through via context; sinks must tolerate blank values.
 	RequestID string `json:"request_id,omitempty"`
 
+	// Session / agent / policy / tool correlation fields mirrored
+	// from audit.Event. Every field is optional — older call sites
+	// and pre-v5 audit rows leave them empty and sinks must tolerate
+	// blanks without erroring. See audit.Event for the semantic
+	// contract of each field.
+	SessionID string `json:"session_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`
+	// AgentInstanceID is per-session in v7 (empty when no session
+	// context is anchored to the event). The process-scoped identity
+	// moved to SidecarInstanceID; downstream consumers grouping
+	// "sessions" must use AgentInstanceID, and those grouping "sidecar
+	// processes" must use SidecarInstanceID.
+	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string `json:"policy_id,omitempty"`
+	DestinationApp    string `json:"destination_app,omitempty"`
+	ToolName          string `json:"tool_name,omitempty"`
+	ToolID            string `json:"tool_id,omitempty"`
+
 	// Structured payload — when set, this is the canonical machine-readable
 	// representation of the event (e.g. a guardrail verdict). Sinks should
 	// prefer Structured over Details when emitting.
@@ -178,6 +198,16 @@ type Manager struct {
 	closed atomic.Bool
 
 	stderr *os.File // injected for tests; defaults to os.Stderr in production
+
+	// deliveryHook is invoked after each sink Forward (Track 5). Nil is a no-op.
+	deliveryHook func(ctx context.Context, kind, sinkName string, err error, latencyMs float64)
+
+	cbMu       sync.Mutex
+	failStreak map[string]int
+	tripped    map[string]bool
+
+	onCircuitTrip    func(kind, sinkName string)
+	onCircuitRecover func(kind, sinkName string)
 }
 
 // NewManager builds an empty Manager ready to accept Register calls.
@@ -186,6 +216,30 @@ func NewManager() *Manager {
 		flushImmediateActions: defaultImmediateFlushActions(),
 		stderr:                os.Stderr,
 	}
+}
+
+// SetDeliveryHook installs a per-sink Forward observer (metrics, SQLite
+// sink_health, gateway errors). Pass nil to detach.
+func (m *Manager) SetDeliveryHook(h func(ctx context.Context, kind, sinkName string, err error, latencyMs float64)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.deliveryHook = h
+	m.mu.Unlock()
+}
+
+// SetCircuitCallbacks wires circuit-breaker trip/recover notifications after
+// 5 consecutive failures and the next success (soft breaker — forwards are
+// still attempted every time).
+func (m *Manager) SetCircuitCallbacks(onTrip, onRecover func(kind, sinkName string)) {
+	if m == nil {
+		return
+	}
+	m.cbMu.Lock()
+	m.onCircuitTrip = onTrip
+	m.onCircuitRecover = onRecover
+	m.cbMu.Unlock()
 }
 
 // Register adds a sink to the fan-out list. Order is preserved.
@@ -221,10 +275,9 @@ func (m *Manager) Len() int {
 	return len(m.sinks)
 }
 
-// Forward fans out the event to every registered sink. Errors are logged
-// to stderr and returned aggregated; one failing sink does not stop
-// delivery to the others.
-func (m *Manager) Forward(ctx context.Context, e Event) error {
+// Forward fans out the event to every registered sink. The returned map
+// holds one entry per sink that returned a non-nil error (key = sink name).
+func (m *Manager) Forward(ctx context.Context, e Event) map[string]error {
 	if m == nil || m.closed.Load() {
 		return nil
 	}
@@ -232,18 +285,28 @@ func (m *Manager) Forward(ctx context.Context, e Event) error {
 	snap := make([]Sink, len(m.sinks))
 	copy(snap, m.sinks)
 	immediate := m.shouldFlushImmediatelyLocked(e.Action)
+	hook := m.deliveryHook
 	m.mu.RUnlock()
 
 	if len(snap) == 0 {
 		return nil
 	}
 
-	var errs []error
+	perSink := make(map[string]error)
 	for _, s := range snap {
-		if err := m.safeForward(ctx, s, e); err != nil {
+		start := time.Now()
+		err := m.safeForward(ctx, s, e)
+		latencyMs := float64(time.Since(start).Nanoseconds()) / 1e6
+		if hook != nil {
+			hook(ctx, s.Kind(), s.Name(), err, latencyMs)
+		}
+		if err != nil {
 			fmt.Fprintf(m.stderr, "warning: audit sink %q (%s): forward: %v\n",
 				s.Name(), s.Kind(), err)
-			errs = append(errs, fmt.Errorf("%s: %w", s.Name(), err))
+			perSink[s.Name()] = err
+			m.recordSinkFailure(s.Kind(), s.Name())
+		} else {
+			m.recordSinkSuccess(s.Kind(), s.Name())
 		}
 	}
 
@@ -261,10 +324,44 @@ func (m *Manager) Forward(ctx context.Context, e Event) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	if len(perSink) == 0 {
+		return nil
 	}
-	return nil
+	return perSink
+}
+
+func (m *Manager) recordSinkFailure(kind, name string) {
+	m.cbMu.Lock()
+	defer m.cbMu.Unlock()
+	if m.failStreak == nil {
+		m.failStreak = make(map[string]int)
+	}
+	if m.tripped == nil {
+		m.tripped = make(map[string]bool)
+	}
+	m.failStreak[name]++
+	if m.failStreak[name] == 5 && !m.tripped[name] {
+		m.tripped[name] = true
+		if m.onCircuitTrip != nil {
+			m.onCircuitTrip(kind, name)
+		}
+	}
+}
+
+func (m *Manager) recordSinkSuccess(kind, name string) {
+	m.cbMu.Lock()
+	defer m.cbMu.Unlock()
+	if m.tripped != nil && m.tripped[name] {
+		if m.onCircuitRecover != nil {
+			m.onCircuitRecover(kind, name)
+		}
+	}
+	if m.failStreak != nil {
+		delete(m.failStreak, name)
+	}
+	if m.tripped != nil {
+		delete(m.tripped, name)
+	}
 }
 
 // safeForward wraps a single sink's Forward with recover() so a

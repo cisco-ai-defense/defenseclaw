@@ -107,18 +107,38 @@ type splunkEvent struct {
 // pre-migration shape so search queries (`source=defenseclaw action=…`)
 // continue to work.
 type splunkAuditEvent struct {
-	ID         string         `json:"id"`
-	Timestamp  string         `json:"timestamp"`
-	Action     string         `json:"action"`
-	Target     string         `json:"target"`
-	Actor      string         `json:"actor"`
-	Details    string         `json:"details"`
-	Severity   string         `json:"severity"`
-	RunID      string         `json:"run_id,omitempty"`
-	Source     string         `json:"source"`
-	TraceID    string         `json:"trace_id,omitempty"`
-	RequestID  string         `json:"request_id,omitempty"`
-	Structured map[string]any `json:"structured,omitempty"`
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	Action    string `json:"action"`
+	Target    string `json:"target"`
+	Actor     string `json:"actor"`
+	Details   string `json:"details"`
+	Severity  string `json:"severity"`
+	RunID     string `json:"run_id,omitempty"`
+	Source    string `json:"source"`
+	TraceID   string `json:"trace_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	// Extended correlation fields emitted as first-class Splunk
+	// event attributes so dashboards (Splunk Local Bridge
+	// macros.conf, Cisco SIEM AgentWatch) can key on them without
+	// reparsing `details`. Matches the contract in sinks.Event.
+	SessionID string `json:"session_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	// AgentID (configured logical id) and SidecarInstanceID
+	// (per-process UUID) are both part of the v7 three-tier identity
+	// contract and MUST reach Splunk — dashboards key on these for
+	// cost attribution and incident forensics. They were omitted from
+	// an earlier revision of this struct, which the I1 integration
+	// test (TestCorrelation_RequestEnvelopeLandsOnAuditAndSink) now
+	// pins in place.
+	AgentID           string         `json:"agent_id,omitempty"`
+	AgentInstanceID   string         `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string         `json:"policy_id,omitempty"`
+	DestinationApp    string         `json:"destination_app,omitempty"`
+	ToolName          string         `json:"tool_name,omitempty"`
+	ToolID            string         `json:"tool_id,omitempty"`
+	Structured        map[string]any `json:"structured,omitempty"`
 }
 
 // NewSplunkHECSink validates config and returns a ready-to-use sink. The
@@ -214,7 +234,12 @@ func (s *SplunkHECSink) Kind() string { return "splunk_hec" }
 // NewSplunkHECSink) — we never emit a missing/empty sourcetype on the
 // wire because the HEC event format treats that as "use the HEC
 // token's default", which is operator-specific and hard to audit.
-func (s *SplunkHECSink) sourceTypeFor(action string) string {
+func (s *SplunkHECSink) sourceTypeFor(action string, structured map[string]any) string {
+	if structured != nil {
+		if v, ok := structured["defenseclaw_event"].(string); ok && v == "activity" {
+			return "defenseclaw:activity"
+		}
+	}
 	if action != "" && s.cfg.SourceTypeOverrides != nil {
 		if v, ok := s.cfg.SourceTypeOverrides[action]; ok && v != "" {
 			return v
@@ -230,21 +255,30 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 	se := splunkEvent{
 		Time:       float64(e.Timestamp.Unix()) + float64(e.Timestamp.Nanosecond())/1e9,
 		Source:     s.cfg.Source,
-		SourceType: s.sourceTypeFor(e.Action),
+		SourceType: s.sourceTypeFor(e.Action, e.Structured),
 		Index:      s.cfg.Index,
 		Event: splunkAuditEvent{
-			ID:         e.ID,
-			Timestamp:  e.Timestamp.Format(time.RFC3339),
-			Action:     e.Action,
-			Target:     e.Target,
-			Actor:      e.Actor,
-			Details:    e.Details,
-			Severity:   e.Severity,
-			RunID:      e.RunID,
-			Source:     "defenseclaw",
-			TraceID:    e.TraceID,
-			RequestID:  e.RequestID,
-			Structured: e.Structured,
+			ID:                e.ID,
+			Timestamp:         e.Timestamp.Format(time.RFC3339),
+			Action:            e.Action,
+			Target:            e.Target,
+			Actor:             e.Actor,
+			Details:           e.Details,
+			Severity:          e.Severity,
+			RunID:             e.RunID,
+			Source:            "defenseclaw",
+			TraceID:           e.TraceID,
+			RequestID:         e.RequestID,
+			SessionID:         e.SessionID,
+			AgentName:         e.AgentName,
+			AgentID:           e.AgentID,
+			AgentInstanceID:   e.AgentInstanceID,
+			SidecarInstanceID: e.SidecarInstanceID,
+			PolicyID:          e.PolicyID,
+			DestinationApp:    e.DestinationApp,
+			ToolName:          e.ToolName,
+			ToolID:            e.ToolID,
+			Structured:        e.Structured,
 		},
 	}
 

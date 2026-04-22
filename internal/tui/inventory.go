@@ -214,7 +214,7 @@ func (p *InventoryPanel) LoadCmd() tea.Cmd {
 	p.loading = true
 	args := p.loadCmdArgs()
 	return func() tea.Msg {
-		cmd := exec.Command("defenseclaw", args...)
+		cmd := exec.Command(resolveDefenseclawBin(), args...)
 		out, err := cmd.Output()
 		if err != nil {
 			return InventoryLoadedMsg{Err: err}

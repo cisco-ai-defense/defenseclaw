@@ -60,6 +60,14 @@ func (s *CodeGuardScanner) SupportedTargets() []string { return []string{"code"}
 
 // ScanContent scans an in-memory code string against builtin + custom rules.
 // The filename is used for extension-based rule filtering and finding locations.
+func codeguardRuleCategory(ruleID string) string {
+	parts := strings.Split(ruleID, "-")
+	if len(parts) >= 2 {
+		return strings.ToLower(parts[1])
+	}
+	return "codeguard"
+}
+
 func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 	ext := filepath.Ext(filename)
 	var findings []Finding
@@ -72,6 +80,7 @@ func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 				continue
 			}
 			if r.pattern.MatchString(line) {
+				ln := lineNum + 1
 				findings = append(findings, Finding{
 					ID:          r.id,
 					Severity:    r.severity,
@@ -81,6 +90,9 @@ func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 					Remediation: r.remediation,
 					Scanner:     "codeguard",
 					Tags:        []string{"codeguard"},
+					RuleID:      r.id,
+					Category:    codeguardRuleCategory(r.id),
+					LineNumber:  &ln,
 				})
 			}
 		}
@@ -89,25 +101,35 @@ func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 	return findings
 }
 
-func (s *CodeGuardScanner) Scan(_ context.Context, target string) (*ScanResult, error) {
+func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
+	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
+	exitCode := 0
+	var scanErr error
+	var result *ScanResult
+	defer func() {
+		FinishScanSpan(sp, result, exitCode, scanErr)
+	}()
 
-	result := &ScanResult{
-		Scanner:   s.Name(),
-		Target:    target,
-		Timestamp: start,
+	result = &ScanResult{
+		Scanner:    s.Name(),
+		Target:     target,
+		Timestamp:  start,
+		TargetType: InferTargetType(s.Name()),
 	}
 
 	info, err := os.Stat(target)
 	if err != nil {
-		return nil, fmt.Errorf("scanner: codeguard: %w", err)
+		scanErr = fmt.Errorf("scanner: codeguard: %w", err)
+		return nil, scanErr
 	}
 
 	var files []string
 	if info.IsDir() {
 		files, err = collectCodeFiles(target)
 		if err != nil {
-			return nil, fmt.Errorf("scanner: codeguard: walk %s: %w", target, err)
+			scanErr = fmt.Errorf("scanner: codeguard: walk %s: %w", target, err)
+			return nil, scanErr
 		}
 	} else {
 		files = []string{target}
@@ -268,6 +290,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 				continue
 			}
 			if r.pattern.MatchString(line) {
+				ln := lineNum
 				findings = append(findings, Finding{
 					ID:          r.id,
 					Severity:    r.severity,
@@ -277,6 +300,9 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 					Remediation: r.remediation,
 					Scanner:     "codeguard",
 					Tags:        []string{"codeguard"},
+					RuleID:      r.id,
+					Category:    codeguardRuleCategory(r.id),
+					LineNumber:  &ln,
 				})
 			}
 		}

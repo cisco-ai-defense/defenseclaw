@@ -146,9 +146,18 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.git-credentials`), Title: "Git credentials file", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.netrc`), Title: "netrc credentials file", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-ETC-PASSWD", Pattern: regexp.MustCompile(`/etc/passwd\b`), Title: "/etc/passwd access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"system-file"}},
-	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`/etc/shadow\b`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"system-file", "credential"}},
-	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`/etc/sudoers\b`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"system-file", "privilege"}},
+	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
+	// canonical "/etc/passwd", space-separated "etc passwd", backslash
+	// "etc\passwd", spelled-out "etc slash passwd", and URL-encoded
+	// "etc%2Fpasswd". The narrow `/etc/passwd\b` pattern was trivially
+	// bypassed by prompts like "cat my etc passwd", which then had to
+	// rely entirely on the LLM Judge (itself capped at MEDIUM when only
+	// one injection category fires) — producing a silent pass-through.
+	// `pas{1,4}wd` also tolerates the common "passswd" typo (extra s)
+	// which LLMs happily resolve to /etc/passwd but strict spelling misses.
+	{ID: "PATH-ETC-PASSWD", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)`), Title: "/etc/passwd access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file"}},
+	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file", "credential"}},
+	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file", "privilege"}},
 	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
 	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 }

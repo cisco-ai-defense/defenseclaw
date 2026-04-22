@@ -1,0 +1,269 @@
+# Alerting rules — every alert is:
+#   (a) actionable (has a runbook pointer + description of which dashboard
+#       to open), and
+#   (b) tied to a user-visible SLO or a correctness invariant we must not
+#       regress on.
+#
+# Severity convention:
+#   critical : pages on-call — site integrity / security guarantee broken
+#   warning  : inspect within a business hour — trending toward breach
+#   info     : informational only (dashboards only, no page)
+groups:
+  - name: defenseclaw.correctness
+    rules:
+      - alert: DefenseClawSchemaViolations
+        expr: sum(rate(defenseclaw_schema_violations_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          surface: gateway
+        annotations:
+          summary: "gateway.jsonl events are being dropped for schema violations"
+          description: |
+            gatewaylog.Writer is rejecting events because they fail runtime
+            JSON-schema validation. Any sustained non-zero rate means our
+            observability contract is broken.
+            Open: Reliability dashboard → "Schema violations by event type".
+          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-schema-violations"
+
+      - alert: DefenseClawGatewayErrorsSpike
+        expr: sum(rate(defenseclaw_gateway_errors_total[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway error rate above 30/min for 5m"
+          description: |
+            defenseclaw.gateway.errors is emitting more than 30 events/min.
+            Drill into Reliability → "Top error codes (1h)" to isolate the
+            subsystem/code pair.
+
+      - alert: DefenseClawPanic
+        expr: increase(defenseclaw_panics_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A DefenseClaw subsystem panicked"
+          description: |
+            RecordPanic fired. Go `recover()` caught a panic; the process
+            may still be alive but the triggering request failed.  Inspect
+            Reliability → "Panics by subsystem" and Loki for the stack.
+
+  - name: defenseclaw.slo.alerts
+    rules:
+      # Traffic-gated: if the admission pipeline is idle (<0.05 events/s
+      # in 5m) we silence this alert. Otherwise NaN / empty histograms
+      # can trigger false-positive SLO breaches on quiet systems.
+      - alert: DefenseClawBlockSLOBreach
+        expr: |
+          slo:defenseclaw_block_latency:ratio_5m < 0.99
+          and on()
+          sum(rate(defenseclaw_slo_block_latency_milliseconds_count[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          slo: block-under-2s
+        annotations:
+          summary: "Block SLO below 99% over 10m"
+          description: |
+            Admission-block decisions are not completing under the 2s SLO.
+            Open Runtime & SLO dashboard → "Block SLO compliance".
+          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-block-slo"
+
+      - alert: DefenseClawTUIRefreshSLOBreach
+        expr: |
+          slo:defenseclaw_tui_refresh:ratio_5m < 0.99
+          and on()
+          sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m])) > 0.01
+        for: 15m
+        labels:
+          severity: warning
+          slo: tui-refresh-under-5s
+        annotations:
+          summary: "TUI refresh SLO below 99% over 15m"
+          description: |
+            Bubbletea dashboards are not refreshing inside the 5s SLO.
+            Open Runtime & SLO dashboard → "TUI refresh SLO".
+
+  - name: defenseclaw.pipeline
+    rules:
+      - alert: DefenseClawOTLPExporterStalled
+        expr: exporter:defenseclaw_otlp_freshness:seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+          surface: telemetry
+        annotations:
+          summary: "OTLP exporter has not exported in >5 minutes"
+          description: |
+            At least one exporter ({{ $labels.exporter }}) has not sent a
+            batch for 5+ minutes. Observability is blind; check OTel
+            Collector health and network reachability.
+          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-exporter-stalled"
+
+      - alert: DefenseClawOTLPExporterErrors
+        expr: sum(rate(defenseclaw_telemetry_exporter_errors_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          surface: telemetry
+        annotations:
+          summary: "OTLP exporter errors sustained"
+          description: |
+            Exporter errors above 6/min for 10m — spans/metrics/logs may be
+            dropped. Drill into Runtime & SLO → "OTLP exporter errors".
+
+      # NOTE: defenseclaw.audit.sink.failures is recorded with
+      # attributes sink.kind / sink.name / sink.reason (see
+      # internal/telemetry/metrics.go::RecordSinkFailure). Group by
+      # sink_name to page with the offending sink identifier; we
+      # deliberately do NOT group by sink.reason because a flapping
+      # reason should still count as one outage.
+      - alert: DefenseClawAuditSinkFailures
+        expr: sum by (sink_kind, sink_name) (rate(defenseclaw_audit_sink_failures_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          surface: audit
+        annotations:
+          summary: "Audit sink {{ $labels.sink_kind }}/{{ $labels.sink_name }} is failing"
+          description: |
+            A configured audit sink is returning errors for 10 minutes.
+            Compliance downstreams may be missing events. Open Reliability
+            dashboard → "Sink batches delivered vs dropped".
+          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-audit-sink"
+
+      - alert: DefenseClawAuditSinkCircuitOpen
+        expr: max by (sink_kind, sink_name) (defenseclaw_audit_sink_circuit_state) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          surface: audit
+        annotations:
+          summary: "Audit sink circuit breaker open ({{ $labels.sink_name }})"
+          description: |
+            The breaker for sink {{ $labels.sink_kind }}/{{ $labels.sink_name }}
+            is non-closed (open or half-open) for 5+ minutes.
+
+  - name: defenseclaw.security
+    rules:
+      - alert: DefenseClawBlockRateSpike
+        expr: |
+          sum(rate(defenseclaw_gateway_verdicts_total{verdict_action="block"}[5m]))
+          /
+          clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[5m])), 0.0001)
+          > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          surface: security
+        annotations:
+          summary: "More than 25% of gateway verdicts are blocks"
+          description: |
+            Either a real attack is in progress or a recent policy/scanner
+            change is producing false positives. Open Security dashboard →
+            "Verdicts by stage" + "Verdict breakdown" table.
+
+      - alert: DefenseClawJudgeErrorRate
+        expr: |
+          sum(rate(defenseclaw_gateway_judge_errors_total[5m]))
+          /
+          clamp_min(sum(rate(defenseclaw_gateway_judge_invocations_total[5m])), 0.0001)
+          > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          surface: guardrail
+        annotations:
+          summary: "LLM judge error rate above 10%"
+          description: |
+            Guardrail judge is erroring on >10% of calls. We fall back to
+            heuristics, so guardrail quality is degraded. Inspect Security
+            dashboard → "Judge errors by reason".
+
+      - alert: DefenseClawWebhookFailuresSustained
+        expr: |
+          sum by (webhook_kind) (rate(defenseclaw_webhook_dispatches_total{outcome="failed"}[10m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+          surface: webhooks
+        annotations:
+          summary: "Webhook {{ $labels.webhook_kind }} failures sustained"
+          description: |
+            Per-event notifier webhooks ({{ $labels.webhook_kind }}) are
+            failing for 15m. Security and incident signal may be missed.
+
+  - name: defenseclaw.traffic
+    rules:
+      - alert: DefenseClawHTTP5xxSpike
+        expr: service:defenseclaw_http_requests_5xx_ratio:5m > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway 5xx ratio above 2% for 10m"
+          description: |
+            The gateway is returning 5xx on >2% of requests. Drill into
+            Traffic & Traces → "Status code mix" and the 500-flavored
+            routes.
+
+      - alert: DefenseClawHTTPAuthFailuresSurge
+        expr: sum(rate(defenseclaw_http_auth_failures_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          surface: security
+        annotations:
+          summary: "Authentication failures > 60/min for 10m"
+          description: |
+            Either bad-credential probing or a deployment regression.
+            Correlate with verdict spike + Loki auth failure events.
+
+      - alert: DefenseClawRateLimitSurge
+        expr: sum(rate(defenseclaw_http_rate_limit_breaches_total[5m])) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate-limit breaches > 120/min for 10m"
+          description: |
+            A client is being throttled aggressively. Check Traffic & Traces
+            → "Rate-limit breaches" and the offending principal.
+
+  - name: defenseclaw.runtime
+    rules:
+      - alert: DefenseClawGoroutineLeak
+        expr: max(defenseclaw_runtime_goroutines) > 10000
+        for: 15m
+        labels:
+          severity: warning
+          surface: runtime
+        annotations:
+          summary: "Goroutine count above 10k for 15m"
+          description: |
+            Possible leak. Inspect Runtime & SLO → "Goroutines" trend.
+
+      - alert: DefenseClawSQLiteBusyRetries
+        expr: sum(rate(defenseclaw_sqlite_busy_retries_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          surface: audit-db
+        annotations:
+          summary: "SQLite busy retries sustained"
+          description: |
+            The audit store is being contended. Long term this hurts the
+            block SLO. Inspect Runtime & SLO → "SQLite busy retries".
+
+      - alert: DefenseClawConfigLoadErrors
+        expr: increase(defenseclaw_config_load_errors_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Config reload failures detected"
+          description: |
+            A recent config reload failed. The previous config is still
+            active, but the operator-facing change did not take effect.

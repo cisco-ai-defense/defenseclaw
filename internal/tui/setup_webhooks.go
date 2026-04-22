@@ -390,7 +390,7 @@ func (m *WebhookEditorModel) View() string {
 }
 
 func defaultWebhookLister() ([]webhookRow, error) {
-	cmd := exec.Command("defenseclaw", "setup", "webhook", "list", "--json")
+	cmd := exec.Command(resolveDefenseclawBin(), "setup", "webhook", "list", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {

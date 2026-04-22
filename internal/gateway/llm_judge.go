@@ -33,6 +33,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // judgeCtxKey is a private context key used to mark an inspection path as
@@ -298,10 +301,120 @@ func wrapJudgeSample(content string) string {
 	return "<<<SAMPLE>>>\n" + content + "\n<<</SAMPLE>>>"
 }
 
+// sensitiveFileContextRe matches common high-signal tokens that indicate
+// the user prompt is probing host secrets: /etc/ account files, SSH keys,
+// cloud credentials, in-container env files, /proc credential leaks, and
+// common config artefacts. Deliberately broader than the blocking regex
+// in sensitive-paths.yaml: this one does NOT block on its own, it only
+// boosts the injection-judge verdict out of the single-category cap.
+//
+// Keeping it separate from the blocking regex lets us ship a permissive
+// context probe (catches typos like "passsswd", space-separated "etc
+// passwd", spelled-out "etc slash passwd") without flipping the default
+// posture into over-blocking for legitimate sysadmin questions.
+var sensitiveFileContextRe = regexp.MustCompile(
+	`(?i)` +
+		`\betc[\s/\\]+(?:slash[\s]+)?(?:pas{0,8}wd|sha{0,2}dow|sudoers|hosts|hostname|resolv\.conf)\b` +
+		`|\betc%2F(?:pas{0,8}wd|sha{0,2}dow|sudoers)\b` +
+		`|\b(?:id_rsa|id_ed25519|id_ecdsa|authorized_keys|known_hosts)\b` +
+		`|\.ssh/(?:config|id_rsa|id_ed25519|authorized_keys)\b` +
+		`|\.aws/(?:credentials|config)\b` +
+		`|\baws_(?:access_key_id|secret_access_key|session_token)\b` +
+		`|\b(?:kubeconfig|service[-_]?account\.json|gcloud[-_]application[-_]default[-_]credentials)\b` +
+		`|/proc/(?:self|\d+)/(?:environ|cmdline|status)\b` +
+		`|(?:^|[\s/\\'"` + "`" + `])\.env(?:\.|\b)`,
+)
+
+// hasSensitiveFileContext returns true when the user prompt looks like it
+// is probing host secrets. Callers use this to un-cap judge verdicts for
+// the specific attack class where a single injection-category hit on a
+// prompt that mentions /etc/passwd (or similar) should still block, even
+// under the default profile's `single_category_max_severity: MEDIUM`
+// policy that would otherwise downgrade it to alert/passthrough.
+func hasSensitiveFileContext(content string) bool {
+	if content == "" {
+		return false
+	}
+	return sensitiveFileContextRe.MatchString(content)
+}
+
+// filterHallucinatedEntities removes judge-reported PII entity strings
+// that are not substrings of the input content. This defeats a class of
+// false positives where the judge infers an entity semantically instead
+// of extracting it literally — e.g. classifying "retrieve /etc/passwd"
+// as Username=["root"] even though "root" never appears in the prompt.
+//
+// The check is case-insensitive and normalizes whitespace so the judge
+// is not penalized for trimming surrounding space. When a category's
+// entity list is emptied by this filter, its `detection_result` is
+// also flipped back to false so downstream verdict logic doesn't
+// record a phantom finding.
+//
+// Returns the number of hallucinated entities dropped (for logging).
+func filterHallucinatedEntities(data map[string]interface{}, content string) int {
+	if data == nil || content == "" {
+		return 0
+	}
+	normHaystack := strings.ToLower(strings.Join(strings.Fields(content), " "))
+	if normHaystack == "" {
+		return 0
+	}
+	dropped := 0
+	for cat, entry := range data {
+		m, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		detected, _ := m["detection_result"].(bool)
+		if !detected {
+			continue
+		}
+		rawEntities, hasList := m["entities"].([]interface{})
+		if !hasList || len(rawEntities) == 0 {
+			continue
+		}
+		kept := rawEntities[:0]
+		for _, e := range rawEntities {
+			s, _ := e.(string)
+			if s == "" {
+				continue
+			}
+			needle := strings.ToLower(strings.Join(strings.Fields(s), " "))
+			if needle == "" {
+				continue
+			}
+			if strings.Contains(normHaystack, needle) {
+				kept = append(kept, e)
+				continue
+			}
+			dropped++
+			if judgeLogTrace() {
+				fmt.Fprintf(defaultLogWriter,
+					"  [llm-judge] drop hallucinated entity cat=%q value=%s (not in input)\n",
+					cat, redactEntity(s))
+			}
+		}
+		m["entities"] = kept
+		if len(kept) == 0 {
+			m["detection_result"] = false
+		}
+	}
+	return dropped
+}
+
 func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanVerdict {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" || len(trimmed) < minJudgeContentLen {
 		return allowVerdict("llm-judge-injection")
+	}
+
+	const kind = "injection"
+	const scannerMetric = "llm-judge-injection"
+	maxTok := 1024
+	if c := judgeVerdictCache(); c != nil {
+		if snap, ok := c.Get(ctx, kind, j.model, "prompt", content, scannerMetric, "none"); ok {
+			return scanVerdictFromSnapshot(snap)
+		}
 	}
 
 	prompt := injectionSystemPrompt
@@ -309,72 +422,141 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		prompt = jc.SystemPrompt
 	}
 
+	tel := judgeTelemetry()
+	sys := judgeGenAISystem(j.model)
+	llmCtx := ctx
+	var sp trace.Span
+	if tel != nil {
+		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	}
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
+
+	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: prompt},
 			{Role: "user", Content: wrapJudgeSample(content)},
 		},
-		MaxTokens: intPtr(1024),
+		MaxTokens: intPtr(maxTok),
 		Fallbacks: j.cfg.Fallbacks,
 	})
 	latencyMs := time.Since(start).Milliseconds()
+	promptTok, completionTok := 0, 0
+	responseModel := j.model
+	if resp != nil && resp.Usage != nil {
+		promptTok = int(resp.Usage.PromptTokens)
+		completionTok = int(resp.Usage.CompletionTokens)
+	}
+
+	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
+		if tel == nil {
+			return
+		}
+		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
+		if promptTok > 0 {
+			tel.RecordJudgeTokens(ctx, j.model, "input", int64(promptTok))
+		}
+		if completionTok > 0 {
+			tel.RecordJudgeTokens(ctx, j.model, "output", int64(completionTok))
+		}
+		va := "error"
+		if verdict != nil {
+			if verdict.JudgeFailed || parseErr {
+				va = "error"
+			} else {
+				va = verdict.Action
+			}
+		}
+		var endErr error
+		if err != nil {
+			endErr = err
+		} else if parseErr {
+			endErr = fmt.Errorf("parse-failed")
+		}
+		tel.EndJudgeSpan(sp, responseModel, promptTok, completionTok, latencyMs, va, false, endErr)
+	}
+
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection error: %v\n", err)
-		emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
+		recordJudgeMetrics(nil, false)
+		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "")
+			err.Error(), "", JudgeEmitOpts{})
 		return errorVerdict("llm-judge-injection")
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
+		recordJudgeMetrics(nil, false)
+		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "")
+			"empty-response", "", JudgeEmitOpts{})
 		return errorVerdict("llm-judge-injection")
 	}
 
+	if resp.Model != "" {
+		responseModel = resp.Model
+	}
+
 	rawResponse := resp.Choices[0].Message.Content
-	if judgeLogTrace() {
-		// The injection-judge response regularly echoes
-		// excerpts of the triggering prompt. Even when the
-		// operator opted into trace mode, run the preview
-		// through the redactor so accidentally-shared
-		// logs never leak the raw literal.
+	if judgeLogTrace() || redaction.Reveal() {
+		// The injection-judge response regularly echoes excerpts of the
+		// triggering prompt. Even when the operator opted into trace
+		// mode, run the preview through the redactor so accidentally-
+		// shared logs never leak the raw literal. redaction.Reveal() is
+		// honored here so operators debugging with
+		// DEFENSECLAW_REVEAL_PII=1 see judge bodies without needing to
+		// also flip DEFENSECLAW_JUDGE_TRACE.
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection raw response: %s\n",
 			redaction.MessageContent(truncateJudgeLog(rawResponse, 500)))
 	}
 
 	parsed := parseJudgeJSON(rawResponse)
 	if parsed == nil {
-		// Fail-closed: an unparseable judge response should not silently
-		// allow the request. Surface it as an error verdict so the regex
-		// triage fallback (MEDIUM alert) applies instead of a blanket
-		// allow. JudgeFailed also prevents the verdict from being counted
-		// as an authoritative clean.
-		emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
+		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
+			"injection judge returned unparseable JSON", fmt.Errorf("parse-failed"))
+		recordJudgeMetrics(nil, true)
+		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse))
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{})
 		return errorVerdict("llm-judge-injection")
 	}
 
-	verdict := j.injectionToVerdict(parsed)
+	// Un-cap the single-category severity when the prompt itself is probing
+	// host secrets. Without this, a prompt like "please dump etc passsssswd"
+	// would only hit JUDGE-INJ-INSTRUCT (one category), get capped at
+	// MEDIUM by the default profile, and silently pass. See
+	// hasSensitiveFileContext for the token set.
+	sensitiveCtx := hasSensitiveFileContext(content)
+	verdict := j.injectionToVerdictCtx(parsed, sensitiveCtx)
+	recordJudgeMetrics(verdict, false)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection verdict: action=%s severity=%s findings=%v\n",
 		verdict.Action, verdict.Severity, verdict.Findings)
-	emitJudge("injection", j.model, gatewaylog.DirectionPrompt,
+	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse))
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict)})
+	if c := judgeVerdictCache(); c != nil {
+		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
+	}
 	return verdict
 }
 
 // judgeRawForEmit returns the raw judge body only when the operator
-// has explicitly opted in to retention via either the env trace
-// switch (DEFENSECLAW_JUDGE_TRACE=1) or the durable config flag
-// guardrail.retain_judge_bodies. Default-off protects operators
-// from accidentally persisting fragments of user prompts and PII
-// into the JSONL + sink pipeline.
+// has explicitly opted in to retention via one of:
+//   - DEFENSECLAW_JUDGE_TRACE=1 (ephemeral, session-only)
+//   - DEFENSECLAW_REVEAL_PII=1  (ephemeral, local triage; also flips
+//     operator-facing log redaction off)
+//   - guardrail.retain_judge_bodies = true (durable, config)
+//
+// REVEAL_PII is included because operators debugging false positives
+// need to see exactly what the judge said matched — without this,
+// flipping REVEAL_PII ON showed only "<redacted len=503 sha=...>"
+// for judge bodies, forcing operators to also flip JUDGE_TRACE. Both
+// switches are local-only by design (the JSONL sink still applies
+// ForSink* redaction when forwarding downstream).
+//
+// Default-off protects operators from accidentally persisting
+// fragments of user prompts and PII into the JSONL + sink pipeline.
 func judgeRawForEmit(raw string) string {
-	if judgeLogTrace() || retainJudgeBodies.Load() {
+	if judgeLogTrace() || retainJudgeBodies.Load() || redaction.Reveal() {
 		return truncateJudgeLog(raw, 500)
 	}
 	return ""
@@ -393,6 +575,114 @@ func SetRetainJudgeBodies(v bool) {
 	retainJudgeBodies.Store(v)
 }
 
+// judgeTel optionally wires OTel for judge spans + histograms (Track 3).
+var judgeTel atomic.Pointer[telemetry.Provider]
+
+// SetJudgeTelemetryProvider installs the shared OTel provider for judge
+// instrumentation. Pass nil to disable.
+func SetJudgeTelemetryProvider(p *telemetry.Provider) {
+	judgeTel.Store(p)
+}
+
+func judgeTelemetry() *telemetry.Provider {
+	return judgeTel.Load()
+}
+
+// verdictCache is an optional process-local TTL cache for judge results.
+var verdictCache atomic.Pointer[guardrail.VerdictCache]
+
+// SetJudgeVerdictCache wires the verdict cache (Track 3). Nil disables.
+func SetJudgeVerdictCache(c *guardrail.VerdictCache) {
+	verdictCache.Store(c)
+}
+
+// NewJudgeVerdictCache constructs a verdict cache with optional OTel hit/miss hooks.
+func NewJudgeVerdictCache(ttl time.Duration, tel *telemetry.Provider) *guardrail.VerdictCache {
+	return guardrail.NewVerdictCache(ttl,
+		func(ctx context.Context, scanner, verdict, ttlB string) {
+			if tel != nil {
+				tel.RecordGuardrailCacheHit(ctx, scanner, verdict, ttlB)
+			}
+		},
+		func(ctx context.Context, scanner, verdict, ttlB string) {
+			if tel != nil {
+				tel.RecordGuardrailCacheMiss(ctx, scanner, verdict, ttlB)
+			}
+		},
+	)
+}
+
+func judgeVerdictCache() *guardrail.VerdictCache {
+	return verdictCache.Load()
+}
+
+// InvalidateJudgeVerdictCache bumps the cache generation so every
+// currently-held entry becomes a miss on next lookup. Called from the
+// OPA policy reload handler so a verdict rendered under the old
+// policy is never served once the policy has changed. Safe to call
+// when the cache is unset (no-op).
+func InvalidateJudgeVerdictCache() {
+	if c := verdictCache.Load(); c != nil {
+		c.Invalidate()
+	}
+}
+
+func judgeGenAISystem(model string) string {
+	if i := strings.Index(model, "/"); i > 0 {
+		return strings.ToLower(model[:i])
+	}
+	return "openclaw"
+}
+
+func verdictSnapshotFrom(v *ScanVerdict) *guardrail.VerdictSnapshot {
+	if v == nil {
+		return nil
+	}
+	return &guardrail.VerdictSnapshot{
+		Action:         v.Action,
+		Severity:       v.Severity,
+		Reason:         v.Reason,
+		Findings:       append([]string(nil), v.Findings...),
+		EntityCount:    v.EntityCount,
+		Scanner:        v.Scanner,
+		ScannerSources: append([]string(nil), v.ScannerSources...),
+		JudgeFailed:    v.JudgeFailed,
+	}
+}
+
+func scanVerdictFromSnapshot(s *guardrail.VerdictSnapshot) *ScanVerdict {
+	if s == nil {
+		return allowVerdict("llm-judge")
+	}
+	return &ScanVerdict{
+		Action:         s.Action,
+		Severity:       s.Severity,
+		Reason:         s.Reason,
+		Findings:       append([]string(nil), s.Findings...),
+		EntityCount:    s.EntityCount,
+		Scanner:        s.Scanner,
+		ScannerSources: append([]string(nil), s.ScannerSources...),
+		JudgeFailed:    s.JudgeFailed,
+	}
+}
+
+func judgeFindingsPayload(v *ScanVerdict) []gatewaylog.Finding {
+	if v == nil || len(v.Findings) == 0 {
+		return nil
+	}
+	sev := deriveSeverity(v.Severity)
+	out := make([]gatewaylog.Finding, 0, len(v.Findings))
+	for _, id := range v.Findings {
+		out = append(out, gatewaylog.Finding{
+			Category: id,
+			Severity: sev,
+			Rule:     id,
+			Source:   "judge",
+		})
+	}
+	return out
+}
+
 var injectionCategories = map[string]string{
 	"Instruction Manipulation": "JUDGE-INJ-INSTRUCT",
 	"Context Manipulation":     "JUDGE-INJ-CONTEXT",
@@ -401,7 +691,22 @@ var injectionCategories = map[string]string{
 	"Token Exploitation":       "JUDGE-INJ-TOKEN",
 }
 
+// injectionToVerdict preserves the original signature for tests and other
+// callers that do not have a sensitive-context signal. The runtime path
+// uses injectionToVerdictCtx so it can un-cap verdicts when the user
+// prompt is probing host secrets.
 func (j *LLMJudge) injectionToVerdict(data map[string]interface{}) *ScanVerdict {
+	return j.injectionToVerdictCtx(data, false)
+}
+
+// injectionToVerdictCtx is the context-aware variant. When
+// sensitiveContext is true, a single-category finding is NOT downgraded
+// by the rule pack's single_category_max_severity cap — the verdict
+// stays at HIGH (or higher if the finding count warrants CRITICAL).
+// This closes the "one injection-category hit + obvious /etc/passwd
+// probe → MEDIUM/alert → passthrough" gap where the judge clearly
+// recognized the intent but the confidence gate silently forgave it.
+func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveContext bool) *ScanVerdict {
 	if data == nil {
 		return allowVerdict("llm-judge-injection")
 	}
@@ -447,7 +752,7 @@ func (j *LLMJudge) injectionToVerdict(data map[string]interface{}) *ScanVerdict 
 	}
 
 	severity := "HIGH"
-	if len(findings) < minForHigh && singleCatMaxSev != "" {
+	if len(findings) < minForHigh && singleCatMaxSev != "" && !sensitiveContext {
 		severity = singleCatMaxSev
 	} else if len(findings) >= 3 {
 		severity = "CRITICAL"
@@ -458,10 +763,19 @@ func (j *LLMJudge) injectionToVerdict(data map[string]interface{}) *ScanVerdict 
 		action = "alert"
 	}
 
+	reason := "judge-injection: " + strings.Join(reasons, "; ")
+	if sensitiveContext && len(findings) < minForHigh && singleCatMaxSev != "" {
+		// Annotate the verdict so audit logs make the un-cap visible.
+		// Without this, an operator inspecting the verdict cannot tell
+		// whether HIGH came from multi-category detection or from the
+		// sensitive-file-context boost.
+		reason += " [sensitive-file-context: single-category cap overridden]"
+	}
+
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-injection: " + strings.Join(reasons, "; "),
+		Reason:   reason,
 		Findings: findings,
 		Scanner:  "llm-judge-injection",
 	}
@@ -507,66 +821,147 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		return allowVerdict("llm-judge-pii")
 	}
 
+	const kind = "pii"
+	const scannerMetric = "llm-judge-pii"
+	maxTok := 1024
+	dir := string(direction)
+	if c := judgeVerdictCache(); c != nil {
+		if snap, ok := c.Get(ctx, kind, j.model, dir, content, scannerMetric, "none"); ok {
+			return scanVerdictFromSnapshot(snap)
+		}
+	}
+
 	prompt := piiSystemPrompt
 	if jc := j.rp.PIIJudge(); jc != nil && jc.SystemPrompt != "" {
 		prompt = jc.SystemPrompt
 	}
 
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: calling provider (dir=%s, content_len=%d)\n", direction, len(content))
+
+	tel := judgeTelemetry()
+	sys := judgeGenAISystem(j.model)
+	llmCtx := ctx
+	var sp trace.Span
+	if tel != nil {
+		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	}
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
+	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: prompt},
 			{Role: "user", Content: wrapJudgeSample(content)},
 		},
-		MaxTokens: intPtr(1024),
+		MaxTokens: intPtr(maxTok),
 		Fallbacks: j.cfg.Fallbacks,
 	})
 	latencyMs := time.Since(start).Milliseconds()
+	responseModel := j.model
+
+	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
+		if tel == nil {
+			return
+		}
+		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
+		pt, ct := 0, 0
+		if resp != nil && resp.Usage != nil {
+			pt = int(resp.Usage.PromptTokens)
+			ct = int(resp.Usage.CompletionTokens)
+			if pt > 0 {
+				tel.RecordJudgeTokens(ctx, j.model, "input", int64(pt))
+			}
+			if ct > 0 {
+				tel.RecordJudgeTokens(ctx, j.model, "output", int64(ct))
+			}
+		}
+		va := "error"
+		if verdict != nil {
+			if verdict.JudgeFailed || parseErr {
+				va = "error"
+			} else {
+				va = verdict.Action
+			}
+		}
+		var endErr error
+		if err != nil {
+			endErr = err
+		} else if parseErr {
+			endErr = fmt.Errorf("parse-failed")
+		}
+		tel.EndJudgeSpan(sp, responseModel, pt, ct, latencyMs, va, false, endErr)
+	}
+
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii error (dir=%s): %v\n", direction, err)
-		emitJudge("pii", j.model, gatewaylog.Direction(direction),
+		recordJudgeMetrics(nil, false)
+		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "")
+			err.Error(), "", JudgeEmitOpts{ToolName: toolName})
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		emitJudge("pii", j.model, gatewaylog.Direction(direction),
+		recordJudgeMetrics(nil, false)
+		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "")
+			"empty-response", "", JudgeEmitOpts{ToolName: toolName})
 		return errorVerdict("llm-judge-pii")
+	}
+
+	if resp.Model != "" {
+		responseModel = resp.Model
 	}
 
 	rawResponse := resp.Choices[0].Message.Content
 	// The raw response echoes the detected PII values back (that's how the
 	// prompt is structured). Never log it at info — operators can enable
-	// DEFENSECLAW_JUDGE_TRACE=1 in non-production if they need the payload.
-	if judgeLogTrace() {
-		// PII judge prompts are constructed by asking the
-		// model to echo back matched tokens; the raw
-		// response will contain those tokens verbatim.
-		// Always run it through the message-content
-		// redactor before printing, even under trace.
+	// DEFENSECLAW_JUDGE_TRACE=1 or DEFENSECLAW_REVEAL_PII=1 in non-
+	// production if they need the payload. Always run it through
+	// redaction.MessageContent before printing — under REVEAL the redactor
+	// passes through; under TRACE it still scrubs any secondary sensitive
+	// shapes.
+	if judgeLogTrace() || redaction.Reveal() {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii raw response (dir=%s): %s\n",
 			direction, redaction.MessageContent(truncateJudgeLog(rawResponse, 500)))
 	}
 
 	parsed := parseJudgeJSON(rawResponse)
 	if parsed == nil {
-		emitJudge("pii", j.model, gatewaylog.Direction(direction),
+		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
+			"pii judge returned unparseable JSON", fmt.Errorf("parse-failed"))
+		recordJudgeMetrics(nil, true)
+		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse))
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName})
 		return errorVerdict("llm-judge-pii")
 	}
 
+	// Drop judge-reported entities that are not substrings of the
+	// input. Claude Haiku in particular likes to "helpfully" hallucinate
+	// PII (e.g. Username=["root"] for an /etc/passwd probe where "root"
+	// never appears). Doing this before piiToVerdict means a category
+	// whose only entities were hallucinated is simply dropped from the
+	// verdict, rather than surfacing as a real finding.
+	if dropped := filterHallucinatedEntities(parsed, content); dropped > 0 {
+		suffix := "y"
+		if dropped != 1 {
+			suffix = "ies"
+		}
+		fmt.Fprintf(defaultLogWriter,
+			"  [llm-judge] pii: dropped %d hallucinated entit%s (dir=%s)\n",
+			dropped, suffix, direction)
+	}
+
 	verdict := j.piiToVerdict(parsed, direction, toolName)
+	recordJudgeMetrics(verdict, false)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii verdict (dir=%s): action=%s severity=%s findings=%v\n",
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
-	emitJudge("pii", j.model, gatewaylog.Direction(direction),
+	emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse))
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName})
+	if c := judgeVerdictCache(); c != nil {
+		c.Put(kind, j.model, dir, content, verdictSnapshotFrom(verdict))
+	}
 	return verdict
 }
 
@@ -907,34 +1302,113 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	}
 	systemPrompt := fmt.Sprintf(basePrompt, sanitizedTool)
 
-	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
+	const kind = "tool_injection"
+	const scannerMetric = "llm-judge-tool"
+	maxTok := 1024
+	cacheBody := toolName + "\x00" + args
+	if c := judgeVerdictCache(); c != nil {
+		if snap, ok := c.Get(ctx, kind, j.model, "tool_call", cacheBody, scannerMetric, "none"); ok {
+			return scanVerdictFromSnapshot(snap)
+		}
+	}
+
+	tel := judgeTelemetry()
+	sys := judgeGenAISystem(j.model)
+	llmCtx := ctx
+	var sp trace.Span
+	if tel != nil {
+		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	}
+	start := time.Now()
+	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: wrapJudgeSample(args)},
 		},
-		MaxTokens: intPtr(1024),
+		MaxTokens: intPtr(maxTok),
 		Fallbacks: j.cfg.Fallbacks,
 	})
+	latencyMs := time.Since(start).Milliseconds()
+	responseModel := j.model
+
+	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
+		if tel == nil {
+			return
+		}
+		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
+		if resp != nil && resp.Usage != nil {
+			if resp.Usage.PromptTokens > 0 {
+				tel.RecordJudgeTokens(ctx, j.model, "input", resp.Usage.PromptTokens)
+			}
+			if resp.Usage.CompletionTokens > 0 {
+				tel.RecordJudgeTokens(ctx, j.model, "output", resp.Usage.CompletionTokens)
+			}
+		}
+		va := "error"
+		if verdict != nil {
+			if verdict.JudgeFailed || parseErr {
+				va = "error"
+			} else {
+				va = verdict.Action
+			}
+		}
+		var endErr error
+		if err != nil {
+			endErr = err
+		} else if parseErr {
+			endErr = fmt.Errorf("parse-failed")
+		}
+		pt, ct := 0, 0
+		if resp != nil && resp.Usage != nil {
+			pt = int(resp.Usage.PromptTokens)
+			ct = int(resp.Usage.CompletionTokens)
+		}
+		tel.EndJudgeSpan(sp, responseModel, pt, ct, latencyMs, va, false, endErr)
+	}
+
+	dir := gatewaylog.DirectionPrompt
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] tool injection error: %v\n", err)
+		recordJudgeMetrics(nil, false)
+		emitJudge(ctx, kind, j.model, dir,
+			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
+			err.Error(), "", JudgeEmitOpts{ToolName: toolName})
 		return errorVerdict("llm-judge-tool")
+	}
+
+	if resp.Model != "" {
+		responseModel = resp.Model
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		recordJudgeMetrics(nil, false)
+		emitJudge(ctx, kind, j.model, dir,
+			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
+			"empty-response", "", JudgeEmitOpts{ToolName: toolName})
 		return errorVerdict("llm-judge-tool")
 	}
 
-	parsed := parseJudgeJSON(resp.Choices[0].Message.Content)
+	rawResponse := resp.Choices[0].Message.Content
+	parsed := parseJudgeJSON(rawResponse)
 	if parsed == nil {
-		// Fail-closed on malformed judge output. An unparseable response
-		// is indistinguishable from a successful jailbreak of the judge;
-		// treat it as a judge failure so the caller's fallback policy
-		// (regex verdict, MEDIUM alert) applies instead of silently
-		// allowing the tool call.
+		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
+			"tool injection judge returned unparseable JSON", fmt.Errorf("parse-failed"))
+		recordJudgeMetrics(nil, true)
+		emitJudge(ctx, kind, j.model, dir,
+			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName})
 		return errorVerdict("llm-judge-tool")
 	}
 
-	return toolInjectionToVerdict(parsed)
+	verdict := toolInjectionToVerdict(parsed)
+	recordJudgeMetrics(verdict, false)
+	emitJudge(ctx, kind, j.model, dir,
+		len(args), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName})
+	if c := judgeVerdictCache(); c != nil {
+		c.Put(kind, j.model, "tool_call", cacheBody, verdictSnapshotFrom(verdict))
+	}
+	return verdict
 }
 
 var toolInjectionCategories = map[string]string{

@@ -25,9 +25,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	logNoop "go.opentelemetry.io/otel/log/noop"
@@ -67,6 +69,18 @@ type Provider struct {
 	metrics *metricsSet
 
 	enabled bool
+
+	startTime time.Time
+
+	// capacityShutdown stops the 15s runtime/SQLite metrics goroutine.
+	capacityShutdown context.CancelFunc
+
+	// agentInstanceID is the per-process stable identifier the
+	// sidecar mints at boot. Accessed from multiple goroutines
+	// (every StartAgentSpan / StartToolSpan call reads it) so we
+	// guard it with an atomic load rather than a mutex; writes
+	// happen exactly once during NewSidecar.
+	agentInstanceID atomic.Value // string
 }
 
 // NewProvider initializes the OTel SDK providers and exporters. When
@@ -74,16 +88,20 @@ type Provider struct {
 func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
 	cfg := fullCfg.OTel
 	if !cfg.Enabled {
-		return &Provider{enabled: false}, nil
+		return &Provider{
+			enabled: false,
+			tracer:  traceNoop.NewTracerProvider().Tracer("defenseclaw"),
+		}, nil
 	}
 
 	res := buildResource(fullCfg, version)
 	headers := expandHeaders(cfg.Headers)
 
 	p := &Provider{
-		cfg:     cfg,
-		res:     res,
-		enabled: true,
+		cfg:       cfg,
+		res:       res,
+		enabled:   true,
+		startTime: time.Now(),
 	}
 
 	if cfg.Traces.Enabled {
@@ -111,7 +129,7 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	}
 
 	if cfg.Metrics.Enabled {
-		mp, err := newMeterProvider(ctx, cfg, res, headers)
+		mp, err := newMeterProvider(ctx, cfg, res, headers, p)
 		if err != nil {
 			return nil, fmt.Errorf("telemetry: metrics: %w", err)
 		}
@@ -128,12 +146,64 @@ func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*
 	}
 	p.metrics = ms
 
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		if err == nil || p.metrics == nil {
+			return
+		}
+		reason := err.Error()
+		if len(reason) > 200 {
+			reason = reason[:200] + "…"
+		}
+		p.metrics.telemetryExporterErrs.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attribute.String("signal", "otel_sdk"),
+				attribute.String("reason", reason),
+			))
+		p.emitExporterFailure(context.Background(), "otel_sdk")
+	}))
+
+	setGlobalTelemetryProvider(p)
+	config.ReportConfigLoadError = func(ctx context.Context, reason string) {
+		p.RecordConfigLoadError(ctx, reason)
+	}
+
+	if cfg.Metrics.Enabled {
+		capCtx, capCancel := context.WithCancel(context.Background())
+		p.capacityShutdown = capCancel
+		startCapacityBackground(capCtx, p)
+	}
+
 	return p, nil
 }
 
 // Enabled reports whether OTel export is active.
 func (p *Provider) Enabled() bool {
 	return p != nil && p.enabled
+}
+
+// Tracer returns the defenseclaw tracer, or a no-op tracer when the
+// provider is nil or OTel is disabled.
+func (p *Provider) Tracer() trace.Tracer {
+	if p == nil || p.tracer == nil {
+		return traceNoop.NewTracerProvider().Tracer("defenseclaw")
+	}
+	return p.tracer
+}
+
+// EmitTUIFilterTrace records a short-lived span when an operator changes
+// a TUI filter (severity, subsystem, agent id, …).
+func (p *Provider) EmitTUIFilterTrace(ctx context.Context, panel, filterType, oldVal, newVal string) {
+	if p == nil || !p.Enabled() || p.tracer == nil {
+		return
+	}
+	_, sp := p.tracer.Start(ctx, "defenseclaw.tui.filter",
+		trace.WithAttributes(
+			attribute.String("panel", panel),
+			attribute.String("filter_type", filterType),
+			attribute.String("old", oldVal),
+			attribute.String("new", newVal),
+		))
+	sp.End()
 }
 
 // LogsEnabled reports whether OTel log export is active.
@@ -144,6 +214,28 @@ func (p *Provider) LogsEnabled() bool {
 // TracesEnabled reports whether OTel trace export is active.
 func (p *Provider) TracesEnabled() bool {
 	return p.Enabled() && p.tracerProvider != nil
+}
+
+// SetAgentInstanceID installs the per-process stable agent instance
+// identifier. The sidecar mints it once at boot and propagates it to
+// both the telemetry Provider (for every span/log it emits) and the
+// audit package (for every row it persists). Safe to call on a nil
+// provider — no-op in that case.
+func (p *Provider) SetAgentInstanceID(id string) {
+	if p == nil {
+		return
+	}
+	p.agentInstanceID.Store(strings.TrimSpace(id))
+}
+
+// AgentInstanceID returns the currently registered per-process
+// agent instance id, or empty string if none was set.
+func (p *Provider) AgentInstanceID() string {
+	if p == nil {
+		return ""
+	}
+	v, _ := p.agentInstanceID.Load().(string)
+	return v
 }
 
 // Shutdown flushes pending telemetry and releases resources.
@@ -164,6 +256,9 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 		if err := p.loggerProvider.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("logs: %w", err))
 		}
+	}
+	if p.capacityShutdown != nil {
+		p.capacityShutdown()
 	}
 	if p.meterProvider != nil {
 		if err := p.meterProvider.Shutdown(ctx); err != nil {
@@ -358,7 +453,7 @@ func temporalitySelector(mode string) sdkmetric.TemporalitySelector {
 	}
 }
 
-func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string) (*sdkmetric.MeterProvider, error) {
+func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string, tel *Provider) (*sdkmetric.MeterProvider, error) {
 	var exporter sdkmetric.Exporter
 	var err error
 
@@ -430,7 +525,9 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 		return nil, err
 	}
 
-	reader := sdkmetric.NewPeriodicReader(exporter,
+	wrapped := &metricExporterProbe{inner: exporter, p: tel}
+
+	reader := sdkmetric.NewPeriodicReader(wrapped,
 		sdkmetric.WithInterval(time.Duration(cfg.Metrics.ExportIntervalS)*time.Second),
 	)
 

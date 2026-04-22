@@ -18,6 +18,7 @@ package scanner
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -48,14 +49,35 @@ type Finding struct {
 	Remediation string   `json:"remediation"`
 	Scanner     string   `json:"scanner"`
 	Tags        []string `json:"tags"`
+	// RuleID is the stable detection id (from upstream JSON or synthesized).
+	RuleID string `json:"rule_id,omitempty"`
+	// Category groups findings for synthesis when RuleID is absent.
+	Category string `json:"category,omitempty"`
+	// LineNumber is 1-based when applicable; nil means unknown / N/A.
+	LineNumber *int `json:"line_number,omitempty"`
 }
 
 type ScanResult struct {
-	Scanner   string        `json:"scanner"`
-	Target    string        `json:"target"`
-	Timestamp time.Time     `json:"timestamp"`
-	Findings  []Finding     `json:"findings"`
-	Duration  time.Duration `json:"duration"`
+	Scanner    string        `json:"scanner"`
+	Target     string        `json:"target"`
+	Timestamp  time.Time     `json:"timestamp"`
+	Findings   []Finding     `json:"findings"`
+	Duration   time.Duration `json:"duration"`
+	TargetType string        `json:"target_type,omitempty"`
+	Verdict    string        `json:"verdict,omitempty"`
+	ExitCode   int           `json:"exit_code,omitempty"`
+	ScanError  string        `json:"error,omitempty"`
+}
+
+// EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).
+func (r *ScanResult) EffectiveTargetType() string {
+	if r == nil {
+		return ""
+	}
+	if strings.TrimSpace(r.TargetType) != "" {
+		return r.TargetType
+	}
+	return InferTargetType(r.Scanner)
 }
 
 func (r *ScanResult) HasSeverity(s Severity) bool {

@@ -15,6 +15,7 @@ DIST_DIR    := dist
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
+        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -211,6 +212,22 @@ cli-install: pycli
 	@mkdir -p $(INSTALL_DIR)
 	@ln -sf "$(CURDIR)/$(VENV)/bin/defenseclaw" "$(INSTALL_DIR)/defenseclaw"
 	@ln -sf "$(CURDIR)/$(VENV)/bin/litellm" "$(INSTALL_DIR)/litellm" 2>/dev/null || true
+	@# Expose the scanner entry points (skill-scanner, mcp-scanner,
+	@# plus the -api / -pre-commit siblings) on PATH via the same
+	@# ~/.local/bin symlink pattern we already use for the main CLI.
+	@# Without these, a fresh `make all` leaves `defenseclaw doctor`
+	@# reporting '[FAIL] Scanner: skill-scanner — not on PATH' because
+	@# the binaries live in $(VENV)/bin but $(VENV)/bin is never on the
+	@# operator's shell PATH by design. `|| true` keeps this optional
+	@# so old venvs that somehow lack one of the entry points don't
+	@# break install; the doctor check surfaces any real misses.
+	@for tool in skill-scanner skill-scanner-api skill-scanner-pre-commit \
+	             mcp-scanner mcp-scanner-api; do \
+		src="$(CURDIR)/$(VENV)/bin/$$tool"; \
+		if [ -x "$$src" ]; then \
+			ln -sf "$$src" "$(INSTALL_DIR)/$$tool"; \
+		fi; \
+	done
 	@echo "Installed defenseclaw CLI to $(INSTALL_DIR)"
 	@if ! echo "$$PATH" | grep -q "$(INSTALL_DIR)"; then \
 		echo ""; \
@@ -316,6 +333,40 @@ test-file:
 	$(VENV)/bin/python -m unittest cli.tests.$(FILE) -v
 
 # ---------------------------------------------------------------------------
+# v7 parity gates — prevent drift between Go (source of truth),
+# Python, and JSON schemas. Adding a new audit action / error code
+# / schema? Run `make check` locally before pushing; CI runs this
+# too and will fail the build on drift.
+# ---------------------------------------------------------------------------
+
+check: check-v7 check-provider-coverage
+
+check-v7: check-audit-actions check-error-codes check-schemas
+	@echo "check-v7: all parity gates passed."
+
+check-audit-actions:
+	@$(VENV)/bin/python scripts/check_audit_actions.py
+
+check-error-codes:
+	@$(VENV)/bin/python scripts/check_error_codes.py
+
+check-schemas:
+	@$(VENV)/bin/python scripts/check_schemas.py
+
+# check-provider-coverage runs the shared test/testdata/llm-endpoints.json
+# corpus through both the Go shape detector (provider_coverage_test.go)
+# and the TS interceptor (provider-coverage.test.ts). A drift between
+# the two sides — e.g. a new provider added to providers.json but
+# never exercised — would be the exact "silent bypass" failure mode
+# Layer 4 of the robust-guardrail plan is designed to surface.
+check-provider-coverage:
+	@echo "==> provider coverage (Go)"
+	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
+	@echo "==> provider coverage (TS)"
+	@cd extensions/defenseclaw && npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
+	@echo "check-provider-coverage: corpus is in sync across Go + TS."
+
+# ---------------------------------------------------------------------------
 # Lint targets
 # ---------------------------------------------------------------------------
 
@@ -381,6 +432,7 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
+	@rm -rf cli/defenseclaw/_data/local_observability_stack
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
@@ -393,6 +445,7 @@ _bundle-data:
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
+	cp -r bundles/local_observability_stack cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:

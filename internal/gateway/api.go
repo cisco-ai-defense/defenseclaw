@@ -36,13 +36,17 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/google/uuid"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -129,16 +133,22 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 
-	handler := a.metricsMiddleware(csrfProtect(maxBodyMiddleware(mux, 1<<20)))
+	handler := maxBodyMiddleware(mux, 1<<20)
+	handler = a.apiCSRFProtect(handler)
 	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
 		handler = a.tokenAuth(handler)
 	}
-	// Phase 5: request-ID middleware runs outermost so every audit
-	// entry coming out of the API server — including auth failures
-	// and rate-limited requests — carries a correlation key. Clients
-	// that already mint their own trace id can pass it in via any
-	// of the recognised request-id headers and we honour it verbatim.
+	handler = a.metricsMiddleware(handler)
+	var reg *AgentRegistry
+	if a.scannerCfg != nil {
+		reg = InstallSharedAgentRegistry(a.scannerCfg.Agent.ID, a.scannerCfg.Agent.Name)
+	} else {
+		reg = InstallSharedAgentRegistry("", "")
+	}
+	handler = CorrelationMiddleware(reg)(handler)
+	// request-ID then OTel so the HTTP server span includes the full chain.
 	handler = requestIDMiddleware(handler)
+	handler = otelHTTPServerMiddleware("sidecar-api", handler)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -177,7 +187,18 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := a.health.Snapshot()
-	a.writeJSON(w, http.StatusOK, snap)
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	body["provenance"] = version.Current()
+	a.writeJSON(w, http.StatusOK, body)
 }
 
 func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +210,8 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	snap := a.health.Snapshot()
 
 	status := map[string]interface{}{
-		"health": snap,
+		"health":     snap,
+		"provenance": version.Current(),
 	}
 
 	if a.client != nil && a.client.Hello() != nil {
@@ -234,7 +256,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-disable", req.SkillKey, "disabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-disable", req.SkillKey, "disabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "skillKey": req.SkillKey})
 }
@@ -269,7 +291,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-enable", req.SkillKey, "enabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-enable", req.SkillKey, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "skillKey": req.SkillKey})
 }
@@ -310,7 +332,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-plugin-disable", req.PluginName, "disabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-disable", req.PluginName, "disabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "pluginName": req.PluginName})
 }
@@ -347,7 +369,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-plugin-enable", req.PluginName, "enabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-enable", req.PluginName, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "pluginName": req.PluginName})
 }
@@ -464,7 +486,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-config-patch", req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
+		_ = a.logger.LogActionCtx(r.Context(), "api-config-patch", req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
 }
@@ -537,7 +559,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.logger != nil {
-			_ = a.logger.LogAction("api-enforce-block", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+			_ = a.logger.LogActionCtx(r.Context(), "api-enforce-block", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 		}
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "blocked"})
 	case http.MethodDelete:
@@ -546,7 +568,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.logger != nil {
-			_ = a.logger.LogAction("api-enforce-unblock", req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
+			_ = a.logger.LogActionCtx(r.Context(), "api-enforce-unblock", req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
 		}
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked"})
 	}
@@ -625,7 +647,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-enforce-allow", policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+		_ = a.logger.LogActionCtx(r.Context(), "api-enforce-allow", policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 }
@@ -788,6 +810,11 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 	if a.otel != nil {
 		ctx, span = a.otel.StartPolicySpan(ctx, "admission", req.Input.TargetType, req.Input.TargetName)
 	}
+	endAdmission := func(verdict, reason string) {
+		if a.otel != nil && span != nil {
+			a.otel.EndPolicySpan(span, "admission", verdict, reason, start)
+		}
+	}
 
 	input := policy.AdmissionInput{
 		TargetType: req.Input.TargetType,
@@ -805,12 +832,21 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 
 	out, err := a.evaluateAdmissionPolicy(ctx, input)
 	if err != nil {
+		endAdmission("error", err.Error())
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	if a.otel != nil {
-		a.otel.EndPolicySpan(span, "admission", out.Verdict, out.Reason, start)
+		endAdmission(out.Verdict, out.Reason)
+		a.otel.RecordAdmissionDecision(ctx, out.Verdict, req.Input.TargetType, "api")
+		a.otel.RecordPolicyEvaluation(ctx, "admission", out.Verdict)
+		latencyMs := float64(time.Since(start).Milliseconds())
+		a.otel.RecordPolicyLatency(ctx, "admission", latencyMs)
+		// Feed the <2000ms block SLO histogram for every admission
+		// decision so the dashboard can compare blocked vs allowed
+		// latency distributions.
+		a.otel.RecordBlockSLO(ctx, req.Input.TargetType, latencyMs)
 		if out.Verdict == "blocked" || out.Verdict == "rejected" {
 			a.otel.EmitPolicyDecision("admission", out.Verdict, req.Input.TargetName, req.Input.TargetType, out.Reason, nil)
 		}
@@ -889,6 +925,20 @@ func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} {
+	bySev := make(map[string]int)
+	for _, f := range result.Findings {
+		bySev[string(f.Severity)]++
+	}
+	return map[string]interface{}{
+		"scan_id":                    uuid.New().String(),
+		"verdict":                    string(result.MaxSeverity()),
+		"provenance":                 version.Current(),
+		"findings_count_by_severity": bySev,
+		"result":                     result,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/skill/scan — run skill scanner on a local path (Option 2: remote scan)
 // ---------------------------------------------------------------------------
@@ -928,6 +978,11 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Route through the unified resolver so top-level ``llm:`` defaults
+	// flow into the skill scanner with ``scanners.skill.llm:`` overrides
+	// applied on top. ``NewSkillScannerFromLLM`` is the post-v5
+	// constructor; the legacy ``NewSkillScanner`` path is kept alive
+	// only for tests that still pass ``InspectLLMConfig``.
 	ss := scanner.NewSkillScannerFromLLM(
 		a.scannerCfg.Scanners.SkillScanner,
 		a.scannerCfg.ResolveLLM("scanners.skill"),
@@ -947,11 +1002,11 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithVerdict(result, "")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, result)
+	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
 }
 
 func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
@@ -994,11 +1049,11 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-plugin-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithVerdict(result, "")
+		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, result)
+	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,11 +1105,11 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-mcp-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithVerdict(result, "")
+		_ = a.logger.LogActionCtx(r.Context(), "api-mcp-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, result)
+	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,7 +1145,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("api-skill-fetch", req.Target, "streaming skill tar.gz")
+		_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch", req.Target, "streaming skill tar.gz")
 	}
 
 	w.Header().Set("Content-Type", "application/gzip")
@@ -1237,7 +1292,29 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionWithCorrelation("guardrail-verdict", req.Model, details, "", requestID)
+		// v7 envelope threading: see review finding C1. The previous
+		// LogActionWithCorrelation carried only trace_id + request_id
+		// onto the guardrail-verdict audit row — every other
+		// dimension (session_id, agent_*, policy_id, destination_app,
+		// tool_*) was silently dropped before the row reached
+		// SQLite/sinks/OTel. LogActionCtx routes through the same
+		// ctx envelope the middleware already stamped for this
+		// request so all five surfaces agree.
+		_ = a.logger.LogActionCtx(r.Context(), "guardrail-verdict", req.Model, details)
+	}
+	if a.store != nil {
+		evt := audit.Event{
+			Action:    "guardrail-inspection",
+			Target:    req.Model,
+			Severity:  req.Severity,
+			Details:   details,
+			Timestamp: time.Now().UTC(),
+			RequestID: requestID,
+		}
+		// Store-level twin row (TUI-only surface) — ApplyEnvelope
+		// keeps it in lockstep with the logger row above.
+		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
+		_ = a.store.LogEvent(evt)
 	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{
 		Action:    "guardrail-inspection",
@@ -1264,7 +1341,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", SharedAgentRegistry().AgentID(), tIn, tOut)
 		}
 	}
 
@@ -1333,7 +1410,19 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionWithCorrelation("guardrail-opa-verdict", req.Model, details, "", requestID)
+		_ = a.logger.LogActionCtx(r.Context(), "guardrail-opa-verdict", req.Model, details)
+	}
+	if a.store != nil {
+		evt := audit.Event{
+			Action:    "guardrail-opa-inspection",
+			Target:    req.Model,
+			Severity:  out.Severity,
+			Details:   details,
+			Timestamp: time.Now().UTC(),
+			RequestID: requestID,
+		}
+		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
+		_ = a.store.LogEvent(evt)
 	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{
 		Action:    "guardrail-opa-inspection",
@@ -1421,7 +1510,7 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.cfgMu.Unlock()
 
 		if a.logger != nil {
-			_ = a.logger.LogAction("guardrail-config-reload", "", strings.Join(changed, " "))
+			_ = a.logger.LogActionCtx(r.Context(), "guardrail-config-reload", "", strings.Join(changed, " "))
 		}
 
 		a.writeJSON(w, http.StatusOK, resp)
@@ -1527,6 +1616,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		route := r.URL.Path
+		if r.Pattern != "" {
+			route = r.Pattern
+		}
+		ctx := r.Context()
 
 		token := ""
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
@@ -1536,10 +1630,74 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			token = r.Header.Get("X-DefenseClaw-Token")
 		}
 
-		expected := a.scannerCfg.Gateway.Token
-		if token != expected {
+		expected := ""
+		if a.scannerCfg != nil {
+			expected = a.scannerCfg.Gateway.Token
+		}
+		if expected == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if token == "" {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
+		}
+		if token != expected {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, route string, code gatewaylog.ErrorCode, metricReason string) {
+	actor := "anonymous"
+	if strings.TrimSpace(r.Header.Get("Authorization")) != "" || r.Header.Get("X-DefenseClaw-Token") != "" {
+		actor = "claimed"
+	}
+	msg := fmt.Sprintf("sidecar API auth failure (actor=%s client_ip=%s ua=%q)",
+		actor, ClientIPRedacted(r), TruncateUserAgent256(r.UserAgent()))
+	emitGatewayError(ctx, gatewaylog.SubsystemAuth, code, msg, nil)
+	if a.otel != nil {
+		a.otel.RecordHTTPAuthFailure(ctx, route, metricReason)
+	}
+}
+
+// apiCSRFProtect is the CSRF gate for the REST API with structured auth telemetry.
+func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		route := r.URL.Path
+		if r.Pattern != "" {
+			route = r.Pattern
+		}
+		ctx := r.Context()
+
+		if r.Header.Get("X-DefenseClaw-Client") == "" {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
+			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			return
+		}
+
+		ct := r.Header.Get("Content-Type")
+		if !strings.Contains(ct, "application/json") {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
+			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			return
+		}
+
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !isLocalhostOrigin(origin) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
+				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)
@@ -1718,21 +1876,29 @@ func (a *APIServer) handlePolicyEvaluateFirewall(w http.ResponseWriter, r *http.
 	if a.otel != nil {
 		ctx, span = a.otel.StartPolicySpan(ctx, "firewall", "network", input.Destination)
 	}
+	endFw := func(verdict, detail string) {
+		if a.otel != nil && span != nil {
+			a.otel.EndPolicySpan(span, "firewall", verdict, detail, start)
+		}
+	}
 
 	engine, err := a.loadPolicyEngine()
 	if err != nil {
+		endFw("error", err.Error())
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	out, err := engine.EvaluateFirewall(ctx, input)
 	if err != nil {
+		endFw("error", err.Error())
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	if a.otel != nil {
-		a.otel.EndPolicySpan(span, "firewall", out.Action, out.RuleName, start)
+		endFw(out.Action, out.RuleName)
+		a.otel.RecordPolicyEvaluation(ctx, "firewall", out.Action)
 		if out.Action == "deny" || out.Action == "block" {
 			a.otel.EmitPolicyDecision("firewall", out.Action, input.Destination, "network", out.RuleName, nil)
 		}
@@ -1763,15 +1929,22 @@ func (a *APIServer) handlePolicyEvaluateAudit(w http.ResponseWriter, r *http.Req
 	if a.otel != nil {
 		ctx, span = a.otel.StartPolicySpan(ctx, "audit", input.EventType, input.Severity)
 	}
+	endAud := func(verdict, detail string) {
+		if a.otel != nil && span != nil {
+			a.otel.EndPolicySpan(span, "audit", verdict, detail, start)
+		}
+	}
 
 	engine, err := a.loadPolicyEngine()
 	if err != nil {
+		endAud("error", err.Error())
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	out, err := engine.EvaluateAudit(ctx, input)
 	if err != nil {
+		endAud("error", err.Error())
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1781,7 +1954,8 @@ func (a *APIServer) handlePolicyEvaluateAudit(w http.ResponseWriter, r *http.Req
 		if out.Retain {
 			verdict = "retain"
 		}
-		a.otel.EndPolicySpan(span, "audit", verdict, out.RetainReason, start)
+		endAud(verdict, out.RetainReason)
+		a.otel.RecordPolicyEvaluation(ctx, "audit", verdict)
 	}
 
 	a.writeJSON(w, http.StatusOK, out)
@@ -1813,15 +1987,22 @@ func (a *APIServer) handlePolicyEvaluateSkillActions(w http.ResponseWriter, r *h
 	if a.otel != nil {
 		ctx, span = a.otel.StartPolicySpan(ctx, "skill-actions", input.TargetType, input.Severity)
 	}
+	endSkill := func(verdict, detail string) {
+		if a.otel != nil && span != nil {
+			a.otel.EndPolicySpan(span, "skill-actions", verdict, detail, start)
+		}
+	}
 
 	engine, err := a.loadPolicyEngine()
 	if err != nil {
+		endSkill("error", err.Error())
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	out, err := engine.EvaluateSkillActions(ctx, input)
 	if err != nil {
+		endSkill("error", err.Error())
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1831,7 +2012,8 @@ func (a *APIServer) handlePolicyEvaluateSkillActions(w http.ResponseWriter, r *h
 		if out.ShouldBlock {
 			verdict = "block"
 		}
-		a.otel.EndPolicySpan(span, "skill-actions", verdict, "", start)
+		endSkill(verdict, "")
+		a.otel.RecordPolicyEvaluation(ctx, "skill-actions", verdict)
 	}
 
 	a.writeJSON(w, http.StatusOK, out)
@@ -1889,15 +2071,20 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Any cached LLM-judge verdict was rendered under the previous
+	// policy; drop it in O(1) so the next call re-evaluates under
+	// the fresh rulepack. Safe no-op when the cache is unset.
+	InvalidateJudgeVerdictCache()
+
 	if a.otel != nil {
 		a.otel.RecordPolicyReload(r.Context(), "success")
 		a.otel.EmitPolicyDecision("reload", "success", a.scannerCfg.PolicyDir, "", "OPA policy reloaded via API", nil)
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogAction("policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
+		_ = a.logger.LogActionCtx(r.Context(), "policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
 	}
-	emitLifecycle("policy", "reload", map[string]string{
+	emitLifecycle(r.Context(), "policy", "reload", map[string]string{
 		"policy_dir": a.scannerCfg.PolicyDir,
 		"source":     "api",
 	})
@@ -1955,7 +2142,7 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogScan(result)
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
 	a.writeJSON(w, http.StatusOK, result)

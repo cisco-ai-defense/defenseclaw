@@ -31,6 +31,7 @@ import json
 
 import click
 
+from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
     CredentialStatus,
@@ -78,6 +79,8 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
 @pass_ctx
 def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
     """Set a credential and persist it to ``~/.defenseclaw/.env``."""
+    import os
+
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
     env_name = env_name.strip()
@@ -104,7 +107,36 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
         click.echo("  ✗ No value provided — nothing saved.")
         raise click.Abort()
 
+    dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+    had = False
+    if os.path.isfile(dotenv_path):
+        try:
+            with open(dotenv_path, encoding="utf-8") as ef:
+                had = any(
+                    line.strip().startswith(f"{env_name}=")
+                    for line in ef.read().splitlines()
+                )
+        except OSError:
+            had = False
+
     _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
+    if app.logger:
+        app.logger.log_activity(
+            actor="cli:operator",
+            action=ACTION_CONFIG_UPDATE,
+            target_type="config",
+            target_id=f"dotenv:{env_name}",
+            before={"env": env_name, "had_value": had},
+            after={"env": env_name, "had_value": True},
+            diff=[
+                {
+                    "path": f"/.env/{env_name}",
+                    "op": "replace",
+                    "before": "set" if had else "unset",
+                    "after": "set",
+                },
+            ],
+        )
     click.echo(f"  ✓ Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env")
 
 

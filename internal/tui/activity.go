@@ -18,6 +18,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,9 +36,20 @@ type activityEntry struct {
 	Expanded  bool
 }
 
-// ActivityPanel shows command execution output and history.
+const (
+	activityTabCommands = iota
+	activityTabMutations
+)
+
+// ActivityPanel shows command execution output/history and gateway activity (mutations).
 type ActivityPanel struct {
-	theme      *Theme
+	theme     *Theme
+	dataDir   string
+	tab       int // activityTabCommands | activityTabMutations
+	mutations []ActivityMutation
+	mutCursor int
+	diffOpen  map[int]bool // mutation index -> show structured diff
+
 	entries    []activityEntry
 	cursor     int
 	width      int
@@ -47,8 +59,35 @@ type ActivityPanel struct {
 }
 
 // NewActivityPanel creates the activity panel.
-func NewActivityPanel(theme *Theme) ActivityPanel {
-	return ActivityPanel{theme: theme}
+func NewActivityPanel(theme *Theme, dataDir string) ActivityPanel {
+	return ActivityPanel{theme: theme, dataDir: dataDir, tab: activityTabCommands, diffOpen: make(map[int]bool)}
+}
+
+// LoadMutations refreshes EventActivity rows from gateway.jsonl.
+func (p *ActivityPanel) LoadMutations() {
+	if p.dataDir == "" {
+		return
+	}
+	path := filepath.Join(p.dataDir, "gateway.jsonl")
+	m, err := LoadGatewayActivity(path)
+	if err != nil || len(m) == 0 {
+		p.mutations = m
+		return
+	}
+	p.mutations = m
+	if p.mutCursor >= len(p.mutations) {
+		p.mutCursor = len(p.mutations) - 1
+	}
+	if p.mutCursor < 0 {
+		p.mutCursor = 0
+	}
+}
+
+// SetTab switches between Commands and Mutations sub-views.
+func (p *ActivityPanel) SetTab(tab int) {
+	if tab == activityTabCommands || tab == activityTabMutations {
+		p.tab = tab
+	}
 }
 
 // AddEntry adds a new running command entry and enters terminal mode.
@@ -148,6 +187,31 @@ func (p *ActivityPanel) IsRunning() bool {
 // Update handles key events.
 func (p *ActivityPanel) Update(msg tea.Msg) {
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		switch keyMsg.String() {
+		case "1":
+			p.SetTab(activityTabCommands)
+			return
+		case "2":
+			p.SetTab(activityTabMutations)
+			return
+		}
+		if p.tab == activityTabMutations {
+			switch keyMsg.String() {
+			case "up", "k":
+				if p.mutCursor > 0 {
+					p.mutCursor--
+				}
+			case "down", "j":
+				if p.mutCursor < len(p.mutations)-1 {
+					p.mutCursor++
+				}
+			case "enter":
+				if p.mutCursor >= 0 && p.mutCursor < len(p.mutations) {
+					p.diffOpen[p.mutCursor] = !p.diffOpen[p.mutCursor]
+				}
+			}
+			return
+		}
 		if p.termMode {
 			switch keyMsg.String() {
 			case "esc", "q":
@@ -188,14 +252,76 @@ func (p *ActivityPanel) Update(msg tea.Msg) {
 
 // View renders the activity panel.
 func (p *ActivityPanel) View() string {
+	tabBar := p.theme.Dimmed.Render("  [1] Commands   [2] Mutations (gateway activity)") + "\n\n"
+	if p.tab == activityTabMutations {
+		return tabBar + p.viewMutations()
+	}
+
 	if len(p.entries) == 0 {
-		return p.theme.Dimmed.Render("  No commands run yet. Press : or Ctrl+K to open the command palette.\n  Try: \"doctor\", \"status\", or \"scan skill --all\".")
+		return tabBar + p.theme.Dimmed.Render("  No commands run yet. Press : or Ctrl+K to open the command palette.\n  Try: \"doctor\", \"status\", or \"scan skill --all\".")
 	}
 
 	if p.termMode {
-		return p.viewTerminal()
+		return tabBar + p.viewTerminal()
 	}
-	return p.viewHistory()
+	return tabBar + p.viewHistory()
+}
+
+func (p *ActivityPanel) viewMutations() string {
+	if len(p.mutations) == 0 {
+		return p.theme.Dimmed.Render("  No activity events in gateway.jsonl yet.")
+	}
+	var b strings.Builder
+	max := p.height - 6
+	if max < 5 {
+		max = 5
+	}
+	start := 0
+	if p.mutCursor >= max {
+		start = p.mutCursor - max + 1
+	}
+	for i := start; i < len(p.mutations) && i < start+max; i++ {
+		m := p.mutations[i]
+		sel := "  "
+		if i == p.mutCursor {
+			sel = p.theme.CmdName.Render("▸ ")
+		}
+		target := m.TargetType + ":" + m.TargetID
+		if m.TargetType == "" {
+			target = m.TargetID
+		}
+		ver := m.VersionFrom
+		if ver == "" {
+			ver = "∅"
+		}
+		verTo := m.VersionTo
+		if verTo == "" {
+			verTo = "∅"
+		}
+		line := fmt.Sprintf("%s%s  %s  %s  %s → %s  %s",
+			sel, m.TS.Format("15:04:05"), m.Actor, m.Action, target, ver, verTo)
+		if len(m.Reason) > 0 {
+			line += " — " + truncateStr(m.Reason, 40)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+		if p.diffOpen[i] && len(m.Diff) > 0 {
+			for _, d := range m.Diff {
+				b.WriteString(p.theme.Dimmed.Render(fmt.Sprintf("      %s %s\n", d.Op, d.Path)))
+			}
+		} else if p.diffOpen[i] {
+			b.WriteString(p.theme.Dimmed.Render("      (no structured diff)\n"))
+		}
+	}
+	b.WriteString(p.theme.Dimmed.Render("\n  [Enter] expand diff"))
+	return b.String()
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 func (p *ActivityPanel) viewTerminal() string {

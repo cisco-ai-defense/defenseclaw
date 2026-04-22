@@ -30,7 +30,7 @@ declare module "@openclaw/plugin-sdk" {
     blockReason?: string;
   }
 
-  interface ToolContext {
+  export interface ToolContext {
     agentId?: string;
     sessionKey?: string;
     sessionId?: string;
@@ -58,10 +58,17 @@ declare module "@openclaw/plugin-sdk" {
   }
 
   export interface PluginApi {
-    on(event: "before_tool_call", handler: (event: BeforeToolCallEvent, ctx: ToolContext) => BeforeToolCallResult | void | Promise<BeforeToolCallResult | void>): void;
+    on(event: "before_tool_call", handler: (event: BeforeToolCallEvent, ctx?: ToolContext) => BeforeToolCallResult | void | Promise<BeforeToolCallResult | void>): void;
     on(event: string, handler: (...args: any[]) => void | Promise<void>): void;
     registerCommand(def: CommandRegistration): void;
     registerService(def: ServiceRegistration): void;
+    /** OpenClaw plugin configuration (see openclaw.plugin.json configSchema). */
+    getPluginConfig?: () => Promise<Record<string, unknown>>;
+    /** VS Code–style extension globalState for stable ids (optional). */
+    globalState?: {
+      get(key: string): unknown;
+      update(key: string, value: unknown): Promise<void>;
+    };
   }
 
   type PluginEntry = (api: PluginApi) => void;

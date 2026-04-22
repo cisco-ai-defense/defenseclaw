@@ -456,7 +456,7 @@ func truncMid(s string, width int) string {
 //   - the editor needs rows synchronously on Open/Refresh so the View
 //     has data to render on the first frame
 func defaultSinkLister() ([]sinkRow, error) {
-	cmd := exec.Command("defenseclaw", "setup", "observability", "list", "--json")
+	cmd := exec.Command(resolveDefenseclawBin(), "setup", "observability", "list", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {

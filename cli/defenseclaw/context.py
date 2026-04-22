@@ -31,3 +31,6 @@ class AppContext:
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)
+
+# Alias for command modules that import `pass_context`.
+pass_context = pass_ctx

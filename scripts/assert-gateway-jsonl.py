@@ -59,6 +59,20 @@ REQUIRED_EVENT_FIELDS = {
     # Diagnostic payload uses "component" (not "subsystem") and
     # "message" — matches the Go DiagnosticPayload struct.
     "diagnostic": {"component", "message"},
+    # v7 scanner fan-out. `scan` is the roll-up per invocation;
+    # every finding lands on its own `scan_finding` sibling event
+    # so SIEM can alert per row without joining to the parent.
+    # Required fields mirror internal/gatewaylog/events.go
+    # (ScanPayload / ScanFindingPayload). `verdict`, `severity_max`,
+    # `rule_id`, and `line_number` are recommended but optional on
+    # the wire because scanners may legitimately emit partials on
+    # error paths.
+    "scan":         {"scan_id", "scanner", "target"},
+    "scan_finding": {"scan_id", "scanner", "target"},
+    # v7 operator mutation log. Actor + action + target uniquely
+    # identify the mutation; before/after/diff are optional because
+    # create/delete mutations legitimately drop one side.
+    "activity":   {"actor", "action", "target_type", "target_id"},
 }
 
 VALID_EVENT_TYPES = set(REQUIRED_EVENT_FIELDS.keys())

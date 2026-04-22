@@ -477,6 +477,25 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
 
 For the full OTEL signal spec and Splunk mapping, see [docs/OTEL.md](docs/OTEL.md).
 
+#### Local observability stack (Prom + Loki + Tempo + Grafana)
+
+For end-to-end local testing, DefenseClaw ships a bundled docker-compose
+stack with an OTel Collector, Prometheus, Loki, Tempo, and a
+pre-provisioned Grafana. One command boots it, waits for readiness, and
+wires `~/.defenseclaw/config.yaml` to point at the local collector:
+
+```bash
+defenseclaw setup local-observability up        # boot + wire config
+defenseclaw gateway                             # sidecar now exports locally
+open http://127.0.0.1:3000                      # Grafana (admin / admin)
+defenseclaw setup local-observability status    # compose ps + readiness
+defenseclaw setup local-observability down      # stop, keep data
+defenseclaw setup local-observability reset     # stop + wipe volumes
+```
+
+Full dashboard / alert rule walkthrough:
+[docs/OBSERVABILITY.md §8](docs/OBSERVABILITY.md#8-local-otlp--schema-validation-stack).
+
 ---
 
 ## Building from Source

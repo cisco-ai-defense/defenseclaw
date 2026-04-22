@@ -273,6 +273,15 @@ def _remove_binaries() -> None:
     targets = [
         os.path.expanduser("~/.local/bin/defenseclaw-gateway"),
         os.path.expanduser("~/.local/bin/defenseclaw"),
+        # Scanner entry points symlinked by `make cli-install`. Keep
+        # this list in sync with the Makefile `cli-install` loop so a
+        # fresh install / uninstall round-trip leaves no orphan links.
+        os.path.expanduser("~/.local/bin/skill-scanner"),
+        os.path.expanduser("~/.local/bin/skill-scanner-api"),
+        os.path.expanduser("~/.local/bin/skill-scanner-pre-commit"),
+        os.path.expanduser("~/.local/bin/mcp-scanner"),
+        os.path.expanduser("~/.local/bin/mcp-scanner-api"),
+        os.path.expanduser("~/.local/bin/litellm"),
     ]
     for path in targets:
         if not os.path.lexists(path):

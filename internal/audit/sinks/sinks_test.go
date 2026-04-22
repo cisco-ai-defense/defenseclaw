@@ -144,8 +144,8 @@ func TestSinkFilter_Matches(t *testing.T) {
 
 func TestManager_ZeroValueIsNoop(t *testing.T) {
 	var m *Manager
-	if err := m.Forward(context.Background(), Event{}); err != nil {
-		t.Fatalf("nil Manager.Forward err=%v, want nil", err)
+	if errs := m.Forward(context.Background(), Event{}); len(errs) > 0 {
+		t.Fatalf("nil Manager.Forward err=%v, want nil", errs)
 	}
 	if n := m.Len(); n != 0 {
 		t.Fatalf("nil Manager.Len=%d", n)
@@ -171,8 +171,8 @@ func TestManager_RegisterAndFanout(t *testing.T) {
 
 	ev := Event{ID: "e1", Action: "scan-complete", Severity: "HIGH",
 		Timestamp: time.Unix(1700000000, 0)}
-	if err := m.Forward(context.Background(), ev); err != nil {
-		t.Fatalf("Forward err=%v", err)
+	if errs := m.Forward(context.Background(), ev); len(errs) > 0 {
+		t.Fatalf("Forward err=%v", errs)
 	}
 
 	if got := a.snapshot(); len(got) != 1 || got[0].ID != "e1" {
@@ -199,13 +199,17 @@ func TestManager_Forward_AggregatesErrorsButKeepsDelivering(t *testing.T) {
 	m.Register(broken)
 	m.Register(healthy)
 
-	err := m.Forward(context.Background(), Event{ID: "e", Action: "scan"})
-	if err == nil {
+	errs := m.Forward(context.Background(), Event{ID: "e", Action: "scan"})
+	if len(errs) == 0 {
 		t.Fatalf("expected aggregated error, got nil")
 	}
-	if !strings.Contains(err.Error(), "broken") ||
-		!strings.Contains(err.Error(), "downstream 500") {
-		t.Fatalf("error missing sink context: %v", err)
+	var agg string
+	for n, e := range errs {
+		agg += n + ": " + e.Error()
+	}
+	if !strings.Contains(agg, "broken") ||
+		!strings.Contains(agg, "downstream 500") {
+		t.Fatalf("error missing sink context: %v", agg)
 	}
 	if got := len(healthy.snapshot()); got != 1 {
 		t.Fatalf("healthy sink not delivered-to despite broken peer: %d", got)
@@ -220,9 +224,9 @@ func TestManager_ImmediateFlushActions(t *testing.T) {
 	// `sidecar-start` is in the default immediate-flush list — Manager
 	// fires a background FlushAll. We poll the sink briefly instead of
 	// relying on a fixed sleep.
-	if err := m.Forward(context.Background(),
-		Event{Action: "sidecar-start", Severity: "INFO"}); err != nil {
-		t.Fatalf("Forward err=%v", err)
+	if errs := m.Forward(context.Background(),
+		Event{Action: "sidecar-start", Severity: "INFO"}); len(errs) > 0 {
+		t.Fatalf("Forward err=%v", errs)
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -293,8 +297,8 @@ func TestManager_Close_FlushesAndCloses_AndMakesForwardNoop(t *testing.T) {
 
 	// Post-Close: Forward must be a no-op because Close clears the sink
 	// list. Nothing should be delivered.
-	if err := m.Forward(context.Background(), Event{ID: "post-close"}); err != nil {
-		t.Fatalf("Forward after Close err=%v (must be noop)", err)
+	if errs := m.Forward(context.Background(), Event{ID: "post-close"}); len(errs) > 0 {
+		t.Fatalf("Forward after Close err=%v (must be noop)", errs)
 	}
 	if got := len(s.snapshot()); got != 0 {
 		t.Fatalf("sink received %d events after Close, want 0", got)
@@ -328,12 +332,16 @@ func TestManager_Forward_RecoversFromSinkPanic(t *testing.T) {
 	// A panicking sink must not unwind into the caller; the panic
 	// is converted into a forward error and the healthy peer still
 	// receives the event.
-	err := m.Forward(context.Background(), Event{ID: "e", Action: "scan"})
-	if err == nil {
+	errs := m.Forward(context.Background(), Event{ID: "e", Action: "scan"})
+	if len(errs) == 0 {
 		t.Fatalf("expected aggregated error from panicking sink")
 	}
-	if !strings.Contains(err.Error(), "panic") {
-		t.Fatalf("panic not surfaced in aggregated error: %v", err)
+	var agg string
+	for n, e := range errs {
+		agg += n + ": " + e.Error()
+	}
+	if !strings.Contains(agg, "panic") {
+		t.Fatalf("panic not surfaced in aggregated error: %v", agg)
 	}
 	if got := len(healthy.snapshot()); got != 1 {
 		t.Fatalf("healthy peer starved by panicking sink: got %d events", got)

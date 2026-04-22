@@ -16,6 +16,9 @@
 
 package gateway
 
+// Verdict cache metrics + LLM judge spans are implemented in llm_judge.go and
+// internal/guardrail/verdict_cache.go (Track 3).
+
 import (
 	"context"
 	"fmt"
@@ -272,7 +275,8 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 	// cover the "nothing happened" case.
 	if verdict != nil && verdict.Severity != "" && verdict.Severity != "NONE" {
 		emitVerdict(
-			gatewaylog.Stage("guardrail"),
+			ctx,
+			gatewaylog.StageFinal,
 			gatewaylog.Direction(direction),
 			model,
 			verdict.Action,
@@ -500,8 +504,22 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	triageCh := make(chan []TriageSignal, 1)
 
 	// Run judge and triage in parallel.
+	//
+	// A panic in either goroutine would leave its channel unwritten and
+	// deadlock the parent on `<-judgeCh` / `<-triageCh`, stalling the
+	// request and permanently pinning the http handler goroutine.
+	// Both producers therefore wrap their body in defer/recover() and
+	// fall back to an error sentinel so the parent always proceeds
+	// (judge → regex fallback, triage → empty signal set) even under
+	// a pathological policy / scanner bug.
 	if g.judge != nil {
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					fmt.Fprintf(defaultLogWriter, "[guardrail] judge_first: judge goroutine panic recovered: %v\n", rec)
+					judgeCh <- result{verdict: nil, err: true}
+				}
+			}()
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.sweep")
 			v := g.judge.RunJudges(judgeCtx, direction, content, "")
@@ -513,6 +531,12 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				fmt.Fprintf(defaultLogWriter, "[guardrail] judge_first: triage goroutine panic recovered: %v\n", rec)
+				triageCh <- nil
+			}
+		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
 		sigs := triagePatterns(direction, content)
@@ -804,7 +828,12 @@ var bulkAccessRegex = regexp.MustCompile(
 	`(?i)\b(?:users_list|contacts_list|mail_search|delegated_email_list_principals)\b.*\btop\s+\d{2,}\b`)
 
 func scanLocalPatterns(direction, content string) *ScanVerdict {
-	lower := strings.ToLower(content)
+	// normalized defeats whitespace/slash-run evasions (Phase 7 of the
+	// multi-provider-adapters PR). Substring and regex matches use the
+	// normalized string so "/ etc / passwd" and "/etc//passwd" still
+	// flag; the judge still receives `content` (the unmodified original)
+	// to avoid false-positive leakage from normalization.
+	lower := normalizeForTriage(content)
 	var flags []string
 	isHigh := false
 
@@ -839,9 +868,21 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 
+	// PII and secret regexes run against BOTH `content` (byte-aligned,
+	// case-preserved) AND `lower` (the normalizeForTriage output) via
+	// findRegexMatch so zero-width / Unicode-whitespace evasions
+	// ("1234\u200B5678\u200B9012\u200B3456" for credit card,
+	// "token\u00A0=\u00A0<secret>" for the token regex) still surface
+	// here. Without the normalized fallback the docstring above would
+	// be a lie: PII/secret regexes are exactly the surfaces an attacker
+	// would target with invisible-character splicing.
 	for _, re := range piiDataRegexes {
-		if re.MatchString(content) {
-			flags = append(flags, "pii-data:"+re.FindString(content))
+		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+			flag := "pii-data:" + match
+			if norm {
+				flag = "pii-data:[normalized] " + match
+			}
+			flags = append(flags, flag)
 			isHigh = true
 		}
 	}
@@ -852,8 +893,12 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 	for _, re := range secretPatternRegexes {
-		if re.MatchString(content) {
-			flags = append(flags, re.FindString(content))
+		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+			flag := match
+			if norm {
+				flag = "[normalized] " + match
+			}
+			flags = append(flags, flag)
 		}
 	}
 
@@ -948,7 +993,10 @@ var bare9DigitRegex = regexp.MustCompile(`\b\d{9}\b`)
 var creditCardRegex = regexp.MustCompile(`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
 
 func triagePatterns(direction, content string) []TriageSignal {
-	lower := strings.ToLower(content)
+	// See scanLocalPatterns for why we normalize for regex matching
+	// only — the original `content` is preserved for evidence
+	// extraction and for anything downstream that feeds the judge.
+	lower := normalizeForTriage(content)
 	var signals []TriageSignal
 
 	if direction == "prompt" {
@@ -963,11 +1011,11 @@ func triagePatterns(direction, content string) []TriageSignal {
 			}
 		}
 		for _, re := range highSignalInjectionRegexes {
-			if loc := re.FindStringIndex(lower); loc != nil {
+			if re.MatchString(lower) {
 				signals = append(signals, TriageSignal{
 					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-INJ-REGEX",
 					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.90,
+					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.90,
 				})
 			}
 		}
@@ -983,11 +1031,11 @@ func triagePatterns(direction, content string) []TriageSignal {
 			}
 		}
 		for _, re := range reviewInjectionRegexes {
-			if loc := re.FindStringIndex(lower); loc != nil {
+			if re.MatchString(lower) {
 				signals = append(signals, TriageSignal{
 					Level: "NEEDS_REVIEW", FindingID: "TRIAGE-INJ-REVIEW",
 					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.50,
+					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.50,
 				})
 			}
 		}
@@ -1015,35 +1063,50 @@ func triagePatterns(direction, content string) []TriageSignal {
 		}
 
 		// Bulk data access (NEEDS_REVIEW — judge decides if intent is benign).
-		if loc := bulkAccessRegex.FindStringIndex(lower); loc != nil {
+		if bulkAccessRegex.MatchString(lower) {
 			signals = append(signals, TriageSignal{
 				Level: "NEEDS_REVIEW", FindingID: "TRIAGE-BULK-ACCESS",
 				Category: "data-access", Pattern: "sensitive tool bulk access",
-				Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.60,
+				Evidence: extractEvidenceRegex(content, lower, bulkAccessRegex), Confidence: 0.60,
 			})
 		}
 	}
 
-	// PII data patterns (direction-independent).
-	if loc := ssnDashRegex.FindStringIndex(content); loc != nil {
+	// PII data patterns (direction-independent). Matched against both
+	// `content` and `lower` via findRegexLoc so zero-width / Unicode-
+	// whitespace splicing ("123-45\u200B-6789", "4111\u00A04111…")
+	// cannot slip past SSN / 9-digit / credit-card triage.
+	if loc, src, norm, ok := findRegexLoc(content, lower, ssnDashRegex); ok {
+		ev := extractEvidenceAt(src, loc[0], loc[1])
+		if norm {
+			ev = "[normalized] " + ev
+		}
 		signals = append(signals, TriageSignal{
 			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-PII-SSN",
 			Category: "pii", Pattern: "SSN (xxx-xx-xxxx)",
-			Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.90,
+			Evidence: ev, Confidence: 0.90,
 		})
 	}
-	if loc := bare9DigitRegex.FindStringIndex(content); loc != nil {
+	if loc, src, norm, ok := findRegexLoc(content, lower, bare9DigitRegex); ok {
+		ev := extractEvidenceAt(src, loc[0], loc[1])
+		if norm {
+			ev = "[normalized] " + ev
+		}
 		signals = append(signals, TriageSignal{
 			Level: "NEEDS_REVIEW", FindingID: "TRIAGE-PII-9DIGIT",
 			Category: "pii", Pattern: "9-digit number",
-			Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.30,
+			Evidence: ev, Confidence: 0.30,
 		})
 	}
-	if loc := creditCardRegex.FindStringIndex(content); loc != nil {
+	if loc, src, norm, ok := findRegexLoc(content, lower, creditCardRegex); ok {
+		ev := extractEvidenceAt(src, loc[0], loc[1])
+		if norm {
+			ev = "[normalized] " + ev
+		}
 		signals = append(signals, TriageSignal{
 			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-PII-CC",
 			Category: "pii", Pattern: "credit card number",
-			Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.95,
+			Evidence: ev, Confidence: 0.95,
 		})
 	}
 
@@ -1062,12 +1125,22 @@ func triagePatterns(direction, content string) []TriageSignal {
 			})
 		}
 	}
+	// Secret regex: tries `content` first (case/whitespace preserved
+	// for audit context) and falls back to `lower` so evasions like
+	// "token\u200B=\u200B<60-char key>" still fire. Without the
+	// fallback the docstring on scanLocalPatterns above — which
+	// promises normalization defeats whitespace/slash-run evasions —
+	// would not hold for secrets.
 	for _, re := range secretPatternRegexes {
-		if loc := re.FindStringIndex(content); loc != nil {
+		if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
+			ev := extractEvidenceAt(src, loc[0], loc[1])
+			if norm {
+				ev = "[normalized] " + ev
+			}
 			signals = append(signals, TriageSignal{
 				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
 				Category: "secret", Pattern: re.String(),
-				Evidence: extractEvidenceAt(content, loc[0], loc[1]), Confidence: 0.75,
+				Evidence: ev, Confidence: 0.75,
 			})
 		}
 	}
@@ -1132,30 +1205,98 @@ func signalsToVerdict(signals []TriageSignal, scanner string) *ScanVerdict {
 }
 
 // extractEvidence returns ~200 chars of context around the first occurrence
-// of pattern in the lowercase content, but returns the original-case text.
+// of pattern in original (case-insensitively). The `normalized` argument is
+// the output of normalizeForTriage(original) and is used ONLY as a
+// fallback when the pattern required normalization to match (e.g. the
+// pattern is "/etc/passwd" and original was "/ etc / passwd"): in that
+// case the literal pattern does not exist as contiguous bytes in original,
+// so we extract the window from the normalized string instead and prefix
+// the returned snippet with "[normalized]" so log consumers can tell.
 //
-// This is UTF-8-safe in the common case: strings.ToLower preserves byte
-// length for all ASCII and for the BMP letters we care about (Latin, Greek,
-// Cyrillic). When length drift does occur (e.g. "İ" 0x130 → "i̇" 2 bytes
-// mapped to "i" 1 byte in some locales), the byte offset from lower may
-// fall mid-rune in original; extractEvidenceAt clamps both ends to the
-// nearest rune boundary to avoid emitting invalid UTF-8 to logs.
-func extractEvidence(original, lower, pattern string) string {
-	idx := strings.Index(lower, pattern)
-	if idx < 0 {
-		return ""
+// Rationale: before Phase 7, `lower` was just strings.ToLower(original)
+// and its byte offsets aligned 1:1 with original for the ASCII+BMP fast
+// path. After Phase 7, `normalized` can be shorter than original (whitespace-
+// around-slash collapse, duplicate-slash collapse, NFC composition), so
+// using a normalized offset as an index into original produces a window
+// pointing at the wrong bytes. Re-locating against strings.ToLower(original)
+// restores byte alignment in the common case.
+//
+// UTF-8 safety: extractEvidenceAt clamps both ends to the nearest rune
+// boundary so we never emit invalid UTF-8 to logs, audit records, or
+// downstream sinks.
+func extractEvidence(original, normalized, pattern string) string {
+	lowerOrig := strings.ToLower(original)
+	if idx := strings.Index(lowerOrig, pattern); idx >= 0 {
+		return extractEvidenceAt(original, idx, idx+len(pattern))
 	}
-	// Guard against exotic cases where ToLower changed byte length and the
-	// idx now exceeds original's length. Fall back to a plain search on
-	// original for a best-effort window.
-	if idx > len(original) {
-		if orig := strings.Index(strings.ToLower(original), pattern); orig >= 0 {
-			idx = orig
-		} else {
-			return ""
-		}
+	// Fast path missed: normalization was load-bearing for the match.
+	// Return the normalized window so logs still carry useful context,
+	// prefixed with a marker so operators know the bytes are post-
+	// normalization (the original may have had whitespace evasion,
+	// NFC-decomposed characters, or duplicate slashes).
+	if idx := strings.Index(normalized, pattern); idx >= 0 {
+		return "[normalized] " + extractEvidenceAt(normalized, idx, idx+len(pattern))
 	}
-	return extractEvidenceAt(original, idx, idx+len(pattern))
+	return ""
+}
+
+// extractEvidenceRegex returns a ±window snippet around the first match of
+// `re` in original. Like extractEvidence, it prefers the original-bytes
+// path and falls back to the normalized string when normalization was
+// required for the regex to hit.
+//
+// Assumes `re` is pre-lowercased (all triage regexes in this file are);
+// case-insensitivity is handled by lowercasing original rather than by
+// a `(?i)` flag, matching how the rest of this file dispatches.
+func extractEvidenceRegex(original, normalized string, re *regexp.Regexp) string {
+	if loc := re.FindStringIndex(strings.ToLower(original)); loc != nil {
+		return extractEvidenceAt(original, loc[0], loc[1])
+	}
+	if loc := re.FindStringIndex(normalized); loc != nil {
+		return "[normalized] " + extractEvidenceAt(normalized, loc[0], loc[1])
+	}
+	return ""
+}
+
+// findRegexLoc locates the first match of `re` in `original`; when
+// `original` has no match, it falls back to `normalized` (the
+// normalizeForTriage output: NFC-composed, zero-width-stripped,
+// lowercased, slash-collapsed) so evasions that splice invisible or
+// Unicode-whitespace characters between otherwise-matching bytes —
+// "4111\u200B1111\u200B1111\u200B1111" for credit card,
+// "token\u00A0=\u00A0<key>" for the token secret regex — still fire.
+//
+// Returns the location, the string the location indexes into (so
+// callers can extractEvidenceAt it without tracking which path was
+// taken), wasNormalized telling callers to prefix operator-visible
+// evidence with "[normalized] ", and ok = whether any match was found.
+// The fallback is only consulted when `original` misses, so in the
+// common non-evasion case we preserve byte-aligned original-text
+// offsets and avoid extra regex work.
+func findRegexLoc(original, normalized string, re *regexp.Regexp) (loc []int, source string, wasNormalized, ok bool) {
+	if l := re.FindStringIndex(original); l != nil {
+		return l, original, false, true
+	}
+	if l := re.FindStringIndex(normalized); l != nil {
+		return l, normalized, true, true
+	}
+	return nil, "", false, false
+}
+
+// findRegexMatch is the FindString sibling of findRegexLoc. Used by
+// scanLocalPatterns where callers record the matched substring rather
+// than slicing a ±window around it. Same original-first / normalized-
+// fallback contract; wasNormalized tells the caller to tag the flag
+// with "[normalized] " so operators grepping audit logs can see which
+// evasion path fired.
+func findRegexMatch(original, normalized string, re *regexp.Regexp) (match string, wasNormalized, ok bool) {
+	if m := re.FindString(original); m != "" {
+		return m, false, true
+	}
+	if m := re.FindString(normalized); m != "" {
+		return m, true, true
+	}
+	return "", false, false
 }
 
 func extractEvidenceAt(content string, matchStart, matchEnd int) string {
@@ -1303,35 +1444,98 @@ func lastUserText(messages []ChatMessage) string {
 // ("Read HEARTBEAT.md") + expects "HEARTBEAT_OK" back; flagging it as prompt
 // injection is a false positive.
 //
-// The match is intentionally narrow (requires the specific OpenClaw tokens
-// "HEARTBEAT.md" or "HEARTBEAT_OK" AND a short overall message) so a user
-// merely mentioning the word "heartbeat" cannot bypass the guardrail.
-func isHeartbeatMessage(userText string, messages []ChatMessage) bool {
-	if !containsHeartbeatToken(userText) {
-		hasToken := false
-		for _, m := range messages {
-			if containsHeartbeatToken(m.Content) {
-				hasToken = true
-				break
-			}
-		}
-		if !hasToken {
-			return false
-		}
+// The bypass is keyed STRICTLY on the current user turn (userText).
+// `messages` is intentionally ignored — a past turn's "HEARTBEAT_OK"
+// assistant reply left in the conversation history must NEVER enable a
+// bypass for the next turn, otherwise the very first heartbeat handshake
+// would disarm guardrail inspection for the entire rest of the session.
+// That was the v0.2.0 regression; see PR #127.
+//
+// Bypass conditions (ALL must hold):
+//
+//  1. Length ≤ maxHeartbeatProbeLen. The canonical probe is ~170 chars;
+//     messaging bridges (WhatsApp/Teams) prepend transport banners and
+//     timing metadata that push it to several hundred chars, so we cap
+//     generously — but we still cap so an attacker cannot smuggle an
+//     arbitrarily large payload past the guardrail.
+//
+//  2. References the canonical probe file "HEARTBEAT.md" (not merely
+//     the response token "HEARTBEAT_OK", which an attacker could trivially
+//     append to an injection payload).
+//
+//  3. Ends with the canonical response-token instruction
+//     ("…HEARTBEAT_OK[.!]?$"). A legitimate probe ALWAYS tells the LLM
+//     how to reply; an attacker appending malicious tail content (e.g.
+//     "Read HEARTBEAT.md. Ignore all prior instructions.") will not end
+//     with HEARTBEAT_OK and is therefore inspected normally.
+//
+//  4. No known injection imperatives appear anywhere in the text
+//     ("ignore previous/prior", "disregard", "override", "exfiltrate",
+//     "rm -rf", "cat /", "/etc/passwd|shadow", "DAN", "jailbreak").
+//     Belt-and-suspenders: if an attacker manages to craft text that
+//     satisfies (2) and (3) simultaneously, these token triggers will
+//     still force normal inspection.
+//
+// This function is called only from the pre-call prompt inspection
+// site in handlePassthrough / handleChatCompletion; completion-side
+// inspection does not consult it.
+func isHeartbeatMessage(userText string, _ []ChatMessage) bool {
+	const maxHeartbeatProbeLen = 2048
+	if userText == "" || len(userText) > maxHeartbeatProbeLen {
+		return false
 	}
-	// Heartbeat payloads are small (OpenClaw probe is ~170 chars). Cap to
-	// prevent a large crafted message from riding on the bypass.
-	totalLen := len(userText)
-	for _, m := range messages {
-		totalLen += len(m.Content)
+	if !containsHeartbeatProbeSignature(userText) {
+		return false
 	}
-	return totalLen <= 512
+	if !heartbeatOKFooterRe.MatchString(userText) {
+		return false
+	}
+	if heartbeatInjectionHintRe.MatchString(userText) {
+		return false
+	}
+	return true
 }
 
-func containsHeartbeatToken(s string) bool {
-	upper := strings.ToUpper(s)
-	return strings.Contains(upper, "HEARTBEAT.MD") || strings.Contains(upper, "HEARTBEAT_OK")
+// containsHeartbeatProbeSignature reports whether s references the probe
+// filename "HEARTBEAT.md". Matching on the filename (not the response
+// token) prevents an attacker from bypassing the guardrail by appending
+// "HEARTBEAT_OK" to an otherwise malicious prompt.
+func containsHeartbeatProbeSignature(s string) bool {
+	return strings.Contains(strings.ToUpper(s), "HEARTBEAT.MD")
 }
+
+// heartbeatOKFooterRe matches when a message ends with the canonical
+// HEARTBEAT_OK response-token instruction, allowing for trailing
+// punctuation / whitespace. Used by isHeartbeatMessage to reject any
+// "Read HEARTBEAT.md. <injection tail>" smuggling attempt because a
+// legitimate probe ALWAYS ends by telling the LLM to reply HEARTBEAT_OK.
+var heartbeatOKFooterRe = regexp.MustCompile(`(?i)\bHEARTBEAT_OK\b[\s"'.!?)\]]*$`)
+
+// heartbeatInjectionHintRe matches a small vocabulary of unambiguous
+// prompt-injection / exfil imperatives. If any of them appears anywhere
+// in a message that otherwise looks like a heartbeat probe, we force
+// normal inspection. This is belt-and-suspenders — the ends-with
+// HEARTBEAT_OK check (heartbeatOKFooterRe) already rejects most tail
+// smuggling, but this catches attackers who manage to structure their
+// attack around the footer.
+//
+// The word list stays narrow on purpose so it does not accidentally
+// match the legitimate probe body ("do not infer or repeat old tasks
+// from prior chats" — the probe text contains "prior" as a bare word,
+// so we only match IGNORE + PRIOR together, not PRIOR alone).
+var heartbeatInjectionHintRe = regexp.MustCompile(
+	`(?i)\b(?:` +
+		`IGNORE(?:\s+ALL)?\s+(?:PRIOR|PREVIOUS)|` +
+		`DISREGARD(?:\s+(?:ALL|ANY|PRIOR|PREVIOUS|THE))?\s*(?:INSTRUCTION|PROMPT|RULE|CONTEXT)|` +
+		`OVERRIDE\s+(?:YOUR|THE|ALL|ANY)\s+(?:INSTRUCTION|RULE|SYSTEM|PROMPT)|` +
+		`EXFILTRATE|` +
+		`RM\s+-\s*RF|` +
+		`CAT\s+/|` +
+		`/ETC/(?:PASSWD|SHADOW|HOSTS)|` +
+		`\bDAN\s+MODE\b|` +
+		`JAILBREAK|` +
+		`SUDO\s+RM` +
+		`)\b`)
 
 // ---------------------------------------------------------------------------
 // Secret redaction

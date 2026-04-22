@@ -18,6 +18,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -127,7 +128,13 @@ var sevFilterLabels = []string{"All", "Critical", "High", "Medium", "Low"}
 
 type AlertsPanel struct {
 	items      []audit.Event
-	filtered   []audit.Event
+	merged     []alertMergeItem
+	scanBlocks []*ScanBlock
+	flatAll    []alertFlatRow
+	filtered   []alertFlatRow
+	expanded   map[string]bool
+	dataDir    string
+
 	cursor     int
 	width      int
 	height     int
@@ -140,8 +147,13 @@ type AlertsPanel struct {
 	detailOpen bool            // inline detail pane visible
 }
 
-func NewAlertsPanel(store *audit.Store) AlertsPanel {
-	return AlertsPanel{store: store, selected: make(map[string]bool)}
+func NewAlertsPanel(store *audit.Store, dataDir string) AlertsPanel {
+	return AlertsPanel{
+		store:    store,
+		dataDir:  dataDir,
+		selected: make(map[string]bool),
+		expanded: make(map[string]bool),
+	}
 }
 
 func (p *AlertsPanel) Refresh() {
@@ -154,6 +166,19 @@ func (p *AlertsPanel) Refresh() {
 		return
 	}
 	p.items = alerts
+	var scans []*ScanBlock
+	if p.dataDir != "" {
+		path := filepath.Join(p.dataDir, "gateway.jsonl")
+		var loadErr error
+		scans, loadErr = LoadGatewayScanBlocks(path)
+		if loadErr != nil {
+			// Missing gateway.jsonl is normal before first gateway run.
+			scans = nil
+		}
+	}
+	p.scanBlocks = scans
+	p.merged = mergeAlertsWithScans(p.items, p.scanBlocks)
+	p.flatAll = buildAlertFlatRows(p.merged, p.expanded)
 	p.applyFilter()
 	p.message = ""
 	alive := make(map[string]bool)
@@ -167,10 +192,18 @@ func (p *AlertsPanel) Refresh() {
 	}
 }
 
+func (p *AlertsPanel) rebuildFlat() {
+	p.flatAll = buildAlertFlatRows(p.merged, p.expanded)
+}
+
 func (p *AlertsPanel) applyFilter() {
 	p.filtered = nil
 	query := strings.ToLower(p.filter)
-	for _, item := range p.items {
+	for _, row := range p.flatAll {
+		item := row.Event
+		if item == nil {
+			continue
+		}
 		if p.sevFilter != "" && item.Severity != p.sevFilter {
 			continue
 		}
@@ -180,7 +213,7 @@ func (p *AlertsPanel) applyFilter() {
 				continue
 			}
 		}
-		p.filtered = append(p.filtered, item)
+		p.filtered = append(p.filtered, row)
 	}
 	if len(p.filtered) == 0 {
 		p.cursor = 0
@@ -235,20 +268,37 @@ func (p *AlertsPanel) CursorDown() {
 
 func (p *AlertsPanel) Selected() *audit.Event {
 	if p.cursor >= 0 && p.cursor < len(p.filtered) {
-		return &p.filtered[p.cursor]
+		return p.filtered[p.cursor].Event
 	}
 	return nil
 }
 
-func (p *AlertsPanel) ToggleDetail() {
+// ToggleExpandOrDetail expands/collapses scan parents on Enter, or toggles
+// the detail pane for audit / finding rows.
+func (p *AlertsPanel) ToggleExpandOrDetail() {
+	if p.cursor < 0 || p.cursor >= len(p.filtered) {
+		return
+	}
+	row := p.filtered[p.cursor]
+	if row.Kind == alertFlatScanHead {
+		sid := row.ScanID
+		p.expanded[sid] = !p.expanded[sid]
+		p.rebuildFlat()
+		p.applyFilter()
+		return
+	}
 	p.detailOpen = !p.detailOpen
+}
+
+func (p *AlertsPanel) ToggleDetail() {
+	p.ToggleExpandOrDetail()
 }
 
 // ---------- Multi-select ----------
 
 func (p *AlertsPanel) ToggleSelect() {
 	sel := p.Selected()
-	if sel == nil {
+	if sel == nil || strings.HasPrefix(sel.ID, "gw:") {
 		return
 	}
 	if p.selected[sel.ID] {
@@ -259,8 +309,11 @@ func (p *AlertsPanel) ToggleSelect() {
 }
 
 func (p *AlertsPanel) SelectAll() {
-	for _, e := range p.filtered {
-		p.selected[e.ID] = true
+	for _, row := range p.filtered {
+		if row.Event == nil || strings.HasPrefix(row.Event.ID, "gw:") {
+			continue
+		}
+		p.selected[row.Event.ID] = true
 	}
 }
 
@@ -280,8 +333,11 @@ func (p *AlertsPanel) SelectedIDs() []string {
 
 func (p *AlertsPanel) FilteredIDs() []string {
 	ids := make([]string, 0, len(p.filtered))
-	for _, e := range p.filtered {
-		ids = append(ids, e.ID)
+	for _, row := range p.filtered {
+		if row.Event == nil || strings.HasPrefix(row.Event.ID, "gw:") {
+			continue
+		}
+		ids = append(ids, row.Event.ID)
 	}
 	return ids
 }
@@ -292,7 +348,7 @@ func (p *AlertsPanel) IsSelected(id string) bool { return p.selected[id] }
 
 func (p *AlertsPanel) Dismiss() string {
 	sel := p.Selected()
-	if sel == nil {
+	if sel == nil || strings.HasPrefix(sel.ID, "gw:") {
 		return ""
 	}
 	if p.store != nil {
@@ -309,23 +365,41 @@ func (p *AlertsPanel) Dismiss() string {
 
 // ---------- Counts and navigation ----------
 
-func (p *AlertsPanel) Count() int         { return len(p.items) }
+func (p *AlertsPanel) Count() int { return len(p.merged) }
+
 func (p *AlertsPanel) FilteredCount() int { return len(p.filtered) }
 func (p *AlertsPanel) CursorAt() int      { return p.cursor }
 
 func (p *AlertsPanel) CriticalCount() int {
 	n := 0
-	for _, item := range p.items {
-		if item.Severity == "CRITICAL" || item.Severity == "HIGH" {
-			n++
+	for _, it := range p.merged {
+		switch it.Kind {
+		case alertMergeAudit:
+			if it.Audit != nil && (it.Audit.Severity == "CRITICAL" || it.Audit.Severity == "HIGH") {
+				n++
+			}
+		case alertMergeScan:
+			if it.Scan == nil {
+				continue
+			}
+			sev := string(it.Scan.Summary.SeverityMax)
+			if sev == "CRITICAL" || sev == "HIGH" {
+				n++
+			}
 		}
 	}
 	return n
 }
 
 func (p *AlertsPanel) SevCounts() (crit, high, med, low int) {
-	for _, e := range p.items {
-		switch e.Severity {
+	for _, row := range p.flatAll {
+		if row.Kind == alertFlatScanFinding {
+			continue
+		}
+		if row.Event == nil {
+			continue
+		}
+		switch row.Event.Severity {
 		case "CRITICAL":
 			crit++
 		case "HIGH":
@@ -380,17 +454,32 @@ func (p *AlertsPanel) ScrollBy(delta int) {
 
 // DetailInfo collects enriched info about the selected alert.
 type DetailInfo struct {
-	Event    audit.Event
-	Findings []audit.FindingRow
-	History  []audit.Event
+	Event          audit.Event
+	Findings       []audit.FindingRow
+	History        []audit.Event
+	GatewayFinding *GatewayFindingDetail
 }
 
 func (p *AlertsPanel) GetDetailInfo() *DetailInfo {
-	sel := p.Selected()
-	if sel == nil {
+	if p.cursor < 0 || p.cursor >= len(p.filtered) {
 		return nil
 	}
+	row := p.filtered[p.cursor]
+	if row.Event == nil {
+		return nil
+	}
+	sel := row.Event
 	info := &DetailInfo{Event: *sel}
+	if row.Kind == alertFlatScanFinding {
+		blk := scanBlockForRow(p.scanBlocks, row.ScanID)
+		if blk != nil && row.FindIdx >= 0 && row.FindIdx < len(blk.Findings) {
+			info.GatewayFinding = &GatewayFindingDetail{
+				Finding: blk.Findings[row.FindIdx],
+				Scan:    blk.Summary,
+			}
+		}
+		return info
+	}
 	if p.store == nil {
 		return info
 	}
@@ -475,7 +564,7 @@ func (p *AlertsPanel) SevButtonPositions() [][2]int {
 		case sevFilterLow:
 			count = p.countBySev("LOW")
 		default:
-			count = len(p.items)
+			count = len(p.merged)
 		}
 		text := fmt.Sprintf(" %s %d ", label, count)
 		w := lipgloss.Width(text)
@@ -487,8 +576,11 @@ func (p *AlertsPanel) SevButtonPositions() [][2]int {
 
 func (p *AlertsPanel) countBySev(sev string) int {
 	n := 0
-	for _, e := range p.items {
-		if e.Severity == sev {
+	for _, row := range p.flatAll {
+		if row.Kind == alertFlatScanFinding {
+			continue
+		}
+		if row.Event != nil && row.Event.Severity == sev {
 			n++
 		}
 	}
@@ -572,7 +664,15 @@ func (p *AlertsPanel) View() string {
 	checkOff := lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render("☐")
 
 	for i := start; i < end; i++ {
-		item := p.filtered[i]
+		row := p.filtered[i]
+		item := row.Event
+		if item == nil {
+			continue
+		}
+		indent := ""
+		if row.Kind == alertFlatScanFinding {
+			indent = "  "
+		}
 		badge := sevBadge(item.Severity)
 		ts := lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(item.Timestamp.Format("Jan 02 15:04"))
 		target := item.Target
@@ -590,14 +690,14 @@ func (p *AlertsPanel) View() string {
 		}
 
 		check := checkOff
-		if p.IsSelected(item.ID) {
+		if row.Kind != alertFlatScanFinding && p.IsSelected(item.ID) {
 			check = checkOn
 		}
 
-		line := fmt.Sprintf("%s%s %s %s  %-22s %-30s", pointer, check, badge, ts, action, target)
-
+		full := fmt.Sprintf("%s%s%s %s %s  %-22s %-30s", indent, pointer, check, badge, ts, action, target)
+		line := full
 		if i == p.cursor {
-			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(p.width).Render(line)
+			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(p.width).Render(full)
 		}
 		b.WriteString(line)
 		if i < end-1 {
@@ -631,6 +731,10 @@ func (p *AlertsPanel) renderDetail() string {
 		return ""
 	}
 	e := info.Event
+
+	if info.GatewayFinding != nil {
+		return p.renderGatewayFindingDetail(info)
+	}
 
 	dh := p.detailHeight()
 	borderColor := lipgloss.Color("62")
@@ -742,5 +846,42 @@ func (p *AlertsPanel) renderDetail() string {
 
 	d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("  [Enter] close detail  [Esc] close"))
 
+	return boxStyle.Render(d.String())
+}
+
+func (p *AlertsPanel) renderGatewayFindingDetail(info *DetailInfo) string {
+	g := info.GatewayFinding
+	if g == nil {
+		return ""
+	}
+	f := g.Finding
+	dh := p.detailHeight()
+	borderColor := lipgloss.Color("62")
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Width(p.width - 4).
+		MaxHeight(dh)
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+	var d strings.Builder
+	d.WriteString(titleStyle.Render("  Scan finding"))
+	d.WriteString("\n")
+	d.WriteString(labelStyle.Render("  Scanner: ") + valStyle.Render(g.Scan.Scanner) + "\n")
+	d.WriteString(labelStyle.Render("  Target:  ") + valStyle.Render(f.Target) + "\n")
+	d.WriteString(labelStyle.Render("  Rule:    ") + valStyle.Render(f.RuleID) + "\n")
+	d.WriteString(labelStyle.Render("  Line:    ") + valStyle.Render(fmt.Sprintf("%d", f.LineNumber)) + "\n")
+	if f.Location != "" {
+		d.WriteString(labelStyle.Render("  Loc:     ") + valStyle.Render(f.Location) + "\n")
+	}
+	if f.Title != "" {
+		d.WriteString(labelStyle.Render("  Title:   ") + valStyle.Render(f.Title) + "\n")
+	}
+	if f.Description != "" {
+		d.WriteString(labelStyle.Render("  Desc:    ") + valStyle.Render(f.Description) + "\n")
+	}
+	d.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("  [Enter] close detail  [Esc] close"))
 	return boxStyle.Render(d.String())
 }

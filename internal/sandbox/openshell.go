@@ -17,18 +17,31 @@
 package sandbox
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
+
+const openshellStderrTailMax = 4096
 
 type OpenShell struct {
 	BinaryPath  string
 	PolicyDir   string
 	FallbackDir string
+
+	tel    *telemetry.Provider
+	events *gatewaylog.Writer
 }
 
 func New(binaryPath, policyDir string) *OpenShell {
@@ -37,6 +50,15 @@ func New(binaryPath, policyDir string) *OpenShell {
 
 func NewWithFallback(binaryPath, policyDir, fallbackDir string) *OpenShell {
 	return &OpenShell{BinaryPath: binaryPath, PolicyDir: policyDir, FallbackDir: fallbackDir}
+}
+
+// BindObservability attaches structured event + metric sinks (optional).
+func (o *OpenShell) BindObservability(p *telemetry.Provider, w *gatewaylog.Writer) {
+	if o == nil {
+		return
+	}
+	o.tel = p
+	o.events = w
 }
 
 func (o *OpenShell) IsAvailable() bool {
@@ -76,13 +98,63 @@ func (o *OpenShell) SavePolicy(p *Policy) error {
 	return p.Save(path)
 }
 
+func stderrTail(b []byte) string {
+	if len(b) <= openshellStderrTailMax {
+		return string(b)
+	}
+	return string(b[len(b)-openshellStderrTailMax:])
+}
+
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+func (o *OpenShell) emitOpenShellError(ctx context.Context, command string, exitCode int, stderrText string) {
+	if o.tel != nil {
+		o.tel.RecordOpenShellExit(ctx, command, exitCode)
+	}
+	if o.events == nil {
+		return
+	}
+	o.events.Emit(gatewaylog.Event{
+		EventType: gatewaylog.EventError,
+		Severity:  gatewaylog.SeverityHigh,
+		Error: &gatewaylog.ErrorPayload{
+			Subsystem: string(gatewaylog.SubsystemOpenShell),
+			Code:      string(gatewaylog.ErrCodeSubprocessExit),
+			Message:   fmt.Sprintf("openshell subprocess exited with code %d", exitCode),
+			Cause:     stderrText,
+		},
+	})
+}
+
 func (o *OpenShell) ReloadPolicy() error {
 	if !o.IsAvailable() {
 		return fmt.Errorf("sandbox: openshell binary not found at %q", o.BinaryPath)
 	}
+	ctx := context.Background()
 	cmd := exec.Command(o.BinaryPath, "policy", "reload")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sandbox: reload policy: %s: %w", string(out), err)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		code := exitCode(err)
+		tail := stderrTail(out)
+		o.emitOpenShellError(ctx, "openshell policy reload", code, tail)
+		return fmt.Errorf("sandbox: reload policy: %s: %w", tail, err)
+	}
+	if o.events != nil {
+		o.events.Emit(gatewaylog.Event{
+			EventType: gatewaylog.EventLifecycle,
+			Severity:  gatewaylog.SeverityInfo,
+			Lifecycle: &gatewaylog.LifecyclePayload{
+				Subsystem:  string(gatewaylog.SubsystemOpenShell),
+				Transition: "policy-reloaded",
+				Details:    map[string]string{"command": "policy reload"},
+			},
+		})
 	}
 	return nil
 }
@@ -94,7 +166,8 @@ func (o *OpenShell) Start(policyPath string) error {
 	args := []string{"start", "--policy", policyPath}
 	cmd := exec.Command(o.BinaryPath, args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("sandbox: start openshell: %w", err)
 	}
@@ -103,8 +176,19 @@ func (o *OpenShell) Start(policyPath string) error {
 		return fmt.Errorf("sandbox: write pid file: %w", err)
 	}
 	go func() {
-		_ = cmd.Wait()
+		ctx := context.Background()
+		waitErr := cmd.Wait()
 		_ = removePidFile()
+		code := 0
+		if waitErr != nil {
+			code = exitCode(waitErr)
+			if code < 0 {
+				code = 1
+			}
+		}
+		if code != 0 {
+			o.emitOpenShellError(ctx, "openshell start", code, stderrTail(stderrBuf.Bytes()))
+		}
 	}()
 	return nil
 }
@@ -124,8 +208,17 @@ func (o *OpenShell) Stop() error {
 	if err := proc.Signal(os.Interrupt); err != nil {
 		_ = proc.Kill()
 	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if !isOpenShellProcess(pid) {
+			_ = removePidFile()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = proc.Kill()
 	_ = removePidFile()
-	return nil
+	return fmt.Errorf("sandbox: openshell stop: process %d did not exit within 15s", pid)
 }
 
 func (o *OpenShell) IsRunning() bool {

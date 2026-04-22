@@ -81,7 +81,7 @@ func NewPluginsPanel(theme *Theme, store *audit.Store) PluginsPanel {
 func (p *PluginsPanel) LoadCmd() tea.Cmd {
 	p.loading = true
 	return func() tea.Msg {
-		cmd := exec.Command("defenseclaw", "plugin", "list", "--json")
+		cmd := exec.Command(resolveDefenseclawBin(), "plugin", "list", "--json")
 		out, err := cmd.Output()
 		if err != nil {
 			return PluginsLoadedMsg{Err: err}

@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
 		persistedDirection gatewaylog.Direction
 		persistedInvoked   int
 	)
-	SetJudgePersistor(func(p gatewaylog.JudgePayload, dir gatewaylog.Direction) {
+	SetJudgePersistor(func(_ context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, _ JudgeEmitOpts) {
 		persistedMu.Lock()
 		defer persistedMu.Unlock()
 		persistedRaw = p.RawResponse
@@ -41,8 +42,8 @@ func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
 	t.Cleanup(func() { SetJudgePersistor(nil) })
 
 	raw := `{"verdict":"block","reason":"email found: victim@example.com"}`
-	emitJudge("pii", "gpt-4", gatewaylog.DirectionPrompt, 128, 42, "block",
-		gatewaylog.SeverityHigh, "", raw)
+	emitJudge(t.Context(), "pii", "gpt-4", gatewaylog.DirectionPrompt, 128, 42, "block",
+		gatewaylog.SeverityHigh, "", raw, JudgeEmitOpts{})
 
 	persistedMu.Lock()
 	gotRaw := persistedRaw
@@ -79,11 +80,11 @@ func TestEmitJudge_EmptyRawDoesNotCallPersistor(t *testing.T) {
 	_ = withCapturedEvents(t)
 
 	var called int
-	SetJudgePersistor(func(p gatewaylog.JudgePayload, _ gatewaylog.Direction) { called++ })
+	SetJudgePersistor(func(_ context.Context, _ gatewaylog.JudgePayload, _ gatewaylog.Direction, _ JudgeEmitOpts) { called++ })
 	t.Cleanup(func() { SetJudgePersistor(nil) })
 
-	emitJudge("injection", "gpt-4", gatewaylog.DirectionPrompt, 0, 1, "allow",
-		gatewaylog.SeverityInfo, "", "")
+	emitJudge(t.Context(), "injection", "gpt-4", gatewaylog.DirectionPrompt, 0, 1, "allow",
+		gatewaylog.SeverityInfo, "", "", JudgeEmitOpts{})
 	if called != 0 {
 		t.Fatalf("persistor called %d times on empty raw (retention no-op path)", called)
 	}
@@ -93,6 +94,6 @@ func TestEmitJudge_NilPersistorSafe(t *testing.T) {
 	_ = withCapturedEvents(t)
 	SetJudgePersistor(nil)
 	// Must not panic.
-	emitJudge("pii", "gpt-4", gatewaylog.DirectionPrompt, 10, 1, "allow",
-		gatewaylog.SeverityInfo, "", "raw body")
+	emitJudge(t.Context(), "pii", "gpt-4", gatewaylog.DirectionPrompt, 10, 1, "allow",
+		gatewaylog.SeverityInfo, "", "raw body", JudgeEmitOpts{})
 }

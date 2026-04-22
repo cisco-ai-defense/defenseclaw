@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 func TestGatewayConfigResolvedToken(t *testing.T) {
@@ -847,6 +849,43 @@ func TestOTelEnvVarTLSInsecure(t *testing.T) {
 	}
 }
 
+func TestLoadOTelResourceAttributesPreservesDottedKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", tmpDir)
+
+	configFile := filepath.Join(tmpDir, DefaultConfigName)
+	data := []byte(`otel:
+  enabled: true
+  resource:
+    attributes:
+      defenseclaw.preset: splunk-o11y
+      defenseclaw.preset_name: Splunk Observability Cloud
+      service.name: pr117
+`)
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	want := map[string]string{
+		"defenseclaw.preset":      "splunk-o11y",
+		"defenseclaw.preset_name": "Splunk Observability Cloud",
+		"service.name":            "pr117",
+	}
+	if len(cfg.OTel.Resource.Attributes) != len(want) {
+		t.Fatalf("OTel.Resource.Attributes len = %d, want %d (%v)", len(cfg.OTel.Resource.Attributes), len(want), cfg.OTel.Resource.Attributes)
+	}
+	for key, wantValue := range want {
+		if got := cfg.OTel.Resource.Attributes[key]; got != wantValue {
+			t.Errorf("OTel.Resource.Attributes[%q] = %q, want %q", key, got, wantValue)
+		}
+	}
+}
+
 func TestConfig_ClawHomeDir(t *testing.T) {
 	cfg := &Config{
 		Claw: ClawConfig{HomeDir: "/tmp/my-claw"},
@@ -1146,6 +1185,47 @@ func TestConfig_Save(t *testing.T) {
 	configFile := filepath.Join(tmpDir, DefaultConfigName)
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		t.Error("config file was not created")
+	}
+}
+
+// TestConfig_Save_BumpsProvenance pins the v7 contract that every
+// successful Save() updates the process-wide content_hash AND
+// increments the monotonic generation counter. Dashboards rely on
+// generation to detect churn without diffing hashes, and a regression
+// here (e.g. a caller that marshals through a different path and
+// forgets the bump) would cause "config changed" alerts to miss real
+// writes until the next sidecar restart re-seeds from disk.
+func TestConfig_Save_BumpsProvenance(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = tmpDir
+
+	before := version.Current()
+
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save() returned error: %v", err)
+	}
+	afterFirst := version.Current()
+	if afterFirst.Generation <= before.Generation {
+		t.Errorf("generation did not bump on first Save: before=%d after=%d", before.Generation, afterFirst.Generation)
+	}
+	if afterFirst.ContentHash == "" {
+		t.Errorf("content_hash empty after Save — expected hash of marshaled config")
+	}
+
+	// Mutate the config and save again; both hash and generation
+	// must advance. Pinning this guards the "ContentHash stable
+	// across identical saves, fresh per mutation" invariant.
+	cfg.Claw.Mode = "nemoclaw"
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save() (2) returned error: %v", err)
+	}
+	afterSecond := version.Current()
+	if afterSecond.Generation <= afterFirst.Generation {
+		t.Errorf("generation did not bump on second Save: first=%d second=%d", afterFirst.Generation, afterSecond.Generation)
+	}
+	if afterSecond.ContentHash == afterFirst.ContentHash {
+		t.Errorf("content_hash unchanged after config mutation — hashing is not observing the new bytes")
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -38,6 +39,31 @@ type Writer struct {
 	fanout  []func(Event)
 	encoder *json.Encoder
 	closed  bool
+
+	// validator is the runtime JSON Schema gate. Nil when operators
+	// opted out (DEFENSECLAW_SCHEMA_VALIDATION=off or never wired
+	// up). Non-nil means "strict mode": invalid events are dropped
+	// from JSONL/pretty/fanout and a single EventError surfaces the
+	// violation exactly once.
+	validator *Validator
+
+	// schemaViolations is an atomic counter of dropped events. Used
+	// by Provider.RecordSchemaViolation (installed via
+	// OnSchemaViolation) to emit the Prometheus metric without
+	// pulling a full telemetry dependency into gatewaylog.
+	schemaViolations atomic.Int64
+
+	// onSchemaViolation is an optional observer invoked synchronously
+	// from the Emit path (outside w.mu) so operators can wire a
+	// counter increment via telemetry.Provider without gatewaylog
+	// importing telemetry. Nil is a no-op.
+	onSchemaViolation func(eventType EventType, code, message string)
+
+	// emitDepth guards against recursion: when the validator
+	// rejects an event, Emit turns it into an EventError and
+	// recurses; if the EventError itself fails validation we must
+	// NOT recurse a second time or we lock up the hot path.
+	emitDepth atomic.Int32
 }
 
 // Config controls writer construction. JSONLPath is required; when
@@ -61,13 +87,21 @@ type Config struct {
 	// default inside the daemonized sidecar where stderr is already
 	// captured by the supervising daemon.
 	Pretty io.Writer
+
+	// Validator, when non-nil, enforces the
+	// gateway-event-envelope.json schema on every Emit call.
+	// Invalid events are dropped; an EventError surfaces the
+	// violation to the operator. Nil disables validation entirely
+	// (legacy behavior) — callers opt in by constructing a
+	// *Validator via NewValidatorFromDir and passing it here.
+	Validator *Validator
 }
 
 // New constructs a Writer. Callers must hold the returned Writer
 // across the full gateway lifetime and invoke Close on shutdown so
 // the final batch flushes to disk.
 func New(cfg Config) (*Writer, error) {
-	w := &Writer{pretty: cfg.Pretty}
+	w := &Writer{pretty: cfg.Pretty, validator: cfg.Validator}
 
 	if cfg.JSONLPath != "" {
 		lj := &lumberjack.Logger{
@@ -122,6 +156,41 @@ func (w *Writer) Emit(e Event) {
 	if e.Severity == "" {
 		e.Severity = SeverityInfo
 	}
+	// v7: stamp provenance at the choke point so every event on
+	// every tier (JSONL, pretty, OTel fanout, sinks.Manager)
+	// reflects a consistent snapshot of config state. Callers who
+	// pre-stamped (tests pinning a historical generation) keep
+	// their values — StampProvenance is idempotent-ish, the last
+	// writer wins, which matches the invariant "the sidecar that
+	// serialized the event is authoritative for provenance".
+	if e.SchemaVersion == 0 {
+		e.StampProvenance()
+	}
+	// v7: stamp the per-process sidecar UUID on every event whose
+	// caller did not set one. This is the last-line defense for the
+	// "every event MUST carry sidecar_instance_id" contract — the
+	// hot-path emitVerdict/emitJudge helpers stamp from context,
+	// but a library caller that forgets (or runs outside a request
+	// context such as boot/shutdown) still gets a valid row. Never
+	// overwrites a caller-supplied value so tests can pin their own.
+	if e.SidecarInstanceID == "" {
+		e.SidecarInstanceID = SidecarInstanceID()
+	}
+
+	// Strict schema gate. Runs AFTER provenance/sidecar stamping so
+	// a missing provenance or sidecar_instance_id becomes a normal
+	// validation error instead of a silent drop. emitDepth guards
+	// recursion: when we're already inside a schema-violation
+	// EventError emit, we skip re-validation to guarantee the
+	// operator sees *exactly one* violation per offending event.
+	// A nil validator short-circuits with zero allocations so
+	// legacy tests / callers get legacy behavior for free.
+	if w.validator != nil && w.emitDepth.Load() == 0 {
+		if err := w.validator.Validate(e); err != nil {
+			w.handleSchemaViolation(e, err)
+			return
+		}
+	}
 
 	var fanout []func(Event)
 	w.mu.Lock()
@@ -165,6 +234,117 @@ func (w *Writer) Emit(e Event) {
 	for _, fn := range fanout {
 		safeFanout(fn, e, pretty)
 	}
+}
+
+// OnSchemaViolation installs a synchronous observer invoked every
+// time the validator rejects an event. The observer must be
+// non-blocking and allocation-light — it runs on the guardrail hot
+// path and gatewaylog intentionally does not queue it. The typical
+// implementation increments a Prometheus counter via
+// telemetry.Provider.RecordSchemaViolation.
+func (w *Writer) OnSchemaViolation(fn func(eventType EventType, code, message string)) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onSchemaViolation = fn
+}
+
+// SchemaViolationsCount returns the cumulative count of events
+// rejected by the validator since construction. Safe for concurrent
+// reads. Primarily used by tests and the `doctor` debug surface.
+func (w *Writer) SchemaViolationsCount() int64 {
+	if w == nil {
+		return 0
+	}
+	return w.schemaViolations.Load()
+}
+
+// handleSchemaViolation is the centralised strict-mode reaction
+// path: drop the offending event, increment the counter, notify
+// the observer, and emit a single EventError on the standard Emit
+// path so operators can see it on every tier (JSONL / pretty /
+// OTel fanout). The emitDepth guard ensures the violation error
+// itself cannot recurse if, somehow, it fails validation too.
+func (w *Writer) handleSchemaViolation(src Event, cause error) {
+	w.schemaViolations.Add(1)
+
+	msg := "schema validation failed"
+	if cause != nil {
+		msg = cause.Error()
+	}
+
+	w.mu.Lock()
+	observer := w.onSchemaViolation
+	pretty := w.pretty
+	w.mu.Unlock()
+
+	if observer != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p := pretty
+					if p == nil {
+						p = os.Stderr
+					}
+					fmt.Fprintf(p, "[gatewaylog] schema-violation observer panic: %v\n", r)
+				}
+			}()
+			observer(src.EventType, string(ErrCodeSchemaViolation), msg)
+		}()
+	}
+
+	// Always surface a human-readable hint on the pretty tier so an
+	// operator tailing stderr sees *why* events are missing. We
+	// keep this short to avoid double-reporting when the EventError
+	// path below also renders to stderr.
+	if pretty != nil {
+		fmt.Fprintf(pretty, "[gatewaylog] DROP (schema violation, event_type=%s): %s\n", src.EventType, truncate(msg, 200))
+	}
+
+	// Build the operator-facing violation event. We deliberately
+	// echo the dropped event's correlation + provenance so the
+	// error is attributable to the exact request that produced the
+	// bad emission. event_type=error puts us on the `error`
+	// oneOf branch of the envelope.
+	viol := Event{
+		Timestamp:         time.Now().UTC(),
+		EventType:         EventError,
+		Severity:          SeverityMedium,
+		TraceID:           src.TraceID,
+		RunID:             src.RunID,
+		SessionID:         src.SessionID,
+		RequestID:         src.RequestID,
+		AgentID:           src.AgentID,
+		AgentInstanceID:   src.AgentInstanceID,
+		SidecarInstanceID: src.SidecarInstanceID,
+		Error: &ErrorPayload{
+			Subsystem: string(SubsystemGatewaylog),
+			Code:      string(ErrCodeSchemaViolation),
+			Message:   truncate(fmt.Sprintf("dropped %s event: %s", src.EventType, msg), 1024),
+			Cause:     string(src.EventType),
+		},
+	}
+
+	// Recursion guard: bump emitDepth so the nested Emit skips the
+	// validator. Even if the crafted violation event somehow fails
+	// validation (should not happen — EventError is a well-formed
+	// oneOf branch) we still want it to appear on sinks so the
+	// operator is not left blind.
+	w.emitDepth.Add(1)
+	defer w.emitDepth.Add(-1)
+	w.Emit(viol)
+}
+
+// truncate caps s at n runes and appends an ellipsis if we clipped.
+// Used to keep the schema-violation message compact on sinks that
+// charge per byte (OTLP, Splunk HEC).
+func truncate(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // safeFanout invokes fn(e) with a recover() guard so a panic in

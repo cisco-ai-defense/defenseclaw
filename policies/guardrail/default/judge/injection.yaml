@@ -54,6 +54,17 @@ categories:
     finding_id: JUDGE-INJ-TOKEN
     severity: HIGH
 
+# Confidence gating for the injection judge's verdict. The default
+# profile is tolerant: a prompt that hits a single category (e.g. only
+# "Instruction Manipulation" on an imperative request) is downgraded
+# from HIGH to MEDIUM so normal tool-use prompts aren't blocked on a
+# soft signal. Strict posture keeps min_categories_for_high=1.
+#
+# The gateway code un-caps this limit when the user prompt itself
+# contains sensitive-file tokens (etc/passwd, .ssh keys, aws
+# credentials, /proc/*/environ, etc.) — see hasSensitiveFileContext
+# in internal/gateway/llm_judge.go. That narrow boost closes the
+# "cat my etc passwd" bypass without widening the default cap.
 min_categories_for_high: 2
 single_category_max_severity: MEDIUM
 

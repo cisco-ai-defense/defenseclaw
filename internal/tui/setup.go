@@ -17,7 +17,9 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -131,6 +133,7 @@ var observabilityPresets = [][2]string{
 	{"honeycomb", "Honeycomb"},
 	{"newrelic", "New Relic"},
 	{"grafana-cloud", "Grafana Cloud"},
+	{"local-otlp", "Local Observability Stack"},
 	{"otlp", "Generic OTLP"},
 	{"webhook", "Generic HTTP JSONL"},
 }
@@ -1940,6 +1943,56 @@ func (p *SetupPanel) HandleMouseMotion(x, y int) {
 			}
 		}
 	}
+}
+
+// AuditActivityTempFile writes a JSON payload suitable for
+// `defenseclaw audit log-activity --payload-file`. The caller must
+// delete the file when done. Returns ("", nil, nil) when there are
+// no pending edits.
+func (p *SetupPanel) AuditActivityTempFile() (path string, cleanup func(), err error) {
+	if p == nil || !p.HasChanges() {
+		return "", func() {}, nil
+	}
+	before := map[string]any{}
+	after := map[string]any{}
+	for _, sec := range p.sections {
+		for _, f := range sec.Fields {
+			if f.Value != f.Original {
+				before[f.Key] = f.Original
+				after[f.Key] = f.Value
+			}
+		}
+	}
+	payload := map[string]any{
+		"actor":        "tui",
+		"action":       "config-update",
+		"target_type":  "config",
+		"target_id":    "config.yaml",
+		"before":       before,
+		"after":        after,
+		"version_from": "",
+		"version_to":   "",
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("setup: marshal audit activity: %w", err)
+	}
+	f, err := os.CreateTemp("", "defenseclaw-activity-*.json")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("setup: temp activity file: %w", err)
+	}
+	path = f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", func() {}, fmt.Errorf("setup: write activity payload: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", func() {}, err
+	}
+	cleanup = func() { _ = os.Remove(path) }
+	return path, cleanup, nil
 }
 
 // SaveConfig writes modified fields back to the config object and saves to disk.

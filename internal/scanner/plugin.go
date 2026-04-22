@@ -67,6 +67,13 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
+	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
+	exitCode := 0
+	var scanErr error
+	var result *ScanResult
+	defer func() {
+		FinishScanSpan(sp, result, exitCode, scanErr)
+	}()
 
 	binaryPath, args := s.pluginScanCommand(target)
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
@@ -76,27 +83,44 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 
 	err := cmd.Run()
 	duration := time.Since(start)
+	stderrStr := stderr.String()
 
-	result := &ScanResult{
-		Scanner:   s.Name(),
-		Target:    target,
-		Timestamp: start,
-		Duration:  duration,
+	result = &ScanResult{
+		Scanner:    s.Name(),
+		Target:     target,
+		Timestamp:  start,
+		Duration:   duration,
+		TargetType: InferTargetType(s.Name()),
 	}
 
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
 		if errors.Is(err, exec.ErrNotFound) {
-			return nil, fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw", s.Name(), s.BinaryPath)
+			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw", s.Name(), s.BinaryPath)
+			return nil, scanErr
+		}
+		if exitCode != 0 {
+			EmitSubprocessExitFromContext(ctx, binaryPath, exitCode, stderrStr)
 		}
 		if stdout.Len() == 0 {
-			return nil, fmt.Errorf("scanner: %s failed: %s", s.Name(), stderr.String())
+			scanErr = fmt.Errorf("scanner: %s failed: %s", s.Name(), stderrStr)
+			return nil, scanErr
 		}
+	}
+
+	result.ExitCode = exitCode
+	if exitCode != 0 {
+		result.ScanError = stderrStr
 	}
 
 	if stdout.Len() > 0 {
 		findings, parseErr := parsePluginOutput(stdout.Bytes())
 		if parseErr != nil {
-			return nil, fmt.Errorf("scanner: failed to parse %s output: %w", s.Name(), parseErr)
+			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
+			return nil, scanErr
 		}
 		result.Findings = findings
 	}
@@ -116,12 +140,14 @@ type pluginScanResult struct {
 type pluginFinding struct {
 	ID              string   `json:"id"`
 	RuleID          string   `json:"rule_id"`
+	Category        string   `json:"category"`
 	Severity        string   `json:"severity"`
 	Confidence      float64  `json:"confidence"`
 	Title           string   `json:"title"`
 	Description     string   `json:"description"`
 	Evidence        string   `json:"evidence"`
 	Location        string   `json:"location"`
+	Line            int      `json:"line"`
 	Remediation     string   `json:"remediation"`
 	Tags            []string `json:"tags"`
 	OccurrenceCount int      `json:"occurrence_count"`
@@ -139,6 +165,11 @@ func parsePluginOutput(data []byte) ([]Finding, error) {
 		if f.Suppressed {
 			continue
 		}
+		var ln *int
+		if f.Line > 0 {
+			v := f.Line
+			ln = &v
+		}
 		findings = append(findings, Finding{
 			ID:          f.ID,
 			Severity:    Severity(f.Severity),
@@ -148,6 +179,9 @@ func parsePluginOutput(data []byte) ([]Finding, error) {
 			Remediation: f.Remediation,
 			Scanner:     "plugin-scanner",
 			Tags:        f.Tags,
+			RuleID:      f.RuleID,
+			Category:    f.Category,
+			LineNumber:  ln,
 		})
 	}
 	return findings, nil

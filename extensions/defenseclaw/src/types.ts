@@ -198,3 +198,30 @@ export interface PluginScanOptions {
   /** Policy preset name ("default", "strict", "permissive") or path to YAML policy file. */
   policy?: string;
 }
+
+/**
+ * Correlates plugin↔sidecar traffic for observability and agent registry mapping.
+ * Field names use camelCase; HTTP headers use the X-DefenseClaw-* spellings.
+ */
+export interface CorrelationContext {
+  runId?: string;
+  sessionId?: string;
+  /** Logical agent id for `X-DefenseClaw-Agent-Id` (config, env, or persisted stable id). */
+  agentId: string;
+  /** Per–extension-session instance id minted by the plugin; may converge with the sidecar echo. */
+  agentInstanceId?: string;
+  /** Echoed from the sidecar (`X-DefenseClaw-Sidecar-Instance-Id` response header). */
+  sidecarInstanceId?: string;
+  traceId?: string;
+  agentName?: string;
+  policyId?: string;
+}
+
+/** Structured log line for outbound sidecar HTTP requests (retain_plugin_logs). */
+export interface OutboundSidecarRequestLog {
+  runId?: string;
+  sessionId?: string;
+  agentId: string;
+  status_code: number;
+  duration_ms: number;
+}

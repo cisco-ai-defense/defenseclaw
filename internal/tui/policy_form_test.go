@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // ------------------------------------------------------------------
@@ -267,19 +268,41 @@ func TestHandlePoliciesKey_NavigationAndCLIDispatch(t *testing.T) {
 		t.Errorf("after 'j', cursor=%d, want 1", p.policyCursor)
 	}
 
-	// enter on selection → activate CLI dispatch
-	bin, args, name := p.handlePoliciesKey("enter")
+	// B3a: Enter (and 's') now open an in-panel YAML overlay
+	// instead of dispatching `policy show` to the Activity panel.
+	// The overlay stays on the Policies tab, so bin must be empty
+	// and policyDetailOpen must flip to true with the selected
+	// policy's content loaded.
+	bin, args, _ := p.handlePoliciesKey("enter")
+	if bin != "" || len(args) != 0 {
+		t.Errorf("Enter must not dispatch a CLI command (overlay only), got bin=%q args=%v", bin, args)
+	}
+	if !p.policyDetailOpen || p.policyDetailName != "b" {
+		t.Errorf("Enter must open the detail overlay for 'b', got open=%v name=%q", p.policyDetailOpen, p.policyDetailName)
+	}
+
+	// Closing the overlay via HandleKey lets the next dispatch
+	// path run normally again.
+	p.HandleKey("esc")
+	if p.policyDetailOpen {
+		t.Fatal("esc must close the policy detail overlay")
+	}
+
+	// 'a' → activate (previously handled by Enter).
+	bin, args, name := p.handlePoliciesKey("a")
 	if bin != "defenseclaw" || len(args) != 3 || args[0] != "policy" || args[1] != "activate" || args[2] != "b" {
-		t.Errorf("Enter must dispatch `policy activate b`, got bin=%q args=%v", bin, args)
+		t.Errorf("'a' must dispatch `policy activate b`, got bin=%q args=%v", bin, args)
 	}
 	if !strings.Contains(name, "activate b") {
 		t.Errorf("display name should mention the target, got %q", name)
 	}
 
-	// 's' → show
-	if _, args, _ := p.handlePoliciesKey("s"); len(args) != 3 || args[1] != "show" {
-		t.Errorf("'s' must dispatch `policy show`, got %v", args)
+	// 's' → open the overlay (same behaviour as Enter).
+	if _, _, _ = p.handlePoliciesKey("s"); !p.policyDetailOpen {
+		t.Errorf("'s' must open the detail overlay")
 	}
+	p.HandleKey("esc")
+
 	// 'd' → delete
 	if _, args, _ := p.handlePoliciesKey("d"); len(args) != 3 || args[1] != "delete" {
 		t.Errorf("'d' must dispatch `policy delete`, got %v", args)
@@ -334,14 +357,21 @@ func TestHandlePoliciesKey_N_OpensCreateForm(t *testing.T) {
 
 // TestHandleOPAKey_T_RunsPolicyTest is the P1-#8 regression test.
 // Before the fix, capital-T silently did nothing on the OPA tab.
+// B3d moved the dispatch into a pendingCmd (so the output lands
+// in-panel rather than routing through the Activity panel), so
+// the assertion now checks that a Cmd is queued and the OPA output
+// placeholder is populated rather than looking for CLI args.
 func TestHandleOPAKey_T_RunsPolicyTest(t *testing.T) {
 	p := NewPolicyPanel(nil, &config.Config{})
-	bin, args, _ := p.handleOPAKey("T")
-	if bin != "defenseclaw" {
-		t.Fatalf("'T' must dispatch defenseclaw, got %q", bin)
+	bin, _, _ := p.handleOPAKey("T")
+	if bin != "" {
+		t.Fatalf("'T' must not dispatch via the Activity panel; got bin=%q", bin)
 	}
-	if len(args) != 2 || args[0] != "policy" || args[1] != "test" {
-		t.Errorf("'T' must dispatch `policy test`, got %v", args)
+	if cmd := p.TakeCmd(); cmd == nil {
+		t.Fatal("'T' must queue a pending tea.Cmd for in-panel execution")
+	}
+	if p.regoOutput == "" {
+		t.Error("'T' must seed regoOutput with a running indicator")
 	}
 }
 
@@ -380,5 +410,281 @@ func TestLoadPolicies_ActiveMarker(t *testing.T) {
 		if n == "active" {
 			t.Error("policies list must not include the active marker file")
 		}
+	}
+}
+
+// TestRuleDetailEdit_LaunchesEditorOnSourceFile is the follow-up to
+// the user report "how do I edit the rule?" — the rule detail
+// overlay must expose an editor path so they're not stuck reading
+// an un-editable YAML viewer. We assert that (a) opening the detail
+// overlay on a disk-backed rule captures the source path, and (b)
+// pressing 'e' inside the overlay queues a pending Cmd rather than
+// silently doing nothing. We can't execute the Cmd in unit tests
+// (it would exec “$EDITOR“), so the pending Cmd's existence is
+// the behavioural contract.
+func TestRuleDetailEdit_LaunchesEditorOnSourceFile(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.packRules = []*guardrail.RulesFileYAML{
+		{
+			Version:    1,
+			Category:   "c2",
+			SourcePath: "/etc/defenseclaw/rule-packs/default/rules/c2.yaml",
+			Rules: []guardrail.RuleDefYAML{
+				{ID: "C2-WEBHOOK-SITE", Pattern: "(?i)webhook\\.site", Title: "webhook.site", Severity: "HIGH"},
+			},
+		},
+	}
+	p.ruleCursor = 0
+
+	p.openRuleDetail()
+	if !p.ruleDetailOpen {
+		t.Fatal("openRuleDetail did not flip the overlay flag")
+	}
+	if p.ruleDetailPath != "/etc/defenseclaw/rule-packs/default/rules/c2.yaml" {
+		t.Fatalf("ruleDetailPath = %q, want the backing file", p.ruleDetailPath)
+	}
+
+	// Pressing 'e' inside the overlay must queue a pending Cmd;
+	// the app-level EditorClosedMsg handler reloads the pack
+	// when the editor exits.
+	p.HandleKey("e")
+	if cmd := p.TakeCmd(); cmd == nil {
+		t.Fatal("'e' inside rule detail overlay must queue a launchEditor Cmd")
+	}
+}
+
+// TestRuleDetailEdit_EmbeddedDefaultIsReadOnly protects the "don't
+// promise an edit we can't deliver" case: rules loaded from the
+// embedded defaults have no SourcePath, so 'e' must be a no-op and
+// the overlay header switches to the read-only hint.
+func TestRuleDetailEdit_EmbeddedDefaultIsReadOnly(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.packRules = []*guardrail.RulesFileYAML{
+		{
+			Version:  1,
+			Category: "c2",
+			// SourcePath intentionally empty — embedded default.
+			Rules: []guardrail.RuleDefYAML{{ID: "X", Title: "x"}},
+		},
+	}
+	p.ruleCursor = 0
+	p.openRuleDetail()
+	if p.ruleDetailPath != "" {
+		t.Fatalf("embedded default leaked a source path: %q", p.ruleDetailPath)
+	}
+
+	p.HandleKey("e")
+	if cmd := p.TakeCmd(); cmd != nil {
+		t.Fatal("'e' on embedded-default rule must be a no-op")
+	}
+}
+
+// TestRuleFilePathAtCursor_FlatIndex guards the invariant that
+// packDetail's 'e' shortcut and openRuleDetail both resolve
+// ruleCursor against the same flat index across (file → rule) —
+// if they ever drift the 'e' key will edit a different file than
+// the preview overlay shows.
+func TestRuleFilePathAtCursor_FlatIndex(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.packRules = []*guardrail.RulesFileYAML{
+		{Version: 1, Category: "a", SourcePath: "/a.yaml", Rules: []guardrail.RuleDefYAML{{ID: "a1"}, {ID: "a2"}}},
+		{Version: 1, Category: "b", SourcePath: "/b.yaml", Rules: []guardrail.RuleDefYAML{{ID: "b1"}}},
+	}
+
+	cases := []struct {
+		cursor int
+		want   string
+	}{
+		{0, "/a.yaml"},
+		{1, "/a.yaml"},
+		{2, "/b.yaml"},
+		{3, ""}, // out of range → no path
+	}
+	for _, tc := range cases {
+		p.ruleCursor = tc.cursor
+		if got := p.ruleFilePathAtCursor(); got != tc.want {
+			t.Errorf("ruleCursor=%d: got %q, want %q", tc.cursor, got, tc.want)
+		}
+	}
+}
+
+// ------------------------------------------------------------------
+// Overlay viewport clamping (policy + rule detail)
+// ------------------------------------------------------------------
+
+// longYAML returns a deterministic multi-line YAML body of exactly N
+// lines (no trailing newline, so strings.Split returns exactly N
+// elements — matching what we want the overlay footer to report).
+func longYAML(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("- id: line-")
+		b.WriteString(itoa(i))
+	}
+	return b.String()
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// TestPolicyDetailOverlay_ClampsToViewport pins the contract that a
+// long YAML body never spills past the supplied (w, h). This is the
+// regression we caught after PR #117: sensitive-paths YAMLs can be
+// ~80 lines and used to overflow into the help bar / neighbouring
+// panels.
+func TestPolicyDetailOverlay_ClampsToViewport(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.policyDetailOpen = true
+	p.policyDetailName = "sensitive-paths"
+	p.policyDetailYAML = longYAML(80)
+
+	out := p.renderPolicyDetailOverlay(60, 12)
+	lines := strings.Split(out, "\n")
+	if len(lines) > 12 {
+		t.Fatalf("overlay exceeded height=12: got %d lines\n%s", len(lines), out)
+	}
+	// Footer must report the total even when we only show a slice.
+	if !strings.Contains(out, "/ 80") {
+		t.Errorf("expected '/ 80' in footer, got:\n%s", out)
+	}
+	// First body line should be visible when scroll is 0.
+	if !strings.Contains(out, "line-0") {
+		t.Errorf("expected first line visible, got:\n%s", out)
+	}
+}
+
+// TestPolicyDetailOverlay_ScrollAdvances makes sure the scroll state
+// we wired up in HandleKey actually reaches the renderer and that
+// EOF is clamped so G / large-scroll doesn't strand the body off-screen.
+func TestPolicyDetailOverlay_ScrollAdvances(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.policyDetailOpen = true
+	p.policyDetailYAML = longYAML(40)
+
+	// Scroll down 5 lines — line-0..4 should be hidden, line-5 visible.
+	p.policyDetailScroll = 5
+	out := p.renderPolicyDetailOverlay(60, 10)
+	if strings.Contains(out, "id: line-0\n") {
+		t.Errorf("expected line-0 to be scrolled off, got:\n%s", out)
+	}
+	if !strings.Contains(out, "line-5") {
+		t.Errorf("expected line-5 to be visible after scroll=5, got:\n%s", out)
+	}
+
+	// Over-scroll sentinel (emulates the 'G' / end key) must clamp to
+	// the last page, not silently render an empty body.
+	p.policyDetailScroll = 1 << 30
+	out = p.renderPolicyDetailOverlay(60, 10)
+	if !strings.Contains(out, "/ 40") {
+		t.Errorf("expected footer to still show /40 at EOF, got:\n%s", out)
+	}
+	if !strings.Contains(out, "line-39") {
+		t.Errorf("expected last line-39 visible after end-jump, got:\n%s", out)
+	}
+	if p.policyDetailScroll >= 40 {
+		t.Errorf("expected scroll to be clamped below total (40), got %d", p.policyDetailScroll)
+	}
+}
+
+// TestRuleDetailOverlay_ClampsAndFitsFooter mirrors the policy
+// overlay test. We also check that the "file:" footer is preserved
+// since ruleDetailPath drives the editor shortcut.
+func TestRuleDetailOverlay_ClampsAndFitsFooter(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.ruleDetailOpen = true
+	p.ruleDetailPath = "/tmp/rules/injection.yaml"
+	p.ruleDetailYAML = longYAML(50)
+
+	out := p.renderRuleDetailOverlay(40, 14)
+	lines := strings.Split(out, "\n")
+	if len(lines) > 14 {
+		t.Fatalf("rule overlay exceeded height=14: got %d lines\n%s", len(lines), out)
+	}
+	if !strings.Contains(out, "file: /tmp/rules/injection.yaml") {
+		t.Errorf("expected file footer, got:\n%s", out)
+	}
+	if !strings.Contains(out, "/ 50") {
+		t.Errorf("expected '/ 50' in footer, got:\n%s", out)
+	}
+}
+
+// TestPolicyDetailOverlay_HandleKey_ScrollAndClose exercises the
+// HandleKey pathway end-to-end to prove the scroll keys actually
+// update policyDetailScroll (and that esc/enter/q still close the
+// overlay the way the original review expected).
+func TestPolicyDetailOverlay_HandleKey_ScrollAndClose(t *testing.T) {
+	p := NewPolicyPanel(nil, &config.Config{})
+	p.policyDetailOpen = true
+	p.policyDetailYAML = longYAML(30)
+	p.policyDetailName = "x"
+
+	p.HandleKey("down")
+	p.HandleKey("down")
+	if p.policyDetailScroll != 2 {
+		t.Fatalf("expected scroll=2 after two 'down', got %d", p.policyDetailScroll)
+	}
+	p.HandleKey("pgup")
+	if p.policyDetailScroll != 0 {
+		t.Errorf("expected scroll to clamp to 0 after pgup from 2, got %d", p.policyDetailScroll)
+	}
+
+	p.HandleKey("esc")
+	if p.policyDetailOpen {
+		t.Errorf("expected esc to close the overlay")
+	}
+	if p.policyDetailScroll != 0 {
+		t.Errorf("expected scroll reset on close, got %d", p.policyDetailScroll)
+	}
+}
+
+// TestClampYAMLBody_SmallViewport covers the pathological terminal
+// sizes the existing review flagged: very narrow width and 1-row
+// height. The helper must never return a string that blows past
+// either bound or panics on empty input.
+func TestClampYAMLBody_SmallViewport(t *testing.T) {
+	scroll := 0
+	// 3 rows of 200-char lines, 1-row viewport, 20-col width.
+	yaml := strings.Repeat(strings.Repeat("a", 200)+"\n", 3)
+	rendered, first, last, total := clampYAMLBody(yaml, 20, 1, &scroll)
+	for _, line := range strings.Split(rendered, "\n") {
+		if len(line) > 20 {
+			t.Errorf("line exceeded width=20: len=%d", len(line))
+		}
+	}
+	if total < 3 {
+		t.Errorf("expected total>=3, got %d", total)
+	}
+	if first != 1 || last != 1 {
+		t.Errorf("expected first=last=1 in 1-row viewport, got %d..%d", first, last)
+	}
+
+	// Empty input must not panic and must report total=1 (strings.Split
+	// of "" returns a single empty element).
+	scroll = 0
+	_, _, _, total = clampYAMLBody("", 20, 4, &scroll)
+	if total != 1 {
+		t.Errorf("expected total=1 for empty yaml, got %d", total)
 	}
 }

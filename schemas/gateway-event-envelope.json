@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/gateway-event-envelope.json",
+  "title": "DefenseClaw Gateway Event Envelope (v7)",
+  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects (`verdict`, `judge`, `lifecycle`, `error`, `diagnostic`, `scan`, `scan_finding`, `activity`) is populated and selected by `event_type`.",
+  "type": "object",
+  "required": ["ts", "event_type", "severity", "schema_version"],
+  "properties": {
+    "ts":         { "type": "string", "format": "date-time" },
+    "event_type": {
+      "type": "string",
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress"]
+    },
+    "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
+
+    "schema_version": { "type": "integer", "minimum": 7 },
+    "content_hash":   { "type": ["string", "null"] },
+    "generation":     { "type": ["integer", "null"], "minimum": 0 },
+    "binary_version": { "type": ["string", "null"] },
+
+    "run_id":     { "type": ["string", "null"] },
+    "request_id": { "type": ["string", "null"] },
+    "session_id": { "type": ["string", "null"] },
+    "trace_id":   { "type": ["string", "null"] },
+
+    "provider":  { "type": ["string", "null"] },
+    "model":     { "type": ["string", "null"] },
+    "direction": { "type": ["string", "null"], "enum": ["prompt", "completion", "tool_call", null] },
+
+    "agent_id":            { "type": ["string", "null"] },
+    "agent_name":          { "type": ["string", "null"] },
+    "agent_instance_id":   { "type": ["string", "null"] },
+    "sidecar_instance_id": { "type": ["string", "null"] },
+
+    "policy_id":       { "type": ["string", "null"] },
+    "destination_app": { "type": ["string", "null"] },
+    "tool_name":       { "type": ["string", "null"] },
+    "tool_id":         { "type": ["string", "null"] },
+
+    "tenant_id":        { "type": ["string", "null"], "description": "RESERVED (v7): logical tenancy boundary for hosted/SaaS deployments. Unpopulated until a matching producer ships." },
+    "workspace_id":     { "type": ["string", "null"], "description": "RESERVED (v7): sub-tenant workspace/organization/team scope. Unpopulated until a matching producer ships." },
+    "environment":      { "type": ["string", "null"], "description": "RESERVED (v7): deployment environment (dev|staging|prod|sandbox). Unpopulated until a matching producer ships." },
+    "deployment_mode":  { "type": ["string", "null"], "description": "RESERVED (v7): sidecar deployment mode (standalone|managed|edge|ci). Unpopulated until a matching producer ships." },
+    "discovery_source": { "type": ["string", "null"], "description": "RESERVED (v7): how the monitored agent/tool was discovered (registry|manual|scan|import). Unpopulated until a matching producer ships." },
+
+    "verdict":      { "$ref": "#/$defs/VerdictPayload" },
+    "judge":        { "$ref": "#/$defs/JudgePayload" },
+    "lifecycle":    { "$ref": "#/$defs/LifecyclePayload" },
+    "error":        { "$ref": "#/$defs/ErrorPayload" },
+    "diagnostic":   { "$ref": "#/$defs/DiagnosticPayload" },
+    "scan":         { "$ref": "https://defenseclaw.io/schemas/scan-event.json#/$defs/ScanPayload" },
+    "scan_finding": { "$ref": "https://defenseclaw.io/schemas/scan-finding-event.json#/$defs/ScanFindingPayload" },
+    "activity":     { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" },
+    "egress":       { "$ref": "#/$defs/EgressPayload" }
+  },
+  "oneOf": [
+    { "required": ["verdict"] },
+    { "required": ["judge"] },
+    { "required": ["lifecycle"] },
+    { "required": ["error"] },
+    { "required": ["diagnostic"] },
+    { "required": ["scan"] },
+    { "required": ["scan_finding"] },
+    { "required": ["activity"] },
+    { "required": ["egress"] }
+  ],
+  "$defs": {
+    "VerdictPayload": {
+      "type": "object",
+      "required": ["stage", "action"],
+      "properties": {
+        "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final", "session_message", "multi_turn", "block_list", "approval"] },
+        "action":     { "type": "string", "enum": ["allow", "warn", "block"] },
+        "reason":     { "type": ["string", "null"] },
+        "categories": { "type": ["array", "null"], "items": { "type": "string" } },
+        "latency_ms": { "type": ["integer", "null"] }
+      }
+    },
+    "JudgePayload": {
+      "type": "object",
+      "required": ["kind", "model", "input_bytes", "latency_ms"],
+      "properties": {
+        "kind":         { "type": "string" },
+        "model":        { "type": "string" },
+        "input_bytes":  { "type": "integer" },
+        "latency_ms":   { "type": "integer" },
+        "action":       { "type": ["string", "null"] },
+        "severity":     { "type": ["string", "null"] },
+        "findings":     { "type": ["array", "null"] },
+        "raw_response": { "type": ["string", "null"] },
+        "parse_error":  { "type": ["string", "null"] }
+      }
+    },
+    "LifecyclePayload": {
+      "type": "object",
+      "required": ["subsystem", "transition"],
+      "properties": {
+        "subsystem":  { "type": "string" },
+        "transition": { "type": "string", "enum": ["start", "stop", "ready", "degraded", "restored", "alert", "completed"] },
+        "details":    { "type": ["object", "null"] }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "required": ["subsystem", "message"],
+      "properties": {
+        "subsystem": { "type": "string" },
+        "code":      { "type": ["string", "null"] },
+        "message":   { "type": "string" },
+        "cause":     { "type": ["string", "null"] }
+      }
+    },
+    "DiagnosticPayload": {
+      "type": "object",
+      "required": ["component", "message"],
+      "properties": {
+        "component": { "type": "string" },
+        "message":   { "type": "string" },
+        "fields":    { "type": ["object", "null"] }
+      }
+    },
+    "EgressPayload": {
+      "type": "object",
+      "required": ["branch", "decision", "source"],
+      "properties": {
+        "target_host":    { "type": ["string", "null"] },
+        "target_path":    { "type": ["string", "null"] },
+        "body_shape":     { "type": ["string", "null"], "enum": ["", "none", "messages", "prompt", "input", "contents", "unknown", null] },
+        "looks_like_llm": { "type": ["boolean", "null"] },
+        "branch":         { "type": "string", "enum": ["known", "shape", "passthrough"] },
+        "decision":       { "type": "string", "enum": ["allow", "block"] },
+        "reason":         { "type": ["string", "null"] },
+        "source":         { "type": "string", "enum": ["go", "ts"] }
+      }
+    }
+  }
+}

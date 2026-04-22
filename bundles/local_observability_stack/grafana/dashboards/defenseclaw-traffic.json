@@ -1,0 +1,224 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "panels": [
+    {"type": "row", "title": "HTTP surface", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}},
+
+    {
+      "type": "stat",
+      "title": "Requests / sec",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_http_request_count_total[5m])) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "5xx rate",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 6, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "(sum(rate(defenseclaw_http_request_count_total{http_status_code=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(defenseclaw_http_request_count_total[5m])), 0.0001)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.01}, {"color": "red", "value": 0.05}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Auth failures / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_http_auth_failures_total[5m])) * 60 or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Rate-limit breaches / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_http_rate_limit_breaches_total[5m])) * 60 or vector(0)", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "HTTP traffic", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Requests per route",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (http_route) (rate(defenseclaw_http_request_count_total[$__rate_interval]))", "legendFormat": "{{http_route}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Request duration p95 by route",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(defenseclaw_http_request_duration_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{http_route}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Status code mix",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (http_status_code) (rate(defenseclaw_http_request_count_total[$__rate_interval]))", "legendFormat": "{{http_status_code}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"custom": {"stacking": {"mode": "normal"}}}}
+    },
+    {
+      "type": "table",
+      "title": "Top slow routes (p95, 5m)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(15, histogram_quantile(0.95, sum by (le, http_route, http_method) (rate(defenseclaw_http_request_duration_milliseconds_bucket[5m]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "p95 ms"}}}]
+    },
+
+    {"type": "row", "title": "SSE streams", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Stream lifecycle (open/close by outcome)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (transition, outcome) (rate(defenseclaw_stream_lifecycle_total[$__rate_interval]))", "legendFormat": "{{transition}} · {{outcome}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream duration p95 by route + outcome",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, http_route, outcome) (rate(defenseclaw_stream_duration_ms_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{http_route}} · {{outcome}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes sent per stream (p95)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(defenseclaw_stream_bytes_sent_bytes_bucket[$__rate_interval])))", "legendFormat": "{{http_route}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Provenance bumps",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (reason) (rate(defenseclaw_provenance_bumps_total[$__rate_interval]))", "legendFormat": "{{reason}}", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Tool calls", "gridPos": {"x": 0, "y": 39, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "Tool invocations by tool + provider",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 40, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (tool_name, tool_provider) (rate(defenseclaw_tool_calls_total[$__rate_interval]))", "legendFormat": "{{tool_name}} · {{tool_provider}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool duration p95",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 40, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(defenseclaw_tool_duration_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{tool_name}} p95", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool errors + dangerous calls",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 48, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum by (tool_name) (rate(defenseclaw_tool_errors_total[$__rate_interval]))", "legendFormat": "err · {{tool_name}}", "refId": "A"},
+        {"expr": "sum by (tool_name) (rate(defenseclaw_tool_calls_total{dangerous=\"true\"}[$__rate_interval]))", "legendFormat": "dangerous · {{tool_name}}", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Admission decisions",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 48, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (decision) (rate(defenseclaw_admission_decisions_total[$__rate_interval]))", "legendFormat": "{{decision}}", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "External integrations", "gridPos": {"x": 0, "y": 56, "w": 24, "h": 1}},
+
+    {
+      "type": "timeseries",
+      "title": "LLM bridge latency p95",
+      "description": "defenseclaw.llm_bridge.latency — attributes: gen_ai.request.model, status.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 57, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, gen_ai_request_model, status) (rate(defenseclaw_llm_bridge_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{gen_ai_request_model}} · {{status}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Cisco Inspect latency p95",
+      "description": "defenseclaw.cisco_inspect.latency — attribute: outcome (success|error|etc.).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 57, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(defenseclaw_cisco_inspect_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{outcome}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "OpenShell exit codes",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 65, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (exit_code) (rate(defenseclaw_openshell_exit_total[$__rate_interval]))", "legendFormat": "exit={{exit_code}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cisco errors",
+      "description": "defenseclaw.cisco.errors — attribute: code (stable error enum).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 65, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (code) (rate(defenseclaw_cisco_errors_total[$__rate_interval]))", "legendFormat": "{{code}}", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Traces", "gridPos": {"x": 0, "y": 73, "w": 24, "h": 1}},
+
+    {
+      "type": "table",
+      "title": "Recent gateway traces (Tempo)",
+      "description": "TraceQL search for the defenseclaw service. Click the trace ID cell to open the flame graph in Explore. (The native 'traces' panel plugin is not shipped with core Grafana; this table is portable across 10.x/11.x.)",
+      "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"},
+      "gridPos": {"x": 0, "y": 74, "w": 24, "h": 12},
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "filters": [
+            {"id": "service-name", "tag": "service.name", "operator": "=", "scope": "resource", "value": ["defenseclaw"], "valueType": "string"}
+          ],
+          "limit": 50,
+          "tableType": "traces",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "left"},
+          "links": [
+            {
+              "title": "Open trace",
+              "url": "/explore?left=%7B%22datasource%22:%22defenseclaw-tempo%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22tempo%22,%22uid%22:%22defenseclaw-tempo%22%7D,%22queryType%22:%22traceql%22,%22query%22:%22${__data.fields.traceID}%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D",
+              "targetBlank": true
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "traffic", "traces", "http"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Traffic & Traces",
+  "uid": "defenseclaw-traffic",
+  "version": 1,
+  "weekStart": ""
+}

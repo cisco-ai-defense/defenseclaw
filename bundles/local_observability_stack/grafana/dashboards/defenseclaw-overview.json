@@ -1,0 +1,237 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "enable": true,
+        "expr": "ALERTS{alertstate=\"firing\"}",
+        "iconColor": "red",
+        "name": "Firing alerts",
+        "tagKeys": "alertname,severity",
+        "titleFormat": "{{alertname}} — {{severity}}",
+        "useValueForTime": false
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {"title": "Security",    "type": "link", "url": "/d/defenseclaw-security",    "icon": "external link", "targetBlank": false},
+    {"title": "Scanners",    "type": "link", "url": "/d/defenseclaw-scanners",    "icon": "external link", "targetBlank": false},
+    {"title": "Reliability", "type": "link", "url": "/d/defenseclaw-reliability", "icon": "external link", "targetBlank": false},
+    {"title": "Runtime",     "type": "link", "url": "/d/defenseclaw-runtime",     "icon": "external link", "targetBlank": false},
+    {"title": "Traffic",     "type": "link", "url": "/d/defenseclaw-traffic",     "icon": "external link", "targetBlank": false}
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Health at a glance",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Firing alerts",
+      "description": "Count of Prometheus alerting rules currently firing.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "none"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 5}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Verdicts / min",
+      "description": "Guardrail verdicts emitted per minute across every stage.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Blocks / min",
+      "description": "Verdict=block rate.  A non-zero value means DefenseClaw is actively denying traffic — correlate with the Security dashboard to see which stage and reason.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"block\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 30}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Schema violations / min",
+      "description": "Events dropped by the strict JSON-schema gate in gatewaylog.Writer. ANY non-zero value is a contract bug — check Reliability dashboard.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_schema_violations_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Gateway errors / min",
+      "description": "EventError emissions by subsystem.  Drill into Reliability → Gateway errors by subsystem/code.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_errors_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 30}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Sink failures / min",
+      "description": "Audit sinks that returned a permanent failure for a batch. Drill into Reliability → Sinks.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_audit_sink_failures_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.01}, {"color": "red", "value": 1}]}}}
+    },
+
+    {
+      "type": "row",
+      "title": "Firing alerts",
+      "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Alerts (Prometheus rules)",
+      "description": "All Prometheus alerting rules currently firing, sourced from prometheus/rules/alerts.yml. Click through to the linked dashboards via the annotations guide.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 24, "h": 6},
+      "targets": [{"expr": "ALERTS{alertstate=\"firing\"}", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true, "Value": true}, "indexByName": {"alertname": 0, "severity": 1, "surface": 2, "slo": 3, "alertstate": 4}}}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"align": "left"}, "mappings": [{"type": "value", "options": {"critical": {"color": "red", "index": 0}, "warning": {"color": "orange", "index": 1}, "info": {"color": "blue", "index": 2}}}]}}
+    },
+
+    {
+      "type": "row",
+      "title": "SLO compliance",
+      "gridPos": {"x": 0, "y": 12, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "gauge",
+      "title": "Block SLO — enforcement < 2000 ms (5m)",
+      "description": "Fraction of admission-block decisions that complete in <2s. Target ≥ 99%.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 13, "w": 6, "h": 6},
+      "targets": [{"expr": "sum(rate(defenseclaw_slo_block_latency_milliseconds_bucket{le=\"2000\"}[5m])) / sum(rate(defenseclaw_slo_block_latency_milliseconds_count[5m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.95}, {"color": "green", "value": 0.99}]}}}
+    },
+    {
+      "type": "gauge",
+      "title": "TUI SLO — refresh < 5000 ms (5m)",
+      "description": "Fraction of TUI panel refreshes in < 5s. Target ≥ 99%.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 6, "y": 13, "w": 6, "h": 6},
+      "targets": [{"expr": "sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket{le=\"5000\"}[5m])) / sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.95}, {"color": "green", "value": 0.99}]}}}
+    },
+    {
+      "type": "gauge",
+      "title": "Exporter freshness",
+      "description": "Seconds since the OTLP metric exporter last succeeded. Alerts fire if > 300s.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 13, "w": 6, "h": 6},
+      "targets": [{"expr": "time() - max(defenseclaw_telemetry_exporter_last_export_ts_seconds)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 60}, {"color": "red", "value": 300}]}}}
+    },
+    {
+      "type": "gauge",
+      "title": "Sink circuit health",
+      "description": "Max sink circuit state (0=closed/healthy, 1=open/rejecting, 2=half-open).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 18, "y": 13, "w": 6, "h": 6},
+      "targets": [{"expr": "max(defenseclaw_audit_sink_circuit_state) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"min": 0, "max": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 2}]}, "mappings": [{"type": "value", "options": {"0": {"text": "closed"}, "1": {"text": "open"}, "2": {"text": "half-open"}}}]}}
+    },
+
+    {
+      "type": "row",
+      "title": "Traffic + guardrail",
+      "gridPos": {"x": 0, "y": 19, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Verdicts by action",
+      "description": "Stacked verdict decisions. A wedge of 'block' > 10% usually means a policy is too aggressive or the caller is probing.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total[$__rate_interval]))", "legendFormat": "{{verdict_action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Guardrail latency (p50/p95/p99)",
+      "description": "Per-scanner guardrail latency quantiles. Investigate if p99 > 500 ms.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+
+    {
+      "type": "row",
+      "title": "Findings + errors",
+      "gridPos": {"x": 0, "y": 28, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Scan findings by severity",
+      "description": "All findings (skill, MCP, plugin) stacked by severity.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 29, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (severity) (rate(defenseclaw_scan_findings_total[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway errors by subsystem / code",
+      "description": "Stacked structured errors. Each (subsystem, code) pair is a stable enum — no cardinality explosion.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 29, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))", "legendFormat": "{{error_subsystem}} / {{error_code}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+
+    {
+      "type": "row",
+      "title": "Recent events (Loki)",
+      "gridPos": {"x": 0, "y": 37, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "All gateway events",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 38, "w": 24, "h": 12},
+      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} | json | line_format \"{{.defenseclaw_gateway_event_type}} | {{.defenseclaw_verdict_action}}{{.defenseclaw_judge_action}}{{.defenseclaw_error_code}} | {{__line__}}\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "observability", "overview"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Overview",
+  "uid": "defenseclaw-overview",
+  "version": 3,
+  "weekStart": ""
+}

@@ -1,0 +1,148 @@
+# DefenseClaw local observability stack.
+#
+# Brings up a full OTLP pipeline on loopback so the sidecar can be
+# pointed at 127.0.0.1:4317 (gRPC) / 127.0.0.1:4318 (HTTP) and have
+# every span / metric / log land in Tempo / Prometheus / Loki, all
+# queryable from a pre-provisioned Grafana at http://localhost:3000.
+#
+# Usage:
+#   # Preferred — boots the stack, waits for readiness, and wires
+#   # ~/.defenseclaw/config.yaml to point at the local collector:
+#   defenseclaw setup local-observability up
+#
+#   # Manual compose access (no CLI side-effects on config.yaml):
+#   cd bundles/local_observability_stack
+#   docker compose up -d
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317 \
+#     DEFENSECLAW_TELEMETRY_ENABLED=1 \
+#     go run ./cmd/defenseclaw gateway
+#
+# Ports (host, bound to 127.0.0.1 by default):
+#   4317 / 4318 — OTel Collector OTLP receivers
+#   3000        — Grafana UI (login: admin / admin)
+#   3100        — Loki HTTP (scraped by Grafana)
+#   3200        — Tempo HTTP
+#   9090        — Prometheus UI
+#   8888 / 8889 — Collector self-metrics + prom exporter
+#
+# SECURITY: all host-side port publishes are scoped to the loopback
+# interface (127.0.0.1) so a developer laptop joining a coffee-shop
+# Wi-Fi does not accidentally expose Grafana/Prometheus/Tempo to the
+# LAN. If you need LAN access (e.g. sharing a dashboard with a
+# teammate), override HOST_BIND=0.0.0.0 in your shell *and* set a real
+# Grafana admin password via GF_SECURITY_ADMIN_PASSWORD.
+#
+# Teardown drops everything including persisted data volumes:
+#   docker compose down -v
+
+name: defenseclaw-observability
+
+networks:
+  defenseclaw-o11y:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: defenseclaw-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:4317:4317"   # OTLP gRPC (traces, metrics, logs)
+      - "${HOST_BIND:-127.0.0.1}:4318:4318"   # OTLP HTTP
+      - "${HOST_BIND:-127.0.0.1}:8888:8888"   # Collector telemetry
+      - "${HOST_BIND:-127.0.0.1}:8889:8889"   # Prometheus-format exporter for scraping
+      - "${HOST_BIND:-127.0.0.1}:13133:13133" # health check extension
+    networks:
+      - defenseclaw-o11y
+    depends_on:
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: defenseclaw-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-remote-write-receiver"
+      - "--web.enable-lifecycle"
+      - "--enable-feature=exemplar-storage,native-histograms"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:9090:9090"
+    networks:
+      - defenseclaw-o11y
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: defenseclaw-loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:3100:3100"
+    networks:
+      - defenseclaw-o11y
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    container_name: defenseclaw-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:3200:3200" # tempo HTTP
+      - "${HOST_BIND:-127.0.0.1}:9095:9095" # tempo gRPC (internal)
+    networks:
+      - defenseclaw-o11y
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: defenseclaw-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      - GF_USERS_DEFAULT_THEME=dark
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:3000:3000"
+    networks:
+      - defenseclaw-o11y
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped

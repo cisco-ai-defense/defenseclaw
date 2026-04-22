@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/scan-finding-event.json",
+  "title": "DefenseClaw Scan Finding Event Payload (v7)",
+  "description": "Populates the `scan_finding` sub-object on a gateway-event-envelope when event_type=\"scan_finding\". One emission per scanner finding; downstream SIEM can alert on a single critical finding without joining against the parent EventScan summary.",
+  "$defs": {
+    "ScanFindingPayload": {
+      "type": "object",
+      "required": ["scan_id", "scanner", "target"],
+      "properties": {
+        "scan_id":     { "type": "string" },
+        "scanner":     { "type": "string", "enum": ["skill", "mcp", "plugin", "aibom", "codeguard"] },
+        "target":      { "type": "string" },
+        "finding_id":  { "type": ["string", "null"] },
+        "rule_id":     { "type": ["string", "null"], "description": "Stable detection rule identifier. Preferred group-by for SIEM; never display-string." },
+        "category":    { "type": ["string", "null"] },
+        "title":       { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"], "description": "Always redacted." },
+        "severity":    { "type": ["string", "null"], "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", null] },
+        "location":    { "type": ["string", "null"], "description": "Redacted path + line." },
+        "line_number": { "type": ["integer", "null"], "minimum": 0 },
+        "remediation": { "type": ["string", "null"] },
+        "tags":        { "type": ["array", "null"], "items": { "type": "string" } }
+      }
+    }
+  },
+  "type": "object",
+  "$ref": "#/$defs/ScanFindingPayload"
+}

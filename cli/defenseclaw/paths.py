@@ -20,11 +20,13 @@ Wheel install (production):
     <site-packages>/defenseclaw/_data/policies/
     <site-packages>/defenseclaw/_data/skills/codeguard/
     <site-packages>/defenseclaw/_data/splunk_local_bridge/
+    <site-packages>/defenseclaw/_data/local_observability_stack/
 
 Editable install (dev):
     <repo>/policies/
     <repo>/skills/codeguard/
     <repo>/bundles/splunk_local_bridge/
+    <repo>/bundles/local_observability_stack/
     <repo>/extensions/defenseclaw/
 
 Every resolver tries _data/ first (wheel), then repo-relative (dev).
@@ -77,6 +79,20 @@ def bundled_splunk_bridge_dir() -> Path:
     return _first_existing(
         _DATA_DIR / "splunk_local_bridge",
         _REPO_ROOT / "bundles" / "splunk_local_bridge",
+    )
+
+
+def bundled_local_observability_dir() -> Path:
+    """Vendored local observability stack (OTel Collector + Prom + Loki + Tempo + Grafana).
+
+    Ships the same compose-driven layout that historically lived under
+    ``deploy/observability/``. The stack is seeded into the user's data
+    directory by ``defenseclaw init`` so operators can customize
+    dashboards / alert rules in place without editing the Python wheel.
+    """
+    return _first_existing(
+        _DATA_DIR / "local_observability_stack",
+        _REPO_ROOT / "bundles" / "local_observability_stack",
     )
 
 
@@ -140,6 +156,25 @@ def splunk_bridge_bin(data_dir: str) -> str | None:
     candidates = [
         os.path.join(data_dir, "splunk-bridge", "bin", "splunk-claw-bridge"),
         str(bundled_splunk_bridge_dir() / "bin" / "splunk-claw-bridge"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def local_observability_bridge_bin(data_dir: str) -> str | None:
+    """Locate the openclaw-observability-bridge executable.
+
+    Checks the user's seeded copy (~/.defenseclaw/observability-stack/)
+    first, then the bundled source. The bridge is used by
+    ``defenseclaw setup local-observability`` to drive a docker compose
+    stack with Prometheus, Loki, Tempo, Grafana, and an OTel Collector
+    on loopback.
+    """
+    candidates = [
+        os.path.join(data_dir, "observability-stack", "bin", "openclaw-observability-bridge"),
+        str(bundled_local_observability_dir() / "bin" / "openclaw-observability-bridge"),
     ]
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):

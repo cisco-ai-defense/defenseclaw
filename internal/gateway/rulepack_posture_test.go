@@ -1,0 +1,104 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+)
+
+// TestProfilePosture_InjectionJudge is a contract test that pins the
+// relative strictness ordering of the shipped policy profiles:
+//
+//	permissive  ≥  default  ≥  strict   (in terms of single-category cap)
+//
+// A regression here means an operator could flip to the strict
+// profile and unknowingly inherit the default profile's tolerance
+// for single-category injection hits (MEDIUM/alert instead of
+// HIGH/block). The concrete attack class this defends against is
+// the "cat my etc passwd" bypass — see TestHasSensitiveFileContext
+// and TestInjectionToVerdictCtx_SensitiveContextUnCapsSingleCategory
+// for the runtime-side un-cap when a sensitive-file token is in the
+// prompt. This test guards the YAML contract so the boost isn't
+// the only thing protecting that class.
+func TestProfilePosture_InjectionJudge(t *testing.T) {
+	_, selfPath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve caller path")
+	}
+	// .../internal/gateway/rulepack_posture_test.go -> repo root
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+
+	cases := []struct {
+		profile               string
+		wantMinCats           int
+		wantSingleCategoryCap string
+	}{
+		// Strict: block on a single injection category; no MEDIUM cap.
+		{"strict", 1, "HIGH"},
+		// Default: require two categories or rely on the sensitive-
+		// file-context runtime boost.
+		{"default", 2, "MEDIUM"},
+		// Permissive: same cap as default — the permissive posture is
+		// about rule-set breadth, not injection-cap leniency.
+		{"permissive", 2, "MEDIUM"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.profile, func(t *testing.T) {
+			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
+			if rp == nil {
+				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
+			}
+			ij := rp.InjectionJudge()
+			if ij == nil {
+				t.Fatalf("profile=%s has no InjectionJudge config", tc.profile)
+			}
+			if ij.MinCategoriesForHigh != tc.wantMinCats {
+				t.Errorf("profile=%s: min_categories_for_high = %d, want %d",
+					tc.profile, ij.MinCategoriesForHigh, tc.wantMinCats)
+			}
+			if ij.SingleCategoryMaxSev != tc.wantSingleCategoryCap {
+				t.Errorf("profile=%s: single_category_max_severity = %q, want %q",
+					tc.profile, ij.SingleCategoryMaxSev, tc.wantSingleCategoryCap)
+			}
+		})
+	}
+}
+
+// TestProfilePosture_StrictIsStricterThanDefault makes the ordering
+// constraint explicit: flipping the numbers in default/ to match
+// strict/ would silently pass the individual-profile assertions
+// above, so we also assert the relation between the two.
+func TestProfilePosture_StrictIsStricterThanDefault(t *testing.T) {
+	_, selfPath, _, _ := runtime.Caller(0)
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+
+	strict := guardrail.LoadRulePack(filepath.Join(policiesRoot, "strict")).InjectionJudge()
+	def := guardrail.LoadRulePack(filepath.Join(policiesRoot, "default")).InjectionJudge()
+
+	if strict.MinCategoriesForHigh > def.MinCategoriesForHigh {
+		t.Errorf("strict.min_categories_for_high (%d) > default (%d); strict must be ≤ default",
+			strict.MinCategoriesForHigh, def.MinCategoriesForHigh)
+	}
+
+	// severityRank is the runtime source of truth for the cap comparison.
+	if severityRank[strict.SingleCategoryMaxSev] < severityRank[def.SingleCategoryMaxSev] {
+		t.Errorf("strict single-category cap %q is softer than default %q",
+			strict.SingleCategoryMaxSev, def.SingleCategoryMaxSev)
+	}
+}

@@ -223,6 +223,39 @@ GRAFANA_CLOUD = Preset(
     ),
 )
 
+LOCAL_OTLP = Preset(
+    id="local-otlp",
+    display_name="Local Observability Stack",
+    target="otel",
+    description=(
+        "Bundled docker-compose stack on loopback (OTel Collector + "
+        "Prometheus + Loki + Tempo + Grafana). Driven by "
+        "`defenseclaw setup local-observability`."
+    ),
+    otel_protocol="grpc",
+    # ``{endpoint}`` is substituted from the sole prompt so operators
+    # can re-point at a non-default host:port without editing YAML, but
+    # the out-of-box path is zero-config loopback.
+    endpoint_template="{endpoint}",
+    # grpc has no per-signal URL paths — the single endpoint multiplexes
+    # traces / metrics / logs.
+    signal_url_paths={},
+    default_signals=("traces", "metrics", "logs"),
+    # No auth: the stack binds to 127.0.0.1 by default. If an operator
+    # opens it up to the LAN they are expected to add headers manually.
+    otel_headers={},
+    token_env="",
+    token_label="",
+    prompts=(
+        (
+            "endpoint",
+            "127.0.0.1:4317",
+            "OTLP endpoint (host:port) for the local collector",
+            "127.0.0.1:4317",
+        ),
+    ),
+)
+
 GENERIC_OTLP = Preset(
     id="otlp",
     display_name="Generic OTLP",
@@ -268,6 +301,7 @@ PRESETS: dict[str, Preset] = {
         HONEYCOMB,
         NEWRELIC,
         GRAFANA_CLOUD,
+        LOCAL_OTLP,
         GENERIC_OTLP,
         GENERIC_WEBHOOK,
     )
@@ -296,6 +330,7 @@ def preset_choices() -> list[str]:
         "honeycomb",
         "newrelic",
         "grafana-cloud",
+        "local-otlp",
         "otlp",
         "webhook",
     ]

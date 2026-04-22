@@ -1,0 +1,22 @@
+{
+  "binary_version": "\u003cstripped\u003e",
+  "content_hash": "\u003cstripped\u003e",
+  "event_type": "scan_finding",
+  "generation": 1,
+  "run_id": "\u003cstripped\u003e",
+  "scan_finding": {
+    "category": "c",
+    "finding_id": "\u003cstripped\u003e",
+    "line_number": 3,
+    "rule_id": "R9",
+    "scan_id": "\u003cstripped\u003e",
+    "scanner": "skill",
+    "severity": "CRITICAL",
+    "target": "/tmp/e2e",
+    "title": "x"
+  },
+  "schema_version": 7,
+  "severity": "CRITICAL",
+  "sidecar_instance_id": "\u003cstripped\u003e",
+  "ts": "2000-01-01T00:00:00Z"
+}

@@ -196,17 +196,23 @@ func TestAuditBridge_DetailsOmitEnvelopeFields(t *testing.T) {
 	}
 	got := events[0]
 
-	// Envelope must carry the correlation key.
+	// Envelope must carry the correlation keys. As of the v6
+	// observability contract, trace_id joins run_id/request_id on
+	// the envelope so downstream sinks don't have to reparse
+	// Details to key on it.
 	if got.RequestID != "req-abc-001" {
 		t.Errorf("envelope request_id=%q want req-abc-001", got.RequestID)
 	}
 	if got.RunID != "run-xyz" {
 		t.Errorf("envelope run_id=%q want run-xyz", got.RunID)
 	}
+	if got.TraceID != "trace-abc" {
+		t.Errorf("envelope trace_id=%q want trace-abc", got.TraceID)
+	}
 
 	// Details must NOT duplicate fields that already live on the
-	// envelope (request_id). trace_id has no envelope slot so it
-	// stays in details; audit_id and action stay for pivot-back.
+	// envelope (request_id, run_id, trace_id). audit_id and action
+	// stay for pivot-back.
 	if got.Lifecycle == nil {
 		t.Fatalf("lifecycle payload missing")
 	}
@@ -214,8 +220,9 @@ func TestAuditBridge_DetailsOmitEnvelopeFields(t *testing.T) {
 		t.Errorf("details.request_id leaked — should only live on envelope: %v",
 			got.Lifecycle.Details)
 	}
-	if got.Lifecycle.Details["trace_id"] != "trace-abc" {
-		t.Errorf("trace_id dropped: %q", got.Lifecycle.Details["trace_id"])
+	if _, dup := got.Lifecycle.Details["trace_id"]; dup {
+		t.Errorf("details.trace_id leaked — should only live on envelope: %v",
+			got.Lifecycle.Details)
 	}
 	if got.Lifecycle.Details["audit_id"] != "evt-42" {
 		t.Errorf("audit_id dropped: %q", got.Lifecycle.Details["audit_id"])
@@ -310,6 +317,59 @@ func TestAuditBridge_ConcurrentEmits(t *testing.T) {
 		}
 		if e.Lifecycle == nil || e.Lifecycle.Transition != "start" {
 			t.Fatalf("bad lifecycle payload: %+v", e.Lifecycle)
+		}
+	}
+}
+
+// The v6 observability contract extended the envelope with session /
+// agent / policy / tool correlation fields. Every one of them must
+// flow from audit.Event through to the gatewaylog.Event envelope so
+// the JSONL stream, Splunk HEC, OTLP logs, and http_jsonl sinks see
+// consistent data.
+func TestAuditBridge_ForwardsV6CorrelationFields(t *testing.T) {
+	w, path := newWriterForTest(t)
+	b := newAuditBridge(w)
+
+	b.EmitAudit(audit.Event{
+		Action:          "watcher-block",
+		Target:          "demo-skill",
+		Severity:        "HIGH",
+		RunID:           "run-1",
+		TraceID:         "trace-1",
+		RequestID:       "req-1",
+		SessionID:       "sess-1",
+		AgentName:       "openclaw",
+		AgentInstanceID: "instance-1",
+		PolicyID:        "strict",
+		DestinationApp:  "mcp:github",
+		ToolName:        "github.create_pr",
+		ToolID:          "call_abc123",
+	})
+	_ = w.Close()
+
+	events := readJSONLEvents(t, path)
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	got := events[0]
+
+	cases := []struct {
+		name, got, want string
+	}{
+		{"trace_id", got.TraceID, "trace-1"},
+		{"run_id", got.RunID, "run-1"},
+		{"request_id", got.RequestID, "req-1"},
+		{"session_id", got.SessionID, "sess-1"},
+		{"agent_name", got.AgentName, "openclaw"},
+		{"agent_instance_id", got.AgentInstanceID, "instance-1"},
+		{"policy_id", got.PolicyID, "strict"},
+		{"destination_app", got.DestinationApp, "mcp:github"},
+		{"tool_name", got.ToolName, "github.create_pr"},
+		{"tool_id", got.ToolID, "call_abc123"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("envelope %s=%q want %q", tc.name, tc.got, tc.want)
 		}
 	}
 }

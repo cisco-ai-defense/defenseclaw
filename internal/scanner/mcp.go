@@ -142,6 +142,13 @@ func (s *MCPScanner) scanEnv() []string {
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
+	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
+	exitCode := 0
+	var scanErr error
+	var result *ScanResult
+	defer func() {
+		FinishScanSpan(sp, result, exitCode, scanErr)
+	}()
 
 	args := s.buildArgs(target)
 	cmd := exec.CommandContext(ctx, s.Config.Binary, args...)
@@ -153,27 +160,44 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 
 	err := cmd.Run()
 	duration := time.Since(start)
+	stderrStr := stderr.String()
 
-	result := &ScanResult{
-		Scanner:   s.Name(),
-		Target:    target,
-		Timestamp: start,
-		Duration:  duration,
+	result = &ScanResult{
+		Scanner:    s.Name(),
+		Target:     target,
+		Timestamp:  start,
+		Duration:   duration,
+		TargetType: InferTargetType(s.Name()),
 	}
 
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
 		if errors.Is(err, exec.ErrNotFound) {
-			return nil, fmt.Errorf("scanner: %s not found at %q — install with: uv tool install cisco-ai-mcp-scanner", s.Name(), s.Config.Binary)
+			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: uv tool install cisco-ai-mcp-scanner", s.Name(), s.Config.Binary)
+			return nil, scanErr
+		}
+		if exitCode != 0 {
+			EmitSubprocessExitFromContext(ctx, s.Config.Binary, exitCode, stderrStr)
 		}
 		if stdout.Len() == 0 {
-			return nil, fmt.Errorf("scanner: %s failed: %s", s.Name(), stderr.String())
+			scanErr = fmt.Errorf("scanner: %s failed: %s", s.Name(), stderrStr)
+			return nil, scanErr
 		}
+	}
+
+	result.ExitCode = exitCode
+	if exitCode != 0 {
+		result.ScanError = stderrStr
 	}
 
 	if stdout.Len() > 0 {
 		findings, parseErr := parseMCPOutput(stdout.Bytes())
 		if parseErr != nil {
-			return nil, fmt.Errorf("scanner: failed to parse %s output: %w", s.Name(), parseErr)
+			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
+			return nil, scanErr
 		}
 		result.Findings = findings
 	}
@@ -192,6 +216,9 @@ type mcpFinding struct {
 	Description string `json:"description"`
 	Location    string `json:"location"`
 	Remediation string `json:"remediation"`
+	RuleID      string `json:"rule_id"`
+	Category    string `json:"category"`
+	Line        int    `json:"line"`
 }
 
 func parseMCPOutput(data []byte) ([]Finding, error) {
@@ -203,6 +230,11 @@ func parseMCPOutput(data []byte) ([]Finding, error) {
 
 	findings := make([]Finding, 0, len(out.Findings))
 	for _, f := range out.Findings {
+		var ln *int
+		if f.Line > 0 {
+			v := f.Line
+			ln = &v
+		}
 		findings = append(findings, Finding{
 			ID:          f.ID,
 			Severity:    Severity(f.Severity),
@@ -211,6 +243,9 @@ func parseMCPOutput(data []byte) ([]Finding, error) {
 			Location:    f.Location,
 			Remediation: f.Remediation,
 			Scanner:     "mcp-scanner",
+			RuleID:      f.RuleID,
+			Category:    f.Category,
+			LineNumber:  ln,
 		})
 	}
 	return findings, nil

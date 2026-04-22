@@ -162,6 +162,30 @@ func (s *OTLPLogsSink) Forward(ctx context.Context, e Event) error {
 	if e.Details != "" {
 		record.AddAttributes(otellog.String("audit.details", e.Details))
 	}
+	// Extended correlation fields — only added when non-empty so
+	// downstream query layers (Grafana/OTel Cloud) don't get a flood
+	// of empty attribute rows on events that predate the v6 contract.
+	if e.SessionID != "" {
+		record.AddAttributes(otellog.String("audit.session_id", e.SessionID))
+	}
+	if e.AgentName != "" {
+		record.AddAttributes(otellog.String("audit.agent_name", e.AgentName))
+	}
+	if e.AgentInstanceID != "" {
+		record.AddAttributes(otellog.String("audit.agent_instance_id", e.AgentInstanceID))
+	}
+	if e.PolicyID != "" {
+		record.AddAttributes(otellog.String("audit.policy_id", e.PolicyID))
+	}
+	if e.DestinationApp != "" {
+		record.AddAttributes(otellog.String("audit.destination_app", e.DestinationApp))
+	}
+	if e.ToolName != "" {
+		record.AddAttributes(otellog.String("audit.tool_name", e.ToolName))
+	}
+	if e.ToolID != "" {
+		record.AddAttributes(otellog.String("audit.tool_id", e.ToolID))
+	}
 
 	s.logger.Emit(ctx, record)
 	return nil
@@ -194,6 +218,7 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 
 	if cfg.Protocol == "http" {
 		opts := []loghttp.Option{
+			loghttp.WithHeaders(headers),
 			loghttp.WithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
 		}
 		if host, path, insecure, ok := splitEndpointURL(cfg.Endpoint); ok {
@@ -206,9 +231,6 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 			}
 		} else {
 			opts = append(opts, loghttp.WithEndpoint(cfg.Endpoint))
-		}
-		if len(headers) > 0 {
-			opts = append(opts, loghttp.WithHeaders(headers))
 		}
 		if cfg.URLPath != "" {
 			opts = append(opts, loghttp.WithURLPath(cfg.URLPath))
@@ -227,15 +249,13 @@ func buildLogExporter(ctx context.Context, cfg OTLPLogsConfig) (sdklog.Exporter,
 	}
 
 	opts := []loggrpc.Option{
+		loggrpc.WithHeaders(headers),
 		loggrpc.WithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
 	}
 	if endpointLooksLikeURL(cfg.Endpoint) {
 		opts = append(opts, loggrpc.WithEndpointURL(cfg.Endpoint))
 	} else {
 		opts = append(opts, loggrpc.WithEndpoint(cfg.Endpoint))
-	}
-	if len(headers) > 0 {
-		opts = append(opts, loggrpc.WithHeaders(headers))
 	}
 	if cfg.Insecure {
 		opts = append(opts, loggrpc.WithInsecure())
@@ -259,21 +279,6 @@ func loadTLSConfig(caCertPath string) (*tls.Config, error) {
 		return nil, fmt.Errorf("otlp_logs: parse CA cert %s", caCertPath)
 	}
 	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
-}
-
-func endpointLooksLikeURL(endpoint string) bool {
-	return strings.Contains(endpoint, "://")
-}
-
-func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
-	if !endpointLooksLikeURL(endpoint) {
-		return "", "", false, false
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Host == "" {
-		return "", "", false, false
-	}
-	return u.Host, u.Path, strings.EqualFold(u.Scheme, "http"), true
 }
 
 // severityToOTel maps DefenseClaw severity strings to OTel SeverityNumbers
@@ -315,4 +320,27 @@ func buildBody(e Event) string {
 		"target": e.Target,
 	})
 	return string(buf)
+}
+
+// endpointLooksLikeURL returns true when the configured endpoint carries a
+// scheme (e.g. "http://host:4318/v1/logs"). Used to decide whether we should
+// route via WithEndpointURL (which parses the full URL) or WithEndpoint
+// (host:port only).
+func endpointLooksLikeURL(endpoint string) bool {
+	return strings.Contains(endpoint, "://")
+}
+
+// splitEndpointURL extracts host, path, and insecure (http scheme) from a
+// URL-form endpoint. Returns ok=false for non-URL inputs so callers can fall
+// back to treating the value as a bare host:port. Empty host is treated as
+// a parse failure because OTLP exporters require a host to dial.
+func splitEndpointURL(endpoint string) (host, path string, insecure, ok bool) {
+	if !endpointLooksLikeURL(endpoint) {
+		return "", "", false, false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", "", false, false
+	}
+	return u.Host, u.Path, strings.EqualFold(u.Scheme, "http"), true
 }

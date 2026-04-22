@@ -23,7 +23,7 @@ import (
 )
 
 func TestActivityPanelEmpty(t *testing.T) {
-	panel := NewActivityPanel(testTheme())
+	panel := NewActivityPanel(testTheme(), "")
 
 	if panel.Count() != 0 {
 		t.Errorf("expected Count()=0, got %d", panel.Count())
@@ -43,7 +43,7 @@ func TestActivityPanelEmpty(t *testing.T) {
 }
 
 func TestActivityPanelAddEntry(t *testing.T) {
-	panel := NewActivityPanel(testTheme())
+	panel := NewActivityPanel(testTheme(), "")
 
 	panel.AddEntry("scan skill my-agent")
 
@@ -59,7 +59,7 @@ func TestActivityPanelAddEntry(t *testing.T) {
 }
 
 func TestActivityPanelAppendOutput(t *testing.T) {
-	panel := NewActivityPanel(testTheme())
+	panel := NewActivityPanel(testTheme(), "")
 	panel.SetSize(80, 40)
 
 	panel.AppendOutput("stray line")
@@ -76,7 +76,7 @@ func TestActivityPanelAppendOutput(t *testing.T) {
 }
 
 func TestActivityPanelFinishEntry(t *testing.T) {
-	panel := NewActivityPanel(testTheme())
+	panel := NewActivityPanel(testTheme(), "")
 
 	panel.AddEntry("status")
 	panel.AppendOutput("All systems go")
@@ -88,7 +88,7 @@ func TestActivityPanelFinishEntry(t *testing.T) {
 }
 
 func TestActivityPanelMultipleEntries(t *testing.T) {
-	panel := NewActivityPanel(testTheme())
+	panel := NewActivityPanel(testTheme(), "")
 
 	panel.AddEntry("doctor")
 	panel.FinishEntry(0, 100*time.Millisecond)
@@ -111,7 +111,7 @@ func TestActivityPanelMultipleEntries(t *testing.T) {
 }
 
 func TestActivityPanelFinishEmptyNoOp(t *testing.T) {
-	panel := NewActivityPanel(testTheme())
+	panel := NewActivityPanel(testTheme(), "")
 	panel.FinishEntry(0, 0)
 	panel.AppendOutput("nothing")
 

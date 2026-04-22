@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // legacySchemaWithoutRunID is the pre-migration-2 schema (no run_id on audit_events / scan_results).
@@ -89,7 +91,13 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 	}
 }
 
-func TestLogEventRoundTripIncludesTraceID(t *testing.T) {
+// TestStoreObservabilityPhase6ColumnsPresent asserts that the
+// Phase 6 migration added the v6 observability columns (session_id,
+// agent_name, agent_instance_id, policy_id, destination_app,
+// tool_name, tool_id) to audit_events. Without these, the
+// gatewaylog → audit → SIEM pipeline silently drops the fields used
+// by /v1/agentwatch/summary top_tools + per-agent aggregations.
+func TestStoreObservabilityPhase6ColumnsPresent(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -99,12 +107,118 @@ func TestLogEventRoundTripIncludesTraceID(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	if err := store.LogEvent(Event{
-		Action:   "guardrail-inspection",
-		Target:   "gpt-4",
-		Details:  "trace-bearing event",
-		Severity: "HIGH",
-		TraceID:  "trace-123",
+	expected := []string{
+		"session_id",
+		"agent_name",
+		"agent_instance_id",
+		"policy_id",
+		"destination_app",
+		"tool_name",
+		"tool_id",
+	}
+	for _, col := range expected {
+		ok, err := store.hasColumn("audit_events", col)
+		if err != nil {
+			t.Fatalf("hasColumn(audit_events, %s): %v", col, err)
+		}
+		if !ok {
+			t.Fatalf("audit_events.%s missing — Phase 6 migration did not run", col)
+		}
+	}
+}
+
+// TestStoreLogEventRoundTripsPhase6Fields writes an Event with every
+// Phase 6 field populated and reads it back via ListEvents. All
+// fields must survive the sqlite round-trip unchanged — this is the
+// contract the audit bridge, Splunk HEC, and OTLP log sinks all rely
+// on.
+func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	in := Event{
+		Action:          "gateway-tool-call",
+		Target:          "github.create_pr",
+		Severity:        "INFO",
+		RunID:           "run-42",
+		TraceID:         "trace-42",
+		RequestID:       "req-42",
+		SessionID:       "sess-42",
+		AgentName:       "openclaw",
+		AgentInstanceID: "instance-42",
+		PolicyID:        "strict",
+		DestinationApp:  "mcp:github",
+		ToolName:        "github.create_pr",
+		ToolID:          "call_xyz",
+	}
+	if err := store.LogEvent(in); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	got := events[0]
+
+	cases := []struct {
+		name, got, want string
+	}{
+		{"RunID", got.RunID, in.RunID},
+		{"TraceID", got.TraceID, in.TraceID},
+		{"RequestID", got.RequestID, in.RequestID},
+		{"SessionID", got.SessionID, in.SessionID},
+		{"AgentName", got.AgentName, in.AgentName},
+		{"AgentInstanceID", got.AgentInstanceID, in.AgentInstanceID},
+		{"PolicyID", got.PolicyID, in.PolicyID},
+		{"DestinationApp", got.DestinationApp, in.DestinationApp},
+		{"ToolName", got.ToolName, in.ToolName},
+		{"ToolID", got.ToolID, in.ToolID},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s roundtrip: got %q want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestStoreLogEventAutoPopulatesSidecarInstanceID pins the v7 identity
+// contract: when a caller leaves SidecarInstanceID empty, the Logger
+// fills it from the process-wide value so every audit row carries a
+// stable per-sidecar identity. AgentInstanceID, by contrast, stays
+// empty — it is a per-SESSION identifier and must never be backfilled
+// from the process UUID (that was the v6 pitfall: session aggregates
+// collapsed under a single sidecar instance).
+func TestStoreLogEventAutoPopulatesSidecarInstanceID(t *testing.T) {
+	// Remember the process-wide value so we don't pollute other tests
+	// in this package (it's global state).
+	prev := ProcessAgentInstanceID()
+	t.Cleanup(func() { SetProcessAgentInstanceID(prev) })
+	SetProcessAgentInstanceID("proc-instance-id-abc")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	if err := logger.LogEvent(Event{
+		Action:   "gateway-tool-call",
+		Target:   "shell",
+		Severity: "INFO",
 	}); err != nil {
 		t.Fatalf("LogEvent: %v", err)
 	}
@@ -114,11 +228,121 @@ func TestLogEventRoundTripIncludesTraceID(t *testing.T) {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	if len(events) != 1 {
-		t.Fatalf("ListEvents returned %d rows, want 1", len(events))
+		t.Fatalf("want 1 event, got %d", len(events))
 	}
-	if got := events[0].TraceID; got != "trace-123" {
-		t.Fatalf("TraceID = %q, want %q", got, "trace-123")
+	if got := events[0].SidecarInstanceID; got != "proc-instance-id-abc" {
+		t.Errorf("SidecarInstanceID auto-fill = %q, want %q", got, "proc-instance-id-abc")
 	}
+	if got := events[0].AgentInstanceID; got != "" {
+		t.Errorf("AgentInstanceID leaked process id = %q (v6 regression: per-session must not inherit per-process)", got)
+	}
+}
+
+// TestStoreLogEventStampsProvenance pins the v7 provenance contract
+// at the store choke point. Every audit_events row must carry a
+// non-zero schema_version + a binary_version when those are unset by
+// the caller, so downstream SQLite readers can pivot on config
+// generation without scraping Details. Pre-stamped values must win
+// (historical replays stay stable), and both the config-hash and
+// generation flow through version.Current() so the whole process
+// shares a single consistent snapshot for the duration of a run.
+func TestStoreLogEventStampsProvenance(t *testing.T) {
+	// Pin a deterministic content hash + generation so the assertions
+	// are stable across parallel test runs and don't depend on
+	// whatever config.Save() ran before us.
+	version.SetContentHash([]byte("unit-provenance-test"))
+	version.SetBinaryVersion("unit-test-binary")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	t.Run("empty_envelope_auto_fills", func(t *testing.T) {
+		if err := store.LogEvent(Event{
+			Action:   "v7-provenance-empty",
+			Target:   "target-empty",
+			Severity: "INFO",
+		}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+		events, err := store.ListEvents(10)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		// Most recent event ordering: ListEvents returns
+		// newest-first in production. Fish out the one we care
+		// about by action so the test is order-agnostic.
+		var got Event
+		for _, e := range events {
+			if e.Action == "v7-provenance-empty" {
+				got = e
+				break
+			}
+		}
+		if got.Action == "" {
+			t.Fatalf("never found v7-provenance-empty audit row: %+v", events)
+		}
+		prov := version.Current()
+		if got.SchemaVersion != prov.SchemaVersion {
+			t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, prov.SchemaVersion)
+		}
+		if got.ContentHash != prov.ContentHash || got.ContentHash == "" {
+			t.Errorf("ContentHash = %q, want %q (non-empty)", got.ContentHash, prov.ContentHash)
+		}
+		if got.BinaryVersion != prov.BinaryVersion || got.BinaryVersion == "" {
+			t.Errorf("BinaryVersion = %q, want %q (non-empty)", got.BinaryVersion, prov.BinaryVersion)
+		}
+		// Generation is monotonic and may have been bumped by
+		// other tests; we only assert it round-trips into the row.
+		if got.Generation != prov.Generation {
+			t.Errorf("Generation = %d, want %d", got.Generation, prov.Generation)
+		}
+	})
+
+	t.Run("preserves_caller_supplied_values", func(t *testing.T) {
+		if err := store.LogEvent(Event{
+			Action:        "v7-provenance-preset",
+			Target:        "target-preset",
+			Severity:      "INFO",
+			SchemaVersion: 99,
+			ContentHash:   "frozen-hash",
+			Generation:    7,
+			BinaryVersion: "frozen-binary",
+		}); err != nil {
+			t.Fatalf("LogEvent: %v", err)
+		}
+		events, err := store.ListEvents(10)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		var got Event
+		for _, e := range events {
+			if e.Action == "v7-provenance-preset" {
+				got = e
+				break
+			}
+		}
+		if got.Action == "" {
+			t.Fatalf("never found v7-provenance-preset audit row: %+v", events)
+		}
+		if got.SchemaVersion != 99 {
+			t.Errorf("SchemaVersion = %d, want 99 (caller value overwritten)", got.SchemaVersion)
+		}
+		if got.ContentHash != "frozen-hash" {
+			t.Errorf("ContentHash = %q, want frozen-hash", got.ContentHash)
+		}
+		if got.Generation != 7 {
+			t.Errorf("Generation = %d, want 7", got.Generation)
+		}
+		if got.BinaryVersion != "frozen-binary" {
+			t.Errorf("BinaryVersion = %q, want frozen-binary", got.BinaryVersion)
+		}
+	})
 }
 
 func TestStoreLogEventUsesEnvRunID(t *testing.T) {

@@ -47,6 +47,12 @@ type OverviewPanel struct {
 	allowedMCPs   int
 	totalScans    int
 	activeAlerts  int
+	// silentBypass is the count of passthrough egress events in the
+	// last 5 minutes whose payload still looked like an LLM call.
+	// It's the one indicator that can flag "our guardrail doesn't
+	// know about this provider yet" before policy gets wrong. See
+	// SetSilentBypassCount + internal/tui/egress.go.
+	silentBypass int
 
 	// doctor is a cached copy of the most recent `defenseclaw
 	// doctor --json-output` run, loaded by the owning Model from
@@ -100,6 +106,28 @@ func (p *OverviewPanel) SetDoctorCache(c *DoctorCache) {
 func (p *OverviewPanel) DoctorCache() *DoctorCache {
 	return p.doctor
 }
+
+// SetSilentBypassCount plugs in the current window count of
+// allowed-but-not-triaged LLM egress events. Populated from
+// CountRecentSilentBypass in internal/tui/egress.go, which counts
+// the union of:
+//
+//	branch=passthrough + looks_like_llm=true + decision=allow
+//	branch=shape                              + decision=allow
+//
+// A non-zero value lights up a warning tile on the Overview panel so
+// operators see "unknown LLM provider slipped past" at a glance
+// without scrolling through the Alerts timeline.
+func (p *OverviewPanel) SetSilentBypassCount(n int) {
+	if n < 0 {
+		n = 0
+	}
+	p.silentBypass = n
+}
+
+// SilentBypassCount returns the currently rendered silent-bypass
+// count. Exposed primarily for tests.
+func (p *OverviewPanel) SilentBypassCount() int { return p.silentBypass }
 
 func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) error {
 	counts, err := store.GetCounts()
@@ -403,6 +431,17 @@ func (p *OverviewPanel) renderStatsBox(w int) string {
 	// Scans
 	scanBar := p.miniBar(p.totalScans, 1000, 20)
 	fmt.Fprintf(&content, " Total scans %s %s\n", p.theme.Clean.Render(fmt.Sprintf("%d", p.totalScans)), scanBar)
+
+	// Silent-bypass (shape/path-matching egress left uninspected).
+	// Only render when > 0 so a healthy install doesn't get an
+	// extra line of noise.
+	if p.silentBypass > 0 {
+		fmt.Fprintf(&content, " %s %s %s\n",
+			p.theme.Medium.Render("Silent bypass"),
+			p.theme.Critical.Render(fmt.Sprintf("%d", p.silentBypass)),
+			p.theme.Dimmed.Render("(see Alerts → egress)"),
+		)
+	}
 
 	content.WriteString(" ─────────────────────────\n")
 

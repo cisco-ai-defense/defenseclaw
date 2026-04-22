@@ -229,6 +229,73 @@ func TestLoggerSinkForwardingIncludesDefaultedFields(t *testing.T) {
 	}
 }
 
+// TestLoggerForwardsWhenStoreWriteFails locks in the v7 contract that
+// non-critical audit actions (lifecycle signals like sidecar-connected,
+// gateway-ready, watch-start) are still fanned out to sinks and the
+// structured emitter even when the local SQLite audit write fails.
+// Dropping the event entirely on a DB error was the root cause of the
+// "sidecar-connected missing from Splunk" incident — #127 — where the
+// sidecar successfully connected to the gateway but the transition
+// never reached Splunk because one of the concurrent SQLite writers
+// briefly held the write lock.
+func TestLoggerForwardsWhenStoreWriteFails(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+	// Force every subsequent LogEvent to return an error.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err = logger.LogAction("sidecar-connected", "", "protocol=3")
+	if err == nil {
+		t.Fatal("expected LogAction to surface the store error, got nil")
+	}
+
+	got := cs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected sink fan-out on db failure, got %d events", len(got))
+	}
+	if got[0].Action != "sidecar-connected" {
+		t.Fatalf("forwarded action = %q, want sidecar-connected", got[0].Action)
+	}
+}
+
+// TestLoggerDoesNotForwardCriticalActionsOnStoreFailure asserts the
+// other side of the v7 contract: block/allow/quarantine decisions must
+// NOT be fanned out when the SQLite row fails to persist, because the
+// local DB is the canonical source of truth for admission policy.
+// Forwarding those signals to Splunk without the on-disk twin would
+// make external auditors diverge from the runtime admission gate.
+func TestLoggerDoesNotForwardCriticalActionsOnStoreFailure(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := logger.LogAction("block", "some-skill", "reason=test"); err == nil {
+		t.Fatal("expected LogAction(block) to surface the store error, got nil")
+	}
+
+	if got := cs.snapshot(); len(got) != 0 {
+		t.Fatalf("block must NOT fan out when the audit row failed to persist; got %d events", len(got))
+	}
+}
+
 func TestLoggerSinkFlushesWatchStartImmediately(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
@@ -511,24 +578,31 @@ func TestLoggerRedactsFindingFieldsBeforeSQLite(t *testing.T) {
 	if len(scans) == 0 {
 		t.Fatal("expected a scan row")
 	}
-	findings, err := store.ListFindingsByScan(scans[0].ID)
+	findings, err := store.ListScanFindings(scans[0].ID)
 	if err != nil {
-		t.Fatalf("ListFindingsByScan: %v", err)
+		t.Fatalf("ListScanFindings: %v", err)
 	}
 	if len(findings) == 0 {
 		t.Fatal("expected a finding row")
 	}
 	f := findings[0]
+	desc := f.Description.String
+	loc := f.Location.String
+	rem := f.Remediation.String
+	title := ""
+	if f.Title.Valid {
+		title = f.Title.String
+	}
 	for _, needle := range []string{"123-45-6789", "4155551234", "alice@example.com"} {
-		if strings.Contains(f.Description, needle) ||
-			strings.Contains(f.Location, needle) ||
-			strings.Contains(f.Remediation, needle) {
+		if strings.Contains(desc, needle) ||
+			strings.Contains(loc, needle) ||
+			strings.Contains(rem, needle) {
 			t.Fatalf("SQLite finding leaked %q: desc=%q loc=%q rem=%q",
-				needle, f.Description, f.Location, f.Remediation)
+				needle, desc, loc, rem)
 		}
 	}
-	if f.Title != "PII detected" {
-		t.Fatalf("Title should be preserved verbatim; got %q", f.Title)
+	if title != "PII detected" {
+		t.Fatalf("Title should be preserved verbatim; got %q", title)
 	}
 }
 

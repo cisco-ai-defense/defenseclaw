@@ -272,6 +272,7 @@ func TestObservabilityPresets_MatchPythonRegistry(t *testing.T) {
 		"honeycomb":     true,
 		"newrelic":      true,
 		"grafana-cloud": true,
+		"local-otlp":    true,
 		"otlp":          true,
 		"webhook":       true,
 	}

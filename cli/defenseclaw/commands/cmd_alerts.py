@@ -31,6 +31,7 @@ import json
 
 import click
 
+from defenseclaw.audit_actions import ACTION_ACK_ALERTS, ACTION_DISMISS_ALERTS
 from defenseclaw.context import AppContext, pass_ctx
 
 # ---------------------------------------------------------------------------
@@ -185,10 +186,10 @@ def _render_table(alert_list: list, store) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI command
+# CLI command group (default = table view)
 # ---------------------------------------------------------------------------
 
-@click.command()
+@click.group("alerts", invoke_without_command=True)
 @click.option("-n", "--limit", default=25, help="Number of alerts to load")
 @click.option("--show", "show_idx", default=None, type=int,
               help="Print full details for alert # and exit (non-interactive)")
@@ -200,14 +201,19 @@ def _render_table(alert_list: list, store) -> None:
         "This flag now prints a deprecation notice and falls back to the table."
     ),
 )
-@pass_ctx
-def alerts(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None:
-    """View security alerts as a table.
+@click.pass_context
+def alerts(ctx: click.Context, limit: int, show_idx: int | None, tui: bool) -> None:
+    """View and manage security alerts."""
+    if ctx.invoked_subcommand is not None:
+        return
+    app = ctx.find_object(AppContext)
+    if app is None:
+        raise click.ClickException("internal error: AppContext missing")
+    _alerts_default(app, limit, show_idx, tui)
 
-    The interactive alerts view now lives in the Go-based TUI — launch
-    it with ``defenseclaw tui`` and press ``2`` to open the Alerts
-    panel. Use ``--show N`` for a scripted single-alert dump.
-    """
+
+def _alerts_default(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None:
+    """View security alerts as a table (legacy ``defenseclaw alerts``)."""
     if not app.store:
         click.echo("No audit store available. Run 'defenseclaw init' first.")
         return
@@ -218,7 +224,6 @@ def alerts(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None
         click.echo("No alerts. All clear.")
         return
 
-    # ---- --show <n>: non-interactive single-alert detail ----
     if show_idx is not None:
         if show_idx < 1 or show_idx > len(alert_list):
             click.echo(f"error: alert #{show_idx} not found (1–{len(alert_list)})", err=True)
@@ -250,9 +255,6 @@ def alerts(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None
                     click.echo(f" {f['title']}{loc}")
         return
 
-    # --tui is a no-op retained for backward-compat; emit a single-line
-    # deprecation notice on stderr so wrapper scripts still work but
-    # operators learn where the TUI moved.
     if tui:
         click.echo(
             "note: `defenseclaw alerts --tui` has been retired. "
@@ -261,3 +263,61 @@ def alerts(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None
         )
 
     _render_table(alert_list, app.store)
+
+
+@alerts.command("acknowledge")
+@click.option(
+    "--severity",
+    type=click.Choice(["all", "CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+    default="all",
+    show_default=True,
+    help="Limit which severities are acknowledged.",
+)
+@pass_ctx
+def alerts_acknowledge(app: AppContext, severity: str) -> None:
+    """Mark alerts as acknowledged (downgrades severity to ACK in the audit DB)."""
+    if not app.store:
+        raise click.ClickException("No audit store — run 'defenseclaw init' first.")
+    before = {"open_severities": severity}
+    n = app.store.acknowledge_alerts("all" if severity == "all" else severity)
+    after = {"acknowledged_rows": n}
+    if app.logger:
+        app.logger.log_activity(
+            actor="cli:operator",
+            action=ACTION_ACK_ALERTS,
+            target_type="alert",
+            target_id="audit_events",
+            before=before,
+            after=after,
+            diff=[{"path": "/alerts", "op": "replace", "before": before, "after": after}],
+        )
+    click.echo(f"Acknowledged {n} alert(s).")
+
+
+@alerts.command("dismiss")
+@click.option(
+    "--severity",
+    type=click.Choice(["all", "CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+    default="all",
+    show_default=True,
+    help="Limit which severities are cleared from the active list.",
+)
+@pass_ctx
+def alerts_dismiss(app: AppContext, severity: str) -> None:
+    """Dismiss alerts from the active operator view (same DB update as acknowledge)."""
+    if not app.store:
+        raise click.ClickException("No audit store — run 'defenseclaw init' first.")
+    before = {"visible_severities": severity}
+    n = app.store.dismiss_alerts_visible("all" if severity == "all" else severity)
+    after = {"cleared_rows": n}
+    if app.logger:
+        app.logger.log_activity(
+            actor="cli:operator",
+            action=ACTION_DISMISS_ALERTS,
+            target_type="alert",
+            target_id="audit_events",
+            before=before,
+            after=after,
+            diff=[{"path": "/alerts", "op": "replace", "before": before, "after": after}],
+        )
+    click.echo(f"Dismissed {n} alert(s) from the active list.")

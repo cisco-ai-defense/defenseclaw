@@ -160,7 +160,11 @@ class TestCLIFlagParsing(unittest.TestCase):
         # regex matches when enabled; per-direction overrides stay empty.
         self.assertEqual(gc.detection_strategy, "regex_judge")
         self.assertEqual(gc.detection_strategy_prompt, "")
-        self.assertFalse(gc.judge_sweep)
+        # judge_sweep defaults to True as of the multi-provider-adapters
+        # PR — see cli/defenseclaw/config.py and docs/GUARDRAIL.md for
+        # the reasoning (semantic-only evasions dominate the regex-only
+        # false-negative rate). Operators opt out explicitly.
+        self.assertTrue(gc.judge_sweep)
         self.assertEqual(gc.rule_pack_dir, "")
 
     def test_guardrail_full_yaml_roundtrip(self):

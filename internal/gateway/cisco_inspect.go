@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,8 +26,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 var defaultEnabledRules = []map[string]string{
@@ -51,6 +57,39 @@ type CiscoInspectClient struct {
 	timeout      time.Duration
 	enabledRules []map[string]string
 	client       *http.Client
+	tel          *telemetry.Provider
+}
+
+// SetTelemetry wires OTel metrics (optional). Called from NewGuardrailProxy.
+func (c *CiscoInspectClient) SetTelemetry(p *telemetry.Provider) {
+	if c == nil {
+		return
+	}
+	c.tel = p
+}
+
+// EmitCiscoError records a structured gateway error + optional metric for Cisco Inspect.
+// ctx supplies request correlation (request_id / session_id / trace_id)
+// and agent identity; pass context.Background() only from boot / test
+// harnesses where no request exists. Routes through emitError so the
+// stampEventCorrelation choke point populates the envelope.
+func EmitCiscoError(ctx context.Context, tel *telemetry.Provider, code gatewaylog.ErrorCode, detail string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var cause error
+	if detail != "" {
+		cause = fmt.Errorf("%s", detail)
+	}
+	emitError(ctx,
+		string(gatewaylog.SubsystemCiscoInspect),
+		string(code),
+		"cisco ai defense inspect",
+		cause,
+	)
+	if tel != nil {
+		tel.RecordCiscoError(ctx, string(code))
+	}
 }
 
 // NewCiscoInspectClient creates a client from the config. Returns nil if no
@@ -110,6 +149,20 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 	}
 
 	url := c.endpoint + "/api/v1/inspect/chat"
+	ctx := context.Background()
+	var span trace.Span
+	if c.tel != nil && c.tel.TracesEnabled() {
+		ctx, span = c.tel.Tracer().Start(ctx, "cisco.inspect.chat")
+		span.SetAttributes(
+			attribute.String("http.request.method", http.MethodPost),
+			attribute.String("url.full", url),
+		)
+	}
+	defer func() {
+		if span != nil {
+			span.End()
+		}
+	}()
 
 	// Retry once without rules config if the key has pre-configured rules.
 	triedWithoutRules := false
@@ -127,14 +180,27 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("X-Cisco-AI-Defense-API-Key", c.apiKey)
 
+		start := time.Now()
 		resp, err := c.client.Do(req)
 		if err != nil {
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: %v\n", err)
+			if c.tel != nil {
+				c.tel.RecordCiscoInspectLatency(ctx, float64(time.Since(start).Milliseconds()), "upstream-error")
+			}
+			EmitCiscoError(ctx, c.tel, gatewaylog.ErrCodeUpstreamError, err.Error())
 			return nil
 		}
 
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		resp.Body.Close()
+		elapsedMs := float64(time.Since(start).Milliseconds())
+		if c.tel != nil {
+			outcome := "success"
+			if resp.StatusCode != http.StatusOK {
+				outcome = fmt.Sprintf("http-%d", resp.StatusCode)
+			}
+			c.tel.RecordCiscoInspectLatency(ctx, elapsedMs, outcome)
+		}
 
 		if resp.StatusCode == http.StatusBadRequest && !triedWithoutRules {
 			lower := strings.ToLower(string(respBody))
@@ -148,21 +214,17 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			// Cisco AI Defense error responses echo the
-			// offending prompt back in their `detail` field
-			// when input validation trips upstream. Treat
-			// the body as untrusted message content and
-			// redact before logging to stderr. The byte
-			// cap remains so pathological responses can't
-			// flood logs regardless of Reveal state.
 			bodySnippet := string(respBody[:minInt(len(respBody), 200)])
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: HTTP %d: %s\n",
 				resp.StatusCode, redaction.MessageContent(bodySnippet))
+			EmitCiscoError(ctx, c.tel, gatewaylog.ErrCodeInvalidResponse,
+				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, redaction.MessageContent(bodySnippet)))
 			return nil
 		}
 
 		var data map[string]interface{}
 		if err := json.Unmarshal(respBody, &data); err != nil {
+			EmitCiscoError(ctx, c.tel, gatewaylog.ErrCodeInvalidResponse, "json: "+err.Error())
 			return nil
 		}
 		return normalizeCiscoResponse(data)

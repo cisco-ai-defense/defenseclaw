@@ -123,6 +123,7 @@ class PresetRegistryTests(unittest.TestCase):
         "honeycomb",
         "newrelic",
         "grafana-cloud",
+        "local-otlp",
         "otlp",
         "webhook",
     }

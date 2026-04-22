@@ -85,6 +85,26 @@ type ToolCallPayload struct {
 	Tool   string          `json:"tool"`
 	Args   json.RawMessage `json:"args,omitempty"`
 	Status string          `json:"status,omitempty"`
+	// ID is the provider-assigned tool_call identifier (e.g. the
+	// OpenAI tool_call_id). Required for cross-event correlation in
+	// /v1/agentwatch/summary top_tools aggregation and for joining
+	// tool_call + tool_result rows in downstream SIEMs. Optional at
+	// the wire level — legacy OpenClaw streams that do not carry a
+	// callId leave it blank.
+	ID string `json:"id,omitempty"`
+	// SessionID is the OpenClaw session/conversation key this tool
+	// call belongs to. Populated by the router when synthesizing a
+	// tool_call from a session.tool / session.message envelope; raw
+	// tool_call frames that arrive without a session context leave
+	// it empty.
+	SessionID string `json:"session_id,omitempty"`
+	// RunID is the OpenClaw run identifier (one per agent invocation).
+	// Same population rules as SessionID.
+	RunID string `json:"run_id,omitempty"`
+	// AgentName is the name of the agent the tool call runs under
+	// (from the incoming stream or from cfg.Claw.Mode). Empty when
+	// the caller did not supply one.
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 // ToolResultPayload is the payload of a tool_result event.
@@ -92,6 +112,14 @@ type ToolResultPayload struct {
 	Tool     string `json:"tool"`
 	Output   string `json:"output,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
+	// ID pairs a tool_result with the tool_call that produced it.
+	// See ToolCallPayload.ID for the semantics and wire-level
+	// optionality. When blank, SIEMs fall back to joining on Tool
+	// name + temporal proximity (lossy but preserves legacy behavior).
+	ID        string `json:"id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
 }
 
 // ApprovalRequestPayload is the payload of an exec.approval.requested event.

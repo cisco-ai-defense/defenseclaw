@@ -42,9 +42,11 @@ class Finding:
     remediation: str = ""
     scanner: str = ""
     tags: list[str] = field(default_factory=list)
+    rule_id: str = ""
+    line_number: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "severity": self.severity,
             "title": self.title,
@@ -54,6 +56,11 @@ class Finding:
             "scanner": self.scanner,
             "tags": self.tags,
         }
+        if self.rule_id:
+            d["rule_id"] = self.rule_id
+        if self.line_number is not None:
+            d["line_number"] = self.line_number
+        return d
 
 
 @dataclass

@@ -119,6 +119,60 @@ CREATE INDEX IF NOT EXISTS idx_egress_session ON network_egress_events(session_i
 CREATE INDEX IF NOT EXISTS idx_snapshots_target ON target_snapshots(target_type, target_path);
 """
 
+# v7 tables (mirrors Go migrations 8–9). Created idempotently for CLI tests
+# against DBs that were not opened by the Go sidecar yet.
+_V7_EXTRA_DDL = """
+CREATE TABLE IF NOT EXISTS activity_events (
+    id TEXT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    reason TEXT,
+    before_json TEXT,
+    after_json TEXT,
+    diff_json TEXT,
+    version_from TEXT,
+    version_to TEXT,
+    request_id TEXT,
+    trace_id TEXT,
+    run_id TEXT,
+    schema_version INTEGER,
+    content_hash TEXT,
+    generation INTEGER,
+    binary_version TEXT,
+    agent_id TEXT,
+    sidecar_instance_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_activity_actor ON activity_events(actor);
+CREATE INDEX IF NOT EXISTS idx_activity_action ON activity_events(action);
+CREATE INDEX IF NOT EXISTS idx_activity_target ON activity_events(target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_activity_generation ON activity_events(generation);
+CREATE TABLE IF NOT EXISTS sink_health (
+    id TEXT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    sink_name TEXT NOT NULL,
+    sink_kind TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    status_code INTEGER,
+    latency_ms INTEGER,
+    batch_size INTEGER,
+    error TEXT,
+    queue_depth INTEGER,
+    dropped_count INTEGER,
+    schema_version INTEGER,
+    content_hash TEXT,
+    generation INTEGER,
+    binary_version TEXT,
+    sidecar_instance_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sink_health_timestamp ON sink_health(timestamp);
+CREATE INDEX IF NOT EXISTS idx_sink_health_sink ON sink_health(sink_name);
+CREATE INDEX IF NOT EXISTS idx_sink_health_outcome ON sink_health(outcome);
+"""
+
 _VALID_FIELDS: dict[str, set[str]] = {
     "install": {"", "block", "allow", "none"},
     "file": {"", "quarantine", "none"},
@@ -146,6 +200,7 @@ class Store:
         self.db.executescript(SCHEMA)
         self._ensure_run_id_columns()
         self._migrate_old_lists()
+        self._ensure_v7_tables()
 
     def close(self) -> None:
         self.db.close()
@@ -196,6 +251,78 @@ class Store:
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
         self.db.commit()
 
+    def _ensure_v7_tables(self) -> None:
+        self.db.executescript(_V7_EXTRA_DDL)
+        self.db.commit()
+
+    def insert_activity_event(
+        self,
+        activity_id: str,
+        *,
+        actor: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        reason: str = "",
+        before_json: str = "",
+        after_json: str = "",
+        diff_json: str = "",
+        version_from: str = "",
+        version_to: str = "",
+        run_id: str = "",
+    ) -> None:
+        ts = datetime.now(timezone.utc).isoformat()
+        rid = run_id or _current_run_id()
+        self.db.execute(
+            """INSERT INTO activity_events (
+                id, timestamp, actor, action, target_type, target_id, reason,
+                before_json, after_json, diff_json, version_from, version_to,
+                run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                activity_id,
+                ts,
+                actor,
+                action,
+                target_type,
+                target_id,
+                reason or None,
+                before_json or None,
+                after_json or None,
+                diff_json or None,
+                version_from or None,
+                version_to or None,
+                rid or None,
+            ),
+        )
+        self.db.commit()
+
+    def get_activity_event(self, activity_id: str) -> dict[str, Any] | None:
+        cur = self.db.execute(
+            """SELECT id, timestamp, actor, action, target_type, target_id, reason,
+                      before_json, after_json, diff_json, version_from, version_to, run_id
+               FROM activity_events WHERE id = ?""",
+            (activity_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "timestamp": row[1],
+            "actor": row[2],
+            "action": row[3],
+            "target_type": row[4],
+            "target_id": row[5],
+            "reason": row[6] or "",
+            "before_json": row[7] or "",
+            "after_json": row[8] or "",
+            "diff_json": row[9] or "",
+            "version_from": row[10] or "",
+            "version_to": row[11] or "",
+            "run_id": row[12] or "",
+        }
+
     # -- Audit events --
 
     def log_event(self, event: Event) -> None:
@@ -234,6 +361,25 @@ class Store:
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
+
+    def acknowledge_alerts(self, severity_filter: str = "all") -> int:
+        """Mirror internal/audit/store.go AcknowledgeAlerts — rows updated."""
+        if severity_filter in ("", "all"):
+            cur = self.db.execute(
+                """UPDATE audit_events SET severity = 'ACK'
+                   WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')""",
+            )
+        else:
+            cur = self.db.execute(
+                "UPDATE audit_events SET severity = 'ACK' WHERE severity = ?",
+                (severity_filter,),
+            )
+        self.db.commit()
+        return int(cur.rowcount or 0)
+
+    def dismiss_alerts_visible(self, severity_filter: str = "all") -> int:
+        """Clear visible alerts by downgrading severity (parity with acknowledge for SQLite schema)."""
+        return self.acknowledge_alerts(severity_filter)
 
     # -- Scan results --
 
