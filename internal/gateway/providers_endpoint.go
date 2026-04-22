@@ -111,9 +111,9 @@ func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":         "ok",
-		"provider_count": providerCount,
-		"overlay_path":   configs.CustomProvidersPath(),
+		"status":          "ok",
+		"provider_count":  providerCount,
+		"overlay_path":    configs.CustomProvidersPath(),
 		"overlay_applied": overlayExists(configs.CustomProvidersPath()),
 	})
 }

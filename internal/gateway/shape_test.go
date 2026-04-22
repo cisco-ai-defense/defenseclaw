@@ -79,16 +79,16 @@ func TestIsLLMShapedBodyCapsAtSixtyFourKiB(t *testing.T) {
 
 func TestIsLLMPathSuffix(t *testing.T) {
 	cases := map[string]bool{
-		"https://api.openai.com/v1/chat/completions":      true,
-		"https://api.anthropic.com/v1/messages":           true,
+		"https://api.openai.com/v1/chat/completions":                                     true,
+		"https://api.anthropic.com/v1/messages":                                          true,
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent": true,
 		"https://bedrock-runtime.us-east-1.amazonaws.com/model/foo/converse":             true,
-		"http://localhost:11434/api/chat":                 true,
-		"https://api.openai.com/v1/responses":             true,
-		"https://github.com/foo/bar":                      false,
-		"https://registry.npmjs.org/express":              false,
-		"":                                                false,
-		"://broken-url":                                   false,
+		"http://localhost:11434/api/chat":                                                true,
+		"https://api.openai.com/v1/responses":                                            true,
+		"https://github.com/foo/bar":                                                     false,
+		"https://registry.npmjs.org/express":                                             false,
+		"":                                                                               false,
+		"://broken-url":                                                                  false,
 	}
 	for u, want := range cases {
 		if got := isLLMPathSuffix(u); got != want {
@@ -99,14 +99,14 @@ func TestIsLLMPathSuffix(t *testing.T) {
 
 func TestIsKnownSafeDomain(t *testing.T) {
 	cases := map[string]bool{
-		"https://github.com/foo":                          true,
-		"https://raw.githubusercontent.com/foo":           true,
-		"https://sub.sentry.io/"+`x`:                       true,
-		"https://registry.npmjs.org/express":              true,
-		"https://api.openai.com/v1/chat/completions":      false,
-		"https://api.anthropic.com/v1/messages":           false,
-		"http://localhost:11434/api/chat":                 false,
-		"":                                                false,
+		"https://github.com/foo":                     true,
+		"https://raw.githubusercontent.com/foo":      true,
+		"https://sub.sentry.io/" + `x`:               true,
+		"https://registry.npmjs.org/express":         true,
+		"https://api.openai.com/v1/chat/completions": false,
+		"https://api.anthropic.com/v1/messages":      false,
+		"http://localhost:11434/api/chat":            false,
+		"":                                           false,
 	}
 	for u, want := range cases {
 		if got := isKnownSafeDomain(u); got != want {
@@ -117,20 +117,20 @@ func TestIsKnownSafeDomain(t *testing.T) {
 
 func TestIsPrivateHost(t *testing.T) {
 	cases := map[string]bool{
-		"10.0.0.1":               true,
-		"10.0.0.1:8080":          true,
-		"127.0.0.1":              true,
-		"127.0.0.1:80":           true,
-		"169.254.169.254":        true, // cloud IMDS
-		"192.168.1.5":            true,
-		"[::1]:8080":             true,
-		"::1":                    true,
-		"fe80::1":                true,
-		"1.2.3.4":                false,
-		"8.8.8.8":                false,
-		"api.openai.com":         false, // hostname, not IP literal
-		"api.openai.com:443":     false,
-		"":                       false,
+		"10.0.0.1":           true,
+		"10.0.0.1:8080":      true,
+		"127.0.0.1":          true,
+		"127.0.0.1:80":       true,
+		"169.254.169.254":    true, // cloud IMDS
+		"192.168.1.5":        true,
+		"[::1]:8080":         true,
+		"::1":                true,
+		"fe80::1":            true,
+		"1.2.3.4":            false,
+		"8.8.8.8":            false,
+		"api.openai.com":     false, // hostname, not IP literal
+		"api.openai.com:443": false,
+		"":                   false,
 	}
 	for h, want := range cases {
 		if got := isPrivateHost(h); got != want {
