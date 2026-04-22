@@ -1424,35 +1424,36 @@ func lastUserText(messages []ChatMessage) string {
 // ("Read HEARTBEAT.md") + expects "HEARTBEAT_OK" back; flagging it as prompt
 // injection is a false positive.
 //
-// Bypass conditions are intentionally narrow:
+// The bypass is keyed STRICTLY on the current user turn (userText).
+// `messages` is intentionally ignored — a past turn's "HEARTBEAT_OK"
+// assistant reply left in the conversation history must NEVER enable a
+// bypass for the next turn, otherwise the very first heartbeat handshake
+// would disarm guardrail inspection for the entire rest of the session.
+// That was the v0.2.0 regression; see PR #127.
 //
-//   - The current user turn must reference the canonical probe file
+// Bypass conditions (all must hold):
+//
+//   - The current user turn references the canonical probe file
 //     "HEARTBEAT.md" (not merely the response token "HEARTBEAT_OK",
-//     which an attacker could easily append to an injection payload),
-//     and the turn itself must stay within maxHeartbeatProbeLen. The
-//     probe body is ~170 chars on its own but messaging bridges
+//     which an attacker could easily append to an injection payload).
+//
+//   - The current turn stays within maxHeartbeatProbeLen. The probe
+//     body is ~170 chars on its own but messaging bridges
 //     (WhatsApp/Teams) routinely prepend a transport banner and timing
 //     metadata, pushing the legitimate probe to several hundred chars —
-//     so we only cap the *current* turn, not the accumulated history.
+//     so we cap generously but still cap so an attacker cannot smuggle
+//     an arbitrarily large payload past the guardrail by including
+//     "HEARTBEAT.md" somewhere in it.
 //
-//   - Alternatively, an assistant message is literally "HEARTBEAT_OK"
-//     (after trimming). This is the expected terse reply; anything
-//     longer is not a heartbeat response and must go through normal
-//     inspection.
-func isHeartbeatMessage(userText string, messages []ChatMessage) bool {
+// This function is called only from the pre-call prompt inspection
+// site in handlePassthrough / handleChatCompletion; completion-side
+// inspection does not consult it.
+func isHeartbeatMessage(userText string, _ []ChatMessage) bool {
 	const maxHeartbeatProbeLen = 2048
-	if containsHeartbeatProbeSignature(userText) {
-		return len(userText) <= maxHeartbeatProbeLen
+	if !containsHeartbeatProbeSignature(userText) {
+		return false
 	}
-	for _, m := range messages {
-		if isHeartbeatOKResponse(m) {
-			return true
-		}
-		if m.Role == "user" && containsHeartbeatProbeSignature(m.Content) {
-			return len(m.Content) <= maxHeartbeatProbeLen
-		}
-	}
-	return false
+	return len(userText) <= maxHeartbeatProbeLen
 }
 
 // containsHeartbeatProbeSignature reports whether s references the probe
@@ -1461,20 +1462,6 @@ func isHeartbeatMessage(userText string, messages []ChatMessage) bool {
 // "HEARTBEAT_OK" to an otherwise malicious prompt.
 func containsHeartbeatProbeSignature(s string) bool {
 	return strings.Contains(strings.ToUpper(s), "HEARTBEAT.MD")
-}
-
-// isHeartbeatOKResponse reports whether m is an assistant turn that is
-// literally "HEARTBEAT_OK". Length is bounded so padding cannot ride on
-// the bypass.
-func isHeartbeatOKResponse(m ChatMessage) bool {
-	if m.Role != "assistant" {
-		return false
-	}
-	trimmed := strings.TrimSpace(m.Content)
-	if len(trimmed) > 32 {
-		return false
-	}
-	return strings.EqualFold(trimmed, "HEARTBEAT_OK")
 }
 
 // ---------------------------------------------------------------------------
