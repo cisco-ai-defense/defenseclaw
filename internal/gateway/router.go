@@ -274,6 +274,38 @@ func (r *EventRouter) logStreamAction(sessionKey, action, target, details string
 	_ = r.logger.LogActionCtx(ctx, action, target, details)
 }
 
+// logStreamToolAction is the tool-scoped analogue of logStreamAction.
+// Tool events need more than the generic session-level envelope —
+// downstream SQLite / aggregate readers (top_tools in
+// /v1/agentwatch/summary, tool_history per session) depend on
+// destination_app, tool_name, and tool_id being persisted explicitly
+// rather than parsed out of the free-form Details string. This helper
+// merges those three dimensions on top of the session envelope
+// produced by streamEnvelope and hands off through LogActionCtx so
+// the emission path matches the HTTP surface byte-for-byte.
+//
+// destination_app defaults to "builtin": the Bifrost wire schema
+// (ToolCallPayload / ToolResultPayload) does not carry a provider
+// field, and every stream-delivered tool call today is an OpenClaw
+// built-in. When a multi-provider stream shape appears (MCP-over-
+// Bifrost, skill-over-Bifrost), extend the payload first, then plumb
+// a provider/qualifier pair through here via toolDestinationApp.
+func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, details string) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	env := audit.MergeEnvelope(
+		r.streamEnvelope(context.Background(), sessionKey),
+		audit.CorrelationEnvelope{
+			DestinationApp: "builtin",
+			ToolName:       toolName,
+			ToolID:         toolID,
+		},
+	)
+	ctx := audit.ContextWithEnvelope(context.Background(), env)
+	_ = r.logger.LogActionCtx(ctx, action, toolName, details)
+}
+
 // SetRulePack configures the guardrail rule pack for tool result inspection.
 func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
 	r.rp = rp
@@ -1078,14 +1110,14 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		return
 	}
 
-	r.logStreamAction(payload.SessionID, "gateway-tool-call", payload.Tool,
+	r.logStreamToolAction(payload.SessionID, "gateway-tool-call", payload.Tool, payload.ID,
 		fmt.Sprintf("status=%s args_length=%d", payload.Status, len(payload.Args)))
 
 	// Static block list — checked before any pattern scanning.
 	if r.policy != nil {
 		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
-			r.logStreamAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, "reason=static-block-list")
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID, "reason=static-block-list")
 			vctx := ContextWithSessionID(context.Background(), payload.SessionID)
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", "static block list",
@@ -1104,7 +1136,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	flaggedPattern := ""
 	if dangerous {
 		flaggedPattern = findings[0].RuleID
-		r.logStreamAction(payload.SessionID, "gateway-tool-call-flagged", payload.Tool,
+		r.logStreamToolAction(payload.SessionID, "gateway-tool-call-flagged", payload.Tool, payload.ID,
 			fmt.Sprintf("reason=%s severity=%s confidence=%.2f",
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
@@ -1126,7 +1158,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// The semaphore bounds concurrent judge executions while queued goroutines
 	// wait for a slot instead of dropping inspection entirely.
 	if r.judge != nil && len(payload.Args) > 0 {
-		go func(tool, sessionID string, args json.RawMessage) {
+		go func(tool, sessionID, toolID string, args json.RawMessage) {
 			r.judgeSem <- struct{}{}
 			defer func() { <-r.judgeSem }()
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1142,7 +1174,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				// persistent sink.
 				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
 					tool, verdict.Severity, redaction.Reason(verdict.Reason))
-				r.logStreamAction(sessionID, "gateway-tool-call-judge-flagged", tool,
+				r.logStreamToolAction(sessionID, "gateway-tool-call-judge-flagged", tool, toolID,
 					fmt.Sprintf("severity=%s findings=%d reason=%s",
 						verdict.Severity, len(verdict.Findings),
 						redaction.ForSinkReason(verdict.Reason)))
@@ -1150,7 +1182,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
 				}
 			}
-		}(payload.Tool, payload.SessionID, payload.Args)
+		}(payload.Tool, payload.SessionID, payload.ID, payload.Args)
 	}
 
 	if r.otel != nil {
@@ -1214,7 +1246,7 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 		exitCode = *payload.ExitCode
 	}
 
-	r.logStreamAction(payload.SessionID, "gateway-tool-result", payload.Tool,
+	r.logStreamToolAction(payload.SessionID, "gateway-tool-result", payload.Tool, payload.ID,
 		fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
 
 	r.inspectToolResult(payload)
@@ -1318,7 +1350,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
 		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
-	r.logStreamAction(payload.SessionID, "tool-result-pii-alert", payload.Tool,
+	r.logStreamToolAction(payload.SessionID, "tool-result-pii-alert", payload.Tool, payload.ID,
 		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
 			verdict.Severity, entityCount, len(verdict.Findings),
 			redaction.ForSinkReason(verdict.Reason)))

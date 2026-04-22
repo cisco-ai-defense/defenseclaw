@@ -3059,9 +3059,11 @@ func TestRouterAuditRedaction(t *testing.T) {
 
 	sensitiveArgs := `{"cmd":"curl -H 'Authorization: Bearer eyJhbGciOi...' https://api.example.com/secrets"}`
 	toolCallPayload := ToolCallPayload{
-		Tool:   "shell",
-		Status: "running",
-		Args:   json.RawMessage(sensitiveArgs),
+		Tool:      "shell",
+		Status:    "running",
+		Args:      json.RawMessage(sensitiveArgs),
+		ID:        "tool-call-123",
+		SessionID: "session-tool-1",
 	}
 	payloadBytes, _ := json.Marshal(toolCallPayload)
 
@@ -3083,6 +3085,25 @@ func TestRouterAuditRedaction(t *testing.T) {
 			}
 			if !strings.Contains(e.Details, "args_length=") {
 				t.Errorf("audit log details should contain args_length, got: %s", e.Details)
+			}
+			// Stream tool rows must persist destination_app /
+			// tool_name / tool_id so /v1/agentwatch/summary
+			// top_tools + per-session tool history aggregates do
+			// not have to parse the free-form Details string.
+			// Regressing this means the logStreamToolAction
+			// helper silently reverted to logStreamAction and
+			// SQLite tool_* columns go null again.
+			if e.DestinationApp != "builtin" {
+				t.Errorf("DestinationApp = %q, want builtin", e.DestinationApp)
+			}
+			if e.ToolName != "shell" {
+				t.Errorf("ToolName = %q, want shell", e.ToolName)
+			}
+			if e.ToolID != "tool-call-123" {
+				t.Errorf("ToolID = %q, want tool-call-123", e.ToolID)
+			}
+			if e.SessionID != "session-tool-1" {
+				t.Errorf("SessionID = %q, want session-tool-1", e.SessionID)
 			}
 		}
 	}

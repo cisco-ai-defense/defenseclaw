@@ -96,6 +96,22 @@ Empty values are omitted (never sent as `""`) to keep SQLite rows sparse rather 
 
 **Breaking change vs v6:** Do not treat `agent_instance_id` as interchangeable with `sidecar_instance_id`. They answer different questions (who ran vs which binary emitted).
 
+### `agent_id` resolution (operator contract)
+
+`AgentRegistry.Resolve` (`internal/gateway/agent_registry.go`) is intentionally strict about the logical id and only reads from, in order:
+
+1. `X-DefenseClaw-Agent-Id` request header (plugin-supplied per request).
+2. `agent.id` in `~/.defenseclaw/config.yaml` (process-wide default).
+
+It does **not** fall back to `agent_name`, the claw-mode string, or stream-provided agent hints. This is by design — `agent_id` is a join key for downstream SIEMs and must be stable across sidecar restarts, which `agent_name` (human label) and `claw.mode` (framework id) are not.
+
+Consequence for operators: if neither source is set, every runtime audit row will carry `agent_id = ""` while still stamping `agent_name`, `agent_instance_id`, and `sidecar_instance_id` normally. To populate `agent_id`:
+
+- **Plugin-scoped (recommended):** set `X-DefenseClaw-Agent-Id` on the fetch interceptor's correlation headers. The OpenClaw plugin already pulls this from its identity cache; verify with `defenseclaw doctor` that `agent.id` is resolved.
+- **Sidecar-scoped fallback:** set `agent.id: <your-logical-id>` in `~/.defenseclaw/config.yaml` so every event the sidecar emits (boot, admission, scan) carries the same id even before a plugin request lands.
+
+An empty `agent_id` on runtime rows is a config signal, not a code regression.
+
 ---
 
 ## Nullability (summary)
