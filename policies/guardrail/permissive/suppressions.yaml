@@ -14,6 +14,16 @@ pre_judge_strips:
     context: "Local development URLs are not exfiltration targets"
     applies_to: [pii, injection]
 
+  - id: STRIP-MESSAGING-BRIDGE-STATUS
+    pattern: '(?im)^[ \t]*System:[ \t]*\[[^\]\n]+\][ \t]+[^\n]*?\b(?:connected|disconnected|reconnected|linked|unlinked|online|offline)\b[^\n]*$'
+    context: "Messaging bridge status banners (WhatsApp/Telegram/Slack/Discord gateway connect/disconnect lines) embed channel IDs or phone numbers that are transport metadata, not user-provided PII"
+    applies_to: [pii]
+
+  - id: STRIP-MESSAGING-BRIDGE-TIMESTAMP
+    pattern: '(?m)^[ \t]*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[ \t]+\d{4}-\d{2}-\d{2}[ \t]+\d{1,2}:\d{2}(?::\d{2})?(?:[ \t]+[A-Z]{2,5})?\][ \t]*'
+    context: "Per-message timestamp prefix injected by messaging bridges (e.g. [Wed 2026-04-22 12:03 EDT]) — not user content"
+    applies_to: [pii]
+
 finding_suppressions:
   - id: SUPP-USERNAME-METADATA
     finding_pattern: JUDGE-PII-USER

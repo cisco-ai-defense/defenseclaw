@@ -1,6 +1,7 @@
 package guardrail
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -100,6 +101,87 @@ func TestPreJudgeStripContent(t *testing.T) {
 			t.Errorf("got %q, want test", got)
 		}
 	})
+}
+
+// TestPreJudgeStripContent_MessagingBridgeBanners covers the regression
+// where WhatsApp / Teams / Slack style gateway status banners embedded
+// a phone number or channel ID that the PII judge flagged on every
+// benign user turn (e.g. a one-word "great" reply was blocked). The
+// status line is transport metadata and must be stripped before the
+// PII judge sees it. The injection judge is intentionally NOT covered
+// by these strips so a genuine prompt-injection attempt that happens
+// to reuse the "System: [...]" prefix is still evaluated in full.
+func TestPreJudgeStripContent_MessagingBridgeBanners(t *testing.T) {
+	strips := []PreJudgeStrip{
+		{
+			ID:        "STRIP-MESSAGING-BRIDGE-STATUS",
+			Pattern:   `(?im)^[ \t]*System:[ \t]*\[[^\]\n]+\][ \t]+[^\n]*?\b(?:connected|disconnected|reconnected|linked|unlinked|online|offline)\b[^\n]*$`,
+			AppliesTo: []string{"pii"},
+		},
+		{
+			ID:        "STRIP-MESSAGING-BRIDGE-TIMESTAMP",
+			Pattern:   `(?m)^[ \t]*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[ \t]+\d{4}-\d{2}-\d{2}[ \t]+\d{1,2}:\d{2}(?::\d{2})?(?:[ \t]+[A-Z]{2,5})?\][ \t]*`,
+			AppliesTo: []string{"pii"},
+		},
+	}
+
+	cases := []struct {
+		name     string
+		input    string
+		wantGone []string
+		wantKeep []string
+	}{
+		{
+			name: "whatsapp connect banner + timestamped user reply",
+			input: "System: [2026-04-22 12:03:21 EDT] WhatsApp gateway connected as +12069795695.\n" +
+				"[Wed 2026-04-22 12:03 EDT] great",
+			wantGone: []string{"+12069795695", "WhatsApp gateway", "Wed 2026-04-22"},
+			wantKeep: []string{"great"},
+		},
+		{
+			name:     "whatsapp disconnect banner with status code",
+			input:    "System: [2026-04-22 08:07:02 EDT] WhatsApp gateway disconnected (status 499)",
+			wantGone: []string{"WhatsApp gateway", "disconnected"},
+		},
+		{
+			name:     "telegram bot linked banner",
+			input:    "System: [2026-04-22 09:00] Telegram bot linked as @alice_bot.",
+			wantGone: []string{"@alice_bot", "Telegram"},
+		},
+		{
+			name:     "benign user sentence with the word connected is NOT stripped",
+			input:    "I just connected my laptop to the wifi — all good.",
+			wantKeep: []string{"I just connected my laptop"},
+		},
+		{
+			name:     "status banner without an action keyword is NOT stripped",
+			input:    "System: [2026-04-22 12:03] everything looks fine here.",
+			wantKeep: []string{"everything looks fine here"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PreJudgeStripContent(tc.input, strips, "pii")
+			for _, needle := range tc.wantGone {
+				if strings.Contains(got, needle) {
+					t.Errorf("expected %q to be stripped, still present in: %q", needle, got)
+				}
+			}
+			for _, needle := range tc.wantKeep {
+				if !strings.Contains(got, needle) {
+					t.Errorf("expected %q to be preserved, missing from: %q", needle, got)
+				}
+			}
+
+			// Strips must only apply to PII judge: the injection judge
+			// needs the full text to detect manipulation attempts.
+			injection := PreJudgeStripContent(tc.input, strips, "injection")
+			if injection != tc.input {
+				t.Errorf("strips leaked into injection judge:\n  in:  %q\n  out: %q", tc.input, injection)
+			}
+		})
+	}
 }
 
 func TestFilterPIIEntities(t *testing.T) {

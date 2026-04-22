@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -25,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // gatewayEvents is the process-wide structured event writer. It is
@@ -408,6 +411,161 @@ func emitDiagnostic(ctx context.Context, component, message string, details map[
 			Fields:    fields,
 		},
 	})
+}
+
+// emitEgress records a classified outbound request observed by the
+// guardrail proxy's passthrough path (Layer 1) or reported back from
+// the TypeScript fetch-interceptor (Layer 3). Severity follows the
+// branch × decision matrix:
+//
+//	branch=shape       decision=block  → HIGH     (silent-bypass attempt)
+//	branch=passthrough decision=block  → MEDIUM   (SSRF defense in depth)
+//	branch=shape       decision=allow  → MEDIUM   (operator opted into unknown hosts)
+//	branch=known                        → INFO
+//
+// source is "go" for gateway-observed events and "ts" for
+// fetch-interceptor-reported events. Callers MUST pass the exact
+// enum values defined in EgressPayload — the schema validator will
+// drop misspelled branches/decisions.
+func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
+	if p.Source == "" {
+		p.Source = "go"
+	}
+	sev := gatewaylog.SeverityInfo
+	switch {
+	case p.Branch == "shape" && p.Decision == "block":
+		sev = gatewaylog.SeverityHigh
+	case p.Branch == "passthrough" && p.Decision == "block":
+		sev = gatewaylog.SeverityMedium
+	case p.Branch == "shape" && p.Decision == "allow":
+		sev = gatewaylog.SeverityMedium
+	}
+	// Truncate string fields to keep a single event below the
+	// 4 KiB JSONL comfort ceiling even when a caller supplies a
+	// pathological URL or reason string. TargetPath retains enough
+	// to identify the endpoint (/chat/completions or
+	// :generateContent) without echoing user-supplied path
+	// parameters. TargetHost is a FQDN so 253 is the DNS ceiling.
+	// Reason is operator-facing; 512 keeps it useful without
+	// letting a misbehaving TS caller bloat gateway.jsonl.
+	if len(p.TargetPath) > 256 {
+		p.TargetPath = p.TargetPath[:256]
+	}
+	if len(p.TargetHost) > 253 {
+		p.TargetHost = p.TargetHost[:253]
+	}
+	if len(p.Reason) > 512 {
+		p.Reason = p.Reason[:512]
+	}
+	// BodyShape is a known enum — reject anything else so a
+	// malformed TS client cannot inject arbitrary strings into the
+	// downstream contract. validEgressBranch / validEgressDecision
+	// already enforce Branch / Decision at the HTTP boundary; shape
+	// is the remaining free-form field.
+	switch p.BodyShape {
+	case "none", "messages", "prompt", "input", "contents", "":
+		// ok
+	default:
+		p.BodyShape = "unknown"
+	}
+	// Source is also enum-shaped (go / ts / <empty>). Drop unknown
+	// values so a rogue caller cannot forge "go"-origin events.
+	if p.Source != "go" && p.Source != "ts" {
+		p.Source = "ts"
+	}
+	emitEvent(ctx, gatewaylog.Event{
+		EventType: gatewaylog.EventEgress,
+		Severity:  sev,
+		Egress:    &p,
+	})
+	incEgressCounter(ctx, p.Branch, p.Decision, p.Source)
+	if sev == gatewaylog.SeverityHigh {
+		emitEgressAlert(ctx, p)
+	}
+}
+
+// incEgressCounter + emitEgressAlert are package-level hooks so the
+// telemetry / alerting wiring can be swapped out in tests without
+// pulling in the full OTel stack. Default: stderr alert + no-op
+// counter; SetEgressTelemetry upgrades both to real OTel sinks.
+var (
+	egressTelemetryMu sync.RWMutex
+	egressTelemetry   *telemetry.Provider
+
+	incEgressCounter = func(ctx context.Context, branch, decision, source string) {
+		egressTelemetryMu.RLock()
+		tp := egressTelemetry
+		egressTelemetryMu.RUnlock()
+		if tp == nil {
+			return
+		}
+		tp.RecordEgress(ctx, branch, decision, source)
+	}
+	emitEgressAlert = func(ctx context.Context, p gatewaylog.EgressPayload) {
+		// Always log to stderr — operators need a signal even when
+		// the OTel stack is disabled. The gatewaylog Writer already
+		// emits the structured event; this is the complementary
+		// human-facing rail.
+		//
+		// Sanitize every caller-controlled string before printing to
+		// stderr to prevent log injection: a malicious reason/host
+		// containing "\n" could otherwise forge a fake following
+		// alert line, breaking any tailing pipeline that treats a
+		// line as the atomic unit.
+		fmt.Fprintf(os.Stderr, "[guardrail] ALERT egress branch=%s decision=%s host=%s shape=%s reason=%s source=%s\n",
+			sanitizeAlertField(p.Branch),
+			sanitizeAlertField(p.Decision),
+			sanitizeAlertField(p.TargetHost),
+			sanitizeAlertField(p.BodyShape),
+			sanitizeAlertField(p.Reason),
+			sanitizeAlertField(p.Source))
+	}
+)
+
+// sanitizeAlertField strips control characters from an operator-
+// or network-supplied string before it is written to stderr or
+// another line-delimited log stream. Prevents log injection
+// (embedded "\n" forging a follow-up alert line) and trims the
+// result so a single alert line cannot exceed a reasonable size.
+// We preserve 7-bit ASCII printable bytes (0x20..0x7E) plus tab
+// (rendered as space) and drop everything else; non-ASCII bytes
+// are replaced with a '?' placeholder so a malicious UTF-8 host
+// cannot embed ANSI escape sequences that re-render the terminal.
+func sanitizeAlertField(s string) string {
+	if s == "" {
+		return s
+	}
+	const maxAlertField = 256
+	if len(s) > maxAlertField {
+		s = s[:maxAlertField]
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\t':
+			b.WriteByte(' ')
+		case c < 0x20 || c == 0x7f:
+			b.WriteByte('?')
+		case c > 0x7e:
+			b.WriteByte('?')
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// SetEgressTelemetry installs the OTel provider used by the
+// emitEgress counter hook. Passing nil resets to the no-op default.
+// The sidecar boot path calls this right after telemetry is
+// configured so Layer 3 events begin counting as soon as the
+// passthrough handler accepts traffic.
+func SetEgressTelemetry(tp *telemetry.Provider) {
+	egressTelemetryMu.Lock()
+	defer egressTelemetryMu.Unlock()
+	egressTelemetry = tp
 }
 
 // deriveSeverity maps an audit.Event severity string into the strict

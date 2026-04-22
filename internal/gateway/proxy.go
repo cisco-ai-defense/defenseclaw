@@ -268,6 +268,20 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/health/liveliness", p.handleHealth) // backward compat
 	mux.HandleFunc("/health/readiness", p.handleHealth)
 	mux.HandleFunc("/health", p.handleHealth)
+	// Layer 3 (observability): egress events reported back from the
+	// TypeScript fetch-interceptor. Authenticated with the same
+	// X-DC-Auth flow as every other proxy path.
+	mux.HandleFunc("/v1/events/egress", p.handleEgressEvent)
+	// Layer 4 (governance): the TypeScript fetch-interceptor fetches
+	// the merged provider list (built-ins + ~/.defenseclaw/custom-providers.json)
+	// at bootstrap so operators can extend coverage without rebuilding
+	// the Go binary. Public — domain names are not secrets.
+	mux.HandleFunc("/v1/config/providers", p.handleListProviders)
+	// Operator trigger to reread the overlay at runtime after editing
+	// custom-providers.json. Requires X-DC-Auth (same as every other
+	// mutating endpoint) to prevent a hostile local process from
+	// rolling the registry.
+	mux.HandleFunc("/v1/config/providers/reload", p.handleReloadProviders)
 	// Catch-all for provider-native paths (e.g. /v1/messages for Anthropic,
 	// /v1beta/models/*/generateContent for Gemini). The fetch interceptor
 	// preserves the original path; we inspect the content then forward verbatim
@@ -426,18 +440,85 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// be matched correctly by the allowlist and the provider inference.
 	targetForMatch := targetOrigin + r.URL.Path
 
-	// SSRF protection: only forward to domains listed in providers.json
-	// or Ollama loopback.  Reject other internal hosts (e.g. cloud IMDS).
-	if !isKnownProviderDomain(targetForMatch) {
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s (path=%s)\n", targetOrigin, r.URL.Path)
-		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
-		return
-	}
-
+	// Peek the body once so the shape classifier can run even when the
+	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
+	}
+
+	// Three-branch passthrough policy:
+	//   known       → forward and audit as normal (legacy behavior)
+	//   shape       → shape classifier says this is an LLM body but the
+	//                 host is unknown; forward IFF
+	//                 guardrail.allow_unknown_llm_domains=true, always
+	//                 emit an egress event, never forward to a private /
+	//                 link-local IP (SSRF defense in depth)
+	//   passthrough → blocked outright; caller sees 403
+	//
+	// Every branch emits an EventEgress below so the operator can
+	// tune the allowlist confidently. See internal/gateway/events.go.
+	targetHost := ""
+	if u, perr := url.Parse(targetOrigin); perr == nil {
+		targetHost = u.Hostname()
+	}
+	branch := "passthrough"
+	var bodyShape BodyShape = BodyShapeNone
+	if isKnownProviderDomain(targetForMatch) {
+		branch = "known"
+	} else {
+		if shape, ok := isLLMShapedBody(body); ok {
+			bodyShape = shape
+			branch = "shape"
+		}
+	}
+
+	mkEgress := func(decision, reason string) gatewaylog.EgressPayload {
+		return gatewaylog.EgressPayload{
+			TargetHost:   targetHost,
+			TargetPath:   r.URL.Path,
+			BodyShape:    string(bodyShape),
+			LooksLikeLLM: branch != "passthrough",
+			Branch:       branch,
+			Decision:     decision,
+			Reason:       reason,
+			Source:       "go",
+		}
+	}
+
+	if branch == "passthrough" {
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s (path=%s)\n", targetOrigin, r.URL.Path)
+		emitEgress(r.Context(), mkEgress("block", "unknown-host-no-shape"))
+		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
+		return
+	}
+
+	if branch == "shape" {
+		// SSRF defense-in-depth: never forward an LLM-shaped request
+		// to a private / link-local IP even when AllowUnknownLLMDomains
+		// is on. A malicious skill could point the LLM SDK at the cloud
+		// IMDS endpoint (169.254.169.254) and happen to send a
+		// `messages`-shaped body.
+		if isPrivateHost(targetHost) {
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED LLM-shaped passthrough to private IP: %s\n", targetHost)
+			emitEgress(r.Context(), mkEgress("block", "private-ip"))
+			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+			return
+		}
+		allow := false
+		if p.cfg != nil {
+			allow = p.cfg.AllowUnknownLLMDomains
+		}
+		if !allow {
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED shape-detected passthrough to unknown domain: %s (shape=%s)\n", targetHost, bodyShape)
+			emitEgress(r.Context(), mkEgress("block", "allow-unknown-disabled"))
+			writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain (set guardrail.allow_unknown_llm_domains to permit)")
+			return
+		}
+		emitEgress(r.Context(), mkEgress("allow", "allow-unknown-enabled"))
+	} else {
+		emitEgress(r.Context(), mkEgress("allow", "known-provider"))
 	}
 
 	// Extract text for inspection. Parse multiple API formats:
@@ -1019,9 +1100,17 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// providerDomains is built once at init from the embedded providers.json.
-// Each entry maps a domain substring to the provider name.
-var providerDomains []struct {
+// providerRegistryMu guards providerDomains / ollamaPorts / providerRegistry.
+// The registry can be rebuilt at runtime via ReloadProviderRegistry() when
+// the operator overlay at ~/.defenseclaw/custom-providers.json changes.
+var providerRegistryMu sync.RWMutex
+
+// providerDomains is built at init (and on reload) from the embedded
+// providers.json merged with the operator overlay. Each entry maps a
+// domain substring to the provider name.
+var providerDomains []providerDomainEntry
+
+type providerDomainEntry struct {
 	domain string
 	name   string
 }
@@ -1031,20 +1120,46 @@ var providerDomains []struct {
 // provider traffic so the SSRF allowlist does not reject them.
 var ollamaPorts []int
 
+// providerRegistry holds the merged provider list (built-ins + overlay)
+// as last loaded, for serving GET /v1/config/providers.
+var providerRegistry *configs.ProvidersConfig
+
 func init() {
-	cfg, err := configs.LoadProviders()
-	if err != nil {
+	if err := ReloadProviderRegistry(); err != nil {
 		panic("gateway: failed to load embedded providers.json: " + err.Error())
 	}
+}
+
+// ReloadProviderRegistry re-reads the embedded providers.json and merges
+// the operator overlay at ~/.defenseclaw/custom-providers.json. Safe to
+// call at runtime; concurrent readers of providerDomains / ollamaPorts
+// see a consistent snapshot.
+func ReloadProviderRegistry() error {
+	cfg, err := configs.LoadProviders()
+	if err != nil {
+		return err
+	}
+	domains := make([]providerDomainEntry, 0, len(cfg.Providers)*2)
 	for _, p := range cfg.Providers {
 		for _, d := range p.Domains {
-			providerDomains = append(providerDomains, struct {
-				domain string
-				name   string
-			}{d, p.Name})
+			domains = append(domains, providerDomainEntry{domain: d, name: p.Name})
 		}
 	}
+	providerRegistryMu.Lock()
+	providerDomains = domains
 	ollamaPorts = cfg.OllamaPorts
+	providerRegistry = cfg
+	providerRegistryMu.Unlock()
+	return nil
+}
+
+// providerRegistrySnapshot returns the currently-loaded provider list
+// under the read lock. The returned slice is safe to iterate but not to
+// mutate.
+func providerRegistrySnapshot() (*configs.ProvidersConfig, []providerDomainEntry, []int) {
+	providerRegistryMu.RLock()
+	defer providerRegistryMu.RUnlock()
+	return providerRegistry, providerDomains, ollamaPorts
 }
 
 // inferProviderFromURL maps a target URL (from the X-DC-Target-URL header
@@ -1057,7 +1172,10 @@ func inferProviderFromURL(targetURL string) string {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())
-	for _, pd := range providerDomains {
+	providerRegistryMu.RLock()
+	domains := providerDomains
+	providerRegistryMu.RUnlock()
+	for _, pd := range domains {
 		if matchProviderDomain(host, u.Path, pd.domain) {
 			return pd.name
 		}
@@ -2606,7 +2724,13 @@ func scrubURLSecrets(raw string) string {
 // proxy never forwards to itself.
 func isOllamaLoopback(targetURL string, guardrailPort int) bool {
 	u, err := url.Parse(targetURL)
-	if err != nil || len(ollamaPorts) == 0 {
+	if err != nil {
+		return false
+	}
+	providerRegistryMu.RLock()
+	ports := ollamaPorts
+	providerRegistryMu.RUnlock()
+	if len(ports) == 0 {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
@@ -2624,7 +2748,7 @@ func isOllamaLoopback(targetURL string, guardrailPort int) bool {
 	if port == guardrailPort {
 		return false
 	}
-	for _, op := range ollamaPorts {
+	for _, op := range ports {
 		if port == op {
 			return true
 		}
@@ -2643,7 +2767,10 @@ func isKnownProviderDomain(targetURL string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	for _, pd := range providerDomains {
+	providerRegistryMu.RLock()
+	domains := providerDomains
+	providerRegistryMu.RUnlock()
+	for _, pd := range domains {
 		if matchProviderDomain(host, u.Path, pd.domain) {
 			return true
 		}

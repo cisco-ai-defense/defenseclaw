@@ -1424,34 +1424,57 @@ func lastUserText(messages []ChatMessage) string {
 // ("Read HEARTBEAT.md") + expects "HEARTBEAT_OK" back; flagging it as prompt
 // injection is a false positive.
 //
-// The match is intentionally narrow (requires the specific OpenClaw tokens
-// "HEARTBEAT.md" or "HEARTBEAT_OK" AND a short overall message) so a user
-// merely mentioning the word "heartbeat" cannot bypass the guardrail.
+// Bypass conditions are intentionally narrow:
+//
+//   - The current user turn must reference the canonical probe file
+//     "HEARTBEAT.md" (not merely the response token "HEARTBEAT_OK",
+//     which an attacker could easily append to an injection payload),
+//     and the turn itself must stay within maxHeartbeatProbeLen. The
+//     probe body is ~170 chars on its own but messaging bridges
+//     (WhatsApp/Teams) routinely prepend a transport banner and timing
+//     metadata, pushing the legitimate probe to several hundred chars —
+//     so we only cap the *current* turn, not the accumulated history.
+//
+//   - Alternatively, an assistant message is literally "HEARTBEAT_OK"
+//     (after trimming). This is the expected terse reply; anything
+//     longer is not a heartbeat response and must go through normal
+//     inspection.
 func isHeartbeatMessage(userText string, messages []ChatMessage) bool {
-	if !containsHeartbeatToken(userText) {
-		hasToken := false
-		for _, m := range messages {
-			if containsHeartbeatToken(m.Content) {
-				hasToken = true
-				break
-			}
-		}
-		if !hasToken {
-			return false
-		}
+	const maxHeartbeatProbeLen = 2048
+	if containsHeartbeatProbeSignature(userText) {
+		return len(userText) <= maxHeartbeatProbeLen
 	}
-	// Heartbeat payloads are small (OpenClaw probe is ~170 chars). Cap to
-	// prevent a large crafted message from riding on the bypass.
-	totalLen := len(userText)
 	for _, m := range messages {
-		totalLen += len(m.Content)
+		if isHeartbeatOKResponse(m) {
+			return true
+		}
+		if m.Role == "user" && containsHeartbeatProbeSignature(m.Content) {
+			return len(m.Content) <= maxHeartbeatProbeLen
+		}
 	}
-	return totalLen <= 512
+	return false
 }
 
-func containsHeartbeatToken(s string) bool {
-	upper := strings.ToUpper(s)
-	return strings.Contains(upper, "HEARTBEAT.MD") || strings.Contains(upper, "HEARTBEAT_OK")
+// containsHeartbeatProbeSignature reports whether s references the probe
+// filename "HEARTBEAT.md". Matching on the filename (not the response
+// token) prevents an attacker from bypassing the guardrail by appending
+// "HEARTBEAT_OK" to an otherwise malicious prompt.
+func containsHeartbeatProbeSignature(s string) bool {
+	return strings.Contains(strings.ToUpper(s), "HEARTBEAT.MD")
+}
+
+// isHeartbeatOKResponse reports whether m is an assistant turn that is
+// literally "HEARTBEAT_OK". Length is bounded so padding cannot ride on
+// the bypass.
+func isHeartbeatOKResponse(m ChatMessage) bool {
+	if m.Role != "assistant" {
+		return false
+	}
+	trimmed := strings.TrimSpace(m.Content)
+	if len(trimmed) > 32 {
+		return false
+	}
+	return strings.EqualFold(trimmed, "HEARTBEAT_OK")
 }
 
 // ---------------------------------------------------------------------------

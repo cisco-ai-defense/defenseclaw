@@ -1,0 +1,147 @@
+{
+  "$schema_description": "Canonical corpus driving the provider-coverage gate. Each row is exercised against hasLLMPathSuffix + isLLMShapedRequest (TS) and isLLMPathSuffix + isLLMShapedBody (Go) so both sides stay in sync. Expected branches: `known` — hostname is on providers.json; `shape` — LLM shape match on unknown host; `passthrough` — non-LLM, must not intercept.",
+  "positive": [
+    {
+      "name": "openai_chat_completions",
+      "url": "https://api.openai.com/v1/chat/completions",
+      "method": "POST",
+      "body": { "model": "gpt-4o", "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "known"
+    },
+    {
+      "name": "openai_responses_api",
+      "url": "https://api.openai.com/v1/responses",
+      "method": "POST",
+      "body": { "input": "hi", "model": "gpt-4o" },
+      "expected_branch": "known"
+    },
+    {
+      "name": "anthropic_messages",
+      "url": "https://api.anthropic.com/v1/messages",
+      "method": "POST",
+      "body": { "model": "claude-3-5-sonnet-latest", "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "known"
+    },
+    {
+      "name": "gemini_generate_content",
+      "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+      "method": "POST",
+      "body": { "contents": [{ "parts": [{ "text": "hi" }] }] },
+      "expected_branch": "known"
+    },
+    {
+      "name": "bedrock_converse",
+      "url": "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-sonnet/converse",
+      "method": "POST",
+      "body": { "messages": [{ "role": "user", "content": [{ "text": "hi" }] }] },
+      "expected_branch": "known"
+    },
+    {
+      "name": "ollama_chat",
+      "url": "http://127.0.0.1:11434/api/chat",
+      "method": "POST",
+      "body": { "model": "llama3", "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "known"
+    },
+    {
+      "name": "openrouter_chat",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "method": "POST",
+      "body": { "model": "openai/gpt-4o", "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "known"
+    },
+    {
+      "name": "unknown_host_messages_path",
+      "url": "https://api.novel-llm.example.test/v1/messages",
+      "method": "POST",
+      "body": { "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "shape",
+      "notes": "Unknown host; both path and body shape match."
+    },
+    {
+      "name": "unknown_host_openai_shape_path",
+      "url": "https://infra.example.test/v1/chat/completions",
+      "method": "POST",
+      "body": { "model": "x", "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "shape"
+    },
+    {
+      "name": "unknown_host_shape_only",
+      "url": "https://unknown.example.test/infer",
+      "method": "POST",
+      "body": { "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "shape",
+      "notes": "Body shape classifies it; path does not match."
+    },
+    {
+      "name": "unknown_host_path_only",
+      "url": "https://unknown.example.test/v1/messages",
+      "method": "POST",
+      "body": null,
+      "expected_branch": "shape",
+      "notes": "Body not peekable (e.g. streamed); path alone flags this as an LLM call."
+    }
+  ],
+  "negative": [
+    {
+      "name": "npm_registry_metadata",
+      "url": "https://registry.npmjs.org/react",
+      "method": "GET",
+      "body": null,
+      "expected_branch": "passthrough",
+      "notes": "Known-safe domain allowlist wins."
+    },
+    {
+      "name": "pypi_package_metadata",
+      "url": "https://pypi.org/pypi/requests/json",
+      "method": "GET",
+      "body": null,
+      "expected_branch": "passthrough"
+    },
+    {
+      "name": "github_raw",
+      "url": "https://raw.githubusercontent.com/defenseclaw/defenseclaw/main/README.md",
+      "method": "GET",
+      "body": null,
+      "expected_branch": "passthrough"
+    },
+    {
+      "name": "telemetry_sentry",
+      "url": "https://o123.ingest.sentry.io/api/456/store/",
+      "method": "POST",
+      "body": { "event_id": "abc" },
+      "expected_branch": "passthrough",
+      "notes": "Sentry is on KNOWN_SAFE_DOMAINS; should not intercept even though it's a POST."
+    },
+    {
+      "name": "unknown_business_api",
+      "url": "https://billing.example.test/v1/invoices",
+      "method": "POST",
+      "body": { "account_id": "abc", "amount": 100 },
+      "expected_branch": "passthrough"
+    },
+    {
+      "name": "unknown_host_get_with_llm_path",
+      "url": "https://unknown.example.test/v1/messages",
+      "method": "GET",
+      "body": null,
+      "expected_branch": "passthrough",
+      "notes": "Safe HTTP method — GET/HEAD/OPTIONS never intercept regardless of path."
+    },
+    {
+      "name": "unknown_host_non_llm_body",
+      "url": "https://unknown.example.test/v1/users",
+      "method": "POST",
+      "body": { "name": "alice", "email": "alice@example.test" },
+      "expected_branch": "passthrough"
+    },
+    {
+      "name": "safe_domain_with_llm_path",
+      "url": "https://github.com/v1/messages",
+      "method": "POST",
+      "body": { "messages": [{ "role": "user", "content": "hi" }] },
+      "expected_branch": "passthrough",
+      "notes": "Known-safe allowlist overrides both path and body shape."
+    }
+  ]
+}

@@ -9,7 +9,7 @@
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -50,7 +50,8 @@
     "diagnostic":   { "$ref": "#/$defs/DiagnosticPayload" },
     "scan":         { "$ref": "https://defenseclaw.io/schemas/scan-event.json#/$defs/ScanPayload" },
     "scan_finding": { "$ref": "https://defenseclaw.io/schemas/scan-finding-event.json#/$defs/ScanFindingPayload" },
-    "activity":     { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" }
+    "activity":     { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" },
+    "egress":       { "$ref": "#/$defs/EgressPayload" }
   },
   "oneOf": [
     { "required": ["verdict"] },
@@ -60,7 +61,8 @@
     { "required": ["diagnostic"] },
     { "required": ["scan"] },
     { "required": ["scan_finding"] },
-    { "required": ["activity"] }
+    { "required": ["activity"] },
+    { "required": ["egress"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -115,6 +117,20 @@
         "component": { "type": "string" },
         "message":   { "type": "string" },
         "fields":    { "type": ["object", "null"] }
+      }
+    },
+    "EgressPayload": {
+      "type": "object",
+      "required": ["branch", "decision", "source"],
+      "properties": {
+        "target_host":    { "type": ["string", "null"] },
+        "target_path":    { "type": ["string", "null"] },
+        "body_shape":     { "type": ["string", "null"], "enum": ["", "none", "messages", "prompt", "input", "contents", "unknown", null] },
+        "looks_like_llm": { "type": ["boolean", "null"] },
+        "branch":         { "type": "string", "enum": ["known", "shape", "passthrough"] },
+        "decision":       { "type": "string", "enum": ["allow", "block"] },
+        "reason":         { "type": ["string", "null"] },
+        "source":         { "type": "string", "enum": ["go", "ts"] }
       }
     }
   }

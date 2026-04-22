@@ -819,6 +819,14 @@ type GuardrailConfig struct {
 	// the safety mechanism for downstream sinks; retention is a
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
+
+	// AllowUnknownLLMDomains, when true, permits passthrough to hosts
+	// that are NOT listed in providers.json — provided the request
+	// body still classifies as an LLM shape (messages/contents/input/
+	// prompt). The default is false; unknown hosts are rejected so the
+	// proxy never fails open. The request is still inspected, audited,
+	// and emitted as an EventEgress with branch="shape".
+	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,

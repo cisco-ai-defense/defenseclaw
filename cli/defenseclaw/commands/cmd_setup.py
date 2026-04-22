@@ -112,6 +112,14 @@ from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
 setup.add_command(webhook)
 
+# Register `defenseclaw setup provider` (custom-providers.json overlay).
+# Drives the Layer-4 "add a new LLM endpoint without a release" flow
+# that the shape-detection rails and the Go /v1/config/providers
+# endpoint rely on. See cmd_setup_provider.py for the full rationale.
+from defenseclaw.commands.cmd_setup_provider import provider  # noqa: E402
+
+setup.add_command(provider)
+
 
 # --------------------------------------------------------------------------
 # `defenseclaw setup migrate-llm`

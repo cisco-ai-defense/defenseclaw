@@ -248,6 +248,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		})
 	}
 	SetEventWriter(events)
+	// Layer 3 egress observability: wire the OTel provider so
+	// RecordEgress fires alongside every EventEgress emission.
+	// Resets to no-op on shutdown via the matching SetEventWriter(nil) path.
+	SetEgressTelemetry(otel)
 
 	var webhooks *WebhookDispatcher
 	if len(cfg.Webhooks) > 0 {
@@ -488,6 +492,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		}
 		_ = s.events.Close()
 		SetEventWriter(nil)
+		SetEgressTelemetry(nil)
 		SetJudgePersistor(nil)
 	}
 

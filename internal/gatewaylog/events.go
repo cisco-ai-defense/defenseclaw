@@ -84,6 +84,15 @@ const (
 	// compliance auditors can reconstruct every change without
 	// scraping CLI output.
 	EventActivity EventType = "activity"
+
+	// EventEgress [v7.1] records every outbound request observed
+	// by the guardrail proxy's passthrough path, classified by the
+	// Layer 1 shape detector. The three branches — known / shape /
+	// passthrough — map to provider-allowlist hits, unknown hosts
+	// whose body looks like an LLM call, and unknown hosts with no
+	// LLM shape respectively. Emitted regardless of allow/block so
+	// operators can confirm coverage of the silent-bypass surface.
+	EventEgress EventType = "egress"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -271,6 +280,7 @@ type Event struct {
 	Scan        *ScanPayload        `json:"scan,omitempty"`
 	ScanFinding *ScanFindingPayload `json:"scan_finding,omitempty"`
 	Activity    *ActivityPayload    `json:"activity,omitempty"`
+	Egress      *EgressPayload      `json:"egress,omitempty"`
 }
 
 // StampProvenance fills the four v7 provenance fields from the
@@ -454,4 +464,41 @@ type DiffEntry struct {
 	Op     string `json:"op"` // add | remove | replace
 	Before any    `json:"before,omitempty"`
 	After  any    `json:"after,omitempty"`
+}
+
+// EgressPayload [v7.1] records a classified outbound request observed
+// by the guardrail proxy. Layer 1 (shape detection) and Layer 3
+// (observability) both populate this payload — Layer 1 on the Go
+// side from handlePassthrough, Layer 3 from the TS fetch-interceptor
+// reporting its own branch decision back through the /v1/events/egress
+// endpoint.
+//
+// Field semantics:
+//   - TargetHost: destination hostname (not the full URL — we never
+//     log the query string to avoid leaking API keys).
+//   - TargetPath: URL pathname only, trimmed to 256 chars. Useful
+//     for distinguishing /chat/completions vs /messages.
+//   - BodyShape: BodyShapeNone | messages | prompt | input | contents.
+//     Empty for non-body requests (GETs reported from the TS side).
+//   - LooksLikeLLM: true when the request hit a known provider OR
+//     the shape classifier matched.
+//   - Branch: known | shape | passthrough. The three-branch Layer 1
+//     policy — downstream alerting keys on this for each surface.
+//   - Decision: allow | block. Paired with Branch because a "shape"
+//     branch can produce either depending on allow_unknown_llm_domains.
+//   - Reason: stable short identifier matching the Go emitter's
+//     call-site reason strings (e.g. "unknown-host-no-shape",
+//     "private-ip", "allow-unknown-disabled", "known-provider").
+//   - Source: "go" | "ts" — which layer observed the request. Both
+//     are expected in a correctly instrumented fleet; mismatches are
+//     a red flag that one layer has a stale allowlist.
+type EgressPayload struct {
+	TargetHost   string `json:"target_host,omitempty"`
+	TargetPath   string `json:"target_path,omitempty"`
+	BodyShape    string `json:"body_shape,omitempty"`
+	LooksLikeLLM bool   `json:"looks_like_llm,omitempty"`
+	Branch       string `json:"branch"`
+	Decision     string `json:"decision"`
+	Reason       string `json:"reason,omitempty"`
+	Source       string `json:"source"`
 }

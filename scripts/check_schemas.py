@@ -35,7 +35,7 @@ SCHEMA_DIR = ROOT / "schemas"
 
 EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
-    "scan", "scan_finding", "activity",
+    "scan", "scan_finding", "activity", "egress",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {

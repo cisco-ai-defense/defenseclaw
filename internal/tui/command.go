@@ -430,6 +430,10 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup splunk", CLIBinary: dc, CLIArgs: []string{"setup", "splunk"}, Description: "Configure Splunk / O11y", Category: "setup"},
 		{TUIName: "setup observability list", CLIBinary: dc, CLIArgs: []string{"setup", "observability", "list"}, Description: "List configured observability destinations", Category: "setup"},
 		{TUIName: "setup observability migrate-splunk", CLIBinary: dc, CLIArgs: []string{"setup", "observability", "migrate-splunk", "--apply"}, Description: "Migrate legacy splunk: block into audit_sinks[]", Category: "setup"},
+		{TUIName: "setup provider add", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "add"}, Description: "Add a custom LLM provider to the overlay", Category: "setup"},
+		{TUIName: "setup provider remove", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "remove"}, Description: "Remove a custom LLM provider from the overlay", Category: "setup"},
+		{TUIName: "setup provider list", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "list"}, Description: "List overlay provider entries", Category: "setup"},
+		{TUIName: "setup provider show", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "show"}, Description: "Show merged provider registry", Category: "setup"},
 
 		// Scan
 		{TUIName: "scan skill", CLIBinary: dc, CLIArgs: []string{"skill", "scan"}, Description: "Scan a skill", Category: "scan", NeedsArg: true, ArgHint: "<skill-name>"},

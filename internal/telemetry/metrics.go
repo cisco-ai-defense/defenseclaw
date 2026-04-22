@@ -107,6 +107,12 @@ type metricsSet struct {
 	// Track 6 (activity tracking)
 	activityTotal       metric.Int64Counter
 	activityDiffEntries metric.Int64Histogram
+
+	// v7.1 — egress (Layer 3 silent-bypass observability).
+	// Labels: branch (known|shape|passthrough), decision (allow|block),
+	// source (go|ts). Kept low-cardinality so Prometheus recording
+	// rules can roll this up per-branch without blowing up TSDB.
+	egressEvents metric.Int64Counter
 	// Track 7 (external integrations — sink health)
 	sinkBatchesDelivered metric.Int64Counter
 	sinkBatchesDropped   metric.Int64Counter
@@ -446,6 +452,14 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.activityDiffEntries, err = m.Int64Histogram("defenseclaw.activity.diff_entries",
 		metric.WithUnit("{entry}"),
 		metric.WithDescription("Number of diff entries per EventActivity"))
+	if err != nil {
+		return nil, err
+	}
+
+	// v7.1 — egress silent-bypass telemetry
+	ms.egressEvents, err = m.Int64Counter("defenseclaw.egress.events",
+		metric.WithUnit("{event}"),
+		metric.WithDescription("Egress requests classified by Layer 1 shape detection (branch=known|shape|passthrough)"))
 	if err != nil {
 		return nil, err
 	}
@@ -1189,6 +1203,24 @@ func (p *Provider) RecordActivity(ctx context.Context, action, targetType, actor
 	)
 	p.metrics.activityTotal.Add(ctx, 1, attrs)
 	p.metrics.activityDiffEntries.Record(ctx, int64(diffEntries), attrs)
+}
+
+// RecordEgress increments the v7.1 egress counter with a small,
+// bounded label set so downstream Prometheus/OTLP pipelines can
+// alert on "shape-branch block surge" without TSDB cardinality
+// explosions. Callers MUST pass the enum values defined in
+// gatewaylog.EgressPayload (branch=known|shape|passthrough,
+// decision=allow|block, source=go|ts); malformed labels are
+// accepted but should fail the shape_test.go validator.
+func (p *Provider) RecordEgress(ctx context.Context, branch, decision, source string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.egressEvents.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("branch", branch),
+		attribute.String("decision", decision),
+		attribute.String("source", source),
+	))
 }
 
 // RecordSinkBatch is DEPRECATED and intentionally a no-op.

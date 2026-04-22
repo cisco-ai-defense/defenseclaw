@@ -15,7 +15,7 @@ DIST_DIR    := dist
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 \
+        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7
+check: check-v7 check-provider-coverage
 
 check-v7: check-audit-actions check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -336,6 +336,19 @@ check-error-codes:
 
 check-schemas:
 	@$(VENV)/bin/python scripts/check_schemas.py
+
+# check-provider-coverage runs the shared test/testdata/llm-endpoints.json
+# corpus through both the Go shape detector (provider_coverage_test.go)
+# and the TS interceptor (provider-coverage.test.ts). A drift between
+# the two sides — e.g. a new provider added to providers.json but
+# never exercised — would be the exact "silent bypass" failure mode
+# Layer 4 of the robust-guardrail plan is designed to surface.
+check-provider-coverage:
+	@echo "==> provider coverage (Go)"
+	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
+	@echo "==> provider coverage (TS)"
+	@cd extensions/defenseclaw && npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
+	@echo "check-provider-coverage: corpus is in sync across Go + TS."
 
 # ---------------------------------------------------------------------------
 # Lint targets

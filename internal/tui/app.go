@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -2349,6 +2350,19 @@ func (m *Model) refresh() {
 	if m.store != nil {
 		if err := m.overview.SetEnforcementCounts(m.store); err != nil {
 			m.toasts.Push(ToastWarn, "Failed to refresh counts: "+err.Error())
+		}
+	}
+	// Silent-bypass tile on the Overview panel. Loading here (rather
+	// than in a dedicated command) keeps it on the same refresh cadence
+	// as the other Overview counts; LoadGatewayEgress is a bounded
+	// tail read (512 KiB) so it's cheap relative to the audit-store
+	// queries that already run on this path. A missing gateway.jsonl
+	// degrades silently — CountRecentSilentBypass returns 0 for a nil
+	// slice, which is the correct "we haven't seen any egress yet"
+	// display.
+	if m.cfg != nil && m.cfg.DataDir != "" {
+		if events, err := LoadGatewayEgress(filepath.Join(m.cfg.DataDir, "gateway.jsonl")); err == nil {
+			m.overview.SetSilentBypassCount(CountRecentSilentBypass(events, 5*time.Minute))
 		}
 	}
 	m.lastRefresh = time.Now()
