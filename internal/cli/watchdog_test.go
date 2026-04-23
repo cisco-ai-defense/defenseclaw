@@ -142,7 +142,7 @@ func TestWatchdogStateTransitions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, nil)
 
 	if n := downProbes.Load(); n < 2 {
 		t.Fatalf("expected at least %d probes while server returned errors after flip, got %d", 2, n)
@@ -233,7 +233,7 @@ func TestWatchdogWebhookDispatchOnStateChange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, healthSrv.URL+"/health", 10*time.Millisecond, 2, webhooks)
+	runWatchdogLoop(ctx, healthSrv.URL+"/health", 10*time.Millisecond, 2, webhooks, nil)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -285,7 +285,7 @@ func TestWatchdogStatePersistenceAndRecovery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, nil)
 
 	restored := loadWatchdogState(tmpDir)
 	if restored != stateHealthy {
