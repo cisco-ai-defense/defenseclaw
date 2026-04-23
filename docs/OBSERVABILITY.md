@@ -49,6 +49,38 @@ JSONL file and simultaneously dispatched to registered listeners (audit
 store, sinks, webhooks). This is the primary structured event tier for
 local debugging and log forwarding pipelines that read files directly.
 
+### 1.2.1 Audit Bridge
+
+The `auditBridge` (`internal/gateway/audit_bridge.go`) connects the SQLite
+audit store to the JSONL event stream, ensuring every scan verdict, watcher
+transition, and enforcement action appears in `gateway.jsonl` alongside
+guardrail verdicts — giving operators a single, correlated log instead of
+three partial ones (SQLite, OTel, JSONL).
+
+**Behavior:**
+
+- Registered as a callback on `audit.Logger` — fires on every persisted event.
+- Translates audit `Action` fields into `EventLifecycle` entries with
+  automatic subsystem inference:
+
+  | Action prefix | Subsystem |
+  |---------------|-----------|
+  | `scan` | `scanner` |
+  | `watcher-`, `watch-start`, `watch-stop` | `watcher` |
+  | `sidecar-`, `gateway-ready` | `gateway` |
+  | `api-` | `api` |
+  | `sink-`, `splunk-` | `sinks` |
+  | `otel-`, `telemetry-` | `telemetry` |
+  | `skill-`, `mcp-`, `block-`, `allow-`, `quarantine-` | `enforcement` |
+
+- **Deduplication**: skips `guardrail-verdict` and `llm-judge-response`
+  actions because those already have dedicated structured emissions
+  (`emitVerdict` / `emitJudge`) on the proxy hot path.
+- **Stateless**: relies on `audit.sanitizeEvent` for PII redaction — all
+  text is forwarded verbatim without re-running detection.
+- Details map preserves `target`, `actor`, `details`, `trace_id`,
+  `audit_id`, and `action` for pivot queries between JSONL and SQLite.
+
 ### 1.3 OpenTelemetry
 
 `internal/telemetry` is a plain OTLP client — gRPC or HTTP, logs +
@@ -321,8 +353,7 @@ defenseclaw setup webhook test    <name>   # dispatches a synthetic event
 ```
 
 All secrets are resolved from env vars (never written in `config.yaml`).
-URLs are validated against SSRF (private ranges, localhost, cloud
-metadata endpoints are rejected by default).
+URLs are validated against SSRF (see §7.5 below).
 
 ### 7.2 YAML schema
 
@@ -360,6 +391,62 @@ via single-key form fields).
 - `secret_env` / room_id presence for types that need it
 - reachability (HEAD/OPTIONS) — **never** dispatches live events; use
   `setup webhook test` for an end-to-end synthetic dispatch.
+
+### 7.5 SSRF Protection
+
+`validateWebhookURL` (`internal/gateway/webhook.go`) blocks outbound
+webhook delivery to unsafe destinations. Every webhook URL (at config
+load and at dispatch time) is checked against:
+
+| Blocked range | CIDR | Reason |
+|---------------|------|--------|
+| RFC1918 Class A | `10.0.0.0/8` | Private network |
+| RFC1918 Class B | `172.16.0.0/12` | Private network |
+| RFC1918 Class C | `192.168.0.0/16` | Private network |
+| Loopback | `127.0.0.0/8` | Localhost |
+| Link-local / cloud metadata | `169.254.0.0/16` | AWS/GCP/Azure metadata endpoint |
+| IPv6 loopback | `::1/128` | Localhost |
+| IPv6 unique local | `fc00::/7` | Private network |
+| IPv6 link-local | `fe80::/10` | Link-local |
+
+Additionally:
+- Non-HTTP(S) schemes are rejected.
+- Hostnames are DNS-resolved at config time; if any A/AAAA record points
+  to a private IP, the endpoint is rejected.
+- `localhost` is rejected unless `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1`
+  (for local development only).
+
+### 7.6 HMAC Signing
+
+For `generic` webhook type, payloads are signed with HMAC-SHA256 using
+the secret from `secret_env`. The signature is sent in the
+`X-DefenseClaw-Signature` header as a hex-encoded digest:
+
+```
+X-DefenseClaw-Signature: <hex(HMAC-SHA256(payload, secret))>
+```
+
+Receivers should compute the same HMAC over the raw request body and
+compare using constant-time comparison.
+
+### 7.7 Dispatcher Internals
+
+The `WebhookDispatcher` (`internal/gateway/webhook.go`) manages delivery:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Max retries | 3 | Per delivery attempt |
+| Retry backoff | 2s | Between retries |
+| Max concurrency | 20 | Bounded goroutine pool via semaphore |
+| Default timeout | 10s | Per HTTP request |
+| Default cooldown | 300s (5 min) | Debounce per (webhook, event-category) pair |
+| Retryable status codes | 429, 5xx | All others are terminal failures |
+
+Payload formatters per type:
+- **Slack**: Block Kit attachments with severity color coding
+- **PagerDuty**: Events API v2 format with routing key
+- **Webex**: Adaptive card with room ID targeting
+- **Generic**: Raw JSON audit event with HMAC signature
 
 ---
 

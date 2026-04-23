@@ -236,6 +236,11 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 │  ├── Streaming response inspection (mid-stream + final assembly)   │
 │  ├── OPA policy evaluation in-process (policy.Engine)              │
 │  ├── Hot-reload (proxy reads guardrail_runtime.json with TTL)      │
+│  ├── Multi-turn context tracking (ContextTracker)                  │
+│  ├── Security notification injection (NotificationQueue)           │
+│  ├── Rule pack + suppression engine (internal/guardrail/)          │
+│  ├── Provider fallback chain (Bifrost SDK)                         │
+│  ├── Rate limiting (100/s, burst 200)                              │
 │  ├── Block/allow decision per mode                                 │
 │  └── Audit + OTel via proxy telemetry helpers                      │
 │                                                                     │
@@ -580,6 +585,117 @@ in-process via `policy.Engine.EvaluateGuardrail`, which decides the final verdic
 The HTTP endpoint `POST /v1/guardrail/evaluate` exposes the same evaluation
 for external callers; the built-in proxy does not require it for normal operation.
 
+## Multi-Turn Injection Detection
+
+The guardrail proxy integrates with the event router's `ContextTracker`
+(`internal/gateway/context_tracker.go`) to detect injection attacks
+spread across multiple conversation turns.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `maxTurns` | 10 | Messages per session (FIFO) |
+| `maxSessions` | 200 | Sessions tracked (LRU eviction) |
+| `sessionTTL` | 30 min | Idle session expiry |
+
+When a tool call or exec approval arrives, the router calls
+`HasRepeatedInjection(sessionKey, threshold=3)`. This scans all buffered
+user turns for the session against the active regex pattern set. If 3+
+turns trigger injection patterns, the request is automatically denied.
+
+The context buffer is also fed to the `GuardrailInspector` via
+`RecentMessages()` so the LLM judge can evaluate multi-turn context
+rather than isolated single prompts.
+
+## Security Notification Queue
+
+The proxy maintains a `NotificationQueue` (`internal/gateway/notifications.go`)
+that injects enforcement alerts into LLM requests as system messages.
+
+When the watcher blocks a skill/MCP/plugin, it pushes a
+`SecurityNotification` (subject type, name, severity, findings, actions,
+reason). Before each LLM call, the proxy calls `FormatSystemMessage()` and
+prepends a `[DEFENSECLAW SECURITY ENFORCEMENT]` system message instructing
+the model to inform the user about the action.
+
+- TTL: 2 minutes per notification (not drained on read — all sessions see it)
+- Queue cap: 50 entries (oldest dropped on overflow)
+- Subject types: `skill`, `plugin`, `mcp`, `tool`
+
+## Provider Fallback Chain
+
+The `ChatRequest` struct includes a `Fallbacks` field for model failover:
+
+```json
+{
+  "model": "anthropic/claude-opus-4-5",
+  "fallbacks": ["openai/gpt-4o", "bedrock/claude-3-sonnet"]
+}
+```
+
+When the primary provider returns an error, the proxy can route to fallback
+models in order. The Bifrost SDK handles provider-specific API differences
+for each fallback. Each `(provider, sha256(key), baseURL)` tuple gets a
+dedicated HTTP client with its own connection pool.
+
+Supported providers: openai, anthropic, azure, bedrock, amazon-bedrock,
+gemini, gemini-openai, openrouter, groq, mistral, ollama, vertex, cohere,
+perplexity, cerebras, fireworks, xai, huggingface, replicate, vllm.
+
+Provider inference (when no `provider/` prefix is given):
+- `ABSK` key prefix → bedrock
+- `claude` model prefix or `sk-ant-` key → anthropic
+- `gemini` model prefix or `AIza` key → gemini
+- Default: openai
+
+## Rule Pack System
+
+The `internal/guardrail/` package provides a rule pack system for
+customizing detection behavior:
+
+### RulePack Structure
+
+`LoadRulePack(dir)` loads a rule pack from a directory. Missing files are
+silently skipped; the embedded default pack is used when `dir` is empty.
+
+A rule pack contains:
+
+| Component | Purpose |
+|-----------|---------|
+| **JudgeYAML definitions** | Prompt templates for the LLM judge — `InjectionJudge`, `PIIJudge`, `ToolInjectionJudge` |
+| **Sensitive tool definitions** | Tools that require elevated scrutiny (looked up by `LookupSensitiveTool(name)`) |
+| **Finding suppressions** | Rules to suppress false positives (e.g. platform IDs vs phone numbers) |
+| **Tool suppressions** | Per-tool finding suppression (e.g. suppress PII findings for `read_file`) |
+| **Pre-judge strip rules** | Regex patterns to strip from content before sending to the LLM judge |
+
+### Suppression Engine
+
+The suppression engine (`internal/guardrail/suppress.go`) filters false
+positives from PII and tool-injection findings:
+
+- **Finding suppressions**: `FindingSuppression` matches by `finding_pattern`
+  (anchored regex) + `entity_pattern` (regex) + optional `condition`.
+- **Conditions**: `is_epoch` (Unix timestamp range 2001–2036), `is_platform_id`
+  (channel platform numeric IDs that look like phone numbers).
+- **NANP phone heuristic**: `IsPlatformID` distinguishes real North American
+  phone numbers (valid area/exchange codes) from platform IDs. Fails open
+  for real phones — a 10-digit number with valid NANP structure is surfaced
+  as PII, not suppressed.
+- **Tool suppressions**: `ToolSuppression` matches tool name by regex and
+  suppresses specific finding IDs for that tool.
+- **Pre-judge stripping**: removes noise patterns from content before the
+  LLM judge evaluates it, reducing false positives from code snippets.
+
+### LRU Regex Cache
+
+All suppression patterns are compiled through a global LRU regex cache
+(`compileRegex` in `suppress.go`):
+
+- Max entries: 1024 (far above realistic rule packs)
+- Negative caching: invalid patterns cache a `nil` result to avoid
+  re-compiling on every request
+- Thread-safe: `sync.Mutex` with double-check after reacquiring lock
+- LRU eviction: oldest entries removed when cache is full
+
 ## Component Ownership
 
 ```
@@ -615,6 +731,9 @@ for external callers; the built-in proxy does not require it for normal operatio
 │  ├── Cisco AI Defense client (HTTP, in gateway package)             │
 │  ├── OPA policy evaluation in-process (policy.Engine)              │
 │  ├── Verdict merging (mergeVerdicts, mergeWithJudge)               │
+│  ├── Multi-turn injection detection via ContextTracker             │
+│  ├── Security notification queue (inject warnings into LLM calls)  │
+│  ├── Rule pack loading + suppression engine (LRU regex cache)      │
 │  ├── Block/allow decision per mode                                 │
 │  └── Structured logging + audit / OTel via proxy telemetry         │
 └─────────────────────────────────────────────────────────────────────┘

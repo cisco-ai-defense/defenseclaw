@@ -62,6 +62,13 @@ cancellation.
 | `health.go` | Subsystem health tracker. Thread-safe state machine with snapshots for the API. |
 | `proxy.go` | Guardrail proxy. Builds `GuardrailProxy`, runs the OpenAI-compatible HTTP server, and supervises LLM traffic inspection. |
 | `guardrail.go` | `GuardrailInspector` — local patterns, Cisco AI Defense, LLM judge, OPA `EvaluateGuardrail`, verdict merge. |
+| `context_tracker.go` | Per-session conversation buffer for multi-turn injection detection. Bounded: 10 turns/session, 200 sessions, 30-min TTL. |
+| `notifications.go` | `NotificationQueue` — security enforcement alerts injected into LLM requests as system messages (2-min TTL, 50 cap). |
+| `audit_bridge.go` | Translates `audit.Event` records into structured `gatewaylog.Event` emissions for correlated JSONL output. |
+| `webhook.go` | `WebhookDispatcher` — Slack, PagerDuty, Webex, generic HMAC-signed webhook delivery with SSRF validation and retry. |
+| `events.go` | Structured event emission helpers (`emitVerdict`, `emitJudge`, `emitLifecycle`, `emitError`, `emitDiagnostic`). |
+| `provider.go` | `LLMProvider` interface and Bifrost SDK integration. Provider inference from model name/API key prefix. |
+| `dotenv.go` | `loadDotEnv` — loads `~/.defenseclaw/.env` for API key resolution when env vars are not set. |
 
 ## WebSocket Protocol (v3)
 
@@ -86,12 +93,15 @@ Client                              Gateway
 
 1. Client dials `ws://host:port`.
 2. Gateway sends a `connect.challenge` event containing a random `nonce`.
-3. Client builds a connect request with protocol version, role, scopes,
+3. Client starts the read loop and enables **handshake event buffering** —
+   events received before `hello-ok` are queued in memory (not dropped).
+4. Client builds a connect request with protocol version, role, scopes,
    auth token, and a device identity block containing the Ed25519 public
    key and a signature over a deterministic v3 payload (see below).
-4. Gateway verifies the signature, returns `hello-ok` with negotiated
+5. Gateway verifies the signature, returns `hello-ok` with negotiated
    features, auth confirmation, and policy (e.g. tick interval).
-5. Read loop starts dispatching events.
+6. Client disables buffering and replays all queued events in FIFO order.
+7. Read loop continues dispatching events normally.
 
 ### Device Authentication
 
@@ -123,7 +133,10 @@ Request/response pairs are correlated by UUID `id`. The client maintains a
 by matching IDs. Context cancellation cleans up pending entries.
 
 Events carry an optional monotonic `seq` number. The client tracks `lastSeq`
-and logs gaps for observability.
+and logs gaps for observability. When the received sequence number does not
+equal `lastSeq+1`, the client writes a warning to stderr:
+`[gateway] sequence gap: expected N, got M`. This signals dropped events
+(network issues, gateway restart) without failing the connection.
 
 ### RPC Methods
 
@@ -145,6 +158,9 @@ and logs gaps for observability.
 | `tool_call` | `{ tool, args, status }` | Logged to audit; flagged if tool is `shell`/`exec`/`system.run` with dangerous args |
 | `tool_result` | `{ tool, output, exit_code }` | Logged to audit |
 | `exec.approval.requested` | `{ id, systemRunPlan }` | Dangerous commands denied; safe commands optionally auto-approved |
+| `session.tool` | `{ type, tool, callId, data:{phase, name} }` | Dispatched to `handleToolCall` or `handleToolResult` based on type/phase. Supports two data shapes: top-level `{type, tool}` and nested `{data:{phase, name}}` |
+| `session.message` | Format A: `{ sessionKey, message }` / Format B: `{ stream:"tool", data:{phase, name}, runId }` | Format A (chat): logged as action only. Format B (tool stream): forwarded to `handleSessionTool()` for tool call/result processing |
+| `sessions.changed` | `{ sessions[] }` | Logged; errors trigger audit entry |
 | `tick` | *(empty)* | Keepalive, no action |
 
 ## Event Router

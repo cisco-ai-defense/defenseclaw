@@ -358,7 +358,7 @@ The Go gateway is organized into 19 internal packages:
 | `gatewaylog/` | Structured JSONL event writer with fanout callbacks (rotating, 50MB) |
 | `guardrail/` | RulePack loading, JudgeYAML definitions, LRU-cached suppressions |
 | `inventory/` | Installed skills/MCP server tracking (AIBOM) |
-| `notify/` | Webhook and SIEM event dispatching with retry logic |
+| `notify/` | Cross-platform desktop notifications (osascript on macOS, notify-send on Linux, stderr fallback) for watchdog alerts |
 | `policy/` | OPA engine — 7 Rego files (admission, guardrail, firewall, audit, skill_actions, sandbox, openshell), compiled once via `sync.Once` |
 | `redaction/` | Two-layer PII redaction: `<redacted len=N sha=8hex>`, ForSink variants always redact |
 | `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |
@@ -366,6 +366,83 @@ The Go gateway is organized into 19 internal packages:
 | `telemetry/` | OpenTelemetry: resource attributes, spans (tool, approval, LLM, guardrail, agent), GenAI semconv metrics |
 | `tui/` | 12-panel Bubbletea dashboard (Lipgloss + Bubbles) |
 | `watcher/` | File system monitoring for skill installation/removal |
+
+## Multi-Turn Injection Detection
+
+The event router maintains a `ContextTracker` (`internal/gateway/context_tracker.go`)
+that buffers per-session conversation history and detects multi-turn prompt
+injection attacks — where an attacker spreads malicious instructions across
+several user messages to evade single-turn pattern matching.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `maxTurns` | 10 | Messages retained per session (FIFO ring buffer) |
+| `maxSessions` | 200 | Total sessions tracked (LRU eviction when exceeded) |
+| `sessionTTL` | 30 min | Idle sessions are evicted after this period |
+| `staleSweepFrequency` | every 50 writes | Amortized sweep cost — no dedicated goroutine |
+
+**Detection flow:**
+
+1. Every `session.tool` / `session.message` event records the user turn via
+   `ContextTracker.Record(sessionKey, role, content)`.
+2. On each exec approval request, the router calls
+   `HasRepeatedInjection(sessionKey, threshold=3)`.
+3. `HasRepeatedInjection` scans all buffered user turns against the active
+   regex pattern set (honoring rule pack overrides). If 3+ turns contain
+   injection-like patterns, the request is denied automatically.
+4. The context buffer is also passed to the `GuardrailInspector` via
+   `RecentMessages()` so the LLM judge can evaluate multi-turn context.
+
+**Eviction strategy:** LRU by `LastSeen` timestamp. When `maxSessions` is
+exceeded, the oldest 25% of sessions are pruned in O(n log n) via a
+snapshot-and-sort pass. TTL-based eviction runs every 50 `Record` calls.
+
+## Security Notification Queue
+
+The guardrail proxy maintains a `NotificationQueue` (`internal/gateway/notifications.go`)
+that injects security enforcement alerts into LLM conversations as system
+messages, ensuring the AI informs the user about blocked or quarantined
+components.
+
+**How it works:**
+
+1. When the watcher detects and enforces a blocked skill/MCP/plugin, it pushes
+   a `SecurityNotification` to the queue with: subject type, skill name,
+   severity, finding count, actions taken, and reason.
+2. Each notification has a 2-minute TTL. The queue is capped at 50 entries.
+3. Before every LLM request, the proxy calls `FormatSystemMessage()` which
+   returns a formatted `[DEFENSECLAW SECURITY ENFORCEMENT]` block containing
+   all active (unexpired) notifications.
+4. This message is prepended to the LLM request as a system message, instructing
+   the model to proactively inform the user about the enforcement action.
+5. Notifications are not drained on read — every session sees them until expiry.
+
+## Audit Bridge
+
+The `auditBridge` (`internal/gateway/audit_bridge.go`) translates audit events
+from the SQLite store into the structured JSONL gateway log, providing a
+single correlated observability stream.
+
+- Registered as a callback on `audit.Logger` — fires on every persisted event.
+- Translates audit actions into `gatewaylog.EventLifecycle` with subsystem
+  inference (scanner, watcher, gateway, api, sinks, telemetry, enforcement).
+- Skips actions that already have dedicated structured emissions on the hot
+  path (`guardrail-verdict`, `llm-judge-response`) to avoid duplicate rows.
+- Stateless: relies on `audit.sanitizeEvent` for PII redaction — forwards
+  text verbatim without re-running detection.
+
+## Plugin Scanner Registry
+
+The `plugins/` package provides an extensible scanner plugin system:
+
+- **`Scanner` interface** (`plugins/plugin.go`): `Name()`, `Version()`,
+  `SupportedTargets()`, `Scan(ctx, target) (*ScanResult, error)`.
+- **`Registry`** (`plugins/registry.go`): discovers plugins from filesystem
+  directories by looking for `plugin.yaml` manifests in subdirectories.
+- **Custom scanners**: implement the `Scanner` interface as a Go binary.
+  See `plugins/examples/custom-scanner/main.go` for a working example.
+- **Integration**: the TUI Plugins panel shows installed plugins with
+  status and install/remove/quarantine actions.
 
 ## Dual Policy Engines
 
