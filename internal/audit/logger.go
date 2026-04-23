@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/receipt"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -98,6 +99,10 @@ type Logger struct {
 	// gwWriter is optional: when set, scan completions emit EventScan /
 	// EventScanFinding rows through the gateway JSONL choke point.
 	gwWriter *gatewaylog.Writer
+	// receipts is optional: when set, every audit event also produces
+	// an Ed25519-signed, hash-chained decision receipt conforming to
+	// draft-farley-acta-signed-receipts. nil is a safe no-op.
+	receipts *receipt.Signer
 }
 
 func NewLogger(store *Store) *Logger {
@@ -140,6 +145,16 @@ func (l *Logger) SetGatewayLogWriter(w *gatewaylog.Writer) {
 	l.mu.Unlock()
 }
 
+// SetReceiptSigner installs the optional decision-receipt signer.
+// When set, every audit event also produces an Ed25519-signed,
+// hash-chained receipt file conforming to
+// draft-farley-acta-signed-receipts. Pass nil to disable.
+func (l *Logger) SetReceiptSigner(s *receipt.Signer) {
+	l.mu.Lock()
+	l.receipts = s
+	l.mu.Unlock()
+}
+
 func (l *Logger) gatewayWriterSnapshot() *gatewaylog.Writer {
 	l.mu.RLock()
 	w := l.gwWriter
@@ -152,11 +167,11 @@ func (l *Logger) gatewayWriterSnapshot() *gatewaylog.Writer {
 // fan-out without holding the lock — so a misbehaving sink cannot
 // stall setters, and a concurrent Set* swap does not tear an
 // in-flight interface field read.
-func (l *Logger) snapshot() (*sinks.Manager, *telemetry.Provider, StructuredEmitter) {
+func (l *Logger) snapshot() (*sinks.Manager, *telemetry.Provider, StructuredEmitter, *receipt.Signer) {
 	l.mu.RLock()
-	s, o, e := l.sinks, l.otel, l.structured
+	s, o, e, r := l.sinks, l.otel, l.structured, l.receipts
 	l.mu.RUnlock()
-	return s, o, e
+	return s, o, e, r
 }
 
 // emitStructuredSnapshot fans the event out to an explicit snapshot
@@ -175,6 +190,27 @@ func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Ev
 		return
 	}
 	emitter.EmitGatewayEvent(ev)
+}
+
+// emitReceipt signs an audit event as a decision receipt if a receipt
+// signer is installed. The receipt hash is stamped back onto the
+// audit_events row in SQLite for correlation. Errors are logged to
+// stderr but do not block the audit pipeline. The signer is
+// goroutine-safe; this method does not hold the Logger mutex
+// during signing.
+func (l *Logger) emitReceipt(signer *receipt.Signer, e Event) {
+	if signer == nil {
+		return
+	}
+	_, receiptHash, err := signer.SignEvent(e.ToolName, e.Action, e.PolicyID, e.AgentID, e.SessionID, e.Details)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[audit] WARN: receipt signing failed for event %s: %v\n", e.ID, err)
+		return
+	}
+	// Stamp the receipt hash onto the SQLite row for correlation.
+	if l.store != nil && receiptHash != "" {
+		_ = l.store.SetReceiptHash(e.ID, receiptHash)
+	}
 }
 
 // stampGatewayEnvelope fills the v7 correlation + identity envelope
@@ -259,7 +295,7 @@ func (l *Logger) LogScanWithCorrelation(
 	verdict string,
 	corr ScanCorrelation,
 ) error {
-	sinksMgr, otel, structured := l.snapshot()
+	sinksMgr, otel, structured, _ := l.snapshot()
 
 	if verdict != "" {
 		result.Verdict = verdict
@@ -388,7 +424,7 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 // SQLite, sinks, and OTel — a regression in one surface can no longer
 // diverge from the others.
 func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, details string) error {
-	sinksMgr, otel, structured := l.snapshot()
+	sinksMgr, otel, structured, _ := l.snapshot()
 	event := Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
@@ -468,7 +504,7 @@ func mustPersistAction(action string) bool {
 // for OTel lifecycle signals. The enforcement map may contain keys:
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
-	sinksMgr, otel, structured := l.snapshot()
+	sinksMgr, otel, structured, _ := l.snapshot()
 	event := sanitizeEvent(Event{
 		ID:                uuid.New().String(),
 		Timestamp:         time.Now().UTC(),
@@ -522,7 +558,7 @@ func (l *Logger) LogEventCtx(ctx context.Context, event Event) error {
 // (SQLite + audit sinks + OTel). Use this when the caller needs to
 // control severity or other fields that LogAction hardcodes.
 func (l *Logger) LogEvent(event Event) error {
-	sinksMgr, otel, structured := l.snapshot()
+	sinksMgr, otel, structured, rcptSigner := l.snapshot()
 	if event.ID == "" {
 		event.ID = uuid.New().String()
 	}
@@ -554,6 +590,7 @@ func (l *Logger) LogEvent(event Event) error {
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
+	l.emitReceipt(rcptSigner, event)
 	return nil
 }
 
@@ -711,7 +748,7 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 	}
 	blob, _ := json.Marshal(payload)
 
-	_, otel, emitter := l.snapshot()
+	_, otel, emitter, _ := l.snapshot()
 	if otel != nil {
 		otel.RecordAlert(context.Background(), "runtime", severity, source)
 	}

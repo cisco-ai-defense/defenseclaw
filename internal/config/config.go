@@ -170,6 +170,12 @@ type Config struct {
 	// detected at Load() and emit a hard migration error.
 	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+
+	// Receipts configures optional Ed25519-signed decision receipts.
+	// When enabled, every audit event also produces a hash-chained,
+	// offline-verifiable receipt file in the format defined by
+	// draft-farley-acta-signed-receipts.
+	Receipts ReceiptConfig `mapstructure:"receipts"          yaml:"receipts,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -536,6 +542,24 @@ type OTelBatchConfig struct {
 
 type OTelResourceConfig struct {
 	Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
+}
+
+// ReceiptConfig controls the optional Ed25519-signed decision receipt
+// feature. When Enabled is true, every audit event produces a
+// hash-chained, offline-verifiable receipt file. Receipts conform to
+// draft-farley-acta-signed-receipts and are cross-verifiable with:
+//
+//	npx @veritasacta/verify defenseclaw-receipts/*.json
+type ReceiptConfig struct {
+	// Enabled turns receipt signing on. Default: false.
+	Enabled bool `mapstructure:"enabled"    yaml:"enabled"`
+	// OutputDir is the directory where receipt JSON files are written.
+	// Default: "./defenseclaw-receipts".
+	OutputDir string `mapstructure:"output_dir" yaml:"output_dir,omitempty"`
+	// KeyPath is the path to a raw Ed25519 seed (32 bytes hex or binary).
+	// If empty, a new ephemeral key is generated on startup (suitable
+	// for development; not recommended for production).
+	KeyPath string `mapstructure:"key_path"   yaml:"key_path,omitempty"`
 }
 
 type FirewallConfig struct {

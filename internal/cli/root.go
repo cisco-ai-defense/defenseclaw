@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/receipt"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -91,6 +92,7 @@ Run without arguments to start the sidecar daemon.`,
 		}
 		initAuditSinks()
 		initOTelProvider()
+		initReceipts()
 		return nil
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
@@ -183,4 +185,27 @@ func initAuditSinks() {
 	if mgr != nil && mgr.Len() > 0 {
 		auditLog.SetSinks(mgr)
 	}
+}
+
+// initReceipts creates and installs the decision-receipt signer when
+// receipts.enabled is true in config.yaml. Follows the same lifecycle
+// as initOTelProvider and initAuditSinks: errors are logged but
+// non-fatal; receipt signing failing should not take down the sidecar.
+func initReceipts() {
+	if cfg == nil || !cfg.Receipts.Enabled {
+		return
+	}
+	signer, err := receipt.NewSigner(receipt.Config{
+		Enabled:   true,
+		OutputDir: cfg.Receipts.OutputDir,
+		KeyPath:   cfg.Receipts.KeyPath,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: receipt signer init: %v\n", err)
+		return
+	}
+	auditLog.SetReceiptSigner(signer)
+	fmt.Fprintf(os.Stderr, "[receipts] enabled: signing key=%s output=%s\n",
+		signer.PublicKeyHex()[:16]+"...",
+		cfg.Receipts.OutputDir)
 }
