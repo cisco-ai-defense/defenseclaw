@@ -7,6 +7,10 @@ Node.js process) with a Go guardrail reverse proxy
 every prompt and response without requiring any changes to OpenClaw or agent
 code.
 
+If you are trying to tune false positives, switch between `default` /
+`strict` / `permissive`, or edit `suppressions.yaml`, see
+[Guardrail Rule Packs & Suppressions](GUARDRAIL_RULE_PACKS.md).
+
 ## Why a Fetch Interceptor + Proxy?
 
 OpenClaw's `message_sending` plugin hook is broken (issue #26422) — outbound
