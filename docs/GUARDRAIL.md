@@ -283,7 +283,7 @@ updates come from `guardrail_runtime.json`.
 Mode can be changed at runtime via hot-reload (no restart required):
 
 ```bash
-curl -X PATCH http://127.0.0.1:18790/v1/guardrail/config \
+curl -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
   -H 'Content-Type: application/json' \
   -H 'X-DefenseClaw-Client: cli' \
   -d '{"mode": "action"}'
@@ -531,7 +531,7 @@ guardrail:
     endpoint: "https://us.api.inspect.aidefense.security.cisco.com"
     api_key_env: "CISCO_AI_DEFENSE_API_KEY"
     timeout_ms: 3000
-    enabled_rules: []  # empty = send 8 default rules (Prompt Injection, Harassment, etc.)
+    enabled_rules: []  # empty = send 12 default rules (see below)
 ```
 
 The API key is **never hardcoded** — it is read from the environment
@@ -539,17 +539,21 @@ variable specified in `api_key_env`.
 
 ### Default Enabled Rules
 
-When `enabled_rules` is empty (default), the client sends these 8 rules in
+When `enabled_rules` is empty (default), the client sends these 12 rules in
 every API request:
 
 1. Prompt Injection
-2. Harassment
-3. Hate Speech
-4. Profanity
-5. Sexual Content & Exploitation
-6. Social Division & Polarization
-7. Violence & Public Safety Threats
-8. Code Detection
+2. Jailbreak
+3. PII Detection
+4. Sensitive Data
+5. Data Leakage
+6. Harassment
+7. Hate Speech
+8. Profanity
+9. Sexual Content & Exploitation
+10. Social Division & Polarization
+11. Violence & Public Safety Threats
+12. Code Detection
 
 If the API key has pre-configured rules on the Cisco dashboard, the client
 detects the `400 Bad Request` ("already has rules configured") and
@@ -723,13 +727,13 @@ Mode and scanner_mode can be changed at runtime without restarting:
 
 ```bash
 # Switch from observe to action mode
-curl -X PATCH http://127.0.0.1:18790/v1/guardrail/config \
+curl -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
   -H 'Content-Type: application/json' \
   -H 'X-DefenseClaw-Client: cli' \
   -d '{"mode": "action", "scanner_mode": "both"}'
 
 # Check current config
-curl http://127.0.0.1:18790/v1/guardrail/config
+curl http://127.0.0.1:18970/v1/guardrail/config
 ```
 
 The PATCH endpoint updates the in-memory config and writes

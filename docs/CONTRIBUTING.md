@@ -8,7 +8,7 @@ Thank you for helping improve DefenseClaw.
 2. Build: `make build`
 3. Run tests: `make test`
 
-Ensure Go 1.25+ and Python 3.10+ are installed. For scanner integration, install
+Ensure Go 1.26+ and Python 3.10+ are installed. For scanner integration, install
 the external scanners via `defenseclaw init` or manually with
 `scripts/setup-scanners.sh`.
 

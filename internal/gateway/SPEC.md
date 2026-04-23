@@ -335,7 +335,7 @@ gateway:
   reconnect_ms: 2000           # initial reconnect delay
   max_reconnect_ms: 30000      # max reconnect delay
   approval_timeout_s: 30       # unused in v1 (reserved)
-  api_port: 18790              # local REST API port
+  api_port: 18970              # local REST API port
   watcher:
     enabled: false
     skill:

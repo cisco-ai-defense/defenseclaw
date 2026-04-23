@@ -31,7 +31,25 @@ Sink kinds:
 Sinks are independent: you can run zero, one, or many in parallel.
 A failing sink does **not** block a decision — audit remains local-first.
 
-### 1.2 OpenTelemetry
+### 1.2 Structured JSONL Event Log (gatewaylog)
+
+In addition to audit sinks, the gateway writes a structured JSONL event
+stream via `internal/gatewaylog/`. This is a local rotating log file
+(`gateway.jsonl`) managed by lumberjack:
+
+| Setting | Default |
+|---------|---------|
+| Max file size | 50 MB |
+| Max backups | 5 |
+| Max age | 30 days |
+| Compression | gzip |
+
+The gatewaylog writer uses fanout callbacks — each event is written to the
+JSONL file and simultaneously dispatched to registered listeners (audit
+store, sinks, webhooks). This is the primary structured event tier for
+local debugging and log forwarding pipelines that read files directly.
+
+### 1.3 OpenTelemetry
 
 `internal/telemetry` is a plain OTLP client — gRPC or HTTP, logs +
 metrics + traces, configurable via `otel:` in the config file or the

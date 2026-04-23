@@ -86,7 +86,7 @@ This section covers building DefenseClaw from the repository.
 
 | Tool | Minimum | Check | Install |
 |------|---------|-------|---------|
-| Go | 1.25+ | `go version` | [go.dev/dl](https://go.dev/dl/) or `brew install go` |
+| Go | 1.26.2+ | `go version` | [go.dev/dl](https://go.dev/dl/) or `brew install go` |
 | Python | 3.10+ (3.12 recommended) | `python3 --version` | System package manager or [python.org](https://python.org) |
 | uv | latest | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js / npm | 18+ | `node --version` | [nodejs.org](https://nodejs.org) or `brew install node` |
@@ -475,7 +475,7 @@ In local interactive mode, the setup can read the gateway token from
 
 ```bash
 # Local with explicit port
-defenseclaw setup gateway --host 127.0.0.1 --api-port 18790 --non-interactive
+defenseclaw setup gateway --host 127.0.0.1 --api-port 18970 --non-interactive
 
 # Remote with SSM token
 defenseclaw setup gateway --remote --ssm-param /prod/openclaw/token --ssm-region us-west-2 --non-interactive

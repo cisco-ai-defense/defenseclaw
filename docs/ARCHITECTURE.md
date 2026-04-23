@@ -38,9 +38,13 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │  └───────────┘ └───────────┘ └──────────┘ └────────┬────────┘       │    │
 │  │                                                     │               │    │
 │  │  ┌────────────────────────────────────────────┐     │               │    │
-│  │  │  Inspection Engine (Tool & CodeGuard)       │     │              │    │
+│  │  │  Inspection Engine (4-stage pipeline)        │     │              │    │
 │  │  │  /api/v1/inspect/tool                      │     │               │    │
-│  │  │  Block list → engine → CodeGuard           │     │               │    │
+│  │  │  1. Regex (113 rules, 6 categories)        │     │               │    │
+│  │  │  2. Cisco AI Defense (12 cloud rules)      │     │               │    │
+│  │  │  3. LLM Judge (injection/PII/tool-inj)     │     │               │    │
+│  │  │  4. OPA policy (7 Rego files)              │     │               │    │
+│  │  │  + CodeGuard for write/edit tools          │     │               │    │
 │  │  │  Verdict: allow / alert / block            │     │               │    │
 │  │  └────────────────────────────────────────────┘     │               │    │
 │  │                                                     │               │    │
@@ -148,15 +152,24 @@ only component with direct access to all subsystems.
 
 | Responsibility | Detail |
 |----------------|--------|
-| REST API server | Accepts requests from CLI and plugins |
-| OpenClaw WebSocket client | Connects via protocol v3, device-key auth, challenge-response |
-| Event subscription | Subscribes to all OpenClaw gateway events (`tool_call`, `tool_result`, `exec.approval.requested`, etc.) |
-| Command dispatch | Sends RPC commands to OpenClaw: `exec.approval.resolve`, `skills.update`, `config.patch` |
-| Policy engine | Runs admission gate: block list → allow list → scan → verdict |
-| LLM guardrail management | Runs guardrail proxy; restarts on crash |
-| Audit / SIEM | Logs all events to SQLite, forwards to Splunk HEC (batch or real-time) |
-| Webhook dispatch | Pushes enforcement events (block, drift, guardrail-block) to configured webhook endpoints (Slack, PagerDuty, generic HTTP) with severity filtering, event-type filtering, and retry |
-| DB access | Full read/write to SQLite — scan results, block/allow lists, inventory |
+| REST API server (`:18970`) | Accepts requests from CLI and plugins; CSRF-protected, localhost-bound |
+| Guardrail proxy (`:4000`) | HTTP reverse proxy that inspects all LLM traffic; rate-limited (100/s, burst 200) |
+| OpenClaw WebSocket client | Connects via protocol v3, HMAC-SHA256 challenge-response auth, sequence tracking |
+| Event router | Dispatches WebSocket events (`tool_call`, `tool_result`, `exec.approval.requested`, `session.message`, `agent`) with judge semaphore (cap 16) |
+| Command dispatch | Sends RPC commands to OpenClaw: `exec.approval.resolve`, `skills.update`, `config.get`, `config.patch`, `tools.catalog`, `sessions.list` |
+| Enforcement engine | Manages block/allow lists in SQLite (`internal/enforce/`) — separate from OPA |
+| OPA policy engine | Runs Rego policies for admission, guardrail verdicts, firewall, audit, sandbox, skill-actions — compiled once via `sync.Once` |
+| Inspection pipeline | 4-stage detection: (1) regex patterns → (2) Cisco AI Defense cloud scanner → (3) LLM judge → (4) OPA verdict aggregation |
+| Audit / SIEM | Logs all events to SQLite (WAL), rotating JSONL (50MB via lumberjack), Splunk HEC, OpenTelemetry |
+| Webhook dispatch | Pushes enforcement events to Slack (Block Kit), PagerDuty (Events v2), Webex, generic HMAC-SHA256 with severity/event filtering and retry |
+| Firewall | Kernel-level network filtering (iptables on Linux, pfctl on macOS) |
+| Watcher | File system monitoring for skill installation/removal events |
+| Inventory | Tracks installed skills/MCP servers (AIBOM) |
+| Daemon control | PID file management, process lifecycle (start/stop/restart), lumberjack log rotation |
+| Telemetry | OpenTelemetry tracing and metrics (spans for tools, approvals, LLM calls, guardrail stages, agent lifecycle) |
+| TUI dashboard | 12-panel Bubbletea terminal UI (Overview, Alerts, Skills, MCPs, Plugins, Inventory, Policy, Logs, Audit, Activity, Tools, Setup) |
+| PII redaction | Two-layer redaction: `<redacted len=N sha=8hex>` — sink layer always redacts regardless of reveal flag |
+| Hot reload | `guardrail_runtime.json` checked every 5s; updates mode and blockMessage under RWMutex |
 
 ### 4. SQLite Database
 
@@ -178,14 +191,16 @@ the Go guardrail reverse proxy regardless of which provider the user selects.
 
 | Responsibility | Detail |
 |----------------|--------|
-| Universal interception | Fetch interceptor covers all 7 providers (Anthropic, OpenAI, Azure, Gemini, OpenRouter, Ollama, Bedrock) |
-| Prompt inspection | Scans every prompt for injection attacks, secrets, PII, data exfiltration patterns before it reaches the LLM |
-| Response inspection | Scans every LLM response for leaked secrets, tool call anomalies |
-| Multi-provider routing | Proxy routes to the correct upstream based on `X-DC-Target-URL` header set by the interceptor |
-| Auth separation | `X-AI-Auth` header carries the real provider key; `Authorization` carries the DefenseClaw gateway key |
+| Universal interception | Fetch interceptor patches `globalThis.fetch` + `https.request`, covering 20+ providers via Bifrost SDK (v1.5.2) |
+| 4-stage inspection | (1) 113 regex rules across 6 categories → (2) Cisco AI Defense cloud scanner (12 rules) → (3) LLM Judge (Claude Sonnet, reentrancy-guarded) → (4) OPA policy verdict aggregation |
+| Detection strategies | `regex_only` (fastest), `regex_judge` (default — regex triages, judge verifies ambiguous), `judge_first` (most accurate, highest cost) |
+| Provider routing | Bifrost SDK routes to correct provider based on model format (`provider/model-name`) and API key prefix inference. Tenant-isolated: each `(provider, sha256(key), baseURL)` gets dedicated client |
+| Streaming inspection | Buffers first 8KB for tool call detection; `toolCallAccumulator` merges delta fragments; mid-stream inspection every 500 bytes; can terminate stream on CRITICAL finding |
+| Auth separation | `X-AI-Auth` header carries the real provider key; `X-DC-Auth` carries the DefenseClaw sidecar token |
 | Observe mode | Logs findings with colored output, never blocks (default, recommended to start) |
 | Action mode | Blocks prompts/responses that match security policies by raising exceptions |
 | Transparent proxy | No agent code changes required — the interceptor is invisible to OpenClaw |
+| Concurrency | RWMutexes (`rtMu`, `engineMu`, `spanMu`, `cfgMu`), judge semaphore (cap 16), rate limiter (100/s burst 200), connection pool (20 idle, 10/host) |
 
 **How it connects:**
 
@@ -325,4 +340,76 @@ requires only a new case in `internal/config/claw.go`.
                                                               ▼
                                                        LLM Provider
                                                     (Anthropic, OpenAI…)
+```
+
+## Internal Packages (Go Gateway)
+
+The Go gateway is organized into 19 internal packages:
+
+| Package | Purpose |
+|---------|---------|
+| `gateway/` | Core: GuardrailProxy (`:4000`), APIServer (`:18970`), WebSocket Client, Event Router, Inspection Engine, LLM Judge, Cisco AI Defense client, Bifrost provider integration |
+| `audit/` | SQLite WAL store — 8 tables, 5s busy timeout |
+| `cli/` | Go CLI (Cobra commands for gateway, policy, etc.) |
+| `config/` | Full config schema with LLM resolution, hot-reload support |
+| `daemon/` | PID file management, process lifecycle, lumberjack log rotation |
+| `enforce/` | Block/allow list PolicyEngine (SQLite JSON actions) — distinct from OPA |
+| `firewall/` | Kernel-level network filtering (iptables on Linux, pfctl on macOS) |
+| `gatewaylog/` | Structured JSONL event writer with fanout callbacks (rotating, 50MB) |
+| `guardrail/` | RulePack loading, JudgeYAML definitions, LRU-cached suppressions |
+| `inventory/` | Installed skills/MCP server tracking (AIBOM) |
+| `notify/` | Webhook and SIEM event dispatching with retry logic |
+| `policy/` | OPA engine — 7 Rego files (admission, guardrail, firewall, audit, skill_actions, sandbox, openshell), compiled once via `sync.Once` |
+| `redaction/` | Two-layer PII redaction: `<redacted len=N sha=8hex>`, ForSink variants always redact |
+| `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |
+| `scanner/` | Scanner wrapper interfaces |
+| `telemetry/` | OpenTelemetry: resource attributes, spans (tool, approval, LLM, guardrail, agent), GenAI semconv metrics |
+| `tui/` | 12-panel Bubbletea dashboard (Lipgloss + Bubbles) |
+| `watcher/` | File system monitoring for skill installation/removal |
+
+## Dual Policy Engines
+
+DefenseClaw has two distinct policy evaluation systems — do not confuse them:
+
+| Engine | Package | Purpose | Data source |
+|--------|---------|---------|-------------|
+| **Enforcement Engine** | `internal/enforce/` | Block/allow list gate: checks SQLite `actions` table for explicit block/allow entries | SQLite JSON actions |
+| **OPA Policy Engine** | `internal/policy/` | Rego-based policy evaluation for admission, guardrail verdicts, firewall rules, sandbox controls | 7 `.rego` files in `policies/rego/` |
+
+The enforcement engine runs first (static block/allow lookup), and if the item is not explicitly listed, the OPA engine evaluates the appropriate Rego policy.
+
+## Inspection Pipeline Detail
+
+The guardrail proxy runs a 4-stage inspection pipeline on every LLM request (pre-call and post-call):
+
+```
+Stage 1: Regex Rules (microseconds)
+  113 compiled patterns across 6 categories:
+    secretRules, commandRules, sensitivePathRules,
+    c2Rules, cognitiveFileRules, trustExploitRules
+  Output: RuleFinding{RuleID, Severity, Confidence, Evidence}
+         │
+         ▼
+Stage 2: Cisco AI Defense (cloud, ~3s)
+  POST to us.api.inspect.aidefense.security.cisco.com
+  12 default rules (Prompt Injection, Jailbreak, PII, etc.)
+  Retry logic: 400 "already configured" → retry without rules
+         │
+         ▼
+Stage 3: LLM Judge (optional, model-dependent)
+  Three detection strategies:
+    regex_only  → skip judge entirely
+    regex_judge → judge verifies ambiguous regex findings only
+    judge_first → judge runs primary, regex as safety net
+  Judge types: injection, pii, tool-injection
+  Reentrancy guard: judgeCtxKey prevents infinite recursion
+  Suppression engine: LRU regex cache (1024), NANP phone heuristic
+         │
+         ▼
+Stage 4: OPA Policy (guardrail.rego)
+  Aggregates max severity across all scanners
+  block_threshold: HIGH (rank 3)
+  alert_threshold: MEDIUM (rank 2)
+  Observe mode: downgrades block → alert
+  Output: final verdict (allow / alert / block)
 ```

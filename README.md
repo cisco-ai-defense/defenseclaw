@@ -118,7 +118,7 @@ DefenseClaw is a multi-component system with three runtimes that work together:
 | Component | Language | Role |
 |-----------|----------|------|
 | **CLI** | Python 3.11+ | Operator-facing tool — runs scanners, manages block/allow lists, TUI dashboard |
-| **Gateway** | Go 1.25+ | Central daemon — REST API, WebSocket bridge to OpenClaw, policy engine, inspection pipeline, SQLite audit store, SIEM export |
+| **Gateway** | Go 1.26+ | Central daemon — REST API, WebSocket bridge to OpenClaw, policy engine, inspection pipeline, SQLite audit store, SIEM export |
 | **Plugin** | TypeScript | Runs inside OpenClaw — fetch interceptor routes all LLM traffic through guardrail proxy, intercepts tool calls via `before_tool_call` hook, provides `/scan`, `/block`, `/allow` slash commands |
 
 The **CLI** and **Plugin** communicate with the **Gateway** over a local REST API. The Gateway connects to the OpenClaw Gateway over WebSocket (protocol v3) to subscribe to events and send enforcement commands. A built-in **guardrail proxy** inspects all LLM traffic in real time.
@@ -134,7 +134,7 @@ For the full system diagram, data flows, and component responsibilities, see [do
 | Requirement | Version | Check |
 |-------------|---------|-------|
 | Python | 3.10+ | `python3 --version` |
-| Go | 1.25+ | `go version` |
+| Go | 1.26.2+ | `go version` |
 | Node.js | 20+ (plugin only) | `node --version` |
 | Git | any | `git --version` |
 
