@@ -48,6 +48,15 @@ func liteLLMModel(llm config.LLMConfig) string {
 	return model
 }
 
+func skillScannerSupportsLLMProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "anthropic", "openai":
+		return true
+	default:
+		return false
+	}
+}
+
 // extractJSON finds the first top-level JSON object in data.
 // Scanner CLIs sometimes print progress text to stdout before the JSON;
 // this isolates the `{...}` payload so json.Unmarshal succeeds.
@@ -163,8 +172,10 @@ func (s *SkillScanner) SupportedTargets() []string { return []string{"skill"} }
 
 func (s *SkillScanner) buildArgs(target string) []string {
 	args := []string{"scan", "--format", "json"}
+	llmProvider := strings.ToLower(strings.TrimSpace(s.LLM.Provider))
+	useLLM := s.Config.UseLLM && skillScannerSupportsLLMProvider(llmProvider)
 
-	if s.Config.UseLLM {
+	if useLLM {
 		args = append(args, "--use-llm")
 	}
 	if s.Config.UseBehavioral {
@@ -182,8 +193,8 @@ func (s *SkillScanner) buildArgs(target string) []string {
 	if s.Config.UseAIDefense {
 		args = append(args, "--use-aidefense")
 	}
-	if s.LLM.Provider != "" {
-		args = append(args, "--llm-provider", s.LLM.Provider)
+	if useLLM && llmProvider != "" {
+		args = append(args, "--llm-provider", llmProvider)
 	}
 	if s.Config.LLMConsensus > 0 {
 		args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))

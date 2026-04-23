@@ -152,6 +152,11 @@ func NewStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
+	// The gateway may record many Codex hook events concurrently. Keep
+	// this process on a single SQLite connection so writes queue in Go
+	// instead of racing into SQLITE_BUSY at the database boundary.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL",

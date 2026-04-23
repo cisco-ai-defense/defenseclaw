@@ -1,0 +1,64 @@
+---
+title: "Actions matrix"
+description: "How severity × direction × mode maps to concrete actions in the gateway."
+order: 3
+---
+
+## Overview
+
+The **actions matrix** is the deterministic mapping from a finding's `(severity, direction, guardrail.mode)` tuple to a concrete action. It lives in `policies/rego/data.json` under `actions.matrix` and is applied by `guardrail.rego`.
+
+## The default matrix
+
+| Severity \ Mode | `observe` | `action` |
+|-----------------|-----------|----------|
+| `CRITICAL` | `log` | `block` |
+| `HIGH` | `log` | `block` |
+| `MEDIUM` | `log` | `warn` |
+| `LOW` | `log` | `log` |
+| `INFO` | `log` | `log` |
+
+`warn` means the response is allowed but a notification and an audit row are emitted; `block` means the request is refused.
+
+## Per-direction overrides
+
+In production most fleets want different thresholds on prompt vs completion. `data.json` supports:
+
+```json
+{
+  "actions": {
+    "matrix": {
+      "prompt":     { "CRITICAL": "block", "HIGH": "block", "MEDIUM": "warn", "LOW": "log", "INFO": "log" },
+      "completion": { "CRITICAL": "block", "HIGH": "warn",  "MEDIUM": "log",  "LOW": "log", "INFO": "log" },
+      "tool_call":  { "CRITICAL": "block", "HIGH": "block", "MEDIUM": "warn", "LOW": "log", "INFO": "log" }
+    }
+  }
+}
+```
+
+Completion is intentionally looser because a mid-response block has worse UX than a pre-call block.
+
+## Why Rego owns the matrix
+
+Keeping the matrix in `data.json` + `guardrail.rego` (rather than hardcoding it in Go) means:
+
+- Operators can override per deployment without recompiling.
+- The audit row records which version of the matrix was applied (via `policy_hash`).
+- The matrix is testable with `opa test` — every row and every edge case is covered by `guardrail_test.rego`.
+- Composing matrices across tenants becomes a data-merge, not a code change.
+
+## Custom severities
+
+The severity enum is fixed (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`). You cannot add a new level. This is deliberate — keeping the enum small and stable is what makes the matrix auditable and dashboards readable across fleets.
+
+If you need a "security team attention" bucket, use `tags` on the rule to route rather than inventing a new severity.
+
+## Related
+
+- [data.json](/docs-site/policy/data-json)
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [Tuning](/docs-site/guardrail/tuning)
+
+---
+
+<!-- generated-from: policies/rego/data.json, policies/rego/guardrail.rego -->

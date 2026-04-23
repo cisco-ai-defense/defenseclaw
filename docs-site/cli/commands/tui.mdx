@@ -1,0 +1,58 @@
+---
+title: "defenseclaw tui"
+description: "Launch the DefenseClaw interactive dashboard (TUI)."
+order: 10
+---
+
+## Overview
+
+`defenseclaw tui` — Launch the DefenseClaw interactive dashboard (TUI).
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:tui -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw tui [OPTIONS]
+```
+
+### Description
+
+Launch the DefenseClaw interactive dashboard (TUI)
+
+Launch the DefenseClaw interactive dashboard (TUI).
+
+    Hands off to the defenseclaw-gateway binary which provides the
+    full Bubbletea-based terminal UI with alerts, skills, MCPs,
+    inventory, logs, and audit panels.
+
+    Binary resolution goes through :func:`defenseclaw.gateway.resolve_gateway_binary`
+    which also falls back to the canonical install path so we keep
+    working in the very shell that just ran ``make all`` (where
+    ``~/.local/bin`` is not yet on ``PATH``).
+
+<!-- END AUTOGEN:cli_py:tui -->
+
+## Usage
+
+### Launch from Python or gateway CLI
+
+```bash
+defenseclaw tui
+defenseclaw-gateway tui
+```
+
+The Python command hands off to the gateway TUI when available.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_tui.py -->

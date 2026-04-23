@@ -1,0 +1,70 @@
+---
+title: "Bifrost provider adapter"
+description: "How the Go gateway delegates provider calls to the upstream Bifrost core library."
+order: 5
+---
+
+## Overview
+
+DefenseClaw does not ship an in-repo `sdk/bifrost/` client. Bifrost in this repo means the upstream Go library imported by `internal/gateway/provider_bifrost.go` to normalize LLM provider calls behind the guardrail proxy.
+
+External code should call the [REST endpoints](/docs-site/api/endpoints) or the LiteLLM-compatible guardrail proxy directly. This page is for contributors touching provider routing inside the Go gateway.
+
+## Layout
+
+| Source | Role |
+|--------|------|
+| `internal/gateway/provider.go` | Parses model strings and chooses the Bifrost-backed `LLMProvider`. |
+| `internal/gateway/provider_bifrost.go` | Owns tenant-isolated Bifrost clients and request/response conversion. |
+| `internal/gateway/providers_endpoint.go` | Serves provider registry data to the plugin at `/v1/config/providers`. |
+| `internal/configs/providers.json` | Shared provider/domain registry copied into the plugin by `make plugin`. |
+
+## Tenant isolation
+
+Each distinct provider tuple gets a dedicated Bifrost client:
+
+| Tuple field | Source | Reason |
+|-------------|--------|--------|
+| `provider` | Parsed model prefix, such as `openai` or `anthropic` | Routes to the correct Bifrost backend. |
+| `keyID` | SHA-256 prefix of the provider API key | Keeps raw credentials out of cache keys and logs. |
+| `baseURL` | Optional custom provider base URL | Keeps tenant endpoints isolated. |
+
+`getBifrostClient` guards the tenant map with `bifrostTenantsMu`, builds a frozen `tenantAccount`, and reuses the client only for identical tuples.
+
+## Provider creation
+
+| Function | Behavior |
+|----------|----------|
+| `NewProvider(model, apiKey)` | Parses `provider/model-name` and returns a Bifrost-backed provider. |
+| `NewProviderWithBase(model, apiKey, baseURL)` | Same as `NewProvider`, but pins a custom upstream base URL. |
+| `mapProviderKey` | Translates DefenseClaw provider strings into Bifrost `ModelProvider` values. |
+
+Provider strings must remain compatible with both gateway routing and scanner configuration. When adding a provider, update the Go mapping, provider registry, plugin provider-coverage tests, and docs together.
+
+## Request conversion
+
+`bifrostProvider` implements the gateway `LLMProvider` interface:
+
+| Method | Converts |
+|--------|----------|
+| `ChatCompletion` | DefenseClaw `ChatRequest` -> Bifrost chat request -> DefenseClaw `ChatResponse`. |
+| `ChatCompletionStream` | DefenseClaw `ChatRequest` -> Bifrost stream callback -> DefenseClaw `StreamChunk`. |
+| `toBifrostMessages` / `fromBifrostMessage` | Message roles, tool calls, raw multimodal content, and usage fields. |
+| `bifrostErrorToGo` | Bifrost error payloads into Go errors with HTTP status context when present. |
+
+## Design principles
+
+1. **No shared mutable credentials.** A request for one tenant cannot mutate the account used by another in-flight request.
+2. **Provider-neutral guardrail path.** Guardrail inspection happens before and after the provider call; Bifrost only owns upstream provider formatting.
+3. **Explicit base URLs.** Custom endpoints are part of the tenant key and never inferred from unrelated traffic.
+4. **Context-aware calls.** Both completion paths accept `context.Context` from the proxy request.
+
+## Related
+
+- [REST endpoints](/docs-site/api/endpoints)
+- [Providers](/docs-site/guardrail/providers)
+- [Plugin protocol](/docs-site/developer/plugin-protocol)
+
+---
+
+<!-- generated-from: internal/gateway/provider.go, internal/gateway/provider_bifrost.go, internal/gateway/providers_endpoint.go, internal/configs/providers.json, go.mod -->

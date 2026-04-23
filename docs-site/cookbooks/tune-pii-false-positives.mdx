@@ -1,0 +1,163 @@
+---
+title: "Tune PII false positives"
+description: "Reduce noise from PII rules without weakening real-exfil detection."
+order: 3
+---
+
+## Problem
+
+The default PII rule pack is aggressive — it has to be, because real PII exfil is the most common failure class. The first 72 hours of `mode: observe` typically produce a batch of false positives from:
+
+- Addresses in sales reply templates
+- Test credit-card numbers (4111-1111-1111-1111)
+- Public sample datasets
+- Documentation referencing emails that aren't actually PII
+
+You want to suppress these while still catching real exfil.
+
+## Solution
+
+### Step 1: Triage
+
+Export recent audit events and isolate likely PII rows:
+
+````bash
+defenseclaw-gateway audit export --limit 5000 --output /tmp/audit.jsonl
+jq 'select(.details | test("pii:"; "i"))' /tmp/audit.jsonl > /tmp/pii-sample.jsonl
+````
+
+Eyeball the top 50 by finding:
+
+````bash
+jq -r '.details' /tmp/pii-sample.jsonl | sort | uniq -c | sort -rn | head -50
+````
+
+Also check whether the finding is coming from the judge category IDs, because suppressions match those exact IDs:
+
+| Category | Finding ID |
+|----------|------------|
+| Email address | `JUDGE-PII-EMAIL` |
+| IP address | `JUDGE-PII-IP` |
+| Phone number | `JUDGE-PII-PHONE` |
+| Driver license | `JUDGE-PII-DL` |
+| Passport | `JUDGE-PII-PASSPORT` |
+| Social Security number | `JUDGE-PII-SSN` |
+| Username | `JUDGE-PII-USER` |
+| Password | `JUDGE-PII-PASS` |
+
+### Step 2: Classify
+
+For each top reason, decide:
+
+- **True positive** — real exfil or leak. Leave alone.
+- **False positive from framework context** — strip before the judge sees it. E.g., messaging bridge banners.
+- **False positive from a specific entity** — suppress the matched entity, not the whole category.
+
+### Step 3: Snapshot the active suppression file
+
+````bash
+cp ~/.defenseclaw/policies/guardrail/default/suppressions.yaml \
+  /tmp/defenseclaw-suppressions-before-pii-tuning.yaml
+````
+
+### Step 4: Write narrow suppressions
+
+The runtime schema has two useful tools:
+
+| Tool | YAML key | Use it for |
+|------|----------|------------|
+| Pre-judge strip | `pre_judge_strips` | Removing known framework text before the PII judge evaluates content |
+| Finding suppression | `finding_suppressions` | Suppressing one finding ID when the entity matches a narrow regex |
+
+<Callout type="warning" title="Merge, do not replace">
+  The default `suppressions.yaml` already contains safety suppressions for system senders, private IPs, Unix timestamps, and platform IDs. Add entries under the existing lists instead of replacing the whole file.
+</Callout>
+
+````yaml
+# Fragment for ~/.defenseclaw/policies/guardrail/default/suppressions.yaml
+version: 1
+
+pre_judge_strips:
+  - id: STRIP-DOCS-SAMPLE-SSN
+    pattern: '\b(?:000-00-0000|123-45-6789)\b'
+    context: "Sample SSNs in documentation and tests"
+    applies_to: [pii]
+
+finding_suppressions:
+  - id: SUPP-SUPPORT-MAILBOX
+    finding_pattern: JUDGE-PII-EMAIL
+    entity_pattern: '^support@(example|your-company)\.com$'
+    reason: "Shared support mailbox, not end-user PII"
+
+  - id: SUPP-PLATFORM-EPOCHS
+    finding_pattern: JUDGE-PII-PHONE
+    entity_pattern: '^\d{10}$'
+    condition: is_epoch
+    reason: "Unix timestamp emitted by integration metadata"
+
+tool_suppressions:
+  - tool_pattern: '^(graph_auth_status|session_status|get_status)$'
+    suppress_findings: [JUDGE-PII-USER]
+    reason: "Status tools return system metadata"
+````
+
+See [Suppressions](/docs-site/guardrail/suppressions) for the full schema.
+
+<Callout type="warning" title="Do not use wildcard suppressions">
+  `finding_pattern: JUDGE-PII-.*` or `entity_pattern: .*` is equivalent to disabling PII detection. Suppress by exact finding ID and exact entity shape.
+</Callout>
+
+### Step 5: Restart and verify
+
+````bash
+defenseclaw-gateway restart
+defenseclaw doctor
+````
+
+Guardrail suppressions are loaded with the rule pack when the proxy starts. Use a restart for rule-pack YAML changes.
+
+### Step 6: Watch the ratio
+
+Monitor the suppression ratio after a normal traffic window:
+
+````spl
+index=defenseclaw source=defenseclaw action="guardrail-verdict" "JUDGE-PII"
+| stats count as total by severity
+````
+
+If your sink includes structured suppression fields, track them separately:
+
+````spl
+index=defenseclaw source=defenseclaw "suppression"
+| stats count as suppressed by action severity
+````
+
+Aim for ≤ 20% suppression ratio per finding. Higher means you're effectively disabling the rule and should rewrite it instead.
+
+## Rollback
+
+Restore the previous file and restart:
+
+````bash
+cp /tmp/defenseclaw-suppressions-before-pii-tuning.yaml \
+  ~/.defenseclaw/policies/guardrail/default/suppressions.yaml
+defenseclaw-gateway restart
+defenseclaw doctor
+````
+
+## Anti-patterns
+
+- Do not suppress a whole rule family. Always scope as narrowly as possible.
+- Do not suppress by wildcard entity regex. That's a functional disable.
+- Do not skip the `reason` field. Future-you will not remember why.
+- Do not suppress CRITICAL findings until someone has reviewed real samples.
+
+## Related
+
+- [Suppressions](/docs-site/guardrail/suppressions)
+- [Tuning](/docs-site/guardrail/tuning)
+- [Writing rules](/docs-site/guardrail/writing-rules)
+
+---
+
+<!-- generated-from: internal/gateway/guardrail.go, internal/guardrail/rulepack.go, internal/guardrail/suppress.go, internal/guardrail/defaults/suppressions.yaml, policies/guardrail/default/judge/pii.yaml -->

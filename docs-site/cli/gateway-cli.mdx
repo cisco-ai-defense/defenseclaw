@@ -1,0 +1,100 @@
+---
+title: "Gateway CLI"
+description: "Reference for the Go defenseclaw-gateway sidecar daemon CLI."
+order: 3
+---
+
+## Overview
+
+`defenseclaw-gateway` is the Go sidecar daemon and runtime CLI. It connects to the OpenClaw gateway WebSocket, enforces policy on tool calls in real time, exposes the local REST API on port `18970`, serves the guardrail proxy on port `4000` when enabled, exports audit evidence, and runs CodeGuard source scans.
+
+<Callout type="info">
+  `defenseclaw tui` resolves this binary and execs `defenseclaw-gateway tui`.
+  Daemon lifecycle commands are not Python wrappers; call `defenseclaw-gateway`
+  directly for `start`, `stop`, `restart`, `status`, and `watchdog`.
+</Callout>
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:root -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Global synopsis
+
+```bash
+defenseclaw-gateway [flags] <command> [args]
+```
+
+### Description
+
+DefenseClaw gateway sidecar — connects to the OpenClaw gateway WebSocket,
+monitors tool_call and tool_result events, enforces policy in real time,
+and exposes a local REST API for the Python CLI.
+
+Run without arguments to start the sidecar daemon.
+
+### Commands
+
+| Command | Description |
+|---|---|
+| [audit](/docs-site/cli/commands-gateway/audit) | Inspect and export the local audit database |
+| [policy](/docs-site/cli/commands-gateway/policy) | Manage and inspect OPA policies |
+| [provenance](/docs-site/cli/commands-gateway/provenance) | Print binary and config provenance (v7 quartet) |
+| [restart](/docs-site/cli/commands-gateway/restart) | Restart the gateway sidecar daemon |
+| [sandbox](/docs-site/cli/commands-gateway/sandbox) | Manage the openshell-sandbox instance |
+| [scan](/docs-site/cli/commands-gateway/scan) | Run security scanners |
+| [start](/docs-site/cli/commands-gateway/start) | Start the gateway sidecar as a background daemon |
+| [status](/docs-site/cli/commands-gateway/status) | Show health of the running sidecar's subsystems |
+| [stop](/docs-site/cli/commands-gateway/stop) | Stop the running gateway sidecar daemon |
+| [tui](/docs-site/cli/commands-gateway/tui) | Launch the interactive TUI dashboard |
+| [watchdog](/docs-site/cli/commands-gateway/watchdog) | Health watchdog that notifies when the gateway is down |
+
+### Persistent flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--host` | `string` | — | Gateway host (default: from config) |
+| `--port` | `int` | `0` | Gateway port (default: from config) |
+
+<!-- END AUTOGEN:cli_go:root -->
+
+## Running the sidecar
+
+| Mode | Command | When to use it |
+|------|---------|----------------|
+| Foreground | `defenseclaw-gateway` | Local debugging, containers, and process managers that supervise PID 1. |
+| Background daemon | `defenseclaw-gateway start` | Operator workstation or host install where DefenseClaw owns `gateway.pid` and `gateway.log`. |
+| Graceful stop | `defenseclaw-gateway stop` | Stops the sidecar and watchdog path cleanly. |
+| Restart after config/policy changes | `defenseclaw-gateway restart` | Reloads config read at startup and restarts the watchdog if configured. |
+| Health check | `defenseclaw-gateway status` | Queries the running sidecar health endpoint and subsystem state. |
+
+The background daemon writes `gateway.pid` and `gateway.log` under `~/.defenseclaw/`. If you changed config with `defenseclaw setup ...`, restart the sidecar so startup-read settings are reloaded.
+
+## Day-two commands
+
+```bash
+defenseclaw-gateway status
+defenseclaw-gateway policy reload
+defenseclaw-gateway scan code ./src --json
+defenseclaw-gateway audit export --limit 1000 --output audit.jsonl
+defenseclaw-gateway watchdog status
+```
+
+<Callout type="warning" title="Avoid secrets on argv">
+  The hidden `--token` flag still works for compatibility, but `internal/cli/sidecar.go` warns that command-line secrets are visible through process listings. Prefer `OPENCLAW_GATEWAY_TOKEN` or `gateway.token` in config.
+</Callout>
+
+## Persistent flags
+
+`--host` and `--port` are root persistent flags. They override the gateway host and port used by commands that connect to the sidecar or start it. Most operators should leave them empty and let config drive the values.
+
+## Related
+
+- [Python CLI](/docs-site/cli/python-cli)
+- [Environment variables](/docs-site/reference/env-vars)
+- [Gateway architecture](/docs-site/developer/architecture)
+- [Audit export](/docs-site/cli/commands-gateway/audit)
+
+---
+
+<!-- generated-from: internal/cli/root.go, internal/cli/daemon.go, internal/cli/sidecar.go, internal/cli/scan.go, internal/cli/policy.go, internal/cli/sandbox.go, internal/cli/audit_export.go, internal/cli/watchdog.go, internal/cli/tui_cmd.go, internal/cli/provenance_cmd.go -->

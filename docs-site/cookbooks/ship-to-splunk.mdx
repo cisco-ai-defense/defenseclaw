@@ -1,0 +1,141 @@
+---
+title: "Ship events to Splunk"
+description: "End-to-end: install the DefenseClaw Splunk app, wire a sink, verify events are indexed, and enable the shipped dashboards."
+order: 6
+---
+
+## Problem
+
+You run Splunk for security telemetry and you want DefenseClaw events indexed there without bespoke Splunk engineering.
+
+## Solution
+
+### Step 1: Choose the deployment pattern
+
+| Pattern | Use when | Operator action |
+|---------|----------|-----------------|
+| Production Splunk HEC | You already run Splunk Enterprise or Splunk Cloud | Create an HEC token, then add a `splunk-hec` audit sink |
+| Local bridge | You need a single-host lab stack | Use the bundled `splunk-claw-bridge` workflow described in [Splunk app](/docs-site/observability/splunk-app) |
+| Airgap | Splunk is internal-only | Use the same `splunk-hec` sink with an internal host and staged token |
+
+This recipe covers the production HEC path.
+
+### Step 2: Create an HEC token
+
+In Splunk:
+
+1. Settings -> Data Inputs -> HTTP Event Collector -> New Token
+2. Name: `defenseclaw`
+3. Allowed indexes: `defenseclaw` or your approved security index
+4. Source type: `_json`
+5. Save and copy the token
+
+<Callout type="tip" title="Use a dedicated index">
+  A dedicated index makes retention, access control, and search cost easier to reason about. The sink defaults to source `defenseclaw` and source type `_json`, with per-action overrides for verdict and judge events.
+</Callout>
+
+### Step 3: Add the sink
+
+````bash
+defenseclaw setup observability add splunk-hec \
+  --host splunk.example.com \
+  --port 8088 \
+  --token "$HEC_TOKEN" \
+  --index defenseclaw \
+  --name splunk-main \
+  --verify-tls \
+  --non-interactive
+````
+
+The CLI writes YAML to `~/.defenseclaw/config.yaml` and stores the token in `~/.defenseclaw/.env`. The gateway reads the updated sink config on restart.
+
+````bash
+defenseclaw-gateway restart
+````
+
+Verify:
+
+````bash
+defenseclaw setup observability test splunk-main
+defenseclaw setup observability list --json
+````
+
+### Step 4: Generate a probe
+
+Run the Splunk probe and a normal health check:
+
+````bash
+defenseclaw setup observability test splunk-main
+defenseclaw doctor
+````
+
+### Step 5: Verify in Splunk
+
+````spl
+index=defenseclaw source=defenseclaw
+| stats count by sourcetype action severity
+````
+
+You should see at least one recent DefenseClaw event from the observability probe or doctor run.
+
+### Step 6: Know the sourcetypes
+
+The Splunk sink applies defaults and per-action overrides:
+
+| Event | Sourcetype |
+|-------|------------|
+| Most audit events | `_json` unless configured otherwise |
+| `guardrail-verdict` | `defenseclaw:verdict` |
+| `llm-judge-response` | `defenseclaw:judge` |
+| Activity events | `defenseclaw:activity` |
+
+### Step 7: Watch the production panels
+
+Navigate to your DefenseClaw dashboards or run equivalent SPL. Key signals:
+
+| Panel | What to watch for |
+|-------|-------------------|
+| Verdict volume | Should track your traffic — big dips mean the sidecar is down |
+| Severity mix | A sustained shift to HIGH/CRITICAL suggests a new threat or a bad rule |
+| Sink lag | Should be 0 or near-zero |
+| Admission rate | Steady background of `allow`; spikes of `block` are interesting |
+
+### Step 8: Tune the index
+
+For production, set retention on the dedicated index according to your audit policy. DefenseClaw sink filters can reduce volume by severity or action, but start broad during rollout so incident responders can reconstruct what happened.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Check | Fix |
+|---------|--------------|-------|-----|
+| `test splunk-main` says token missing | Token was not written to `.env` or wrong env var was configured | `defenseclaw config show --format yaml` | Re-run `setup observability add` with `--token` |
+| HTTP 401 or 403 | HEC token lacks index permissions | `defenseclaw setup observability test splunk-main` | Fix token permissions in Splunk |
+| TLS errors | Certificate chain is not trusted | `defenseclaw setup observability test splunk-main` | Install a trusted cert or re-add without `--verify-tls` only for dev |
+| No events after setup | Gateway has not restarted | `defenseclaw-gateway status` | `defenseclaw-gateway restart` |
+| Events arrive but dashboards are empty | Sourcetype/index mismatch | SPL query by `source=defenseclaw` | Update index macros or sink `--index` |
+
+## Rollback
+
+Disable delivery without deleting the sink:
+
+````bash
+defenseclaw setup observability disable splunk-main
+defenseclaw-gateway restart
+````
+
+Remove the sink after the incident:
+
+````bash
+defenseclaw setup observability remove splunk-main --yes
+defenseclaw-gateway restart
+````
+
+## Related
+
+- [Setup observability](/docs-site/first-setup/setup-observability)
+- [Splunk setup](/docs-site/first-setup/setup-splunk)
+- [Splunk app](/docs-site/observability/splunk-app)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup.py, cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/observability/presets.py, cli/defenseclaw/observability/writer.py, internal/audit/sinks/sinks.go, internal/audit/sinks/splunk_hec.go, bundles/splunk_local_bridge/splunk/README.md -->

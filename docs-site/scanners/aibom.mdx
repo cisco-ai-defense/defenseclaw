@@ -1,0 +1,71 @@
+---
+title: "AIBOM"
+description: "Scan the live OpenClaw inventory and record an AI bill of materials snapshot."
+order: 7
+---
+
+## Overview
+
+`defenseclaw aibom scan` queries the live OpenClaw environment and builds a unified inventory of skills, plugins, MCP servers, agents, tools, models, and memory. The command enriches the inventory with policy state, converts it to a scan result for the audit database, and can print either human output or JSON.
+
+## What it collects
+
+| Component | Source |
+|-----------|--------|
+| Skills | OpenClaw skill inventory |
+| Plugins | OpenClaw plugin inventory |
+| MCP servers | OpenClaw MCP configuration |
+| Agents | OpenClaw agent inventory |
+| Tools | Tool inventory exposed by OpenClaw |
+| Models | Model inventory exposed by OpenClaw |
+| Memory | Memory inventory exposed by OpenClaw |
+
+The implementation lives in `defenseclaw.inventory.claw_inventory` and is invoked from `cli/defenseclaw/commands/cmd_aibom.py::scan`.
+
+## CLI
+
+```bash
+defenseclaw aibom scan
+defenseclaw aibom scan --summary
+defenseclaw aibom scan --json
+defenseclaw aibom scan --only skills,plugins,mcp
+```
+
+See [aibom CLI](/docs-site/cli/commands/aibom).
+
+<Callout type="info" title="Current command surface">
+  The Python CLI exposes `scan` only. It does not expose `generate`, `diff`, `verify`, `--format`, or `--output` in the current source.
+</Callout>
+
+## Output modes
+
+| Option | Behavior |
+|--------|----------|
+| default | Prints the formatted inventory. |
+| `--summary` | Shows the summary table only. |
+| `--json` | Prints the full inventory JSON and stamps provenance metadata. |
+| `--only` | Restricts collection to a comma-separated category list. |
+
+## Audit behavior
+
+After building the inventory, the command calls `claw_aibom_to_scan_result` and logs that scan result when an audit logger is configured. That makes AIBOM part of the same scan history as skill, MCP, plugin, and CodeGuard results.
+
+## Use cases
+
+- **Incident response.** "Is model X installed anywhere?" Use JSON mode and filter the live inventory.
+- **Readiness checks.** Confirm skills, plugins, MCP servers, and tools are visible before enabling watcher enforcement.
+- **Audit trail.** Store scan rows from each AIBOM run in the audit database.
+
+```bash
+defenseclaw aibom scan --json | jq '.models'
+```
+
+## Related
+
+- [ClawShield](/docs-site/scanners/clawshield)
+- [aibom CLI](/docs-site/cli/commands/aibom)
+- [Skill scanner](/docs-site/scanners/skill-scanner)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_aibom.py, cli/defenseclaw/inventory/claw_inventory.py -->

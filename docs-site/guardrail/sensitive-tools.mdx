@@ -1,0 +1,54 @@
+---
+title: "Sensitive tools"
+description: "How sensitive-tools.yaml controls tool-result inspection and entity-count alert gates."
+order: 7
+---
+
+## Overview
+
+`sensitive-tools.yaml` is loaded into `SensitiveToolsConfig`. `LookupSensitiveTool` finds entries by exact tool name. The gateway event router uses this config when handling tool-result events.
+
+```yaml
+version: 1
+tools:
+  - name: users_list
+    result_inspection: true
+    judge_result: true
+    min_entities_for_alert: 3
+```
+
+## Fields
+
+| Field | Source type | Meaning |
+|-------|-------------|---------|
+| `name` | `string` | Exact tool name. |
+| `result_inspection` | `bool` | Enables tool output inspection. If false or missing, that tool result is ignored by this path. |
+| `judge_result` | `bool` | Requests an LLM PII judge pass in addition to deterministic regex scanning when a judge is available. |
+| `min_entities_for_alert` | `int` | Minimum entity/finding count required before an alert is emitted. Values `0` or less behave as `1`. |
+
+## Runtime path
+
+`internal/gateway/router.go::inspectToolResult` implements the current flow:
+
+| Step | Behavior |
+|------|----------|
+| Lookup | Return if no matching sensitive-tool entry or `result_inspection` is false. |
+| Deterministic scan | Always run `scanLocalPatterns("completion", payload.Output)`. |
+| Optional judge | If `judge_result` is true and a judge exists, run `LLMJudge.RunJudges` and merge verdicts. |
+| Entity gate | Compare `verdict.EntityCount`, falling back to `len(verdict.Findings)`, against `min_entities_for_alert`. |
+| Emit | Log a redacted alert and push a `NotificationQueue` item. |
+
+<Callout type="info" title="judge_result is additive">
+  `judge_result: false` does not disable deterministic scanning when
+  `result_inspection: true`; it only skips the LLM judge portion.
+</Callout>
+
+## Related
+
+- [Suppressions](/docs-site/guardrail/suppressions)
+- [Notification queue](/docs-site/guardrail/notification-queue)
+- [Writing rules](/docs-site/guardrail/writing-rules)
+
+---
+
+<!-- generated-from: internal/guardrail/rulepack.go, internal/gateway/router.go, internal/gateway/notifications.go, internal/guardrail/defaults/sensitive-tools.yaml, policies/guardrail/default/sensitive-tools.yaml -->

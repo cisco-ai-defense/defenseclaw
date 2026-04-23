@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
@@ -347,7 +348,8 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 			route = r.Pattern
 		}
 		spanName := r.Method + " " + route
-		ctx, span := tracer.Start(r.Context(), spanName,
+		parentCtx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := tracer.Start(parentCtx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("defenseclaw.http.server", serverName)),
 		)

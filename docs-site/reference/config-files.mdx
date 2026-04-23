@@ -1,0 +1,113 @@
+---
+title: "Config files"
+description: "Every config file DefenseClaw reads: purpose, location, and ownership."
+order: 1
+---
+
+## Overview
+
+DefenseClaw stores state across several files under `~/.defenseclaw/`. This page enumerates the files operators touch during real deployments: what they contain, which process owns them, how to verify them, and how to roll back safely.
+
+Use the CLI when you are unsure where a deployment has moved state:
+
+````bash
+defenseclaw config path
+defenseclaw config validate
+````
+
+## The layout
+
+```text
+~/.defenseclaw/
+├── config.yaml                   # primary config
+├── .env                          # secrets (0600)
+├── audit.db                      # SQLite store
+├── gateway.jsonl[.gz]            # append-only structured log + rotations
+├── policies/                     # operator overlays
+│   ├── rego/*.rego
+│   ├── data.json
+│   └── guardrail/default/
+├── snapshots/                    # drift snapshots (skills, mcp, plugins)
+├── quarantine/                   # files moved out of agent reach
+├── custom-providers.json         # provider domain allow-list overlay
+├── extensions/defenseclaw/       # OpenClaw plugin tree
+├── firewall.yaml                 # firewall compiler config
+├── firewall.pf.conf              # generated macOS pf rules path
+├── scanners/                     # scanner-local registration/config files
+└── sandbox/                      # sandbox-local state (Linux)
+```
+
+## File-by-file
+
+| File | Purpose | Owner | Apply changes |
+|------|---------|-------|---------------|
+| `config.yaml` | Primary config: gateway, guardrail, audit sinks, webhooks, watcher, firewall | CLI writes; sidecar reads | `defenseclaw-gateway restart` for process config |
+| `.env` | Secret material such as master key, judge API key, sink tokens. Mode `0600`. | CLI writes; sidecar reads at start | `defenseclaw-gateway restart` |
+| `audit.db` | SQLite store of audit/activity events | sidecar writes; CLI reads | n/a |
+| `doctor_cache.json` | Last `defenseclaw doctor` result consumed by the TUI overview | CLI writes | rerun `defenseclaw doctor` |
+| `gateway.jsonl` | Append-only structured event log plus rotated compressed backups | sidecar writes | n/a |
+| `policies/rego/*.rego` | Operator overlay Rego modules | human edits | `defenseclaw-gateway policy validate`, then `defenseclaw-gateway policy reload` |
+| `policies/rego/data.json` | OPA data: action matrix, scanner overrides, firewall lists | human edits | `defenseclaw-gateway policy validate`, then `defenseclaw-gateway policy reload` |
+| `policies/guardrail/PROFILE_NAME/rules/*.yaml` | Guardrail regex rule-pack overlay | human edits | `defenseclaw-gateway restart` |
+| `policies/guardrail/PROFILE_NAME/suppressions.yaml` | Guardrail pre-judge strips and finding suppressions | human edits | `defenseclaw-gateway restart` |
+| `snapshots/*.json` | Per-artifact drift snapshots | sidecar writes | n/a |
+| `quarantine/**` | Quarantined artifacts | watcher moves | n/a |
+| `custom-providers.json` | Custom LLM provider overlay for the guardrail proxy | `setup provider add/remove` | provider reload endpoint or restart |
+| `extensions/defenseclaw/` | OpenClaw plugin tree | `setup guardrail` manages | no (restart OpenClaw) |
+| `firewall.yaml` | Firewall compiler input | human edits | compile/apply through firewall workflow |
+| `firewall.pf.conf` | Generated macOS pf rules path | firewall compiler writes | reload pf/anchor outside DefenseClaw |
+| `sandbox/policy.yaml` or `openshell-policy.yaml` | Linux sandbox/OpenShell policy | setup commands and operators | next sandbox invocation or systemd restart |
+
+## Quick checks
+
+| Need | Command | What good looks like |
+|------|---------|----------------------|
+| Find actual paths | `defenseclaw config path` | Paths point at the intended `DEFENSECLAW_HOME` |
+| Validate syntax | `defenseclaw config validate` | `config is valid` |
+| Review without leaking secrets | `defenseclaw config show --format yaml` | secret values are masked |
+| Confirm running process saw changes | `defenseclaw doctor` | sidecar subsystems match `config.yaml` |
+| Confirm OPA data compiles | `defenseclaw-gateway policy validate` | Rego modules and `data.json` compile |
+
+## Ownership and permissions
+
+- Everything under `~/.defenseclaw/` is owned by the installing user.
+- `.env` is `0600`. Violating permissions on `.env` causes `defenseclaw doctor` to fail.
+- `audit.db` is `0600` by default; relaxing permissions is discouraged.
+- `policy/` is `0755` on directories, `0644` on files — human-editable.
+
+## Backup and restore
+
+Backing up `~/.defenseclaw/` is equivalent to a full state snapshot. For airgapped DR, archive the whole directory, or exclude `snapshots/` and rotated `gateway.jsonl` backups for a leaner image.
+
+Before a risky edit:
+
+````bash
+cp ~/.defenseclaw/config.yaml ~/.defenseclaw/config.yaml.bak
+cp ~/.defenseclaw/policies/rego/data.json /tmp/defenseclaw-data.json.bak
+````
+
+Restore is drop-in: untar into `~/.defenseclaw/` on a fresh host, then run:
+
+````bash
+defenseclaw config validate
+defenseclaw-gateway start
+defenseclaw doctor
+````
+
+## Overrides via environment variable
+
+```bash
+DEFENSECLAW_HOME=/opt/defenseclaw
+```
+
+Changes the base directory. Useful for system installs or containerized deployments that want to mount state separately.
+
+## Related
+
+- [Environment variables](/docs-site/reference/env-vars)
+- [Install methods](/docs-site/installation/index)
+- [Audit store](/docs-site/observability/audit-store)
+
+---
+
+<!-- generated-from: cli/defenseclaw/config.py, cli/defenseclaw/paths.py, cli/defenseclaw/commands/cmd_config.py, cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_init.py, internal/config/config.go, internal/cli/policy.go, scripts/install.sh -->

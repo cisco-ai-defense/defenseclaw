@@ -590,6 +590,18 @@ class GatewayConfig:
 
 
 @dataclass
+class CodexConfig:
+    enabled: bool = True
+    mode: str = "inherit"
+    install_scope: str = "user"
+    fail_closed: bool = False
+    scan_on_session_start: bool = True
+    scan_on_stop: bool = True
+    component_scan_interval_minutes: int = 60
+    scan_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SeverityAction:
     file: str = "none"
     runtime: str = "enable"
@@ -808,6 +820,7 @@ class Config:
     splunk: SplunkConfig = field(default_factory=SplunkConfig)
     otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    codex: CodexConfig = field(default_factory=CodexConfig)
     skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
@@ -1362,6 +1375,26 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
     return MCPScannerConfig()
 
 
+def _merge_codex(raw: dict[str, Any] | None) -> CodexConfig:
+    if not raw:
+        return CodexConfig()
+    scan_paths = raw.get("scan_paths", [])
+    if isinstance(scan_paths, str):
+        scan_paths = [p.strip() for p in scan_paths.split(",") if p.strip()]
+    elif not isinstance(scan_paths, list):
+        scan_paths = []
+    return CodexConfig(
+        enabled=raw.get("enabled", True),
+        mode=raw.get("mode", "inherit"),
+        install_scope=raw.get("install_scope", "user"),
+        fail_closed=raw.get("fail_closed", False),
+        scan_on_session_start=raw.get("scan_on_session_start", True),
+        scan_on_stop=raw.get("scan_on_stop", True),
+        component_scan_interval_minutes=raw.get("component_scan_interval_minutes", 60),
+        scan_paths=[str(p) for p in scan_paths],
+    )
+
+
 def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
     if not raw:
         return OTelConfig()
@@ -1663,6 +1696,7 @@ def load() -> Config:
             api_port=gw_raw.get("api_port", 18970),
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
         ),
+        codex=_merge_codex(raw.get("codex")),
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),

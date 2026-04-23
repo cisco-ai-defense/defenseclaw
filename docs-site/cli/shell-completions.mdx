@@ -1,0 +1,55 @@
+---
+title: "Shell completions"
+description: "Install tab completion for defenseclaw and defenseclaw-gateway in bash, zsh, and fish."
+order: 5
+---
+
+## Overview
+
+The Python CLI uses Click's completion emitter. The generated gateway command tree does not expose a `completion` subcommand, so this page only documents completion scripts for `defenseclaw`.
+
+## Python CLI
+
+### Bash
+
+```bash
+_DEFENSECLAW_COMPLETE=bash_source defenseclaw > ~/.local/share/bash-completion/completions/defenseclaw
+# reload current shell
+exec bash
+```
+
+### Zsh
+
+```bash
+_DEFENSECLAW_COMPLETE=zsh_source defenseclaw > ~/.zfunc/_defenseclaw
+# one-time:
+echo 'fpath=(~/.zfunc $fpath)' >> ~/.zshrc
+echo 'autoload -U compinit && compinit' >> ~/.zshrc
+exec zsh
+```
+
+### Fish
+
+```bash
+_DEFENSECLAW_COMPLETE=fish_source defenseclaw > ~/.config/fish/completions/defenseclaw.fish
+```
+
+## Verify
+
+```bash
+defenseclaw --help
+```
+
+Your shell should expand to the full list of top-level Python CLI commands. If it does not, the most common causes are: completion file not in the shell's `fpath` / completion directory, `compinit` not invoked for zsh, or `bash-completion` package not installed.
+
+## Uninstall
+
+```bash
+rm ~/.local/share/bash-completion/completions/defenseclaw
+rm ~/.zfunc/_defenseclaw
+rm ~/.config/fish/completions/defenseclaw.fish
+```
+
+---
+
+<!-- generated-from: cli/defenseclaw/main.py -->

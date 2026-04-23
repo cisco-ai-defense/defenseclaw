@@ -1,0 +1,115 @@
+---
+title: "Make install"
+description: "Makefile targets for build, install, quickstart, llm-setup, dist, and checks."
+order: 4
+---
+
+## Overview
+
+From the repository root, `make all` runs **`install`**, then **`path`**, **`quickstart`**, and **`llm-setup`**—mirroring the non-interactive paths used by `scripts/install.sh` and `scripts/install-dev.sh`. Use **`NO_QUICKSTART=1`**, **`NO_PATH=1`**, or **`NO_LLM_SETUP=1`** when automating pieces of the flow.
+
+Default install locations match the Makefile variables: **`INSTALL_DIR := $(HOME)/.local/bin`**, **`VENV := .venv`**, plugin install under **`~/.defenseclaw/extensions/defenseclaw/`** (`DC_EXT_DIR`).
+
+<Callout type="tip">
+  `gateway-install` copies via a temp file then `mv` to avoid `ETXTBSY` when replacing a running binary on Linux; if the sidecar is already running, rerun **`defenseclaw-gateway restart`** after upgrade.
+</Callout>
+
+## Core flows
+
+| Target | Purpose |
+|--------|---------|
+| `make all` | `install` + `path` + `quickstart` + `llm-setup` (full first-time developer path) |
+| `make install` | `cli-install` + `gateway-install` + `plugin-install` |
+| `make build` | `pycli` + `gateway` + `plugin` (binaries under repo, no user dir copies except venv) |
+| `make dev-install` | Runs `./scripts/install-dev.sh` (editable CLI, dev tools, gateway build) |
+
+## `make quickstart` and `make llm-setup`
+
+| Target | Behavior |
+|--------|----------|
+| `quickstart` | Runs `defenseclaw quickstart --non-interactive --yes` from `$(INSTALL_DIR)/defenseclaw` or `.venv/bin/defenseclaw`; skipped if `NO_QUICKSTART=1` |
+| `llm-setup` | Runs `./scripts/setup-llm.sh` when stdin/stdout are TTY and CI is unset; skipped for non-TTY or `NO_LLM_SETUP=1` / `YES=1` / `CI=true` |
+
+`scripts/setup-llm.sh` resolves the CLI via `DEFENSECLAW_BIN`, repo `.venv`, **`DEFENSECLAW_INSTALL_DIR`** (default `~/.local/bin`), or `PATH`.
+
+## Make target reference
+
+<!-- BEGIN AUTOGEN:make_targets:all -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+| Target | Phony |
+|---|---|
+| `_bundle-data` | no |
+| `all` | yes |
+| `build` | no |
+| `check` | no |
+| `check-audit-actions` | no |
+| `check-error-codes` | no |
+| `check-provider-coverage` | no |
+| `check-schemas` | no |
+| `check-v7` | no |
+| `clean` | no |
+| `cli-install` | no |
+| `cli-test` | no |
+| `cli-test-cov` | no |
+| `dev-install` | no |
+| `dev-pycli` | no |
+| `dist` | no |
+| `dist-checksums` | no |
+| `dist-clean` | no |
+| `dist-cli` | no |
+| `dist-gateway` | no |
+| `dist-plugin` | no |
+| `dist-sandbox` | no |
+| `dist-test` | no |
+| `docs-check` | no |
+| `docs-clean-generated` | no |
+| `docs-deadlinks` | no |
+| `docs-gen` | no |
+| `docs-verify` | no |
+| `doctor` | yes |
+| `gateway` | no |
+| `gateway-cross` | no |
+| `gateway-install` | no |
+| `gateway-run` | no |
+| `gateway-test` | no |
+| `go-lint` | no |
+| `go-test-cov` | no |
+| `install` | no |
+| `lint` | no |
+| `llm-setup` | yes |
+| `path` | yes |
+| `plugin` | no |
+| `plugin-install` | no |
+| `py-lint` | no |
+| `pycli` | no |
+| `quickstart` | yes |
+| `rego-test` | no |
+| `start` | no |
+| `test` | no |
+| `test-file` | no |
+| `test-verbose` | no |
+| `ts-test` | no |
+| `tui-test` | no |
+| `uninstall` | yes |
+
+<!-- END AUTOGEN:make_targets:all -->
+| `dist-plugin` | Build plugin then tarball `defenseclaw-plugin-$(Makefile).tar.gz` |
+| `dist-sandbox` | Copy OpenShell policies and sandbox installer script into `dist/sandbox/` |
+| `dist-test` | Copy E2E/test helper scripts into `dist/test/` |
+| `dist-checksums` | SHA-256 checksums for `dist/` artifacts |
+| `dist-clean` | Remove `dist/` and generated `_data` trees |
+| `docs-gen` | Run Python `scripts.docgen` and `docgen-go` binary |
+| `docs-check` | Regenerate docs and fail if `docs-site/` git diff is non-empty |
+| `docs-deadlinks` | `scripts/docs_deadlinks.py docs-site/` |
+| `docs-clean-generated` | Delete entire `docs-site/` tree |
+
+## Related
+
+- [Build from source](/docs-site/installation/build-from-source)
+- [Curl installer](/docs-site/installation/curl-install)
+- [Developer building](/docs-site/developer/building)
+
+---
+
+<!-- generated-from: Makefile -->

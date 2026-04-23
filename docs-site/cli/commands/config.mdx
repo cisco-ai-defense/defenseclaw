@@ -1,0 +1,89 @@
+---
+title: "defenseclaw config"
+description: "Inspect and validate DefenseClaw configuration."
+order: 10
+---
+
+## Overview
+
+`defenseclaw config` — Inspect and validate DefenseClaw configuration.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:config -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw config [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `path` | Print the filesystem locations DefenseClaw uses. |
+| `show` | Render the resolved configuration (secrets masked). |
+| `validate` | Verify the config file parses and references valid enums. |
+
+### Description
+
+Inspect and validate DefenseClaw configuration
+
+### `defenseclaw config path`
+
+Print the filesystem locations DefenseClaw uses
+
+### `defenseclaw config show`
+
+Render the resolved configuration (secrets masked)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--format` | choice (`yaml`, `json`) | `yaml` | — | no | Output format. |
+| `--reveal` | boolean | — | — | no | Include resolved secret VALUES (masked). Off by default; env-var names are always shown. |
+
+### `defenseclaw config validate`
+
+Verify the config file parses and references valid enums
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--quiet` | boolean | — | — | no | Exit 0/1 with no stdout output. |
+
+<!-- END AUTOGEN:cli_py:config -->
+
+## Usage
+
+### Show resolved config
+
+```bash
+defenseclaw config show --format yaml
+defenseclaw config show --format json --reveal
+```
+
+Use `--reveal` only in a private terminal because it may print secret values.
+
+### Validate config and find its path
+
+```bash
+defenseclaw config validate --quiet
+defenseclaw config path
+```
+
+`validate` checks the active local configuration; `path` prints the file location used by the CLI.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_config.py -->

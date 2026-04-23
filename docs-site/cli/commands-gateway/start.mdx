@@ -1,0 +1,48 @@
+---
+title: "defenseclaw-gateway start"
+description: "Start the gateway sidecar as a background daemon."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway start` — Start the gateway sidecar as a background daemon.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:start -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+start
+```
+
+### Description
+
+Start the DefenseClaw gateway sidecar as a background daemon.
+
+The daemon process runs independently and survives terminal close.
+Use 'status' to check health and 'stop' to shut it down.
+
+Logs are written to ~/.defenseclaw/gateway.log (rotated by size; old files compressed in the same directory).
+PID is stored in ~/.defenseclaw/gateway.pid
+
+<!-- END AUTOGEN:cli_go:start -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/daemon.go -->

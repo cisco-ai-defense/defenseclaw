@@ -440,6 +440,13 @@ def _apply_otel_preset(
     if existing_headers:
         otel["headers"] = existing_headers
 
+    if preset.otel_tls_insecure is not None:
+        tls = otel.setdefault("tls", {})
+        if not isinstance(tls, dict):
+            tls = {}
+            otel["tls"] = tls
+        tls["insecure"] = bool(preset.otel_tls_insecure)
+
     signals_set = set(signals)
     for sig in ("traces", "metrics", "logs"):
         block = otel.setdefault(sig, {})

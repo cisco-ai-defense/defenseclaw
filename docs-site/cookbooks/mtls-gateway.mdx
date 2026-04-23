@@ -1,0 +1,112 @@
+---
+title: "mTLS the gateway"
+description: "Expose the control plane off-host with mutual TLS."
+order: 7
+---
+
+## Problem
+
+You want a central operator host to inspect a DefenseClaw sidecar running elsewhere. The current `internal/gateway/api.go` server binds the control API itself; it does not implement a native mTLS listener. Put a reviewed reverse proxy in front of the loopback API if you must expose it off-host.
+
+## Solution
+
+### Step 1: Mint a CA and per-client certs
+
+````bash
+# Root CA
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
+  -subj "/CN=DefenseClaw Control Plane CA"
+
+# Server cert
+openssl genrsa -out server.key 4096
+openssl req -new -key server.key -out server.csr \
+  -subj "/CN=defenseclaw.gateway.internal"
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out server.crt -days 365 -sha256 \
+  -extfile <(printf "subjectAltName=DNS:defenseclaw.gateway.internal,IP:10.0.1.42")
+
+# Client cert (per operator)
+openssl genrsa -out operator-alice.key 4096
+openssl req -new -key operator-alice.key -out operator-alice.csr \
+  -subj "/CN=alice@operators"
+openssl x509 -req -in operator-alice.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out operator-alice.crt -days 365 -sha256
+````
+
+Use **RSA 4096** or **ECDSA P-384** keys, **SHA-256** signatures, per the crypto rule set.
+
+### Step 2: Keep the sidecar on loopback
+
+Leave DefenseClaw's API on the default loopback bind and port **18970**. Terminate mTLS in a fronting proxy, then proxy only to `http://127.0.0.1:18970`.
+
+Restart:
+
+````bash
+defenseclaw-gateway restart
+````
+
+### Step 3: Terminate mTLS in a reverse proxy
+
+Example NGINX server block:
+
+````ini
+server {
+  listen 9443 ssl;
+  server_name defenseclaw.gateway.internal;
+
+  ssl_certificate /etc/defenseclaw/tls/server.crt;
+  ssl_certificate_key /etc/defenseclaw/tls/server.key;
+  ssl_client_certificate /etc/defenseclaw/tls/ca.crt;
+  ssl_verify_client on;
+
+  location / {
+    proxy_pass http://127.0.0.1:18970;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $remote_addr;
+  }
+}
+````
+
+Verify:
+
+````bash
+curl --cacert ca.crt \
+  --cert operator-alice.crt \
+  --key operator-alice.key \
+  https://defenseclaw.gateway.internal:9443/health | jq .
+````
+
+### Step 4: Rotate
+
+- **Server cert** — rotate every 90 days. Keep old cert trusted until rollover is complete.
+- **Client certs** — rotate every 90 days. Revoke by publishing a CRL or using short-lived certs.
+- **CA** — rotate every 10 years. Stagger: issue new CA, cross-sign, roll servers, roll clients, retire old CA.
+
+Automate with `cert-manager`, Vault PKI, or an internal CA.
+
+### Step 5: Revocation
+
+Keep revocation in the fronting proxy:
+
+````ini
+ssl_crl /etc/defenseclaw/tls/revocations.crl;
+````
+
+OCSP stapling is not yet implemented. For now, keep client cert lifetimes short (30–90 days) and rely on expiry.
+
+## Anti-patterns
+
+- Don't bind the DefenseClaw API directly to a public interface.
+- Don't share a single client cert across operators — you lose per-operator attribution in the audit log.
+- Don't place the mTLS cert material in the repo, in CI secrets without scope, or in any `~/.defenseclaw/` directory without `0600`.
+
+## Related
+
+- [Authentication](/docs-site/api/auth)
+- [Config files](/docs-site/reference/config-files)
+- [Airgapped install](/docs-site/cookbooks/airgapped-install)
+
+---
+
+<!-- generated-from: internal/gateway/proxy.go, internal/gateway/api.go, cli/defenseclaw/commands/cmd_setup.py -->

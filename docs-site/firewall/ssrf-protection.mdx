@@ -1,0 +1,54 @@
+---
+title: "SSRF protection"
+description: "Defense against server-side request forgery: DNS re-resolution, IP class blocks, and redirect tracing."
+order: 4
+---
+
+## Overview
+
+DefenseClaw implements SSRF defenses in two source-backed places:
+
+- Webhook endpoint validation rejects unsafe configured webhook URLs.
+- Guardrail proxy passthrough handling blocks LLM-shaped requests to private or link-local IP literals.
+
+## Defenses
+
+### 1. Webhook URL validation
+
+`validateWebhookURL` accepts only `http` and `https`, requires a hostname, rejects `localhost` by default, resolves hostnames at config time when possible, and rejects private or reserved IP results.
+
+Blocked ranges include:
+
+| Class | Range |
+|-------|-------|
+| RFC 1918 private IPv4 | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
+| Loopback | `127.0.0.0/8`, `::1/128` |
+| Link-local / metadata | `169.254.0.0/16`, `fe80::/10` |
+| Unique local IPv6 | `fc00::/7` |
+
+Localhost can be allowed only for local development by setting `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1`; the exception only permits loopback, not arbitrary private IPs.
+
+### 2. Proxy private-host check
+
+For LLM-shaped passthrough requests to unknown providers, the proxy checks the target host string with `isPrivateHost`. It blocks IP literals that are loopback, private, link-local, multicast link-local, or unspecified. That function intentionally returns false for DNS names; webhook validation is the place that resolves hostnames at config time.
+
+### 3. Scheme restriction
+
+Webhook URLs must be `http://` or `https://`. Other schemes fail validation.
+
+## Not currently implemented
+
+The source does not expose a `firewall.ssrf.*` config block, redirect-depth setting, or firewall-wide DNS pinning layer. Avoid documenting those as available controls unless the code adds them.
+
+## Observability
+
+Webhook URL validation rejects unsafe endpoints during dispatcher construction and logs the rejection. Proxy private-host blocks emit an egress event with decision `block` and reason `private-ip`.
+
+## Related
+
+- [Rule compiler](/docs-site/firewall/rules)
+- [Egress observer](/docs-site/firewall/egress-observer)
+
+---
+
+<!-- generated-from: internal/gateway/webhook.go, internal/gateway/proxy.go, internal/gateway/shape.go -->

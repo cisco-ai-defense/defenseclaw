@@ -43,6 +43,7 @@ const (
 	wizardGuardrail
 	wizardSplunk
 	wizardObservability
+	wizardCodex
 	wizardWebhook
 	wizardSandbox
 	wizardCount
@@ -50,7 +51,7 @@ const (
 
 var wizardNames = [wizardCount]string{
 	"Skill Scanner", "MCP Scanner", "Gateway",
-	"Guardrail", "Splunk", "Observability", "Webhooks", "Sandbox",
+	"Guardrail", "Splunk", "Observability", "Codex", "Webhooks", "Sandbox",
 }
 
 var wizardCommands = [wizardCount][]string{
@@ -62,6 +63,7 @@ var wizardCommands = [wizardCount][]string{
 	// Observability: preset id is injected positionally by
 	// buildWizardArgs from the form's "preset" field.
 	{"setup", "observability", "add"},
+	{"setup", "codex"},
 	// Webhook: channel type is injected positionally from the form's
 	// "type" field. See buildWizardArgs + webhookWizardFields.
 	{"setup", "webhook", "add"},
@@ -75,6 +77,7 @@ var wizardDescriptions = [wizardCount]string{
 	"Configure LLM guardrail proxy (mode, model, scanner mode, judge settings).",
 	"Configure Splunk HEC integration for SIEM (endpoint, token, index, source).",
 	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
+	"Install DefenseClaw Codex hooks, verify the Codex feature flag, and connect hooks to the local sidecar.",
 	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
 }
@@ -109,6 +112,10 @@ var wizardHowTo = [wizardCount]string{
 	"Runs: defenseclaw setup observability add <preset>\n" +
 		"What you'll need: vendor realm/region, ingest token env var, optional service.name/environment overrides.\n" +
 		"Tip: presets pre-fill endpoint + headers. Pick 'otlp' for any vendor not in the list.",
+	// Codex
+	"Runs: defenseclaw setup codex\n" +
+		"What you'll need: Codex installed locally and the DefenseClaw sidecar reachable on gateway.api_port.\n" +
+		"Tip: global hooks live in ~/.codex/hooks.json; start in observe mode before enabling action enforcement.",
 	// Webhook
 	"Runs: defenseclaw setup webhook add <type>\n" +
 		"What you'll need: webhook URL (or env var), HMAC secret env (slack/generic), event filter list.\n" +
@@ -466,6 +473,30 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Flag PII on LLM completions (data leakage from the model)."},
 				{Label: "Tool Injection", Key: "guardrail.judge.tool_injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.ToolInjection),
 					Hint: "Detect malicious payloads inside tool-call arguments."},
+			},
+		},
+		{
+			Name:    "Codex",
+			Summary: "Codex hooks bridge: prompt/tool/stop checks routed through the DefenseClaw sidecar.",
+			Help: "mode=inherit follows guardrail.mode. observe records would-blocks; action enforces active policy. " +
+				"Use the Codex wizard to install or remove hooks in ~/.codex/hooks.json or repo .codex/hooks.json.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "codex.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Codex.Enabled),
+					Hint: "Master switch for Codex hook handling. Installed hooks fail open when this is false."},
+				{Label: "Mode", Key: "codex.mode", Kind: "choice", Value: c.Codex.Mode, Options: []string{"inherit", "observe", "action"},
+					Hint: "inherit=guardrail.mode; observe=record only; action=block when policy says block."},
+				{Label: "Install Scope", Key: "codex.install_scope", Kind: "choice", Value: c.Codex.InstallScope, Options: []string{"user", "repo"},
+					Hint: "user writes ~/.codex/hooks.json; repo writes <repo>/.codex/hooks.json."},
+				{Label: "Fail Closed", Key: "codex.fail_closed", Kind: "bool", Value: fmt.Sprintf("%v", c.Codex.FailClosed),
+					Hint: "When true, hook bridge failures block eligible Codex events instead of allowing them."},
+				{Label: "Scan on SessionStart", Key: "codex.scan_on_session_start", Kind: "bool", Value: fmt.Sprintf("%v", c.Codex.ScanOnSessionStart),
+					Hint: "Run debounced skill/plugin/MCP inventory scans when Codex starts or resumes a session."},
+				{Label: "Scan on Stop", Key: "codex.scan_on_stop", Kind: "bool", Value: fmt.Sprintf("%v", c.Codex.ScanOnStop),
+					Hint: "Run CodeGuard over changed files from the Stop hook."},
+				{Label: "Component Scan Interval", Key: "codex.component_scan_interval_minutes", Kind: "int", Value: fmt.Sprintf("%d", c.Codex.ComponentScanIntervalMinutes),
+					Hint: "Minimum minutes between automatic Codex component scans."},
+				{Label: "Scan Paths", Key: "codex.scan_paths", Kind: "string", Value: strings.Join(c.Codex.ScanPaths, ","),
+					Hint: "CSV of extra paths CodeGuard scans during Stop. Blank means changed files only."},
 			},
 		},
 		// P2-#9: Scanner section now surfaces every field the CLI and
@@ -1616,6 +1647,17 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 		}
 	case wizardObservability:
 		return observabilityWizardFields("splunk-o11y")
+	case wizardCodex:
+		return []wizardFormField{
+			{Label: "Scope", Flag: "--scope", Kind: "choice", Options: []string{"user", "repo"}, Default: "user", Value: "user", Hint: "user=~/.codex/hooks.json; repo=<repo>/.codex/hooks.json"},
+			{Label: "Enable Feature Flag", Flag: "--enable-feature", Kind: "bool", Default: "no", Value: "yes", Hint: "Set [features].codex_hooks=true in ~/.codex/config.toml"},
+			{Label: "Scan on SessionStart", Flag: "--scan-on-session-start", NoFlag: "--no-scan-on-session-start", Kind: "bool", Default: "yes", Value: "yes"},
+			{Label: "Scan on Stop", Flag: "--scan-on-stop", NoFlag: "--no-scan-on-stop", Kind: "bool", Default: "yes", Value: "yes"},
+			{Label: "Fail Closed", Flag: "--fail-closed", NoFlag: "--fail-open", Kind: "bool", Default: "no", Value: "no", Hint: "Only enable after validating sidecar availability"},
+			{Label: "Show Status", Flag: "--status", Kind: "bool", Default: "no", Value: "no"},
+			{Label: "Disable", Flag: "--disable", Kind: "bool", Default: "no", Value: "no", Hint: "Remove DefenseClaw-owned Codex hooks"},
+			{Label: "Scan Components Now", Flag: "--scan-components", Kind: "bool", Default: "no", Value: "no"},
+		}
 	case wizardWebhook:
 		return webhookWizardFields("slack")
 	case wizardSandbox:

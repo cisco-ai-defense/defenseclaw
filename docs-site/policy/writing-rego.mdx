@@ -1,0 +1,169 @@
+---
+title: "Writing Rego"
+description: "Guide to writing admission, audit, firewall, and guardrail Rego policies for DefenseClaw."
+order: 4
+---
+
+## Overview
+
+DefenseClaw ships four Rego modules under `policies/rego/`:
+
+- `admission.rego` — install-time gate for skills, MCP servers, and plugins.
+- `audit.rego` — tags audit rows with severity and routing hints for sinks.
+- `firewall.rego` — evaluates network egress decisions against the rule compiler.
+- `guardrail.rego` — maps guardrail verdicts to block/quarantine/allow actions.
+
+Tests live alongside each module (`*_test.rego`). The policy engine
+(`internal/policy/`) loads them with OPA's embedded runtime — no
+external `opa` binary is required.
+
+## Module signatures
+
+<!-- BEGIN AUTOGEN:rego:modules -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+_6 Rego modules discovered under `policies/rego/`._
+
+### `admission.rego`
+
+- **package:** `defenseclaw.admission`
+- **imports:** `rego.v1`
+- **top-level rules:** `_effective_action`, `_has_scan`, `_is_allow_bypassed`, `_is_blocked`, `_is_explicit_allow_listed`, `_is_policy_allow_listed`, `_should_reject`, `action`, `file_action`, `install_action`, `reason`, `runtime_action`, `verdict`
+
+```text
+Admission gate: block → allow → scan_on_install bypass → scan → severity-based verdict.
+ Input fields:
+   target_type   - "skill", "mcp", or "plugin"
+   target_name   - name of the skill, MCP server, or plugin
+   path          - filesystem path
+   block_list    - array of {target_type, target_name, reason}
+   allow_list    - array of {target_type, target_name, reason}
+   scan_result   - optional {max_severity, total_findings, scanner_name, findings}
+
+ Static data (data.json):
+   config.allow_list_bypass_scan  - bool
+   config.scan_on_install         - bool (when false, skip scan if no result present)
+   actions.<SEVERITY>.runtime     - "block" or "allow"
+   actions.<SEVERITY>.file        - "quarantine" or "none"
+   actions.<SEVERITY>.install     - "block", "allow", or "none"
+   scanner_overrides.<TYPE>.<SEVERITY> - per-scanner-type action overrides
+   severity_ranking.<SEVERITY>    - int (CRITICAL=5 … INFO=1)
+```
+
+### `audit.rego`
+
+- **package:** `defenseclaw.audit`
+- **imports:** `rego.v1`
+- **top-level rules:** `export_to`, `retain`, `retain_reason`
+
+```text
+Evaluates audit event retention and export rules.
+ Input fields:
+   event_type     - "scan", "admission", "enforcement", etc.
+   severity       - "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"
+   age_days       - how old the event is in days
+   export_targets - available export destinations (e.g. ["splunk"])
+
+ Static data (data.json):
+   audit.retention_days     - max retention period
+   audit.log_all_actions    - whether to log everything
+   audit.log_scan_results   - whether to log scan results
+   severity_ranking         - severity → int ranking
+```
+
+### `firewall.rego`
+
+- **package:** `defenseclaw.firewall`
+- **imports:** `rego.v1`
+- **top-level rules:** `_is_allowed_domain`, `_is_allowed_port`, `_is_blocked_destination`, `action`, `rule_name`
+
+```text
+Evaluates egress firewall rules for a given destination.
+ Input fields:
+   target_type - "skill" or "mcp"
+   destination - hostname or IP address
+   port        - destination port number
+   protocol    - "tcp" or "udp"
+
+ Static data (data.json):
+   firewall.default_action          - "deny" or "allow"
+   firewall.blocked_destinations    - always-blocked IPs/hosts
+   firewall.allowed_domains         - explicitly allowed domains
+   firewall.allowed_ports           - allowed port numbers
+```
+
+### `guardrail.rego`
+
+- **package:** `defenseclaw.guardrail`
+- **imports:** `rego.v1`
+- **top-level rules:** `_build_reason`, `_cisco_reason`, `_cisco_sev_rank`, `_highest_sev_rank`, `_highest_severity`, `_local_reason`, `_local_sev_rank`, `action`, `effective_severity`, `else`, `reason`, `scanner_sources`, `severity`
+
+```text
+LLM guardrail verdict policy.
+ Input fields:
+   direction       - "prompt" or "completion"
+   model           - model name
+   mode            - "observe" or "action"
+   scanner_mode    - "local", "remote", or "both"
+   local_result    - {action, severity, findings[]} or null
+   cisco_result    - {action, severity, findings[], is_safe} or null
+   content_length  - int
+
+ Static data (data.guardrail in data.json):
+   severity_rank.<SEV>           - int ranking (CRITICAL=4, HIGH=3, ...)
+   block_threshold               - minimum severity rank to block (default 3 = HIGH)
+   alert_threshold               - minimum severity rank to alert (default 2 = MEDIUM)
+   cisco_trust_level             - "full" | "advisory" | "none"
+```
+
+### `sandbox.rego`
+
+- **package:** `defenseclaw.sandbox`
+- **imports:** `rego.v1`
+- **top-level rules:** `allowed_endpoints`, `allowed_skills`, `denied_endpoints`, `denied_from_request`, `denied_skills`, `permissions`
+
+```text
+Generates OpenShell sandbox policy for a skill.
+ Input fields:
+   skill_name            - name of the skill being sandboxed
+   requested_endpoints   - endpoints the skill wants to access
+   requested_permissions - permissions the skill requests
+
+ Static data (data.json):
+   sandbox.denied_endpoints_global - always-denied endpoints
+   sandbox.default_permissions     - baseline permissions granted
+   firewall.blocked_destinations   - destinations blocked by firewall
+```
+
+### `skill_actions.rego`
+
+- **package:** `defenseclaw.skill_actions`
+- **imports:** `rego.v1`
+- **top-level rules:** `_effective`, `action`, `file_action`, `install_action`, `runtime_action`, `should_block`, `should_block_install`, `should_quarantine`
+
+```text
+Maps a severity level to runtime, file, and install actions.
+ Supports per-scanner-type overrides via data.scanner_overrides.
+
+ Input fields:
+   severity    - "CRITICAL", "HIGH", "MEDIUM", "LOW", or "INFO"
+   target_type - optional "skill", "mcp", or "plugin" for scanner-specific lookup
+
+ Static data (data.json):
+   actions.<SEVERITY>.runtime              - "block" or "allow"
+   actions.<SEVERITY>.file                 - "quarantine" or "none"
+   actions.<SEVERITY>.install              - "block", "allow", or "none"
+   scanner_overrides.<TYPE>.<SEVERITY>.*   - per-scanner overrides
+```
+
+<!-- END AUTOGEN:rego:modules -->
+
+## Related
+
+- [data.json](/docs-site/policy/data-json)
+- [Policy lifecycle](/docs-site/policy/lifecycle)
+- [Testing policies](/docs-site/policy/testing)
+
+---
+
+<!-- generated-from: policies/rego/admission.rego, policies/rego/audit.rego, policies/rego/firewall.rego, policies/rego/guardrail.rego -->

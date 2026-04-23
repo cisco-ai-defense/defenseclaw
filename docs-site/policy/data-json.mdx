@@ -1,0 +1,191 @@
+---
+title: "data.json"
+description: "Static policy input for DefenseClaw Rego modules — schema and semantics."
+order: 5
+---
+
+## Overview
+
+`policies/rego/data.json` is the static companion to the Rego modules.
+It supplies severity tables, action maps, trust lists, and default
+thresholds that admission and audit rules consult. The engine merges it
+under the `data.*` tree at policy-load time.
+
+Operators can override by placing `~/.defenseclaw/policy/data.json`
+(loaded by `defenseclaw-gateway policy reload`). Structure must match the
+built-in shape below.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:rego:data_json -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+`policies/rego/data.json` is the static policy input — merged with request data at admission time. The keys below are the current shape.
+
+```json
+{
+  "actions": {
+    "CRITICAL": {
+      "file": "quarantine",
+      "install": "block",
+      "runtime": "block"
+    },
+    "HIGH": {
+      "file": "quarantine",
+      "install": "block",
+      "runtime": "block"
+    },
+    "INFO": {
+      "file": "none",
+      "install": "none",
+      "runtime": "allow"
+    },
+    "LOW": {
+      "file": "none",
+      "install": "none",
+      "runtime": "allow"
+    },
+    "MEDIUM": {
+      "file": "none",
+      "install": "none",
+      "runtime": "allow"
+    }
+  },
+  "audit": {
+    "log_all_actions": true,
+    "log_scan_results": true,
+    "retention_days": 90
+  },
+  "config": {
+    "allow_list_bypass_scan": true,
+    "max_enforcement_delay_seconds": 2,
+    "policy_name": "default",
+    "scan_on_install": true
+  },
+  "first_party_allow_list": [
+    {
+      "reason": "first-party DefenseClaw plugin",
+      "source_path_contains": [
+        ".defenseclaw",
+        "extensions/defenseclaw"
+      ],
+      "target_name": "defenseclaw",
+      "target_type": "plugin"
+    },
+    {
+      "reason": "first-party DefenseClaw skill",
+      "source_path_contains": [
+        ".defenseclaw",
+        "workspace/skills/codeguard",
+        "skills/codeguard"
+      ],
+      "target_name": "codeguard",
+      "target_type": "skill"
+    }
+  ],
+  "guardrail": {
+    "alert_threshold": 2,
+    "block_threshold": 3,
+    "cisco_trust_level": "full",
+    "patterns": {
+      "exfiltration": [
+        "/etc/passwd",
+        "/etc/shadow",
+        "base64 -d",
+        "base64 --decode",
+        "exfiltrate",
+        "send to my server",
+        "curl http"
+      ],
+      "injection": [
+        "ignore previous",
+        "ignore all instructions",
+        "ignore above",
+        "disregard previous",
+        "disregard all",
+        "you are now",
+        "act as",
+        "pretend you are",
+        "bypass",
+        "jailbreak",
+        "do anything now",
+        "dan mode"
+      ],
+      "secrets": [
+        "sk-",
+        "sk-ant-",
+        "sk-proj-",
+        "api_key=",
+        "apikey=",
+        "-----begin rsa",
+        "-----begin private",
+        "-----begin openssh",
+        "aws_access_key",
+        "aws_secret_access",
+        "password=",
+        "token:",
+        "bearer ",
+        "ghp_",
+        "gho_",
+        "github_pat_"
+      ]
+    },
+    "severity_mappings": {
+      "exfiltration": "HIGH",
+      "injection": "HIGH",
+      "secrets": "MEDIUM"
+    },
+    "severity_rank": {
+      "CRITICAL": 4,
+      "HIGH": 3,
+      "LOW": 1,
+      "MEDIUM": 2,
+      "NONE": 0
+    }
+  },
+  "scanner_overrides": {
+    "mcp": {
+      "LOW": {
+        "file": "none",
+        "install": "none",
+        "runtime": "block"
+      },
+      "MEDIUM": {
+        "file": "quarantine",
+        "install": "block",
+        "runtime": "block"
+      }
+    },
+    "plugin": {
+      "HIGH": {
+        "file": "quarantine",
+        "install": "block",
+        "runtime": "block"
+      },
+      "MEDIUM": {
+        "file": "none",
+        "install": "none",
+        "runtime": "allow"
+      }
+    }
+  },
+  "severity_ranking": {
+    "CRITICAL": 5,
+    "HIGH": 4,
+    "INFO": 1,
+    "LOW": 2,
+    "MEDIUM": 3
+  }
+}
+```
+
+<!-- END AUTOGEN:rego:data_json -->
+
+## Related
+
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [Actions matrix](/docs-site/policy/actions-matrix)
+
+---
+
+<!-- generated-from: policies/rego/data.json -->

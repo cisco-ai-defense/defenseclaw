@@ -86,6 +86,18 @@ groups:
             Bubbletea dashboards are not refreshing inside the 5s SLO.
             Open Runtime & SLO dashboard → "TUI refresh SLO".
 
+      - alert: DefenseClawCodexHookLatencyHigh
+        expr: max(codex:defenseclaw_hook_latency:p95_5m) > 5000
+        for: 10m
+        labels:
+          severity: warning
+          surface: codex
+        annotations:
+          summary: "Codex hook p95 latency above 5s"
+          description: |
+            DefenseClaw Codex hooks are taking longer than expected.
+            Open the Codex dashboard and check hook latency by event.
+
   - name: defenseclaw.pipeline
     rules:
       - alert: DefenseClawOTLPExporterStalled

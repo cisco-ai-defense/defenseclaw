@@ -1,0 +1,145 @@
+---
+title: "FAQ"
+description: "Frequently asked questions about DefenseClaw installation, operation, and philosophy."
+order: 5
+---
+
+## Installation
+
+### Does DefenseClaw work without OpenClaw?
+
+The guardrail, scanners, and sandbox require OpenClaw for the agent-integration plumbing (plugin loader, tool dispatch). The sidecar itself, the audit store, the firewall, and all the CLIs work standalone — some deployments run only the sidecar to log egress from other agent frameworks that can route through `4000`.
+
+### What Python version is required?
+
+Python 3.10 through 3.13 for the CLI, matching `pyproject.toml`.
+
+### Does it run on Windows?
+
+The CLI and gateway run on Windows; the sandbox runs in degraded (non-namespace) mode. See [macOS fallback](/docs-site/sandbox/macos-fallback) for the caveats — they apply to Windows too.
+
+### How do I install offline?
+
+Use `make install` against a pre-downloaded source tree. The installer retries `skill_scanner` / `mcpscanner` Python install on each `init`, but both are optional — the sidecar runs without them, just with fewer scanners available.
+
+## Operation
+
+### What should I run first during an incident?
+
+Start with the smallest commands that do not mutate state:
+
+````bash
+defenseclaw doctor
+defenseclaw config validate
+defenseclaw config path
+defenseclaw-gateway status
+````
+
+If `doctor` reports stale PID files, token drift, or loose `.env` permissions, rerun it with the safe fixer:
+
+````bash
+defenseclaw doctor --fix --yes
+````
+
+The fixer is intentionally narrow: it removes stale PID files, tightens `.env` permissions, repairs OpenClaw token drift, and creates a pristine config backup when needed.
+
+### Is the guardrail on by default after install?
+
+No. Install is deliberately conservative: `defenseclaw init` wires the sidecar and scanners but leaves the guardrail disabled. Run `defenseclaw setup guardrail` to enable it (interactive) or `defenseclaw quickstart` (non-interactive).
+
+### Does the guardrail break OpenClaw traffic?
+
+In `mode: observe` the guardrail only logs. In `mode: action` it can block. We ship `observe` by default and recommend 24–72h observation before flipping to action ([Tuning](/docs-site/guardrail/tuning)).
+
+### What happens if the judge is down?
+
+The guardrail still runs the local rule pipeline. Judge-specific failures are emitted through the gatewaylog/error path and the configured detection strategy determines whether the request can continue. Keep `regex_judge` only when the latency and provider dependency are acceptable for that deployment.
+
+### Can I run multiple gateways on one host?
+
+Use one sidecar per `DEFENSECLAW_HOME` and port set. The sidecar owns the SQLite DB and binds the configured API/proxy ports; running two copies against the same data directory can race on the DB and event files.
+
+### Do setup changes apply immediately?
+
+Some do; some require a restart. Treat this as the safe rule:
+
+| Change | Next step |
+|--------|-----------|
+| OPA `policies/rego/*.rego` or `policies/rego/data.json` | `defenseclaw-gateway policy validate`, then `defenseclaw-gateway policy reload` |
+| `audit_sinks[]`, `webhooks[]`, provider keys, ports, guardrail mode defaults | `defenseclaw-gateway restart` |
+| Guardrail rule-pack YAML under `policies/guardrail/PROFILE_NAME/` | `defenseclaw-gateway restart` |
+| One-off runtime guardrail mode via API | no restart; runtime config is written by the sidecar |
+
+### Does DefenseClaw send data anywhere by default?
+
+No. Every network destination (judge endpoint, sinks, webhooks) is explicitly configured. The installer does not phone home.
+
+## Policy
+
+### Can I write policies without Rego?
+
+Rule packs are YAML — no Rego needed for content scanning. Everything about admission gating, severity matrices, and action mapping is Rego. The engine is embedded; there is no way to opt out of Rego for those decisions without rebuilding the gateway.
+
+### How do I test a policy change without touching production?
+
+Work in a custom profile (see [Writing rules](/docs-site/guardrail/writing-rules)) and point a dev environment at it. For Rego/policy changes, use the policy validation and test commands documented in [Policy testing](/docs-site/policy/testing).
+
+### Can I sign and verify policies?
+
+Not in v1. Gateway events carry provenance fields such as `schema_version`, `content_hash`, `generation`, and `binary_version`, but the on-disk policy files are not individually signed today.
+
+## Security posture
+
+### Is DefenseClaw a security product or a governance product?
+
+Both. It's a security product because it blocks prompt injection, exfiltration, and unsafe tool calls. It's a governance product because it produces auditable records that satisfy compliance requirements.
+
+### Can an attacker disable the guardrail?
+
+Anyone who can edit the agent or DefenseClaw configuration and restart the relevant process can change enforcement behavior. Operationally, treat `~/.defenseclaw/config.yaml`, policy overlays, and OpenClaw config as managed assets so changes require privileged access and are backed by audit/activity records.
+
+### Does DefenseClaw protect against compromised LLM providers?
+
+Partially. The firewall bounds where the agent can send traffic; the guardrail inspects completions for exfil-shaped content; the scanners catch obvious malicious tool definitions. A compromised provider that returns malicious content is still caught by the completion-path inspection, but the full supply-chain attestation (signed models, provenance) is upstream of DefenseClaw.
+
+## Data handling
+
+### Where does the data live?
+
+Everything local. `~/.defenseclaw/` holds the audit DB, the logs, the `policies/` overlays, and the quarantine. External sinks see only what the redactor permits ([Redaction](/docs-site/observability/redaction)).
+
+### How long is data retained?
+
+`gateway.jsonl` uses the writer defaults from `internal/gatewaylog/writer.go`: 50 MB, 5 backups, 30 days, compressed. The audit DB is a local SQLite store; archive or prune it with an operator runbook suited to your deployment.
+
+### Can I encrypt the audit DB from DefenseClaw config?
+
+No config-backed SQLCipher path exists in the current source. Use host disk encryption and filesystem permissions for the local audit DB. Persistent sink output goes through sink-safe redaction helpers.
+
+### How do I roll back a bad config edit?
+
+If the edit was hand-written, restore the backup you made before the change and validate before restart:
+
+````bash
+cp ~/.defenseclaw/config.yaml.bak ~/.defenseclaw/config.yaml
+defenseclaw config validate
+defenseclaw-gateway restart
+````
+
+For sink and webhook mistakes, prefer the CLI toggles because they keep YAML shape valid:
+
+````bash
+defenseclaw setup observability disable splunk-main
+defenseclaw setup webhook disable secops-slack
+defenseclaw-gateway restart
+````
+
+## Related
+
+- [Installation](/docs-site/installation/index)
+- [Troubleshooting](/docs-site/reference/troubleshooting)
+- [Glossary](/docs-site/reference/glossary)
+
+---
+
+<!-- generated-from: README.md, cli/defenseclaw/main.py, cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_config.py, cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/commands/cmd_setup_webhook.py, internal/cli/root.go -->

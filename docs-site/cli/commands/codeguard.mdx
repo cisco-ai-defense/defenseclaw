@@ -1,0 +1,70 @@
+---
+title: "defenseclaw codeguard"
+description: "CodeGuard static-analysis skill management."
+order: 10
+---
+
+## Overview
+
+`defenseclaw codeguard` — CodeGuard static-analysis skill management.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:codeguard -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw codeguard [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `install-skill` | Install the CodeGuard skill into the OpenClaw workspace skills directory. |
+
+### Description
+
+CodeGuard static-analysis skill management
+
+### `defenseclaw codeguard install-skill`
+
+Install the CodeGuard skill into the OpenClaw workspace skills directory
+
+Install the CodeGuard skill into the OpenClaw workspace skills directory.
+
+    Copies the bundled CodeGuard skill into the highest-priority OpenClaw
+    skills directory (workspace skills dir when configured, otherwise the
+    global skills dir) and enables it in openclaw.json.
+
+    Equivalent to the auto-install that runs during ``defenseclaw init``.
+
+<!-- END AUTOGEN:cli_py:codeguard -->
+
+## Usage
+
+### Install the OpenClaw CodeGuard skill
+
+```bash
+defenseclaw codeguard install-skill
+```
+
+The Python command installs the OpenClaw skill wrapper. Source-code scanning is exposed by the gateway CLI:
+
+```bash
+defenseclaw-gateway scan code . --json
+```
+
+See [CodeGuard](/docs-site/scanners/codeguard).
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_codeguard.py -->

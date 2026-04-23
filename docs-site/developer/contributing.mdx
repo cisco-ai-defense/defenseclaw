@@ -1,0 +1,112 @@
+---
+title: "Contributing"
+description: "Coding standards, review expectations, CI gates, and what we optimize for."
+order: 12
+---
+
+## Overview
+
+DefenseClaw is maintained by a small team of Cisco engineers and contributors. This page is the short version of what it takes to land a change.
+
+## Code standards
+
+### Go
+
+- `gofmt`, `goimports`, `golangci-lint` with the repo's `.golangci.yml`.
+- Every package has a doc comment.
+- Exported names have doc comments that start with the name.
+- Prefer standard library; new deps require a justification in the PR.
+- Never `panic` in library code except for programmer errors; use `error`.
+- Use `context.Context` for cancellation; don't stash contexts in structs.
+
+### Python
+
+- `ruff`, `black`, `mypy --strict` on `cli/defenseclaw/`.
+- Type hints everywhere. No `Any` without a `# type: ignore` and reason.
+- Click commands use `@click.pass_context` and thread `ctx.obj` — no globals.
+- Every command is importable as a function for testing.
+
+### TypeScript
+
+- `prettier`, `eslint` with the repo config.
+- Strict mode on; no implicit `any`.
+- Use `fetch` (not axios) to keep the plugin footprint small.
+
+## Commit messages
+
+We use conventional commits:
+
+```text
+feat(guardrail): multi-turn injection detection
+fix(sandbox): release cgroup handle on panic
+docs(first-setup): clarify observe→action promotion
+refactor(audit): split sink queue from bridge
+test(policy): cover drift re-baseline
+chore(release): 0.8.0
+```
+
+Scopes match package boundaries: `gateway`, `guardrail`, `tui`, `sandbox`, `policy`, `watcher`, `audit`, `firewall`, `cli`, `plugin`, `docs`, `build`, `release`, `deps`.
+
+## PR expectations
+
+- One feature per PR. Split refactors into separate PRs when reasonable.
+- A failing test first, then the fix.
+- Every user-visible change has a CHANGELOG entry.
+- Docs updates land in the same PR as the code (no "docs follow-up" PRs).
+- If you touch a docgen-backed file, run `make docs-gen` and commit the result.
+- Breaking changes require explicit sign-off from a maintainer and a [migration page](/docs-site/migration/breaking-changes) update.
+
+## Review rubric
+
+Reviewers look for (in order of priority):
+
+1. **Correctness** — does it do what the description claims?
+2. **Security** — does it widen the trust surface unnecessarily?
+3. **Observability** — can we see when this fails in production?
+4. **Performance** — acceptable at the expected load?
+5. **Docs** — would a new operator understand this tomorrow?
+6. **Style** — is it consistent with the file it's in?
+
+Reviewers are expected to respond within one business day. If you need a faster turn, mention `@maintainers` in the PR.
+
+## CI gates
+
+All required for merge:
+
+- `make test` (unit)
+- `make cli-test-cov`
+- `make go-test-cov`
+- `make ts-test`
+- `make rego-test`
+- `make lint`
+- `make docs-check` (AUTOGEN freshness)
+- `make docs-deadlinks`
+- Python dependency audit in `.github/workflows/ci.yml`
+- npm dependency audit in `.github/workflows/ci.yml`
+- `.github/workflows/e2e.yml` for full-stack scenarios
+
+## What we optimize for
+
+In this priority:
+
+1. **Safety by default** — every default errs toward protecting operators.
+2. **Audit everything** — if it changes state, it writes a row.
+3. **Operator happiness** — good error messages, good docs, good defaults.
+4. **Performance** — P99 under load is a release gate.
+5. **Surface area** — fewer features beats more features.
+
+## CoC and licensing
+
+- Contributors agree to the repo's Code of Conduct.
+- All contributions are licensed under the repo's LICENSE. We don't accept code you can't license under it.
+- No copying code from other projects without attribution and license compatibility check.
+
+## Related
+
+- [Testing](/docs-site/developer/testing)
+- [Building](/docs-site/developer/building)
+- [Release](/docs-site/developer/release)
+
+---
+
+<!-- generated-from: CONTRIBUTING.md, .golangci.yml, .github/workflows/ci.yml -->

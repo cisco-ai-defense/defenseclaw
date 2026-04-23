@@ -1,0 +1,103 @@
+---
+title: "Python CLI"
+description: "Reference for the defenseclaw Python Click CLI — global options and all top-level commands."
+order: 2
+---
+
+## Overview
+
+`defenseclaw` is the Python operator CLI. It provisions config, drives skill/MCP/plugin scanners, manages credentials, edits policy, records operator activity, and launches the TUI by handing off to the Go gateway binary. Use it for decisions an operator owns; use `defenseclaw-gateway` for daemon lifecycle and sidecar-owned runtime operations.
+
+<Callout type="tip">
+  The Go gateway daemon is a sibling binary — see [Gateway CLI](/docs-site/cli/gateway-cli).
+  The two CLIs are covered together in the [CLI overview](/docs-site/cli/index).
+</Callout>
+
+## How to use this page
+
+The table below is auto-generated from the Click root group. Every command that exists in the Python CLI shows up here. Click a command for its full flag reference, examples, and source footer. The only root-level generated option is `--version`; all other flags belong to specific subcommands.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:root -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Global synopsis
+
+```bash
+defenseclaw [--version] [--help] <command> [<args>]
+```
+
+### Commands
+
+| Command | Description |
+|---|---|
+| [aibom](/docs-site/cli/commands/aibom) | AI Bill of Materials — scan live OpenClaw inventory. |
+| [alerts](/docs-site/cli/commands/alerts) | View and manage security alerts. |
+| [audit](/docs-site/cli/commands/audit) | Audit trail helpers (activity logging). |
+| [codeguard](/docs-site/cli/commands/codeguard) | CodeGuard static-analysis skill management. |
+| [codex](/docs-site/cli/commands/codex) | Codex hook runtime integration. |
+| [config](/docs-site/cli/commands/config) | Inspect and validate DefenseClaw configuration. |
+| [doctor](/docs-site/cli/commands/doctor) | Verify credentials, endpoints, and connectivity. |
+| [init](/docs-site/cli/commands/init) | Initialize DefenseClaw environment. |
+| [keys](/docs-site/cli/commands/keys) | Inspect and manage DefenseClaw API keys. |
+| [mcp](/docs-site/cli/commands/mcp) | Manage MCP servers — scan, block, allow, list, set, unset. |
+| [plugin](/docs-site/cli/commands/plugin) | Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore. |
+| [policy](/docs-site/cli/commands/policy) | Manage DefenseClaw security policies — create, list, show, activate, validate, test, edit. |
+| [quickstart](/docs-site/cli/commands/quickstart) | Zero-prompt end-to-end setup with safe defaults. |
+| [reset](/docs-site/cli/commands/reset) | Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean. |
+| [sandbox](/docs-site/cli/commands/sandbox) | [experimental] Manage openshell-sandbox standalone mode. |
+| [settings](/docs-site/cli/commands/settings) | Operator settings (parity with the TUI setup panel save path). |
+| [setup](/docs-site/cli/commands/setup) | Configure DefenseClaw components. |
+| [skill](/docs-site/cli/commands/skill) | Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore. |
+| [status](/docs-site/cli/commands/status) | Show DefenseClaw status. |
+| [tool](/docs-site/cli/commands/tool) | Manage tool-level block/allow lists. |
+| [tui](/docs-site/cli/commands/tui) | Launch the DefenseClaw interactive dashboard (TUI). |
+| [uninstall](/docs-site/cli/commands/uninstall) | Uninstall DefenseClaw (reversibly by default). |
+| [upgrade](/docs-site/cli/commands/upgrade) | Upgrade DefenseClaw to the latest version. |
+| [version](/docs-site/cli/commands/version) | Show DefenseClaw CLI / gateway / plugin versions and flag drift. |
+
+### Global options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--version` | boolean | — | — | no | Show the version and exit. |
+
+<!-- END AUTOGEN:cli_py:root -->
+
+## Automation tips
+
+See [Automation](/docs-site/cli/automation) for CI/CD patterns, exit code
+handling, and JSON output conventions.
+
+## Operator map
+
+| Situation | Start with | Why |
+|-----------|------------|-----|
+| First install | `defenseclaw quickstart` | Creates config, bootstraps the audit DB, applies safe guardrail defaults, and can start the sidecar. |
+| Controlled install | `defenseclaw init` | Gives you explicit scanner, sandbox, and guardrail setup choices. |
+| Missing or broken config | `defenseclaw config validate`, `defenseclaw doctor` | These are recovery-safe commands and are not blocked by the normal config auto-validate hook. |
+| Missing provider keys | `defenseclaw keys list`, `defenseclaw keys fill-missing` | Shows which keys are required by the current config and writes values to `~/.defenseclaw/.env`. |
+| Skill/MCP/plugin review | `defenseclaw skill`, `defenseclaw mcp`, `defenseclaw plugin` | Lists, scans, blocks, allows, disables, quarantines, and restores local inventory. |
+| Policy authoring | `defenseclaw policy` | Creates, validates, tests, activates, and edits local policy data. |
+| Interactive operations | `defenseclaw tui` | Resolves and execs `defenseclaw-gateway tui` so the TUI uses the sibling gateway binary when available. |
+
+<Callout type="info" title="Commands that work before full config load">
+  `init`, `quickstart`, `sandbox`, `tui`, `uninstall`, `reset`, and `version` are allowed to run before normal config and audit-store loading. `config`, `keys`, `doctor`, `upgrade`, and `version` also skip the auto-validate lockout so operators can recover from a bad config file.
+</Callout>
+
+## Safe first commands
+
+```bash
+defenseclaw quickstart --mode observe --scanner local --skip-gateway
+defenseclaw config validate --quiet
+defenseclaw keys check
+defenseclaw doctor --json-output
+defenseclaw status
+```
+
+Start in `observe` mode when you are introducing DefenseClaw to an existing environment. Move to `action` mode only after alerts and scanner output match your expectations.
+
+---
+
+<!-- generated-from: cli/defenseclaw/main.py, cli/defenseclaw/commands/cmd_quickstart.py, cli/defenseclaw/commands/cmd_init.py, cli/defenseclaw/commands/cmd_config.py, cli/defenseclaw/commands/cmd_keys.py, cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_tui.py -->

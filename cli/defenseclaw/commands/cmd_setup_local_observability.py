@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -460,6 +461,21 @@ def _port_owned_by_stack(port: int) -> bool:
     Best-effort — returns False if Docker is unreachable. Prevents the
     preflight from falsely blocking a re-invocation of ``up`` while the
     stack is already healthy.
+
+    Parses the ``Ports`` column emitted by ``docker ps``, which takes
+    three shapes for a single container depending on how compose renders
+    the host binding:
+
+      * single port:   ``127.0.0.1:4317->4317/tcp``
+      * port range:    ``127.0.0.1:4317-4318->4317-4318/tcp``
+      * bare internal: ``55678-55679/tcp``  (no host binding; ignore)
+
+    We previously looked for the fixed substring ``:{port}->``, which
+    never matches the range form — so mapping ``4317-4318:4317-4318``
+    in docker-compose.yml caused the preflight to falsely flag the
+    stack's own OTLP port as "in use by a non-stack process" on every
+    re-invocation of ``up``. Parsing out host ranges ``:LO[-HI]->``
+    and testing ``LO <= port <= HI`` handles all three shapes.
     """
     try:
         result = subprocess.run(
@@ -479,8 +495,12 @@ def _port_owned_by_stack(port: int) -> bool:
         return False
     if result.returncode != 0:
         return False
-    needle = f":{port}->"
-    return needle in (result.stdout or "")
+    for match in re.finditer(r":(\d+)(?:-(\d+))?->", result.stdout or ""):
+        lo = int(match.group(1))
+        hi = int(match.group(2)) if match.group(2) else lo
+        if lo <= port <= hi:
+            return True
+    return False
 
 
 def _parse_signals(raw: str) -> tuple[str, ...]:

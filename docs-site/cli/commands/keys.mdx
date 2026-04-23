@@ -1,0 +1,117 @@
+---
+title: "defenseclaw keys"
+description: "Inspect and manage DefenseClaw API keys."
+order: 10
+---
+
+## Overview
+
+`defenseclaw keys` — Inspect and manage DefenseClaw API keys.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:keys -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw keys [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `check` | Exit 0 when all REQUIRED keys are set, non-zero otherwise. |
+| `fill-missing` | Interactively prompt for every REQUIRED-but-unset credential. |
+| `list` | List every credential DefenseClaw knows about. |
+| `set` | Set a credential and persist it to ``~/.defenseclaw/.env``. |
+
+### Description
+
+Inspect and manage DefenseClaw API keys
+
+### `defenseclaw keys check`
+
+Exit 0 when all REQUIRED keys are set, non-zero otherwise
+
+Exit 0 when all REQUIRED keys are set, non-zero otherwise.
+
+    Intended for CI/preflight hooks. Produces a terse summary on
+    stdout and nothing else.
+
+### `defenseclaw keys fill-missing`
+
+Interactively prompt for every REQUIRED-but-unset credential
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--yes` | boolean | — | — | no | Skip the confirmation prompt. |
+
+### `defenseclaw keys list`
+
+List every credential DefenseClaw knows about
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Emit machine-readable JSON instead of a table. |
+| `--show-values` | boolean | — | — | no | Show masked value previews (still truncated). |
+| `--missing-only` | boolean | — | — | no | Only show credentials that are required by the current config but unset. |
+
+### `defenseclaw keys set`
+
+Set a credential and persist it to ``~/.defenseclaw/.env``
+
+```bash
+defenseclaw keys set <ENV_NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `env_name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--value` | text | — | — | no | Value to store; prompts if omitted. |
+
+<!-- END AUTOGEN:cli_py:keys -->
+
+## Usage
+
+### Inspect required keys
+
+```bash
+defenseclaw keys list --json
+defenseclaw keys list --missing-only
+```
+
+`--missing-only` is useful in setup scripts that only care about unresolved providers.
+
+### Set and verify values
+
+```bash
+defenseclaw keys set OPENAI_API_KEY --value "$OPENAI_API_KEY"
+defenseclaw keys fill-missing --yes
+defenseclaw keys check
+```
+
+Prefer environment-backed values in shared machines and CI.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_keys.py -->

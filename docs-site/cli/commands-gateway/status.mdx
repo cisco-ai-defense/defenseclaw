@@ -1,0 +1,45 @@
+---
+title: "defenseclaw-gateway status"
+description: "Show health of the running sidecar's subsystems."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway status` — Show health of the running sidecar's subsystems.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:status -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+status
+```
+
+### Description
+
+Query the sidecar's REST API to display the health of all three subsystems:
+gateway connection, skill watcher, and API server.
+
+The sidecar must be running for this command to work.
+
+<!-- END AUTOGEN:cli_go:status -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/sidecar.go -->

@@ -1,0 +1,126 @@
+---
+title: "Production readiness"
+description: "A practical checklist before putting DefenseClaw into action mode or production use."
+order: 2
+---
+
+## Overview
+
+Use this page as the final operator checklist before DefenseClaw governs real users or switches the guardrail from `observe` to `action`. The goal is simple: prove the sidecar is healthy on **18970**, the guardrail proxy is correctly wired on **4000**, policy compiles, audit data is retained or forwarded, and rollback is rehearsed before any request can be blocked. Source-built gateway hosts should be built with **Go 1.26.2**, and the init flag for inline guardrail setup is `--enable-guardrail`.
+
+<Callout type="warning" title="Action mode is an enforcement change">
+  `guardrail.mode: action` blocks matching prompts, completions, or tool traffic. Stay in `observe` until every readiness gate below has evidence and an owner.
+</Callout>
+
+## Readiness gates
+
+| Gate | Must be true | Evidence | Block action mode when |
+|------|--------------|----------|------------------------|
+| Install integrity | The Python CLI, Go sidecar, and OpenClaw plugin are the intended versions; source builds used Go **1.26.2**. | `defenseclaw version --json` | Versions drift, the gateway binary is missing, or the build toolchain is unknown. |
+| Local state | `~/.defenseclaw/config.yaml`, `~/.defenseclaw/audit.db`, policy files, and the device key exist. | `defenseclaw status` and `defenseclaw doctor --json-output` | Config or audit DB checks fail. |
+| Sidecar API | The Go sidecar is running and serving the local REST API on **18970**. | `defenseclaw-gateway status` and `defenseclaw doctor --json-output` | The sidecar API check fails or subsystem health is stale after setup. |
+| Guardrail route | Guardrail is enabled, starts in `observe`, and listens on the proxy port **4000**. | `defenseclaw status` and the guardrail section of `defenseclaw doctor --json-output` | The proxy is disabled, unreachable, or still waiting on OpenClaw config patching. |
+| Policy validity | Rego modules compile, `data.json` loads, and unit tests pass before runtime reload. | `defenseclaw policy validate --rego-dir policies/rego` and `defenseclaw policy test --rego-dir policies/rego --verbose` | Validation or tests fail, or reload has not been tested on a running sidecar. |
+| Scanner coverage | Skill and MCP scanner binaries resolve, CodeGuard is available through the gateway, and scanner posture matches the rollout plan. | Scanner rows from `defenseclaw status` and `defenseclaw doctor --json-output` | Required scanner checks fail or the deployment silently downgraded from remote to local scanning. |
+| Credentials | Required LLM, Cisco AI Defense, registry, sink, and webhook secrets resolve from environment-backed config. | Credential section from `defenseclaw doctor --json-output` and `defenseclaw keys list --missing-only` | Required keys are missing, inline secrets are found in config, or remote scanner auth fails. |
+| Observability | SQLite retention is accepted, or Splunk HEC, OTLP logs, HTTP JSONL, and notifier webhooks are configured and probed. | `defenseclaw setup observability list --json`, `defenseclaw setup observability test splunk-main`, and `defenseclaw setup webhook test internal-bus --dry-run` | Events cannot be inspected locally or delivered to the response path. |
+| Rollback | Operators can return to `observe`, disable the guardrail, stop the sidecar, and reload known-good policy. | The commands in [Rollback plan](#rollback-plan) are in the runbook. | The rollback path depends on memory, a single operator, or an untested manual edit. |
+
+## Golden path
+
+Start with an explicit observe-mode bring-up. This path uses only generated CLI surfaces and keeps verification separate from the enforcement flip.
+
+```bash
+defenseclaw init --enable-guardrail
+defenseclaw setup gateway --host 127.0.0.1 --api-port 18970 --non-interactive
+defenseclaw-gateway start
+defenseclaw setup guardrail --mode observe --scanner-mode local --port 4000 --non-interactive
+defenseclaw status
+defenseclaw doctor --json-output
+```
+
+Then validate policy and reload the running sidecar.
+
+```bash
+defenseclaw policy validate --rego-dir policies/rego
+defenseclaw policy test --rego-dir policies/rego --verbose
+defenseclaw-gateway policy reload
+```
+
+Probe configured destinations before routing production traffic.
+
+```bash
+defenseclaw setup observability list --json
+defenseclaw setup observability test splunk-main
+defenseclaw setup webhook list --json
+defenseclaw setup webhook test internal-bus --dry-run
+```
+
+Move to action mode only after the readiness gates have owners and evidence.
+
+```bash
+defenseclaw setup guardrail --mode action --non-interactive
+defenseclaw doctor
+```
+
+<Callout type="tip" title="Keep the first action window small">
+  Switch one control at a time. Change `guardrail.mode` first, verify audit and sink delivery, then tune rule packs, suppressions, or scanner backends in later windows.
+</Callout>
+
+## Rollback plan
+
+The fastest rollback from action mode is to return the guardrail to observe mode. This keeps inspection and audit active while removing request blocking.
+
+```bash
+defenseclaw setup guardrail --mode observe --non-interactive
+defenseclaw doctor
+```
+
+If the proxy itself must leave the request path, disable the guardrail and verify that OpenClaw routing and sidecar health match the expected state.
+
+```bash
+defenseclaw setup guardrail --disable
+defenseclaw doctor
+```
+
+If the sidecar process is the incident trigger, stop it through the gateway daemon command.
+
+```bash
+defenseclaw-gateway stop
+```
+
+For policy rollback, restore the previous policy files through your normal change-control path, validate them, reload the sidecar, and re-run doctor.
+
+```bash
+defenseclaw policy validate --rego-dir policies/rego
+defenseclaw-gateway policy reload
+defenseclaw doctor
+```
+
+## Evidence bundle
+
+| Evidence | Collect with | Keep because |
+|----------|--------------|--------------|
+| Version and drift report | `defenseclaw version --json` | Shows the CLI, gateway, and plugin versions that produced the rollout. |
+| Runtime inventory | `defenseclaw status` | Captures data dir, config path, audit DB path, scanner availability, observability destinations, and sidecar state. |
+| Full health snapshot | `defenseclaw doctor --json-output` | Records PASS/WARN/FAIL/SKIP checks for config, audit DB, scanners, sidecar API, OpenClaw gateway, guardrail proxy, credentials, sinks, and webhooks. |
+| Policy proof | `defenseclaw policy validate --rego-dir policies/rego` and `defenseclaw policy test --rego-dir policies/rego --verbose` | Demonstrates that policy data loads, Rego compiles, and tests pass before enforcement. |
+| Sidecar subsystem status | `defenseclaw-gateway status` | Confirms the Go daemon sees the expected gateway, watcher, guardrail, API, telemetry, Splunk, and sandbox states. |
+| Audit export | `defenseclaw-gateway audit export --output audit-evidence.jsonl --include-activity --limit 1000` | Preserves schema-validated audit and activity rows from the local SQLite store. |
+| Sink inventory and probe | `defenseclaw setup observability list --json` and `defenseclaw setup observability test splunk-main` | Shows which audit sinks are enabled and whether each endpoint is reachable with its configured auth. |
+| Webhook inventory and dry run | `defenseclaw setup webhook list --json` and `defenseclaw setup webhook test internal-bus --dry-run` | Proves responder notifications are configured without paging anyone during readiness review. |
+| Rollback commands | The commands in [Rollback plan](#rollback-plan) | Gives on-call operators a short, tested path back to observe mode or no proxy. |
+
+## Related
+
+- [Zero to governed](/docs-site/first-setup/index)
+- [Verify install](/docs-site/installation/verify-install)
+- [Platform engineer journey](/docs-site/journeys/platform-engineer)
+- [Security team journey](/docs-site/journeys/security-team)
+- [Policy lifecycle](/docs-site/policy/lifecycle)
+- [Observability sinks](/docs-site/observability/sinks)
+- [Guardrail configuration](/docs-site/guardrail/configuration)
+
+---
+
+<!-- generated-from: docs-site/STYLE.md, docs-site/index.mdx, docs-site/journeys/platform-engineer.mdx, docs-site/journeys/security-team.mdx, docs-site/journeys/developer.mdx, docs-site/first-setup/index.mdx, docs-site/installation/verify-install.mdx, docs-site/policy/lifecycle.mdx, docs-site/observability/sinks.mdx, docs-site/guardrail/configuration.mdx, cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_status.py, cli/defenseclaw/commands/cmd_setup.py, cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/commands/cmd_setup_webhook.py, internal/config/defaults.go, internal/config/config.go, internal/cli/daemon.go, internal/cli/policy.go, internal/cli/audit_export.go -->

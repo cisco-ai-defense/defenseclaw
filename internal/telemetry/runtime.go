@@ -161,6 +161,33 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 	return traceID
 }
 
+// EmitCodexHookSpan creates a span for one Codex hook evaluation.
+func (p *Provider) EmitCodexHookSpan(ctx context.Context, event, action, severity, mode string, wouldBlock bool, durationMs float64) string {
+	if !p.TracesEnabled() {
+		return ""
+	}
+	_, span := p.tracer.Start(ctx, "defenseclaw.codex.hook",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithTimestamp(time.Now().Add(-time.Duration(durationMs)*time.Millisecond)),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.codex.hook_event", event),
+		attribute.String("defenseclaw.codex.action", action),
+		attribute.String("defenseclaw.codex.severity", severity),
+		attribute.String("defenseclaw.codex.mode", mode),
+		attribute.Bool("defenseclaw.codex.would_block", wouldBlock),
+		attribute.Float64("defenseclaw.codex.duration_ms", durationMs),
+	)
+	if action == "block" || wouldBlock {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	traceID := span.SpanContext().TraceID().String()
+	span.End()
+	return traceID
+}
+
 // StartAgentSpan starts a new OTel span for an agent invocation session.
 // Follows OTel GenAI semconv: span name = "invoke_agent {agentName}".
 //

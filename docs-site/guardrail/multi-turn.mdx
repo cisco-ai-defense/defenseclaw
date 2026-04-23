@@ -1,0 +1,52 @@
+---
+title: "Multi-turn context"
+description: "What the current ContextTracker stores, how it is bounded, and what it does not yet configure."
+order: 10
+---
+
+## Overview
+
+`internal/gateway/context_tracker.go::ContextTracker` is a bounded in-memory conversation buffer. It is useful support code for multi-turn analysis, but the inspected configuration does not expose a `guardrail.multi_turn` block and the guardrail pages should not document one as a user-facing setting.
+
+<Callout type="warning" title="No guardrail.multi_turn config">
+  Do not configure `guardrail.multi_turn.enabled` or `guardrail.multi_turn.max_history`; those fields are not present in `GuardrailConfig`.
+</Callout>
+
+## Bounds
+
+| Limit | Default | Source |
+|-------|---------|--------|
+| Turns per session | `10` | `defaultMaxTurns` |
+| Sessions | `200` | `defaultMaxSessions` |
+| Session TTL | `30m` | `defaultSessionTTL` |
+| Stale sweep cadence | Every `50` `Record` calls | `staleSweepFrequency` |
+
+Zero or negative constructor arguments use the defaults. `SetTTL` can override TTL in code; a non-positive TTL disables TTL-based eviction and leaves max-session pruning as the bound.
+
+## Available operations
+
+| Method | Behavior |
+|--------|----------|
+| `Record(sessionKey, role, content)` | Appends a message, drops empty inputs, trims the session to max turns, and prunes stale or oldest sessions as needed. |
+| `RecentMessages(sessionKey, n)` | Returns up to the most recent `n` messages as `ChatMessage` values. |
+| `HasRepeatedInjection(sessionKey, threshold)` | Counts repeated injection-like phrases in the stored window. |
+| `SessionCount()` | Returns current session count. |
+
+## What not to claim
+
+| Unsupported claim | Source-backed correction |
+|-------------------|--------------------------|
+| Dedicated multi-turn detector in `GuardrailInspector` | The inspected guardrail strategy functions operate on the provided content/messages; `ContextTracker` is a separate buffer type. |
+| Tunable `max_history` in config | Not present in `GuardrailConfig`. |
+| Extra judge token tables | No source-backed token accounting exists for this page. |
+| Cache bypass for multi-turn verdicts | The judge cache keys judge content; multi-turn cache policy is not configured here. |
+
+## Related
+
+- [Judge vs regex](/docs-site/guardrail/judge-vs-regex)
+- [Configuration](/docs-site/guardrail/configuration)
+- [Verdict cache](/docs-site/guardrail/verdict-cache)
+
+---
+
+<!-- generated-from: internal/gateway/context_tracker.go, internal/config/config.go -->

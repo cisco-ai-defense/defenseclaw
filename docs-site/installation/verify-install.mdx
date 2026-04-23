@@ -1,0 +1,122 @@
+---
+title: "Verify install"
+description: "Validate DefenseClaw with doctor, status, version, and known binary locations."
+order: 8
+---
+
+## Overview
+
+After install, confirm the CLI resolves, the gateway binary matches, and the sidecar answers on the REST API (default **18970**). Use **`defenseclaw doctor`** for deep connectivity checks, **`defenseclaw status`** for a concise inventory, and **`defenseclaw version`** to detect drift between CLI, gateway, and plugin.
+
+<Callout type="info">
+  Guardrail traffic uses a LiteLLM-compatible proxy on **4000** by default when enabled; doctor probes `http://<host>:<port>/health/liveliness` for that subsystem.
+</Callout>
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `defenseclaw doctor` | Config file, audit DB, scanners on PATH, sidecar `/health`, OpenClaw gateway, guardrail proxy, LLM keys, observability sinks, webhooks, registry credentials; optional `--fix` / `--json-output` |
+| `defenseclaw status` | Environment, data dir, config path, audit DB path, sandbox binary presence, scanner rows, DB counts, observability, sidecar snapshot |
+| `defenseclaw version` | Table of CLI, `defenseclaw-gateway`, plugin versions; exit **1** on drift (unless using `--json` for automation) |
+| `defenseclaw keys check` | Exits non-zero when any currently required credential is missing |
+| `defenseclaw-gateway status` | Gateway-owned subsystem status from the Go binary |
+
+Doctor exit code: **0** if no failures, **1** if any check failed.
+
+## Recommended verification order
+
+| Step | Command | What a useful result tells you |
+|------|---------|--------------------------------|
+| 1 | `defenseclaw version` | The Python CLI runs and can discover the gateway/plugin when installed. |
+| 2 | `defenseclaw init` | The data dir, config, policy files, device key, and audit DB can be created or preserved. |
+| 3 | `defenseclaw-gateway start` | The Go sidecar can daemonize and write a PID/log file. |
+| 4 | `curl -s http://127.0.0.1:18970/health` | The sidecar REST API is reachable on the pinned default port. |
+| 5 | `defenseclaw status` | The CLI can load config and talk to the sidecar snapshot. |
+| 6 | `defenseclaw doctor` | External dependencies, scanner binaries, OpenClaw, guardrail, keys, and sinks are checked. |
+
+```bash
+defenseclaw version
+defenseclaw init
+defenseclaw-gateway start
+curl -s http://127.0.0.1:18970/health | jq .
+defenseclaw status
+defenseclaw doctor
+```
+
+<Callout type="tip" title="CI-friendly checks">
+  Use `defenseclaw doctor --json-output` when you need structured health output and `defenseclaw keys check` when a pipeline should fail only on missing required credentials.
+</Callout>
+
+## Binary locations
+
+| Artifact | Typical path |
+|----------|----------------|
+| `defenseclaw` | Symlink in `~/.local/bin` → `.venv/bin/defenseclaw` (release) or repo `.venv` (dev) |
+| `defenseclaw-gateway` | `~/.local/bin/defenseclaw-gateway` |
+| Scanner helpers | `skill-scanner`, `mcp-scanner`, etc., may be symlinked beside the CLI after `make cli-install` |
+| `litellm` | Optional symlink from `make cli-install` |
+| OpenClaw plugin | `~/.defenseclaw/extensions/defenseclaw/` (`package.json`, `dist/`) |
+
+## Example: healthy `defenseclaw doctor` (paraphrased)
+
+After a good install and `defenseclaw init`, non-JSON output resembles:
+
+```text
+
+DefenseClaw Doctor
+══════════════════
+
+  [PASS] Config file  —  ~/.defenseclaw/config.yaml
+  [PASS] Audit database  —  ~/.defenseclaw/audit.db
+
+  ── Scanners ──
+  [PASS] Scanner: skill-scanner  —  /…/skill-scanner
+  [PASS] Scanner: mcp-scanner  —  /…/mcp-scanner
+
+  ── Services ──
+  [PASS] Sidecar API  —  127.0.0.1:18970
+  [PASS]   └─ gateway  —  running
+  [PASS]   └─ watcher  —  running
+  …
+  [PASS] OpenClaw gateway  —  127.0.0.1:<port>
+  [PASS] Guardrail proxy  —  healthy on port 4000
+
+  ── Credentials ──
+  … (LLM key pass/skip/warn per provider)
+
+  ── Observability ──
+  [SKIP] Observability  —  no destinations configured
+
+  ── Webhooks ──
+  [SKIP] Webhooks  —  no webhooks configured
+
+  ── Summary ──
+  N passed, …
+```
+
+Subsystem lines under the sidecar reflect JSON from `/health` (`gateway`, `watcher`, `guardrail`, `api`, `telemetry`, `splunk`, `sandbox`). Disabled subsystems may show `[SKIP]` unless config expects them enabled (stale sidecar → `[WARN]` with restart hint).
+
+## Gateway daemon (reference)
+
+`defenseclaw-gateway start` runs the sidecar in the background; `stop` sends SIGTERM then SIGKILL if needed; `restart` stops then starts. Logs go to `~/.defenseclaw/gateway.log` with PID in `~/.defenseclaw/gateway.pid`.
+
+## Read the result
+
+| Result | Meaning | Next action |
+|--------|---------|-------------|
+| `version` reports gateway missing | The Python CLI installed but `defenseclaw-gateway` is not on `PATH` | Re-run the installer or `make gateway-install`, then open a new shell if PATH changed. |
+| `/health` fails but `gateway.pid` exists | The process started but did not bind or crashed after daemonizing | Inspect `~/.defenseclaw/gateway.log` and run `defenseclaw-gateway restart`. |
+| `status` works but guardrail is disabled | The core sidecar is healthy; LLM proxying is not active | Run [LLM guardrail setup](/docs-site/first-setup/setup-guardrail). |
+| `doctor` fails only on sinks | Core governance is usable, but telemetry export is not | Fix the sink credentials and re-run `defenseclaw doctor`. |
+| `keys check` fails | A configured feature needs a secret that is not set | Run `defenseclaw keys fill-missing` or set the named env var. |
+
+## Related
+
+- [Install methods](/docs-site/installation/index)
+- [Prerequisites](/docs-site/installation/prerequisites)
+- [doctor](/docs-site/cli/commands/doctor)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_status.py, cli/defenseclaw/commands/cmd_version.py, Makefile, internal/cli/daemon.go -->

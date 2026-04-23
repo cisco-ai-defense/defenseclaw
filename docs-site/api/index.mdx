@@ -1,0 +1,82 @@
+---
+title: "API overview"
+description: "DefenseClaw's sidecar REST API and guardrail proxy surfaces."
+order: 1
+---
+
+## Overview
+
+DefenseClaw exposes two HTTP surfaces in the gateway code:
+
+| Surface | Port | Protocol | Purpose |
+|---------|------|----------|---------|
+| Sidecar API | `18970` | HTTP/1.1 + JSON | Health, status, scanner ingestion, policy evaluation, inventory, alerts, and guardrail runtime config |
+| Guardrail proxy | `4000` | HTTP/1.1 + provider-native streaming | OpenAI-compatible chat/model routes, provider-native passthrough, provider registry, and egress reports |
+
+The sidecar API is not uniformly versioned. Some routes are unversioned (`/status`, `/policy/reload`), some scanner and guardrail routes are under `/v1`, and code/network-inspection routes are under `/api/v1`. The generated [REST endpoints](/docs-site/api/endpoints) page is the canonical route map.
+
+<Callout type="warning" title="Do not assume every route is under one prefix">
+  The sidecar mux in `internal/gateway/api.go` registers a mixed route set. Use the generated endpoints table before wiring clients or tests.
+</Callout>
+
+## Choose the right surface
+
+| You are building | Use | Reason |
+|------------------|-----|--------|
+| A health probe or local operator script | Sidecar API on `18970` | It exposes health, status, policy reload, inventory, scanner ingestion, and local config routes. |
+| An IDE/plugin integration that reports egress | Guardrail proxy on `4000` | The egress ingestion route is registered on the proxy mux. |
+| An LLM client that should be inspected | Guardrail proxy on `4000` | Chat/model routes preserve provider streaming behavior while adding inspection. |
+| A policy/scanner integration | Prefer the Python or gateway CLI first | The CLIs already handle local paths, config, and expected headers. |
+| A test that asserts route existence | [REST endpoints](/docs-site/api/endpoints) | The table is generated from Go mux registrations. |
+
+## Quick reference
+
+```bash
+# Health
+curl -s http://127.0.0.1:18970/health | jq .
+
+# Status
+curl -s http://127.0.0.1:18970/status | jq .
+
+# Trigger a policy reload
+curl -s -X POST http://127.0.0.1:18970/policy/reload \
+  -H "X-DefenseClaw-Client: docs" \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
+
+# List proxy provider registry entries
+curl -s http://127.0.0.1:4000/v1/config/providers | jq '.providers | length'
+```
+
+## Request checklist
+
+| Request type | Required details |
+|--------------|------------------|
+| Sidecar `GET` | Token header only if `scannerCfg.Gateway.Token` is configured. |
+| Sidecar mutation | Token if configured, `X-DefenseClaw-Client`, and `Content-Type: application/json`. |
+| Proxy LLM request | Proxy auth when `OPENCLAW_GATEWAY_TOKEN` is set, provider auth, and `X-DC-Target-URL` for passthrough. |
+| Proxy provider registry reload | Proxy auth plus the registered `/v1/config/providers/reload` route. |
+
+## Section map
+
+| Page | Purpose |
+|------|---------|
+| [REST endpoints](/docs-site/api/endpoints) | Generated sidecar/proxy route map with handlers and source files |
+| [RPC status](/docs-site/api/rpc) | What the scoped gateway sources do and do not expose as RPC |
+| [Events and streaming](/docs-site/api/events) | Proxy streaming behavior and the egress event ingestion endpoint |
+| [Authentication](/docs-site/api/auth) | Sidecar token behavior, proxy token behavior, and CSRF headers |
+| [Schemas](/docs-site/api/schemas) | JSON Schemas generated from `schemas/` |
+
+## Versioning
+
+There is no single versioning rule for all gateway routes in the scoped source files. Treat the registered path as the contract. When a route is generated from `internal/gateway/api.go` or `internal/gateway/proxy.go`, the docs should link to [REST endpoints](/docs-site/api/endpoints) rather than infer a prefix.
+
+## Related
+
+- [REST endpoints](/docs-site/api/endpoints)
+- [Authentication](/docs-site/api/auth)
+- [Schemas](/docs-site/api/schemas)
+
+---
+
+<!-- generated-from: internal/gateway/api.go, internal/gateway/proxy.go, internal/gateway/providers_endpoint.go, internal/gateway/egress.go -->

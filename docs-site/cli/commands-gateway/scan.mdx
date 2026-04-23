@@ -1,0 +1,71 @@
+---
+title: "defenseclaw-gateway scan"
+description: "Run security scanners."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway scan` — Run security scanners.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:scan -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+scan
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `code` | Scan source code with CodeGuard |
+
+### Description
+
+Run DefenseClaw security scanners against targets.
+
+### `defenseclaw-gateway scan code`
+
+#### Synopsis
+
+```bash
+code <path>
+```
+
+#### Description
+
+Scan a file or directory for security issues using the CodeGuard static scanner.
+
+Checks for hardcoded secrets, unsafe exec calls, SQL injection, weak crypto,
+path traversal, and more across Python, JS/TS, Go, Java, Ruby, PHP, Shell,
+YAML, JSON, XML, C/C++, and Rust files.
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--json` | `bool` | — | Output results as JSON (v7 scan-result contract) |
+| `--schema` | `bool` | — | Print scan-result.json schema (for downstream validators) and exit |
+
+<!-- END AUTOGEN:cli_go:scan -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/scan.go -->

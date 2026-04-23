@@ -1,0 +1,82 @@
+---
+title: "defenseclaw aibom"
+description: "AI Bill of Materials — scan live OpenClaw inventory."
+order: 10
+---
+
+## Overview
+
+`defenseclaw aibom` — AI Bill of Materials — scan live OpenClaw inventory.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:aibom -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw aibom [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `scan` | Index a live OpenClaw install (skills, plugins, MCP, agents, tools, models, memory). |
+
+### Description
+
+AI Bill of Materials — scan live OpenClaw inventory
+
+### `defenseclaw aibom scan`
+
+Index a live OpenClaw install (skills, plugins, MCP, agents, tools, models, memory)
+
+Index a live OpenClaw install (skills, plugins, MCP, agents, tools, models, memory).
+
+    Calls ``openclaw`` CLI commands in parallel and builds a unified inventory.
+    Results are stored in the audit DB.
+
+    Use --only to restrict which categories are collected (faster).
+    Use --summary to show only the summary table.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output full inventory as JSON |
+| `--summary` | boolean | — | — | no | Show summary table only |
+| `--only` | text | — | — | no | Comma-separated categories to scan: skills,plugins,mcp,agents,tools,models,memory |
+
+<!-- END AUTOGEN:cli_py:aibom -->
+
+## Usage
+
+### Inventory summary
+
+```bash
+defenseclaw aibom scan --summary
+```
+
+Use the summary form when you only need counts by inventory category.
+
+### JSON inventory
+
+```bash
+defenseclaw aibom scan --json --only skills,plugins,mcp
+```
+
+`--only` accepts a comma-separated category list.
+
+See [AIBOM](/docs-site/scanners/aibom).
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_aibom.py -->

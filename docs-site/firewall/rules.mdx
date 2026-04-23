@@ -1,0 +1,83 @@
+---
+title: "Rule compiler"
+description: "How firewall rules are expressed, compiled, and evaluated."
+order: 2
+---
+
+## Overview
+
+Firewall rules have two source-backed forms:
+
+- `internal/firewall.FirewallConfig`, a YAML config compiled into pfctl or iptables rule text.
+- `policies/rego/firewall.rego`, which evaluates sidecar policy requests against `data.firewall`.
+
+The Go compiler is pure in-memory work. Its `ApplyCommand` methods return shell commands for an administrator to run; they do not apply privileged firewall state themselves.
+
+## Rule shapes
+
+```yaml
+version: "1.0"
+default_action: deny
+rules:
+  - name: block-cloud-metadata
+    direction: outbound
+    protocol: tcp
+    destination: 169.254.169.254
+    action: deny
+allowlist:
+  domains:
+    - api.openai.com
+    - api.github.com
+  ips: []
+  ports: [443, 80]
+logging:
+  enabled: true
+  rate_limit: 5/min
+  prefix: "[DEFENSECLAW-BLOCKED]"
+```
+
+Matching semantics:
+
+- `rules[].destination` can be a hostname, IP, or CIDR.
+- `rules[].direction`, when set, must be `outbound`.
+- `rules[].action` must be `allow` or `deny`.
+- `allowlist.domains` are resolved when pfctl/iptables output is generated.
+- `allowlist.ports` constrains generated allow rules when present.
+
+The Rego firewall module is simpler: explicit `data.firewall.blocked_destinations` wins, then `data.firewall.allowed_domains` plus `data.firewall.allowed_ports`, then `data.firewall.default_action`.
+
+## Compiled output
+
+The platform compilers emit backend rule text. For example, the iptables compiler starts with loopback, DNS, established-connection rules, then named rules and allowlist rules, then the default deny rule:
+
+```bash
+sudo iptables-restore < ~/.defenseclaw/firewall.iptables
+```
+
+The pfctl compiler returns the corresponding pf anchor command.
+
+## Policy evaluation
+
+```bash
+defenseclaw-gateway policy evaluate-firewall --destination api.openai.com --port 443 --protocol tcp
+```
+
+The HTTP route behind the gateway command is `POST /policy/evaluate/firewall`. It accepts `target_type`, `destination`, `port`, and `protocol`, then returns an action and rule name from the policy engine.
+
+## Reloading policy
+
+```bash
+defenseclaw-gateway policy reload
+```
+
+`policy reload` reloads Rego modules and `data.json` in the running sidecar. It does not run pfctl or iptables.
+
+## Related
+
+- [Egress observer](/docs-site/firewall/egress-observer)
+- [SSRF protection](/docs-site/firewall/ssrf-protection)
+- [Writing Rego](/docs-site/policy/writing-rego)
+
+---
+
+<!-- generated-from: internal/firewall/compiler.go, policies/rego/firewall.rego -->

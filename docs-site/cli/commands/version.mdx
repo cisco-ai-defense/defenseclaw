@@ -1,0 +1,69 @@
+---
+title: "defenseclaw version"
+description: "Show DefenseClaw CLI / gateway / plugin versions and flag drift."
+order: 10
+---
+
+## Overview
+
+`defenseclaw version` — Show DefenseClaw CLI / gateway / plugin versions and flag drift.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:version -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw version [OPTIONS]
+```
+
+### Description
+
+Show DefenseClaw CLI / gateway / plugin versions and flag drift
+
+Show DefenseClaw CLI / gateway / plugin versions and flag drift.
+
+    This is the command to run first when a bug report says "the
+    guardrail isn't blocking" — nine times out of ten the problem is a
+    freshly rebuilt CLI talking to a stale gateway binary still living
+    in the operator's PATH from ``make install`` weeks ago.
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Emit a machine-readable report. |
+| `--no-drift-exit` | boolean | — | — | no | Always exit 0, even if component versions disagree (useful in CI). |
+
+<!-- END AUTOGEN:cli_py:version -->
+
+## Usage
+
+### Print version metadata
+
+```bash
+defenseclaw version
+defenseclaw version --json
+```
+
+Use JSON output for automation.
+
+### Avoid drift exit codes
+
+```bash
+defenseclaw version --no-drift-exit
+```
+
+This is useful in diagnostics where you want the version report even when local components differ.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_version.py -->

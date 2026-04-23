@@ -120,6 +120,11 @@ func Execute() int {
 	return 0
 }
 
+// RootCmd returns the Cobra root command. It is intended for tooling
+// that needs to walk the command tree (e.g. cmd/docgen-go emits the
+// docs-site CLI reference from this tree). Not for runtime use.
+func RootCmd() *cobra.Command { return rootCmd }
+
 func initOTelProvider() {
 	if cfg == nil || !cfg.OTel.Enabled {
 		return

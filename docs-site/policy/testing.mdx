@@ -1,0 +1,89 @@
+---
+title: "Testing policies"
+description: "Run the Rego test suite and policy validation commands that exist in source."
+order: 7
+---
+
+## Overview
+
+Rego policy tests live beside the policy modules under `policies/rego/`. The Python CLI shells out to the `opa` binary for unit tests; the Makefile exposes the same check as `make rego-test`.
+
+## Running tests
+
+```bash
+make rego-test
+# OR
+defenseclaw policy test
+```
+
+Both commands execute `opa test` against the Rego directory. Non-zero exit means OPA reported a failing test, parse error, timeout, or missing `opa` binary.
+
+Use the real CLI flags when you need a specific policy directory or verbose OPA output:
+
+```bash
+defenseclaw policy test --rego-dir policies/rego --verbose
+```
+
+## Test file layout
+
+```rego
+package admission
+
+test_allow_when_no_findings {
+  decision := admission.decision with input as {"kind":"skill","scanner_verdict":{"severity":"NONE"}}
+  decision.action == "allow"
+}
+
+test_block_on_critical {
+  decision := admission.decision with input as {"kind":"skill","scanner_verdict":{"severity":"CRITICAL"}}
+  decision.action == "block"
+}
+
+test_warn_on_medium {
+  decision := admission.decision with input as {"kind":"skill","scanner_verdict":{"severity":"MEDIUM"}}
+  decision.action == "warn"
+}
+```
+
+Conventions:
+
+- One `test_*` rule per scenario.
+- Use `with input as {...}` to supply scenario-specific input.
+- Name tests after the *outcome* (`test_allow_when_no_findings`), not the step.
+- Keep fixtures inline — don't share fixtures across tests.
+
+## Coverage
+
+The current `defenseclaw policy test` command supports `--rego-dir` and `--verbose`. It does not expose coverage or snapshot flags. If you need coverage locally, run OPA directly outside the DefenseClaw CLI and keep that output separate from the documented operator path.
+
+## Go engine tests
+
+The Go policy engine has unit and integration tests under `internal/policy/`. They exercise admission, firewall, audit, sandbox, guardrail, skill-actions, fallback behavior, and reload behavior.
+
+```bash
+go test ./internal/policy/...
+```
+
+## CI gating
+
+The Makefile target that exists today is:
+
+```bash
+make rego-test
+```
+
+It is the source-backed CI hook for Rego policy tests. Pair it with `defenseclaw policy validate` before reloading a live sidecar.
+
+## Writing a new test
+
+Every time you add a branch to a Rego rule, add a corresponding `test_*` rule in the matching `_test.rego` file. Keep fixtures inline when possible so the test remains readable beside the policy it covers.
+
+## Related
+
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [Actions matrix](/docs-site/policy/actions-matrix)
+- [Scanner policies](/docs-site/policy/scanner-policies)
+
+---
+
+<!-- generated-from: policies/rego/admission_test.rego, policies/rego/audit_test.rego, policies/rego/firewall_test.rego, policies/rego/guardrail_test.rego, policies/rego/sandbox_test.rego, policies/rego/skill_actions_test.rego, internal/policy/engine.go, cli/defenseclaw/commands/cmd_policy.py, Makefile -->

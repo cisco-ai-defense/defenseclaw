@@ -10,13 +10,15 @@ DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
 OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
+BIN_DIR     := bin
 
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
-        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean \
+        docs-gen docs-check docs-deadlinks docs-clean-generated
 
 # ---------------------------------------------------------------------------
 # `make all` — one-shot build → install → PATH → quickstart
@@ -365,6 +367,47 @@ check-provider-coverage:
 	@echo "==> provider coverage (TS)"
 	@cd extensions/defenseclaw && npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
+
+# ---------------------------------------------------------------------------
+# docs-site generator pipeline
+# ---------------------------------------------------------------------------
+#
+# See docs-site/_meta/AUTOGEN.md for the sentinel contract and
+# scripts/docgen/ for the implementation.
+#
+#   make docs-gen           — regenerate every AUTOGEN block + scaffold
+#                             any missing MDX stubs. Idempotent.
+#   make docs-check         — CI gate: run docs-gen and fail if git
+#                             diff is non-empty (drift).
+#   make docs-deadlinks     — walk all MDX links and verify targets.
+#   make docs-clean-generated — delete the docs-site/ tree (recovery).
+
+DOCGEN_PY := $(VENV)/bin/python -m scripts.docgen
+
+$(BIN_DIR)/docgen-go: cmd/docgen-go/main.go $(wildcard internal/cli/*.go)
+	@mkdir -p $(BIN_DIR)
+	go build -o $@ ./cmd/docgen-go
+
+docs-gen: $(BIN_DIR)/docgen-go
+	$(DOCGEN_PY)
+
+docs-verify: $(BIN_DIR)/docgen-go
+	$(VENV)/bin/python scripts/docs_verify.py
+
+docs-check: docs-gen docs-verify docs-deadlinks
+	@if ! git diff --quiet -- docs-site/; then \
+		echo "docs-site/ has uncommitted drift from make docs-gen:"; \
+		git --no-pager diff --stat -- docs-site/; \
+		exit 1; \
+	fi
+	@echo "docs-site/ is up to date."
+
+docs-deadlinks:
+	$(VENV)/bin/python scripts/docs_deadlinks.py docs-site/
+
+docs-clean-generated:
+	@echo "Removing docs-site/ (will be regenerated from sources)."
+	rm -rf docs-site/
 
 # ---------------------------------------------------------------------------
 # Lint targets

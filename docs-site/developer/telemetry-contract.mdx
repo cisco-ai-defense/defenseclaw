@@ -1,0 +1,105 @@
+---
+title: "Telemetry contract"
+description: "Stable span names, metric names, and attribute keys DefenseClaw emits. These names are load-bearing for dashboards and SLOs."
+order: 8
+---
+
+## Overview
+
+If you build a dashboard, an SLO, or an alert against DefenseClaw signals, you want to trust the names won't change. This page is the promise: every name here is stable until a major-version bump.
+
+## Spans
+
+All spans live under the tracer name `defenseclaw`.
+
+| Span | Emitted by | Parent | Key attributes |
+|------|------------|--------|----------------|
+| `gateway.request` | Guardrail proxy | (root) | `correlation_id`, `provider`, `model`, `direction`, `strategy`, `mode`, `action` |
+| `guardrail.normalize` | Normalize stage | `gateway.request` | `size_bytes`, `truncated` |
+| `guardrail.cache_lookup` | Verdict cache | `gateway.request` | `hit`, `pack_version` |
+| `guardrail.triage` | Regex stage | `gateway.request` | `rules_evaluated`, `findings_count` |
+| `guardrail.judge` | LLM judge | `gateway.request` | `judge.provider`, `judge.model`, `judge.tokens_in`, `judge.tokens_out` |
+| `guardrail.suppression` | Suppression stage | `gateway.request` | `suppressions_applied`, `suppressed_findings` |
+| `guardrail.rego` | Rego stage | `gateway.request` | `policy_hash`, `action`, `reason` |
+| `scanner.scan` | Any scanner | scanner-specific | `scanner`, `scanner_version`, `target`, `severity` |
+| `admission.decide` | Watcher | (root) | `scope`, `name`, `verdict.severity`, `action` |
+| `sandbox.invocation` | Sandbox | (root) | `tool`, `policy_profile`, `exit_code`, `violations` |
+| `sink.emit` | Audit bridge | (root) | `sink.name`, `sink.type`, `lag_ms`, `ok` |
+
+## Metrics
+
+All metrics live under the meter name `defenseclaw`.
+
+### Counters
+
+| Metric | Unit | Attributes |
+|--------|------|------------|
+| `defenseclaw_guardrail_verdicts_total` | 1 | `direction`, `action`, `mode`, `severity` |
+| `defenseclaw_guardrail_findings_total` | 1 | `finding_id`, `direction`, `severity` |
+| `defenseclaw_guardrail_suppressions_total` | 1 | `suppression_id` |
+| `defenseclaw_admission_decisions_total` | 1 | `scope`, `action` |
+| `defenseclaw_sink_events_total` | 1 | `sink_name`, `ok` |
+| `defenseclaw_webhook_deliveries_total` | 1 | `webhook_name`, `status` |
+| `defenseclaw_sandbox_invocations_total` | 1 | `tool`, `outcome` |
+| `defenseclaw_firewall_requests_total` | 1 | `action`, `rule_id` |
+
+### Histograms
+
+| Metric | Unit | Attributes |
+|--------|------|------------|
+| `defenseclaw_guardrail_stage_duration_seconds` | s | `stage` |
+| `defenseclaw_guardrail_request_duration_seconds` | s | `provider`, `direction` |
+| `defenseclaw_judge_duration_seconds` | s | `judge.provider`, `judge.model` |
+| `defenseclaw_sink_emit_duration_seconds` | s | `sink_name` |
+| `defenseclaw_webhook_delivery_duration_seconds` | s | `webhook_name` |
+| `defenseclaw_rpc_duration_seconds` | s | `method` |
+
+### Gauges
+
+| Metric | Unit | Attributes |
+|--------|------|------------|
+| `defenseclaw_verdict_cache_size` | 1 | (none) |
+| `defenseclaw_verdict_cache_hit_ratio` | 1 | (rolling window) |
+| `defenseclaw_sink_queue_depth` | 1 | `sink_name` |
+| `defenseclaw_webhook_queue_depth` | 1 | `webhook_name` |
+| `defenseclaw_sandbox_active_invocations` | 1 | (none) |
+
+## Attributes
+
+| Attribute | Values | Purpose |
+|-----------|--------|---------|
+| `correlation_id` | `req_&lt;ULID&gt;` | Trace-wide correlation |
+| `direction` | `prompt`\|`completion`\|`tool_call` | Where in the request cycle |
+| `strategy` | `regex_only`\|`regex_judge`\|`judge_first` | Detection strategy used |
+| `mode` | `observe`\|`action`\|`disabled` | Guardrail mode |
+| `action` | `allow`\|`warn`\|`block`\|`quarantine` | Enforcement outcome |
+| `severity` | `LOW`\|`MEDIUM`\|`HIGH`\|`CRITICAL` | Scanner severity |
+| `scope` | `guardrail`\|`admission`\|`sandbox`\|`firewall`\|`system` | Subsystem |
+| `pack_version` | `&lt;profile&gt;@&lt;hash&gt;` | Rule-pack identity |
+| `policy_hash` | hex | Compiled policy snapshot |
+
+## Resource attributes
+
+Every signal carries these resource attributes:
+
+```text
+service.name         = "defenseclaw"
+service.version      = "<semver>"
+service.instance.id  = <uuid minted on boot>
+deployment.environment = <user-configured or "unknown">
+host.name            = os.Hostname()
+```
+
+## SLO-friendly shapes
+
+The histograms expose both `_count` and `_sum` for percentile math. Our reference dashboards use `_bucket` for P95/P99; see the Splunk / Grafana dashboards that ship with the Splunk app.
+
+## Related
+
+- [Audit store](/docs-site/observability/audit-store)
+- [OTel spec](/docs-site/observability/otel-spec)
+- [RPC contract](/docs-site/developer/rpc-contract)
+
+---
+
+<!-- generated-from: internal/telemetry/metrics.go, internal/telemetry/runtime.go, internal/telemetry/provider.go, internal/telemetry/resource.go, internal/gateway/requestctx.go, internal/gateway/cisco_inspect.go -->

@@ -150,11 +150,12 @@ Behavior:
 
 ## Observability Editor (Setup → Sinks / Webhooks)
 
-The Setup panel includes two distinct mutation surfaces:
+The Setup panel includes distinct mutation surfaces:
 
 | Editor | Backing CLI | Purpose |
 |--------|-------------|---------|
 | Audit Sinks | `defenseclaw setup observability {add,remove,enable,disable,test}` | Forward every audit event to JSONL/HEC/OTLP/HTTP destinations. Bulk export channel. |
+| Codex | `defenseclaw setup codex` | Install user/repo Codex hooks, enable the Codex hook feature flag, view status, disable hooks, and trigger component scans. |
 | Webhooks | `defenseclaw setup webhook {add,remove,enable,disable,test}` | Per-event chat/incident notifications (Slack/PagerDuty/Webex/HMAC). Cooldowns + per-channel filters. |
 
 These are **not interchangeable**. See `CLAUDE.md` for the full

@@ -1,0 +1,117 @@
+---
+title: "Testing"
+description: "Test suites, harnesses, and conventions for DefenseClaw contributors."
+order: 9
+---
+
+## Overview
+
+Testing is split by implementation surface and by CI cost. Contributors should add tests at the lowest layer that covers the change, then run the matching Makefile target before opening a PR.
+
+## Layers
+
+| Layer | Where | Cost | What it covers |
+|-------|-------|------|----------------|
+| Python CLI | `cli/tests/` | ~s | Click commands, config migration, Python scanner glue |
+| Go packages | `internal/**/*_test.go`, `test/**/*_test.go` | ~s to minutes | Gateway, TUI, policy, audit, sandbox, race-sensitive paths |
+| TypeScript plugin | `extensions/defenseclaw/src/__tests__/` | ~s | Fetch interceptor, sidecar client, provider coverage |
+| Rego | `policies/rego/*_test.rego` | ~s | Admission, firewall, guardrail, sandbox, skill-action decisions |
+| E2E scripts | `test/e2e/`, `scripts/test-e2e-*.sh`, `.github/workflows/e2e.yml` | minutes | Full-stack runner scenarios outside the default `make test` target |
+
+## Running
+
+```bash
+make test                   # cli-test + gateway-test
+make cli-test-cov           # Python pytest with coverage XML
+make go-test-cov            # Go race tests with coverage.out
+make ts-test                # plugin Vitest suite
+make rego-test              # OPA policy tests
+make check                  # parity gates and provider coverage
+```
+
+Per-package: `go test ./internal/gateway/...` or `pytest cli/defenseclaw/commands/test_cmd_init.py`.
+
+## Conventions
+
+### Go
+
+- Table-driven tests. One function per unit. Subtests via `t.Run(name, ...)`.
+- Use `testify/require` for assertions that short-circuit and `testify/assert` for non-fatal ones.
+- Prefer `httptest.Server` to real network. Prefer `t.TempDir()` to `os/exec` to filesystem fixtures.
+- Fake the clock with `clockwork.NewFakeClock` — never read the wall clock in tests.
+
+### Python
+
+- `pytest` + `pytest-click`. One test file per command.
+- Use `CliRunner.isolated_filesystem()` to avoid leaking state.
+- Mock sidecar calls via `responses` or a local test server from `test/helpers/`.
+
+### Fixtures
+
+- `test/fixtures/skills/` — skill directories exhibiting specific findings.
+- `test/fixtures/plugins/` — plugin fixtures for scanner coverage.
+- `test/fixtures/mcps/` — MCP server fixtures.
+- `test/fixtures/code/` — code scanning fixtures.
+- `test/testdata/` — shared endpoint/provider corpora.
+
+Fixtures are versioned and treated as source. Breaking a fixture to match a new behavior requires the test to be updated explicitly.
+
+## Harnesses
+
+### Policy tests
+
+Rego tests live next to the policy modules and run through the `rego-test` target:
+
+```bash
+make rego-test
+```
+
+### Plugin tests
+
+Vitest suites under `extensions/defenseclaw/src/__tests__/` use mocks and local HTTP servers instead of live providers:
+
+```ts
+const res = await interceptFetch("https://api.openai.com/v1/chat/completions");
+expect(res.headers["X-DC-Target-URL"]).toContain("api.openai.com");
+```
+
+## What to test
+
+- **Parsers**: every error path (malformed YAML, bad regex, unknown fields).
+- **Compilers**: round-trip (parse → compile → serialize → parse == original).
+- **Decisions**: every row of the actions matrix.
+- **Concurrency**: race tests (`go test -race`) on every new shared state.
+- **Errors**: exit codes match the reference table.
+- **Upgrades**: migration from prior on-disk layouts — fixture directories preserved.
+
+## What not to test
+
+- Don't test OPA itself. Assume OPA is correct; test your rules.
+- Don't test SQLite itself.
+- Don't test upstream providers with live keys.
+- Don't rely on wall-clock time.
+- Don't shell out to the system-installed `defenseclaw` — use the harness.
+
+## CI gates
+
+The following are required for a PR to land:
+
+- `make test`
+- `make cli-test-cov`
+- `make go-test-cov`
+- `make ts-test`
+- `make rego-test`
+- `.github/workflows/e2e.yml` for full-stack E2E coverage
+- `make lint` (golangci-lint, ruff, prettier)
+- `make docs-check` (no docgen drift)
+- `make docs-deadlinks` (no broken doc links)
+
+## Related
+
+- [Building](/docs-site/developer/building)
+- [Contributing](/docs-site/developer/contributing)
+- [Policy testing](/docs-site/policy/testing)
+
+---
+
+<!-- generated-from: Makefile, .github/workflows/ci.yml, .github/workflows/e2e.yml, scripts/test-e2e-cli.py, extensions/defenseclaw/package.json -->

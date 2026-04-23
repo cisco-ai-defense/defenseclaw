@@ -1,0 +1,99 @@
+---
+title: "defenseclaw alerts"
+description: "View and manage security alerts."
+order: 10
+---
+
+## Overview
+
+`defenseclaw alerts` — View and manage security alerts.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:alerts -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw alerts [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `acknowledge` | Mark alerts as acknowledged (downgrades severity to ACK in the audit DB). |
+| `dismiss` | Dismiss alerts from the active operator view (same DB update as acknowledge). |
+
+### Description
+
+View and manage security alerts
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `-n, --limit` | integer | `25` | — | no | Number of alerts to load |
+| `--show` | integer | — | — | no | Print full details for alert # and exit (non-interactive) |
+| `--tui, --no-tui` | boolean | — | — | no | Deprecated: the interactive TUI moved to `defenseclaw tui` in P3-#20. This flag now prints a deprecation notice and falls back to the table. |
+
+### `defenseclaw alerts acknowledge`
+
+Mark alerts as acknowledged (downgrades severity to ACK in the audit DB)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--severity` | choice (`all`, `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`) | `all` | — | no | Limit which severities are acknowledged. |
+
+### `defenseclaw alerts dismiss`
+
+Dismiss alerts from the active operator view (same DB update as acknowledge)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--severity` | choice (`all`, `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`) | `all` | — | no | Limit which severities are cleared from the active list. |
+
+<!-- END AUTOGEN:cli_py:alerts -->
+
+## Usage
+
+### Show recent alerts
+
+```bash
+defenseclaw alerts --limit 20
+defenseclaw alerts --show
+```
+
+`--limit` controls how many recent alerts are loaded; `--show` prints alert details instead of only the summary.
+
+### Acknowledge or dismiss by severity
+
+```bash
+defenseclaw alerts acknowledge --severity high
+defenseclaw alerts dismiss --severity medium
+```
+
+The command acts on matching alerts in the local alert store.
+
+### Hand off to the TUI
+
+```bash
+defenseclaw alerts --tui
+```
+
+Use the TUI when you need to triage a set of alerts interactively.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_alerts.py -->

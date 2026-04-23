@@ -1,0 +1,90 @@
+---
+title: "Install"
+description: "Provisioning the OpenShell sandbox on Linux: user, cgroups, systemd units, and the run-sandbox.sh launcher."
+order: 2
+---
+
+## Overview
+
+Sandbox setup has two parts:
+
+1. Install the `openshell-sandbox` binary.
+2. Configure DefenseClaw/OpenClaw standalone mode with the Python `defenseclaw sandbox` commands.
+
+## Install the OpenShell binary
+
+```bash
+./scripts/install-openshell-sandbox.sh --version 0.0.16 --install-dir ~/.local/bin
+```
+
+The installer downloads the Linux-specific OpenShell layer from `ghcr.io/nvidia/openshell/cluster`, extracts `opt/openshell/bin/openshell-sandbox`, installs it, and verifies it with `openshell-sandbox --version`. It requires Linux plus `curl`, `tar`, and `python3`.
+
+## Configure standalone mode
+
+```bash
+defenseclaw sandbox init
+defenseclaw sandbox setup --sandbox-ip 10.200.0.2 --host-ip 10.200.0.1 --policy permissive
+```
+
+`sandbox init` verifies Linux, requires an existing DefenseClaw config, ensures `openshell-sandbox`, ensures `iptables` when host networking or guardrail is enabled, creates the sandbox user/home, integrates OpenClaw ownership, and installs policy/plugin assets as applicable.
+
+`sandbox setup` configures `openshell.mode=standalone`, sandbox/host IPs, OpenClaw gateway port, guardrail host, sandbox home, policy template, DNS, systemd units, launcher scripts, and optional device pre-pairing.
+
+## Verification
+
+```bash
+defenseclaw-gateway sandbox status
+```
+
+The gateway status command prints `systemctl status --no-pager` for `openshell-sandbox.service` and `defenseclaw-gateway.service`.
+
+## Policy template
+
+DefenseClaw's Go policy wrapper reads and writes `defenseclaw-policy.yaml` in the configured OpenShell policy directory:
+
+```yaml
+version: "1"
+allowed_endpoints: []
+denied_endpoints: []
+allowed_skills: []
+denied_skills: []
+permissions: []
+```
+
+The setup command also installs a fuller OpenShell policy template selected by `--policy default|strict|permissive`.
+
+## Runtime commands
+
+```bash
+defenseclaw-gateway sandbox start
+defenseclaw-gateway sandbox stop
+defenseclaw-gateway sandbox restart
+defenseclaw-gateway sandbox exec python -c 'print("hello")'
+defenseclaw-gateway sandbox shell
+```
+
+## Upgrading the sandbox
+
+```bash
+OPENSHELL_VERSION=0.0.16 ./scripts/install-openshell-sandbox.sh
+```
+
+The installer exits early when `openshell-sandbox` is already on `PATH`.
+
+## Disabling standalone mode
+
+```bash
+defenseclaw sandbox setup --disable
+```
+
+The disable path reverts DefenseClaw out of standalone sandbox mode.
+
+## Related
+
+- [Monitoring](/docs-site/sandbox/monitoring)
+- [sandbox CLI](/docs-site/cli/commands/sandbox)
+- [Setup sandbox](/docs-site/first-setup/setup-sandbox)
+
+---
+
+<!-- generated-from: scripts/install-openshell-sandbox.sh, internal/sandbox/install.go, internal/sandbox/policy.go, cli/defenseclaw/commands/cmd_sandbox.py, cli/defenseclaw/commands/cmd_init_sandbox.py, cli/defenseclaw/commands/cmd_setup_sandbox.py, internal/cli/sandbox.go -->

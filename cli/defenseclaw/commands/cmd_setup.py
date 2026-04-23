@@ -120,6 +120,11 @@ from defenseclaw.commands.cmd_setup_provider import provider  # noqa: E402
 
 setup.add_command(provider)
 
+# Register `defenseclaw setup codex` (Codex hooks + sidecar bridge).
+from defenseclaw.commands.cmd_setup_codex import codex_setup  # noqa: E402
+
+setup.add_command(codex_setup)
+
 
 # --------------------------------------------------------------------------
 # `defenseclaw setup migrate-llm`

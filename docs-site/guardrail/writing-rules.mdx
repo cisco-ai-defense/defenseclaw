@@ -1,0 +1,70 @@
+---
+title: "Writing rules"
+description: "The YAML rule shape loaded by DefenseClaw guardrail rule packs."
+order: 5
+---
+
+## Overview
+
+Rules are loaded by `internal/guardrail/rulepack.go::loadRuleFiles`. The loader reads every `.yaml` file under `<rule_pack_dir>/rules`, unmarshals it into `RulesFileYAML`, records the source path, and skips files whose `version` is not `1`.
+
+Patterns are Go regular expressions. `RulePack.Validate` compiles patterns with `regexp.Compile` and logs warnings for invalid regexes; the rule pack degrades gracefully instead of crashing the process.
+
+## File schema
+
+```yaml
+version: 1
+category: secret
+rules:
+  - id: SEC-MY-KEY
+    pattern: '(?i)my_co_[a-z]+_[a-z0-9]{32}'
+    title: "MyCo internal API key"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [credential, internal]
+```
+
+## Fields
+
+| Field | Required | Source type | Notes |
+|-------|----------|-------------|-------|
+| `version` | yes | `int` | Only version `1` is loaded. |
+| `category` | yes | `string` | Category label for the rule file. |
+| `rules[].id` | yes | `string` | Stable rule ID used in findings. |
+| `rules[].pattern` | yes | `string` | Go regexp pattern. |
+| `rules[].title` | yes | `string` | Human-readable title. |
+| `rules[].severity` | yes | `string` | Severity string consumed by guardrail severity ranking. |
+| `rules[].confidence` | yes | `float64` | Confidence value carried with rule findings. |
+| `rules[].tags` | no | `[]string` | Free-form tags. |
+
+<Callout type="info" title="Keep the schema tight">
+  `RuleDefYAML` does not define `judge_hint`, `applies_to`, `excerpt`, or
+  `deprecated`. Avoid documenting those fields as supported rule keys.
+</Callout>
+
+## Runtime use
+
+`ScanAllRules(content, toolName)` evaluates loaded rule definitions and returns `RuleFinding` values. The guardrail uses those findings as a safety net in `regex_judge` and `judge_first`, and the proxy uses them for tool-call argument inspection.
+
+High or critical rule findings produce a block-shaped local verdict. Final enforcement still depends on `guardrail.mode` and optional OPA finalization.
+
+## Authoring guidance
+
+| Practice | Reason |
+|----------|--------|
+| Anchor on format prefixes | Avoid generic high-entropy matches that catch hashes and IDs. |
+| Keep patterns bounded | Go regexp is safe from catastrophic backtracking, but bounded patterns are easier to audit. |
+| Use explicit severities | The proxy blocks high and critical findings in local scanner paths. |
+| Add targeted suppressions for false positives | Weakening the rule hides true positives too. |
+| Validate with the running rule-pack loader | Invalid patterns log warnings and then do not match. |
+
+## Related
+
+- [Rule packs](/docs-site/guardrail/rule-packs)
+- [Suppressions](/docs-site/guardrail/suppressions)
+- [Sensitive tools](/docs-site/guardrail/sensitive-tools)
+- [Judge vs regex](/docs-site/guardrail/judge-vs-regex)
+
+---
+
+<!-- generated-from: internal/guardrail/rulepack.go, internal/gateway/guardrail.go, internal/gateway/proxy.go, policies/guardrail/default/rules/*.yaml -->

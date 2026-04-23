@@ -1,0 +1,83 @@
+---
+title: "Authentication"
+description: "Sidecar and guardrail proxy authentication headers from the gateway sources."
+order: 5
+---
+
+## Overview
+
+DefenseClaw has separate authentication paths for the sidecar API on `18970` and the guardrail proxy on `4000`.
+
+| Surface | Auth behavior | Accepted headers |
+|---------|---------------|------------------|
+| Sidecar API | Token auth is installed only when `scannerCfg.Gateway.Token` is non-empty. `GET /health` is exempt. | `Authorization: Bearer <token>` or `X-DefenseClaw-Token: <token>` |
+| Sidecar mutating requests | All non-read methods pass through the CSRF guard. | `X-DefenseClaw-Client`, `Content-Type: application/json`, and a localhost `Origin` if `Origin` is present |
+| Guardrail proxy | `OPENCLAW_GATEWAY_TOKEN` requires `X-DC-Auth` even on loopback. A derived proxy master key is also accepted through `Authorization`. If no gateway token is configured, loopback is trusted. | `X-DC-Auth: Bearer <OPENCLAW_GATEWAY_TOKEN>` or `Authorization: Bearer <proxy-master-key>` |
+| Provider upstream auth | The proxy forwards the provider credential to the upstream LLM. | `X-AI-Auth`, `Authorization`, `x-api-key`, or `api-key`, normalized by provider |
+
+<Callout type="warning" title="Mutating sidecar calls need CSRF headers">
+  A valid token is not enough for `POST`, `PUT`, or `PATCH` requests. The sidecar also requires `X-DefenseClaw-Client` and a JSON content type.
+</Callout>
+
+## Sidecar token flow
+
+If `scannerCfg.Gateway.Token` is empty, `internal/gateway/api.go::Run` does not install `tokenAuth`. If a token is configured, every route except `GET /health` must present the configured value.
+
+```bash
+curl -s http://127.0.0.1:18970/status \
+  -H "Authorization: Bearer $DEFENSECLAW_GATEWAY_TOKEN" | jq .
+
+curl -s http://127.0.0.1:18970/status \
+  -H "X-DefenseClaw-Token: $DEFENSECLAW_GATEWAY_TOKEN" | jq .
+```
+
+For mutating sidecar calls, include the CSRF headers:
+
+```bash
+curl -s -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
+  -H "Authorization: Bearer $DEFENSECLAW_GATEWAY_TOKEN" \
+  -H "X-DefenseClaw-Client: docs" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"observe"}' | jq .
+```
+
+The CSRF guard rejects mutating requests that omit `X-DefenseClaw-Client`, use a non-JSON content type, or send a non-localhost `Origin`.
+
+## Guardrail proxy auth
+
+The proxy authenticates traffic before forwarding provider keys. `X-DC-Auth` is checked against `OPENCLAW_GATEWAY_TOKEN`; `Authorization` is checked against the derived proxy master key. If `OPENCLAW_GATEWAY_TOKEN` is unset, loopback requests are allowed so first-run local setups keep working.
+
+```bash
+curl -s http://127.0.0.1:4000/v1/chat/completions \
+  -H "X-DC-Auth: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+  -H "X-DC-Target-URL: https://api.openai.com" \
+  -H "X-AI-Auth: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}' | jq .
+```
+
+## Provider registry auth
+
+`GET /v1/config/providers` on the proxy is intentionally unauthenticated because the TypeScript fetch interceptor uses it at bootstrap and provider domains are not secrets. `POST /v1/config/providers/reload` requires the normal proxy authentication path.
+
+Auth failures are emitted through gateway error telemetry with redacted client IP and user-agent context.
+
+## Debugging auth failures
+
+| Status or symptom | Check |
+|-------------------|-------|
+| `401` from sidecar route | Confirm `scannerCfg.Gateway.Token` is configured and the request sends either `Authorization: Bearer ...` or `X-DefenseClaw-Token`. |
+| `403` on sidecar mutation | Add `X-DefenseClaw-Client`; if `Origin` is present, make sure it is localhost. |
+| `415` on sidecar mutation | Set `Content-Type: application/json` and send a JSON body, even for an empty payload. |
+| Proxy request works on loopback but fails remotely | Set `OPENCLAW_GATEWAY_TOKEN` and send `X-DC-Auth: Bearer ...`. |
+| Upstream provider returns auth error | The proxy authenticated the local request, but the provider credential in `X-AI-Auth` or the provider-specific auth header is wrong. |
+
+## Related
+
+- [REST endpoints](/docs-site/api/endpoints)
+- [Events and streaming](/docs-site/api/events)
+- [Guardrail providers](/docs-site/guardrail/providers)
+
+---
+
+<!-- generated-from: internal/gateway/api.go, internal/gateway/proxy.go, internal/gateway/providers_endpoint.go, internal/gateway/egress.go -->

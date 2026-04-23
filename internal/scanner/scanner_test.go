@@ -104,6 +104,38 @@ func TestSkillScanner_ScanEnv_InjectsCiscoKey(t *testing.T) {
 	t.Error("AI_DEFENSE_API_KEY not found in scanEnv()")
 }
 
+func TestSkillScanner_BuildArgsUsesSupportedLLMProvider(t *testing.T) {
+	ss := NewSkillScannerFromLLM(
+		config.SkillScannerConfig{UseLLM: true},
+		config.LLMConfig{Provider: "Anthropic", Model: "claude-3-5-sonnet"},
+		config.CiscoAIDefenseConfig{},
+	)
+
+	got := strings.Join(ss.buildArgs("/tmp/skill"), " ")
+	if !strings.Contains(got, "--use-llm") {
+		t.Fatalf("expected --use-llm in args: %s", got)
+	}
+	if !strings.Contains(got, "--llm-provider anthropic") {
+		t.Fatalf("expected normalized supported provider in args: %s", got)
+	}
+}
+
+func TestSkillScanner_BuildArgsSkipsUnsupportedInheritedLLMProvider(t *testing.T) {
+	ss := NewSkillScannerFromLLM(
+		config.SkillScannerConfig{UseLLM: true},
+		config.LLMConfig{Provider: "bedrock", Model: "bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0"},
+		config.CiscoAIDefenseConfig{},
+	)
+
+	got := strings.Join(ss.buildArgs("/tmp/skill"), " ")
+	if strings.Contains(got, "--use-llm") {
+		t.Fatalf("did not expect --use-llm for unsupported provider: %s", got)
+	}
+	if strings.Contains(got, "--llm-provider") || strings.Contains(got, "bedrock") {
+		t.Fatalf("did not expect unsupported provider in args: %s", got)
+	}
+}
+
 func TestNewMCPScanner_DefaultBinary(t *testing.T) {
 	ms := NewMCPScanner(config.MCPScannerConfig{}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
 	if ms.Config.Binary != "mcp-scanner" {

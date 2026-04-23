@@ -1,0 +1,78 @@
+---
+title: "REST endpoints"
+description: "Code-generated HTTP route inventory for the DefenseClaw sidecar and guardrail proxy."
+order: 2
+---
+
+## Overview
+
+This page is generated from the Go HTTP mux registrations. If a route is not listed in the reference table, it is not exposed by the current binary.
+
+<Callout type="info">
+  The sidecar REST API and the guardrail proxy are separate HTTP surfaces. Both are listed here because both register routes in Go.
+</Callout>
+
+## Reference
+
+<!-- BEGIN AUTOGEN:api_routes:all -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+| Path | Surface | Method(s) | Handler | Source |
+|---|---|---|---|---|
+| `/` | guardrail proxy | `GET, POST` | `handlePassthrough` | `internal/gateway/proxy.go` |
+| `/chat/completions` | guardrail proxy | `POST` | `handleChatCompletion` | `internal/gateway/proxy.go` |
+| `/health/liveliness` | guardrail proxy | `ANY` | `handleHealth` | `internal/gateway/proxy.go` |
+| `/health/liveness` | guardrail proxy | `ANY` | `handleHealth` | `internal/gateway/proxy.go` |
+| `/health/readiness` | guardrail proxy | `ANY` | `handleHealth` | `internal/gateway/proxy.go` |
+| `/health` | guardrail proxy | `ANY` | `handleHealth` | `internal/gateway/proxy.go` |
+| `/models` | guardrail proxy | `GET` | `handleModels` | `internal/gateway/proxy.go` |
+| `/v1/chat/completions` | guardrail proxy | `POST` | `handleChatCompletion` | `internal/gateway/proxy.go` |
+| `/v1/config/providers/reload` | guardrail proxy | `ANY` | `handleReloadProviders` | `internal/gateway/proxy.go` |
+| `/v1/config/providers` | guardrail proxy | `ANY` | `handleListProviders` | `internal/gateway/proxy.go` |
+| `/v1/events/egress` | guardrail proxy | `ANY` | `handleEgressEvent` | `internal/gateway/proxy.go` |
+| `/v1/models` | guardrail proxy | `GET` | `handleModels` | `internal/gateway/proxy.go` |
+| `/alerts` | sidecar REST | `GET` | `handleAlerts` | `internal/gateway/api.go` |
+| `/api/v1/codex/hook` | sidecar REST | `ANY` | `handleCodexHook` | `internal/gateway/api.go` |
+| `/api/v1/inspect/tool` | sidecar REST | `ANY` | `handleInspectTool` | `internal/gateway/api.go` |
+| `/api/v1/network-egress` | sidecar REST | `ANY` | `handleNetworkEgress` | `internal/gateway/api.go` |
+| `/api/v1/scan/code` | sidecar REST | `POST` | `handleCodeScan` | `internal/gateway/api.go` |
+| `/audit/event` | sidecar REST | `POST` | `handleAuditEvent` | `internal/gateway/api.go` |
+| `/config/patch` | sidecar REST | `POST` | `handleConfigPatch` | `internal/gateway/api.go` |
+| `/enforce/allow` | sidecar REST | `POST` | `handleEnforceAllow` | `internal/gateway/api.go` |
+| `/enforce/allowed` | sidecar REST | `GET` | `handleEnforceAllowed` | `internal/gateway/api.go` |
+| `/enforce/block` | sidecar REST | `DELETE, POST` | `handleEnforceBlock` | `internal/gateway/api.go` |
+| `/enforce/blocked` | sidecar REST | `GET` | `handleEnforceBlocked` | `internal/gateway/api.go` |
+| `/health` | sidecar REST | `GET` | `handleHealth` | `internal/gateway/api.go` |
+| `/mcps` | sidecar REST | `GET` | `handleMCPs` | `internal/gateway/api.go` |
+| `/plugin/disable` | sidecar REST | `POST` | `handlePluginDisable` | `internal/gateway/api.go` |
+| `/plugin/enable` | sidecar REST | `POST` | `handlePluginEnable` | `internal/gateway/api.go` |
+| `/policy/evaluate/audit` | sidecar REST | `POST` | `handlePolicyEvaluateAudit` | `internal/gateway/api.go` |
+| `/policy/evaluate/firewall` | sidecar REST | `POST` | `handlePolicyEvaluateFirewall` | `internal/gateway/api.go` |
+| `/policy/evaluate/skill-actions` | sidecar REST | `POST` | `handlePolicyEvaluateSkillActions` | `internal/gateway/api.go` |
+| `/policy/evaluate` | sidecar REST | `POST` | `handlePolicyEvaluate` | `internal/gateway/api.go` |
+| `/policy/reload` | sidecar REST | `POST` | `handlePolicyReload` | `internal/gateway/api.go` |
+| `/scan/result` | sidecar REST | `POST` | `handleScanResult` | `internal/gateway/api.go` |
+| `/skill/disable` | sidecar REST | `POST` | `handleSkillDisable` | `internal/gateway/api.go` |
+| `/skill/enable` | sidecar REST | `POST` | `handleSkillEnable` | `internal/gateway/api.go` |
+| `/skills` | sidecar REST | `GET` | `handleSkills` | `internal/gateway/api.go` |
+| `/status` | sidecar REST | `GET` | `handleStatus` | `internal/gateway/api.go` |
+| `/tools/catalog` | sidecar REST | `GET` | `handleToolsCatalog` | `internal/gateway/api.go` |
+| `/v1/guardrail/config` | sidecar REST | `GET, HEAD, OPTIONS, PATCH, POST, PUT` | `handleGuardrailConfig` | `internal/gateway/api.go` |
+| `/v1/guardrail/evaluate` | sidecar REST | `POST` | `handleGuardrailEvaluate` | `internal/gateway/api.go` |
+| `/v1/guardrail/event` | sidecar REST | `POST` | `handleGuardrailEvent` | `internal/gateway/api.go` |
+| `/v1/mcp/scan` | sidecar REST | `POST` | `handleMCPScan` | `internal/gateway/api.go` |
+| `/v1/plugin/scan` | sidecar REST | `POST` | `handlePluginScan` | `internal/gateway/api.go` |
+| `/v1/skill/fetch` | sidecar REST | `POST` | `handleSkillFetch` | `internal/gateway/api.go` |
+| `/v1/skill/scan` | sidecar REST | `POST` | `handleSkillScan` | `internal/gateway/api.go` |
+
+<!-- END AUTOGEN:api_routes:all -->
+
+## Related
+
+- [API overview](/docs-site/api/index)
+- [Authentication](/docs-site/api/auth)
+- [Schemas](/docs-site/api/schemas)
+
+---
+
+<!-- generated-from: internal/gateway/api.go, internal/gateway/proxy.go -->

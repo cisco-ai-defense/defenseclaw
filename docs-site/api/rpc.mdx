@@ -1,0 +1,47 @@
+---
+title: "RPC status"
+description: "What the current gateway sources expose for RPC-style clients."
+order: 3
+---
+
+## Overview
+
+The scoped gateway sources do not register a public WebSocket or JSON-RPC route on the sidecar or guardrail proxy mux. The API surface available to external clients is HTTP: the sidecar routes in `internal/gateway/api.go` and the proxy routes in `internal/gateway/proxy.go`.
+
+<Callout type="warning" title="No documented WebSocket route">
+  Do not build integrations around an RPC WebSocket endpoint unless a future gateway mux registers one. Use the generated [REST endpoints](/docs-site/api/endpoints) page as the route contract.
+</Callout>
+
+## Available request-response surfaces
+
+| Need | Use this HTTP surface | Notes |
+|------|------------------------|-------|
+| Runtime status | `GET /status` on `18970` | Sidecar status handler |
+| Policy reload | `POST /policy/reload` on `18970` | Requires sidecar mutating-request headers |
+| Scanner submission | `/v1/skill/scan`, `/v1/plugin/scan`, `/v1/mcp/scan` on `18970` | Sidecar scanner handlers |
+| Guardrail runtime mode | `GET` or `PATCH /v1/guardrail/config` on `18970` | Only `mode` and `scanner_mode` are patchable |
+| Network egress records | `GET` or `POST /api/v1/network-egress` on `18970` | Structured audit-backed egress records |
+| LLM traffic proxying | `/v1/chat/completions`, `/chat/completions`, or provider-native passthrough on `4000` | Guardrail proxy auth and provider headers apply |
+
+## Client implications
+
+Use ordinary HTTP clients for automation. For repeated reads, poll the relevant route or consume the persisted artifacts described in [Observability](/docs-site/observability/index). For LLM response streaming, use the guardrail proxy streaming behavior described in [Events and streaming](/docs-site/api/events).
+
+```bash
+curl -s http://127.0.0.1:18970/status | jq .
+
+curl -s -X POST http://127.0.0.1:18970/policy/reload \
+  -H "X-DefenseClaw-Client: docs" \
+  -H "Content-Type: application/json" \
+  -d '{}' | jq .
+```
+
+## Related
+
+- [REST endpoints](/docs-site/api/endpoints)
+- [Authentication](/docs-site/api/auth)
+- [Events and streaming](/docs-site/api/events)
+
+---
+
+<!-- generated-from: internal/gateway/api.go, internal/gateway/proxy.go -->

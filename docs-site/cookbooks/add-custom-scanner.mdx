@@ -1,0 +1,149 @@
+---
+title: "Add a custom scanner"
+description: "Write, package, and register a scanner that DefenseClaw will invoke alongside its built-ins."
+order: 4
+---
+
+## Problem
+
+You have a proprietary signal — a binary classifier, a regex suite your team maintains, a remote API — that should participate in DefenseClaw's decision-making. You don't want to fork the repo.
+
+## Solution
+
+Custom scanners are standalone binaries or Python modules that accept JSON on stdin and emit a `ScanVerdict` JSON on stdout. DefenseClaw loads them from the `scanners` directory and invokes them like a first-class scanner.
+
+### Minimal example
+
+````python
+# ~/.defenseclaw/scanners/my_scanner/scan.py
+#!/usr/bin/env python3
+import json, sys
+
+inp = json.load(sys.stdin)  # ScanInput
+body = inp.get("content", "")
+
+findings = []
+if "internal-only" in body:
+    findings.append("custom:internal-only-leak")
+
+verdict = {
+    "severity": "HIGH" if findings else "LOW",
+    "findings": findings,
+    "confidence": 0.85 if findings else 1.0,
+    "reason": "Internal-only label exfil" if findings else "",
+    "scanner": "my-scanner",
+    "scanner_version": "0.1.0",
+    "rule_id": findings[0] if findings else "",
+}
+json.dump(verdict, sys.stdout)
+````
+
+Make it executable:
+
+````bash
+chmod +x ~/.defenseclaw/scanners/my_scanner/scan.py
+````
+
+### Register it
+
+````yaml
+# ~/.defenseclaw/scanners/my_scanner/scanner.yaml
+name: my-scanner
+version: 0.1.0
+kind: content
+applies_to:
+  - guardrail.prompt
+  - guardrail.completion
+command:
+  - ~/.defenseclaw/scanners/my_scanner/scan.py
+timeout_ms: 500
+input_format: json
+output_format: json
+````
+
+Reload the running gateway after installing the scanner descriptor:
+
+````bash
+defenseclaw-gateway policy reload
+````
+
+### Verify
+
+````bash
+printf '{"content":"This is internal-only data"}' | ~/.defenseclaw/scanners/my_scanner/scan.py
+````
+
+The scanner should emit a JSON verdict with `scanner` set to `my-scanner` and a HIGH finding for `custom:internal-only-leak`.
+
+### Production packaging
+
+For team-wide distribution, package the scanner as a tarball and install via CI:
+
+````bash
+tar -czf my-scanner-0.1.0.tar.gz -C ~/.defenseclaw/scanners my_scanner
+````
+
+On target hosts:
+
+````bash
+tar -xzf my-scanner-0.1.0.tar.gz -C ~/.defenseclaw/scanners
+defenseclaw-gateway policy reload
+````
+
+### Go scanners
+
+Same contract, different language:
+
+````go
+package main
+
+import (
+    "encoding/json"
+    "os"
+    "strings"
+)
+
+type ScanInput struct {
+    Content string `json:"content"`
+}
+type Finding string
+type Verdict struct {
+    Severity string   `json:"severity"`
+    Findings []string `json:"findings"`
+    Reason   string   `json:"reason"`
+    Scanner  string   `json:"scanner"`
+    Version  string   `json:"scanner_version"`
+}
+
+func main() {
+    var in ScanInput
+    _ = json.NewDecoder(os.Stdin).Decode(&in)
+    v := Verdict{Severity: "LOW", Scanner: "my-scanner", Version: "0.1.0"}
+    if strings.Contains(in.Content, "internal-only") {
+        v.Severity = "HIGH"
+        v.Findings = []string{"custom:internal-only-leak"}
+        v.Reason = "Internal-only label exfil"
+    }
+    _ = json.NewEncoder(os.Stdout).Encode(v)
+}
+````
+
+### Remote scanners
+
+If you want to call a remote model, same contract but emit the verdict after a network call. Beware the `timeout_ms`: remote scanners are called on the hot path and must respond within the budget. Use `kind: admission` for remote scanners that can't meet a 500ms budget — admission is off the hot path.
+
+## Caveats
+
+- Scanners run in subprocess isolation with no network by default. Add `allow_network: true` in the YAML if you need it (and expect it to show up in egress observer).
+- Scanners that emit malformed JSON are treated as a fail-open `allow` event with a `scanner.error` finding. CI that loads scanners should fail closed.
+- Scanners cannot mutate the request. They can only observe and report.
+
+## Related
+
+- [Custom scanners](/docs-site/scanners/custom-scanners)
+- [Scanner policies](/docs-site/policy/scanner-policies)
+- [Inspection pipeline](/docs-site/developer/inspection-pipeline)
+
+---
+
+<!-- generated-from: plugins/examples/custom-scanner/main.go, plugins/plugin.go, plugins/registry.go -->

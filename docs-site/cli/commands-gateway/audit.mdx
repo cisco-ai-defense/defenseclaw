@@ -1,0 +1,70 @@
+---
+title: "defenseclaw-gateway audit"
+description: "Inspect and export the local audit database."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway audit` — Inspect and export the local audit database.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:audit -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+audit
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `export` | Export audit_events as JSONL (v7 schema) |
+
+### Description
+
+Inspect and export the local audit database
+
+### `defenseclaw-gateway audit export`
+
+#### Synopsis
+
+```bash
+export
+```
+
+#### Description
+
+Write one JSON object per line. Each audit row is validated against
+schemas/audit-event.json before it is written. With --include-activity,
+append rows from activity_events validated against activity-event.json.
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--include-activity` | `bool` | — | Append activity_events payloads (activity-event.json) after audit lines |
+| `--limit` | `int` | `0` | Max audit rows (0 = unlimited) |
+| `-o, --output` | `string` | `-` | Output file path, or '-' for stdout |
+
+<!-- END AUTOGEN:cli_go:audit -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/audit_export.go -->

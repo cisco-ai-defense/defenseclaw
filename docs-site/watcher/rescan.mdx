@@ -1,0 +1,59 @@
+---
+title: "Periodic rescan"
+description: "Scheduled full-fleet rescans catch content that didn't change on disk but where scanners have improved."
+order: 4
+---
+
+## Overview
+
+Periodic rescan runs in the watcher process when `watch.rescan_enabled` is true. It enumerates configured skills, plugins, and MCP servers, snapshots each target, compares against the stored baseline, and emits drift alerts when content or scan findings change.
+
+## Schedule
+
+```yaml
+watch:
+  rescan_enabled: true
+  rescan_interval_min: 60
+```
+
+The runtime default is 60 minutes when the configured interval is zero or negative. On startup the loop immediately runs one baseline/rescan cycle, then waits for the configured interval.
+
+## Behavior
+
+A rescan walks direct children of skill/plugin directories and reads MCP server entries from OpenClaw config. For each target:
+
+1. Snapshot the current content/config/dependency/endpoint state.
+2. Store a baseline if none exists.
+3. Compare the current snapshot with the baseline.
+4. Run the scanner and compare current findings with the baseline scan result.
+5. Emit a `drift` audit event only when deltas exist.
+
+## Scanner comparison
+
+The comparison keys findings by scanner, title, and location. It reports new findings, resolved findings, and severity escalations. Scanner-version-only changes are not a separate drift type in the current code.
+
+## Manual triggering
+
+There is no standalone top-level rescan command. To force fresh scan output manually, use the existing scanner commands:
+
+```bash
+defenseclaw skill scan all
+defenseclaw mcp scan --all
+defenseclaw plugin scan /path/to/plugin
+```
+
+Manual scans do not update the watcher's stored rescan baseline by themselves; the baseline path belongs to `internal/watcher/rescan.go`.
+
+## Performance
+
+The current rescan loop processes targets sequentially and gives each scanner call a five-minute timeout. There is no documented `watcher.parallel_scans` setting in the source.
+
+## Related
+
+- [Drift detection](/docs-site/watcher/drift-detection)
+- [Admission gate](/docs-site/watcher/admission-gate)
+- [Scanners](/docs-site/scanners/index)
+
+---
+
+<!-- generated-from: internal/watcher/rescan.go, internal/watcher/snapshot.go, internal/config/defaults.go, cli/defenseclaw/commands/cmd_skill.py, cli/defenseclaw/commands/cmd_mcp.py, cli/defenseclaw/commands/cmd_plugin.py -->

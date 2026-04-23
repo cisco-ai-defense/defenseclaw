@@ -1,0 +1,68 @@
+---
+title: "defenseclaw audit"
+description: "Audit trail helpers (activity logging)."
+order: 10
+---
+
+## Overview
+
+`defenseclaw audit` — Audit trail helpers (activity logging).
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:audit -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw audit [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `log-activity` | Record a config or operator mutation via Logger.log_activity. |
+
+### Description
+
+Audit trail helpers (activity logging)
+
+### `defenseclaw audit log-activity`
+
+Record a config or operator mutation via Logger.log_activity
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--payload-file` | file | `Sentinel.UNSET` | — | yes | JSON payload written by the TUI on config save (before/after snapshots). |
+
+<!-- END AUTOGEN:cli_py:audit -->
+
+## Usage
+
+### Record an activity event
+
+```bash
+defenseclaw audit log-activity --payload-file activity-event.json
+```
+
+The Python CLI currently exposes activity logging. Exporting the audit database is handled by the gateway binary:
+
+```bash
+defenseclaw-gateway audit export --output audit.jsonl --include-activity
+```
+
+See [Audit store](/docs-site/observability/audit-store) for the persisted schema.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_audit.py -->

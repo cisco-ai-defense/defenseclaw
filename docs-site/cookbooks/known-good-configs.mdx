@@ -1,0 +1,241 @@
+---
+title: "Known-good configs"
+description: "Copyable config excerpts for comparing common DefenseClaw guardrail, sink, webhook, scanner, and watcher setups."
+order: 1
+---
+
+## Overview
+
+Use these snippets as minimal compare-against excerpts for `~/.defenseclaw/config.yaml` and `policies/rego/data.json`. They are not complete config files; paste only the block you are changing and keep the rest of your generated config intact.
+
+| Check | Known-good value |
+|-------|------------------|
+| Guardrail proxy port | `4000` |
+| Sidecar API port | `18970` |
+| Source-build Go version | `1.26.2` |
+| Init guardrail flag | `--enable-guardrail` |
+
+<Callout type="warning" title="Secrets stay out of YAML">
+  Keep actual tokens in the process environment or `~/.defenseclaw/.env`.
+  Config excerpts should use `api_key_env`, `token_env`, `bearer_env`, or
+  `secret_env` names only. Use `defenseclaw keys set NAME` for prompted
+  writes instead of printing secret values in a shell.
+</Callout>
+
+<Callout type="info" title="Restart boundary">
+  Edits to `config.yaml` and `.env` are process-start configuration for the
+  gateway. After changing these excerpts, run `defenseclaw config validate`,
+  then restart the sidecar unless the setup command already restarted or
+  reloaded the affected subsystem.
+</Callout>
+
+## Local observe guardrail
+
+This is the local-first guardrail shape to compare against when you want the proxy enabled but not blocking traffic yet.
+
+```yaml
+guardrail:
+  enabled: true
+  mode: observe
+  scanner_mode: local
+  host: ""
+  port: 4000
+  stream_buffer_bytes: 1024
+  block_message: ""
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
+  detection_strategy: regex_only
+  detection_strategy_completion: regex_only
+  judge_sweep: true
+  retain_judge_bodies: true
+  allow_unknown_llm_domains: false
+  judge:
+    enabled: false
+    injection: true
+    pii: true
+    pii_prompt: true
+    pii_completion: true
+    tool_injection: true
+    timeout: 30.0
+    adjudication_timeout: 5.0
+```
+
+`mode: observe` records findings without enforcement. `scanner_mode: local` keeps inspection on built-in local rules instead of requiring Cisco AI Defense credentials.
+
+## Local judge with Ollama
+
+Use this as a delta when the guardrail should use a local Ollama model for judge checks. The `ollama/` model prefix and loopback base URL mark this as a local provider path, so no API key value belongs in the file.
+
+```yaml
+guardrail:
+  detection_strategy: regex_judge
+  detection_strategy_completion: regex_only
+  judge:
+    enabled: true
+    injection: true
+    pii: true
+    pii_prompt: true
+    pii_completion: true
+    tool_injection: true
+    timeout: 30.0
+    adjudication_timeout: 5.0
+    llm:
+      model: ollama/llama3.1
+      base_url: http://127.0.0.1:11434
+      api_key_env: ""
+      timeout: 30
+      max_retries: 2
+```
+
+If every LLM-using component should inherit the same local runtime, put the same `model`, `base_url`, `api_key_env`, `timeout`, and `max_retries` keys under the top-level `llm:` block instead.
+
+## Splunk HEC sink
+
+Splunk forwarding lives under `audit_sinks:`, not under a legacy `splunk:` block. The local SQLite audit store still receives events even when no sink is configured.
+
+```yaml
+audit_sinks:
+  - name: splunk-main
+    kind: splunk_hec
+    enabled: true
+    min_severity: HIGH
+    actions: [guardrail-verdict, sink-failure]
+    batch_size: 50
+    flush_interval_s: 5
+    timeout_s: 10
+    splunk_hec:
+      endpoint: https://splunk.example.com:8088/services/collector
+      token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN
+      index: defenseclaw
+      source: defenseclaw
+      sourcetype: _json
+      verify_tls: true
+```
+
+`kind: splunk_hec` must have a matching `splunk_hec:` block. Use `token_env`; inline `token` is supported only as a fallback and logs a startup warning.
+
+## Generic signed webhook
+
+Notification webhooks live under top-level `webhooks:` and are separate from audit sinks. A generic webhook with `secret_env` signs outbound payloads with HMAC-SHA256.
+
+```yaml
+webhooks:
+  - name: internal-bus
+    type: generic
+    url: https://alerts.example.com/defenseclaw
+    secret_env: DEFENSECLAW_WEBHOOK_SECRET
+    min_severity: low
+    events: [verdict, scan, admission, activity, lifecycle]
+    enabled: true
+```
+
+Omit `cooldown_seconds` to use the dispatcher default. Set it to `0` only when you intentionally want every matching event delivered.
+
+## Scanner and watcher defaults
+
+Use this excerpt to compare scanner switches, the file watcher, and the gateway watcher against the source defaults.
+
+```yaml
+scanners:
+  skill_scanner:
+    binary: skill-scanner
+    use_llm: false
+    use_behavioral: false
+    enable_meta: false
+    use_trigger: false
+    use_virustotal: false
+    use_aidefense: false
+    llm_consensus_runs: 0
+    policy: permissive
+    lenient: true
+    virustotal_api_key_env: VIRUSTOTAL_API_KEY
+  mcp_scanner:
+    binary: mcp-scanner
+    analyzers: yara
+    scan_prompts: false
+    scan_resources: false
+    scan_instructions: false
+  plugin_scanner: defenseclaw
+
+watch:
+  debounce_ms: 500
+  auto_block: true
+  allow_list_bypass_scan: true
+  rescan_enabled: true
+  rescan_interval_min: 60
+
+gateway:
+  api_port: 18970
+  watcher:
+    enabled: true
+    skill:
+      enabled: true
+      take_action: true
+      dirs: []
+    plugin:
+      enabled: true
+      take_action: true
+      dirs: []
+    mcp:
+      take_action: true
+```
+
+The default Rego data also keeps install scanning enabled and blocks high-severity runtime/install outcomes.
+
+```json
+{
+  "config": {
+    "policy_name": "default",
+    "allow_list_bypass_scan": true,
+    "scan_on_install": true,
+    "max_enforcement_delay_seconds": 2
+  },
+  "actions": {
+    "CRITICAL": {
+      "runtime": "block",
+      "file": "quarantine",
+      "install": "block"
+    },
+    "HIGH": {
+      "runtime": "block",
+      "file": "quarantine",
+      "install": "block"
+    },
+    "MEDIUM": {
+      "runtime": "allow",
+      "file": "none",
+      "install": "none"
+    }
+  }
+}
+```
+
+## Verify each config
+
+Validate the merged YAML first, then use the targeted setup test command for the subsystem you changed.
+
+```bash
+defenseclaw config validate
+defenseclaw config show --format yaml
+defenseclaw setup llm --show
+defenseclaw setup observability list
+defenseclaw setup observability test splunk-main
+defenseclaw setup webhook list
+defenseclaw setup webhook test internal-bus --dry-run
+defenseclaw doctor
+defenseclaw-gateway restart
+```
+
+`setup observability test splunk-main` needs `DEFENSECLAW_SPLUNK_HEC_TOKEN` available through the gateway environment or `~/.defenseclaw/.env`. `setup webhook test internal-bus --dry-run` formats the signed request without delivering it; drop `--dry-run` when the receiver is ready.
+
+## Related
+
+- [Guardrail configuration](/docs-site/guardrail/configuration)
+- [Audit sinks](/docs-site/observability/sinks)
+- [Notification webhooks](/docs-site/first-setup/setup-webhook)
+- [LLM provider keys](/docs-site/first-setup/setup-provider)
+- [OpenShell sandbox](/docs-site/first-setup/setup-sandbox)
+- [Config files](/docs-site/reference/config-files)
+
+---
+
+<!-- generated-from: docs-site/STYLE.md, docs-site/guardrail/configuration.mdx, docs-site/observability/sinks.mdx, docs-site/first-setup/setup-webhook.mdx, docs-site/first-setup/setup-provider.mdx, docs-site/first-setup/setup-sandbox.mdx, docs-site/reference/config-files.mdx, internal/config/config.go, internal/config/defaults.go, internal/config/sinks.go, cli/defenseclaw/commands/cmd_setup.py, cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/commands/cmd_setup_webhook.py, cli/defenseclaw/commands/cmd_setup_provider.py, policies/rego/data.json -->

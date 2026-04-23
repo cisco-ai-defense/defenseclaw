@@ -1,0 +1,51 @@
+---
+title: "ClawShield"
+description: "Built-in Go scanners for prompt injection, malware strings, PII, secrets, and vulnerability patterns."
+order: 6
+---
+
+## Overview
+
+ClawShield is a family of built-in Go scanners under `internal/scanner/`. Each scanner implements the common scanner interface and supports `skill` and `code` targets. These scanners inspect readable content for injection, malware, PII, secrets, and vulnerability patterns.
+
+## What it scans
+
+| Scanner | Source file | Targets |
+|---------|-------------|---------|
+| `clawshield-injection` | `internal/scanner/clawshield_injection.go` | `skill`, `code` |
+| `clawshield-malware` | `internal/scanner/clawshield_malware.go` | `skill`, `code` |
+| `clawshield-pii` | `internal/scanner/clawshield_pii.go` | `skill`, `code` |
+| `clawshield-secrets` | `internal/scanner/clawshield_secrets.go` | `skill`, `code` |
+| `clawshield-vuln` | `internal/scanner/clawshield_vuln.go` | `skill`, `code` |
+
+## Detection categories
+
+| Category | Findings prefix | Purpose |
+|----------|-----------------|---------|
+| Injection | `clawshield-injection` | Prompt-injection and instruction-override patterns |
+| Malware | `clawshield-malware` | Reverse shell, credential harvesting, mining, C2, suspicious magic bytes, and high-entropy content |
+| PII | `clawshield-pii` | Credit cards, SSNs, emails, phone numbers, dates of birth, passport-style IDs, and related patterns |
+| Secrets | `clawshield-secrets` | Provider keys and token-shaped secrets |
+| Vulnerabilities | `clawshield-vuln` | SQLi, SSRF, path traversal, command injection, and XSS patterns |
+
+## CLI
+
+There is no ClawShield command group in the current Python CLI. For a source-code scan exposed through the public gateway CLI, use CodeGuard:
+
+```bash
+defenseclaw-gateway scan code ./src --json
+```
+
+<Callout type="warning" title="No archive or image CLI">
+  The current ClawShield source does not expose OCI image, archive expansion, PDF, YARA, or `--stdin` scanning commands. Do not document those as supported operator flows until a CLI or gateway route is added.
+</Callout>
+
+## Related
+
+- [AIBOM](/docs-site/scanners/aibom)
+- [CodeGuard](/docs-site/scanners/codeguard)
+- [Gateway scan CLI](/docs-site/cli/commands-gateway/scan)
+
+---
+
+<!-- generated-from: internal/scanner/clawshield_injection.go, internal/scanner/clawshield_malware.go, internal/scanner/clawshield_pii.go, internal/scanner/clawshield_secrets.go, internal/scanner/clawshield_vuln.go, internal/scanner/target_type.go, internal/cli/scan.go -->

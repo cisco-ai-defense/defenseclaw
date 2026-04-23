@@ -1,0 +1,268 @@
+---
+title: "defenseclaw policy"
+description: "Manage DefenseClaw security policies — create, list, show, activate, validate, test, edit."
+order: 10
+---
+
+## Overview
+
+`defenseclaw policy` — Manage DefenseClaw security policies — create, list, show, activate, validate, test, edit.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:policy -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw policy [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `activate` | Activate a policy — applies it to config.yaml and syncs OPA data.json. |
+| `create` | Create a new security policy. |
+| `delete` | Delete a custom policy. |
+| `edit` | Edit policy sections (guardrail, firewall, scanner, actions). |
+| `list` | List all available policies (built-in and custom). |
+| `show` | Show details of a policy. |
+| `test` | Run OPA Rego unit tests. |
+| `validate` | Validate OPA Rego modules and data.json schema. |
+
+### Description
+
+Manage DefenseClaw security policies — create, list, show, activate, validate, test, edit
+
+### `defenseclaw policy activate`
+
+Activate a policy — applies it to config.yaml and syncs OPA data.json
+
+```bash
+defenseclaw policy activate <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+### `defenseclaw policy create`
+
+Create a new security policy
+
+Create a new security policy.
+
+    Examples:
+
+      defenseclaw policy create my-strict --from-preset strict
+
+      defenseclaw policy create prod --critical-action block --high-action block --medium-action warn
+
+      defenseclaw policy create dev --critical-action block --high-action warn --medium-action allow
+
+```bash
+defenseclaw policy create <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--description, -d` | text | — | — | no | Policy description |
+| `--from-preset` | choice (`default`, `strict`, `permissive`) | `Sentinel.UNSET` | — | no | Start from a built-in preset and customize |
+| `--scan-on-install, --no-scan-on-install` | boolean | true | — | no | Scan on install (default: true) |
+| `--allow-list-bypass, --no-allow-list-bypass` | boolean | true | — | no | Allow-listed items skip scan (default: true) |
+| `--critical-action` | choice (`block`, `warn`, `allow`) | — | — | no | Action for CRITICAL findings |
+| `--high-action` | choice (`block`, `warn`, `allow`) | — | — | no | Action for HIGH findings |
+| `--medium-action` | choice (`block`, `warn`, `allow`) | — | — | no | Action for MEDIUM findings |
+| `--low-action` | choice (`block`, `warn`, `allow`) | — | — | no | Action for LOW findings |
+
+### `defenseclaw policy delete`
+
+Delete a custom policy
+
+```bash
+defenseclaw policy delete <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+### `defenseclaw policy edit`
+
+Edit policy sections (guardrail, firewall, scanner, actions)
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `actions` | Edit severity actions for the global policy. |
+| `firewall` | Edit egress firewall rules (domains, ports, blocked destinations). |
+| `guardrail` | Edit guardrail thresholds, patterns, and severity mappings. |
+| `scanner` | Edit per-scanner-type severity overrides. |
+
+#### `defenseclaw policy edit actions`
+
+Edit severity actions for the global policy
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--severity, -s` | choice (`critical`, `high`, `medium`, `low`, `info`) | `Sentinel.UNSET` | — | yes | Severity level to configure |
+| `--runtime` | choice (`disable`, `enable`) | — | — | no |  |
+| `--file` | choice (`quarantine`, `none`) | — | — | no |  |
+| `--install` | choice (`block`, `allow`, `none`) | — | — | no |  |
+| `--policy-name, -p` | text | — | — | no | Policy to edit (default: active policy) |
+
+#### `defenseclaw policy edit firewall`
+
+Edit egress firewall rules (domains, ports, blocked destinations)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--default-action` | choice (`allow`, `deny`) | — | — | no |  |
+| `--add-domain` | text | `Sentinel.UNSET` | — | no | Add an allowed domain |
+| `--remove-domain` | text | `Sentinel.UNSET` | — | no | Remove an allowed domain |
+| `--add-blocked` | text | `Sentinel.UNSET` | — | no | Add a blocked destination (IP/host) |
+| `--remove-blocked` | text | `Sentinel.UNSET` | — | no | Remove a blocked destination |
+| `--add-port` | integer | `Sentinel.UNSET` | — | no | Add an allowed port |
+| `--remove-port` | integer | `Sentinel.UNSET` | — | no | Remove an allowed port |
+| `--policy-name, -p` | text | — | — | no | Policy to edit (default: active policy) |
+
+#### `defenseclaw policy edit guardrail`
+
+Edit guardrail thresholds, patterns, and severity mappings
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--block-threshold` | integer | — | — | no | Minimum severity rank to block (1=LOW .. 4=CRITICAL) |
+| `--alert-threshold` | integer | — | — | no | Minimum severity rank to alert (1=LOW .. 4=CRITICAL) |
+| `--cisco-trust-level` | choice (`full`, `advisory`, `none`) | — | — | no |  |
+| `--add-pattern` | text | `Sentinel.UNSET` | — | no | Add a guardrail pattern (e.g. --add-pattern injection 'new pattern') |
+| `--remove-pattern` | text | `Sentinel.UNSET` | — | no | Remove a guardrail pattern |
+| `--set-severity-mapping` | text | `Sentinel.UNSET` | — | no | Set severity mapping (e.g. --set-severity-mapping injection CRITICAL) |
+| `--policy-name, -p` | text | — | — | no | Policy to edit (default: active policy) |
+
+#### `defenseclaw policy edit scanner`
+
+Edit per-scanner-type severity overrides
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--type` | choice (`skill`, `mcp`, `plugin`) | `Sentinel.UNSET` | — | yes | Scanner type to override |
+| `--severity, -s` | choice (`critical`, `high`, `medium`, `low`, `info`) | `Sentinel.UNSET` | — | yes | Severity level to configure |
+| `--runtime` | choice (`disable`, `enable`) | — | — | no |  |
+| `--file` | choice (`quarantine`, `none`) | — | — | no |  |
+| `--install` | choice (`block`, `allow`, `none`) | — | — | no |  |
+| `--remove` | boolean | — | — | no | Remove this override (revert to global) |
+| `--policy-name, -p` | text | — | — | no | Policy to edit (default: active policy) |
+
+### `defenseclaw policy list`
+
+List all available policies (built-in and custom)
+
+### `defenseclaw policy show`
+
+Show details of a policy
+
+```bash
+defenseclaw policy show <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+### `defenseclaw policy test`
+
+Run OPA Rego unit tests
+
+Run OPA Rego unit tests.
+
+    Requires 'opa' binary on PATH. Install: https://www.openpolicyagent.org/docs/latest/#running-opa
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--rego-dir` | text | — | — | no | Path to rego directory (default: bundled policies/rego) |
+| `-v, --verbose` | boolean | — | — | no | Verbose test output |
+
+### `defenseclaw policy validate`
+
+Validate OPA Rego modules and data.json schema
+
+Validate OPA Rego modules and data.json schema.
+
+    Checks:
+
+      1. data.json is valid JSON with required top-level keys
+
+      2. All severity levels in actions and scanner_overrides have valid fields
+
+      3. Rego modules compile without errors (requires 'opa' binary or Go daemon)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--rego-dir` | text | — | — | no | Path to rego directory (default: bundled policies/rego) |
+
+<!-- END AUTOGEN:cli_py:policy -->
+
+## Usage
+
+### Inspect and activate policies
+
+```bash
+defenseclaw policy list
+defenseclaw policy show default
+defenseclaw policy activate default
+```
+
+The Python CLI manages YAML policy profiles. OPA reload is a gateway operation:
+
+```bash
+defenseclaw-gateway policy reload
+```
+
+### Validate and test Rego
+
+```bash
+defenseclaw policy validate --rego-dir policies/rego
+defenseclaw policy test --rego-dir policies/rego --verbose
+```
+
+Use these checks before activating policy changes.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_policy.py -->

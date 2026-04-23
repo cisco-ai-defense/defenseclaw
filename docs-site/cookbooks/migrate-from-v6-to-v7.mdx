@@ -1,0 +1,123 @@
+---
+title: "Migrate v6 to v7"
+description: "What changed, what breaks, and the migration steps to move from DefenseClaw 0.6.x to 0.7.x."
+order: 9
+---
+
+## Overview
+
+This page is a source-backed upgrade checklist for older installations moving onto the current docs-site layout. The codebase does not expose a standalone `defenseclaw migrate from-v6` command; versioned migrations run through `defenseclaw upgrade`, and the explicit one-shot setup migrator currently exposed by Python is `defenseclaw setup migrate-llm`.
+
+## Summary of breaking changes
+
+| Area | v6 | v7 |
+|------|----|----|
+| Audit schema | Flat JSONL | SQLite-backed, typed events |
+| Policy layout | Rego + YAML rules in one tree | Split into `rego/`, `guardrail/<profile>/`, `data.json` |
+| CLI exit codes | Ad-hoc | Stable vocabulary (see [Exit codes](/docs-site/reference/exit-codes)) |
+| Plugin headers | `X-DefClaw-*` | `x-dc-*` (lowercase, short) |
+| OTel span names | `defenseclaw.<stage>` | `guardrail.<stage>`, `scanner.scan`, etc. |
+| Config file | `defenseclaw.yaml` at repo root | `~/.defenseclaw/config.yaml` |
+| TUI | External script | `defenseclaw tui` built-in |
+
+See [Breaking changes](/docs-site/migration/breaking-changes) for the full list.
+
+## Migration steps
+
+### Step 1: Read the CHANGELOG
+
+Every breaking change has a CHANGELOG entry with a migration note. Read through the v6.x → v7.0 section before starting.
+
+### Step 2: Back up
+
+````bash
+cp -r ~/.defenseclaw ~/.defenseclaw.v6-backup
+````
+
+Always safe. Rollback is `mv ~/.defenseclaw.v6-backup ~/.defenseclaw` if needed.
+
+### Step 3: Run the supported upgrade path
+
+````bash
+defenseclaw upgrade --yes
+````
+
+The upgrade command checks the installed version, downloads the selected release when needed, stops the gateway, installs the Python and Go artifacts, runs version-specific migrations from `cli/defenseclaw/migrations.py`, and restarts the gateway unless you opt out.
+
+### Step 4: Update the OpenClaw plugin
+
+The plugin package version for v7 is `1.0.0` (first stable). Upgrade:
+
+````bash
+cd extensions/defenseclaw
+npm install @cisco-ai-defense/defenseclaw@^1.0
+````
+
+Or, if you installed the plugin via `defenseclaw setup guardrail`, re-run setup so the current bundled plugin path is installed:
+
+````bash
+defenseclaw setup guardrail --non-interactive
+````
+
+### Step 5: Rebuild dashboards that query OTel directly
+
+If you have Grafana/Honeycomb/Datadog dashboards querying span names directly, the names changed. See [Telemetry contract](/docs-site/developer/telemetry-contract) for the v7 names.
+
+A sed-style rename of the main span names:
+
+````text
+defenseclaw.request    → gateway.request
+defenseclaw.guardrail  → guardrail.<stage>  (see list)
+defenseclaw.scanner    → scanner.scan
+defenseclaw.admission  → admission.decide
+defenseclaw.sandbox    → sandbox.invocation
+defenseclaw.sink       → sink.emit
+````
+
+### Step 6: Retest in observe before action
+
+Even if your v6 guardrail was in `action` mode, we recommend dropping to `observe` for 24 hours after the upgrade to catch any behavior differences caused by the new pipeline:
+
+````bash
+defenseclaw setup guardrail --mode observe
+# wait 24h
+defenseclaw-gateway audit export --limit 1000 --output /tmp/defenseclaw-audit-sample.jsonl
+defenseclaw setup guardrail --mode action
+````
+
+### Step 7: Decommission the v6 backup
+
+Once 7 days have passed with no issues:
+
+````bash
+rm -rf ~/.defenseclaw.v6-backup
+````
+
+## Rollback
+
+If v7 misbehaves and you need to roll back:
+
+````bash
+defenseclaw-gateway stop
+mv ~/.defenseclaw ~/.defenseclaw.v7-bad
+mv ~/.defenseclaw.v6-backup ~/.defenseclaw
+# reinstall the v6 binaries from your release archive
+````
+
+The v6 and v7 binaries never coexist — you must install one or the other.
+
+## Things that silently changed (check these)
+
+- **Verdict cache TTL default** moved from 60s to 300s. Adjust if you depended on quick invalidation.
+- **Sandbox fallback on macOS** now emits `sandbox.degraded` events where v6 emitted nothing. Expect a one-time noise spike on macOS hosts.
+- **Webhook retries** default to 3 (was 5). Configure if you care.
+
+## Related
+
+- [Breaking changes](/docs-site/migration/breaking-changes)
+- [From docs/*.md](/docs-site/migration/from-old-docs)
+- [Upgrade CLI](/docs-site/cli/commands/upgrade)
+
+---
+
+<!-- generated-from: cli/defenseclaw/migrations.py, internal/policy/fallback.go, policies/rego/data.json -->

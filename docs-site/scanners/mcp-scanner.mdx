@@ -1,0 +1,83 @@
+---
+title: "MCP scanner"
+description: "Scanning Model Context Protocol servers for manifest integrity, tool signatures, credential leaks, and behavior drift."
+order: 3
+---
+
+## Overview
+
+The MCP scanner targets Model Context Protocol (MCP) servers — the external tool providers that modern agents plug in. Because MCP servers expose tools the agent can invoke (file read, shell, web fetch), a compromised or misconfigured MCP server is a direct path to data exfiltration. The scanner inspects MCP configs at install-time and rescans on drift.
+
+Runs via the `mcpscanner` Python SDK. Requires Python **3.11+**.
+
+## What it scans
+
+- MCP server config (`~/.openclaw/mcp.json` or per-server TOML).
+- Exposed tool definitions (name, schema, endpoint).
+- Declared network permissions.
+- Signed manifests when the server ships one.
+
+## Analyzers
+
+| Analyzer | Purpose |
+|----------|---------|
+| `manifest_validation` | Schema-check the MCP manifest; reject malformed configs |
+| `tool_signature` | Diff exposed tools against a known-good signature catalog |
+| `credential_scan` | Flag hardcoded credentials in server configs |
+| `network_allowlist` | Verify egress targets are within the firewall allow-list |
+| `behavior_drift` | Compare current tool graph against the last-approved version |
+
+## Configuration
+
+```yaml
+scanners:
+  mcp:
+    enabled: true
+    mode: local
+    profile: balanced
+    analyzers:
+      manifest_validation: true
+      tool_signature: true
+      credential_scan: true
+      network_allowlist: true
+      behavior_drift: true
+    tool_graph_depth: 3    # how far to traverse tool->tool refs
+```
+
+## Tool graph
+
+MCP scanner builds a graph of `(tool, next_tool, trust_boundary)` edges. Tools that can invoke other tools across a trust boundary are flagged for review. `tool_graph_depth` bounds traversal; 3 is a good default that catches most indirect exfil paths without blowing up on large MCP installations.
+
+## CLI
+
+```bash
+defenseclaw mcp scan
+defenseclaw mcp scan slack-mcp
+defenseclaw mcp scan --all --json
+defenseclaw mcp list --json
+```
+
+See [mcp CLI](/docs-site/cli/commands/mcp).
+
+## Behavior drift
+
+When an MCP server is first approved, its tool catalog is snapshotted to `~/.defenseclaw/mcp/snapshots/<server>.json`. On each subsequent scan, the scanner diffs the live catalog against the snapshot. Differences are reported as `tool:added`, `tool:removed`, `tool:modified` findings — useful for catching supply-chain compromises that silently add new tools to an already-trusted server.
+
+Operators can mark a server as allowed with:
+
+```bash
+defenseclaw mcp allow slack-mcp --reason "reviewed baseline"
+```
+
+This records an allow action for enforcement. The current Python CLI does not expose an `approve` subcommand.
+
+## Related
+
+- [Skill scanner](/docs-site/scanners/skill-scanner)
+- [Admission policy](/docs-site/policy/scanner-policies)
+- [Watcher](/docs-site/watcher/index)
+- [mcp CLI](/docs-site/cli/commands/mcp)
+
+---
+
+<!-- generated-from: internal/scanner/mcp.go, cli/defenseclaw/commands/cmd_mcp.py -->

@@ -1,0 +1,130 @@
+---
+title: "Automation"
+description: "Scripting patterns, CI gates, and exit-code contracts for driving DefenseClaw from pipelines."
+order: 4
+---
+
+## Overview
+
+Both DefenseClaw CLIs can be scripted, but flags are command-specific. Use the generated command pages as the contract: if a page does not list `--json`, `--yes`, or another automation flag, do not assume it exists. The safest automation pattern is to validate local config with `defenseclaw`, operate the sidecar with `defenseclaw-gateway`, and save machine-readable outputs as build artifacts.
+
+<Callout type="tip" title="Prefer explicit files">
+  Write JSON and JSONL outputs to named files before parsing them. That leaves evidence for incident review and makes retry behavior easier to debug.
+</Callout>
+
+## CI preflight
+
+Run this before starting a build to fail fast on missing prerequisites:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p defenseclaw-artifacts
+defenseclaw version --json > version.json
+defenseclaw keys check
+defenseclaw config validate --quiet
+defenseclaw doctor --json-output > doctor.json
+```
+
+| Exit | Cause |
+|------|-------|
+| `0` | All preconditions satisfied |
+| non-zero | The failing command prints the failing subsystem or validation error |
+
+## Machine-output commands
+
+| Need | Command | Output shape |
+|------|---------|--------------|
+| Version and drift report | `defenseclaw version --json` | Single JSON object |
+| Doctor report | `defenseclaw doctor --json-output` | Single JSON object |
+| Config snapshot | `defenseclaw config show --format json` | Single JSON object with secrets masked |
+| Required credential check | `defenseclaw keys check` | Text summary, non-zero if required keys are missing |
+| Skills inventory | `defenseclaw skill list --json` | JSON list |
+| MCP inventory | `defenseclaw mcp list --json` | JSON list |
+| Plugin inventory | `defenseclaw plugin list --json` | JSON list |
+| CodeGuard source scan | `defenseclaw-gateway scan code <path> --json` | Single JSON scan result |
+| Audit export | `defenseclaw-gateway audit export --output <file>` | JSONL |
+
+<Callout type="warning" title="Batch scans are not always one JSON array">
+  `defenseclaw skill scan --all --json` and `defenseclaw mcp scan --all --json` can print one scan-result object per target. For CI parsing, prefer single-target scans or the list commands above unless your parser handles multiple JSON documents.
+</Callout>
+
+## Gate a build on scanner verdicts
+
+```bash
+defenseclaw-gateway scan code ./src --json > scan.json
+high_findings=$(jq '[.findings[] | select((.severity | ascii_upcase)=="HIGH" or (.severity | ascii_upcase)=="CRITICAL")] | length' scan.json)
+if [[ "$high_findings" -gt 0 ]]; then
+  jq -r '.findings[] | "\(.severity) \(.rule_id) \(.location):\(.line_number)"' scan.json
+  exit 1
+fi
+```
+
+## Gate admission on inventories
+
+```bash
+defenseclaw skill list --json > skills.json
+defenseclaw mcp list --json > mcps.json
+
+jq -e '[.[] | select(.verdict=="block" or .status=="blocked")] | length == 0' skills.json
+jq -e '[.[] | select(.verdict=="block" or .status=="blocked")] | length == 0' mcps.json
+```
+
+Use this as a fast gate after scans have populated the audit store. It checks the local inventory view rather than pretending that all scanner outputs share one array schema.
+
+## Run scans in a scheduled job
+
+```bash
+# /etc/cron.d/defenseclaw-periodic-scan
+0 */6 * * *  svc-defenseclaw  /usr/local/bin/defenseclaw skill scan --all --json \
+             | /usr/local/bin/curl -H "Authorization: Bearer $HEC" --data-binary @- \
+                 https://hec.corp.example.com:8088/services/collector/event
+```
+
+In practice you'd attach a Splunk HEC sink via `defenseclaw setup observability` instead; this is the escape hatch when you need a custom relay.
+
+## Block on sidecar health in scripts
+
+```bash
+for i in $(seq 1 30); do
+  if defenseclaw-gateway status >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+```
+
+Follow the loop with `defenseclaw doctor --json-output` when `status` does not come up. `status` tells you whether the sidecar answers; `doctor` tells you which prerequisite is failing.
+
+## Export audit evidence
+
+```bash
+defenseclaw-gateway audit export \
+  --include-activity \
+  --limit 500 \
+  --output defenseclaw-audit.jsonl
+```
+
+`--include-activity` appends operator mutation records from `activity_events` after the main audit-event stream. Use it for change windows and incident review; omit it when the receiving system only expects `audit-event.json`.
+
+## Idempotent config checks
+
+```bash
+defenseclaw config validate --quiet
+defenseclaw config show --format json > resolved-config.json
+defenseclaw config path
+```
+
+The current CLI validates and prints config; it does not expose a generic `config apply` command. Use the setup commands and policy edit commands for supported mutations.
+
+## Related
+
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Schemas](/docs-site/api/schemas)
+- [Environment variables](/docs-site/reference/env-vars)
+- [CLI parity](/docs-site/tui/cli-parity)
+
+---
+
+<!-- generated-from: cli/defenseclaw/main.py, cli/defenseclaw/commands/cmd_config.py, cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_keys.py, cli/defenseclaw/commands/cmd_mcp.py, cli/defenseclaw/commands/cmd_skill.py, internal/cli/root.go, internal/cli/scan.go, internal/cli/audit_export.go, internal/cli/sidecar.go -->

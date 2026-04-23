@@ -66,6 +66,13 @@ type metricsSet struct {
 	inspectEvaluations metric.Int64Counter
 	inspectLatency     metric.Float64Histogram
 
+	// Codex hook metrics
+	codexHookInvocations metric.Int64Counter
+	codexHookLatency     metric.Float64Histogram
+	codexBlocks          metric.Int64Counter
+	codexWouldBlocks     metric.Int64Counter
+	codexComponentScans  metric.Int64Counter
+
 	// Audit store metrics
 	auditDBErrors metric.Int64Counter
 	auditEvents   metric.Int64Counter
@@ -339,6 +346,37 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.inspectLatency, err = m.Float64Histogram("defenseclaw.inspect.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("Tool/message inspect latency distribution"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.codexHookInvocations, err = m.Int64Counter("defenseclaw.codex.hook.invocations",
+		metric.WithUnit("{hook}"),
+		metric.WithDescription("Codex hook invocations by event/action/mode"))
+	if err != nil {
+		return nil, err
+	}
+	ms.codexHookLatency, err = m.Float64Histogram("defenseclaw.codex.hook.latency",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Codex hook evaluation latency"))
+	if err != nil {
+		return nil, err
+	}
+	ms.codexBlocks, err = m.Int64Counter("defenseclaw.codex.blocks",
+		metric.WithUnit("{block}"),
+		metric.WithDescription("Codex hook enforcement blocks by event/severity/profile"))
+	if err != nil {
+		return nil, err
+	}
+	ms.codexWouldBlocks, err = m.Int64Counter("defenseclaw.codex.would_blocks",
+		metric.WithUnit("{would_block}"),
+		metric.WithDescription("Codex observe-mode findings that would block in action mode"))
+	if err != nil {
+		return nil, err
+	}
+	ms.codexComponentScans, err = m.Int64Counter("defenseclaw.codex.component_scans",
+		metric.WithUnit("{scan}"),
+		metric.WithDescription("Codex component scan attempts by component/result"))
 	if err != nil {
 		return nil, err
 	}
@@ -1021,6 +1059,40 @@ func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durati
 	}
 	p.metrics.inspectLatency.Record(ctx, durationMs, metric.WithAttributes(
 		attribute.String("tool", tool),
+	))
+}
+
+// RecordCodexHook records one Codex hook evaluation and its latency.
+func (p *Provider) RecordCodexHook(ctx context.Context, event, action, severity, mode string, wouldBlock bool, durationMs float64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("hook_event", event),
+		attribute.String("action", action),
+		attribute.String("severity", severity),
+		attribute.String("mode", mode),
+	)
+	p.metrics.codexHookInvocations.Add(ctx, 1, attrs)
+	p.metrics.codexHookLatency.Record(ctx, durationMs, metric.WithAttributes(
+		attribute.String("hook_event", event),
+	))
+	if action == "block" {
+		p.metrics.codexBlocks.Add(ctx, 1, attrs)
+	}
+	if wouldBlock {
+		p.metrics.codexWouldBlocks.Add(ctx, 1, attrs)
+	}
+}
+
+// RecordCodexComponentScan records a Codex component inventory scan attempt.
+func (p *Provider) RecordCodexComponentScan(ctx context.Context, component, result string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.codexComponentScans.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("component", component),
+		attribute.String("result", result),
 	))
 }
 

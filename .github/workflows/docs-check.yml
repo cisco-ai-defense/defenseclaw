@@ -1,0 +1,68 @@
+name: docs-check
+
+on:
+  pull_request:
+    paths:
+      - "cli/**"
+      - "internal/**"
+      - "cmd/**"
+      - "extensions/**"
+      - "policies/**"
+      - "schemas/**"
+      - "docs-site/**"
+      - "scripts/docgen/**"
+      - "scripts/docs_deadlinks.py"
+      - "scripts/docs_verify.py"
+      - "Makefile"
+      - ".github/workflows/docs-check.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python package (editable) + deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -U pip wheel
+          .venv/bin/pip install -e "cli[test]"
+          .venv/bin/pip install pyyaml
+
+      - name: Build Go docgen helper
+        run: |
+          mkdir -p bin
+          go build -o bin/docgen-go ./cmd/docgen-go
+
+      - name: Regenerate docs-site/
+        run: make docs-gen
+
+      - name: Verify docs-site accuracy
+        run: make docs-verify
+
+      - name: Dead-link check
+        run: make docs-deadlinks
+
+      - name: Fail on drift
+        run: |
+          if ! git diff --quiet -- docs-site/; then
+            echo "::error::docs-site/ is out of sync with sources."
+            echo "Run 'make docs-gen' locally and commit the result."
+            git --no-pager diff -- docs-site/
+            exit 1
+          fi

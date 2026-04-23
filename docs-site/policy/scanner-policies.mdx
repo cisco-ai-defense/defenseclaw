@@ -1,0 +1,119 @@
+---
+title: "Scanner policies"
+description: "Rego admission policies that gate skill, MCP, plugin, and tool installs based on scanner verdicts."
+order: 6
+---
+
+## Overview
+
+Every install of a skill, MCP server, plugin, or extension tool goes through `admission.rego`. The module evaluates the scanner verdict for the artifact and decides `allow`, `warn`, or `block`. This is the single choke-point that keeps unsafe extensions from entering an agent's runtime.
+
+## Input shape
+
+```json
+{
+  "kind": "skill",                 // skill | mcp | plugin | tool
+  "name": "excel_integration",
+  "version": "1.4.2",
+  "scanner_verdict": {
+    "severity": "HIGH",
+    "findings": ["injection:shell", "secret:aws-key"],
+    "confidence": 0.92
+  },
+  "trust": {
+    "signed_by": "org:engineering",
+    "origin": "internal-registry"
+  }
+}
+```
+
+## Default admission
+
+`admission.rego` (simplified):
+
+```rego
+package admission
+
+default decision = {"action": "block", "reason": "no match"}
+
+decision = {"action": "allow"} {
+  input.scanner_verdict.severity == "NONE"
+}
+
+decision = {"action": "warn", "reason": sprintf("medium finding: %v", [input.scanner_verdict.findings])} {
+  input.scanner_verdict.severity == "MEDIUM"
+}
+
+decision = {"action": "block", "reason": sprintf("%v: %v", [input.scanner_verdict.severity, input.scanner_verdict.findings])} {
+  input.scanner_verdict.severity == "HIGH"
+}
+
+decision = {"action": "block", "reason": "critical finding"} {
+  input.scanner_verdict.severity == "CRITICAL"
+}
+```
+
+## Trust overrides
+
+Organizations typically want to allow signed, internally-audited artifacts to ship even with medium findings. The trust table in `data.json`:
+
+```json
+{
+  "trust": {
+    "signers": {
+      "org:engineering": { "auto_allow_up_to": "MEDIUM" },
+      "org:security":    { "auto_allow_up_to": "HIGH"   }
+    },
+    "origins": {
+      "internal-registry": { "auto_allow_up_to": "LOW" }
+    }
+  }
+}
+```
+
+`admission.rego` consults the trust table:
+
+```rego
+decision = {"action": "allow"} {
+  sev := input.scanner_verdict.severity
+  trust_limit := data.trust.signers[input.trust.signed_by].auto_allow_up_to
+  severity_leq(sev, trust_limit)
+}
+```
+
+## Testing admission rules
+
+Every scenario has a fixture in `admission_test.rego`:
+
+```rego
+test_allow_when_no_findings {
+  admission.decision == {"action": "allow"}
+  with input as {
+    "kind": "skill", "name": "x",
+    "scanner_verdict": {"severity": "NONE", "findings": []}
+  }
+}
+```
+
+The Rego test suite runs through `make rego-test` and `defenseclaw policy test`. Adding a new admission branch should include a matching `_test.rego` scenario.
+
+## Per-scanner custom logic
+
+For advanced deployments you can add scanner-specific modules:
+
+- `admission_skill.rego` — skills-only
+- `admission_mcp.rego` — MCP-only
+- `admission_plugin.rego` — plugins-only
+- `admission_tool.rego` — tools-only
+
+The top-level `admission.rego` dispatches on `input.kind`.
+
+## Related
+
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [data.json](/docs-site/policy/data-json)
+- [Scanners overview](/docs-site/scanners/index)
+
+---
+
+<!-- generated-from: policies/rego/admission.rego, policies/rego/data.json -->

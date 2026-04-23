@@ -22,7 +22,7 @@ datasources:
     jsonData:
       derivedFields:
         - datasourceUid: defenseclaw-tempo
-          matcherRegex: "trace_id=([a-f0-9]+)"
+          matcherRegex: 'trace_id[":=]+([a-f0-9]{32})'
           name: trace_id
           url: "$${__value.raw}"
 

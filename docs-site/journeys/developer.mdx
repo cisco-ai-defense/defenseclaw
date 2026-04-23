@@ -1,0 +1,166 @@
+---
+title: "Developer journey"
+description: "A source-backed path for developers integrating, scanning, and extending DefenseClaw."
+order: 4
+---
+
+## Overview
+
+This journey is for developers who are wiring DefenseClaw into an OpenClaw workspace, validating skills/MCP servers/plugins before they ship, or extending the scanner and plugin surfaces. It is a guided path through the reference docs; use the linked pages when you need every flag, schema field, or internal package detail.
+
+<Callout type="info" title="Use the right binary">
+  `defenseclaw` owns Python Click workflows such as skill, MCP, plugin, setup, and scanner setup commands. `defenseclaw-gateway` owns the Go sidecar, CodeGuard code scans, policy reload/evaluation, audit export, and the Go TUI.
+</Callout>
+
+## Goal
+
+By the end of this path, you should be able to:
+
+| Task | Primary surface | Reference |
+|------|-----------------|-----------|
+| Inspect the local install and launch the operator console | `defenseclaw status`, `defenseclaw tui` | [CLI overview](/docs-site/cli/index), [TUI overview](/docs-site/tui/index) |
+| Scan OpenClaw skills before install or release | `defenseclaw skill scan` | [Skill CLI](/docs-site/cli/commands/skill), [Skill scanner](/docs-site/scanners/skill-scanner) |
+| Register and scan MCP servers safely | `defenseclaw mcp set`, `defenseclaw mcp scan` | [MCP CLI](/docs-site/cli/commands/mcp), [MCP scanner](/docs-site/scanners/mcp-scanner) |
+| Scan OpenClaw plugin directories | `defenseclaw plugin scan` | [Plugin CLI](/docs-site/cli/commands/plugin), [Plugin scanner](/docs-site/scanners/plugin-scanner) |
+| Scan source code with CodeGuard | `defenseclaw-gateway scan code` | [Gateway scan CLI](/docs-site/cli/commands-gateway/scan), [CodeGuard](/docs-site/scanners/codeguard) |
+| Build against stable event and scan shapes | JSON Schemas under `schemas/` | [Schemas](/docs-site/api/schemas), [Telemetry contract](/docs-site/developer/telemetry-contract) |
+
+## Before you start
+
+Start from a verified local install and source checkout. You need Python 3.10 - 3.13, Go 1.26.2, Node.js 18+ for the OpenClaw plugin, and the repo dependencies installed.
+
+```bash
+make dev-install
+make build
+defenseclaw status
+defenseclaw-gateway status
+```
+
+If you are adding scanner behavior, read the [package tour](/docs-site/developer/packages) first. The Go scanner contract lives in `internal/scanner`, Python command surfaces live under `cli/defenseclaw/commands`, and the OpenClaw plugin lives under `extensions/defenseclaw/src`.
+
+<Callout type="warning" title="Do not shell out to stale docs">
+  Treat generated command pages as the CLI contract. If an example is not accepted by `defenseclaw --help`, `defenseclaw-gateway --help`, or the linked generated command page, do not use it in tests, scripts, or README snippets.
+</Callout>
+
+## First 30 minutes
+
+1. Orient yourself with the CLIs and TUI.
+
+```bash
+defenseclaw status
+defenseclaw tui
+defenseclaw-gateway status
+```
+
+Use the TUI when you want a quick view of alerts, inventory, audit activity, and scanner state. Use the CLI when you need reproducible commands for CI, fixtures, or bug reports.
+
+2. Scan the OpenClaw artifacts you are editing.
+
+```bash
+defenseclaw skill list --json
+defenseclaw skill scan --all --json
+defenseclaw mcp list --json
+defenseclaw mcp scan --all --json
+defenseclaw plugin scan ./extensions/defenseclaw --json --profile strict
+```
+
+The skill and MCP commands are best for workspace assets. The plugin command is best for an OpenClaw plugin directory or named installed plugin.
+
+3. Scan source code with the Go gateway scanner.
+
+```bash
+defenseclaw-gateway scan code ./src --json
+defenseclaw-gateway scan code ./src --schema
+```
+
+`--json` returns the v7 scan-result shape; `--schema` prints the embedded schema used by downstream validators.
+
+4. Check the contracts you will emit or consume.
+
+| Contract | Source-backed doc | When to read it |
+|----------|-------------------|-----------------|
+| Scan result JSON | [Schemas](/docs-site/api/schemas) | You parse scanner output or store scan evidence. |
+| Gateway event envelope | [Gateway log JSONL](/docs-site/observability/gatewaylog-jsonl) | You consume `gateway.jsonl` or sink events. |
+| Plugin headers and fetch rewrite | [Plugin protocol](/docs-site/developer/plugin-protocol) | You modify the OpenClaw TypeScript extension. |
+| Sidecar REST routes | [API endpoints](/docs-site/api/endpoints) | You call the local sidecar or guardrail proxy directly. |
+
+5. Run the narrow test target for the surface you touched.
+
+```bash
+make cli-test
+make gateway-test
+make tui-test
+make ts-test
+make rego-test
+make docs-check
+```
+
+For end-to-end CLI smoke coverage without the sidecar/API portion, use:
+
+```bash
+python scripts/test-e2e-cli.py --skip-api
+```
+
+## Production hardening
+
+Treat every extension point as a contract with a verifier behind it:
+
+| Surface | Hardening move | Verification |
+|---------|----------------|--------------|
+| Skill or MCP workflow | Prefer `list --json` and `scan --json` in automation. | Compare output to the linked scanner docs and audit events. |
+| Plugin code | Keep provider routing headers additive and backward-compatible. | Run `make ts-test` and review [plugin protocol](/docs-site/developer/plugin-protocol). |
+| Code scanner changes | Preserve `scan-result.json` fields and stable rule IDs. | Run `make gateway-test` and `defenseclaw-gateway scan code ./src --json`. |
+| Custom scanner | Implement the scanner interface and return structured findings. | Run `go test ./plugins/...` and read [custom scanners](/docs-site/scanners/custom-scanners). |
+| Rego policy changes | Test policy decisions outside the runtime first. | Run `make rego-test` and `defenseclaw-gateway policy validate`. |
+| Docs and examples | Regenerate and verify before publishing. | Run `make docs-check`. |
+
+<Callout type="tip" title="Keep JSON stable">
+  Consumers should key off stable fields such as `scanner`, `target`, `findings`, `rule_id`, `severity`, `schema_version`, and correlation IDs. Display strings like titles and remediation are useful for humans but weaker join keys.
+</Callout>
+
+## Verify it worked
+
+Use this quick pass before opening a PR or handing a build to another team:
+
+```bash
+make test
+make ts-test
+make rego-test
+make docs-check
+defenseclaw-gateway scan code ./src --json
+```
+
+Then review the generated evidence:
+
+| Evidence | Command or file | Expected signal |
+|----------|-----------------|-----------------|
+| Python CLI behavior | `make cli-test` | Click command coverage passes. |
+| Go sidecar and scanner behavior | `make gateway-test` | Gateway, scanner, audit, and TUI package tests pass. |
+| TypeScript plugin behavior | `make ts-test` | Fetch interceptor, sidecar client, provider coverage, and scanner tests pass. |
+| Policy behavior | `make rego-test` | Rego modules compile and policy tests pass. |
+| Docs accuracy | `make docs-check` | Generated references, verifier, and dead links are clean. |
+
+## Where to go next
+
+Choose the next page by what you are building:
+
+| If you are building... | Go next |
+|------------------------|---------|
+| A workspace setup path for developers | [First setup](/docs-site/first-setup/index) |
+| A scanner-backed integration | [Scanner catalog](/docs-site/scanners/index) |
+| A custom scanner | [Custom scanners](/docs-site/scanners/custom-scanners) |
+| A TypeScript OpenClaw plugin change | [Plugin protocol](/docs-site/developer/plugin-protocol) |
+| A sidecar API client | [API overview](/docs-site/api/index) |
+| A SIEM or data pipeline consumer | [Observability overview](/docs-site/observability/index) |
+| A policy rule change | [Policy lifecycle](/docs-site/policy/lifecycle) |
+
+## Related
+
+- [Developer architecture](/docs-site/developer/architecture)
+- [Building](/docs-site/developer/building)
+- [Testing](/docs-site/developer/testing)
+- [Contributing](/docs-site/developer/contributing)
+
+---
+
+<!-- generated-from: cli/defenseclaw/main.py, cli/defenseclaw/commands/cmd_skill.py, cli/defenseclaw/commands/cmd_mcp.py, cli/defenseclaw/commands/cmd_plugin.py, cli/defenseclaw/commands/cmd_tui.py, internal/cli/root.go, internal/cli/scan.go, internal/cli/sidecar.go, internal/cli/tui_cmd.go, internal/cli/policy.go, internal/scanner/scanner.go, internal/scanner/result.go, internal/scanner/plugin.go, extensions/defenseclaw/src/index.ts, extensions/defenseclaw/src/types.ts, extensions/defenseclaw/src/client.ts, schemas/scan-result.json, schemas/gateway-event-envelope.json, scripts/test-e2e-cli.py, Makefile, go.mod, pyproject.toml -->

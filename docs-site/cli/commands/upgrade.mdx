@@ -1,0 +1,72 @@
+---
+title: "defenseclaw upgrade"
+description: "Upgrade DefenseClaw to the latest version."
+order: 10
+---
+
+## Overview
+
+`defenseclaw upgrade` — Upgrade DefenseClaw to the latest version.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:upgrade -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw upgrade [OPTIONS]
+```
+
+### Description
+
+Upgrade DefenseClaw to the latest version
+
+Upgrade DefenseClaw to the latest version.
+
+    Downloads pre-built release artifacts (gateway binary, Python CLI wheel)
+    from GitHub Releases, runs version-specific migrations, and restarts
+    services. Your existing configuration is preserved.
+
+    The upgrade is non-destructive: artifacts are downloaded and verified
+    before the gateway is stopped, so a failed download never disrupts a
+    running gateway.
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--yes, -y` | boolean | — | — | no | Skip confirmation prompts |
+| `--version` | text | — | — | no | Upgrade to a specific release version (e.g. 0.3.1) |
+| `--health-timeout` | integer | `60` | — | no | Seconds to wait for gateway health after restart |
+
+<!-- END AUTOGEN:cli_py:upgrade -->
+
+## Usage
+
+### Upgrade to a specific version
+
+```bash
+defenseclaw upgrade --version 1.2.3 --yes
+```
+
+The version flag pins the requested DefenseClaw release.
+
+### Tune health wait time
+
+```bash
+defenseclaw upgrade --health-timeout 60
+```
+
+Use a longer timeout on slower hosts where the sidecar needs more startup time after upgrade.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_upgrade.py -->

@@ -1,0 +1,820 @@
+---
+title: "defenseclaw setup"
+description: "Configure DefenseClaw components."
+order: 10
+---
+
+## Overview
+
+`defenseclaw setup` — Configure DefenseClaw components.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:setup -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw setup [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `codex` | Configure DefenseClaw hooks for Codex. |
+| `gateway` | Configure gateway connection for the DefenseClaw sidecar. |
+| `guardrail` | Configure the LLM guardrail (routes LLM traffic through the Go proxy for inspection). |
+| `llm` | Configure the unified top-level ``llm:`` block. |
+| `local-observability` | Run the bundled Prom/Loki/Tempo/Grafana stack on loopback. |
+| `mcp-scanner` | Configure mcp-scanner analyzers and scan options. |
+| `migrate-llm` | Rewrite config.yaml to the unified v5 LLM shape. |
+| `observability` | Configure OpenTelemetry + audit log destinations. |
+| `provider` | Manage the custom provider overlay (~/.defenseclaw/custom-providers.json). |
+| `skill-scanner` | Configure skill-scanner analyzers, API keys, and policy. |
+| `splunk` | Configure Splunk integration for DefenseClaw. |
+| `webhook` | Configure Slack/PagerDuty/Webex/generic chat + incident webhooks. |
+
+### Description
+
+Configure DefenseClaw components
+
+### `defenseclaw setup codex`
+
+Configure DefenseClaw hooks for Codex
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--non-interactive` | boolean | — | — | no | Use defaults instead of prompts. |
+| `--enable-feature` | boolean | — | — | no | Enable [features].codex_hooks in ~/.codex/config.toml. |
+| `--scope` | choice (`user`, `repo`) | — | — | no | Where to install hooks (default from config, then user). |
+| `--scan-on-session-start, --no-scan-on-session-start` | boolean | — | — | no | Enable or disable Codex component scans on SessionStart. |
+| `--scan-on-stop, --no-scan-on-stop` | boolean | — | — | no | Enable or disable CodeGuard scans from the Stop hook. |
+| `--fail-closed, --fail-open` | boolean | — | — | no | Block when the hook bridge cannot reach the sidecar. |
+| `--disable` | boolean | — | — | no | Remove DefenseClaw-owned Codex hooks. |
+| `--status` | boolean | — | — | no | Show Codex integration status. |
+| `--scan-components` | boolean | — | — | no | Ask the sidecar to scan Codex skills/plugins/MCP config now. |
+| `--dry-run` | boolean | — | — | no | Show what would change without writing files. |
+| `--force` | boolean | — | — | no | Replace invalid hooks.json instead of failing. |
+
+### `defenseclaw setup gateway`
+
+Configure gateway connection for the DefenseClaw sidecar
+
+Configure gateway connection for the DefenseClaw sidecar.
+
+    By default configures for a local OpenClaw instance (auth token from
+    ~/.defenseclaw/.env when OpenClaw requires it).
+    Use --remote to configure for a remote gateway that requires an auth token,
+    optionally fetched from AWS SSM Parameter Store.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--remote` | boolean | — | — | no | Configure for a remote OpenClaw gateway (requires auth token) |
+| `--host` | text | — | — | no | Gateway host |
+| `--port` | integer | — | — | no | Gateway WebSocket port |
+| `--api-port` | integer | — | — | no | Sidecar REST API port |
+| `--token` | text | — | — | no | Gateway auth token |
+| `--ssm-param` | text | — | — | no | AWS SSM parameter name for token |
+| `--ssm-region` | text | — | — | no | AWS region for SSM |
+| `--ssm-profile` | text | — | — | no | AWS CLI profile for SSM |
+| `--verify, --no-verify` | boolean | true | — | no | Run connectivity checks after setup (default: on) |
+| `--non-interactive` | boolean | — | — | no | Use flags instead of prompts |
+
+### `defenseclaw setup guardrail`
+
+Configure the LLM guardrail (routes LLM traffic through the Go proxy for inspection)
+
+Configure the LLM guardrail (routes LLM traffic through the Go proxy for inspection).
+
+    Routes all LLM traffic through the built-in Go guardrail proxy.
+    Every prompt and response is inspected for prompt injection, secrets,
+    PII, and data exfiltration patterns.
+
+    Two modes:
+      observe — log findings, never block (default, recommended to start)
+      action  — block prompts/responses that match security policies
+
+    Use --disable to turn off the guardrail and restore direct LLM access.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--disable` | boolean | — | — | no | Disable guardrail and revert OpenClaw config |
+| `--mode` | choice (`observe`, `action`) | — | — | no | Guardrail mode |
+| `--scanner-mode` | choice (`local`, `remote`) | — | — | no | Scanner mode (local patterns or remote Cisco API) |
+| `--cisco-endpoint` | text | — | — | no | Cisco AI Defense API endpoint |
+| `--cisco-api-key-env` | text | — | — | no | Env var name holding Cisco AI Defense API key |
+| `--cisco-timeout-ms` | integer | — | — | no | Cisco AI Defense timeout (ms) |
+| `--port` | integer | — | — | no | Guardrail proxy port |
+| `--block-message` | text | — | — | no | Custom message shown when a request is blocked (empty = default) |
+| `--detection-strategy` | choice (`regex_only`, `regex_judge`, `judge_first`) | — | — | no | Detection strategy (regex_only, regex_judge, judge_first) |
+| `--judge-model` | text | — | — | no | LLM judge model (e.g. anthropic/claude-sonnet-4-20250514) |
+| `--judge-api-base` | text | — | — | no | LLM judge API base URL (e.g. Bifrost URL) |
+| `--judge-api-key-env` | text | — | — | no | Env var name for judge API key |
+| `--restart, --no-restart` | boolean | true | — | no | Restart gateway and openclaw after setup (default: on) |
+| `--verify, --no-verify` | boolean | true | — | no | Run connectivity checks after setup (default: on) |
+| `--non-interactive, --accept-defaults` | boolean | — | — | no | Use flags instead of prompts (alias: --accept-defaults) |
+
+### `defenseclaw setup llm`
+
+Configure the unified top-level ``llm:`` block
+
+Configure the unified top-level ``llm:`` block.
+
+    Prompts for provider, model, API key env var, and base URL, writing
+    the values to ``~/.defenseclaw/config.yaml`` (config) and
+    ``~/.defenseclaw/.env`` (secret, chmod 0600). Every LLM-using
+    component (guardrail judge, MCP scanner, skill scanner, plugin
+    scanner) resolves through this block via ``Config.resolve_llm``, so
+    a single edit reroutes them all.
+
+    Use ``--show`` to inspect the current resolved values without
+    modifying anything. This is the CLI equivalent of
+    ``scripts/setup-llm.sh`` and the LLM section of ``defenseclaw init``.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--show` | boolean | — | — | no | Print the current unified LLM config and exit (no prompts). |
+
+### `defenseclaw setup local-observability`
+
+Run the bundled Prom/Loki/Tempo/Grafana stack on loopback
+
+Drive the bundled local observability stack.
+
+    Provides a one-command path to the same compose stack that
+    historically lived under ``deploy/observability/``. Subcommands:
+
+    
+      up       Start the stack, wait for readiness, wire config.yaml
+      down     Stop containers, keep volumes
+      reset    Stop + wipe all metric / log / trace data volumes
+      status   Show compose ps + per-service readiness probes
+      logs     Tail logs for one or all services
+      url      Print the Grafana / Prometheus / Tempo / Loki URLs
+
+    Bare invocation is an alias for ``up`` so ``defenseclaw setup
+    local-observability`` matches the ergonomics of ``setup splunk
+    --logs``.
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `down` | Stop the stack (volumes preserved). |
+| `logs` | Tail logs from the running stack. |
+| `reset` | Stop the stack and drop all persisted metric / log / trace volumes. |
+| `status` | Show compose ps and per-service readiness probes. |
+| `up` | Start the stack, wait for readiness, and wire the gateway config. |
+| `url` | Print the Grafana / Prometheus / Tempo / Loki URLs. |
+
+#### `defenseclaw setup local-observability down`
+
+Stop the stack (volumes preserved)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--disable-config` | boolean | — | — | no | Also flip otel.enabled=false in config.yaml. |
+
+#### `defenseclaw setup local-observability logs`
+
+Tail logs from the running stack
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--service` | text | — | — | no | Compose service to target (default: all). |
+| `--follow, --no-follow` | boolean | — | — | no | Stream logs until Ctrl+C. |
+
+#### `defenseclaw setup local-observability reset`
+
+Stop the stack and drop all persisted metric / log / trace volumes
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--yes` | boolean | — | — | no | Skip the destructive-action confirmation prompt. |
+
+#### `defenseclaw setup local-observability status`
+
+Show compose ps and per-service readiness probes
+
+#### `defenseclaw setup local-observability up`
+
+Start the stack, wait for readiness, and wire the gateway config
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--timeout` | integer | `180` | — | no | Readiness wait budget (seconds) for the stack's OTLP + Grafana ports. |
+| `--no-wait` | boolean | — | — | no | Skip the readiness wait (container ps only). |
+| `--no-config` | boolean | — | — | no | Do not write config.yaml. Useful for 'just start the containers' flows where a different preset already owns the otel: block. |
+| `--endpoint` | text | — | — | no | Override the OTLP endpoint stamped into config.yaml (default: from bridge). |
+| `--signals` | text | `traces,metrics,logs` | — | no | Comma-separated OTel signals to enable (traces,metrics,logs). |
+| `--service-name` | text | `defenseclaw` | — | no | Value to stamp into otel.resource.attributes.service.name. |
+
+#### `defenseclaw setup local-observability url`
+
+Print the Grafana / Prometheus / Tempo / Loki URLs
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Emit machine-readable JSON. |
+
+### `defenseclaw setup mcp-scanner`
+
+Configure mcp-scanner analyzers and scan options
+
+Configure mcp-scanner analyzers and scan options.
+
+    Interactively configure how mcp-scanner runs. MCP servers are managed
+    via ``defenseclaw mcp set/unset`` rather than directory watching.
+
+    LLM settings land in the unified top-level ``llm:`` block (shared
+    with skill/plugin scanners and guardrail). Cisco AI Defense settings
+    continue to live in ``cisco_ai_defense``.
+
+    Use --non-interactive with flags for CI/scripted configuration.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--analyzers` | text | — | — | no | Comma-separated analyzer list (yara,api,llm,behavioral,readiness) |
+| `--llm-provider` | choice (`anthropic`, `openai`) | — | — | no | LLM provider (anthropic or openai) |
+| `--llm-model` | text | — | — | no | LLM model for semantic analysis |
+| `--scan-prompts` | boolean | — | — | no | Scan MCP prompts |
+| `--scan-resources` | boolean | — | — | no | Scan MCP resources |
+| `--scan-instructions` | boolean | — | — | no | Scan server instructions |
+| `--verify, --no-verify` | boolean | true | — | no | Run connectivity checks after setup (default: on) |
+| `--non-interactive` | boolean | — | — | no | Use flags instead of prompts |
+
+### `defenseclaw setup migrate-llm`
+
+Rewrite config.yaml to the unified v5 LLM shape
+
+Rewrite config.yaml to the unified v5 LLM shape.
+
+    Copies ``inspect_llm``, ``default_llm_*``, and legacy ``guardrail``
+    fields into ``llm:`` (if not already merged), then clears the v4
+    slots so a round-trip through ``config.load()``/``save()`` produces
+    a minimal YAML. Writes a ``config.yaml.bak`` alongside the live
+    file unless ``--no-backup`` is passed.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--dry-run` | boolean | — | — | no | Show what would change without modifying config.yaml. |
+| `--no-backup` | boolean | — | — | no | Skip writing config.yaml.bak (advanced; use only when orchestrated by a VCS). |
+
+### `defenseclaw setup observability`
+
+Configure OpenTelemetry + audit log destinations
+
+Configure OpenTelemetry + audit log destinations.
+
+    Supports Splunk Observability Cloud, Splunk HEC, Datadog, Honeycomb,
+    New Relic, Grafana Cloud, plus generic OTLP and generic HTTP JSONL
+    fallbacks. For chat/incident notifier webhooks (Slack, PagerDuty,
+    Webex, HMAC-signed), see ``defenseclaw setup webhook`` — that's a
+    separate ``webhooks[]`` list and not an audit-sink.
+    Splunk configuration authored with ``defenseclaw setup splunk``
+    remains fully back-compatible (those flags are aliases for
+    ``observability add splunk-o11y`` / ``splunk-hec``).
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `add` | Configure a telemetry destination. |
+| `disable` | Disable a destination. |
+| `enable` | Enable a destination (``name=otel`` targets the gateway exporter). |
+| `list` | List configured observability destinations. |
+| `migrate-splunk` | Migrate the legacy ``splunk:`` block into ``audit_sinks[]``. |
+| `remove` | Delete a destination (``name=otel`` disables but preserves the block). |
+| `test` | Probe a destination for reachability + auth. |
+
+#### `defenseclaw setup observability add`
+
+Configure a telemetry destination
+
+Configure a telemetry destination.
+
+    Examples:
+
+    
+      # Non-interactive (CI / TUI shell-out)
+      defenseclaw setup observability add datadog \
+          --non-interactive --site us5 --token "$DD_API_KEY"
+    
+      # Interactive (default)
+      defenseclaw setup observability add splunk-hec
+
+```bash
+defenseclaw setup observability add <PRESET_ID>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `preset_id` | choice (`splunk-o11y`, `splunk-hec`, `datadog`, `honeycomb`, `newrelic`, `grafana-cloud`, `local-otlp`, `otlp`, `webhook`) | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--name` | text | — | — | no | Destination name (default: derived from preset+inputs) |
+| `--target` | choice (`otel`, `audit_sinks`) | — | — | no | Target for generic OTLP presets (otel exporter vs. otlp_logs sink) |
+| `--signals` | text | — | — | no | Comma-separated OTel signals to enable (traces,metrics,logs) |
+| `--token` | text | — | — | no | Secret value to persist under the preset's token_env in ~/.defenseclaw/.env |
+| `--enabled, --disabled` | boolean | true | — | no | Mark destination enabled (default) or disabled |
+| `--dry-run` | boolean | — | — | no | Preview YAML/dotenv changes without writing |
+| `--non-interactive` | boolean | — | — | no | Skip prompts; use flags only |
+| `--realm` | text | — | — | no |  |
+| `--site` | text | — | — | no |  |
+| `--region` | text | — | — | no |  |
+| `--dataset` | text | — | — | no |  |
+| `--endpoint` | text | — | — | no |  |
+| `--protocol` | choice (`grpc`, `http`) | — | — | no |  |
+| `--host` | text | — | — | no |  |
+| `--port` | text | — | — | no |  |
+| `--index` | text | — | — | no |  |
+| `--source` | text | — | — | no |  |
+| `--sourcetype` | text | — | — | no |  |
+| `--url` | text | — | — | no |  |
+| `--method` | text | — | — | no |  |
+| `--url-path` | text | — | — | no |  |
+| `--verify-tls, --no-verify-tls` | boolean | — | — | no |  |
+
+#### `defenseclaw setup observability disable`
+
+Disable a destination
+
+```bash
+defenseclaw setup observability disable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+#### `defenseclaw setup observability enable`
+
+Enable a destination (``name=otel`` targets the gateway exporter)
+
+```bash
+defenseclaw setup observability enable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+#### `defenseclaw setup observability list`
+
+List configured observability destinations
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Emit machine-readable JSON |
+
+#### `defenseclaw setup observability migrate-splunk`
+
+Migrate the legacy ``splunk:`` block into ``audit_sinks[]``
+
+Migrate the legacy ``splunk:`` block into ``audit_sinks[]``.
+
+    Idempotent: safe to re-run. Always preserves non-Splunk sinks. The
+    Go gateway rejects any top-level ``splunk:`` block on start, so this
+    command exists to help operators upgrade to the v4 schema.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--apply` | boolean | — | — | no | Write the migration (default: preview) |
+
+#### `defenseclaw setup observability remove`
+
+Delete a destination (``name=otel`` disables but preserves the block)
+
+```bash
+defenseclaw setup observability remove <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--yes` | boolean | — | — | no | Skip confirmation prompt |
+
+#### `defenseclaw setup observability test`
+
+Probe a destination for reachability + auth
+
+Probe a destination for reachability + auth.
+
+    Safe to run — we POST a marker event for webhook/HEC sinks and TCP
+    dial OTLP endpoints. Failures are reported with actionable hints.
+
+```bash
+defenseclaw setup observability test <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--timeout` | float | `5.0` | — | no | Per-probe timeout in seconds |
+
+### `defenseclaw setup provider`
+
+Manage the custom provider overlay (~/.defenseclaw/custom-providers.json)
+
+Manage the custom provider overlay (~/.defenseclaw/custom-providers.json).
+
+    The overlay additively extends the domains / env-vars / Ollama
+    ports the guardrail treats as "known LLM endpoints". Use this when
+    you deploy an internal or self-hosted LLM and do not want to wait
+    for its domain to land in a DefenseClaw release.
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `add` | Add a provider entry to the operator overlay. |
+| `list` | Print the overlay contents. Read-only; never touches the |
+| `remove` | Remove an entry from the operator overlay. |
+| `show` | Print the merged registry as reported by the live sidecar |
+
+#### `defenseclaw setup provider add`
+
+Add a provider entry to the operator overlay
+
+Add a provider entry to the operator overlay.
+
+    Additive: if ``NAME`` already exists in the overlay, its Domains
+    and EnvKeys are unioned; duplicates are collapsed so repeated
+    ``add`` calls are idempotent.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--name` | text | `Sentinel.UNSET` | — | yes | Canonical provider name (case-insensitive match against built-ins). |
+| `--domain` | text | `Sentinel.UNSET` | — | yes | Domain to recognise as LLM traffic (repeatable). Accepts full URLs; scheme and path are stripped. |
+| `--env-key` | text | `Sentinel.UNSET` | — | no | Environment variable holding the API key for this provider (repeatable). Optional. |
+| `--profile-id` | text | — | — | no | OpenClaw auth-profiles.json profile ID. Optional; leave unset for providers without a profile (e.g. bedrock). |
+| `--ollama-port` | integer | `Sentinel.UNSET` | — | no | Additional Ollama-style loopback port. Repeatable. Optional. |
+| `--no-reload` | boolean | — | — | no | Do not call the sidecar reload endpoint after writing. |
+
+#### `defenseclaw setup provider list`
+
+Print the overlay contents. Read-only; never touches the
+    sidecar. For the merged view (built-ins + overlay) use
+    :command:`defenseclaw setup provider show`
+
+#### `defenseclaw setup provider remove`
+
+Remove an entry from the operator overlay
+
+Remove an entry from the operator overlay.
+
+    Only overlay entries are removable — the embedded baseline is
+    always in effect. If the name isn't present, exit 1 so scripts
+    can tell removal from no-op.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--name` | text | `Sentinel.UNSET` | — | yes | Overlay provider name to remove. |
+| `--no-reload` | boolean | — | — | no | Do not call the sidecar reload endpoint after writing. |
+
+#### `defenseclaw setup provider show`
+
+Print the merged registry as reported by the live sidecar
+    (``GET /v1/config/providers``). Falls back to parsing the overlay
+    when the sidecar isn't running
+
+### `defenseclaw setup skill-scanner`
+
+Configure skill-scanner analyzers, API keys, and policy
+
+Configure skill-scanner analyzers, API keys, and policy.
+
+    Interactively configure how skill-scanner runs. Enables LLM analysis,
+    behavioral dataflow analysis, meta-analyzer filtering, and more.
+
+    LLM settings land in the unified top-level ``llm:`` block (see
+    ``Config.resolve_llm`` for the merge semantics) so skill, MCP,
+    plugin, and guardrail scanners all share the same defaults. Cisco
+    AI Defense settings continue to live in ``cisco_ai_defense``.
+
+    Use --non-interactive with flags for CI/scripted configuration.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--use-llm` | boolean | — | — | no | Enable LLM analyzer |
+| `--use-behavioral` | boolean | — | — | no | Enable behavioral analyzer |
+| `--enable-meta` | boolean | — | — | no | Enable meta-analyzer |
+| `--use-trigger` | boolean | — | — | no | Enable trigger analyzer |
+| `--use-virustotal` | boolean | — | — | no | Enable VirusTotal scanner |
+| `--use-aidefense` | boolean | — | — | no | Enable AI Defense analyzer |
+| `--llm-provider` | choice (`anthropic`, `openai`) | — | — | no | LLM provider (anthropic or openai) |
+| `--llm-model` | text | — | — | no | LLM model name |
+| `--llm-consensus-runs` | integer | — | — | no | LLM consensus runs (0=disabled) |
+| `--policy` | text | — | — | no | Scan policy preset (strict, balanced, permissive) |
+| `--lenient` | boolean | — | — | no | Tolerate malformed skills |
+| `--verify, --no-verify` | boolean | true | — | no | Run connectivity checks after setup (default: on) |
+| `--non-interactive` | boolean | — | — | no | Use flags instead of prompts |
+
+### `defenseclaw setup splunk`
+
+Configure Splunk integration for DefenseClaw
+
+Configure Splunk integration for DefenseClaw.
+
+    Two independent pipelines are available:
+
+    
+      --o11y   Splunk Observability Cloud (traces + metrics via OTLP HTTP)
+               No local infrastructure needed. Requires a Splunk access token.
+    
+      --logs   Local Splunk (Docker, HEC logs + dashboards)
+               Starts the bundled profile in Splunk Free mode from day 1.
+               Requires Docker.
+
+    Both can run simultaneously. Without flags, runs an interactive wizard.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--o11y` | boolean | — | — | no | Enable Splunk Observability Cloud (OTLP traces + metrics) |
+| `--logs` | boolean | — | — | no | Enable local Splunk via Docker (HEC logs + dashboards, Free mode) |
+| `--realm` | text | — | — | no | Splunk O11y realm (e.g. us1, us0, eu0) |
+| `--access-token` | text | — | — | no | Splunk O11y access token |
+| `--app-name` | text | — | — | no | OTEL service name (default: defenseclaw) |
+| `--index` | text | — | — | no | HEC index for --logs (default: defenseclaw_local) |
+| `--source` | text | — | — | no | HEC source for --logs (default: defenseclaw) |
+| `--sourcetype` | text | — | — | no | HEC sourcetype for --logs (default: defenseclaw:json) |
+| `--traces, --no-traces` | boolean | — | — | no | Enable/disable trace export (O11y) |
+| `--metrics, --no-metrics` | boolean | — | — | no | Enable/disable metrics export (O11y) |
+| `--logs-export, --no-logs-export` | boolean | — | — | no | Enable/disable logs export (O11y) |
+| `--disable` | boolean | — | — | no | Disable Splunk integration(s) |
+| `--accept-splunk-license` | boolean | — | — | no | Acknowledge the Splunk General Terms for local Splunk enablement |
+| `--show-credentials` | boolean | — | — | no | Show Splunk Web login credentials |
+| `--non-interactive` | boolean | — | — | no | Use flags instead of prompts |
+
+### `defenseclaw setup webhook`
+
+Configure Slack/PagerDuty/Webex/generic chat + incident webhooks
+
+Configure Slack/PagerDuty/Webex/generic chat + incident webhooks.
+
+    Separate from ``setup observability add webhook`` (which configures
+    a generic HTTP JSONL audit-log forwarder). This group edits the
+    top-level ``webhooks:`` list consumed by the runtime dispatcher.
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `add` | Create or update a webhook notifier. |
+| `disable` | Disable a webhook (preserves the entry). |
+| `enable` | Enable a webhook. |
+| `list` | List configured webhooks (secrets are referenced, never printed). |
+| `remove` | Delete a webhook entry. |
+| `show` | Pretty-print a single webhook entry (secret values never printed). |
+| `test` | Dispatch a synthetic event through a configured webhook. |
+
+#### `defenseclaw setup webhook add`
+
+Create or update a webhook notifier
+
+Create or update a webhook notifier.
+
+    Examples:
+
+    
+      # Slack (no auth header, URL carries the secret)
+      defenseclaw setup webhook add slack --url https://hooks.slack.com/...
+    
+      # PagerDuty (routing key in an env var)
+      defenseclaw setup webhook add pagerduty \
+          --url https://events.pagerduty.com/v2/enqueue \
+          --secret-env DEFENSECLAW_PD_KEY
+    
+      # Webex (bot token + room ID)
+      defenseclaw setup webhook add webex \
+          --url https://webexapis.com/v1/messages \
+          --secret-env DEFENSECLAW_WEBEX_TOKEN --room-id Y2lzY29z...
+    
+      # Generic HMAC (payload signed with SHA-256)
+      defenseclaw setup webhook add generic \
+          --url https://siem.example.com/hook \
+          --secret-env DEFENSECLAW_SIEM_SECRET
+
+```bash
+defenseclaw setup webhook add <WEBHOOK_TYPE>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `webhook_type` | choice (`slack`, `pagerduty`, `webex`, `generic`) | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--name` | text | — | — | no | Destination name (default: derived from type+host) |
+| `--url` | text | — | — | no | Webhook URL (Slack/PagerDuty/Webex/generic endpoint) |
+| `--secret-env` | text | — | — | no | Environment variable NAME holding the secret/routing key/bot token |
+| `--room-id` | text | — | — | no | Webex room ID (Webex only) |
+| `--min-severity` | choice (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`) | — | — | no | Minimum severity to forward (default: HIGH) |
+| `--events` | text | — | — | no | Comma-separated event categories to forward (allowed: block, scan, guardrail, drift, health) |
+| `--timeout-seconds` | integer | — | — | no | Per-delivery timeout (default: 10) |
+| `--cooldown-seconds` | integer | — | — | no | Override dedup cooldown (omit=runtime default 300s; 0=disabled) |
+| `--enabled, --disabled` | boolean | true | — | no | Mark webhook enabled (default) or disabled |
+| `--dry-run` | boolean | — | — | no | Preview YAML changes without writing |
+| `--non-interactive` | boolean | — | — | no | Skip prompts; use flags only |
+
+#### `defenseclaw setup webhook disable`
+
+Disable a webhook (preserves the entry)
+
+```bash
+defenseclaw setup webhook disable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+#### `defenseclaw setup webhook enable`
+
+Enable a webhook
+
+```bash
+defenseclaw setup webhook enable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+#### `defenseclaw setup webhook list`
+
+List configured webhooks (secrets are referenced, never printed)
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Emit machine-readable JSON |
+
+#### `defenseclaw setup webhook remove`
+
+Delete a webhook entry
+
+```bash
+defenseclaw setup webhook remove <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--yes` | boolean | — | — | no | Skip confirmation prompt |
+
+#### `defenseclaw setup webhook show`
+
+Pretty-print a single webhook entry (secret values never printed)
+
+```bash
+defenseclaw setup webhook show <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Emit JSON |
+
+#### `defenseclaw setup webhook test`
+
+Dispatch a synthetic event through a configured webhook
+
+Dispatch a synthetic event through a configured webhook.
+
+    Safe to run repeatedly — every invocation stamps a unique event ID
+    so receivers don't dedup. Use ``--dry-run`` to inspect the payload
+    without delivering.
+
+```bash
+defenseclaw setup webhook test <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--dry-run` | boolean | — | — | no | Format the payload but do NOT deliver |
+| `--timeout` | float | `5.0` | — | no | Per-delivery timeout in seconds |
+
+<!-- END AUTOGEN:cli_py:setup -->
+
+## Usage
+
+### Configure core services
+
+```bash
+defenseclaw setup gateway --host 127.0.0.1 --api-port 18970 --non-interactive
+defenseclaw setup guardrail --mode observe --detection-strategy regex_judge --non-interactive
+defenseclaw setup splunk --o11y --realm us0 --access-token "$SPLUNK_ACCESS_TOKEN" --non-interactive
+```
+
+Use the nested setup commands for repeatable provisioning.
+
+### Manage providers and webhooks
+
+```bash
+defenseclaw setup provider add --name openai --domain api.openai.com --env-key OPENAI_API_KEY
+defenseclaw setup webhook add --name alerts --url https://example.com/hook --secret-env WEBHOOK_SECRET --events guardrail,scan
+defenseclaw setup webhook list --json
+```
+
+Provider and webhook entries are stored in DefenseClaw configuration.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup.py -->

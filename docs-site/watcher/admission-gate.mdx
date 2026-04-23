@@ -1,0 +1,79 @@
+---
+title: "Admission gate"
+description: "The install-time choke point: scanner verdict → Rego decision → install or quarantine."
+order: 2
+---
+
+## Overview
+
+Every new skill or plugin directory discovered by the watcher goes through the admission gate. The gate has three phases:
+
+1. Evaluate block and allow lists before scanning.
+2. Run the matching scanner.
+3. Evaluate the scan result through Rego when the OPA engine is available, or through the Go fallback profile when it is not.
+
+Manual block entries win before and after scanning. Manual allow entries can skip automatic enforcement, but they do not erase the scan result from the audit trail.
+
+## Decision inputs
+
+`internal/policy.AdmissionInput` carries the target identity, current block and allow lists, and, after scanning, a scan-result object:
+
+```json
+{
+  "target_type": "skill",
+  "target_name": "example-skill",
+  "path": "...",
+  "block_list": [],
+  "allow_list": [],
+  "scan_result": {
+    "severity": "HIGH",
+    "total_findings": 2,
+    "scanner_name": "skill-scanner"
+  }
+}
+```
+
+## Decision outputs
+
+```json
+{ "verdict": "allowed", "reason": "allow-listed" }
+{ "verdict": "warning", "reason": "medium finding" }
+{ "verdict": "rejected", "install_action": "block", "file_action": "quarantine" }
+```
+
+## Action semantics
+
+| Verdict | Effect |
+|---------|--------|
+| `allowed` | The item is allow-listed and automatic enforcement is skipped. |
+| `clean` | The scan result is recorded without enforcement. |
+| `warning` | The scan result is recorded as a warning. |
+| `blocked` | The item is blocked by a pre-scan or post-scan list check. |
+| `rejected` | The post-scan policy rejected the item; configured side effects may block, disable, or quarantine it. |
+| `scan-error` | No scanner was available or the scanner failed. |
+
+## Race handling
+
+The watcher stores pending paths behind a mutex and processes paths once they have been quiet for the debounce window. Admission itself runs synchronously for each ready path in the current tick.
+
+## Override
+
+There is no `admit` command. Use the existing block and allow commands to change list state:
+
+```bash
+defenseclaw skill allow example-skill --reason "reviewed by eng-security"
+defenseclaw plugin allow example-plugin --reason "reviewed by eng-security"
+defenseclaw mcp allow https://mcp.example.com/sse --reason "reviewed by eng-security"
+```
+
+Allow-list entries are visible to the admission input and are checked again after scanning to avoid races while a scan is running.
+
+## Related
+
+- [Scanner policies](/docs-site/policy/scanner-policies)
+- [Drift detection](/docs-site/watcher/drift-detection)
+- [Enforcement](/docs-site/watcher/enforcement)
+
+---
+
+<!-- generated-from: internal/watcher/watcher.go, internal/enforce/policy.go, internal/policy/types.go, internal/policy/fallback.go, policies/rego/admission.rego, cli/defenseclaw/commands/cmd_skill.py, cli/defenseclaw/commands/cmd_plugin.py, cli/defenseclaw/commands/cmd_mcp.py -->

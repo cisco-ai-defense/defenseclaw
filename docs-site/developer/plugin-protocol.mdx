@@ -1,0 +1,93 @@
+---
+title: "Plugin protocol"
+description: "How the OpenClaw plugin and the guardrail proxy talk: request shape, headers, streaming."
+order: 6
+---
+
+## Overview
+
+The DefenseClaw OpenClaw plugin rewrites agent LLM calls to go through the guardrail proxy at `127.0.0.1:4000`. The protocol between plugin and proxy is HTTP — intentionally LiteLLM-compatible — plus a small set of DefenseClaw-specific headers for correlation and metadata.
+
+## Plugin responsibilities
+
+1. Intercept `fetch` calls in the OpenClaw runtime.
+2. Check the destination URL against the `known_provider_domains` list.
+3. If matched, rewrite to `http://127.0.0.1:4000` and add `X-DC-Target-URL` so the proxy can reconstruct the upstream request.
+4. Attach proxy auth, provider auth, and `X-DefenseClaw-*` correlation headers when available.
+5. Forward the response to the agent verbatim.
+
+## Request shape
+
+Requests preserve the original provider's body (OpenAI chat, Anthropic messages, Bedrock Converse, Ollama, Cohere, Gemini). The proxy decodes by provider shape — no change to the body is required.
+
+### Headers the plugin sends
+
+| Header | Required | Purpose |
+|--------|----------|---------|
+| `X-DC-Target-URL` | yes | Original upstream origin or URL, such as `https://api.anthropic.com`; consumed by `handlePassthrough` routing. |
+| `X-AI-Auth` | no | Provider API key extracted from the caller's provider-specific auth header. |
+| `X-DC-Auth` | no | DefenseClaw proxy auth token for remote deployments. |
+| `X-DefenseClaw-Request-Id` | no | Client-supplied request correlation ID; the proxy mints one when absent. |
+| `X-DefenseClaw-Agent-Id` | no | Logical agent identity. |
+| `X-DefenseClaw-Agent-Instance-Id` | no | Per-process agent instance identity. |
+| `X-DefenseClaw-Session-Id` | no | Session identity. |
+| `X-DefenseClaw-Run-Id` | no | Agent run identity. |
+| `X-DefenseClaw-Trace-Id` | no | Trace identity from the plugin. |
+| `X-DefenseClaw-Policy-Id` | no | Policy identity from the plugin. |
+
+The proxy strips `x-dc-*` and `x-defenseclaw-*` hop headers before forwarding to the upstream provider.
+
+## Response shape
+
+Responses are returned verbatim. For streaming (SSE, chunked), the proxy injects chunk-level inspection without changing frame boundaries.
+
+If the verdict is `block`, the proxy returns:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-DefenseClaw-Blocked: true
+
+{"id":"chatcmpl-blocked","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"[DefenseClaw] request blocked"}}],"defenseclaw_blocked":true,"defenseclaw_reason":"[DefenseClaw] request blocked"}
+```
+
+The exact body is adapter-specific. DefenseClaw-aware clients should key off `X-DefenseClaw-Blocked` and the `defenseclaw_blocked` / `defenseclaw_reason` fields where the provider format supports them.
+
+## Streaming semantics
+
+- Server-Sent Events (`text/event-stream`) and chunked transfer are supported.
+- Streaming blocks are returned in the native provider stream format when an adapter owns that path.
+- OpenAI-compatible chat streams use regular `data:` chunks, include `X-DefenseClaw-Blocked: true`, set `finish_reason` to `content_filter`, then emit `data: [DONE]`.
+- See [Streaming](/docs-site/guardrail/streaming) for the full spec.
+
+## Versioning
+
+The fetch-interceptor protocol is source-compatible rather than handshake-negotiated. Header additions are additive; removing or renaming `X-DC-Target-URL`, `X-AI-Auth`, `X-DC-Auth`, or the `X-DefenseClaw-*` correlation headers is a breaking change.
+
+## Development
+
+```bash
+cd extensions/defenseclaw
+npm install
+npm test            # plugin unit tests
+npm run smoke       # smoke test against a running sidecar
+```
+
+To test a local plugin change against a real agent:
+
+```bash
+# Build the plugin
+npm run build
+# Install the rebuilt plugin into DefenseClaw's extension directory
+make plugin-install
+```
+
+## Related
+
+- [Architecture](/docs-site/developer/architecture)
+- [Providers](/docs-site/guardrail/providers)
+- [Streaming](/docs-site/guardrail/streaming)
+
+---
+
+<!-- generated-from: extensions/defenseclaw/src/types.ts, extensions/defenseclaw/src/fetch-interceptor.ts, extensions/defenseclaw/src/correlation-headers.ts, internal/gateway/proxy.go, internal/gateway/requestctx.go -->

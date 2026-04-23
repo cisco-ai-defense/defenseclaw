@@ -1,0 +1,65 @@
+---
+title: "defenseclaw uninstall"
+description: "Uninstall DefenseClaw (reversibly by default)."
+order: 10
+---
+
+## Overview
+
+`defenseclaw uninstall` — Uninstall DefenseClaw (reversibly by default).
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:uninstall -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw uninstall [OPTIONS]
+```
+
+### Description
+
+Uninstall DefenseClaw (reversibly by default)
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--all` | boolean | — | — | no | Also delete ~/.defenseclaw (audit log, config, secrets). |
+| `--binaries` | boolean | — | — | no | Additionally remove the defenseclaw + defenseclaw-gateway binaries from ~/.local/bin. |
+| `--keep-openclaw` | boolean | — | — | no | Do NOT revert ~/.openclaw/openclaw.json or remove the plugin. |
+| `--dry-run` | boolean | — | — | no | Show what would happen without touching the system. |
+| `--yes` | boolean | — | — | no | Skip the confirmation prompt. |
+
+<!-- END AUTOGEN:cli_py:uninstall -->
+
+## Usage
+
+### Preview removal
+
+```bash
+defenseclaw uninstall --dry-run
+```
+
+Dry-run prints the paths and binaries that would be removed.
+
+### Remove DefenseClaw state
+
+```bash
+defenseclaw uninstall --all --yes
+defenseclaw uninstall --binaries --keep-openclaw --yes
+```
+
+`--all` removes local DefenseClaw state; `--keep-openclaw` preserves the OpenClaw installation when removing binaries.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_uninstall.py -->

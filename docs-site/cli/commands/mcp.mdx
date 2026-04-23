@@ -1,0 +1,220 @@
+---
+title: "defenseclaw mcp"
+description: "Manage MCP servers — scan, block, allow, list, set, unset."
+order: 10
+---
+
+## Overview
+
+`defenseclaw mcp` — Manage MCP servers — scan, block, allow, list, set, unset.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:mcp -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw mcp [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `allow` | Allow an MCP server (by name or URL). |
+| `block` | Block an MCP server (by name or URL). |
+| `list` | List MCP servers configured in OpenClaw. |
+| `scan` | Scan an MCP server by name or URL. |
+| `set` | Add or update an MCP server in OpenClaw config. |
+| `unblock` | Remove an MCP server from the block list and clear enforcement state. |
+| `unset` | Remove an MCP server from OpenClaw config. |
+
+### Description
+
+Manage MCP servers — scan, block, allow, list, set, unset
+
+### `defenseclaw mcp allow`
+
+Allow an MCP server (by name or URL)
+
+```bash
+defenseclaw mcp allow <TARGET>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `target` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for allowing |
+
+### `defenseclaw mcp block`
+
+Block an MCP server (by name or URL)
+
+```bash
+defenseclaw mcp block <TARGET>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `target` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for blocking |
+
+### `defenseclaw mcp list`
+
+List MCP servers configured in OpenClaw
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output as JSON |
+
+### `defenseclaw mcp scan`
+
+Scan an MCP server by name or URL
+
+Scan an MCP server by name or URL.
+
+    TARGET can be a server name from openclaw.json or a direct URL.
+    Use --all to scan every configured server.
+
+```bash
+defenseclaw mcp scan [TARGET]
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `target` | text | 1 | no |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output results as JSON |
+| `--analyzers` | text | — | — | no | Comma-separated analyzer list |
+| `--scan-prompts` | boolean | — | — | no | Also scan MCP prompts |
+| `--scan-resources` | boolean | — | — | no | Also scan MCP resources |
+| `--scan-instructions` | boolean | — | — | no | Also scan server instructions |
+| `--all` | boolean | — | — | no | Scan every server in openclaw.json |
+
+### `defenseclaw mcp set`
+
+Add or update an MCP server in OpenClaw config
+
+Add or update an MCP server in OpenClaw config.
+
+    Scans the server before adding unless --skip-scan is set.
+    Rejects servers with HIGH/CRITICAL findings.
+
+    
+    Examples:
+      defenseclaw mcp set context7 --command uvx --args context7-mcp
+      defenseclaw mcp set deepwiki --url https://mcp.deepwiki.com/mcp
+      defenseclaw mcp set myserver --command npx --args '["-y", "@myorg/mcp-server"]'
+      defenseclaw mcp set myserver --command node --args server.js --env API_KEY=xxx
+      defenseclaw mcp set untrusted --url http://example.com/mcp --skip-scan
+
+```bash
+defenseclaw mcp set <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--command` | text | — | — | no | Server command (e.g. npx, uvx) |
+| `--args` | text | — | — | no | Command args (JSON array or comma-separated) |
+| `--url` | text | — | — | no | Server URL (for SSE/HTTP transport) |
+| `--transport` | text | — | — | no | Transport type (stdio, sse) |
+| `--env` | text | `Sentinel.UNSET` | — | no | Env vars as KEY=VAL (repeatable) |
+| `--skip-scan` | boolean | — | — | no | Skip security scan before adding |
+
+### `defenseclaw mcp unblock`
+
+Remove an MCP server from the block list and clear enforcement state
+
+Remove an MCP server from the block list and clear enforcement state.
+
+    Unlike 'allow', this does not add the server to the allow list — it
+    simply removes the block so the server goes through normal scanning
+    on the next check.
+
+```bash
+defenseclaw mcp unblock <TARGET>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `target` | text | 1 | yes |
+
+### `defenseclaw mcp unset`
+
+Remove an MCP server from OpenClaw config
+
+```bash
+defenseclaw mcp unset <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+<!-- END AUTOGEN:cli_py:mcp -->
+
+## Usage
+
+### List and scan MCP servers
+
+```bash
+defenseclaw mcp list --json
+defenseclaw mcp scan --all --json
+```
+
+`--all` scans configured MCP entries instead of a single target.
+
+### Register or block a server
+
+```bash
+defenseclaw mcp set local-tools --command npx --args "@modelcontextprotocol/server-filesystem" --skip-scan
+defenseclaw mcp block local-tools --reason "pending review"
+```
+
+Use `--skip-scan` only when another gate has already reviewed the server.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_mcp.py -->

@@ -1,0 +1,98 @@
+---
+title: "Audit store"
+description: "The SQLite audit database: schema, indexes, retention, and query patterns."
+order: 3
+---
+
+## Overview
+
+The audit store is a SQLite database at `~/.defenseclaw/audit.db`. It persists operator actions, scan results, guardrail verdicts, network-egress events, judge responses, activity events, sink health, and enforcement state. It is the local record that sink delivery and JSONL emission are derived from.
+
+SQLite is opened by `internal/audit/store.go` with `PRAGMA journal_mode=WAL` and a `busy_timeout` so local readers can inspect the database while the gateway writes.
+
+## Schema summary
+
+```sql
+CREATE TABLE audit_events (
+  id TEXT PRIMARY KEY,
+  timestamp DATETIME NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT,
+  actor TEXT NOT NULL DEFAULT 'defenseclaw',
+  details TEXT,
+  severity TEXT,
+  run_id TEXT,
+  request_id TEXT,
+  session_id TEXT,
+  trace_id TEXT,
+  agent_id TEXT,
+  agent_name TEXT,
+  agent_instance_id TEXT,
+  sidecar_instance_id TEXT,
+  policy_id TEXT,
+  destination_app TEXT,
+  tool_name TEXT,
+  tool_id TEXT,
+  schema_version INTEGER,
+  content_hash TEXT,
+  generation INTEGER,
+  binary_version TEXT
+);
+
+CREATE INDEX idx_audit_timestamp ON audit_events(timestamp);
+CREATE INDEX idx_audit_action ON audit_events(action);
+CREATE INDEX idx_audit_request_id ON audit_events(request_id);
+CREATE INDEX idx_audit_session_id ON audit_events(session_id);
+```
+
+Additional tables include `scan_results`, `findings`, `scan_findings`, `network_egress_events`, `target_snapshots`, `judge_responses`, `activity_events`, `sink_health`, and the `actions` table used by enforcement state.
+
+## Querying via CLI
+
+The Python CLI exposes only the activity-logging helper used by TUI and automation:
+
+```bash
+defenseclaw audit log-activity --payload-file activity.json
+```
+
+For audit export, use the Go gateway CLI:
+
+```bash
+defenseclaw-gateway audit export --output audit-events.jsonl --limit 1000
+defenseclaw-gateway audit export --include-activity --output combined-events.jsonl
+```
+
+## Querying via SQL
+
+```bash
+sqlite3 ~/.defenseclaw/audit.db <<'SQL'
+SELECT severity, COUNT(*)
+FROM audit_events
+WHERE timestamp > datetime('now', '-1 day')
+  AND action LIKE 'guardrail-%'
+GROUP BY severity;
+SQL
+```
+
+Read-only access is safe; writes are owned by the sidecar.
+
+## Atomicity & durability
+
+- Events are inserted with a generated UUID when the caller does not provide one.
+- `PRAGMA journal_mode=WAL` enabled — concurrent readers don't block writers.
+- `PRAGMA busy_timeout=5000` gives concurrent writers a five-second window before surfacing `SQLITE_BUSY`.
+- Schema migrations run sequentially through `schema_version`; new columns are added without dropping older rows.
+
+<Callout type="warning" title="No SQLCipher path in source">
+  The current store code does not expose an `audit.encryption` config block. Use host disk encryption or filesystem controls when the local audit DB contains sensitive operational history.
+</Callout>
+
+## Related
+
+- [Audit bridge](/docs-site/observability/audit-bridge)
+- [Gateway JSONL log](/docs-site/observability/gatewaylog-jsonl)
+- [audit CLI](/docs-site/cli/commands/audit)
+
+---
+
+<!-- generated-from: internal/audit/store.go, internal/cli/audit_export.go, cli/defenseclaw/commands/cmd_audit.py -->

@@ -89,6 +89,29 @@ standard `OTEL_*` environment variables. There is **no** Splunk-specific
 coupling in the telemetry stack; operators who need a Splunk access
 token put it in `otel.headers` or `OTEL_EXPORTER_OTLP_HEADERS`.
 
+### 1.4 Codex Hook Observability
+
+`defenseclaw setup codex` installs Codex hooks that call
+`defenseclaw codex hook`. Runtime decisions are evaluated by
+`POST /api/v1/codex/hook`, so Codex prompt/tool/stop checks share the
+same redaction, audit, metrics, and trace pipeline as the rest of the
+gateway.
+
+Codex-specific OTel instruments:
+
+| Metric | Purpose |
+|--------|---------|
+| `defenseclaw.codex.hook.invocations` | Hook volume by event, action, severity, and mode. |
+| `defenseclaw.codex.hook.latency` | Hook evaluation latency in milliseconds. |
+| `defenseclaw.codex.blocks` | Enforced action-mode blocks. |
+| `defenseclaw.codex.would_blocks` | Observe-mode findings that would block in action mode. |
+| `defenseclaw.codex.component_scans` | Skill/plugin/MCP component scan attempts. |
+
+The local stack ships a `defenseclaw-codex.json` Grafana dashboard and
+Prometheus recording rules for hook rate, block ratio, and p95 latency.
+Raw prompts, Bash output, and file contents are not written to logs or
+spans outside the existing scanner paths.
+
 ---
 
 ## 2. Migration from v3 → v4

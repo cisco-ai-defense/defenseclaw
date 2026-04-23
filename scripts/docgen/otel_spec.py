@@ -1,0 +1,179 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+"""OpenTelemetry instrument & span inventory → MDX AUTOGEN block.
+
+Scans `internal/telemetry/*.go` for metric instrument registrations and
+span name constants.
+"""
+
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+from . import mdx, splice
+
+
+PAGE = Path("docs-site/observability/otel-spec.mdx")
+TELEMETRY_DIR = Path("internal/telemetry")
+
+# Match otel instrument factory calls like:
+#   meter.Int64Counter("defenseclaw.gateway.tool_calls", metric.WithDescription("..."), metric.WithUnit("1"))
+INSTRUMENT = re.compile(
+    r'(?:Int64|Float64)(Counter|UpDownCounter|Histogram|Gauge)'
+    r'\(\s*"([a-z0-9._\-]+)"'
+    r'(?:[^)]*?WithDescription\(\s*"([^"]*)"\s*\))?'
+    r'(?:[^)]*?WithUnit\(\s*"([^"]*)"\s*\))?',
+    re.DOTALL,
+)
+
+# Match tracer.Start(ctx, "span.name", ...)
+SPAN = re.compile(r'(?:Tracer\w*\.Start|tracer\.Start)\([^,]+,\s*"([a-z0-9._\-/]+)"')
+
+# Match span name constants: const SpanXxx = "..."
+SPAN_CONST = re.compile(r'Span[A-Za-z]+\s*=\s*"([a-z0-9._\-/]+)"')
+
+
+def _scan() -> Tuple[List[dict], List[str]]:
+    metrics: List[dict] = []
+    spans: set[str] = set()
+    if not TELEMETRY_DIR.exists():
+        return metrics, sorted(spans)
+    for f in TELEMETRY_DIR.rglob("*.go"):
+        if f.name.endswith("_test.go"):
+            continue
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        for m in INSTRUMENT.finditer(text):
+            kind, name, desc, unit = m.group(1), m.group(2), m.group(3) or "", m.group(4) or ""
+            metrics.append({
+                "name": name,
+                "kind": kind,
+                "description": desc,
+                "unit": unit or "1",
+                "source": str(f),
+            })
+        for m in SPAN.finditer(text):
+            spans.add(m.group(1))
+        for m in SPAN_CONST.finditer(text):
+            spans.add(m.group(1))
+    # Also scan internal/gateway and internal/watcher for instrument calls — they do some direct registration.
+    for root in (Path("internal/gateway"), Path("internal/watcher"),
+                 Path("internal/audit"), Path("internal/guardrail")):
+        if not root.exists():
+            continue
+        for f in root.rglob("*.go"):
+            if f.name.endswith("_test.go"):
+                continue
+            text = f.read_text(encoding="utf-8", errors="ignore")
+            for m in INSTRUMENT.finditer(text):
+                metrics.append({
+                    "name": m.group(2),
+                    "kind": m.group(1),
+                    "description": m.group(3) or "",
+                    "unit": m.group(4) or "1",
+                    "source": str(f),
+                })
+            for m in SPAN.finditer(text):
+                spans.add(m.group(1))
+            for m in SPAN_CONST.finditer(text):
+                spans.add(m.group(1))
+    # De-dupe metrics by name (first occurrence wins).
+    seen = set()
+    unique: List[dict] = []
+    for m in metrics:
+        if m["name"] in seen:
+            continue
+        seen.add(m["name"])
+        unique.append(m)
+    return sorted(unique, key=lambda x: x["name"]), sorted(spans)
+
+
+def _render_metrics(metrics: List[dict]) -> str:
+    body = [f"_{len(metrics)} metric instruments registered across "
+            f"`internal/telemetry/`, `internal/gateway/`, `internal/watcher/`, "
+            f"`internal/audit/`, `internal/guardrail/`._", ""]
+    if not metrics:
+        body.append("_No instruments discovered — is `internal/telemetry/` present?_")
+        return "\n".join(body) + "\n"
+    rows = []
+    for m in metrics:
+        rows.append([
+            mdx.md_code(m["name"]),
+            m["kind"],
+            mdx.md_code(m["unit"]),
+            mdx.escape_pipe(m["description"] or ""),
+            mdx.md_code(m["source"].removeprefix("internal/")),
+        ])
+    body.append(mdx.render_table(
+        ["Name", "Kind", "Unit", "Description", "Source"],
+        rows,
+    ))
+    return "\n".join(body).rstrip() + "\n"
+
+
+def _render_spans(spans: List[str]) -> str:
+    body = [f"_{len(spans)} span names defined across `internal/telemetry/`, "
+            f"`internal/gateway/`, `internal/watcher/`, `internal/audit/`, `internal/guardrail/`._", ""]
+    if not spans:
+        body.append("_No span names discovered._")
+        return "\n".join(body) + "\n"
+    body.append(mdx.render_table(["Span name"], [[mdx.md_code(s)] for s in spans]))
+    return "\n".join(body).rstrip() + "\n"
+
+
+def _template() -> str:
+    return """---
+title: "OTel spec"
+description: "OpenTelemetry metric and span inventory emitted by DefenseClaw."
+order: 2
+---
+
+## Overview
+
+DefenseClaw emits OpenTelemetry traces and metrics when
+`otel.enabled: true` in config.yaml. The spec here is the live inventory
+— generated by walking `internal/telemetry/` and related packages. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` (and optionally headers/protocol) to
+ship to any OTLP-compatible backend.
+
+<Callout type="info">
+  See [Audit store](/docs-site/observability/audit-store) for the
+  complementary SQLite ledger; OTel covers the hot-path telemetry,
+  SQLite covers durable evidence.
+</Callout>
+
+## Metrics
+
+<!-- BEGIN AUTOGEN:otel:metrics -->
+<!-- END AUTOGEN:otel:metrics -->
+
+## Spans
+
+<!-- BEGIN AUTOGEN:otel:spans -->
+<!-- END AUTOGEN:otel:spans -->
+
+## Related
+
+- [Observability overview](/docs-site/observability/index)
+- [Sinks](/docs-site/observability/sinks)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: internal/telemetry/, internal/gateway/, internal/watcher/, internal/audit/, internal/guardrail/ -->
+"""
+
+
+def run() -> List[Tuple[str, bool]]:
+    metrics, spans = _scan()
+    splice.ensure_scaffold(PAGE, _template())
+    c1 = splice.splice(PAGE, "otel", "metrics", _render_metrics(metrics))
+    c2 = splice.splice(PAGE, "otel", "spans", _render_spans(spans))
+    return [(str(PAGE) + " [metrics]", c1), (str(PAGE) + " [spans]", c2)]
+
+
+if __name__ == "__main__":
+    for p, ch in run():
+        print(("CHANGED " if ch else "ok      ") + p)

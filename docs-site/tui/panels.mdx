@@ -1,0 +1,159 @@
+---
+title: "Panels"
+description: "Reference for every panel in the DefenseClaw TUI: what it shows, where the data comes from, and which keys are bound locally."
+order: 2
+---
+
+## Overview
+
+Each panel is an independent Bubbletea model composed by `internal/tui/app.go`. Panels never mutate state directly — they delegate to the `CommandExecutor` subprocess bridge, which invokes the same CLI verbs documented in the [CLI reference](/docs-site/cli/index). This page maps each panel to its source file, its data source, and its panel-local keys.
+
+## Overview (`1`)
+
+Source: `internal/tui/overview.go`, `internal/tui/health.go`, `internal/tui/doctor_cache.go`
+
+| Tile | Data |
+|------|------|
+| Sidecar health | `GET http://127.0.0.1:18970/health` (poll 5s) |
+| Mode + guardrail | `config.yaml` + health `guardrail.state` |
+| Missing keys | Cached doctor results from `defenseclaw doctor --json-output` |
+| Recent verdicts | Alert count from `audit.Store.GetCounts()` |
+| Audit stats | Block/allow/scan counts from the audit store |
+
+No panel-local keybindings — navigation only.
+
+## Alerts (`2`)
+
+Source: `internal/tui/alerts.go`, `internal/tui/alerts_gateway.go`
+
+Alert rows are loaded from the local audit store with `ListAlerts(500)` and merged with scan-finding rows parsed from `gateway.jsonl`. HTTP consumers use the sidecar's `GET /alerts` route; the TUI panel itself reads the store directly.
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Move row selection |
+| `enter` | Open detail panel |
+| `/` | Start filter (free-text over alert `message` and tag fields) |
+| `1`–`5` | Quick severity filter (panel owns `1`–`5`; does not switch panels) |
+| `f` | Cycle `action` filter (`allow`, `warn`, `block`) |
+| `esc` | Close detail / clear filter |
+
+The filter bar supports compound queries: `action=block type=guardrail severity>=high`. Filter telemetry is captured via `filter_telemetry_test.go` so analytics teams can see which filters operators lean on.
+
+## Skills (`3`)
+
+Source: `internal/tui/skills.go`, `internal/tui/actionmenu.go`
+
+Lists every skill in `~/.claw/skills/` with trust status, last scan verdict, and quarantine state.
+
+| Key | Action |
+|-----|--------|
+| `enter` | Open detail + scan summary |
+| `a` | Open action menu (scan / block / allow / unblock / disable / enable / quarantine / restore) |
+| `s` | Scan now (subprocess: `defenseclaw skill scan <name>`) |
+| `q` | Quarantine selected skill (local-only — does not quit TUI) |
+| `/` | Filter by name, trust, verdict |
+
+Action menu items are wired to palette entries so they fire the exact same CLI verbs — parity is enforced in `cli_parity_test.go`.
+
+## MCPs (`4`)
+
+Source: `internal/tui/mcps.go`, `internal/tui/mcp_set_form.go`
+
+Registered MCP servers with transport, allow/block state, and last scan. The "set" form is a guided `scan + set` flow that appends the server to OpenClaw's config after a successful scan.
+
+| Key | Action |
+|-----|--------|
+| `enter` | Open detail panel |
+| `a` | Action menu (scan / block / allow / unblock / set / unset) |
+| `s` | Scan |
+| `b` / `u` | Block / unblock |
+| `x` | Cancel form |
+
+## Plugins (`5`)
+
+Source: `internal/tui/plugins.go`, `internal/tui/actionmenu.go`
+
+Lists DefenseClaw extensions (guardrail, CodeGuard, custom scanners). Install-state and version come from `~/.defenseclaw/extensions/`.
+
+| Key | Action |
+|-----|--------|
+| `a` | Action menu |
+| `i` | Install / refresh |
+| `d` | Disable |
+| `e` | Enable |
+
+## Inventory (`6`)
+
+Source: `internal/tui/inventory.go`
+
+Cross-cutting asset index. Useful when you want to see every asset of a given risk level without tab-hopping. Panel owns `1`–`4` for quick scope filters: `1=skills`, `2=mcps`, `3=plugins`, `4=tools`.
+
+## Policy (`7`)
+
+Source: `internal/tui/policy.go`, `internal/tui/policy_create_form.go`
+
+Lists policy artifacts under `~/.defenseclaw/policy/`: Rego bundles, guardrail rule packs, data.json, sensitive-tools list.
+
+| Key | Action |
+|-----|--------|
+| `enter` | Open YAML / Rego viewer overlay |
+| `e` | Edit in `$EDITOR` (subprocess `defenseclaw policy edit …`) |
+| `n` | New policy (form) |
+| `r` | Reload policies (`defenseclaw-gateway policy reload`) |
+| `t` | Run `defenseclaw policy test` |
+| `esc` | Close overlay |
+
+Opening the viewer pushes the panel into "exclusive" mode — global keys `q`, `1`–`9` are swallowed so you can type any character inside YAML.
+
+## Logs (`8`)
+
+Source: `internal/tui/logs.go`
+
+Tails `~/.defenseclaw/gateway.log`. Supports `/` filter and follow-mode toggle.
+
+| Key | Action |
+|-----|--------|
+| `g` / `G` | Top / bottom |
+| `f` | Toggle follow |
+| `/` | Filter |
+| `c` | Clear filter |
+
+## Audit (`9`)
+
+Source: `internal/tui/audit.go`
+
+Queryable audit store (`~/.defenseclaw/audit.db`). The panel filters rows in-process and can export the filtered subset without relying on a Python `audit query` command.
+
+| Key | Action |
+|-----|--------|
+| `enter` | Open row detail (full JSON) |
+| `/` | Compound filter (`event_type=verdict severity>=high`) |
+| `e` | Export filtered subset |
+
+## Activity
+
+Source: `internal/tui/activity.go`
+
+Watcher activity stream: quarantines, admission decisions, snapshot diffs, periodic rescans. Panel owns `1` and `2` for "recent" / "all-time".
+
+## Tools (`T`)
+
+Source: `internal/tui/tools.go`
+
+Tools declared by MCP servers. Reached via `T` (uppercase, mnemonic) or the palette. There is no numeric shortcut — the numeric slot is reserved so the existing 1–9 bindings remain stable across releases.
+
+## Setup (`0`)
+
+Source: `internal/tui/setup.go`, `internal/tui/setup_sinks.go`, `internal/tui/setup_webhooks.go`
+
+Wizard panel that runs `defenseclaw setup ...` flows inside the TUI. Forms capture input, validate locally, then shell to the CLI with the right flags.
+
+## Related
+
+- [Keybindings](/docs-site/tui/keybindings)
+- [Command palette](/docs-site/tui/command-palette)
+- [CLI parity](/docs-site/tui/cli-parity)
+
+---
+
+<!-- generated-from: internal/tui/app.go, internal/tui/overview.go, internal/tui/health.go, internal/tui/doctor_cache.go, internal/tui/alerts.go, internal/tui/alerts_gateway.go, internal/tui/skills.go, internal/tui/mcps.go, internal/tui/plugins.go, internal/tui/inventory.go, internal/tui/policy.go, internal/tui/logs.go, internal/tui/audit.go, internal/tui/activity.go, internal/tui/tools.go, internal/tui/setup.go, internal/tui/command.go, internal/gateway/api.go -->

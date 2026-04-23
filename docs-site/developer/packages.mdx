@@ -1,0 +1,107 @@
+---
+title: "Package tour"
+description: "Every top-level package in the DefenseClaw repo, what it's for, and the stability expectation."
+order: 3
+---
+
+## Overview
+
+Use this page to orient yourself in the codebase. Each entry is one line so the map stays printable. Follow the link in each entry's dedicated README for deeper coverage.
+
+## Go: `cmd/`
+
+| Package | Role | Stability |
+|---------|------|-----------|
+| `cmd/defenseclaw` | Go entrypoint built as `defenseclaw-gateway` by the Makefile | Stable |
+| `cmd/docgen-go` | Cobra → JSON docs generator | Internal |
+
+## Go: `internal/`
+
+| Package | Role | Stability |
+|---------|------|-----------|
+| `internal/gateway` | Sidecar REST API, OpenClaw WebSocket client, guardrail proxy, provider adapters, judge client | Stable (API contracts) |
+| `internal/guardrail` | Rule packs, suppressions, sensitive-tool defaults, verdict cache | Stable |
+| `internal/watcher` | Filesystem event loop, snapshots, drift, periodic rescan | Stable |
+| `internal/policy` | OPA host, policy loader, hot-reload, snapshotter | Stable |
+| `internal/audit` | SQLite writer, retention, export/import | Stable (schema) |
+| `internal/tui` | Bubbletea TUI + panels + command palette | Stable (keybindings) |
+| `internal/cli` | Go-side Cobra commands (`start`, `stop`, `restart`, …) | Stable |
+| `internal/sandbox` | OpenShell sandbox supervisor | Stable (Linux); advisory (macOS/Windows) |
+| `internal/firewall` | Egress observer, rule compiler, SSRF guard | Stable |
+| `internal/config` | Config loader, validator, schema enforcement | Stable |
+| `internal/configs` | Embedded provider registry and JSON schema data | Stable |
+| `internal/telemetry` | OTel wiring, span builder, metric emitters | Stable (span names) |
+| `internal/gatewaylog` | Structured JSONL event writer and schema validation | Stable |
+| `internal/notify` | Local desktop notification helpers | Internal |
+| `internal/redaction` | Display and sink redaction helpers | Stable |
+| `internal/scanner` | Scanner contracts and code scanner glue | Stable |
+| `internal/enforce` | Skill, plugin, and MCP enforcement helpers | Stable |
+| `internal/inventory` | Inventory model and discovery helpers | Stable |
+| `internal/daemon` | Background process management for the sidecar | Internal |
+| `internal/version` | Binary version plumbing | Internal |
+
+## Python: `cli/defenseclaw/`
+
+| Package | Role | Stability |
+|---------|------|-----------|
+| `cli/defenseclaw/commands/` | Every Click command (`cmd_init.py`, `cmd_setup.py`, …) | Stable (CLI surface) |
+| `cli/defenseclaw/scanner/` | Python-side scanner adapters and plugin scanner helpers | Stable (scanner contract) |
+| `cli/defenseclaw/enforce/` | Python-side enforcement helpers | Internal |
+| `cli/defenseclaw/inventory/` | Python inventory helpers | Internal |
+| `cli/defenseclaw/observability/` | Local observability setup helpers | Internal |
+| `cli/defenseclaw/webhooks/` | Webhook setup and delivery helpers | Stable |
+
+## Node / TypeScript: `extensions/defenseclaw/`
+
+| Package | Role | Stability |
+|---------|------|-----------|
+| `extensions/defenseclaw/src/index.ts` | OpenClaw plugin entrypoint | Stable (plugin protocol) |
+| `extensions/defenseclaw/src/fetch-interceptor.ts` | `fetch` interceptor + provider mapping | Stable |
+| `extensions/defenseclaw/src/correlation-headers.ts` | Correlation header constants and helpers | Stable |
+| `extensions/defenseclaw/src/client.ts` | Sidecar REST client for the plugin | Stable |
+
+## Policies: `policies/`
+
+| Package | Role |
+|---------|------|
+| `policies/rego/admission.rego` | Admission decision for scanners |
+| `policies/rego/guardrail.rego` | Severity/direction/mode → action |
+| `policies/rego/firewall.rego` | URL allow/deny |
+| `policies/rego/audit.rego` | Event filter logic for sinks |
+| `policies/guardrail/default/rules/*.yaml` | Default rule pack |
+| `policies/guardrail/default/suppressions.yaml` | Default suppressions |
+| `policies/guardrail/default/sensitive-tools.yaml` | Default sensitive tools registry |
+| `policies/rego/data.json` | Static Rego policy inputs |
+
+## Tests: `test/`
+
+| Package | Role |
+|---------|------|
+| `test/e2e/` | Black-box end-to-end test data and helpers |
+| `test/unit/` | Unit test fixtures and helpers |
+| `test/fixtures/` | Rule packs, policies, and artifacts used by the above |
+| `test/testdata/` | Shared provider and endpoint corpora |
+
+## Scripts and tooling: `scripts/`
+
+| Package | Role |
+|---------|------|
+| `scripts/install.sh` | Curl-bash installer |
+| `scripts/install-dev.sh` | Development install helper |
+| `scripts/upgrade.sh` | Upgrade helper |
+| `scripts/setup-llm.sh` | Interactive LLM setup helper |
+| `scripts/setup-scanners.sh` | Scanner setup helper |
+| `scripts/docgen/` | Python-based documentation generators |
+| `scripts/docs_verify.py` | Docs-site source-accuracy verifier |
+| `scripts/docs_deadlinks.py` | Docs-site internal link checker |
+| `scripts/test-e2e-*.sh` | E2E shell harnesses |
+
+## Related
+
+- [Architecture](/docs-site/developer/architecture)
+- [Contributing](/docs-site/developer/contributing)
+- [Building](/docs-site/developer/building)
+
+---
+
+<!-- generated-from: go.mod, Makefile, pyproject.toml, extensions/defenseclaw/package.json -->

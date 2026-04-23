@@ -1,0 +1,102 @@
+---
+title: "Command palette"
+description: "Fuzzy-search launcher for every CLI operation the TUI exposes; opens with Ctrl+K or :, runs commands in-place with captured output."
+order: 4
+---
+
+## Overview
+
+The command palette is an overlay modeled on `charm.sh` + `sahilm/fuzzy`. It indexes the `CmdEntry` registry defined in `internal/tui/command.go`, runs commands through the same subprocess bridge the panels use, and streams output in the Activity panel. It is the fastest way to run a known operator task without remembering which panel owns it.
+
+## Opening the palette
+
+| Key | Where |
+|-----|-------|
+| `Ctrl+K` | Anywhere |
+| `:` | Anywhere |
+
+`Ctrl+K` is the conventional binding; `:` exists because operators with muscle memory from editors and `k9s` reach for it first. Both open the same overlay.
+
+## Layout
+
+```text
+┌─ Command palette ────────────────────────────────────────────────┐
+│ > policy rel                                                     │
+├──────────────────────────────────────────────────────────────────┤
+│  ▸ policy reload          Reload policy in running sidecar policy│
+│    policy validate        Validate policy data + Rego      policy│
+│    policy test            Run OPA policy tests             policy│
+└──────────────────────────────────────────────────────────────────┘
+```
+
+The input line echoes what you typed; the result list shows `TUIName` (left), `Description` (center), `Category` (right). Fuzzy matching is case-insensitive and orders by match score.
+
+## Registry categories
+
+| Category | Example entries |
+|----------|-----------------|
+| `setup` | `init`, `setup skill-scanner`, `setup guardrail`, `setup splunk`, `setup provider add` |
+| `scan` | `scan skill`, `scan skill --all`, `scan mcp`, `scan plugin`, `scan aibom`, `scan code` |
+| `enforce` | `block skill`, `allow skill`, `quarantine skill`, `set mcp`, `disable plugin`, `block tool` |
+| `install` | `install skill`, `install plugin`, `install codeguard` |
+| `policy` | `policy validate`, `policy test`, `policy reload`, `policy evaluate`, `policy domains` |
+| `info` | `status`, `doctor`, `alerts`, `skill list`, `mcp list`, `plugin list`, `tool list` |
+| `daemon` | `start`, `stop`, `restart`, `gateway status`, `watchdog status` |
+| `sandbox` | `sandbox init`, `sandbox start`, `sandbox status`, `sandbox shell` |
+| `other` | `upgrade`, `audit log-activity` |
+
+See `internal/tui/command.go` for the full list. The current registry contains 101 entries across setup, scan, enforce, install, policy, info, daemon, sandbox, and other categories. Duplicate TUI names are caught by `command_test.go`.
+
+## Executing a command
+
+1. Type enough characters to disambiguate.
+2. Press `enter` on the highlighted match.
+3. If the entry has `NeedsArg=true`, type the extra argument after the selected command name.
+4. The palette closes; the TUI switches to Activity and streams subprocess output there.
+
+For long-running commands (scans, setups), the Activity panel shows streaming output. Open the command output in terminal mode before using `Ctrl+C` if you want to interrupt the subprocess without quitting the TUI.
+
+## Arg-taking entries
+
+A subset of entries expects a positional argument. Type the argument after the command name:
+
+| Entry | Arg hint |
+|-------|----------|
+| `scan skill` | `<skill-name>` |
+| `scan mcp` | `<url>` |
+| `scan plugin` | `<plugin-name>` |
+| `scan code` | `<path>` |
+| `block skill` / `unblock skill` / ... | `<skill-name>` |
+| `sandbox exec` | `<command>` |
+| `audit log-activity` | `--payload-file <path>` |
+
+Palette arguments are parsed with shell-like quote handling by `splitCommandTail`. For example, `scan code "./src with spaces"` stays a single path argument. Panel action menus are different: they derive the selected row argument directly from the active panel.
+
+## Why a palette exists alongside panels
+
+Panels are optimized for browsing-and-acting-on-lists. The palette is optimized for "I know what I want to do". They share the subprocess bridge, so:
+
+- A palette run such as `scan skill --all` becomes `defenseclaw skill scan --all`.
+- A palette run such as `policy reload` becomes `defenseclaw-gateway policy reload`.
+- CI pipelines can copy the same CLI invocation and get the same command behavior.
+
+This three-way parity — palette, panel, CLI — is tested in `cli_parity_test.go`.
+
+## Closing the palette
+
+| Key | Behavior |
+|-----|----------|
+| `esc` | Close without running |
+| `enter` | Close after running (unless the entry keeps the palette open) |
+| `tab` | Complete the currently highlighted command name into the input bar |
+
+## Related
+
+- [Keybindings](/docs-site/tui/keybindings)
+- [Panels](/docs-site/tui/panels)
+- [CLI parity](/docs-site/tui/cli-parity)
+- [CLI overview](/docs-site/cli/index)
+
+---
+
+<!-- generated-from: internal/tui/palette.go, internal/tui/command.go, internal/tui/command_test.go, internal/tui/command_resolve_test.go -->

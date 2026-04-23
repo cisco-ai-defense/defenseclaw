@@ -1,0 +1,160 @@
+---
+title: "Notification webhooks"
+description: "Fan out high-severity DefenseClaw events to Slack, PagerDuty, Webex, or a generic HMAC-signed endpoint."
+order: 9
+---
+
+## Overview
+
+Webhooks are for **human notification** — chat and incident paging. They are intentionally separate from [observability sinks](/docs-site/first-setup/setup-observability) so that a noisy SIEM ingestion does not create duplicate alerting traffic. The `defenseclaw setup webhook` command group adds, lists, enables, disables, tests, and removes webhook endpoints. The sidecar's notification queue fans out one event per configured webhook and applies the configured severity floor.
+
+<Callout type="warning" title="SSRF protection is always on">
+  Every webhook URL is validated against the firewall allow-list before the first dispatch. Loopback, link-local, private RFC1918 ranges, and metadata IPs are rejected by default. Override with `firewall.webhook_allowlist` only when you have an internal chat server on RFC1918 that has been reviewed.
+</Callout>
+
+## Supported types
+
+| Type | Transport | Auth | Severity floor default |
+|------|-----------|------|------------------------|
+| `slack` | Slack incoming webhook URL | URL secret | `medium` |
+| `pagerduty` | PD Events API v2 | routing key env var | `high` |
+| `webex` | Webex REST API (bot token) | bot token env var + `--room-id` | `medium` |
+| `generic` | Operator-specified URL with HMAC-SHA256 signature | shared secret env var | `low` |
+
+## Commands
+
+| Subcommand | Purpose |
+|------------|---------|
+| `add <type>` | Register a webhook, probe it, and persist to config |
+| `list` | Print all webhooks with type, URL (redacted), severity floor, enabled state |
+| `show <name>` | Print one webhook's effective config |
+| `enable <name>` / `disable <name>` | Flip state without removing |
+| `remove <name>` | Delete (needs `--yes`) |
+| `test <name>` | Dispatch a synthetic event through the normal code path |
+
+## Non-interactive examples
+
+### Slack
+
+````bash
+defenseclaw setup webhook add slack \
+  --name soc-slack \
+  --url https://hooks.slack.com/services/T.../B.../XXX \
+  --min-severity medium \
+  --events verdict,scan,admission \
+  --non-interactive
+````
+
+### PagerDuty
+
+````bash
+export DEFENSECLAW_PD_ROUTING_KEY=<routing-key>
+defenseclaw setup webhook add pagerduty \
+  --name soc-page \
+  --secret-env DEFENSECLAW_PD_ROUTING_KEY \
+  --min-severity high \
+  --events verdict,admission \
+  --non-interactive
+````
+
+### Webex
+
+````bash
+export DEFENSECLAW_WEBEX_TOKEN=<bot-token>
+defenseclaw setup webhook add webex \
+  --name sec-channel \
+  --secret-env DEFENSECLAW_WEBEX_TOKEN \
+  --room-id Y2lzY29zcGFyazovL3VybjpURUFN... \
+  --min-severity medium \
+  --non-interactive
+````
+
+### Generic HMAC
+
+````bash
+export DEFENSECLAW_WEBHOOK_SECRET=<shared-secret>
+defenseclaw setup webhook add generic \
+  --name internal-bus \
+  --url https://bus.corp.example.com/hooks/defenseclaw \
+  --secret-env DEFENSECLAW_WEBHOOK_SECRET \
+  --min-severity low \
+  --events verdict,scan,admission,activity \
+  --non-interactive
+````
+
+Each outbound POST carries `X-DefenseClaw-Signature: sha256=<hex>` over the raw body so your receiver can verify integrity. Replay is mitigated by `X-DefenseClaw-Timestamp` (the receiver should reject events older than 5 minutes).
+
+## Event filtering
+
+| Event | Triggered by |
+|-------|--------------|
+| `verdict` | Every guardrail decision (observe: warn/block; action: block) |
+| `scan` | Scanner run with findings at/above severity floor |
+| `admission` | Policy admission decisions (skill / MCP / plugin gate) |
+| `activity` | Watcher events (quarantine, policy reload, circuit-breaker flips) |
+| `lifecycle` | Sidecar start/stop, sink failures, circuit-breaker transitions |
+
+Use `--events` to subscribe only to what the destination team cares about. Unsubscribed events are filtered before the HTTP round-trip so unused endpoints are effectively free.
+
+## Config shape
+
+````yaml
+# config.yaml excerpt
+webhooks:
+  - name: soc-slack
+    type: slack
+    url: https://hooks.slack.com/services/...
+    min_severity: medium
+    events: [verdict, scan, admission]
+    enabled: true
+    # secret_env omitted for slack (URL is the secret)
+  - name: soc-page
+    type: pagerduty
+    secret_env: DEFENSECLAW_PD_ROUTING_KEY
+    min_severity: high
+    events: [verdict, admission]
+    enabled: true
+````
+
+Rewrites are atomic (tmp+rename), token values never enter `config.yaml`, and re-running `add` with an existing `--name` updates in place.
+
+## Test behavior
+
+`setup webhook add` validates the URL and writes config. `setup webhook test <name>` dispatches a synthetic event matching the target API's contract:
+
+| Type | Probe |
+|------|-------|
+| Slack | `POST {url}` with `{"text":"DefenseClaw connectivity probe"}`, expect `200 ok` |
+| PagerDuty | `POST /v2/enqueue` with `event_action=trigger` and `dedup_key=defenseclaw-probe`, expect `202` |
+| Webex | Webex messages API with `roomId`/`markdown`, expect `200` |
+| Generic | `POST {url}` with `{"probe":true,...}` and HMAC signature; expect `2xx` |
+
+Failures from `test` leave the saved webhook entry in place so operators can fix endpoint-side configuration and test again.
+
+## Verify it worked
+
+````bash
+defenseclaw setup webhook list
+defenseclaw setup webhook test soc-slack
+# trigger a real verdict
+defenseclaw skill scan some-skill --path ~/.claw/skills/some-skill
+````
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `firewall rejected url: private address` | RFC1918 destination | Add host to `firewall.webhook_allowlist` after review |
+| Slack webhook returns 404 | Revoked or rotated URL | Create a new webhook in Slack; `setup webhook add slack` to replace |
+| PagerDuty receives no events | Routing key bound to wrong service | Update `DEFENSECLAW_PD_ROUTING_KEY` in `.env` and restart sidecar |
+| HMAC verification fails on receiver | Wrong secret or body reading issue | Compare `X-DefenseClaw-Signature` with `hmac_sha256(secret, raw_body)` |
+
+## Related
+
+- [Observability setup](/docs-site/first-setup/setup-observability)
+- [Firewall](/docs-site/firewall/index)
+- [Audit store](/docs-site/observability/audit-store)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup_webhook.py, cli/defenseclaw/webhooks/writer.py, cli/defenseclaw/webhooks/dispatch.py, cli/defenseclaw/webhooks/otel_metrics.py, internal/gateway/egress.go -->

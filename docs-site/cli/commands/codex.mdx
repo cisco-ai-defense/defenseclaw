@@ -1,0 +1,64 @@
+---
+title: "defenseclaw codex"
+description: "Codex hook runtime integration."
+order: 10
+---
+
+## Overview
+
+`defenseclaw codex` — Codex hook runtime integration.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:codex -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw codex [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `hook` | Run one DefenseClaw Codex hook evaluation. |
+
+### Description
+
+Codex hook runtime integration
+
+### `defenseclaw codex hook`
+
+Run one DefenseClaw Codex hook evaluation
+
+Run one DefenseClaw Codex hook evaluation.
+
+    This command is called by Codex. It must keep stdout machine-readable:
+    diagnostics go to stderr, and fail-open cases emit no output except for
+    Stop, where Codex expects JSON when output is present.
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--event` | text | — | — | no | Override hook_event_name when stdin is missing it. |
+
+<!-- END AUTOGEN:cli_py:codex -->
+
+## Usage
+
+_This section is hand-written by the `cli-commands` subagents — concrete
+invocation recipes, typical flags in context, and cross-links to related
+pages go here._
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_codex.py -->

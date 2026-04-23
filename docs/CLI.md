@@ -31,6 +31,7 @@ Use `<binary> --help` for any command.
 | `setup gateway` | Configure gateway connection settings |
 | `setup guardrail` | Configure LLM guardrail (mode, model, port, API key) |
 | `setup splunk` | Configure Splunk HEC / OTLP / local bridge integration |
+| `setup codex` | Install/status/remove Codex hooks and trigger Codex component scans |
 
 ### skill
 
@@ -108,6 +109,19 @@ at the matching profile. See
 | Command | Description |
 |---------|-------------|
 | `codeguard install-skill` | Install the CodeGuard skill into the OpenClaw workspace |
+
+### codex
+
+| Command | Description |
+|---------|-------------|
+| `codex hook` | Runtime hook bridge called by Codex; reads hook JSON from stdin and emits Codex-compatible JSON on stdout |
+
+`defenseclaw setup codex --non-interactive --enable-feature` installs
+DefenseClaw-owned entries into `~/.codex/hooks.json` by default. Use
+`--scope repo` for `<repo>/.codex/hooks.json`, `--status` to inspect the
+installation, `--disable` to remove only DefenseClaw-owned hooks, and
+`--scan-components` to ask the sidecar to scan Codex skills/plugins/MCP
+configuration now.
 
 ### upgrade
 

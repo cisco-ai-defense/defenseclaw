@@ -1,0 +1,59 @@
+---
+title: "Egress observer"
+description: "Non-blocking passive logging of every outbound request — allowed or denied — with bytes, latency, and decision attribution."
+order: 3
+---
+
+## Overview
+
+`internal/firewall.Observe` is a passive discovery helper. It runs `lsof` to inspect established outbound IPv4 TCP connections, reverse-resolves remote IPs when possible, scans skill source files for `http://` and `https://` domains, and builds a proposed `FirewallConfig`.
+
+The gateway has a separate egress event path for guardrail proxy passthrough decisions and the sidecar exposes `GET` and `POST /api/v1/network-egress` for persisted network egress records.
+
+## What is logged
+
+The observer result is an in-memory structure:
+
+| Field | Source |
+|-------|--------|
+| `Connections` | Established remote IPv4 connections from `lsof`. |
+| `SkillDomains` | Domains extracted from skill files with a URL regex. |
+| `ProposedConfig` | A deny-by-default config seeded from defaults plus observed domains/IPs. |
+| `WouldBlock` | Observed connections not covered by the proposed config. |
+
+Private, loopback, and link-local IPs are filtered out of observed connections before proposal generation.
+
+## Sidecar network-egress route
+
+```bash
+curl "http://127.0.0.1:18970/api/v1/network-egress?limit=50"
+```
+
+`GET /api/v1/network-egress` lists stored records. `POST /api/v1/network-egress` ingests one event from an external observer or runtime hook.
+
+## Proposed config
+
+```yaml
+version: "1.0"
+default_action: deny
+allowlist:
+  domains:
+    - api.openai.com
+    - github.com
+  ips: []
+  ports: [443, 80]
+```
+
+## OTel
+
+The current telemetry inventory includes `defenseclaw.egress.events`. The passive observer itself is a helper package; gateway egress event emission is handled in the gateway/proxy path.
+
+## Related
+
+- [Rule compiler](/docs-site/firewall/rules)
+- [SSRF protection](/docs-site/firewall/ssrf-protection)
+- [OTEL spec](/docs-site/observability/otel-spec)
+
+---
+
+<!-- generated-from: internal/firewall/observe.go, internal/firewall/config.go, internal/gateway/api.go, internal/gateway/proxy.go -->

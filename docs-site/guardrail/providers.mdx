@@ -1,0 +1,92 @@
+---
+title: "Providers"
+description: "LLM provider catalog and format adapter matrix for the DefenseClaw guardrail."
+order: 12
+---
+
+## Overview
+
+The guardrail proxy is a LiteLLM-compatible endpoint on `localhost:4000`.
+It fans out to upstream LLM providers using format adapters that shape
+the request body and parse the streaming response. The matrix below
+is sourced from [`internal/configs/providers.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/configs/providers.json)
+and the adapter files under `internal/gateway/`.
+
+<Callout type="warning" title="Prefer env vars for secrets">
+  `LLMConfig` prefers `api_key_env` and defaults the shared key name to
+  `DEFENSECLAW_LLM_KEY`. Inline `api_key` still exists as a fallback, and
+  config loading warns when plaintext secrets are present.
+</Callout>
+
+## Provider names and model prefixes
+
+The provider catalog below is the proxy-domain catalog from
+`internal/configs/providers.json`. Model routing uses the `provider/model`
+prefixes recognized by `internal/config/config.go::recognizedLLMProviders`.
+Most names line up directly, but some are intentionally different.
+
+| Catalog name | LLM model prefix |
+|--------------|------------------|
+| `together` | `together_ai/...` |
+| `vertex` | `vertex_ai/...` |
+| `openai-codex` | Provider-domain catalog entry only; not a recognized `llm.model` prefix. |
+
+Use the catalog names when reasoning about intercepted domains. Use the LLM
+prefixes when setting `llm.model`, `guardrail.llm.model`, or
+`guardrail.judge.llm.model`.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:providers:matrix -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+_15 providers mapped; adapters auto-select the right request/response format per route._
+
+| Provider | Domains | Profile ID | Env vars |
+|---|---|---|---|
+| `anthropic` | `api.anthropic.com` | `anthropic:default` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` |
+| `openrouter` | `openrouter.ai` | `openrouter:default` | `OPENROUTER_API_KEY` |
+| `openai` | `api.openai.com` | `openai:default` | `OPENAI_API_KEY` |
+| `openai-codex` | `chatgpt.com/backend-api` | — | — |
+| `groq` | `api.groq.com` | `groq:default` | `GROQ_API_KEY` |
+| `mistral` | `api.mistral.ai` | `mistral:default` | `MISTRAL_API_KEY` |
+| `cohere` | `api.cohere.com`, `api.cohere.ai` | `cohere:default` | `COHERE_API_KEY` |
+| `deepseek` | `api.deepseek.com` | `deepseek:default` | `DEEPSEEK_API_KEY` |
+| `perplexity` | `api.perplexity.ai` | `perplexity:default` | `PERPLEXITY_API_KEY` |
+| `together` | `api.together.xyz` | `together:default` | `TOGETHER_API_KEY` |
+| `xai` | `api.x.ai` | `xai:default` | `XAI_API_KEY` |
+| `vertex` | `aiplatform.googleapis.com` | — | — |
+| `azure` | `openai.azure.com` | `azure:default` | `AZURE_OPENAI_API_KEY` |
+| `gemini` | `generativelanguage.googleapis.com`, `googleapis.com/v1/projects` | `google:default` | `GOOGLE_API_KEY`, `GEMINI_API_KEY` |
+| `bedrock` | `bedrock-runtime.` | — | — |
+
+**Format adapters**
+
+These adapters shape requests and parse streaming responses. `internal/gateway/adapter_*.go`.
+
+| Adapter | Source |
+|---|---|
+| `anthropic` | `internal/gateway/adapter_anthropic.go` |
+| `bedrock_converse` | `internal/gateway/adapter_bedrock_converse.go` |
+| `gemini` | `internal/gateway/adapter_gemini.go` |
+| `ollama` | `internal/gateway/adapter_ollama.go` |
+| `openai_chat` | `internal/gateway/adapter_openai_chat.go` |
+| `openai_responses` | `internal/gateway/adapter_openai_responses.go` |
+
+<!-- END AUTOGEN:providers:matrix -->
+
+## Adding a new provider
+
+See [Developer › Architecture](/docs-site/developer/architecture#provider-pipeline)
+for the end-to-end flow, and [Developer › Plugin protocol](/docs-site/developer/plugin-protocol)
+if you need a custom injection point.
+
+## Related
+
+- [Guardrail overview](/docs-site/guardrail/index)
+- [Streaming](/docs-site/guardrail/streaming)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: internal/config/config.go, internal/configs/providers.json, internal/gateway/provider_bifrost.go, internal/gateway/adapter_anthropic.go, internal/gateway/adapter_gemini.go, internal/gateway/adapter_openai_chat.go, internal/gateway/adapter_openai_responses.go, internal/gateway/adapter_bedrock_converse.go, internal/gateway/adapter_ollama.go -->

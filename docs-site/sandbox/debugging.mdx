@@ -1,0 +1,67 @@
+---
+title: "Debugging"
+description: "Inspecting a stuck or failing sandbox invocation."
+order: 4
+---
+
+## Overview
+
+When standalone sandbox mode misbehaves, debug the service layer first: gateway status, systemd status, OpenShell availability, and policy reload errors.
+
+## Service status
+
+```bash
+defenseclaw-gateway sandbox status
+```
+
+The command runs `systemctl status --no-pager` for `openshell-sandbox.service` and `defenseclaw-gateway.service`.
+
+## journald
+
+```bash
+journalctl -u openshell-sandbox.service --since '10 min ago'
+journalctl -u defenseclaw-gateway.service --since '10 min ago'
+```
+
+Use journald for service startup failures, policy reload failures, and sidecar reconnect problems.
+
+## Network namespace checks
+
+```bash
+defenseclaw-gateway sandbox exec --netns ip addr
+defenseclaw-gateway sandbox exec --netns curl -I https://api.openai.com
+```
+
+`--netns` asks the gateway CLI to find an OpenShell namespace and run the command in it as the `sandbox` user. Without `--netns`, `sandbox exec` runs via `sudo -u sandbox` on the host filesystem.
+
+## Interactive shell
+
+```bash
+defenseclaw-gateway sandbox shell
+```
+
+This opens `sudo -u sandbox bash`.
+
+## Policy reload errors
+
+`internal/sandbox.OpenShell.ReloadPolicy` runs `openshell-sandbox policy reload`. On non-zero exit it records the OpenShell exit metric, emits a gateway error event when a writer is attached, and includes the tail of stderr in the returned error.
+
+## Common failures
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `openshell-sandbox not found` | Install the binary or set the configured binary path. |
+| `openshell.mode is not 'standalone'` | Run `defenseclaw sandbox setup` before gateway lifecycle commands. |
+| `no openshell namespace found` | The OpenShell service is not running, or namespace naming changed. |
+| `version mismatch` | `VerifyOpenShellBinary` found a version different from the configured required version. |
+| `policy reload` error | Inspect the stderr tail from the returned error and journald logs. |
+
+## Related
+
+- [Monitoring](/docs-site/sandbox/monitoring)
+- [Events](/docs-site/sandbox/events)
+- [sandbox CLI](/docs-site/cli/commands/sandbox)
+
+---
+
+<!-- generated-from: internal/cli/sandbox.go, internal/sandbox/openshell.go, internal/sandbox/install.go, cli/defenseclaw/commands/cmd_sandbox.py, cli/defenseclaw/commands/cmd_setup_sandbox.py -->

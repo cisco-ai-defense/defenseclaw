@@ -1,0 +1,166 @@
+---
+title: "Airgapped install"
+description: "Install, run, and update DefenseClaw without internet access."
+order: 8
+---
+
+## Problem
+
+You're deploying into an airgapped network. The `curl | bash` installer needs internet, the Python scanner SDKs pull from PyPI, the OTel exporters want to reach SaaS endpoints. None of that is available to you.
+
+## Solution
+
+DefenseClaw is airgap-friendly by design: binaries are statically linked, scanners are optional, and the default sinks write to local disk. This is the operator checklist.
+
+### Step 1: Build artifacts on an internet host
+
+````bash
+# on an internet-connected host
+make dist
+# artifacts land in dist/
+````
+
+Copy into the airgap:
+
+- `dist/defenseclaw-*.whl`
+- `dist/defenseclaw-gateway-linux-amd64` or the platform binary you need
+- `dist/defenseclaw-plugin-*.tar.gz`
+- `dist/sandbox/` if you use OpenShell sandbox mode
+- `scripts/install.sh`
+- SHA-256 sums
+
+Verify before transfer:
+
+````bash
+cd dist
+shasum -a 256 -c checksums.txt
+````
+
+### Step 2: Stage package dependencies
+
+The local installer path still needs `uv` and any Python dependencies not already available to the target. Decide before you cross the airgap:
+
+| Need | What to stage |
+|------|---------------|
+| DefenseClaw CLI and gateway only | `dist/`, `scripts/install.sh`, `uv` available on target |
+| Optional scanner SDKs | wheelhouse for `skill-scanner` and `mcpscanner` |
+| Local Splunk or OTel lab stack | Docker images and the bundled bridge assets from the wheel |
+| Sandbox | `dist/sandbox/` and host packages required by OpenShell |
+
+If you want the scanner SDKs available, mirror their Python packages on the internet host:
+
+````bash
+# on internet host
+pip download cisco-ai-skill-scanner cisco-ai-mcp-scanner -d /tmp/defenseclaw-wheels
+````
+
+Transfer `/tmp/defenseclaw-wheels` into the airgap and install those wheels into DefenseClaw's venv after the local installer creates it.
+
+### Step 3: Install on the target
+
+````bash
+chmod +x scripts/install.sh
+./scripts/install.sh --local ./dist
+uv pip install \
+  --python ~/.defenseclaw/.venv/bin/python \
+  --no-index \
+  --find-links=/path/to/wheels \
+  cisco-ai-skill-scanner cisco-ai-mcp-scanner
+defenseclaw init --skip-install   # --skip-install avoids PyPI probes
+````
+
+The `--local` installer path reads artifacts from `dist/` instead of GitHub releases. The `--skip-install` flag tells `init` not to attempt scanner SDK auto-install. If you did not mirror scanner wheels, skip the `uv pip install` command; the dependent scanners remain inactive and the sidecar runs without them.
+
+### Step 4: Point at local-only sinks
+
+Disable SaaS sinks and rely on the local SQLite audit DB at `~/.defenseclaw/audit.db` plus `~/.defenseclaw/gateway.jsonl`.
+
+Or forward to an internal Splunk/OTLP endpoint:
+
+````bash
+defenseclaw setup observability add splunk-hec \
+  --host splunk.internal \
+  --port 8088 \
+  --token "$HEC_TOKEN" \
+  --index defenseclaw \
+  --name splunk-internal \
+  --verify-tls \
+  --non-interactive
+````
+
+Restart after sink changes:
+
+````bash
+defenseclaw-gateway restart
+defenseclaw setup observability test splunk-internal
+````
+
+### Step 5: Disable the LLM judge (or use an internal one)
+
+The default judge config points at an external LLM. In airgap, either:
+
+- Disable judge calls by using `defenseclaw setup guardrail --detection-strategy regex_only --non-interactive`.
+- Point at an internal judge with `--judge-api-base`, `--judge-model`, and `--judge-api-key-env`, then keep `--detection-strategy regex_judge`.
+
+### Step 6: Disable outbound DefenseClaw updates
+
+DefenseClaw has no auto-update by default. Keep hosts airgapped by avoiding installer scripts that fetch from GitHub or PyPI and by mirroring every wheel or release archive explicitly.
+
+## Emergency checks
+
+| Symptom | Check | Fix |
+|---------|-------|-----|
+| Installer tries the network | `./scripts/install.sh --local ./dist` was not used, or `uv` is missing | Stage `uv` or run from an environment with `uv` already installed |
+| `init` tries scanner installs | `--skip-install` omitted | Re-run `defenseclaw init --skip-install` |
+| Splunk test fails | `defenseclaw setup observability test splunk-internal` | Fix token, index, DNS, or cert chain |
+| Judge calls time out | `defenseclaw doctor` | Use `regex_only` or configure an internal judge endpoint |
+| Policy reload fails | `defenseclaw-gateway policy validate` | Restore the previous `policies/rego/data.json` |
+
+## Upgrades
+
+Same flow: download on an internet host, transport, install:
+
+````bash
+make dist
+# transfer dist/ and scripts/install.sh into the airgap
+./scripts/install.sh --local ./dist
+defenseclaw-gateway restart
+````
+
+The on-disk state (`~/.defenseclaw/`) is preserved across upgrades — policies, audit DB, overlays all carry over.
+
+## Rollback
+
+Keep the previous `dist/` bundle until verification passes. To roll back, reinstall the previous local bundle and restart:
+
+````bash
+./scripts/install.sh --local ./dist-previous
+defenseclaw-gateway restart
+defenseclaw doctor
+````
+
+## Verification
+
+````bash
+defenseclaw doctor
+defenseclaw config validate
+defenseclaw-gateway status
+````
+
+Expect passes on binary paths, config, audit DB, device key, scanner import if you mirrored wheels, and sink connectivity if you configured an internal sink. Expect the external judge check to fail unless you wired an internal judge or switched to `regex_only`.
+
+## Caveats
+
+- Time sync matters. Airgapped hosts often drift; if your sinks reject old timestamps, you'll see `sink.rejected` events. Run `chrony` or `ntp` against an internal time source.
+- Monitor CVE disclosures out-of-band. The curl installer has no phone-home, which means you're responsible for noticing when to upgrade.
+- Scanner SDK versions must match the sidecar. Re-mirror wheels whenever you upgrade DefenseClaw.
+
+## Related
+
+- [Install methods](/docs-site/installation/index)
+- [Build from source](/docs-site/installation/build-from-source)
+- [Setup observability](/docs-site/first-setup/setup-observability)
+
+---
+
+<!-- generated-from: scripts/install.sh, scripts/install-dev.sh, Makefile, cli/defenseclaw/commands/cmd_init.py, cli/defenseclaw/commands/cmd_setup.py, cli/defenseclaw/commands/cmd_setup_observability.py -->

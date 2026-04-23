@@ -160,6 +160,7 @@ type Config struct {
 	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
 	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
 	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	Codex          CodexConfig          `mapstructure:"codex"            yaml:"codex"`
 	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
 	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
@@ -170,6 +171,20 @@ type Config struct {
 	// detected at Load() and emit a hard migration error.
 	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+}
+
+// CodexConfig controls the Codex hook bridge installed by
+// `defenseclaw setup codex`. The bridge itself stays thin: policy,
+// scanning, and telemetry decisions are handled by the sidecar.
+type CodexConfig struct {
+	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
+	Mode                         string   `mapstructure:"mode"                            yaml:"mode"`
+	InstallScope                 string   `mapstructure:"install_scope"                   yaml:"install_scope"`
+	FailClosed                   bool     `mapstructure:"fail_closed"                     yaml:"fail_closed"`
+	ScanOnSessionStart           bool     `mapstructure:"scan_on_session_start"           yaml:"scan_on_session_start"`
+	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop"`
+	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes"`
+	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -1762,6 +1777,15 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.enabled", true)
 	viper.SetDefault("gateway.watchdog.interval", 30)
 	viper.SetDefault("gateway.watchdog.debounce", 2)
+
+	viper.SetDefault("codex.enabled", true)
+	viper.SetDefault("codex.mode", "inherit")
+	viper.SetDefault("codex.install_scope", "user")
+	viper.SetDefault("codex.fail_closed", false)
+	viper.SetDefault("codex.scan_on_session_start", true)
+	viper.SetDefault("codex.scan_on_stop", true)
+	viper.SetDefault("codex.component_scan_interval_minutes", 60)
+	viper.SetDefault("codex.scan_paths", []string{})
 
 	viper.SetDefault("otel.enabled", false)
 	viper.SetDefault("otel.protocol", "")

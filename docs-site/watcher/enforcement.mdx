@@ -1,0 +1,54 @@
+---
+title: "Enforcement"
+description: "Quarantine, restore, skip-reasons, and how the watcher applies admission decisions on disk."
+order: 5
+---
+
+## Overview
+
+When the admission gate returns a blocking or rejected decision, the watcher can apply file and runtime side effects. The exact behavior depends on the target type and on `gateway.watcher.*.take_action`.
+
+## Quarantine mechanics
+
+For skills and plugins, quarantine copies the artifact into the configured quarantine directory and removes the original path:
+
+| Target | Quarantine path |
+|--------|-----------------|
+| Skill | `quarantine_dir/skills/NAME` |
+| Plugin | `quarantine_dir/plugins/NAME` |
+
+The Go enforcers use copy-then-remove, not an atomic rename. If copy succeeds but removal fails, the code returns the quarantine destination along with the removal error.
+
+For MCPs, enforcement edits the OpenShell policy through `MCPEnforcer`: blocked endpoints are added to `denied_endpoints`, allowed endpoints are moved to `allowed_endpoints`, and a running OpenShell process gets `policy reload`.
+
+## Restore
+
+```bash
+defenseclaw skill restore example-skill
+defenseclaw plugin restore example-plugin --path ~/.defenseclaw/plugins/example-plugin
+```
+
+`restore` uses the source path recorded in the policy/action store unless `--path` is supplied. The Python CLI clears the quarantine state after a successful restore.
+
+## Block and allow state
+
+List state is managed by the existing CLI commands:
+
+```bash
+defenseclaw skill block example-skill --reason "policy violation"
+defenseclaw skill allow example-skill --reason "reviewed exception"
+defenseclaw plugin block example-plugin --reason "policy violation"
+defenseclaw mcp block https://mcp.example.com/sse --reason "policy violation"
+```
+
+These commands are the supported operator overrides. There are no `--force` or `--reason` flags on `skill restore`; use `--path` only when the recorded source path is missing or intentionally overridden.
+
+## Related
+
+- [Admission gate](/docs-site/watcher/admission-gate)
+- [Drift detection](/docs-site/watcher/drift-detection)
+- [skill CLI](/docs-site/cli/commands/skill)
+
+---
+
+<!-- generated-from: internal/watcher/watcher.go, internal/enforce/skill_enforcer.go, internal/enforce/plugin_enforcer.go, internal/enforce/mcp_enforcer.go, cli/defenseclaw/commands/cmd_skill.py, cli/defenseclaw/commands/cmd_plugin.py, cli/defenseclaw/commands/cmd_mcp.py -->

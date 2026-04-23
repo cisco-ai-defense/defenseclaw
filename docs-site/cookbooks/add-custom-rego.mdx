@@ -1,0 +1,133 @@
+---
+title: "Add a custom Rego policy"
+description: "Add an operator overlay Rego module that refines admission or guardrail decisions without touching the shipped policies."
+order: 5
+---
+
+## Problem
+
+You need a decision that isn't expressible in YAML rules or the default actions matrix. Examples:
+
+- Different severity thresholds per tenant.
+- Different block conditions during business hours vs off-hours (though we recommend against time-based policy, sometimes you need it).
+- Additional safety checks based on `data.json` operator overlays.
+
+## Solution
+
+Write a Rego module, drop it in `~/.defenseclaw/policy/rego/`, validate it, then ask the running gateway to reload policy.
+
+### Example: per-tenant strict mode
+
+````rego
+# ~/.defenseclaw/policy/rego/tenant_overlay.rego
+package guardrail.overlay
+
+import future.keywords.if
+import future.keywords.in
+
+# Tenants that get the strict treatment
+strict_tenants := {"finance", "legal", "hr"}
+
+# If the session is a strict tenant and severity >= MEDIUM, upgrade to block
+action_override[action] if {
+  input.context.tenant in strict_tenants
+  input.verdict.severity in {"MEDIUM", "HIGH", "CRITICAL"}
+  action := "block"
+}
+````
+
+### Example: admission with data.json overlay
+
+````rego
+# ~/.defenseclaw/policy/rego/admission_overlay.rego
+package admission.overlay
+
+import data.trust.allowlist
+
+# Allow anything in the operator trust list
+allow if {
+  input.kind == "skill"
+  input.fingerprint in allowlist.skills
+}
+````
+
+With `data.json`:
+
+````json
+{
+  "trust": {
+    "allowlist": {
+      "skills": ["sha256:abc...", "sha256:def..."]
+    }
+  }
+}
+````
+
+### Reload and test
+
+````bash
+defenseclaw policy validate
+defenseclaw policy test
+defenseclaw-gateway policy reload
+````
+
+`defenseclaw policy validate` compiles the Rego tree and validates `data.json`; `defenseclaw policy test` runs Rego tests; `defenseclaw-gateway policy reload` tells the running sidecar to swap in the updated policy snapshot.
+
+### Testing before reload
+
+Write a Rego test next to the module:
+
+````rego
+# ~/.defenseclaw/policy/rego/tenant_overlay_test.rego
+package guardrail.overlay_test
+
+import data.guardrail.overlay
+
+test_finance_medium_blocks if {
+  overlay.action_override["block"] with input as {
+    "context": {"tenant": "finance"},
+    "verdict": {"severity": "MEDIUM"}
+  }
+}
+
+test_engineering_medium_not_blocked if {
+  count(overlay.action_override) == 0 with input as {
+    "context": {"tenant": "engineering"},
+    "verdict": {"severity": "MEDIUM"}
+  }
+}
+````
+
+Run the tests:
+
+````bash
+defenseclaw policy test
+# PASS  ~/.defenseclaw/policy/rego/tenant_overlay.rego
+# PASS  tenant_overlay_test.rego
+````
+
+### Where overlays are composed
+
+Operator overlays are merged into the compiled snapshot after the shipped defaults. Package naming matters: for the overlay to participate in a decision point, either:
+
+- Add to an existing package (`package guardrail`) to augment, or
+- Define in `package <domain>.overlay` — the shipped policies import `data.<domain>.overlay` and merge its outputs.
+
+See [Writing Rego](/docs-site/policy/writing-rego) for the full list of overlay hooks.
+
+## Caveats
+
+- Operator overlays can **tighten** decisions (turn `allow` into `block`) but cannot **loosen** them (turn `block` into `allow`) for security-critical packages. Admission allow-lists are the exception — they're specifically a loosening tool.
+- Every overlay module must have an associated `_test.rego` file. `policy test` fails if an overlay has no tests.
+- Don't rely on wall-clock time in policy. If you must, centralize in one helper and test with injected time.
+
+## Related
+
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [data.json](/docs-site/policy/data-json)
+- [Testing policies](/docs-site/policy/testing)
+- [Hot reload](/docs-site/policy/hot-reload)
+
+---
+
+<!-- generated-from: policies/rego/admission.rego, policies/rego/data.json, cli/defenseclaw/commands/cmd_policy.py -->

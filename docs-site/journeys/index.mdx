@@ -1,0 +1,43 @@
+---
+title: "User journeys"
+description: "Role-based paths through DefenseClaw setup, governance, and developer workflows."
+order: 1
+---
+
+## Overview
+
+Use these journeys when you know your job but not yet the right page. Each path points into the same source-backed reference docs; the journey pages do not replace command references, policy specs, or generated API tables.
+
+<Callout type="tip" title="Pick the closest role">
+  If your team owns more than one responsibility, start with the role that matches today's task. Platform engineers usually start with installation and sidecar health, security teams with guardrail and policy, and developers with scanners and extension contracts.
+</Callout>
+
+## Choose a path
+
+| Role | You are trying to | Start here | First verification |
+|------|-------------------|------------|--------------------|
+| Platform engineer | Install, configure, run, and expose DefenseClaw safely. | [Platform engineer](/docs-site/journeys/platform-engineer) | `defenseclaw doctor --json-output` and `defenseclaw-gateway status` |
+| Security team | Roll out guardrails, policy, audit, alerting, and incident response. | [Security team](/docs-site/journeys/security-team) | `defenseclaw policy test --rego-dir policies/rego --verbose` |
+| Developer | Scan artifacts, wire integrations, and extend DefenseClaw safely. | [Developer](/docs-site/journeys/developer) | `make cli-test` or the narrow scanner/plugin test you changed |
+
+## How to use these pages
+
+| Section | What to do |
+|---------|------------|
+| Goal | Confirm the journey matches your responsibility. |
+| Before you start | Check prerequisites and links to source-backed setup pages. |
+| First 30 minutes | Run the smallest safe workflow that proves the path works. |
+| Production hardening | Move from lab success to repeatable operations. |
+| Verify it worked | Use real commands and endpoints to prove the result. |
+| Where to go next | Jump into the deeper reference pages. |
+
+## Related
+
+- [DefenseClaw overview](/docs-site/index)
+- [First setup](/docs-site/first-setup/index)
+- [CLI overview](/docs-site/cli/index)
+- [Troubleshooting](/docs-site/reference/troubleshooting)
+
+---
+
+<!-- generated-from: README.md, docs-site/_meta/toc.json, docs-site/STYLE.md, cli/defenseclaw/main.py, internal/cli/root.go -->

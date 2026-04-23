@@ -1,0 +1,72 @@
+---
+title: "Curl installer"
+description: "Install DefenseClaw from GitHub releases using scripts/install.sh and optional flags."
+order: 3
+---
+
+## Overview
+
+`scripts/install.sh` downloads **release** artifacts (gateway tarball, Python wheel, optional plugin tarball), creates `~/.defenseclaw/.venv` with `uv`, symlinks `defenseclaw` into `~/.local/bin`, and optionally installs or upgrades **OpenClaw**. It does **not** require Go, Node, or git on the target machine—only `bash`, `curl`, and a usable Python (or `uv` to fetch Python).
+
+<Callout type="danger">
+  **Do not pipe curl directly into bash without trusting the source.** Fetch the script, read it, then run a local copy: `curl -LsSf …/install.sh -o install.sh && less install.sh && bash install.sh`. The script wraps logic in `main()` so a truncated download does not execute a partial body mid-network failure.
+</Callout>
+
+## Walkthrough
+
+1. **Download or reference the script** from the raw GitHub URL for your branch/tag, or use a known-good copy from a release tarball.
+2. **Run** from bash. Typical one-liner (after review):  
+   `curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash`
+3. **Platform check** — macOS or Linux; amd64 or arm64. Others exit with an error.
+4. **Dependencies** — ensures `uv` (installs via Astral installer if missing), then Python 3.10+ (existing interpreter or `uv python install 3.12`).
+5. **Version** — resolves `Makefile` env or GitHub `releases/latest`, unless `--local ./dist` is set.
+6. **Artifacts** — gateway tarball extracted to `defenseclaw-gateway` under `~/.local/bin`; wheel installed into `~/.defenseclaw/.venv`; plugin tarball extracted to `~/.defenseclaw/extensions/defenseclaw/` when present.
+7. **OpenClaw** — interactive prompt unless `-y`; may run `npm install -g openclaw@2026.3.24` or the OpenClaw installer script.
+8. **Optional sandbox (Linux)** — `--sandbox` runs `scripts/install-openshell-sandbox.sh` or downloads it from `main`.
+9. **PATH** — prints `export PATH="$HOME/.local/bin:$PATH"` hints when missing.
+10. **Next step** — suggests `defenseclaw init --enable-guardrail` (or `defenseclaw init --sandbox` on Linux when sandbox was requested).
+
+## Flags and non-interactive use
+
+| Flag | Effect |
+|------|--------|
+| `--yes` / `-y` | Skip confirmation prompts (`YES_MODE`) |
+| `--local <dir>` | Install from a local `dist/` layout (no GitHub download); checksum verification skipped |
+| `--sandbox` | After main install, install openshell-sandbox on **Linux** only |
+| `--quickstart` | Run `defenseclaw quickstart --non-interactive --yes` from the venv binary |
+| `--quickstart-mode observe\|action` | Sets `--mode` on quickstart; implies `--quickstart` |
+| `--help` / `-h` | Print usage |
+
+Pass flags after `bash -s --` when piping:  
+`curl -LsSf …/install.sh | bash -s -- --yes --quickstart`
+
+## Environment variables (install.sh)
+
+| Variable | Role |
+|----------|------|
+| `DEFENSECLAW_HOME` | Data home (default `~/.defenseclaw`); venv is `$DEFENSECLAW_HOME/.venv` |
+| `Makefile` | Pin a release version instead of latest |
+| `OPENSHELL_Makefile` | Passed through to the sandbox installer (default in installer script is separate) |
+
+Binaries are installed to **`INSTALL_DIR="${HOME}/.local/bin"`** inside the script; there is **no** `DEFENSECLAW_INSTALL_DIR` read by `install.sh`. That variable is used by **`scripts/setup-llm.sh`** (invoked from `make llm-setup`) to locate `defenseclaw` when resolving the binary—defaulting to `$HOME/.local/bin`. If you relocate symlinks, set `DEFENSECLAW_INSTALL_DIR` for LLM setup consistency, or use `DEFENSECLAW_BIN` as documented in that script.
+
+## Verification
+
+After install:
+
+```bash
+defenseclaw --help
+defenseclaw-gateway --version
+```
+
+Then run [defenseclaw doctor](/docs-site/cli/commands/doctor) once `defenseclaw init` has created config (see [Verify install](/docs-site/installation/verify-install)).
+
+## Related
+
+- [Make install](/docs-site/installation/make-install)
+- [Verify install](/docs-site/installation/verify-install)
+- [OpenShell sandbox setup](/docs-site/first-setup/setup-sandbox)
+
+---
+
+<!-- generated-from: scripts/install.sh, scripts/setup-llm.sh -->

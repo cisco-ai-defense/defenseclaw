@@ -1,0 +1,88 @@
+---
+title: "Plugin scanner"
+description: "Static + dynamic analysis of OpenClaw plugins (JavaScript/TypeScript) before they load into the agent runtime."
+order: 4
+---
+
+## Overview
+
+OpenClaw plugins live in `~/.openclaw/plugins/` and load at agent startup. A malicious plugin can intercept `fetch`, read the filesystem, or patch global prototypes. The plugin scanner inspects every plugin directory before OpenClaw loads it.
+
+## What it scans
+
+- `package.json` — declared permissions, entry points, dependencies.
+- Entry JS/TS file — AST analysis for dangerous APIs.
+- Dependency tree — transitive `node_modules`, flagged against an advisory database.
+- Signatures — `package.json#signed_by` or detached signature files.
+
+## Analyzers
+
+| Analyzer | Purpose |
+|----------|---------|
+| `manifest_integrity` | Validate `package.json`, confirm declared permissions match observed code |
+| `dangerous_apis` | Flag `eval`, `Function`, `child_process.exec`, dynamic `require`, prototype mutation |
+| `dependency_audit` | `npm audit`-equivalent run; high-severity advisories fail the scan |
+| `network_usage` | Extract every hostname the plugin contacts; diff against the allow-list |
+| `signature_verification` | Verify detached signatures against trusted signer keys |
+
+## Configuration
+
+```yaml
+scanners:
+  plugin:
+    enabled: true
+    profile: balanced
+    analyzers:
+      manifest_integrity: true
+      dangerous_apis: true
+      dependency_audit: true
+      network_usage: true
+      signature_verification: true
+    dangerous_apis_allowlist:
+      # per-plugin allowances (rare; require signed manifest)
+      - plugin: "@internal/power-user-kit"
+        allow: ["child_process.exec"]
+```
+
+## Sandboxed dynamic analysis (opt-in)
+
+For high-stakes installs, you can opt into a sandbox run:
+
+```yaml
+scanners:
+  plugin:
+    dynamic_analysis: true
+    dynamic_timeout_ms: 5000
+```
+
+The scanner loads the plugin inside OpenShell sandbox with `fetch` replaced by a recorder. Every outbound request is logged; any request outside the declared allow-list fails the scan. Dynamic analysis is slower (seconds per plugin) — only enable for sensitive deployments.
+
+## CLI
+
+```bash
+defenseclaw plugin scan ./plugins/my-plugin
+defenseclaw plugin list --json
+defenseclaw plugin quarantine <name>
+```
+
+See [plugin CLI](/docs-site/cli/commands/plugin).
+
+## Findings
+
+| Prefix | Example |
+|--------|---------|
+| `code:*` | `code:dangerous_api` (eval used), `code:dynamic_require` |
+| `deps:*` | `deps:cve-high` (high-sev CVE in transitive dep) |
+| `manifest:*` | `manifest:missing_signer`, `manifest:excess_permissions` |
+| `network:*` | `network:unexpected_egress` (hostname outside allow-list) |
+| `signature:*` | `signature:invalid`, `signature:untrusted_signer` |
+
+## Related
+
+- [Skill scanner](/docs-site/scanners/skill-scanner)
+- [OpenShell sandbox](/docs-site/sandbox/index)
+- [plugin CLI](/docs-site/cli/commands/plugin)
+
+---
+
+<!-- generated-from: internal/scanner/plugin.go, cli/defenseclaw/commands/cmd_plugin.py -->

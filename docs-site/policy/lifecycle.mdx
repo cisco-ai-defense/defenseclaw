@@ -1,0 +1,73 @@
+---
+title: "Lifecycle"
+description: "How Rego policy data loads, validates, reloads, and serves decisions."
+order: 2
+---
+
+## Overview
+
+Every Rego policy source goes through four lifecycle phases: **resolve → load → compile → serve**. The Go engine owns runtime evaluation; the Python CLI owns authoring helpers such as `policy create`, `policy validate`, `policy test`, and `policy edit`.
+
+## Resolve
+
+`internal/policy/engine.go::New` accepts a policy directory. If that directory does not contain Rego modules but has a `rego/` child, `resolveRegoDir` uses the child directory instead. This supports both layouts:
+
+| Layout | Loaded path |
+|--------|-------------|
+| `policies/rego/*.rego` | `policies/rego` |
+| `~/.defenseclaw/policy/rego/*.rego` | `~/.defenseclaw/policy/rego` |
+
+## Load
+
+The engine reads `data.json` into an in-memory OPA store and reads every `*.rego` module in the resolved directory. A bad `data.json` parse or unreadable policy directory fails load before the engine is returned.
+
+## Compile
+
+`internal/policy/engine.go::Compile` parses every Rego module with OPA's AST parser and compiles the module set. It does not run Rego tests. Use [Testing policies](/docs-site/policy/testing) for the `opa test` path exposed by `defenseclaw policy test`.
+
+The Python validation helper adds a lighter data check before compile:
+
+```bash
+defenseclaw policy validate --rego-dir policies/rego
+```
+
+## Serve
+
+Evaluation methods share the same compiled store:
+
+| Method | Rego package |
+|--------|--------------|
+| `Evaluate` | `data.defenseclaw.admission` |
+| `EvaluateGuardrail` | `data.defenseclaw.guardrail` |
+| `EvaluateFirewall` | `data.defenseclaw.firewall` |
+| `EvaluateSandbox` | `data.defenseclaw.sandbox` |
+| `EvaluateAudit` | `data.defenseclaw.audit` |
+| `EvaluateSkillActions` | `data.defenseclaw.skill_actions` |
+
+The sidecar exposes dry-run policy routes such as `POST /policy/evaluate` and `POST /policy/evaluate/firewall`. It does not expose a versioned policy-status route in the current route table.
+
+## Reload command
+
+```bash
+defenseclaw-gateway policy reload
+```
+
+The gateway command tells the sidecar to call `POST /policy/reload`. See [Hot reload](/docs-site/policy/hot-reload) for the request path and failure behavior.
+
+## Authoring lifecycle
+
+1. Create or edit policy data with `defenseclaw policy create` or `defenseclaw policy edit ...`.
+2. Validate with `defenseclaw policy validate`.
+3. Test with `defenseclaw policy test`.
+4. Reload a running sidecar with `defenseclaw-gateway policy reload`.
+
+## Related
+
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [data.json](/docs-site/policy/data-json)
+- [Hot reload](/docs-site/policy/hot-reload)
+- [policy CLI](/docs-site/cli/commands/policy)
+
+---
+
+<!-- generated-from: internal/policy/engine.go, internal/gateway/api.go, internal/cli/policy.go, cli/defenseclaw/commands/cmd_policy.py -->

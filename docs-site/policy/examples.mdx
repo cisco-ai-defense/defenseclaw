@@ -1,0 +1,156 @@
+---
+title: "Examples"
+description: "A gallery of policy recipes: trust lists, per-tenant overrides, enforcement stepdowns, and compliance gates."
+order: 9
+---
+
+## Overview
+
+Concrete, copy-pasteable examples for the most-requested policy shapes. Every example is drawn from real deployments.
+
+## 1. Allow an internal signer through HIGH findings
+
+`~/.defenseclaw/policy/data.json`:
+
+```json
+{
+  "trust": {
+    "signers": {
+      "internal-sre-bot": { "auto_allow_up_to": "HIGH" }
+    }
+  }
+}
+```
+
+Signed artifacts from the SRE bot install with up to HIGH findings. CRITICAL still blocks — there is no override for CRITICAL.
+
+## 2. Stricter guardrail on production, looser on dev
+
+Two config files, one tenant label:
+
+```yaml
+# config.production.yaml
+guardrail:
+  profile: strict
+  mode: action
+  strategy:
+    prompt: regex_judge
+    completion: regex_judge
+  action_threshold:
+    prompt: MEDIUM
+    completion: HIGH
+```
+
+```yaml
+# config.development.yaml
+guardrail:
+  profile: default
+  mode: observe
+```
+
+Swap by starting the gateway with `--config config.production.yaml`.
+
+## 3. Block installs from unvetted origins
+
+`~/.defenseclaw/policy/rego/admission_origin.rego`:
+
+```rego
+package admission
+
+decision = {"action": "block", "reason": sprintf("origin %v is not on the allow-list", [input.trust.origin])} {
+  not data.trust.origins[input.trust.origin]
+}
+```
+
+Combined with `data.json`:
+
+```json
+{
+  "trust": {
+    "origins": {
+      "internal-registry": { "auto_allow_up_to": "LOW" },
+      "cisco-ai-defense":  { "auto_allow_up_to": "MEDIUM" }
+    }
+  }
+}
+```
+
+Any artifact with a different `trust.origin` blocks at admission.
+
+## 4. Custom severity for PII in regulated regions
+
+```rego
+package guardrail
+
+action = "block" {
+  input.direction == "completion"
+  some finding in input.findings
+  startswith(finding, "pii:")
+  data.tenant.region in {"EU", "CA"}
+}
+```
+
+Regulated regions block PII in completion regardless of the global `action_threshold`.
+
+## 5. Warn-only mode for new rule roll-out
+
+When introducing a new rule, label it and intercept in `audit.rego`:
+
+```rego
+package audit
+
+severity_override = "LOW" {
+  input.rule_id == "SEC-NEW-EXPERIMENT"
+}
+```
+
+The rule still fires, findings appear in the audit store, but severity is demoted so no action is taken. After a week of observation remove the override.
+
+## 6. Tenant-scoped suppressions
+
+Suppressions live in `suppressions.yaml` but often you want one per tenant. Use a custom profile:
+
+```text
+~/.defenseclaw/policy/guardrail/acme/
+  rules/
+    (symlink to default/rules/)
+  suppressions.yaml   # acme-specific
+```
+
+```yaml
+guardrail:
+  profile: acme
+```
+
+## 7. Compliance attestation event
+
+Emit a signed attestation every time a high-severity verdict is suppressed:
+
+```rego
+package audit
+
+emit_attestation[msg] {
+  input.suppressed
+  input.severity in {"HIGH", "CRITICAL"}
+  msg := {
+    "event": "suppression.attestation",
+    "rule_id": input.rule_id,
+    "suppressed_by": input.suppressed_by,
+    "tenant": input.tenant,
+    "timestamp": time.now_ns()
+  }
+}
+```
+
+`audit.rego` fan-out rules pick up `emit_attestation` and route it to the audit store.
+
+## Related
+
+- [Writing Rego](/docs-site/policy/writing-rego)
+- [data.json](/docs-site/policy/data-json)
+- [Actions matrix](/docs-site/policy/actions-matrix)
+- [Cookbooks](/docs-site/cookbooks/add-custom-rego)
+
+---
+
+<!-- generated-from: policies/rego/, policies/rego/data.json -->

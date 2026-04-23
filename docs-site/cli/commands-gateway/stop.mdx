@@ -1,0 +1,44 @@
+---
+title: "defenseclaw-gateway stop"
+description: "Stop the running gateway sidecar daemon."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway stop` — Stop the running gateway sidecar daemon.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:stop -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+stop
+```
+
+### Description
+
+Stop the DefenseClaw gateway sidecar daemon.
+
+Sends SIGTERM for graceful shutdown, then SIGKILL if needed.
+
+<!-- END AUTOGEN:cli_go:stop -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/daemon.go -->

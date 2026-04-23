@@ -1,0 +1,139 @@
+---
+title: "Observability"
+description: "Attach DefenseClaw to your SIEM and APM: Splunk, Datadog, Honeycomb, Grafana Cloud, New Relic, or a generic OTLP / HTTP JSONL sink."
+order: 10
+---
+
+## Overview
+
+`defenseclaw setup observability` is the unified front door for every **audit sink** and every **OpenTelemetry exporter** DefenseClaw supports. It reads presets out of `cli/defenseclaw/observability/presets.py`, validates operator input, and persists the result into `config.yaml` under the runtime sink/exporter blocks used by the gateway.
+
+<Callout type="info">
+  Observability sinks ship findings, verdicts, scans, and sidecar metrics. They are distinct from **notification** webhooks (Slack / PagerDuty / Webex / generic HMAC) — for those use [setup webhook](/docs-site/first-setup/setup-webhook).
+</Callout>
+
+## Command group
+
+| Subcommand | Purpose |
+|------------|---------|
+| `add <preset>` | Attach a new sink or exporter |
+| `list` | Print all configured sinks with live status |
+| `enable <name>` / `disable <name>` | Flip a sink without removing it |
+| `remove <name>` | Permanently delete a sink; `--yes` skips confirmation |
+| `test <name>` | Re-run the connectivity probe against an existing sink |
+| `migrate-splunk` | Migrate a legacy `audit.splunk.*` config into the new `audit.sinks[]` shape |
+
+## Supported presets
+
+| Preset | Signals | Transport | Required input |
+|--------|---------|-----------|----------------|
+| `splunk-o11y` | Metrics + traces | OTLP/HTTP to Splunk Observability Cloud | `--realm`, `--token` |
+| `splunk-hec` | Audit events (JSONL) | HEC over HTTPS | `--host`, `--port`, `--index`, `--token` |
+| `datadog` | Metrics + traces | OTLP/HTTP via Datadog OTel intake | `--api-key`, `--site` |
+| `honeycomb` | Traces | OTLP/HTTP | `--team`, `--dataset` |
+| `newrelic` | Metrics + traces + logs | OTLP/HTTP | `--license-key` |
+| `grafana-cloud` | Metrics + traces + logs | OTLP via Grafana Cloud | `--instance-id`, `--token` |
+| `otlp` | Any | OTLP/gRPC or OTLP/HTTP, operator-specified | `--endpoint`, `--protocol` |
+| `webhook` | Audit events | Plain JSONL POST | `--url`, `--method` |
+
+Add-on presets (`--signals metrics|traces|logs|audit|all`) select which signals are actually shipped; defaults match the sink's natural strengths.
+
+## Non-interactive setup (CI)
+
+````bash
+defenseclaw setup observability add splunk-hec \
+  --name splunk-prod \
+  --host hec.corp.example.com \
+  --port 8088 \
+  --token $SPLUNK_HEC_TOKEN \
+  --index defenseclaw \
+  --non-interactive
+````
+
+````bash
+defenseclaw setup observability add otlp \
+  --name tempo \
+  --endpoint otlp.tempo.grafana.net:4317 \
+  --protocol grpc \
+  --signals traces,metrics \
+  --non-interactive
+````
+
+`--non-interactive` skips prompts and uses the supplied flags.
+
+## Connectivity probe
+
+Every `add` performs a short, bounded probe before writing config:
+
+| Preset family | Probe |
+|---------------|-------|
+| OTLP | TCP reachability and exporter-specific runtime validation |
+| HEC | `POST /services/collector/event` with a probe event; expects `200` with `{"text":"Success"}` |
+| HTTP JSONL | `POST --data '{"probe":true}'`; expects `2xx` |
+
+Probe failures print `connectivity check failed: <reason>` and abort the install. On success the sink is marked `enabled=true`.
+
+## Where values land
+
+````yaml
+# config.yaml excerpt
+audit:
+  sinks:
+    - name: splunk-prod
+      kind: splunk-hec
+      url: https://hec.corp.example.com:8088
+      token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN
+      enabled: true
+      index: defenseclaw
+telemetry:
+  exporters:
+    - name: tempo
+      kind: otlp
+      endpoint: otlp.tempo.grafana.net:4317
+      protocol: grpc
+      signals: [traces, metrics]
+      enabled: true
+````
+
+Tokens are never written to `config.yaml`. Every credential is stored in `~/.defenseclaw/.env` under a `*_ENV` name, and the sidecar resolves them at startup; `keys list` will surface them as `OPTIONAL - sink: <preset>`.
+
+## Verify it worked
+
+````bash
+defenseclaw setup observability list
+defenseclaw setup observability test splunk-prod
+defenseclaw status | grep -i telemetry
+````
+
+The test subcommand re-runs the probe — if Splunk HEC starts rejecting your token you'll see it here before it silently drops events.
+
+## Migrating from legacy Splunk config
+
+If your install predates the unified observability command, there's a one-shot migration:
+
+````bash
+defenseclaw setup observability migrate-splunk
+````
+
+This moves `audit.splunk.*` into `audit.sinks[]` with `kind=splunk-hec`, preserves enabled state, and normalizes the token env var. The legacy keys are kept for one release as deprecated; expect a lint warning in `defenseclaw doctor`.
+
+## Undo
+
+````bash
+defenseclaw setup observability disable splunk-prod
+defenseclaw setup observability remove splunk-prod --yes
+````
+
+Disable leaves config in place but pauses shipping; remove deletes the sink entry entirely. `config.yaml` rewrites are atomic (tmp+rename) and preserve formatting.
+
+## Related
+
+- [Splunk setup](/docs-site/first-setup/setup-splunk)
+- [Audit store](/docs-site/observability/audit-store)
+- [OTel spec (autogen)](/docs-site/observability/otel-spec)
+- [Environment variables](/docs-site/reference/env-vars)
+- [Gateway sidecar](/docs-site/first-setup/setup-gateway)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/observability/presets.py, internal/telemetry/provider.go, internal/audit/sinks/sinks.go, internal/audit/sinks/splunk_hec.go, internal/audit/sinks/otlp_logs.go, internal/audit/sinks/http_jsonl.go -->

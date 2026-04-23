@@ -1,0 +1,53 @@
+---
+title: "defenseclaw status"
+description: "Show DefenseClaw status."
+order: 10
+---
+
+## Overview
+
+`defenseclaw status` — Show DefenseClaw status.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:status -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw status [OPTIONS]
+```
+
+### Description
+
+Show DefenseClaw status
+
+Show DefenseClaw status.
+
+    Displays environment, sandbox health, scanner availability,
+    enforcement counts, and activity summary.
+
+<!-- END AUTOGEN:cli_py:status -->
+
+## Usage
+
+### Quick health check
+
+```bash
+defenseclaw status
+```
+
+The command prints the local DefenseClaw status that the Python CLI can derive from config, scanner state, and sidecar health.
+
+For deeper problem diagnosis use [`doctor`](/docs-site/cli/commands/doctor).
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_status.py -->

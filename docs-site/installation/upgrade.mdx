@@ -1,0 +1,59 @@
+---
+title: "Upgrade"
+description: "Use defenseclaw upgrade for release artifacts, backups, migrations, and health checks."
+order: 6
+---
+
+## Overview
+
+`defenseclaw upgrade` downloads **pre-built** gateway tarballs and Python wheels from GitHub Releases, verifies artifacts with `HEAD` requests **before** stopping the sidecar, backs up config, replaces binaries under `~/.local/bin`, runs Python migrations, restarts `defenseclaw-gateway` and `openclaw gateway restart`, then polls sidecar health on port **18970** (or the configured API port).
+
+<Callout type="warning">
+  The command requires **`uv`** on `PATH` to refresh the wheel into `~/.defenseclaw/.venv`. If `uv` is missing, the upgrade aborts when installing the wheel.
+</Callout>
+
+## CLI surface
+
+| Flag | Purpose |
+|------|---------|
+| `--yes` / `-y` | Skip confirmation prompts |
+| `--version` | Target release (e.g. `0.3.1`); default is latest from GitHub API |
+| `--health-timeout` | Seconds to wait for gateway health after restart (default **60**) |
+
+Authenticated `GITHUB_TOKEN` or `GH_TOKEN` raises rate limits for the releases API.
+
+## Flow (ordered)
+
+1. Resolve target version; exit early if already current.
+2. Detect platform (`darwin`/`linux` × `amd64`/`arm64`).
+3. Pre-flight `HEAD` on gateway tarball and wheel URLs.
+4. Download artifacts to a temp staging directory.
+5. Unless `--yes`, show plan and confirm.
+6. Create backup under `~/.defenseclaw/backups/upgrade-<timestamp>/` (`config.yaml`, `.env`, `guardrail_runtime.json`, `device.key`, `policies/`, `openclaw.json`).
+7. `defenseclaw-gateway stop`.
+8. Install gateway binary to `~/.local/bin/defenseclaw-gateway` (codesign on Darwin); `uv pip install` wheel into `~/.defenseclaw/.venv`; refresh `~/.local/bin/defenseclaw` symlink.
+9. Run `defenseclaw.migrations.run_migrations` between old and new version.
+10. `defenseclaw-gateway start`; best-effort `openclaw gateway restart`.
+11. Poll `/health` via `OrchestratorClient` until gateway state is `running` or timeout.
+
+## Partial upgrades and failure modes
+
+| Scenario | Behavior |
+|----------|----------|
+| Download or pre-flight fails | Exits before stopping the gateway; nothing is replaced |
+| Install or migration errors | Staging dir is still removed in `finally`; restart is attempted—inspect `gateway.log` / `gateway.jsonl` |
+| Health never reaches `running` | Command prints timeout guidance; backup directory remains for inspection |
+
+## Rollback
+
+There is no single “downgrade” subcommand. Restore from the backup folder created under **`~/.defenseclaw/backups/`** (copy `config.yaml`, `.env`, and other files back; restore `openclaw.json` if needed), reinstall the older gateway binary and wheel (or re-run the [curl installer](/docs-site/installation/curl-install) with `Makefile=…`), then **`defenseclaw-gateway restart`**.
+
+## Related
+
+- [Curl installer](/docs-site/installation/curl-install)
+- [Verify install](/docs-site/installation/verify-install)
+- [upgrade command](/docs-site/cli/commands/upgrade)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_upgrade.py -->

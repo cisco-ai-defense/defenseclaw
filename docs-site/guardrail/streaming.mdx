@@ -1,0 +1,52 @@
+---
+title: "Streaming"
+description: "How the guardrail handles SSE streaming with initial buffering, regex mid-stream scans, and final inspection."
+order: 13
+---
+
+## Overview
+
+Streaming completions are handled in `internal/gateway/proxy.go::handleStreamingRequest` and passthrough streaming is handled in `handlePassthrough`. Mid-stream inspection calls `internal/gateway/guardrail.go::InspectMidStream`, which always delegates to `inspectRegexOnly`; the LLM judge is not called per chunk.
+
+<Callout type="info" title="Two inspections can happen">
+  In action mode, the proxy can scan accumulated text before the first flush and every 500 additional characters. After the stream finishes, it runs a final completion inspection on the accumulated response.
+</Callout>
+
+## OpenAI-compatible streaming path
+
+| Step | Source behavior |
+|------|-----------------|
+| Initial buffer | In action mode, chunks are held until accumulated text reaches `stream_buffer_bytes` or the stream ends. Default is `1024`. |
+| Initial preblock | Before flushing a short or first buffer, the proxy calls `InspectMidStream` on accumulated text. |
+| Mid-stream cadence | After the initial flush, action mode scans each time accumulated text grows by at least `500` characters. |
+| Block response | If a mid-stream scan returns `action=block`, the proxy emits a provider-shaped block chunk and then `data: [DONE]`. |
+| Tool-call chunks | In action mode, streamed tool-call deltas are buffered until post-stream tool-call inspection passes. |
+| Final inspection | When accumulated completion text exists, the proxy runs regular `Inspect` on the full completion. |
+
+## Passthrough streaming path
+
+Provider-native passthrough responses parse `data: ` SSE frames, accumulate extracted text, and use the same `InspectMidStream` function. The first action-mode flush waits for accumulated text to reach `stream_buffer_bytes`, the upstream read to end, or a 1 MiB initial-buffer safety cap.
+
+## What does not exist
+
+| Unsupported doc claim | Source-backed correction |
+|-----------------------|--------------------------|
+| `guardrail.streaming.inspect_chunks` | There is no nested `streaming` config block. |
+| `guardrail.streaming.min_chunk_bytes: 64` | The actual key is `guardrail.stream_buffer_bytes`, default `1024`. |
+| Per-token or every-SSE-frame judge calls | Mid-stream inspection is regex-only. |
+| A `503` trailer or `event: defenseclaw` block event | The proxy writes normal provider-shaped block chunks and terminates SSE with `[DONE]`. |
+| Chunk inspection in observe mode | Mid-stream blocking checks run on the action-mode path. Observe mode forwards streamed chunks and relies on final logging. |
+
+## Why mid-stream is regex-only
+
+`InspectMidStream` intentionally avoids judge calls. The code comments call out the reason: LLM judge calls are too slow for per-chunk scanning, so mid-stream uses deterministic checks for high-severity signatures and reserves semantic judging for pre-call or post-call inspection.
+
+## Related
+
+- [Architecture](/docs-site/guardrail/architecture)
+- [Judge vs regex](/docs-site/guardrail/judge-vs-regex)
+- [Configuration](/docs-site/guardrail/configuration)
+
+---
+
+<!-- generated-from: internal/config/defaults.go, internal/gateway/proxy.go, internal/gateway/guardrail.go -->

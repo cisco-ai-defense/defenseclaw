@@ -1,0 +1,65 @@
+---
+title: "Redaction"
+description: "What is scrubbed from events before they leave the gateway — and what remains."
+order: 8
+---
+
+## Overview
+
+DefenseClaw observes sensitive content by definition: secrets, PII, prompt data, verdict reasons, and tool payloads. The redaction package centralizes how strings are made safe for logs, SQLite, Splunk HEC, OTel log exporters, webhooks, and HTTP responses.
+
+## Placeholder shape
+
+Redacted values use one parseable shape:
+
+```text
+<redacted len=42 sha=1a2b3c4d>
+```
+
+Short values omit the hash. Entity redaction may include a one-rune prefix only for values long enough that the prefix is not useful as a secret hint. Message content never includes a prefix.
+
+## Display vs sink redaction
+
+| Helper family | Honors `DEFENSECLAW_REVEAL_PII` | Intended destination |
+|---|---:|---|
+| `String`, `Entity`, `MessageContent`, `Reason` | yes | short-lived operator-facing stderr/debug output |
+| `ForSinkString`, `ForSinkEntity`, `ForSinkMessageContent`, `ForSinkReason` | no | SQLite, Splunk, OTel, webhooks, HTTP responses |
+
+<Callout type="danger" title="Reveal is local-only">
+  `DEFENSECLAW_REVEAL_PII=1` affects operator-facing log writers only. Persistent sinks must call `ForSink*` helpers and never honor the reveal flag.
+</Callout>
+
+## Idempotency
+
+Every `ForSink*` helper recognizes DefenseClaw's own placeholder format and returns it unchanged. That lets the audit logger, gatewaylog writer, and webhook dispatcher layer redaction defensively without turning a useful placeholder into a second opaque placeholder.
+
+## What is always preserved
+
+- `finding` identifiers (`secret:aws-key`, `pii:email`).
+- `rule_id`, `severity`, `confidence`, `action`, `reason`.
+- request/session/run identifiers, timestamps, model/provider labels, and action names.
+- Metadata that doesn't derive from sensitive content.
+
+This is the contract: external systems see enough to alert, dashboard, and correlate; they don't see the actual keys, emails, or bodies.
+
+## Testing redaction
+
+```bash
+DEFENSECLAW_REVEAL_PII=0 defenseclaw-gateway audit export --limit 5
+```
+
+The export path reads persisted audit rows. For unit-level behavior, inspect or extend tests under `internal/redaction/redaction_test.go`.
+
+## Sink boundary
+
+Webhook dispatchers call `redaction.ForSinkReason` at the delivery boundary, and the sink path receives already-sanitized audit events from `audit.Logger`. This is deliberate belt-and-braces behavior: a caller can forget to scrub, but persistent sinks still receive sink-safe text.
+
+## Related
+
+- [Sinks](/docs-site/observability/sinks)
+- [Webhook dispatcher](/docs-site/observability/webhook-dispatcher)
+- [Audit store](/docs-site/observability/audit-store)
+
+---
+
+<!-- generated-from: internal/redaction/redaction.go, internal/gateway/webhook.go, internal/audit/logger.go -->

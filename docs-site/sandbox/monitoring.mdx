@@ -1,0 +1,53 @@
+---
+title: "Monitoring"
+description: "Health, utilization, and policy-violation signals emitted by the sandbox."
+order: 3
+---
+
+## Overview
+
+Monitoring for the current sandbox implementation is service-oriented: check systemd state, OpenShell policy reload events, and the OpenShell exit metric. The source does not emit per-run utilization histograms for memory, CPU, disk, or PID peaks.
+
+## Lifecycle events
+
+| Event | When |
+|-------|------|
+| Gateway lifecycle `policy-reloaded` | `OpenShell.ReloadPolicy` succeeds. |
+| Gateway error `openshell/subprocess_exit` | `openshell-sandbox` returns non-zero from start or policy reload. |
+| `defenseclaw.openshell.exit` metric | A non-zero OpenShell subprocess exit is recorded. |
+
+## Status command
+
+```bash
+defenseclaw-gateway sandbox status
+```
+
+This is the first health check because it prints both `openshell-sandbox.service` and `defenseclaw-gateway.service`.
+
+## Policy checks
+
+| Check | Source-backed method |
+|-------|----------------------|
+| Binary exists | `VerifyOpenShellBinary` looks up `openshell-sandbox` and runs `--version`. |
+| Policy path | `OpenShell.PolicyPath()` resolves `POLICY_DIR/defenseclaw-policy.yaml`. |
+| Policy reload | `OpenShell.ReloadPolicy()` runs `openshell-sandbox policy reload`. |
+| Running process | `OpenShell.IsRunning()` verifies the stored PID still belongs to `openshell-sandbox`. |
+
+## Logs
+
+Use journald for service-level telemetry:
+
+```bash
+journalctl -u openshell-sandbox.service --since '10 min ago'
+journalctl -u defenseclaw-gateway.service --since '10 min ago'
+```
+
+## Related
+
+- [Debugging](/docs-site/sandbox/debugging)
+- [Events](/docs-site/sandbox/events)
+- [Observability overview](/docs-site/observability/index)
+
+---
+
+<!-- generated-from: internal/sandbox/openshell.go, internal/sandbox/install.go, internal/cli/sandbox.go, internal/telemetry/metrics.go, internal/gatewaylog/error_codes.go -->

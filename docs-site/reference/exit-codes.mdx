@@ -1,0 +1,70 @@
+---
+title: "Exit codes"
+description: "Every exit code the DefenseClaw CLI and gateway binaries emit, grouped by meaning."
+order: 3
+---
+
+## Overview
+
+DefenseClaw uses a narrow, stable exit-code vocabulary shared between both CLIs (`defenseclaw`, `defenseclaw-gateway`) and echoed by the REST API's `problem+json` error bodies. Scripts can rely on these codes indefinitely.
+
+<!-- BEGIN AUTOGEN:exit_codes:all -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+_Canonical code table plus every call-site discovered by AST scan._
+
+| Code | Label | Meaning | Call-sites |
+|---|---|---|---|
+| 0 | Success | Command completed normally. | — |
+| 1 | Generic failure | Unhandled error, runtime exception, or unspecified failure. | `cli/defenseclaw/commands/cmd_quickstart.py:224`, `cli/defenseclaw/commands/cmd_setup_provider.py:678`, `cmd/docgen-go/main.go:117`, `cmd/docgen-go/main.go:124` |
+| 2 | Usage error | Click / argparse rejects invalid flags or arguments. | — |
+| 3 | Configuration error | config.yaml missing, malformed, or fails schema validation. | — |
+| 4 | Policy violation / scan-gate blocked | Scanner or policy blocked the operation (e.g. `skill install` denied). | — |
+| 5 | Daemon not running | Operation required the gateway sidecar but it is down. | — |
+| 6 | Already running | Gateway daemon start requested while it is already running. | — |
+| 7 | Resource not found | Skill, MCP server, plugin, or audit row not found. | — |
+| 8 | Permission denied | Insufficient privileges (sandbox, filesystem, elevated ops). | — |
+| 9 | Provider / upstream failure | LLM provider, webhook, or external API returned an error after retries. | — |
+| 10 | Sandbox error | openshell-sandbox subsystem misbehaved. | — |
+| 100 | Feature disabled | Attempted to use a guardrailed/gated feature that is off. | — |
+
+<!-- END AUTOGEN:exit_codes:all -->
+
+## Patterns
+
+- `0` means success. Always.
+- `1` is a generic runtime failure.
+- `2` is the normal Click/Cobra usage error path for invalid flags or arguments.
+- Command-specific non-zero codes should be treated as failure unless the command page documents a softer automation contract.
+
+## Script examples
+
+```bash
+# Fail a build if config validation fails
+defenseclaw config validate --quiet || {
+  code=$?
+  case $code in
+    1) echo "config is invalid" ;;
+    2) echo "invalid config validate invocation" ;;
+    *) echo "unexpected code $code" ;;
+  esac
+  exit $code
+}
+
+# Export audit rows and preserve the exact failure code
+defenseclaw-gateway audit export --output audit-events.jsonl
+rc=$?
+if [ "$rc" != "0" ]; then
+  echo "audit export failed with code $rc"
+  exit $rc
+fi
+```
+
+## Related
+
+- [CLI overview](/docs-site/cli/index)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: scripts/check_error_codes.py, internal/gateway/api.go, scripts/docgen/exit_codes.py -->

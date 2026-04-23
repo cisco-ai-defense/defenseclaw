@@ -1,0 +1,353 @@
+---
+title: "defenseclaw plugin"
+description: "Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore."
+order: 10
+---
+
+## Overview
+
+`defenseclaw plugin` — Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:plugin -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw plugin [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `allow` | Add a plugin to the install allow list. |
+| `block` | Add a plugin to the install block list. |
+| `disable` | Disable a plugin at runtime via the OpenClaw gateway. |
+| `enable` | Enable a previously disabled plugin via the OpenClaw gateway. |
+| `info` | Show detailed information about a plugin. |
+| `install` | Install a plugin from a local path, npm registry, clawhub, or URL. |
+| `list` | List installed plugins (DefenseClaw + OpenClaw) with scan severity. |
+| `quarantine` | Quarantine a plugin's files to the quarantine area. |
+| `remove` | Remove an installed plugin. |
+| `restore` | Restore a quarantined plugin to its original location. |
+| `scan` | Scan a plugin directory for security issues. |
+
+### Description
+
+Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore
+
+### `defenseclaw plugin allow`
+
+Add a plugin to the install allow list
+
+Add a plugin to the install allow list.
+
+    Allow-listed plugins skip the scan gate during install.
+    Adding a plugin also removes it from the block list.
+
+```bash
+defenseclaw plugin allow <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for allowing |
+
+### `defenseclaw plugin block`
+
+Add a plugin to the install block list
+
+Add a plugin to the install block list.
+
+    Blocked plugins are rejected by the admission gate before any scan.
+    Does not affect already-installed plugins — use 'plugin disable' or
+    'plugin quarantine' for that.
+
+```bash
+defenseclaw plugin block <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for blocking |
+
+### `defenseclaw plugin disable`
+
+Disable a plugin at runtime via the OpenClaw gateway
+
+Disable a plugin at runtime via the OpenClaw gateway.
+
+    Sends an RPC to prevent the agent from using the plugin until
+    re-enabled. This is runtime-only — it does not block install or
+    quarantine files.
+
+    Requires the gateway to be running.
+
+```bash
+defenseclaw plugin disable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for disabling |
+
+### `defenseclaw plugin enable`
+
+Enable a previously disabled plugin via the OpenClaw gateway
+
+Enable a previously disabled plugin via the OpenClaw gateway.
+
+    This is a runtime-only action.
+
+```bash
+defenseclaw plugin enable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+### `defenseclaw plugin info`
+
+Show detailed information about a plugin
+
+Show detailed information about a plugin.
+
+    Displays plugin metadata, latest scan results from the DefenseClaw
+    audit database, and enforcement actions.
+
+```bash
+defenseclaw plugin info <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output plugin info as JSON |
+
+### `defenseclaw plugin install`
+
+Install a plugin from a local path, npm registry, clawhub, or URL
+
+Install a plugin from a local path, npm registry, clawhub, or URL.
+
+    Supports four source types (auto-detected):
+
+    
+      Local directory   defenseclaw plugin install /path/to/plugin
+      npm package       defenseclaw plugin install @openclasw/voice-call
+      clawhub URI       defenseclaw plugin install clawhub://voice-call
+      HTTP(S) URL       defenseclaw plugin install https://example.com/plugin.tgz
+
+    After downloading, the plugin is scanned for security issues. Pass --action
+    to apply the configured plugin_actions policy (quarantine, disable, block)
+    based on scan severity. Use --force to overwrite an existing plugin.
+
+```bash
+defenseclaw plugin install <NAME_OR_PATH>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name_or_path` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--force` | boolean | — | — | no | Force install (overwrites existing) |
+| `--action` | boolean | — | — | no | Apply plugin_actions policy based on scan severity |
+
+### `defenseclaw plugin list`
+
+List installed plugins (DefenseClaw + OpenClaw) with scan severity
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output as JSON |
+
+### `defenseclaw plugin quarantine`
+
+Quarantine a plugin's files to the quarantine area
+
+Quarantine a plugin's files to the quarantine area.
+
+    Moves the plugin's directory to ~/.defenseclaw/quarantine/plugins/ and
+    records the action. The plugin can be restored with 'plugin restore'.
+
+```bash
+defenseclaw plugin quarantine <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for quarantine |
+
+### `defenseclaw plugin remove`
+
+Remove an installed plugin
+
+```bash
+defenseclaw plugin remove <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+### `defenseclaw plugin restore`
+
+Restore a quarantined plugin to its original location
+
+Restore a quarantined plugin to its original location.
+
+    By default restores to the original path recorded during quarantine.
+    Use --path to override the restore destination.
+
+```bash
+defenseclaw plugin restore <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--path` | text | — | — | no | Override restore destination (defaults to original path) |
+
+### `defenseclaw plugin scan`
+
+Scan a plugin directory for security issues
+
+Scan a plugin directory for security issues.
+
+    Uses defenseclaw-plugin-scanner to check for dangerous permissions,
+    install scripts, credential theft, obfuscation, and supply chain risks.
+
+    LLM analysis uses the same configuration as the skill scanner
+    (reads from config.yaml: inspect_llm).
+
+    Examples:
+
+      defenseclaw plugin scan my-plugin
+
+      defenseclaw plugin scan my-plugin --policy strict
+
+      defenseclaw plugin scan my-plugin --use-llm
+
+      defenseclaw plugin scan my-plugin --use-llm --llm-model gpt-4
+
+      defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml
+
+      defenseclaw plugin scan /path/to/plugin --profile strict --lenient
+
+```bash
+defenseclaw plugin scan <NAME_OR_PATH>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name_or_path` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output scan results as JSON |
+| `--policy` | text | — | — | no | Scan policy: default, strict, permissive, or path to YAML |
+| `--profile` | choice (`default`, `strict`) | — | — | no | Scan profile (overrides policy profile) |
+| `--use-llm` | boolean | — | — | no | Enable LLM-based semantic analysis (uses skill_scanner LLM config) |
+| `--llm-model` | text | — | — | no | LLM model override (e.g. claude-sonnet-4-20250514, gpt-4) |
+| `--llm-provider` | text | — | — | no | LLM provider hint (anthropic, openai, ollama, etc.) |
+| `--llm-consensus-runs` | integer | — | — | no | Number of LLM consensus runs (default: 1) |
+| `--enable-meta, --no-meta` | boolean | true | — | no | Enable/disable meta analyzer (default: enabled) |
+| `--lenient` | boolean | — | — | no | Suppress low-confidence findings (sets min_confidence=0.5) |
+
+<!-- END AUTOGEN:cli_py:plugin -->
+
+## Usage
+
+### Scan and list plugins
+
+```bash
+defenseclaw plugin scan ./extensions/defenseclaw --json --profile strict
+defenseclaw plugin list --json
+```
+
+`--profile` selects the scanner profile passed to the plugin scanner.
+
+### Install or quarantine
+
+```bash
+defenseclaw plugin install ./extensions/defenseclaw --force --action quarantine
+defenseclaw plugin info defenseclaw --json
+```
+
+Use `info` before changing enforcement state.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_plugin.py -->

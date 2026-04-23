@@ -1,0 +1,83 @@
+---
+title: "Sinks"
+description: "The audit sink catalog: Splunk HEC, OTLP logs, and generic HTTP JSONL."
+order: 6
+---
+
+## Overview
+
+An **audit sink** is an `audit_sinks[]` destination in `~/.defenseclaw/config.yaml`. The Go gateway builds these entries into an `internal/audit/sinks.Manager`, then forwards audit events to each enabled sink whose severity and action filters match.
+
+<Callout type="info" title="OTel exporter vs audit sink">
+  Presets such as Datadog, Honeycomb, New Relic, Grafana Cloud, and Splunk Observability write the top-level `otel:` exporter. Audit sinks are the smaller set implemented in `internal/config/sinks.go`: `splunk_hec`, `otlp_logs`, and `http_jsonl`.
+</Callout>
+
+## The catalog
+
+| Config kind | Setup preset | Transport | Auth |
+|---|---|---|---|
+| `splunk_hec` | `splunk-hec` | HTTP Event Collector | `token_env` preferred; inline token warns |
+| `otlp_logs` | `otlp --target audit_sinks` | OTLP logs | headers from config/env expansion |
+| `http_jsonl` | `webhook` | HTTP(S) JSON object/JSONL | bearer env/token or custom headers |
+
+Every sink is declared with `defenseclaw setup observability add <preset>`. The writer stores secrets in `~/.defenseclaw/.env` when the preset defines a token env var.
+
+## Common shape
+
+```yaml
+audit_sinks:
+  - name: splunk-main
+    kind: splunk_hec
+    enabled: true
+    min_severity: HIGH
+    actions: [guardrail-verdict, sink-failure]
+    splunk_hec:
+      endpoint: https://splunk.example.com:8088/services/collector
+      token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN
+      index: defenseclaw
+      source: defenseclaw
+      sourcetype: _json
+      verify_tls: true
+  - name: otlp-prod
+    kind: otlp_logs
+    enabled: true
+    otlp_logs:
+      endpoint: otel.example.com:4317
+      protocol: grpc
+```
+
+## Filters
+
+Sink filtering is implemented by severity and action allow-lists:
+
+| Field | Behavior |
+|---|---|
+| `min_severity` | Empty matches all; otherwise events below the severity rank are skipped. |
+| `actions` | Empty matches all; otherwise only exact audit action names are forwarded. |
+
+Filtered-out events do not make network requests.
+
+## Adding / testing / removing
+
+```bash
+defenseclaw setup observability add splunk-hec
+defenseclaw setup observability test splunk-main
+defenseclaw setup observability remove dd-security
+```
+
+The `test` command probes the destination by kind: Splunk HEC and HTTP JSONL post marker payloads; OTLP does a reachability/auth-oriented probe.
+
+## Ordering and parallelism
+
+The manager fans each audit event to each enabled sink. Individual sink implementations own batching, flush, and retry details; failures are recorded through sink health and telemetry hooks without changing the local audit row.
+
+## Related
+
+- [Setup: observability](/docs-site/first-setup/setup-observability)
+- [Webhook dispatcher](/docs-site/observability/webhook-dispatcher)
+- [Redaction](/docs-site/observability/redaction)
+- [Splunk app](/docs-site/observability/splunk-app)
+
+---
+
+<!-- generated-from: internal/audit/sinks/sinks.go, internal/config/sinks.go, cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/observability/presets.py -->

@@ -1,0 +1,65 @@
+---
+title: "Uninstall"
+description: "Remove DefenseClaw with defenseclaw uninstall, reset state with defenseclaw reset, and know data layout."
+order: 7
+---
+
+## Overview
+
+`defenseclaw uninstall` stops the sidecar, optionally reverts OpenClaw configuration, removes the plugin, deletes data under `~/.defenseclaw/`, and optionally removes symlinks and binaries from `~/.local/bin`. `defenseclaw reset` is a narrower **data wipe**: it deletes the data directory but keeps binaries and (by default) the plugin so `defenseclaw quickstart` can rehydrate quickly.
+
+<Callout type="danger">
+  `defenseclaw uninstall --all` and `defenseclaw reset` delete the data directory. `uninstall` refuses paths that do not look like a DefenseClaw data dir (missing `config.yaml`, `audit.db`, `.env`, `policies`, or `quarantine`) to avoid catastrophic `rm -rf`.
+</Callout>
+
+## `defenseclaw uninstall`
+
+| Flag | Effect |
+|------|--------|
+| `--all` | Also delete the data directory (`wipe_data`) |
+| `--binaries` | Remove `defenseclaw`, `defenseclaw-gateway`, scanner symlinks, and `litellm` from `~/.local/bin` |
+| `--keep-openclaw` | Do not revert `openclaw.json` or remove the plugin |
+| `--dry-run` | Print the plan only |
+| `--yes` | Skip confirmation |
+
+Default plan (no flags): stop gateway, revert OpenClaw config (pristine backup preferred), remove plugin, **do not** wipe data or binaries.
+
+## `defenseclaw reset`
+
+- Always wipes the data directory (same safety checks as uninstall).
+- Keeps binaries; does **not** remove the plugin (`remove_plugin=False`).
+- Suggests running `defenseclaw quickstart` afterward.
+
+## State directory layout
+
+Paths resolve from `defenseclaw.config` (`default_data_path()`), typically **`~/.defenseclaw/`** (override with `DEFENSECLAW_HOME` where supported).
+
+| Path | Role |
+|------|------|
+| `config.yaml` | Primary config |
+| `audit.db` | SQLite audit store |
+| `.env` | Secrets (doctor may tighten to mode `0600`) |
+| `policies/` | Seeded Rego, guardrail profiles, OpenShell templates |
+| `quarantine/` | Quarantine storage |
+| `extensions/defenseclaw/` | Installed OpenClaw plugin payload (release or `make plugin-install`) |
+| `.venv/` | Release/curl install Python environment (when used) |
+| `gateway.log` / `gateway.jsonl` | Sidecar logs |
+| `gateway.pid` | Daemon PID file |
+| `doctor_cache.json` | Last `defenseclaw doctor` snapshot for the TUI |
+| `backups/` | Upgrade backups (`upgrade-<timestamp>/`) |
+
+OpenClaw home defaults to `~/.openclaw/`; uninstall may restore `openclaw.json` from a pristine backup captured during guardrail setup.
+
+## Sidecar stop
+
+Uninstall runs `defenseclaw-gateway stop` when the binary is on `PATH` before mutating config or deleting data.
+
+## Related
+
+- [Install methods](/docs-site/installation/index)
+- [Verify install](/docs-site/installation/verify-install)
+- [uninstall command](/docs-site/cli/commands/uninstall)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_uninstall.py, cli/defenseclaw/commands/cmd_init.py -->

@@ -1,0 +1,93 @@
+---
+title: "defenseclaw-gateway watchdog"
+description: "Health watchdog that notifies when the gateway is down."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway watchdog` — Health watchdog that notifies when the gateway is down.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:watchdog -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+watchdog
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `start` | Start the watchdog as a background daemon |
+| `status` | Show the watchdog daemon status |
+| `stop` | Stop the running watchdog daemon |
+
+### Description
+
+The watchdog polls the gateway /health endpoint and sends desktop
+notifications when the sidecar is unreachable or degraded.
+
+Run in the foreground:  defenseclaw-gateway watchdog
+Run as background:      defenseclaw-gateway watchdog start
+Stop:                   defenseclaw-gateway watchdog stop
+
+### `defenseclaw-gateway watchdog start`
+
+#### Synopsis
+
+```bash
+start
+```
+
+#### Description
+
+Start the watchdog as a background daemon
+
+
+### `defenseclaw-gateway watchdog status`
+
+#### Synopsis
+
+```bash
+status
+```
+
+#### Description
+
+Show the watchdog daemon status
+
+
+### `defenseclaw-gateway watchdog stop`
+
+#### Synopsis
+
+```bash
+stop
+```
+
+#### Description
+
+Stop the running watchdog daemon
+
+<!-- END AUTOGEN:cli_go:watchdog -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/watchdog.go -->

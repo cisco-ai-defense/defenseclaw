@@ -1,0 +1,60 @@
+---
+title: "Sandbox events"
+description: "The audit event shape produced by sandbox lifecycle, utilization, and violations."
+order: 5
+---
+
+## Overview
+
+The current sandbox code emits OpenShell-related gateway events and metrics, not a dedicated per-invocation `sandbox.start` / `sandbox.exit` audit schema.
+
+## Emitted signals
+
+| Signal | Source |
+|--------|--------|
+| `defenseclaw.openshell.exit` | Recorded when an OpenShell subprocess exits non-zero in `emitOpenShellError`. |
+| Gateway error event | Emitted with subsystem `openshell` and code `subprocess_exit` when an event writer is attached. |
+| Gateway lifecycle event | Emitted with transition `policy-reloaded` after a successful `openshell-sandbox policy reload`. |
+
+## Error event shape
+
+```json
+{
+  "event_type": "error",
+  "severity": "HIGH",
+  "error": {
+    "subsystem": "openshell",
+    "code": "subprocess_exit",
+    "message": "openshell subprocess exited with code 1",
+    "cause": "stderr tail"
+  }
+}
+```
+
+## Lifecycle event shape
+
+```json
+{
+  "event_type": "lifecycle",
+  "severity": "INFO",
+  "lifecycle": {
+    "subsystem": "openshell",
+    "transition": "policy-reloaded",
+    "details": {
+      "command": "policy reload"
+    }
+  }
+}
+```
+
+Do not document per-run CPU, memory, disk, OOM, or timeout event fields unless a future schema adds them.
+
+## Related
+
+- [Audit store](/docs-site/observability/audit-store)
+- [Monitoring](/docs-site/sandbox/monitoring)
+- [OTEL spec](/docs-site/observability/otel-spec)
+
+---
+
+<!-- generated-from: internal/sandbox/openshell.go, internal/gatewaylog/events.go, internal/gatewaylog/error_codes.go, internal/telemetry/metrics.go -->

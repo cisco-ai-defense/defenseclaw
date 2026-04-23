@@ -1,0 +1,120 @@
+---
+title: "defenseclaw sandbox"
+description: "[experimental] Manage openshell-sandbox standalone mode."
+order: 10
+---
+
+## Overview
+
+`defenseclaw sandbox` — [experimental] Manage openshell-sandbox standalone mode.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:sandbox -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw sandbox [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `init` | Initialize openshell-sandbox standalone mode (Linux only). |
+| `setup` | Configure DefenseClaw for openshell-sandbox standalone mode. |
+
+### Description
+
+[experimental] Manage openshell-sandbox standalone mode
+
+[experimental] Manage openshell-sandbox standalone mode.
+
+    Linux-only. Creates an isolated sandbox environment with Landlock,
+    seccomp, and network namespaces for running OpenClaw agents.
+
+    
+    Requires 'defenseclaw init' to have been run first.
+
+    
+    Commands:
+      init    Create sandbox user, transfer OpenClaw, configure networking
+      setup   Customize sandbox networking, policy, and device pairing
+
+### `defenseclaw sandbox init`
+
+Initialize openshell-sandbox standalone mode (Linux only)
+
+Initialize openshell-sandbox standalone mode (Linux only).
+
+    Creates the sandbox user, transfers OpenClaw ownership, installs
+    the DefenseClaw plugin into the sandbox, and configures networking.
+
+    
+    Prerequisite:
+      Run 'defenseclaw init' first to set up the base environment.
+
+    
+    Example:
+      defenseclaw sandbox init
+
+### `defenseclaw sandbox setup`
+
+Configure DefenseClaw for openshell-sandbox standalone mode
+
+Configure DefenseClaw for openshell-sandbox standalone mode.
+
+    Full orchestration: configures networking, generates systemd units,
+    patches OpenClaw config, sets up device pairing, and installs policy.
+
+    
+    Example:
+      defenseclaw sandbox setup --sandbox-ip 10.200.0.2 --host-ip 10.200.0.1
+      defenseclaw sandbox setup --policy strict --no-auto-pair
+      defenseclaw sandbox setup --disable
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--sandbox-ip` | text | `10.200.0.2` | — | no | Bridge IP of the sandbox (default: 10.200.0.2) |
+| `--host-ip` | text | `10.200.0.1` | — | no | Bridge IP of the host (default: 10.200.0.1) |
+| `--sandbox-home` | text | — | — | no | Sandbox user home directory (default: /home/sandbox) |
+| `--openclaw-port` | integer | `18789` | — | no | OpenClaw gateway port inside sandbox |
+| `--policy` | choice (`default`, `strict`, `permissive`) | `permissive` | — | no | Network policy template |
+| `--dns` | text | `8.8.8.8,1.1.1.1` | — | no | DNS nameservers (comma-separated, or 'host') |
+| `--no-auto-pair` | boolean | — | — | no | Disable automatic device pre-pairing |
+| `--no-host-networking` | boolean | — | — | no | Skip host-side iptables rules (DNS, UI forwarding, MASQUERADE) |
+| `--no-guardrail` | boolean | — | — | no | Skip guardrail network setup (API_PORT + GUARDRAIL_PORT iptables) |
+| `--disable` | boolean | — | — | no | Revert to host mode (no sandbox) |
+| `--non-interactive` | boolean | — | — | no | Skip confirmation prompts |
+
+<!-- END AUTOGEN:cli_py:sandbox -->
+
+## Usage
+
+### Initialize sandbox support
+
+```bash
+defenseclaw sandbox init
+```
+
+### Configure sandbox networking
+
+```bash
+defenseclaw sandbox setup --sandbox-ip 10.42.0.2 --host-ip 10.42.0.1 --non-interactive
+```
+
+The Go gateway binary owns runtime sandbox service controls such as status, start, stop, and shell.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_sandbox.py -->

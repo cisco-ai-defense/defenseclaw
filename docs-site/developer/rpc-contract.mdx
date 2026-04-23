@@ -1,0 +1,96 @@
+---
+title: "RPC contract"
+description: "The OpenClaw gateway WebSocket frame contract and sidecar RPC helpers."
+order: 7
+---
+
+## Overview
+
+DefenseClaw does not expose a local WebSocket RPC endpoint on the sidecar REST API. The RPC contract here is the client-side WebSocket protocol used by `internal/gateway.Client` when it connects to the OpenClaw gateway. Local automation should use the REST routes in [Endpoints](/docs-site/api/endpoints).
+
+## Frame contract
+
+All WebSocket frames are JSON objects with a `type` discriminator:
+
+| Type | Direction | Required fields | Source type |
+|------|-----------|-----------------|-------------|
+| `req` | sidecar -> OpenClaw gateway | `id`, `method`, optional `params` | `RequestFrame` |
+| `res` | OpenClaw gateway -> sidecar | `id`, `ok`, `payload` or `error` | `ResponseFrame` |
+| `event` | OpenClaw gateway -> sidecar | `event`, optional `payload`, optional `seq` | `EventFrame` |
+
+## Stability rules
+
+1. **Frame fields are additive.** Do not rename `type`, `id`, `method`, `params`, `ok`, `payload`, `error`, `event`, or `seq`.
+2. **Parameters are additive.** You can add new optional params; removing or re-typing an existing param is a break.
+3. **Results are additive.** Same as params.
+4. **Events are durable names.** Add new event names rather than changing existing event payload shapes.
+5. **Handshake semantics are load-bearing.** `connect.challenge` and the `connect` request must stay compatible with protocol v3.
+
+## Compatibility table
+
+| Change | Allowed? |
+|--------|----------|
+| Add new method | yes, when OpenClaw also supports it |
+| Add new optional field to request | yes |
+| Add new field to response | yes |
+| Remove a method | no (deprecate + new method) |
+| Rename a field | no |
+| Change a field's type | no |
+| Change a method from sync to stream | no |
+| Change frame discriminator names | no |
+| Remove `connect.challenge` or `hello-ok` | no |
+
+## Current methods
+
+The Go helpers in `internal/gateway/rpc.go` currently call these methods:
+
+| Method | Helper | Purpose |
+|--------|--------|---------|
+| `connect` | `sendConnect` | Complete the protocol v3 handshake after `connect.challenge`. |
+| `skills.update` | `EnableSkill`, `DisableSkill` | Enable or disable a skill by key. |
+| `config.get` | `GetConfig` | Fetch the current OpenClaw config snapshot. |
+| `config.patch` | `PatchConfig`, plugin/MCP helpers | Apply a partial config update. |
+| `status` | `GetStatus` | Fetch OpenClaw gateway status. |
+| `tools.catalog` | `GetToolsCatalog` | Fetch runtime tool catalog metadata. |
+| `skills.status` | `GetSkillsStatus` | Fetch installed skill status. |
+| `skills.bins` | `GetSkillsBins` | Fetch available skill binaries. |
+| `sessions.list` | `SessionsList` | Fetch active sessions. |
+| `sessions.subscribe` | `SessionsSubscribe` | Subscribe to session events. |
+| `sessions.messages.subscribe` | `SessionsMessagesSubscribe` | Subscribe to message-level events. |
+| `sessions.send` | `SessionsSend` | Send a message to a session key. |
+| `exec.approval.resolve` | `ResolveApproval` | Allow or deny an exec approval request. |
+
+## Adding a method
+
+1. Add the OpenClaw gateway method first.
+2. Add a typed helper to `internal/gateway/rpc.go` when DefenseClaw needs to call it from Go.
+3. Keep request parameters JSON-serializable and context-cancellable through `Client.Request`.
+4. Add or update WebSocket tests under `internal/gateway/gateway_ws_test.go` or `internal/gateway/gateway_test.go`.
+5. Update this page and any user-facing docs that depend on the new behavior.
+
+## Backpressure and cancellation
+
+`Client.Request` attaches the caller's context to every in-flight request. When a context is cancelled, the client removes the pending response channel and returns the context error to the caller.
+
+## Tests
+
+The WebSocket tests exercise:
+
+- handshake negotiation
+- `connect.challenge` handling
+- event buffering before `hello-ok`
+- request/response correlation by frame ID
+- sequence gap logging
+- reconnect and auth-repair behavior
+
+These tests gate PRs that touch the gateway client. Adding a new helper without protocol coverage is a red CI.
+
+## Related
+
+- [API RPC notes](/docs-site/api/rpc)
+- [Authentication](/docs-site/api/auth)
+- [Schemas](/docs-site/api/schemas)
+
+---
+
+<!-- generated-from: internal/gateway/client.go, internal/gateway/frames.go, internal/gateway/rpc.go, internal/gateway/gateway_ws_test.go -->

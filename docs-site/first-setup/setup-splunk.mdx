@@ -1,0 +1,108 @@
+---
+title: "Splunk integration"
+description: "Ship DefenseClaw audit events and OpenTelemetry signals into Splunk HEC, Splunk Enterprise, or Splunk Observability Cloud."
+order: 8
+---
+
+## Overview
+
+DefenseClaw supports Splunk HEC and Splunk Observability Cloud through the unified [observability setup](/docs-site/first-setup/setup-observability). The Python CLI also keeps `defenseclaw setup splunk` as a compatibility wrapper, but new automation should use `setup observability add ...` so the same writer handles all destinations.
+
+| Target | What it ingests | Preset |
+|--------|-----------------|--------|
+| Splunk Enterprise / Cloud (HEC) | Audit events — the primary forensic trail | `splunk-hec` |
+| Splunk Observability Cloud | OpenTelemetry metrics + traces | `splunk-o11y` |
+
+<Callout type="info">
+  HEC is the most common pick for SOC workflows because it receives structured `audit` events that map 1:1 to the DefenseClaw [audit store](/docs-site/observability/audit-store). The O11y preset is for SREs focused on sidecar health and guardrail latency histograms.
+</Callout>
+
+## HEC (audit events)
+
+### Non-interactive
+
+````bash
+export DEFENSECLAW_SPLUNK_HEC_TOKEN=<token>
+defenseclaw setup observability add splunk-hec \
+  --name splunk-prod \
+  --host hec.corp.example.com \
+  --port 8088 \
+  --index defenseclaw \
+  --source defenseclaw/gateway \
+  --sourcetype defenseclaw:audit \
+  --token "$DEFENSECLAW_SPLUNK_HEC_TOKEN" \
+  --non-interactive
+````
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--host` | `localhost` | HEC host without scheme |
+| `--port` | `8088` | HEC port |
+| `--index` | `main` | Splunk index to write to |
+| `--source` | `defenseclaw` | Sets `source` on every event |
+| `--sourcetype` | `defenseclaw:audit` | Sets `sourcetype` on every event |
+| `--token` | from `$DEFENSECLAW_SPLUNK_HEC_TOKEN` | Stored in `.env`, never in `config.yaml` |
+| `--verify-tls` / `--no-verify-tls` | preset default | Control TLS verification for sinks that expose the shared flag |
+
+The connectivity probe sends a single event with `event={"probe":true}` and expects HTTP `200` with `{"text":"Success"}`. On failure the sink is not persisted.
+
+### What is emitted
+
+HEC receives one event per audit row. The JSON shape matches the [audit schema](/docs-site/api/schemas) (`event_type`, `correlation_id`, `verdict`, `rule_id`, `severity`, etc.). Events are sent in batches of up to 100 with a 2-second max flush; the sidecar buffers up to 10000 events before applying back-pressure to scanner writers.
+
+## Splunk Observability Cloud (metrics + traces)
+
+````bash
+export SPLUNK_O11Y_TOKEN=<ingest-token>
+defenseclaw setup observability add splunk-o11y \
+  --name splunk-o11y \
+  --realm us1 \
+  --token $SPLUNK_O11Y_TOKEN \
+  --signals metrics,traces \
+  --non-interactive
+````
+
+| Flag | Effect |
+|------|--------|
+| `--realm` | O11y realm (`us0`, `us1`, `eu0`, …) — selects the `https://ingest.{realm}.signalfx.com` endpoint |
+| `--token` | Ingest token (stored in `.env` under `DEFENSECLAW_SPLUNK_O11Y_TOKEN`) |
+| `--signals` | `metrics`, `traces`, `metrics,traces` (default) |
+Metrics shipped match the [OTel spec](/docs-site/observability/otel-spec) — guardrail latency histograms, scanner counters, and the sidecar's process-level Go runtime metrics.
+
+## Bridged local export
+
+On developer laptops the CLI ships a vendored **Splunk local bridge** (`~/.defenseclaw/splunk-bridge/`). It's not a sink — it's a small HEC emulator that writes events to `$CLAW_HOME/splunk/` so operators can inspect the on-the-wire payloads without standing up a real HEC. Activate it by pointing `splunk-hec` at `http://127.0.0.1:8088` during setup. The bridge is seeded during `init` and is not started automatically; run `~/.defenseclaw/splunk-bridge/start.sh`.
+
+## Verify ingestion
+
+````bash
+# Trigger an audit event
+defenseclaw skill scan some-skill --path ~/.claw/skills/some-skill
+
+# HEC: query Splunk
+# search: index=defenseclaw sourcetype=defenseclaw:audit earliest=-5m | head 5
+
+# Re-run probe
+defenseclaw setup observability test splunk-prod
+````
+
+If events don't appear within ~30s, check `~/.defenseclaw/gateway.log` for `audit.sinks.splunk-prod: http 401 Unauthorized` (stale token) or `audit.sinks.splunk-prod: flush timeout` (HEC unreachable).
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `probe failed: 403` | Token lacks index or sourcetype permissions | Rotate token; grant `submit-data` |
+| `probe failed: x509: certificate signed by unknown authority` | Internal CA | Use `--no-verify-tls` for a lab-only check, or add the CA to the OS trust store |
+| Batches rejected intermittently | HEC rate limit | Raise HEC `maxEventSize` and HEC channel count; back-pressure will slow scanners, not lose events |
+| Gaps in metrics but traces OK | O11y realm mismatch | `--realm` must match the token's realm |
+
+## Related
+
+- [Observability setup](/docs-site/first-setup/setup-observability)
+- [Audit store](/docs-site/observability/audit-store)
+- [OTel spec](/docs-site/observability/otel-spec)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/observability/presets.py, internal/audit/sinks/splunk_hec.go, internal/telemetry/provider.go -->

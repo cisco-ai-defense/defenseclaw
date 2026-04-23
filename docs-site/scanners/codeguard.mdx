@@ -1,0 +1,70 @@
+---
+title: "CodeGuard"
+description: "Scan source files and directories for secrets, unsafe execution, SQL injection, weak crypto, and path traversal."
+order: 5
+---
+
+## Overview
+
+CodeGuard is the Go source-code scanner exposed by `defenseclaw-gateway scan code`. It walks a file or directory, filters to supported code/config extensions, applies built-in regex rules plus optional custom YAML rules, and emits scan results through the same audit path as other scanners.
+
+## What it scans
+
+- Files passed to `defenseclaw-gateway scan code <path>`.
+- Directories passed to `scan code`; the scanner skips `.git`, `node_modules`, `__pycache__`, `.venv`, and `venv`.
+- Extensions listed in `internal/scanner/codeguard.go::codeExtensions`.
+- Custom YAML rules from `~/.defenseclaw/codeguard-rules` by default, or the configured `scanners.codeguard` directory.
+
+## Categories
+
+| Built-in rule | Severity | Category |
+|---------------|----------|----------|
+| `CG-CRED-001` | `HIGH` | Hardcoded API key or secret |
+| `CG-CRED-002` | `HIGH` | AWS access key ID |
+| `CG-CRED-003` | `CRITICAL` | Private key embedded in source |
+| `CG-EXEC-001` | `HIGH` | Unsafe command execution |
+| `CG-EXEC-002` | `MEDIUM` | `shell=True` in Python subprocess |
+| `CG-NET-001` | `MEDIUM` | Outbound HTTP request |
+| `CG-DESER-001` | `HIGH` | Unsafe deserialization |
+| `CG-SQL-001` | `HIGH` | Potential SQL injection |
+| `CG-CRYPTO-001` | `MEDIUM` | Weak cryptographic algorithm |
+| `CG-PATH-001` | `MEDIUM` | Potential path traversal |
+
+## Configuration
+
+```yaml
+scanners:
+  codeguard: ~/.defenseclaw/codeguard-rules
+```
+
+Custom rule files are YAML documents with `version` and `rules`; each rule includes `id`, `severity`, `title`, `pattern`, `remediation`, and optional `extensions`.
+
+## CLI
+
+```bash
+defenseclaw-gateway scan code path/to/file.py
+defenseclaw-gateway scan code ./src --json
+defenseclaw-gateway scan code ./src --schema
+```
+
+The Python `defenseclaw codeguard` group currently manages the OpenClaw CodeGuard skill only:
+
+```bash
+defenseclaw codeguard install-skill
+```
+
+See [CodeGuard CLI](/docs-site/cli/commands/codeguard) and [gateway scan CLI](/docs-site/cli/commands-gateway/scan).
+
+## Result shape
+
+`internal/cli/scan_v7.go` serializes `--json` output with scanner name, target, timestamp, findings, duration, scan ID, schema version, and optional agent identifiers from environment variables.
+
+## Related
+
+- [Guardrail rule packs](/docs-site/guardrail/rule-packs)
+- [ClawShield](/docs-site/scanners/clawshield)
+- [Gateway scan CLI](/docs-site/cli/commands-gateway/scan)
+
+---
+
+<!-- generated-from: internal/scanner/codeguard.go, internal/cli/scan.go, internal/cli/scan_v7.go, cli/defenseclaw/commands/cmd_codeguard.py -->

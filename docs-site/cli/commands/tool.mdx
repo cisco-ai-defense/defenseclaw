@@ -1,0 +1,228 @@
+---
+title: "defenseclaw tool"
+description: "Manage tool-level block/allow lists."
+order: 10
+---
+
+## Overview
+
+`defenseclaw tool` — Manage tool-level block/allow lists.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:tool -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw tool [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `allow` | Add a tool to the allow list (skip scan gate). |
+| `block` | Add a tool to the block list. |
+| `list` | List tools in the block/allow list. |
+| `status` | Show the block/allow status of a tool. |
+| `unblock` | Remove a tool from the block/allow list. |
+
+### Description
+
+Manage tool-level block/allow lists
+
+Manage tool-level block/allow lists.
+
+    Tools are named actions exposed by skills or MCP servers.
+    Block/allow rules can be global (any source) or scoped to a specific
+    skill/MCP server with --source.
+
+    
+    Examples:
+      defenseclaw tool block delete_file --reason "too dangerous"
+      defenseclaw tool block delete_file --source filesystem
+      defenseclaw tool allow search --source web-search
+      defenseclaw tool list
+      defenseclaw tool list --blocked
+      defenseclaw tool status delete_file
+      defenseclaw tool unblock delete_file
+
+### `defenseclaw tool allow`
+
+Add a tool to the allow list (skip scan gate)
+
+Add a tool to the allow list (skip scan gate).
+
+    Allow-listed tools bypass the scan gate during execution checks.
+    Use --source to scope the rule to a specific skill or MCP server.
+
+    
+    Examples:
+      defenseclaw tool allow search --source web-search --reason "vetted"
+      defenseclaw tool allow read_file
+
+```bash
+defenseclaw tool allow <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--source` | text | — | — | no | Scope to a specific skill or MCP server name |
+| `--reason` | text | — | — | no | Reason for allowing |
+
+### `defenseclaw tool block`
+
+Add a tool to the block list
+
+Add a tool to the block list.
+
+    Blocked tools are flagged at runtime when called. Use --source to scope
+    the rule to a specific skill or MCP server; without --source the block
+    applies globally regardless of which source exposes the tool.
+
+    
+    Examples:
+      defenseclaw tool block delete_file --reason "destructive"
+      defenseclaw tool block write_file --source filesystem --reason "read-only env"
+
+```bash
+defenseclaw tool block <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--source` | text | — | — | no | Scope to a specific skill or MCP server name |
+| `--reason` | text | — | — | no | Reason for blocking |
+
+### `defenseclaw tool list`
+
+List tools in the block/allow list
+
+List tools in the block/allow list.
+
+    By default shows all tools. Use --blocked or --allowed to filter.
+
+    
+    Examples:
+      defenseclaw tool list
+      defenseclaw tool list --blocked
+      defenseclaw tool list --allowed --json
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--blocked` | boolean | — | — | no | Show only blocked tools |
+| `--allowed` | boolean | — | — | no | Show only allowed tools |
+| `--json` | boolean | — | — | no | Output as JSON |
+
+### `defenseclaw tool status`
+
+Show the block/allow status of a tool
+
+Show the block/allow status of a tool.
+
+    Checks scoped entry first (if --source given), then falls back to the
+    global entry.
+
+    
+    Examples:
+      defenseclaw tool status delete_file
+      defenseclaw tool status write_file --source filesystem
+
+```bash
+defenseclaw tool status <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--source` | text | — | — | no | Scope to a specific skill or MCP server name |
+| `--json` | boolean | — | — | no | Output as JSON |
+
+### `defenseclaw tool unblock`
+
+Remove a tool from the block/allow list
+
+Remove a tool from the block/allow list.
+
+    Pass --source to remove a scoped entry; without --source removes the
+    global entry.
+
+    
+    Examples:
+      defenseclaw tool unblock delete_file
+      defenseclaw tool unblock write_file --source filesystem
+
+```bash
+defenseclaw tool unblock <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--source` | text | — | — | no | Scope to match the scoped entry (if any) |
+
+<!-- END AUTOGEN:cli_py:tool -->
+
+## Usage
+
+### Inspect tool policy
+
+```bash
+defenseclaw tool list --blocked --json
+defenseclaw tool status shell --source builtin --json
+```
+
+The source value disambiguates tools with the same name from different registries.
+
+### Block or allow a tool
+
+```bash
+defenseclaw tool block shell --source builtin --reason "requires review"
+defenseclaw tool allow shell --source builtin --reason "approved"
+```
+
+Use `unblock` when you need to remove an explicit block entry.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_tool.py -->

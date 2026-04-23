@@ -1,0 +1,98 @@
+---
+title: "Configuration"
+description: "The actual guardrail configuration keys exposed by GuardrailConfig and its defaults."
+order: 3
+---
+
+## Overview
+
+Guardrail settings live under `guardrail:` in `~/.defenseclaw/config.yaml` and map to `internal/config/config.go::GuardrailConfig`. This page only lists fields present in that struct or defaults registered in `internal/config/defaults.go`.
+
+<Callout type="warning" title="No nested strategy block">
+  The code does not expose `guardrail.strategy.prompt`, `guardrail.streaming.*`, `guardrail.verdict_cache.*`, or `guardrail.multi_turn.*`. Use the flat keys below.
+</Callout>
+
+## Source-backed block
+
+```yaml
+guardrail:
+  enabled: false
+  mode: observe
+  scanner_mode: both
+  host: ""
+  port: 4000
+  stream_buffer_bytes: 1024
+  block_message: ""
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
+  detection_strategy: regex_judge
+  detection_strategy_prompt: ""
+  detection_strategy_completion: regex_only
+  detection_strategy_tool_call: ""
+  judge_sweep: true
+  retain_judge_bodies: true
+  allow_unknown_llm_domains: false
+  judge:
+    enabled: false
+    injection: true
+    pii: true
+    pii_prompt: true
+    pii_completion: true
+    tool_injection: true
+    timeout: 30.0
+    adjudication_timeout: 5.0
+```
+
+## Key reference
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `guardrail.enabled` | `false` | Enables the proxy listener. |
+| `guardrail.mode` | `observe` | `observe` records blocks as alerts; `action` enforces blocks. |
+| `guardrail.scanner_mode` | `both` | `local`, `remote`, or `both`. Controls local rules and Cisco AI Defense participation. |
+| `guardrail.host` | `""` | Host override. Empty uses the effective host chosen by the proxy. |
+| `guardrail.port` | `4000` | Guardrail proxy port. |
+| `guardrail.stream_buffer_bytes` | `1024` | Initial streaming text buffer threshold in action mode. |
+| `guardrail.block_message` | `""` | Optional custom message for blocked prompt/completion responses. |
+| `guardrail.rule_pack_dir` | `~/.defenseclaw/policies/guardrail/default` | Rule-pack directory. Missing files fall back to embedded defaults. |
+| `guardrail.detection_strategy` | `regex_judge` | Global strategy fallback. |
+| `guardrail.detection_strategy_prompt` | `""` | Prompt-specific override; empty inherits global. |
+| `guardrail.detection_strategy_completion` | `regex_only` | Completion-specific override. |
+| `guardrail.detection_strategy_tool_call` | `""` | Tool-call-specific override; empty inherits global. |
+| `guardrail.judge_sweep` | `true` | In `regex_judge`, no-signal content can still run full judge classification. |
+| `guardrail.retain_judge_bodies` | `true` | Retains raw judge responses locally unless opted out. Sink-forwarded copies are redacted. |
+| `guardrail.allow_unknown_llm_domains` | `false` | Allows LLM-shaped passthrough to unknown provider domains when explicitly enabled. |
+
+## Judge keys
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `guardrail.judge.enabled` | `false` | Constructs an `LLMJudge` only when enabled and model/key resolution succeeds. |
+| `guardrail.judge.injection` | `true` | Enables prompt-injection judge checks for prompt direction. |
+| `guardrail.judge.pii` | `true` | Enables PII judge checks. |
+| `guardrail.judge.pii_prompt` | `true` | Allows PII judge on prompt direction. |
+| `guardrail.judge.pii_completion` | `true` | Allows PII judge on completion direction. |
+| `guardrail.judge.tool_injection` | `true` | Enables the tool-injection judge path. |
+| `guardrail.judge.timeout` | `30.0` | Seconds for full judge classification. |
+| `guardrail.judge.adjudication_timeout` | `5.0` | Seconds for `regex_judge` adjudication calls. |
+| `guardrail.judge.llm.*` | inherited | Per-judge override layered on top of top-level `llm:` settings. |
+| `guardrail.judge.fallbacks` | empty | Provider fallbacks passed into judge LLM calls. |
+
+## LLM credential resolution
+
+Guardrail and judge provider settings use `LLMConfig`. Prefer `api_key_env`, which defaults to `DEFENSECLAW_LLM_KEY` at the top level. Inline `api_key` is still honored as a fallback, but `Load` warns about plaintext secrets.
+
+Recognized model prefixes include `openai`, `anthropic`, `azure`, `gemini`, `vertex_ai`, `bedrock`, `groq`, `mistral`, `cohere`, `ollama`, `vllm`, `deepseek`, `xai`, `fireworks_ai`, `perplexity`, `huggingface`, `replicate`, `openrouter`, `together_ai`, and `cerebras`.
+
+## Runtime update boundary
+
+The API/runtime path updates only `mode`, `scanner_mode`, and `block_message` through `guardrail_runtime.json`, which the proxy reloads in `applyRuntime`. Other keys are process startup configuration in the code inspected here.
+
+## Related
+
+- [Judge vs regex](/docs-site/guardrail/judge-vs-regex)
+- [Verdict cache](/docs-site/guardrail/verdict-cache)
+- [Providers](/docs-site/guardrail/providers)
+
+---
+
+<!-- generated-from: internal/config/config.go, internal/config/defaults.go, internal/gateway/proxy.go, internal/gateway/llm_judge.go -->

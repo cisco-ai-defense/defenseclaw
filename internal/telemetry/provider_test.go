@@ -846,6 +846,97 @@ func TestRecordGuardrailEvaluation_EmitsMetric(t *testing.T) {
 	}
 }
 
+func TestRecordCodexHook_EmitsMetrics(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordCodexHook(ctx, "PreToolUse", "allow", "HIGH", "observe", true, 12.5)
+	p.RecordCodexHook(ctx, "PermissionRequest", "block", "CRITICAL", "action", false, 7.0)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	invocations := findCounter(rm, "defenseclaw.codex.hook.invocations")
+	if invocations == nil {
+		t.Fatal("metric defenseclaw.codex.hook.invocations not found")
+	}
+	sum, ok := invocations.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", invocations.Data)
+	}
+	if got := counterValueByAttr(sum, "hook_event", "PreToolUse"); got != 1 {
+		t.Errorf("PreToolUse invocation count=%d want 1", got)
+	}
+
+	wouldBlocks := findCounter(rm, "defenseclaw.codex.would_blocks")
+	if wouldBlocks == nil {
+		t.Fatal("metric defenseclaw.codex.would_blocks not found")
+	}
+	wouldSum, ok := wouldBlocks.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", wouldBlocks.Data)
+	}
+	if got := counterValueByAttr(wouldSum, "mode", "observe"); got != 1 {
+		t.Errorf("observe would-block count=%d want 1", got)
+	}
+
+	blocks := findCounter(rm, "defenseclaw.codex.blocks")
+	if blocks == nil {
+		t.Fatal("metric defenseclaw.codex.blocks not found")
+	}
+	blockSum, ok := blocks.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", blocks.Data)
+	}
+	if got := counterValueByAttr(blockSum, "action", "block"); got != 1 {
+		t.Errorf("block count=%d want 1", got)
+	}
+
+	if hist := findHistogram(rm, "defenseclaw.codex.hook.latency"); hist == nil {
+		t.Fatal("metric defenseclaw.codex.hook.latency not found")
+	}
+}
+
+func TestRecordCodexComponentScan_EmitsMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordCodexComponentScan(ctx, "skill", "ok")
+	p.RecordCodexComponentScan(ctx, "plugin", "error")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	scans := findCounter(rm, "defenseclaw.codex.component_scans")
+	if scans == nil {
+		t.Fatal("metric defenseclaw.codex.component_scans not found")
+	}
+	sum, ok := scans.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", scans.Data)
+	}
+	if got := counterValueByAttr(sum, "component", "skill"); got != 1 {
+		t.Errorf("skill component scans=%d want 1", got)
+	}
+	if got := counterValueByAttr(sum, "result", "error"); got != 1 {
+		t.Errorf("error component scans=%d want 1", got)
+	}
+}
+
 func TestRecordGuardrailLatency_EmitsMetric(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	p, err := NewProviderForTest(reader)

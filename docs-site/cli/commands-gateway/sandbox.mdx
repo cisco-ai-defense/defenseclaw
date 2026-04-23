@@ -1,0 +1,163 @@
+---
+title: "defenseclaw-gateway sandbox"
+description: "Manage the openshell-sandbox instance."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway sandbox` — Manage the openshell-sandbox instance.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:sandbox -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+sandbox
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `exec` | Run a command as the sandbox user |
+| `policy` | Compare active sandbox policy against configured endpoints |
+| `restart` | Restart the sandbox (sidecar reconnects automatically) |
+| `shell` | Open an interactive shell as the sandbox user |
+| `start` | Start the sandbox and sidecar via systemd |
+| `status` | Show sandbox and sidecar systemd status |
+| `stop` | Stop the sandbox and sidecar via systemd |
+
+### Description
+
+Manage the openshell-sandbox standalone instance.
+
+These are convenience wrappers around systemd. The sandbox and sidecar
+are independent systemd services grouped by defenseclaw-sandbox.target.
+
+### `defenseclaw-gateway sandbox exec`
+
+#### Synopsis
+
+```bash
+exec -- <command> [args...]
+```
+
+#### Description
+
+Run a command as the sandbox user on the host.
+
+By default, runs via 'sudo -u sandbox <command>' on the host filesystem.
+The sandbox home directory is shared (Landlock restricts, doesn't overlay),
+so all changes persist.
+
+Use --netns to run inside the sandbox's network namespace (for debugging).
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--netns` | `bool` | — | Run inside the sandbox network namespace |
+
+
+### `defenseclaw-gateway sandbox policy`
+
+#### Synopsis
+
+```bash
+policy diff
+```
+
+#### Description
+
+Check which endpoints required by OpenClaw's configured channels and
+providers are covered by the active OpenShell sandbox network policy.
+
+Reads openclaw.json to discover required endpoints, then checks each one
+against the active policy YAML. Reports missing entries.
+
+
+### `defenseclaw-gateway sandbox restart`
+
+#### Synopsis
+
+```bash
+restart
+```
+
+#### Description
+
+Restart the sandbox (sidecar reconnects automatically)
+
+
+### `defenseclaw-gateway sandbox shell`
+
+#### Synopsis
+
+```bash
+shell
+```
+
+#### Description
+
+Open an interactive shell as the sandbox user
+
+
+### `defenseclaw-gateway sandbox start`
+
+#### Synopsis
+
+```bash
+start
+```
+
+#### Description
+
+Start the sandbox and sidecar via systemd
+
+
+### `defenseclaw-gateway sandbox status`
+
+#### Synopsis
+
+```bash
+status
+```
+
+#### Description
+
+Show sandbox and sidecar systemd status
+
+
+### `defenseclaw-gateway sandbox stop`
+
+#### Synopsis
+
+```bash
+stop
+```
+
+#### Description
+
+Stop the sandbox and sidecar via systemd
+
+<!-- END AUTOGEN:cli_go:sandbox -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/sandbox.go -->

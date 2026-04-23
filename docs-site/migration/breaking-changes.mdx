@@ -1,0 +1,93 @@
+---
+title: "Breaking changes"
+description: "Every breaking change across DefenseClaw major versions with migration notes."
+order: 2
+---
+
+## Overview
+
+Breaking changes land only in MAJOR version bumps. For each change we document: what changed, who's affected, the migration path, and the earliest version the change can be skipped past.
+
+## v7.0
+
+### Audit schema moved to SQLite
+
+- **What**: The audit log went from a flat JSONL under `~/.defenseclaw/audit.jsonl` to a typed SQLite DB at `~/.defenseclaw/audit.db`.
+- **Who**: Anyone who parsed `audit.jsonl` directly.
+- **Migrate**: Use `defenseclaw-gateway audit export --output audit.jsonl` to produce JSONL from the SQLite DB, or update queries to read `~/.defenseclaw/audit.db` directly.
+- **Skip**: v7.x.
+
+### Policy layout split
+
+- **What**: Policies that lived under `policy/` as a flat tree now live in `policy/rego/`, `policy/guardrail/<profile>/`, and `policy/data.json`.
+- **Who**: Anyone with operator overlays.
+- **Migrate**: Move custom Rego, guardrail profiles, and `data.json` into the split layout before running `defenseclaw policy validate` and `defenseclaw-gateway policy reload`.
+- **Skip**: v7.x.
+
+### Plugin headers renamed
+
+- **What**: `X-DefClaw-*` headers became `x-dc-*` (lowercase, short).
+- **Who**: Anyone running a fork of the plugin or instrumenting the gateway directly.
+- **Migrate**: Rename headers in your code. The proxy accepts both in v7.0 with a deprecation warning; v7.1 drops the old names.
+- **Skip**: v7.1.
+
+### OTel span names normalized
+
+- **What**: Span names moved from `defenseclaw.<stage>` to domain-specific prefixes (`gateway.request`, `guardrail.<stage>`, `scanner.scan`, …).
+- **Who**: Dashboards and alerts that queried span names directly.
+- **Migrate**: Update dashboards. [Telemetry contract](/docs-site/developer/telemetry-contract) lists every v7 name.
+- **Skip**: v7.x.
+
+### Exit code vocabulary
+
+- **What**: Most CLI error paths used to return `1`. Now they return specific codes from a stable list.
+- **Who**: CI scripts that branched on exit code.
+- **Migrate**: See [Exit codes](/docs-site/reference/exit-codes). The common case (`0` = success, `!=0` = failure) is unchanged.
+- **Skip**: v7.x.
+
+### Webhook setup command
+
+- **What**: Chat and incident notification destinations are managed with `defenseclaw setup webhook ...`.
+- **Who**: Scripts that used hand-edited `webhooks:` config.
+- **Migrate**: Optional. Use `defenseclaw setup webhook add ...` for chat and incident destinations, and `defenseclaw setup observability add webhook ...` for HTTP JSONL audit sinks.
+- **Skip**: v7.x.
+
+### Minimum Python 3.10
+
+- **What**: Dropped support for Python 3.8 and 3.9.
+- **Who**: Hosts with old Python.
+- **Migrate**: Install Python 3.10 - 3.13.
+- **Skip**: v7.x.
+
+## v6.0 (historical, for reference)
+
+### Multi-provider guardrail
+
+- **What**: The guardrail gained explicit support for Anthropic, OpenAI, Bedrock Converse, Ollama, Cohere, Gemini routes. v5 assumed OpenAI shape only.
+- **Who**: Users on non-OpenAI providers.
+- **Migrate**: Automatic — the plugin does provider detection.
+
+### OPA embedded
+
+- **What**: OPA moved from a separate process to embedded.
+- **Who**: Operators who ran a sidecar OPA and wired it separately.
+- **Migrate**: Remove the external OPA; use embedded. Rego compatibility preserved.
+
+## How we commit to this policy
+
+Every breaking change:
+
+- Lands in a MAJOR release.
+- Has a CHANGELOG entry in the first beta of that release.
+- Is announced with at least one deprecation minor release (except for security-critical breaks).
+- Has a migration path that doesn't require reading the source.
+
+## Related
+
+- [From docs/*.md](/docs-site/migration/from-old-docs)
+- [Migrate v6 to v7](/docs-site/cookbooks/migrate-from-v6-to-v7)
+- [Release](/docs-site/developer/release)
+
+---
+
+<!-- generated-from: cli/defenseclaw/migrations.py, internal/policy/fallback.go, policies/rego/data.json -->

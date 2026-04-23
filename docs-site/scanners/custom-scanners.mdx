@@ -1,0 +1,62 @@
+---
+title: "Custom scanners"
+description: "Extend DefenseClaw with source-backed scanner interfaces and registry discovery."
+order: 8
+---
+
+## Overview
+
+DefenseClaw's scanner interface is deliberately small. The current source defines a Go interface in `plugins/plugin.go` and a registry in `plugins/registry.go`; discovered `plugin.yaml` directories are validated by name, while runnable scanners are registered in-process through `Registry.Register`.
+
+## The contract
+
+```go
+type Scanner interface {
+	Name() string
+	Version() string
+	SupportedTargets() []string
+	Scan(ctx context.Context, target string) (*ScanResult, error)
+}
+```
+
+`ScanResult` carries `scanner`, `target`, `timestamp`, `findings`, and `duration`; each `Finding` carries ID, severity, title, description, location, remediation, scanner, and tags.
+
+## Registration
+
+`plugins.Registry` exposes two separate steps:
+
+| Step | Source behavior |
+|------|-----------------|
+| `Discover(dir)` | Scans immediate child directories and returns names that contain `plugin.yaml`. |
+| `Register(scanner)` | Adds a concrete `Scanner` implementation to the in-memory registry. |
+
+Discovery does not dynamically load a scanner binary. The source comment is explicit: a discovered plugin is validated but not loaded; the scanner implementation must be registered through `Register()`.
+
+## Language support
+
+The public registry contract is a Go interface. Python scanners used by built-in skill/MCP/plugin paths are wired separately through their own wrappers and are not a generic custom-scanner subprocess bridge.
+
+## Best practices
+
+- **Implement the interface directly.** Make `Name`, `Version`, and `SupportedTargets` stable because downstream audit and telemetry use scanner names.
+- **Return structured findings.** Use consistent IDs and severities so Rego policy can evaluate results predictably.
+- **Keep discovery honest.** A `plugin.yaml` directory proves presence only; it does not prove the scanner is loaded.
+- **Test registry behavior.** `plugins/registry_test.go` covers discovery, lookup, and registration expectations.
+
+## Testing
+
+```bash
+go test ./plugins/...
+```
+
+The example under `plugins/examples/custom-scanner/` is a scaffold, not a fully loaded runtime plugin.
+
+## Related
+
+- [Scanner catalog](/docs-site/scanners/index)
+- [Custom Rego](/docs-site/cookbooks/add-custom-rego)
+- [Add a custom scanner (cookbook)](/docs-site/cookbooks/add-custom-scanner)
+
+---
+
+<!-- generated-from: plugins/plugin.go, plugins/registry.go, plugins/registry_test.go, plugins/examples/custom-scanner/main.go, plugins/examples/custom-scanner/README.md -->

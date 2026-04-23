@@ -65,6 +65,11 @@ type APIServer struct {
 	// /v1/guardrail/config endpoint while other goroutines read them.
 	cfgMu sync.RWMutex
 
+	// codexMu protects component-scan debounce state for Codex
+	// SessionStart hooks, which may run concurrently.
+	codexMu                sync.Mutex
+	codexLastComponentScan time.Time
+
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
@@ -131,6 +136,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 
 	handler := maxBodyMiddleware(mux, 1<<20)

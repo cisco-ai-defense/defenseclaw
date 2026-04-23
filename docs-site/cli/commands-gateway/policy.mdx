@@ -1,0 +1,148 @@
+---
+title: "defenseclaw-gateway policy"
+description: "Manage and inspect OPA policies."
+order: 10
+---
+
+## Overview
+
+`defenseclaw-gateway policy` — Manage and inspect OPA policies.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_go:policy -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+policy
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `domains` | List firewall domain allowlist and blocklist from active policy |
+| `evaluate` | Dry-run the admission policy for a given input |
+| `evaluate-firewall` | Dry-run the firewall policy for a given destination |
+| `reload` | Tell the running sidecar daemon to reload OPA policies |
+| `show` | Display the current OPA data.json policy configuration |
+| `validate` | Compile-check all Rego modules and validate data.json |
+
+### Description
+
+Validate, inspect, evaluate, and reload DefenseClaw OPA policies.
+
+### `defenseclaw-gateway policy domains`
+
+#### Synopsis
+
+```bash
+domains
+```
+
+#### Description
+
+List firewall domain allowlist and blocklist from active policy
+
+
+### `defenseclaw-gateway policy evaluate`
+
+#### Synopsis
+
+```bash
+evaluate
+```
+
+#### Description
+
+Dry-run the admission policy for a given input
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--findings` | `int` | `0` | Number of findings |
+| `--severity` | `string` | — | Max severity of scan result (empty = pre-scan) |
+| `--target-name` | `string` | — | Target name to evaluate |
+| `--target-type` | `string` | `skill` | Target type (skill, mcp, plugin) |
+
+
+### `defenseclaw-gateway policy evaluate-firewall`
+
+#### Synopsis
+
+```bash
+evaluate-firewall
+```
+
+#### Description
+
+Dry-run the firewall policy for a given destination
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--destination` | `string` | — | Destination hostname or IP |
+| `--port` | `int` | `443` | Destination port |
+| `--protocol` | `string` | `tcp` | Protocol (tcp/udp) |
+| `--target-type` | `string` | `skill` | Target type context |
+
+
+### `defenseclaw-gateway policy reload`
+
+#### Synopsis
+
+```bash
+reload
+```
+
+#### Description
+
+Tell the running sidecar daemon to reload OPA policies
+
+
+### `defenseclaw-gateway policy show`
+
+#### Synopsis
+
+```bash
+show
+```
+
+#### Description
+
+Display the current OPA data.json policy configuration
+
+
+### `defenseclaw-gateway policy validate`
+
+#### Synopsis
+
+```bash
+validate
+```
+
+#### Description
+
+Compile-check all Rego modules and validate data.json
+
+<!-- END AUTOGEN:cli_go:policy -->
+
+## Usage
+
+_Concrete invocation recipes are added by the `cli-commands` subagents.
+Pair this with the equivalent Python wrapper command under
+[Python CLI](/docs-site/cli/python-cli) — most gateway operations are
+also available one layer up._
+
+## Related
+
+- [Gateway CLI overview](/docs-site/cli/gateway-cli)
+- [Python CLI](/docs-site/cli/python-cli)
+
+---
+
+<!-- generated-from: internal/cli/policy.go -->

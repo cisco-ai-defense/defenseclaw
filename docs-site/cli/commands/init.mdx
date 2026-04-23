@@ -1,0 +1,70 @@
+---
+title: "defenseclaw init"
+description: "Initialize DefenseClaw environment."
+order: 10
+---
+
+## Overview
+
+`defenseclaw init` — Initialize DefenseClaw environment.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:init -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw init [OPTIONS]
+```
+
+### Description
+
+Initialize DefenseClaw environment
+
+Initialize DefenseClaw environment.
+
+    Creates ~/.defenseclaw/, default config, SQLite database,
+    and installs scanner dependencies.
+
+    Use --sandbox to set up openshell-sandbox standalone mode (Linux only).
+    Use --enable-guardrail to configure the LLM guardrail inline.
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--skip-install` | boolean | — | — | no | Skip automatic scanner dependency installation |
+| `--enable-guardrail` | boolean | — | — | no | Configure LLM guardrail during init |
+| `--sandbox` | boolean | — | — | no | Set up sandbox mode (Linux only: creates sandbox user and directories) |
+
+<!-- END AUTOGEN:cli_py:init -->
+
+## Usage
+
+### Initialize with guardrail enabled
+
+```bash
+defenseclaw init --enable-guardrail
+```
+
+This creates the local DefenseClaw state and enables the guardrail setup path.
+
+### Skip dependency installation
+
+```bash
+defenseclaw init --skip-install
+```
+
+Use this when dependencies are already installed by another provisioning step.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_init.py -->

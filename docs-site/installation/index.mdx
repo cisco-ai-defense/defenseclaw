@@ -1,0 +1,75 @@
+---
+title: "Install methods"
+description: "Choose a DefenseClaw install path: curl release, Make from source, or manual builds."
+order: 1
+---
+
+## Overview
+
+DefenseClaw ships as a Python CLI (`defenseclaw`), a Go gateway binary (`defenseclaw-gateway`), and an OpenClaw TypeScript plugin under `~/.defenseclaw/extensions/defenseclaw/`. Release installs pull pre-built wheels and tarballs; developer installs compile from a git checkout. Pick the row in the matrix that matches your toolchain tolerance and need for reversibility.
+
+<Callout type="info">
+  After any install, use [Verify install](/docs-site/installation/verify-install) and continue with [Zero to governed](/docs-site/first-setup/index).
+</Callout>
+
+## Choose an install path
+
+| You have | Use | Why |
+|----------|-----|-----|
+| A normal workstation with outbound HTTPS | [Curl installer](/docs-site/installation/curl-install) | Lowest-friction release path; no Go, Node.js, or git required. |
+| A repo checkout and contributor toolchains | [Make install](/docs-site/installation/make-install) or `make all` | Builds the exact local code you are editing and can run quickstart afterward. |
+| A package mirror, release artifacts, or no internet | [Build from source](/docs-site/installation/build-from-source) or installer `--local` | Lets you pre-stage artifacts and keep install hosts offline. |
+| A Linux sandbox host | Curl installer with `--sandbox`, then [setup sandbox](/docs-site/first-setup/setup-sandbox) | Adds OpenShell sandbox pieces in addition to the CLI and sidecar. |
+
+If you are unsure, use the curl installer for releases and `make all` for local development.
+
+## Decision matrix
+
+| Path | Audience | Prerequisites | What it builds | Speed | Reversibility |
+|------|----------|---------------|----------------|-------|---------------|
+| [Curl installer](/docs-site/installation/curl-install) | Operators, CI | `bash`, `curl`, network; `uv` installed or bootstrapped; Python 3.10+ (or installed via `uv`) | Release gateway tarball, CLI wheel, optional plugin tarball; OpenClaw via npm or installer | Fast (downloads only) | Remove symlinks under `~/.local/bin`, delete `~/.defenseclaw/.venv`; use [Uninstall](/docs-site/installation/uninstall) for OpenClaw/plugin cleanup |
+| `make all` | Developers cloning the repo | [Prerequisites](/docs-site/installation/prerequisites): Go **1.26.2**, `uv`, Node/npm, `make` | Same as `make install`, then `path`, `quickstart`, `llm-setup` | Slow first time (compiles + npm) | `make clean`, [uninstall](/docs-site/installation/uninstall) flags; local `.venv` is disposable |
+| `make install` | Developers who want binaries without full bootstrap | Same as `make all` minus automatic quickstart/PATH/LLM prompts | Editable Python CLI, built gateway, copied plugin into `~/.defenseclaw/extensions/defenseclaw/` | Medium | Re-run targets idempotently; gateway swap uses atomic rename for live upgrades |
+| [Build from source](/docs-site/installation/build-from-source) | Packagers, air-gapped, or custom forks | Full toolchain; read each component section | Fine-grained control over `pycli`, `gateway`, `plugin`, openshell-sandbox | Slowest | Highest (you choose what to install and where) |
+
+## What success looks like
+
+| Checkpoint | Command | Good result |
+|------------|---------|-------------|
+| CLI resolves | `defenseclaw version` | Prints CLI plus any discovered gateway/plugin versions. |
+| Sidecar binary resolves | `defenseclaw-gateway --version` | Prints the gateway build version. |
+| Config exists | `defenseclaw init` or `defenseclaw quickstart` | Creates or preserves `~/.defenseclaw/config.yaml` and `~/.defenseclaw/audit.db`. |
+| Sidecar starts | `defenseclaw-gateway start` | Writes `~/.defenseclaw/gateway.pid` and logs to `~/.defenseclaw/gateway.log`. |
+| Health endpoint answers | `curl -s http://127.0.0.1:18970/health` | Returns JSON keyed by gateway subsystems. |
+
+<Callout type="warning" title="Install is not the same as governance">
+  Installing binaries only lands the tools. `defenseclaw init`, `defenseclaw setup guardrail`, and `defenseclaw-gateway start` are what create state, patch OpenClaw, and begin inspection.
+</Callout>
+
+## Automation shortcuts
+
+```bash
+# Release install with prompts skipped
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh \
+  | bash -s -- --yes
+
+# Release install that also runs quickstart in observe mode
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh \
+  | bash -s -- --yes --quickstart
+
+# Source install without PATH or quickstart mutation
+NO_PATH=1 NO_QUICKSTART=1 make all
+```
+
+Use `--quickstart-mode action` only after you are ready for blocking behavior. The safer first-run default is observe mode.
+
+## Related
+
+- [Prerequisites](/docs-site/installation/prerequisites)
+- [Curl installer](/docs-site/installation/curl-install)
+- [Make install](/docs-site/installation/make-install)
+- [CLI overview](/docs-site/cli/index)
+
+---
+
+<!-- generated-from: Makefile, scripts/install.sh -->

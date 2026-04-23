@@ -1,0 +1,63 @@
+---
+title: "Scanner catalog"
+description: "DefenseClaw's scanner surfaces, targets, and real command entry points."
+order: 1
+---
+
+## Overview
+
+A **scanner** in DefenseClaw is anything that produces an `internal/scanner.ScanResult` on an artifact or content. The policy engine consumes those results through admission, guardrail, firewall, audit, and skill-action Rego modules.
+
+| Scanner | Target | Timing | Invoked by |
+|---------|--------|--------|------------|
+| [Skill scanner](/docs-site/scanners/skill-scanner) | Skill manifests + tool definitions | Install-time or on demand | `defenseclaw skill scan` |
+| [MCP scanner](/docs-site/scanners/mcp-scanner) | MCP server config + exposed tools | Install-time or on demand | `defenseclaw mcp scan` |
+| [Plugin scanner](/docs-site/scanners/plugin-scanner) | OpenClaw plugins | Install-time or on demand | `defenseclaw plugin scan` |
+| [CodeGuard](/docs-site/scanners/codeguard) | Source files and directories | On demand | `defenseclaw-gateway scan code` |
+| [ClawShield](/docs-site/scanners/clawshield) | Readable skill/code content | Internal scanner implementations | Go scanner constructors |
+| [AIBOM](/docs-site/scanners/aibom) | Live OpenClaw inventory | On demand | `defenseclaw aibom scan` |
+| [Custom](/docs-site/scanners/custom-scanners) | User-defined | In-process registry | `plugins.Registry.Register` |
+
+Every scanner result carries a scanner name, target, timestamp, findings, and duration. The policy engine decides what to do with the resulting severity and finding set.
+
+## The result shape
+
+```json
+{
+  "scanner": "codeguard",
+  "target": "./src",
+  "timestamp": "2026-04-23T00:00:00Z",
+  "findings": [
+    {
+      "id": "CG-EXEC-001",
+      "severity": "HIGH",
+      "title": "Unsafe command execution",
+      "scanner": "codeguard",
+      "tags": ["codeguard"]
+    }
+  ],
+  "duration": 125000000
+}
+```
+
+`defenseclaw-gateway scan code --json` emits the v7 wire shape from `internal/cli/scan_v7.go`, which includes additional schema, scan ID, provenance, and optional agent identity fields.
+
+## Local vs remote
+
+Scanners run in one of three modes, set by `guardrail.scanner_mode`:
+
+- `local` — everything runs in-process / out-of-process on this machine. No network.
+- `remote` — verdicts are requested from the Cisco AI Defense cloud scanner.
+- `both` — local runs first; if `severity=NONE` the remote scanner is consulted for a second opinion.
+
+Most deployments start `local` and add `both` once the remote scanner is integrated.
+
+## Related
+
+- [Scanners CLI](/docs-site/cli/commands/skill)
+- [Admission policy](/docs-site/policy/scanner-policies)
+- [Watcher](/docs-site/watcher/index)
+
+---
+
+<!-- generated-from: internal/scanner/, cli/defenseclaw/commands/cmd_skill.py, cli/defenseclaw/commands/cmd_mcp.py -->

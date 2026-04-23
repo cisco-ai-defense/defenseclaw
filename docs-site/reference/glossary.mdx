@@ -1,0 +1,103 @@
+---
+title: "Glossary"
+description: "The DefenseClaw vocabulary: terms that appear across the docs with a single authoritative definition."
+order: 4
+---
+
+## Overview
+
+When two words could mean the same thing, this page says which one we use and what it means.
+
+## Terms
+
+**Action** — The enforcement outcome of a verdict. One of `allow`, `warn`, `block`, `quarantine`. Distinct from severity.
+
+**Admission** — The install-time gate that decides whether a skill/MCP/plugin/tool is allowed into the agent runtime. Implemented by `admission.rego`.
+
+**Admission override** — An operator decision to install an artifact despite a `block` verdict, recorded in the audit store with a required `reason`.
+
+**AIBOM** — AI Bill of Materials. CycloneDX-shaped inventory of models, datasets, skills, and plugins installed on the host.
+
+**Audit bridge** — The translator that maps persisted audit events into `gatewaylog.Event` lifecycle rows for `gateway.jsonl`.
+
+**Audit store** — The local SQLite database of every decision and verdict. Authoritative; all other sinks are copies.
+
+**Bifrost** — The provider-routing layer used by the Go gateway to call configured LLM providers.
+
+**ClawShield** — The binary/archive/image scanner.
+
+**CodeGuard** — The generated-code scanner.
+
+**Correlation ID** — A string carried end-to-end across a single agent turn so every emitted event can be joined back into one story. Format: `req_01HX...` (ULID-like).
+
+**Direction** — `prompt` | `completion` | `tool_call`. The role of the content being inspected.
+
+**Drift** — Content of an already-approved artifact changed since approval. Detected by snapshot-diff in the watcher.
+
+**Enforcement** — The physical-layer action that follows an admission decision (quarantine, restore, skip). Distinct from admission which is the decision.
+
+**Event** — A structured record of something happening. Produced by every subsystem; persisted in the audit store; forwarded to sinks.
+
+**Event filter** — The sink-level `min_severity` and `actions` filters that decide whether an audit event is delivered.
+
+**Finding** — A single detection emitted by a scanner or rule. Identified by a prefixed string (`secret:aws-key`, `injection:shell`, `pii:email`). Multiple findings compose a verdict.
+
+**Guardrail** — The LLM traffic inspector: the proxy + scanner pipeline that inspects prompts, completions, tool calls.
+
+**Judge** — The LLM-based adjudicator used in `regex_judge` and `judge_first` detection strategies.
+
+**LLM judge client** — The Go client under `internal/gateway/llm_judge.go` that calls the judge, enforces timeouts, and caches verdicts.
+
+**Master key** — The default API bearer token minted at install time.
+
+**MCP** — Model Context Protocol. The standard for agent tool providers.
+
+**Mode** — `observe` | `action` | `disabled`. Controls whether the guardrail logs or enforces.
+
+**Notification queue** — The in-process queue used by the guardrail path to inject pending enforcement notifications into model-facing system messages.
+
+**OpenShell** — The CLI that invokes shell subprocesses on behalf of agents. Sandbox-wrapped by DefenseClaw.
+
+**Pack version** — A hash of the compiled rule pack + suppressions snapshot. Used to version-scope the verdict cache.
+
+**Policy snapshot** — An immutable compile of Rego modules + YAML rules + `data.json` overlays. Swapped atomically on reload.
+
+**Profile** — A named rule-pack directory: `default`, `strict`, `permissive`, or custom.
+
+**Quarantine** — The physical move of a blocked artifact to `~/.defenseclaw/quarantine/`.
+
+**Redaction** — Scrubbing sensitive bytes from events before they leave the gateway.
+
+**Scanner** — Any component that produces a `ScanVerdict`.
+
+**Scanner mode** — `local` | `remote` | `both`. Controls where the scanner runs.
+
+**Sensitive tool** — An MCP tool marked in `sensitive-tools.yaml` for tighter result inspection.
+
+**Sidecar** — The Go process (`defenseclaw-gateway`) that owns policy, audit, and the guardrail proxy.
+
+**Sink** — An `audit_sinks[]` destination for audit events, currently `splunk_hec`, `otlp_logs`, or `http_jsonl`.
+
+**SSRF** — Server-Side Request Forgery. The firewall's SSRF guard mitigates this.
+
+**Strategy** — `regex_only` | `regex_judge` | `judge_first`. Controls how the guardrail decides.
+
+**Suppression** — A declarative rule that drops or strips content to eliminate false positives.
+
+**TUI** — The terminal UI (`defenseclaw tui`) that surfaces everything the CLI can show, interactively.
+
+**Verdict** — The structured output of a scan. `severity`, `findings`, `action`, `reason`, `confidence`.
+
+**Verdict cache** — In-process cache for guardrail verdicts, keyed by content/direction/model/kind in the current source.
+
+**Watcher** — The filesystem observer that triggers scanners on install/change.
+
+## Related
+
+- [Installation](/docs-site/installation/index)
+- [Guardrail overview](/docs-site/guardrail/index)
+- [Observability overview](/docs-site/observability/index)
+
+---
+
+<!-- generated-from: README.md, internal/gateway/guardrail.go, policies/rego/data.json -->

@@ -1,0 +1,105 @@
+---
+title: "Release"
+description: "Versioning, changelog, and the tag flow that ships a new DefenseClaw."
+order: 11
+---
+
+## Overview
+
+DefenseClaw follows semver strictly. Operators should be able to read a version number and know whether an upgrade is safe. This page documents the release process so maintainers can ship consistently and contributors know what to expect.
+
+## Versioning
+
+- `MAJOR` — breaking API/CLI/protocol/schema change. Rare.
+- `MINOR` — new feature, no break.
+- `PATCH` — bug fixes, doc fixes, non-breaking rule updates.
+
+The **guardrail default rule pack** has its own version (`policies/guardrail/default/Makefile`) that bumps independently. Rule-pack version changes are patch releases of DefenseClaw unless the pack schema changes.
+
+## Artifacts
+
+Each release ships:
+
+| Artifact | Where | Purpose |
+|----------|-------|---------|
+| Tarball per OS/arch | GitHub release | Binaries for `defenseclaw-gateway` |
+| Python wheel | PyPI | `pip install defenseclaw` |
+| NPM package | npm | `npm install @cisco-ai-defense/defenseclaw` (plugin) |
+| Debian/RPM packages | GitHub release | System install |
+| Docker image | ghcr.io | Containerized sidecar |
+| SHA-256 sums | GitHub release | Integrity |
+| Sigstore signatures | GitHub release | Provenance |
+| Release notes | GitHub release body | Human-readable summary |
+
+## Flow
+
+### 1. Branch and version bump
+
+```bash
+git checkout -b release/v0.8.0
+# edit Makefile, .goreleaser.yaml, and policies/guardrail/default/Makefile if needed
+make docs-gen
+git commit -am "chore(release): 0.8.0"
+git push -u origin release/v0.8.0
+```
+
+### 2. PR and review
+
+Open a PR. CI runs the full matrix. Reviewers check:
+
+- CHANGELOG entries for every user-visible change since the last release.
+- No breaking changes unless the version is MAJOR.
+- Migration notes added to `docs-site/migration/` if operators need to act.
+- Rule-pack diff is reasonable (the `docs/guardrail/rule-packs` diff block is auto-updated).
+
+### 3. Merge and tag
+
+```bash
+git checkout main && git pull
+git tag -s v0.8.0 -m "DefenseClaw 0.8.0"
+git push origin v0.8.0
+```
+
+The tag triggers the release workflow which builds, signs, and publishes every artifact.
+
+### 4. Announce
+
+- GitHub release notes (auto-populated from CHANGELOG).
+- Docs: merge `docs-site/migration/breaking-changes.mdx` update if the release introduces any.
+- Internal changelog for partners.
+
+## Changelog
+
+`.goreleaser.yaml` follows [Keep a Changelog](https://keepachangelog.com). Each release has:
+
+- **Breaking** — mandatory section for MAJOR; omit otherwise.
+- **Added** — new features.
+- **Changed** — behavior changes that don't break compat.
+- **Fixed** — bugs.
+- **Security** — CVE-adjacent fixes.
+
+Entries are written in the PR that introduces the change, not at release time. A PR that's missing its CHANGELOG entry is blocked by CI.
+
+## Hotfix flow
+
+1. Branch from the released tag: `git checkout -b hotfix/0.7.1 v0.7.0`.
+2. Cherry-pick the fix.
+3. Bump to `0.7.1`, update CHANGELOG.
+4. PR, merge, tag.
+5. Cherry-pick to `main` afterward.
+
+## Deprecation policy
+
+- Deprecated items must be announced in CHANGELOG and marked in the docs with a `<Callout type="warning">` that names the version they'll be removed in.
+- Minimum two minor versions between deprecation announcement and removal.
+- Removals happen only in MAJOR releases.
+
+## Related
+
+- [Building](/docs-site/developer/building)
+- [Contributing](/docs-site/developer/contributing)
+- [Breaking changes](/docs-site/migration/breaking-changes)
+
+---
+
+<!-- generated-from: .github/workflows/release.yaml, .goreleaser.yaml, Makefile -->

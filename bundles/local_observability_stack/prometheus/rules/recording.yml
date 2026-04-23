@@ -49,6 +49,27 @@ groups:
       - record: scanner:defenseclaw_findings_by_severity:rate5m
         expr: sum by (scanner, severity) (rate(defenseclaw_scan_findings_total[5m]))
 
+  - name: defenseclaw.codex
+    interval: 30s
+    rules:
+      - record: codex:defenseclaw_hook_invocations:rate5m
+        expr: sum by (hook_event, action, mode) (rate(defenseclaw_codex_hook_invocations_total[5m]))
+      - record: codex:defenseclaw_blocks:rate5m
+        expr: sum by (hook_event, severity, mode) (rate(defenseclaw_codex_blocks_total[5m]))
+      - record: codex:defenseclaw_would_blocks:rate5m
+        expr: sum by (hook_event, severity, mode) (rate(defenseclaw_codex_would_blocks_total[5m]))
+      - record: codex:defenseclaw_block_ratio:5m
+        expr: |
+          sum(rate(defenseclaw_codex_blocks_total[5m]))
+          /
+          clamp_min(sum(rate(defenseclaw_codex_hook_invocations_total[5m])), 0.0001)
+      - record: codex:defenseclaw_hook_latency:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, hook_event) (rate(defenseclaw_codex_hook_latency_milliseconds_bucket[5m])))
+      - record: codex:defenseclaw_component_scans:rate5m
+        expr: sum by (component, result) (rate(defenseclaw_codex_component_scans_total[5m]))
+
   - name: defenseclaw.slo.recording
     interval: 30s
     rules:

@@ -1,0 +1,103 @@
+---
+title: "Allow an internal MCP server"
+description: "Trust-path an in-house Model Context Protocol server so admission doesn't quarantine it, without lowering the bar for others."
+order: 2
+---
+
+## Problem
+
+Your team runs an internal MCP server — `mcp.corp.example/agents` — that provides legitimate tools. The default scanner profile sees an unfamiliar endpoint and flags it, landing the server in quarantine. You want to trust this specific server while keeping the scanner enabled for everything else.
+
+## Solution
+
+Use a narrow allow entry by exact MCP server name. Do not disable scanning globally and do not add broad domain patterns to policy unless you own every server behind that domain.
+
+<Callout type="warning" title="Allow is an override">
+  `defenseclaw mcp allow` creates an explicit allow-list entry. Admission skips enforcement for that target name, so use a reviewed name, put the ticket or expiry in `--reason`, and remove the entry when the exception ends.
+</Callout>
+
+### Step 1: Register the server without bypassing the scanner
+
+````bash
+defenseclaw mcp set internal-tools \
+  --url https://mcp.corp.example/agents \
+  --transport sse
+````
+
+If the scan blocks the install, keep the block in place until the owning team reviews the finding.
+
+### Step 2: Scan and capture evidence
+
+````bash
+defenseclaw mcp scan internal-tools --json > /tmp/internal-tools-mcp-scan.json
+defenseclaw mcp list --json > /tmp/internal-tools-mcp-list.json
+````
+
+Look for the `max_severity`, `total_findings`, and latest `verdict` before deciding to allow.
+
+### Step 3: Add the narrow allow entry
+
+````bash
+defenseclaw mcp allow internal-tools \
+  --reason "SEC-1842 reviewed by platform; expires 2026-10-15"
+````
+
+The allow entry is stored in DefenseClaw's local action store and is consumed by the admission gate before scanner enforcement.
+
+### Step 4: Re-apply the MCP config
+
+If Step 1 was blocked, run `set` again after the allow entry exists:
+
+````bash
+defenseclaw mcp set internal-tools \
+  --url https://mcp.corp.example/agents \
+  --transport sse
+````
+
+## Verification
+
+````bash
+defenseclaw mcp list --json
+defenseclaw mcp scan internal-tools --json
+defenseclaw-gateway policy evaluate --target-type mcp --target-name internal-tools
+````
+
+Expected result:
+
+| Check | Expected |
+|-------|----------|
+| `mcp list --json` | `internal-tools` exists with the expected URL |
+| `mcp scan internal-tools --json` | findings are understood and attached to the change ticket |
+| `policy evaluate` | admission returns an allow-list reason for `internal-tools` |
+
+## Rollback
+
+Remove the explicit allow entry first. This does not remove the MCP server; it returns the server to normal scanning and enforcement.
+
+````bash
+defenseclaw mcp unblock internal-tools
+defenseclaw mcp scan internal-tools --json
+````
+
+If the server itself should be removed from OpenClaw configuration:
+
+````bash
+defenseclaw mcp unset internal-tools
+````
+
+## Caveats
+
+- The CLI allow entry does not enforce expiry by itself. Put the expiry date in the `--reason` string and track it in your ticketing system.
+- Exact names matter. `internal-tools` and `internal-tools-dev` are separate targets.
+- `--skip-scan` exists for emergency registration, but it bypasses the useful evidence you need for review. Prefer scan-first, allow-second.
+- A manual block still wins operationally: unblock before expecting an allow entry to work.
+
+## Related
+
+- [Watcher admission gate](/docs-site/watcher/admission-gate)
+- [Scanner policies](/docs-site/policy/scanner-policies)
+- [MCP scanner](/docs-site/scanners/mcp-scanner)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_mcp.py, internal/policy/engine.go, internal/watcher/watcher.go, policies/rego/admission.rego, policies/rego/data.json -->

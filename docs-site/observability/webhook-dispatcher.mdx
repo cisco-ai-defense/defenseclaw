@@ -1,0 +1,78 @@
+---
+title: "Webhook dispatcher"
+description: "The dispatcher that delivers notifications to chat/incident webhooks — retry, HMAC signing, and per-destination templates."
+order: 7
+---
+
+## Overview
+
+The webhook dispatcher delivers chat and incident notifications to configured `webhooks[]` entries. It is separate from `audit_sinks[].http_jsonl`: webhooks render notification payloads, while HTTP JSONL sinks forward audit events.
+
+## Configured in two places
+
+Setup uses the dedicated command group:
+
+```bash
+defenseclaw setup webhook add slack --name slack-security --url https://hooks.slack.com/services/...
+defenseclaw setup webhook add pagerduty --name pd-oncall --url https://events.pagerduty.com/v2/enqueue --secret-env DEFENSECLAW_PD_KEY
+defenseclaw setup webhook add webex --name webex-alerts --url https://webexapis.com/v1/messages --secret-env DEFENSECLAW_WEBEX_TOKEN --room-id Y2lzY29z...
+defenseclaw setup webhook add generic --name custom-incident --url https://siem.example.com/hook --secret-env DEFENSECLAW_WEBHOOK_SECRET
+```
+
+Each entry becomes a block under `webhooks:` in `~/.defenseclaw/config.yaml`.
+
+## Transport
+
+| Type | Content-type | Auth | Retry |
+|------|--------------|------|-------|
+| `slack` | `application/json` | URL (secret) | exponential backoff |
+| `pagerduty` | `application/json` | routing-key | exponential backoff |
+| `webex` | `application/json` | bearer | exponential backoff |
+| `generic` | `application/json` | HMAC-SHA256 in `X-Hub-Signature-256` when `secret_env` is set | exponential backoff |
+
+The runtime tries up to four HTTP attempts total: the initial request plus three retries. HTTP 5xx, 429, and transport errors are retryable; most 4xx responses are permanent failures.
+
+## Runtime filters
+
+Each webhook can declare:
+
+| Field | Behavior |
+|---|---|
+| `min_severity` | Events below the configured severity are skipped. |
+| `events` | Optional allow-list of event categories: `block`, `scan`, `guardrail`, `drift`, `health`. |
+| `timeout_seconds` | Per-delivery request timeout; defaults to 10 seconds. |
+| `cooldown_seconds` | Duplicate target/action suppression window; omitted means 300 seconds, `0` disables cooldown. |
+
+```yaml
+webhooks:
+  - name: slack-security
+    type: slack
+    url_env: SLACK_URL
+    secret_env: ""
+    min_severity: HIGH
+    events: [block, guardrail]
+    timeout_seconds: 10
+    cooldown_seconds: 300
+```
+
+The dispatcher redacts `event.Details` with `redaction.ForSinkReason` before formatting payloads.
+
+## Test command
+
+```bash
+defenseclaw setup webhook test slack-security --dry-run
+defenseclaw setup webhook test slack-security --timeout 10
+```
+
+The name is a positional argument. `--dry-run` formats the payload and headers without delivering.
+
+## Related
+
+- [Notification queue](/docs-site/guardrail/notification-queue)
+- [Setup: webhook](/docs-site/first-setup/setup-webhook)
+- [Sinks](/docs-site/observability/sinks)
+- [Redaction](/docs-site/observability/redaction)
+
+---
+
+<!-- generated-from: internal/gateway/webhook.go, cli/defenseclaw/commands/cmd_setup_webhook.py, cli/defenseclaw/webhooks/writer.py, cli/defenseclaw/webhooks/dispatch.py -->

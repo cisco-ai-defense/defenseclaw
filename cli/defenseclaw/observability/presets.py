@@ -74,6 +74,11 @@ class Preset:
     # Header map applied to the OTel exporter. Values may contain
     # ``${ENV_NAME}`` substitutions that resolve at sink-build time.
     otel_headers: dict[str, str] = field(default_factory=dict)
+    # Optional TLS mode override for the OTel exporter. ``None`` means
+    # preserve the operator's existing setting. The bundled local stack
+    # uses plaintext OTLP on loopback, so its preset must stamp
+    # ``otel.tls.insecure=true``.
+    otel_tls_insecure: bool | None = None
 
     # ---- audit_sinks target ----
     sink_kind: SinkKind | None = None
@@ -244,6 +249,7 @@ LOCAL_OTLP = Preset(
     # No auth: the stack binds to 127.0.0.1 by default. If an operator
     # opens it up to the LAN they are expected to add headers manually.
     otel_headers={},
+    otel_tls_insecure=True,
     token_env="",
     token_label="",
     prompts=(

@@ -1,0 +1,138 @@
+---
+title: "Platform engineer journey"
+description: "Install, run, verify, and harden DefenseClaw as a platform-owned service."
+order: 2
+---
+
+## Overview
+
+This journey is for the team that owns the machine, service lifecycle, local ports, OpenClaw integration, and production runbook. Use it when your goal is to get DefenseClaw installed, initialized, reachable, and monitored before security teams tune policy or developers extend scanners.
+
+<Callout type="info" title="Two binaries, two jobs">
+  `defenseclaw` is the operator CLI for setup and checks. `defenseclaw-gateway` is the Go sidecar daemon that serves the local API on **18970** and the guardrail proxy on **4000**.
+</Callout>
+
+## Goal
+
+By the end of this path, you should have:
+
+| Outcome | Proof |
+|---------|-------|
+| Binaries installed | `defenseclaw version` and `defenseclaw-gateway --version` work from the target shell. |
+| Local state initialized | `~/.defenseclaw/config.yaml` and `~/.defenseclaw/audit.db` exist. |
+| Gateway sidecar running | `defenseclaw-gateway status` reports subsystem health. |
+| Health endpoints reachable | `curl` can read `/health` on the sidecar and guardrail ports. |
+| Safe rollout mode | Guardrail starts in `observe` unless the deployment is explicitly ready for `action`. |
+| Operations runbook ready | You know the start, stop, restart, doctor, log, sandbox, and rollback pages. |
+
+## Before you start
+
+| Check | Command | Go deeper |
+|-------|---------|-----------|
+| Pick an install method | `make install` or the curl installer | [Install methods](/docs-site/installation/index) |
+| Confirm toolchains for source builds | `go version`, `python3 --version`, `uv --version`, `node --version` | [Prerequisites](/docs-site/installation/prerequisites) |
+| Know the first-run route | `defenseclaw quickstart --non-interactive --yes --mode observe` | [Zero to governed](/docs-site/first-setup/index) |
+| Confirm local ports | Sidecar **18970**, guardrail proxy **4000** | [API overview](/docs-site/api/index) |
+| Decide whether Linux sandboxing is in scope | `defenseclaw sandbox --help` | [Sandbox overview](/docs-site/sandbox/index) |
+
+<Callout type="warning" title="OpenClaw config gates activation">
+  DefenseClaw can initialize before OpenClaw is fully configured, but `setup guardrail` can only patch OpenClaw after its config file exists. If the patch is skipped, rerun setup after OpenClaw is onboarded.
+</Callout>
+
+## First 30 minutes
+
+Use this path for a platform-owned workstation or single-node lab. It keeps the guardrail in observe mode so you can verify wiring before blocking traffic.
+
+```bash
+defenseclaw quickstart --non-interactive --yes --mode observe
+defenseclaw-gateway status
+defenseclaw doctor --json-output
+```
+
+If you prefer each step to be visible in a runbook, use the explicit route:
+
+```bash
+defenseclaw init --enable-guardrail
+defenseclaw setup gateway --non-interactive --host 127.0.0.1 --api-port 18970
+defenseclaw setup guardrail --mode observe --scanner-mode local --port 4000 --non-interactive
+defenseclaw-gateway start
+defenseclaw status
+defenseclaw doctor
+```
+
+| Step | What to look for | If it fails |
+|------|------------------|-------------|
+| `quickstart` or `init` | Config path, audit DB path, scanner/bootstrap summary | Open [init](/docs-site/first-setup/init) and rerun with `defenseclaw doctor`. |
+| `setup gateway` | Local API host and port are persisted | Check [setup gateway](/docs-site/first-setup/setup-gateway). |
+| `setup guardrail` | Guardrail enabled and OpenClaw patch attempted | Check [setup guardrail](/docs-site/first-setup/setup-guardrail). |
+| `defenseclaw-gateway start` | PID and log path under `~/.defenseclaw/` | Use [gateway start](/docs-site/cli/commands-gateway/start). |
+| `doctor` | PASS/WARN/FAIL/SKIP results suitable for CI | Use [doctor](/docs-site/cli/commands/doctor). |
+
+## Production hardening
+
+| Area | Platform default | Harden when |
+|------|------------------|-------------|
+| Guardrail mode | `observe` | Security review accepts false-positive volume; switch with `defenseclaw setup guardrail --mode action --non-interactive`. |
+| Sidecar lifecycle | `defenseclaw-gateway start`, `restart`, `stop` | Move to host service management once operational ownership is clear. |
+| API access | Loopback sidecar API on **18970** | Add token handling before non-loopback access; see [API auth](/docs-site/api/auth). |
+| Guardrail proxy | Local proxy on **4000** | Confirm provider headers and health before routing production OpenClaw traffic; see [Guardrail architecture](/docs-site/guardrail/architecture). |
+| Observability | Local SQLite audit store | Add Splunk, OTLP, or webhook sinks after the sidecar is healthy; see [Observability](/docs-site/observability/index). |
+| Sandbox | Host mode | Use Linux OpenShell sandbox mode for stronger process and network isolation; see [Setup sandbox](/docs-site/first-setup/setup-sandbox). |
+| Upgrades | Manual release install | Use [Upgrade](/docs-site/installation/upgrade) and run `defenseclaw doctor` after each upgrade. |
+
+For Linux sandbox hosts, configure sandbox mode separately from the normal workstation path:
+
+```bash
+sudo defenseclaw sandbox setup --policy strict --non-interactive
+defenseclaw-gateway sandbox status
+```
+
+## Verify it worked
+
+Run these checks before handing the deployment to the security or application team:
+
+```bash
+defenseclaw status
+defenseclaw doctor --json-output
+defenseclaw-gateway status
+curl -s http://127.0.0.1:18970/health
+curl -s http://127.0.0.1:4000/health
+```
+
+| Signal | Healthy result |
+|--------|----------------|
+| `defenseclaw status` | Shows data directory, scanner availability, observability destinations, and sidecar state. |
+| `defenseclaw doctor --json-output` | Returns machine-readable checks; failures are actionable before traffic is routed. |
+| `defenseclaw-gateway status` | Shows sidecar subsystem health from the Go daemon. |
+| `:18970/health` | Confirms the sidecar API is serving local management traffic. |
+| `:4000/health` | Confirms the LiteLLM-compatible guardrail proxy is listening. |
+
+<Callout type="tip" title="Make verification boring">
+  Put `defenseclaw doctor --json-output`, `defenseclaw-gateway status`, and both health probes into the platform runbook. They catch most install, token, port, and daemon issues before users feel them.
+</Callout>
+
+## Where to go next
+
+| If you need to | Go to |
+|----------------|-------|
+| Choose or repeat an install path | [Install methods](/docs-site/installation/index) |
+| Build from the repo checkout | [Make install](/docs-site/installation/make-install) |
+| Verify a fresh install | [Verify install](/docs-site/installation/verify-install) |
+| Configure guardrail routing | [Setup guardrail](/docs-site/first-setup/setup-guardrail) |
+| Operate the sidecar | [Gateway CLI](/docs-site/cli/gateway-cli) |
+| Understand API/auth headers | [API auth](/docs-site/api/auth) |
+| Add telemetry and audit sinks | [Observability](/docs-site/observability/index) |
+| Harden with Linux sandboxing | [Sandbox install](/docs-site/sandbox/install) |
+| Diagnose incidents | [Troubleshooting](/docs-site/reference/troubleshooting) |
+
+## Related
+
+- [User journeys](/docs-site/journeys/index)
+- [First setup](/docs-site/first-setup/index)
+- [Gateway CLI](/docs-site/cli/gateway-cli)
+- [Config files](/docs-site/reference/config-files)
+- [Security team journey](/docs-site/journeys/security-team)
+
+---
+
+<!-- generated-from: README.md, Makefile, scripts/install.sh, scripts/install-dev.sh, scripts/upgrade.sh, cli/defenseclaw/commands/cmd_init.py, cli/defenseclaw/commands/cmd_quickstart.py, cli/defenseclaw/commands/cmd_setup.py, cli/defenseclaw/commands/cmd_doctor.py, cli/defenseclaw/commands/cmd_status.py, cli/defenseclaw/commands/cmd_sandbox.py, cli/defenseclaw/commands/cmd_setup_sandbox.py, internal/gateway/api.go, internal/gateway/proxy.go, internal/cli/root.go, internal/cli/daemon.go, internal/cli/sandbox.go -->

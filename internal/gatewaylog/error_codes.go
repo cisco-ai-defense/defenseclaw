@@ -107,6 +107,7 @@ const (
 	SubsystemSQLite         Subsystem = "sqlite"
 	SubsystemAdmission      Subsystem = "admission"
 	SubsystemConfigMutation Subsystem = "config_mutation"
+	SubsystemCodex          Subsystem = "codex"
 	// Gatewaylog subsystem — owned by the structured writer itself
 	// (runtime schema validation, fanout panics, forced drops).
 	SubsystemGatewaylog Subsystem = "gatewaylog"
@@ -168,6 +169,7 @@ func AllSubsystems() []Subsystem {
 		SubsystemSQLite,
 		SubsystemAdmission,
 		SubsystemConfigMutation,
+		SubsystemCodex,
 		SubsystemGatewaylog,
 	}
 }

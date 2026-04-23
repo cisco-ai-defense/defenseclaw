@@ -1,0 +1,64 @@
+---
+title: "Splunk app"
+description: "The Cisco DefenseClaw Splunk app: field extractions, props, and shipped dashboards."
+order: 9
+---
+
+## Overview
+
+DefenseClaw ships Splunk-oriented assets under the repository's observability/deploy tree and emits Splunk-ready data through two code paths:
+
+- `splunk-hec` audit sink, configured through `defenseclaw setup observability add splunk-hec`.
+- `gateway.jsonl`, tailed by Splunk Universal Forwarder with sourcetype `defenseclaw:gateway`.
+
+## HEC sink setup
+
+```bash
+defenseclaw setup observability add splunk-hec \
+  --non-interactive \
+  --host splunk.example.com \
+  --port 8088 \
+  --index defenseclaw \
+  --source defenseclaw \
+  --sourcetype _json \
+  --token "$DEFENSECLAW_SPLUNK_HEC_TOKEN"
+```
+
+The writer stores the token in `~/.defenseclaw/.env` and writes an `audit_sinks[]` entry with kind `splunk_hec`.
+
+## Universal Forwarder setup
+
+```ini
+[monitor:///home/defenseclaw/.defenseclaw/gateway.jsonl]
+sourcetype = defenseclaw:gateway
+index = defenseclaw
+
+[monitor:///home/defenseclaw/.defenseclaw/gateway.jsonl.*.gz]
+sourcetype = defenseclaw:gateway
+index = defenseclaw
+```
+
+`gatewaylog.Writer` emits line-delimited JSON, so Splunk field extraction can use normal JSON parsing.
+
+## What to search
+
+| Question | Search starting point |
+|---|---|
+| Recent blocked guardrail decisions | `index=defenseclaw severity=HIGH OR severity=CRITICAL` |
+| Sink delivery failures | `index=defenseclaw event_type=error subsystem=sinks` |
+| Webhook cooldown suppression | `index=defenseclaw code=WEBHOOK_COOLDOWN` |
+| Audit export validation | `defenseclaw-gateway audit export --include-activity --limit 100` |
+
+<Callout type="warning" title="No app uploader command">
+  The current CLI does not expose `setup observability upgrade-app` or an `--install-app` flag. Install Splunk-side assets through your Splunk packaging/deployment process.
+</Callout>
+
+## Related
+
+- [Setup: Splunk](/docs-site/first-setup/setup-splunk)
+- [Sinks](/docs-site/observability/sinks)
+- [Gateway JSONL log](/docs-site/observability/gatewaylog-jsonl)
+
+---
+
+<!-- generated-from: internal/audit/sinks/splunk_hec.go, deploy/observability/README.md, cli/defenseclaw/commands/cmd_setup_observability.py -->

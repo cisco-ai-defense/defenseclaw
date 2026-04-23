@@ -1,0 +1,129 @@
+---
+title: "Building"
+description: "Local dev loop, cross-compile, and release builds."
+order: 10
+---
+
+## Overview
+
+DefenseClaw builds are scripted through `Makefile`. The happy path is `make build`. This page covers the local dev loop, cross-compilation targets, distribution artifacts, and how to iterate quickly.
+
+## Prerequisites
+
+- Go 1.26.2 from `go.mod`
+- Python 3.10 - 3.13
+- Node.js 18+; 22.14+ or 24+ is recommended for OpenClaw plugin work
+- `make`, `git`, `curl`
+
+Optional:
+
+- Docker (for containerized builds)
+- `opa` CLI (for ad-hoc Rego testing; embedded OPA doesn't need it)
+
+## Dev loop
+
+```bash
+# 1. Clone + install development dependencies
+git clone git@github.com:cisco-ai-defense/defenseclaw.git
+cd defenseclaw
+make dev-install
+
+# 2. Build everything
+make build
+
+# 3. Run locally (no install)
+./defenseclaw-gateway
+# in another terminal:
+.venv/bin/defenseclaw status
+
+# 4. Fast iterate on Go
+go run ./cmd/defenseclaw
+
+# 5. Fast iterate on Python CLI
+.venv/bin/python -m defenseclaw status
+
+# 6. Fast iterate on plugin
+cd extensions/defenseclaw && npm run dev
+```
+
+`make dev` runs `make build` in a watch loop — a change anywhere in Go/Python/TS rebuilds the affected binary and restarts the local sidecar.
+
+## Targets
+
+| Target | What it does |
+|--------|--------------|
+| `make build` | Build Go binaries + Python wheel + TS plugin |
+| `make install` | Install everything into `~/.defenseclaw/` and PATH |
+| `make test` | Run Python CLI unittest discovery and Go gateway/TUI/test packages |
+| `make cli-test-cov` | Run Python CLI pytest coverage |
+| `make gateway-test` | Run Go gateway, TUI, and `test/...` race tests |
+| `make ts-test` | Run plugin Vitest suite |
+| `make rego-test` | Run OPA tests under `policies/rego/` |
+| `make lint` | All linters |
+| `make docs-gen` | Regenerate docgen AUTOGEN blocks |
+| `make docs-verify` | Run docs-site accuracy checks |
+| `make docs-check` | Run docs generation, verification, dead-link checks, and drift detection |
+| `make docs-deadlinks` | Scan docs-site for broken internal links |
+| `make quickstart` | Run `defenseclaw quickstart` against the local build |
+| `make clean` | Remove build output |
+| `make dist` | Build local distribution artifacts under `dist/` |
+
+## Cross-compilation
+
+```bash
+# Linux amd64
+GOOS=linux GOARCH=amd64 make build
+
+# Linux arm64 (for sandbox hosts)
+GOOS=linux GOARCH=arm64 make build
+
+# macOS arm64 (Apple Silicon)
+GOOS=darwin GOARCH=arm64 make build
+
+# Windows amd64
+GOOS=windows GOARCH=amd64 make build
+```
+
+The Makefile handles CGO correctly: we're CGO-free so cross-compile works without toolchain gymnastics.
+
+## Distribution builds
+
+```bash
+make dist
+```
+
+Produces, under `dist/`:
+
+- `defenseclaw-gateway-<os>-<arch>` binaries for Linux and macOS on amd64/arm64
+- a Python wheel built by `uv build`
+- `defenseclaw-plugin-<version>.tar.gz`
+- sandbox policy/script copies under `dist/sandbox/`
+- `checksums.txt`
+
+The tag-driven release workflow uses `.goreleaser.yaml` for archive, checksum, SBOM, and cosign signing work, then uploads the wheel and plugin tarball built by the Makefile dist targets.
+
+## Containerized build
+
+```bash
+docker run --rm -it -v "$PWD:/src" -w /src golang:1.26.2 make gateway
+```
+
+Use this when your host Go toolchain does not match `go.mod`. Python and plugin builds still require `uv` and Node.js on the host or in a fuller development image.
+
+## Debugging
+
+- **Go**: `dlv debug ./cmd/defenseclaw`
+- **Python**: `PYTHONBREAKPOINT=ipdb.set_trace python -m defenseclaw status`
+- **TS**: `npm run dev` watches and rebuilds; VSCode launch configs under `.vscode/`.
+
+For sidecar behavior, run the built `./defenseclaw-gateway` in the foreground so stdout/stderr stay attached to your terminal.
+
+## Related
+
+- [Testing](/docs-site/developer/testing)
+- [Release](/docs-site/developer/release)
+- [Contributing](/docs-site/developer/contributing)
+
+---
+
+<!-- generated-from: Makefile, go.mod, pyproject.toml, .github/workflows/release.yaml, .goreleaser.yaml -->

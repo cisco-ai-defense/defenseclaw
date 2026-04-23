@@ -1,0 +1,378 @@
+---
+title: "defenseclaw skill"
+description: "Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore."
+order: 10
+---
+
+## Overview
+
+`defenseclaw skill` — Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:skill -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw skill [OPTIONS]
+```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `allow` | Add a skill to the install allow list. |
+| `block` | Add a skill to the install block list. |
+| `disable` | Disable a skill at runtime via the OpenClaw gateway. |
+| `enable` | Enable a previously disabled skill via the OpenClaw gateway. |
+| `info` | Show detailed information about a skill. |
+| `install` | Install and scan an OpenClaw skill via clawhub. |
+| `list` | List all OpenClaw skills with their latest scan severity. |
+| `quarantine` | Quarantine a skill's files to the quarantine area. |
+| `restore` | Restore a quarantined skill to its original location. |
+| `scan` | Scan a skill by name, path, URL, or 'all' for all configured skills. |
+| `search` | Search the ClawHub skill registry. |
+| `unblock` | Remove a skill from the block list and clear all enforcement state. |
+
+### Description
+
+Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore
+
+### `defenseclaw skill allow`
+
+Add a skill to the install allow list
+
+Add a skill to the install allow list.
+
+    Allow-listed skills skip the scan gate during install.
+    Adding a skill also removes it from the block list.
+
+```bash
+defenseclaw skill allow <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for allowing |
+
+### `defenseclaw skill block`
+
+Add a skill to the install block list
+
+Add a skill to the install block list.
+
+    Blocked skills are rejected by 'skill install' before any scan.
+    Does not affect already-running skills — use 'skill disable' or
+    'skill quarantine' for that.
+
+```bash
+defenseclaw skill block <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for blocking |
+
+### `defenseclaw skill disable`
+
+Disable a skill at runtime via the OpenClaw gateway
+
+Disable a skill at runtime via the OpenClaw gateway.
+
+    Sends a skills.update RPC to prevent the agent from using the skill's
+    tools until re-enabled. This is runtime-only — it does not block install
+    or quarantine files.
+
+    Requires the gateway to be running.
+
+```bash
+defenseclaw skill disable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for disabling |
+
+### `defenseclaw skill enable`
+
+Enable a previously disabled skill via the OpenClaw gateway
+
+Enable a previously disabled skill via the OpenClaw gateway.
+
+    This is a runtime-only action.
+
+```bash
+defenseclaw skill enable <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+### `defenseclaw skill info`
+
+Show detailed information about a skill
+
+Show detailed information about a skill.
+
+    Displays merged skill metadata from OpenClaw, latest scan results from the
+    DefenseClaw audit database, and enforcement actions.
+
+```bash
+defenseclaw skill info <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output skill info as JSON |
+
+### `defenseclaw skill install`
+
+Install and scan an OpenClaw skill via clawhub
+
+Install and scan an OpenClaw skill via clawhub.
+
+    By default, install only runs the scan and reports findings — no enforcement
+    actions are taken. Pass --action to apply the configured skill_actions policy
+    (quarantine, disable, block) based on scan severity.
+
+    Use --force to overwrite an existing skill.
+
+```bash
+defenseclaw skill install <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--force` | boolean | — | — | no | Force install (overwrites existing) |
+| `--action` | boolean | — | — | no | Apply skill_actions policy based on scan severity |
+
+### `defenseclaw skill list`
+
+List all OpenClaw skills with their latest scan severity
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output merged skill list as JSON |
+
+### `defenseclaw skill quarantine`
+
+Quarantine a skill's files to the quarantine area
+
+Quarantine a skill's files to the quarantine area.
+
+    Moves the skill's directory to ~/.defenseclaw/quarantine/skills/ and records
+    the action. The skill can be restored with 'skill restore'.
+
+```bash
+defenseclaw skill quarantine <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--reason` | text | — | — | no | Reason for quarantine |
+
+### `defenseclaw skill restore`
+
+Restore a quarantined skill to its original location
+
+Restore a quarantined skill to its original location.
+
+    By default restores to the original path recorded during quarantine.
+    Use --path to override the restore destination.
+
+```bash
+defenseclaw skill restore <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--path` | text | — | — | no | Override restore destination (defaults to original path) |
+
+### `defenseclaw skill scan`
+
+Scan a skill by name, path, URL, or 'all' for all configured skills
+
+Scan a skill by name, path, URL, or 'all' for all configured skills.
+
+    Uses the native cisco-ai-skill-scanner SDK for local scans.
+
+    Remote scanning (--remote):
+      When the sidecar runs on a remote host (e.g. via SSM port-forward),
+      pass --remote to send the scan request to the sidecar API instead of
+      running the scanner locally.
+
+    URL targets (fetch-to-temp):
+      Pass an https:// URL or clawhub:// URI to download a skill package
+      to a temp directory, scan it locally, then clean up. This lets you
+      pre-screen skills before installing them.
+
+      Examples:
+        defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
+        defenseclaw skill scan clawhub://my-skill@1.2.3
+
+```bash
+defenseclaw skill scan [TARGET]
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `target` | text | 1 | no |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output scan results as JSON |
+| `--path` | text | — | — | no | Override skill directory path |
+| `--remote` | boolean | — | — | no | Scan via sidecar API (for skills on a remote host) |
+| `--all` | boolean | — | — | no | Scan all configured skills |
+| `--action` | boolean | — | — | no | Apply enforcement actions (quarantine/block/disable) based on findings |
+
+### `defenseclaw skill search`
+
+Search the ClawHub skill registry
+
+Search the ClawHub skill registry.
+
+    Delegates to ``npx clawhub search <query>`` and displays results.
+
+    
+    Examples:
+      defenseclaw skill search wiki
+      defenseclaw skill search database --json
+
+```bash
+defenseclaw skill search <QUERY>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `query` | text | 1 | yes |
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json` | boolean | — | — | no | Output results as JSON |
+
+### `defenseclaw skill unblock`
+
+Remove a skill from the block list and clear all enforcement state
+
+Remove a skill from the block list and clear all enforcement state.
+
+    Clears block, quarantine, and disable actions without adding to the
+    allow list — the skill will go through normal scanning on next install.
+
+    To also restore quarantined files, run 'skill restore' after unblocking.
+
+```bash
+defenseclaw skill unblock <NAME>
+```
+
+**Arguments**
+
+| Name | Type | Arity | Required |
+|---|---|---|---|
+| `name` | text | 1 | yes |
+
+<!-- END AUTOGEN:cli_py:skill -->
+
+## Usage
+
+### Find, scan, and inspect skills
+
+```bash
+defenseclaw skill list --json
+defenseclaw skill scan --path ./skills/acme --json
+defenseclaw skill info acme --json
+```
+
+`scan` can target a path, remote URL, or all installed skills.
+
+### Change enforcement state
+
+```bash
+defenseclaw skill block acme --reason "unsafe network access"
+defenseclaw skill allow acme --reason "approved exception"
+defenseclaw skill restore acme --path ./skills/acme
+```
+
+State-changing commands write through the local enforcement store.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_skill.py -->

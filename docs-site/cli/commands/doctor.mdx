@@ -1,0 +1,76 @@
+---
+title: "defenseclaw doctor"
+description: "Verify credentials, endpoints, and connectivity."
+order: 10
+---
+
+## Overview
+
+`defenseclaw doctor` — Verify credentials, endpoints, and connectivity.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:doctor -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw doctor [OPTIONS]
+```
+
+### Description
+
+Verify credentials, endpoints, and connectivity
+
+Verify credentials, endpoints, and connectivity.
+
+    Runs a series of checks against every configured service and API key
+    to catch problems before they surface at runtime.
+
+    Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
+    OpenClaw gateway token drift, missing .env file, and unpatched
+    openclaw.json when the guardrail is enabled). Destructive or
+    ambiguous fixes still require the operator to run the relevant
+    setup command explicitly.
+
+    Exit codes: 0 = all pass, 1 = any failure.
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--json-output` | boolean | — | — | no | Output results as JSON |
+| `--fix` | boolean | — | — | no | Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.) |
+| `--yes` | boolean | — | — | no | When used with --fix, apply fixes without prompting |
+
+<!-- END AUTOGEN:cli_py:doctor -->
+
+## Usage
+
+### Run diagnostics
+
+```bash
+defenseclaw doctor
+defenseclaw doctor --json-output
+```
+
+The plain output is for humans; `--json-output` is intended for automation.
+
+### Apply supported fixes
+
+```bash
+defenseclaw doctor --fix --yes
+```
+
+`--yes` confirms repair prompts for non-interactive runs.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_doctor.py -->

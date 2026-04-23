@@ -1,0 +1,58 @@
+---
+title: "Observability overview"
+description: "DefenseClaw's telemetry: audit store, OTel spec, sinks, webhook dispatcher, and the JSONL local log."
+order: 1
+---
+
+## Overview
+
+Observability in DefenseClaw has three layers, emitted in parallel:
+
+1. **Audit store** — authoritative, persisted SQLite database of every decision, verdict, and action.
+2. **JSONL local log** — append-only structured events on disk, readable by Splunk Universal Forwarder and `jq`.
+3. **OTel + audit sinks** — OpenTelemetry traces/metrics plus audit-event delivery to Splunk HEC, OTLP logs, or HTTP JSONL.
+
+The streams share correlation and provenance fields, but they are not identical copies: the audit bridge translates persisted audit rows into lifecycle JSONL events, while native guardrail/judge/scan emitters write richer structured rows directly.
+
+## Which signal to use
+
+| Question | Start here | Why |
+|----------|------------|-----|
+| Did DefenseClaw make a decision? | [Audit store](/docs-site/observability/audit-store) | SQLite is the persisted source of record. |
+| Did an event leave the process? | [Gateway JSONL log](/docs-site/observability/gatewaylog-jsonl) | JSONL shows what the local writer emitted. |
+| Did the SIEM receive it? | [Sinks](/docs-site/observability/sinks) | Sink probes isolate delivery and auth issues. |
+| Did a webhook receiver reject it? | [Webhook dispatcher](/docs-site/observability/webhook-dispatcher) | Dispatcher docs cover retry, HMAC, cooldown, and SSRF validation. |
+| Did PII get handled correctly? | [Redaction](/docs-site/observability/redaction) | Redaction behavior differs by display and sink path. |
+
+## First checks
+
+```bash
+defenseclaw-gateway status
+defenseclaw setup observability list
+defenseclaw-gateway audit export --limit 5
+```
+
+If the audit export is empty, debug the producing subsystem first. If the export has rows but the external destination is empty, debug the configured sink or webhook.
+
+## Section map
+
+| Page | Purpose |
+|------|---------|
+| [OTEL spec](/docs-site/observability/otel-spec) | Span/metric names, attributes, resource conventions |
+| [Audit store](/docs-site/observability/audit-store) | The SQLite schema, querying, and export paths |
+| [Audit bridge](/docs-site/observability/audit-bridge) | Translating audit rows into gatewaylog lifecycle events |
+| [Gateway JSONL log](/docs-site/observability/gatewaylog-jsonl) | On-disk structured log, rotation, schema |
+| [Sinks](/docs-site/observability/sinks) | Audit sink catalog and per-kind config |
+| [Webhook dispatcher](/docs-site/observability/webhook-dispatcher) | Queueing, retry, HMAC signing |
+| [Redaction](/docs-site/observability/redaction) | What is and isn't scrubbed before egress |
+| [Splunk app](/docs-site/observability/splunk-app) | Cisco DefenseClaw Splunk app overview |
+| [Troubleshooting](/docs-site/observability/troubleshooting) | Common signal-drop scenarios |
+
+## Related
+
+- [Setup: observability](/docs-site/first-setup/setup-observability)
+- [Setup: webhook](/docs-site/first-setup/setup-webhook)
+
+---
+
+<!-- generated-from: internal/audit/store.go, internal/audit/sinks/sinks.go, internal/gateway/audit_bridge.go, internal/gatewaylog/writer.go, internal/telemetry/metrics.go -->

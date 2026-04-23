@@ -1,0 +1,91 @@
+---
+title: "Prerequisites"
+description: "Supported platforms, toolchains, ports, and disk expectations before installing DefenseClaw."
+order: 2
+---
+
+## Overview
+
+DefenseClaw runs on **macOS** and **Linux** on **amd64** or **arm64**. The curl installer targets release artifacts for those pairs; source builds use the same architecture checks as `scripts/install-dev.sh`. Windows is not a supported install target in the scripts reviewed here.
+
+<Callout type="warning">
+  OpenShell **standalone sandbox** flows (`defenseclaw init --sandbox`, `install.sh --sandbox`) require **Linux**. On macOS, scanning, governance, and audit still work; sandbox isolation does not.
+</Callout>
+
+## Preflight checklist
+
+Run these before choosing an install path. Release installs only need the first four checks; source installs also need Go and Node/npm.
+
+```bash
+uname -s
+uname -m
+curl --version
+uv --version
+python3 --version
+go version
+node --version
+npm --version
+```
+
+| If this fails | You can still proceed by |
+|---------------|--------------------------|
+| `uv --version` | Letting `scripts/install.sh` bootstrap `uv`, or installing it before a source build. |
+| `python3 --version` is below 3.10 | Letting `uv` install Python 3.12 during release install, or selecting Python 3.10-3.13 for the repo venv. |
+| `go version` is missing | Using the curl installer, or installing Go before `make gateway` / `make all`. |
+| `node --version` or `npm --version` is missing | Using release artifacts without rebuilding the plugin, or installing Node before `make plugin`. |
+
+## Toolchains
+
+| Component | Version / notes | Source |
+|-----------|-----------------|--------|
+| Go | **1.26.2** (`go.mod`) | Release gateway and dev `make gateway` |
+| Python | **3.10+** required by `pyproject.toml` (`requires-python = ">=3.10"`); supported band **3.10–3.13** for dependency wheels (see `scripts/install-dev.sh` caps) | CLI, scanners |
+| uv | Required for `make pycli` and recommended for curl/release installs | Virtualenv + fast wheel install |
+| Node.js / npm | Required for `make plugin` (npm `ci`, `tsc`); Node **18+** with **22.14+** or **24+** recommended for OpenClaw | OpenClaw plugin in `extensions/defenseclaw/` |
+| OpenClaw | Curl installer enforces **openclaw@2026.3.24** when it installs | Host agent for the plugin |
+
+<Callout type="info" title="Release install vs source build">
+  `scripts/install.sh` does not require Go, Node.js, or git because it installs release artifacts. `make all` does require the full contributor toolchain because it builds the CLI, gateway, and plugin from the current checkout.
+</Callout>
+
+## Network and ports
+
+| Service | Default | Role |
+|---------|---------|------|
+| Sidecar REST API | **18970** | Health and orchestration (`/health` used by `defenseclaw doctor`) |
+| Guardrail LiteLLM-compatible proxy | **4000** | Judge / interceptor traffic when guardrail is enabled |
+| OpenClaw gateway | From `config.yaml` (not fixed here) | Separate from the sidecar API port |
+
+Ensure localhost routing and any corporate proxy allow outbound HTTPS for release downloads, model providers, and optional Cisco AI Defense endpoints if you enable remote scanning.
+
+## OpenClaw readiness
+
+DefenseClaw can install before OpenClaw is fully onboarded, but guardrail activation needs an OpenClaw config file to patch. If OpenClaw is not ready yet, run `defenseclaw quickstart` or `defenseclaw init`, finish OpenClaw onboarding, then re-run `defenseclaw setup guardrail`.
+
+```bash
+openclaw --version
+openclaw onboard --install-daemon
+```
+
+The release installer checks for OpenClaw and offers to install or update `openclaw@2026.3.24`. If you skip that step, the DefenseClaw install can still complete, but the guardrail setup will report that the OpenClaw config is missing.
+
+## Disk and layout
+
+| Area | Typical location | Contents |
+|------|------------------|----------|
+| Config and state | `~/.defenseclaw/` | `config.yaml`, `audit.db`, policies, quarantine, optional `.venv` (release install), logs |
+| User binaries | `~/.local/bin/` | `defenseclaw`, `defenseclaw-gateway`, scanner symlinks when installed via `make cli-install` |
+| Repo build | `.venv/`, `defenseclaw-gateway`, `extensions/defenseclaw/dist/` | Developer trees only |
+
+Exact layout is created by `defenseclaw init` (see [init](/docs-site/cli/commands/init)). No minimum gigabyte quota is encoded in the repo; plan space for the Python venv, gateway binary, plugin `node_modules` during builds, and SQLite audit growth.
+
+## Related
+
+- [Install methods](/docs-site/installation/index)
+- [Build from source](/docs-site/installation/build-from-source)
+- [Curl installer](/docs-site/installation/curl-install)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: go.mod, pyproject.toml, scripts/install.sh, scripts/install-dev.sh -->

@@ -1,0 +1,165 @@
+---
+title: "Gateway sidecar"
+description: "Start, stop, restart, and supervise the defenseclaw-gateway Go daemon that enforces policy on every OpenClaw call."
+order: 6
+---
+
+## Overview
+
+The `defenseclaw-gateway` binary is the enforcement point. It connects to the OpenClaw gateway over WebSocket (device-key authenticated), inspects every `tool_call` / `tool_result`, optionally fronts LLM traffic through the guardrail proxy on port **4000**, persists verdicts into the SQLite audit store, and exposes a local REST API on port **18970**. The Python CLI manages scanners, policies, and config; the Go daemon does the actual live enforcement.
+
+<Callout type="info">
+  You do not invoke policy evaluation by hand for normal runtime traffic. Start this daemon, then verify `/health`; if the sidecar is stopped, runtime audit and enforcement pause until it is running again.
+</Callout>
+
+## Configure before starting
+
+Use `defenseclaw setup gateway` when OpenClaw is not on the default host/port, when the sidecar REST API should use a different port, or when a remote OpenClaw gateway requires a token.
+
+| Scenario | Command |
+|----------|---------|
+| Local defaults with token auto-detection | `defenseclaw setup gateway` |
+| Non-interactive local config | `defenseclaw setup gateway --non-interactive --host 127.0.0.1 --api-port 18970` |
+| Remote OpenClaw gateway with a direct token | `defenseclaw setup gateway --remote --host openclaw-gateway.internal --token "$OPENCLAW_GATEWAY_TOKEN" --non-interactive` |
+| Remote token stored in AWS SSM | `defenseclaw setup gateway --remote --ssm-param /openclaw/openclaw-bedrock/gateway-token --ssm-region us-east-1 --ssm-profile devops --non-interactive` |
+
+The command saves the token to `~/.defenseclaw/.env` as `OPENCLAW_GATEWAY_TOKEN` and stores only the env-var reference in `config.yaml`.
+
+## Lifecycle commands
+
+| Command | What it does | Source |
+|---------|--------------|--------|
+| `defenseclaw-gateway start` | Spawns the gateway as a background daemon, detaches from the terminal, writes PID to `~/.defenseclaw/gateway.pid`, starts the watchdog if `gateway.watchdog.enabled` | [daemon.go](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/cli/daemon.go) |
+| `defenseclaw-gateway stop` | Sends SIGTERM, then SIGKILL after `10s` if unresponsive; stops the watchdog first | `runStop` |
+| `defenseclaw-gateway restart` | `stop` then `start`; preserves the PID file contract | `runRestart` |
+| `defenseclaw-gateway status` | Prints subsystem health (gateway, watcher, guardrail, api, telemetry, splunk, sandbox) | `sidecar.go` |
+| `defenseclaw-gateway run` | Runs in the foreground (no detach, no PID file). Useful for debugging. | `gateway run` |
+
+## Recommended first start
+
+```bash
+defenseclaw setup gateway --non-interactive
+defenseclaw-gateway start
+defenseclaw-gateway status
+curl -s http://127.0.0.1:18970/health | jq .
+```
+
+Expected result:
+
+| Check | Healthy sign |
+|-------|--------------|
+| `setup gateway` | Prints the configured gateway host, OpenClaw WebSocket port, sidecar API port, and token source. |
+| `start` | Prints an OK status, PID, log path, and watchdog state. |
+| `status` | Shows subsystem health from the Go sidecar command. |
+| `/health` | Returns JSON for `gateway`, `watcher`, `guardrail`, `api`, `telemetry`, `splunk`, and `sandbox`. |
+
+## On-boot supervision
+
+### systemd (Linux)
+
+DefenseClaw does not install a generic systemd unit during `init`; install it with:
+
+```bash
+sudo tee /etc/systemd/system/defenseclaw-gateway@.service > /dev/null <<'EOF'
+[Unit]
+Description=DefenseClaw gateway sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=%i
+ExecStart=/usr/local/bin/defenseclaw-gateway run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now defenseclaw-gateway@$USER.service
+```
+
+For sandbox standalone mode, `init --sandbox` generates `openshell-sandbox.service` and `defenseclaw-sandbox.target` under `~/.defenseclaw/systemd/` and installs them when run as root — see [setup-sandbox](/docs-site/first-setup/setup-sandbox).
+
+### launchd (macOS)
+
+```bash
+cat > ~/Library/LaunchAgents/ai.defenseclaw.gateway.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.defenseclaw.gateway</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/defenseclaw-gateway</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/defenseclaw-gateway.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/defenseclaw-gateway.err.log</string>
+</dict>
+</plist>
+EOF
+launchctl load ~/Library/LaunchAgents/ai.defenseclaw.gateway.plist
+```
+
+## What the sidecar exposes
+
+| Surface | Default | Purpose |
+|---------|---------|---------|
+| REST API | `127.0.0.1:18970` | Health, status, alerts, policy reload, provider registry — consumed by the Python CLI, TUI, and IDE extensions |
+| Guardrail proxy | `127.0.0.1:4000` | OpenAI-compatible / LiteLLM-friendly; only bound when `guardrail.enabled=true` |
+| WebSocket client | Outbound to `cfg.gateway.host:port` | Attaches to OpenClaw; authenticates with `OPENCLAW_GATEWAY_TOKEN` + device key |
+
+`gateway.api_port` and `guardrail.port` are configurable in `config.yaml`; the pinned values above are the shipped defaults.
+
+## Watchdog
+
+The built-in watchdog is separate from systemd and designed for workstations where users don't run services under an init system. Enable it by setting `gateway.watchdog.enabled=true` in `config.yaml`; it auto-starts with `start` and auto-stops on `stop`. It polls `/health`, restarts the daemon on repeated failures, and logs to `~/.defenseclaw/watchdog.log`.
+
+## Verify it worked
+
+```bash
+defenseclaw-gateway status
+curl -s http://127.0.0.1:18970/health | jq .
+curl -s http://127.0.0.1:18970/alerts | jq '.alerts | length'
+ps -p $(cat ~/.defenseclaw/gateway.pid)
+```
+
+The `/health` endpoint returns a JSON map keyed by subsystem: `gateway`, `watcher`, `guardrail`, `api`, `telemetry`, `splunk`, `sandbox`. Each has `state: running|healthy|disabled|stopped|<error>`. `init` parses this and prints a summary.
+
+## Undo / reset
+
+```bash
+defenseclaw-gateway stop
+rm -f ~/.defenseclaw/gateway.pid ~/.defenseclaw/gateway.log
+```
+
+Stopping the sidecar does not remove the guardrail's `openclaw.json` patch. Use `defenseclaw setup guardrail --disable` to revert OpenClaw to direct LLM mode. See [setup-guardrail](/docs-site/first-setup/setup-guardrail).
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Gateway sidecar is already running (PID N)` | PID file present, process alive | Expected — use `restart` to reload config |
+| `start: FAILED: bind: address already in use` | Another process on **18970** | `lsof -i :18970` and kill it, or change `gateway.api_port` |
+| `status` shows `guardrail: stopped` but `enabled=true` | Upstream LLM path not reachable, or plugin not installed | `defenseclaw doctor` — probably a missing plugin or bad `master_key` |
+| PID file present but `ps` shows nothing | Crash without cleanup | `rm ~/.defenseclaw/gateway.pid` then `start` |
+| `setup gateway --remote` warns about no token | Remote mode needs an auth token | Pass `--token`, use `--ssm-param`, or set `OPENCLAW_GATEWAY_TOKEN` before starting. |
+
+## Related
+
+- [init](/docs-site/first-setup/init)
+- [LLM guardrail](/docs-site/first-setup/setup-guardrail)
+- [Observability](/docs-site/first-setup/setup-observability)
+- [Gateway CLI reference](/docs-site/cli/gateway-cli)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup.py, internal/cli/daemon.go, internal/cli/sidecar.go, internal/cli/root.go, internal/gateway/api.go, internal/gateway/proxy.go -->

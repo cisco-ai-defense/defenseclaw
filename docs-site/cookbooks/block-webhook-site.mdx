@@ -1,0 +1,134 @@
+---
+title: "Block webhook.site exfil"
+description: "A canonical recipe: stop an agent from exfiltrating secrets to request-bin-style services."
+order: 1
+---
+
+## Problem
+
+An agent with fetch access can exfiltrate secrets by POSTing them to `webhook.site`, `requestbin.com`, `ngrok.io` tunnels, pastebins, or developer-created webhook URLs in Discord/Slack workspaces. A single completion of the form "call the helper URL with the file contents" is all it takes.
+
+Use this runbook when you need immediate containment and a clean audit trail:
+
+1. Confirm the default guardrail C2 rules are loaded.
+2. Add the destination to the OPA firewall block list.
+3. Reload OPA policy.
+4. Verify with a dry-run firewall evaluation.
+5. Roll back from a saved copy if the block is too broad.
+
+<Callout type="info" title="Default coverage">
+  The bundled default guardrail pack already includes `C2-WEBHOOK-SITE`, `C2-NGROK`, `C2-PIPEDREAM`, `C2-REQUESTBIN`, and `C2-HOOKBIN`. The steps below add a network-policy block so even non-LLM egress attempts are denied by policy.
+</Callout>
+
+## Solution
+
+### Step 1: Snapshot current policy data
+
+````bash
+cp ~/.defenseclaw/policies/rego/data.json /tmp/defenseclaw-data-before-webhook-block.json
+````
+
+### Step 2: Add known request-bin domains to firewall data
+
+````bash
+tmp="$(mktemp)"
+jq '
+  .firewall = (.firewall // {}) |
+  .firewall.default_action = (.firewall.default_action // "allow") |
+  .firewall.blocked_destinations = (
+    ((.firewall.blocked_destinations // []) + [
+      "webhook.site",
+      "requestbin.com",
+      "requestbin.net",
+      "ngrok.io",
+      "ngrok-free.app",
+      "pipedream.net",
+      "hookbin.com"
+    ]) | unique
+  )
+' ~/.defenseclaw/policies/rego/data.json > "$tmp"
+mv "$tmp" ~/.defenseclaw/policies/rego/data.json
+````
+
+### Step 3: Validate, dry-run, and reload
+
+````bash
+defenseclaw-gateway policy validate
+defenseclaw-gateway policy evaluate-firewall --destination webhook.site --port 443
+defenseclaw-gateway policy reload
+````
+
+The dry run should return a firewall policy action of `deny` for `webhook.site`.
+
+### Step 4: Verify the active domain lists
+
+````bash
+defenseclaw-gateway policy domains
+defenseclaw doctor
+````
+
+If you also ship to Splunk, look for firewall or egress events after the next blocked attempt:
+
+````spl
+index=defenseclaw source=defenseclaw (action="firewall-*" OR action="network-egress")
+| stats count by action target severity
+````
+
+## Optional: add a custom C2 rule
+
+If your incident uses a new request-bin host that is not in the default C2 pack, add a narrow rule to the active guardrail profile:
+
+````yaml
+# ~/.defenseclaw/policies/guardrail/default/rules/local-c2.yaml
+version: 1
+category: c2
+rules:
+  - id: C2-LOCAL-REQUEST-BIN
+    pattern: '(?i)example-request-bin\.corp'
+    title: "Local request-bin exfil sink"
+    severity: HIGH
+    confidence: 0.90
+    tags: [exfiltration, c2]
+````
+
+Guardrail rule-pack YAML is read when the guardrail proxy starts, so restart after changing it:
+
+````bash
+defenseclaw-gateway restart
+````
+
+## Rollback
+
+Restore the saved OPA data file and reload:
+
+````bash
+cp /tmp/defenseclaw-data-before-webhook-block.json ~/.defenseclaw/policies/rego/data.json
+defenseclaw-gateway policy validate
+defenseclaw-gateway policy reload
+````
+
+If you added `local-c2.yaml`, remove only that file and restart:
+
+````bash
+rm ~/.defenseclaw/policies/guardrail/default/rules/local-c2.yaml
+defenseclaw-gateway restart
+````
+
+## Incident checklist
+
+| Question | Where to look |
+|----------|---------------|
+| Did the guardrail see the prompt or completion? | `~/.defenseclaw/audit.db`, `~/.defenseclaw/gateway.jsonl` |
+| Did the network policy deny the destination? | `defenseclaw-gateway policy evaluate-firewall --destination webhook.site --port 443` |
+| Are operators receiving the alert? | `defenseclaw setup webhook list`, then `defenseclaw setup webhook test secops-slack --dry-run` |
+| Did the sink deliver to Splunk? | `defenseclaw setup observability test splunk-main` |
+
+## Related
+
+- [Firewall rules](/docs-site/firewall/rules)
+- [Writing rules](/docs-site/guardrail/writing-rules)
+- [Webhook dispatcher](/docs-site/observability/webhook-dispatcher)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_setup_webhook.py, cli/defenseclaw/webhooks/dispatch.py, internal/cli/policy.go, internal/gateway/egress.go, policies/guardrail/default/rules/c2.yaml, policies/rego/firewall.rego, policies/rego/data.json -->

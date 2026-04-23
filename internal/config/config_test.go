@@ -143,6 +143,28 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Scanners.PluginScanner != "defenseclaw" {
 		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
 	}
+	if !cfg.Codex.Enabled {
+		t.Error("expected Codex hooks enabled by default")
+	}
+	if cfg.Codex.Mode != "inherit" {
+		t.Errorf("expected Codex mode inherit, got %q", cfg.Codex.Mode)
+	}
+	if cfg.Codex.InstallScope != "user" {
+		t.Errorf("expected Codex install scope user, got %q", cfg.Codex.InstallScope)
+	}
+	if cfg.Codex.FailClosed {
+		t.Error("expected Codex fail_closed=false by default")
+	}
+	if !cfg.Codex.ScanOnSessionStart || !cfg.Codex.ScanOnStop {
+		t.Errorf("expected Codex scan hooks enabled by default, got start=%v stop=%v",
+			cfg.Codex.ScanOnSessionStart, cfg.Codex.ScanOnStop)
+	}
+	if cfg.Codex.ComponentScanIntervalMinutes != 60 {
+		t.Errorf("expected Codex component scan interval 60, got %d", cfg.Codex.ComponentScanIntervalMinutes)
+	}
+	if len(cfg.Codex.ScanPaths) != 0 {
+		t.Errorf("expected empty Codex scan paths, got %v", cfg.Codex.ScanPaths)
+	}
 }
 
 func TestDefaultGatewayWatcherPluginConfig(t *testing.T) {

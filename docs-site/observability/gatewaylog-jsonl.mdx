@@ -1,0 +1,124 @@
+---
+title: "Gateway JSONL log"
+description: "The gatewaylog: an append-only JSONL stream on disk for universal forwarders and grep-shaped workflows."
+order: 5
+---
+
+## Overview
+
+The gateway writes structured events to an append-only JSONL file at `~/.defenseclaw/gateway.jsonl`. One JSON object is written per line by `gatewaylog.Writer`. The same writer also feeds pretty stderr output and optional fanout callbacks for OTel and sinks.
+
+## File layout
+
+- Active file: `gateway.jsonl`
+- Rotated files are managed by `lumberjack`.
+- Default max size: 50 MB.
+- Default backups: 5.
+- Default age: 30 days.
+- Compression is enabled by the sidecar.
+
+```bash
+# Runtime kill switch for the file tier only.
+# Pretty stderr and fanout callbacks continue.
+export DEFENSECLAW_JSONL_DISABLE=1
+```
+
+## Line shape
+
+```json
+{
+  "ts": "2026-04-23T16:42:03Z",
+  "event_type": "verdict",
+  "severity": "HIGH",
+  "request_id": "req_01HXQ...",
+  "run_id": "run_...",
+  "sidecar_instance_id": "sidecar-...",
+  "verdict": {
+    "stage": "regex",
+    "direction": "prompt",
+    "action": "block",
+    "reason": "AWS credential pattern"
+  },
+  "schema_version": 7,
+  "content_hash": "b7a2f1...",
+  "generation": 12,
+  "binary_version": "..."
+}
+```
+
+`gatewaylog.Writer` stamps missing timestamps, default `INFO` severity, provenance fields, and the process-scoped sidecar instance ID before validation and write.
+
+## Validation
+
+When the sidecar can load the embedded `gateway-event-envelope.json` schema, the writer validates each event before writing. Invalid events are dropped from JSONL and surfaced as a single structured error event. Set `DEFENSECLAW_SCHEMA_VALIDATION=off` only as a break-glass path for stale schema/binary mismatches.
+
+## Event families
+
+| Family | Producer |
+|---|---|
+| `verdict` | guardrail verdict emitters |
+| `judge` | LLM judge emitters |
+| `lifecycle` | audit bridge and gateway lifecycle emitters |
+| `activity` | operator/TUI activity logging |
+| `egress` | network egress observer |
+| `error` | gateway error emitters |
+| `diagnostic` | diagnostic emitters |
+
+```json
+{
+  "event_type": "lifecycle",
+  "severity": "HIGH",
+  "lifecycle": {
+    "subsystem": "sinks",
+    "transition": "degraded",
+    "details": {
+      "action": "sink-failure"
+    }
+  }
+}
+```
+
+## Why JSONL
+
+- Universal Forwarder ingestion is trivial — line-delimited JSON is the native Splunk ingestion path.
+- Grep and `jq` work; no SQL required.
+- Append-only is crash-safe.
+- Compression on rotation bounds disk usage.
+
+## Parsing tips
+
+```bash
+# Live tail
+tail -F ~/.defenseclaw/gateway.jsonl | jq 'select(.severity=="CRITICAL")'
+
+# Historical search
+zcat ~/.defenseclaw/gateway.jsonl.*.gz | jq -c 'select(.event_type=="verdict")'
+
+# Correlation trace
+jq 'select(.request_id=="req_01HXQ...")' ~/.defenseclaw/gateway.jsonl
+```
+
+## Splunk universal forwarder
+
+```ini
+# inputs.conf
+[monitor:///home/defenseclaw/.defenseclaw/gateway.jsonl]
+sourcetype = defenseclaw:gateway
+index = defenseclaw
+
+[monitor:///home/defenseclaw/.defenseclaw/gateway.jsonl.*.gz]
+sourcetype = defenseclaw:gateway
+index = defenseclaw
+```
+
+The DefenseClaw Splunk app (see [Splunk app](/docs-site/observability/splunk-app)) ships field extractions, props, and dashboards that match this schema.
+
+## Related
+
+- [Audit store](/docs-site/observability/audit-store)
+- [Sinks](/docs-site/observability/sinks)
+- [Splunk app](/docs-site/observability/splunk-app)
+
+---
+
+<!-- generated-from: internal/gatewaylog/writer.go -->

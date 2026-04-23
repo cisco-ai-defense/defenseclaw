@@ -1,0 +1,65 @@
+---
+title: "Events and streaming"
+description: "Proxy streaming behavior and the authenticated egress event ingestion route."
+order: 4
+---
+
+## Overview
+
+The scoped gateway sources expose two event-like HTTP behaviors:
+
+| Surface | Route | Direction | Purpose |
+|---------|-------|-----------|---------|
+| Guardrail proxy streaming | `POST /v1/chat/completions` or `POST /chat/completions` | Proxy to client | Streams provider-compatible chat completion chunks after guardrail inspection |
+| Provider-native passthrough streaming | Catch-all `POST /...` on the proxy with `X-DC-Target-URL` | Proxy to client | Forwards upstream server-sent event responses while inspecting accumulated output |
+| Egress event ingestion | `POST /v1/events/egress` on the proxy | Client to proxy | Lets the TypeScript fetch interceptor report egress observations the Go proxy did not directly see |
+
+The scoped sources do not register a general sidecar event-subscription route. Gateway lifecycle, verdict, judge, diagnostic, and egress records are emitted through the gateway event writer and downstream observability sinks rather than a general HTTP subscription endpoint.
+
+## Chat streaming
+
+For OpenAI-compatible chat requests, `internal/gateway/proxy.go::handleStreamingRequest` writes `Content-Type: text/event-stream`, disables response buffering, and flushes chunks as the upstream provider yields them.
+
+```bash
+curl -N http://127.0.0.1:4000/v1/chat/completions \
+  -H "X-DC-Auth: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+  -H "X-DC-Target-URL: https://api.openai.com" \
+  -H "X-AI-Auth: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+In action mode, the proxy can cancel a stream when a high-severity completion or tool-call finding is detected. The blocked response is emitted in the provider-compatible format for the active route.
+
+## Passthrough streaming
+
+Provider-native passthrough routes require `X-DC-Target-URL`. The proxy rejoins that origin with the incoming path, inspects the request body, and forwards the request to the real upstream. If the upstream response has `Content-Type: text/event-stream`, the proxy streams it while accumulating output for inspection.
+
+## Egress event ingestion
+
+`POST /v1/events/egress` is for cooperating integrations such as the TypeScript fetch interceptor. It requires proxy authentication, accepts JSON only, caps the body at 8 KiB, forces `source="ts"`, validates `branch` and `decision`, emits the egress event, and returns `204 No Content` on success.
+
+```bash
+curl -i -X POST http://127.0.0.1:4000/v1/events/egress \
+  -H "X-DC-Auth: Bearer $OPENCLAW_GATEWAY_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_host": "api.example.com",
+    "target_path": "/v1/chat/completions",
+    "body_shape": "messages",
+    "looks_like_llm": true,
+    "branch": "shape",
+    "decision": "allow",
+    "reason": "shape-match"
+  }'
+```
+
+## Related
+
+- [REST endpoints](/docs-site/api/endpoints)
+- [Authentication](/docs-site/api/auth)
+- [Observability overview](/docs-site/observability/index)
+
+---
+
+<!-- generated-from: internal/gateway/proxy.go, internal/gateway/egress.go -->

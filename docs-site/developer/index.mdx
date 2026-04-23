@@ -1,0 +1,72 @@
+---
+title: "Developer overview"
+description: "How DefenseClaw is built, where the seams are, and how to contribute changes safely."
+order: 1
+---
+
+## Overview
+
+This section is for contributors and integrators. If you're running DefenseClaw to protect agents, start with [Install methods](/docs-site/installation/index). If you're **building** DefenseClaw — adding scanners, adapting the gateway, or changing the OpenClaw plugin — you're in the right place.
+
+## Two languages, three processes
+
+DefenseClaw is split between Python and Go by design. Each language owns what it does best:
+
+| Language | Role | Where |
+|----------|------|-------|
+| Python (Click) | Operator CLI, human-facing UX, scanner SDKs (skill, MCP) | `cli/defenseclaw/` |
+| Go | Gateway sidecar, guardrail proxy, audit store, OPA host, sandbox supervisor, TUI | `internal/` and `cmd/` |
+| Node.js/TS | OpenClaw plugin that forwards LLM traffic to the guardrail | `extensions/defenseclaw/` |
+
+## Section map
+
+| Page | What it's for |
+|------|---------------|
+| [Architecture](/docs-site/developer/architecture) | Process topology, data flow, boundaries |
+| [Package tour](/docs-site/developer/packages) | Every top-level package with 1-line purpose |
+| [Inspection pipeline](/docs-site/developer/inspection-pipeline) | How a request flows through the guardrail |
+| [Bifrost provider adapter](/docs-site/developer/bifrost-sdk) | How the gateway delegates LLM provider calls to Bifrost |
+| [Plugin protocol](/docs-site/developer/plugin-protocol) | How the OpenClaw plugin and the guardrail communicate |
+| [RPC contract](/docs-site/developer/rpc-contract) | Stable JSON-RPC methods and their invariants |
+| [Telemetry contract](/docs-site/developer/telemetry-contract) | Span names, metric names, attribute keys |
+| [Testing](/docs-site/developer/testing) | Test suites, harnesses, conventions |
+| [Building](/docs-site/developer/building) | Local dev loop, cross-compile, release builds |
+| [Release](/docs-site/developer/release) | Versioning, changelog, tag flow |
+| [Contributing](/docs-site/developer/contributing) | Coding standards, review expectations, CI gates |
+
+## Contracts you should not break
+
+If you're touching DefenseClaw, memorize these boundaries:
+
+1. **REST sidecar and proxy routes** — stable once documented; see [Endpoints](/docs-site/api/endpoints).
+2. **OpenClaw gateway WebSocket methods** — stable; see [RPC contract](/docs-site/developer/rpc-contract).
+3. **Span and metric names** — stable; see [Telemetry contract](/docs-site/developer/telemetry-contract).
+4. **Audit event schema** — stable; additions are allowed, removals and type changes are not.
+5. **Exit codes** — stable; see [Exit codes](/docs-site/reference/exit-codes).
+6. **Plugin protocol** — versioned; bump the protocol version before shipping incompatible changes.
+7. **Rule-pack YAML schema** — versioned via `schema_version`; bump on any breaking change.
+
+## The repo layout at a glance
+
+```text
+.
+├── cli/defenseclaw/            # Python operator CLI
+├── cmd/                        # Go entrypoints (gateway, docgen)
+├── internal/                   # Go private packages (gateway, tui, ...)
+├── extensions/defenseclaw/     # Node.js OpenClaw plugin
+├── policies/                   # Rego modules + default rule packs
+├── scripts/                    # installers, docgen, verification, E2E helpers
+├── test/                       # E2E data, fixtures, unit helpers
+└── docs-site/                  # This documentation
+```
+
+## Where to start
+
+- **Fixing a bug** — open an issue, add a failing test, fix it, `make test`. See [Contributing](/docs-site/developer/contributing).
+- **Adding a scanner** — see [Custom scanners](/docs-site/scanners/custom-scanners) for the runtime contract and the [Add a custom scanner](/docs-site/cookbooks/add-custom-scanner) cookbook for packaging.
+- **Extending the API** — see [REST endpoints](/docs-site/api/endpoints) and [RPC contract](/docs-site/developer/rpc-contract) first; additions to `/v1` are welcome when documented and tested.
+- **Shipping a release** — see [Release](/docs-site/developer/release). Changelog and version bump are required before tagging.
+
+---
+
+<!-- generated-from: README.md, CONTRIBUTING.md, Makefile, go.mod, pyproject.toml -->

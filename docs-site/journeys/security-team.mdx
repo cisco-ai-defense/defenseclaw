@@ -1,0 +1,159 @@
+---
+title: "Security team journey"
+description: "A security-team path for guardrail rollout, policy checks, alerts, SIEM delivery, and tuning."
+order: 3
+---
+
+## Overview
+
+This journey is for security engineers and SOC owners who need DefenseClaw to produce trustworthy decisions before it blocks production traffic. Start in observe mode, validate policy and telemetry, review real findings, then move narrowly into action mode once the audit trail proves the behavior.
+
+<Callout type="warning" title="Start in observe mode">
+  `guardrail.mode: observe` records block-worthy verdicts as alerts instead of blocking the request. Use it to collect baseline noise, tune suppressions, and prove sink delivery before enabling action mode.
+</Callout>
+
+## Goal
+
+Build a security rollout that answers four questions with evidence:
+
+| Question | Evidence path |
+|----------|---------------|
+| What would DefenseClaw block? | [Guardrail verdicts](/docs-site/guardrail/index), [Alerts](/docs-site/cli/commands/alerts), and [Audit store](/docs-site/observability/audit-store) |
+| Are policy changes valid? | [Policy validation](/docs-site/policy/testing) and [Rego modules](/docs-site/policy/writing-rego) |
+| Can responders see events? | [Observability sinks](/docs-site/observability/sinks), [Webhook dispatcher](/docs-site/observability/webhook-dispatcher), and [Splunk app](/docs-site/observability/splunk-app) |
+| Can false positives be tuned safely? | [Suppressions](/docs-site/guardrail/suppressions), [Tuning](/docs-site/guardrail/tuning), and [PII cookbook](/docs-site/cookbooks/tune-pii-false-positives) |
+
+## Before you start
+
+Confirm that the platform setup has already created `~/.defenseclaw/`, started the gateway sidecar, and enabled the guardrail proxy. If not, follow [First setup](/docs-site/first-setup/index) before using this path.
+
+| Need | Check |
+|------|-------|
+| Guardrail proxy configured | [Setup guardrail](/docs-site/first-setup/setup-guardrail) |
+| Provider credentials chosen | [Guardrail providers](/docs-site/guardrail/providers) |
+| Policy tree present | [Policy lifecycle](/docs-site/policy/lifecycle) |
+| Local audit store available | [Audit store](/docs-site/observability/audit-store) |
+| Sink or notifier target ready | [Setup observability](/docs-site/first-setup/setup-observability) or [Setup webhook](/docs-site/first-setup/setup-webhook) |
+
+Run the first pass in local scanner mode unless you already have Cisco AI Defense credentials configured:
+
+```bash
+defenseclaw setup guardrail \
+  --mode observe \
+  --scanner-mode local \
+  --detection-strategy regex_judge \
+  --non-interactive \
+  --no-restart \
+  --no-verify
+```
+
+Then restart through the gateway lifecycle page if this host owns the running sidecar.
+
+## First 30 minutes
+
+Use the first half hour to prove configuration, policy, and operator visibility. Do not tune rules until you have at least one clean policy test and one alert-review loop.
+
+### 1. Validate policy before traffic
+
+```bash
+defenseclaw policy validate --rego-dir policies/rego
+defenseclaw policy test --rego-dir policies/rego --verbose
+```
+
+If either command fails, stay out of action mode. Fix Rego/data issues with [Policy testing](/docs-site/policy/testing) and [Data JSON](/docs-site/policy/data-json).
+
+### 2. Review active alerts
+
+```bash
+defenseclaw alerts --limit 20
+defenseclaw alerts --show
+```
+
+Use the details view to separate expected setup noise from real guardrail, scanner, firewall, or audit-sink events. After review, acknowledge only the severity band you actually handled:
+
+```bash
+defenseclaw alerts acknowledge --severity high
+```
+
+### 3. Confirm SIEM or webhook delivery
+
+For audit sinks:
+
+```bash
+defenseclaw setup observability list
+defenseclaw setup observability test splunk-main
+```
+
+For incident notifiers:
+
+```bash
+defenseclaw setup webhook list
+defenseclaw setup webhook test secops-slack --dry-run
+```
+
+Use [Ship events to Splunk](/docs-site/cookbooks/ship-to-splunk) for the full HEC path, and [Webhook dispatcher](/docs-site/observability/webhook-dispatcher) for notifier behavior.
+
+## Production hardening
+
+Move from baseline to enforcement in small steps:
+
+| Step | Action | Source-backed page |
+|------|--------|--------------------|
+| Choose a rule posture | Compare default, strict, and permissive packs before changing the active rule directory. | [Rule packs](/docs-site/guardrail/rule-packs) |
+| Keep judge cost intentional | Understand `regex`, `regex_judge`, and `judge_first` before broadening semantic checks. | [Judge vs regex](/docs-site/guardrail/judge-vs-regex) |
+| Tune false positives narrowly | Prefer `pre_judge_strips` and exact finding suppressions over broad category disables. | [Suppressions](/docs-site/guardrail/suppressions) |
+| Block sensitive tools explicitly | Use tool block/allow lists for known risky function names. | [Tool command](/docs-site/cli/commands/tool) |
+| Wire incident delivery | Use audit sinks for records and webhooks for responder notification. | [Observability overview](/docs-site/observability/index) |
+| Keep rollback obvious | Snapshot policy data and suppression files before changing them. | [Policy lifecycle](/docs-site/policy/lifecycle) |
+
+When observe-mode evidence is stable, change one control at a time. For example, switch the guardrail to action mode before making rule-pack or suppression changes in the same window:
+
+```bash
+defenseclaw setup guardrail \
+  --mode action \
+  --scanner-mode local \
+  --detection-strategy regex_judge \
+  --non-interactive
+```
+
+<Callout type="danger" title="Do not combine enforcement and broad tuning">
+  Changing to action mode and adding broad suppressions in the same rollout makes incidents harder to explain. Make one change, restart, verify alerts and sink delivery, then continue.
+</Callout>
+
+## Verify it worked
+
+Use this checklist after each rollout window.
+
+| Verification | Command or page | Pass condition |
+|--------------|-----------------|----------------|
+| Policy compiles | `defenseclaw policy validate --rego-dir policies/rego` | No validation errors |
+| Rego behavior is tested | `defenseclaw policy test --rego-dir policies/rego --verbose` | OPA tests pass |
+| Alerts are visible | `defenseclaw alerts --limit 20` | Recent security events render in the operator table |
+| SIEM sink responds | `defenseclaw setup observability test splunk-main` | Probe reports a successful delivery or a clear auth/network failure |
+| Webhook payload is safe to send | `defenseclaw setup webhook test secops-slack --dry-run` | Payload formats without delivering |
+| PII handling is understood | [Redaction](/docs-site/observability/redaction) | Responders know display redaction differs from sink redaction |
+
+If a verification step fails, use [Reference troubleshooting](/docs-site/reference/troubleshooting) first, then jump to the subsystem page linked in the table.
+
+## Where to go next
+
+| If you need to | Go to |
+|----------------|-------|
+| Reduce noisy PII alerts | [Tune PII false positives](/docs-site/cookbooks/tune-pii-false-positives) |
+| Stop request-bin exfiltration | [Block webhook.site exfil](/docs-site/cookbooks/block-webhook-site) |
+| Write or review rule YAML | [Writing guardrail rules](/docs-site/guardrail/writing-rules) |
+| Change policy thresholds or scanner overrides | [Policy examples](/docs-site/policy/examples) |
+| Investigate telemetry gaps | [Observability troubleshooting](/docs-site/observability/troubleshooting) |
+| Understand streaming enforcement limits | [Streaming](/docs-site/guardrail/streaming) |
+
+## Related
+
+- [Guardrail overview](/docs-site/guardrail/index)
+- [Policy overview](/docs-site/policy/index)
+- [Observability overview](/docs-site/observability/index)
+- [Cookbooks](/docs-site/cookbooks/block-webhook-site)
+- [Reference troubleshooting](/docs-site/reference/troubleshooting)
+
+---
+
+<!-- generated-from: internal/gateway/guardrail.go, internal/gateway/proxy.go, internal/gateway/llm_judge.go, internal/guardrail/rulepack.go, internal/guardrail/suppress.go, internal/guardrail/verdict_cache.go, policies/guardrail/default/rules/c2.yaml, policies/guardrail/default/suppressions.yaml, policies/rego/guardrail.rego, policies/rego/data.json, cli/defenseclaw/commands/cmd_setup.py, cli/defenseclaw/commands/cmd_policy.py, cli/defenseclaw/commands/cmd_alerts.py, cli/defenseclaw/commands/cmd_tool.py, cli/defenseclaw/commands/cmd_setup_observability.py, cli/defenseclaw/commands/cmd_setup_webhook.py, internal/audit/store.go, internal/audit/sinks/sinks.go -->

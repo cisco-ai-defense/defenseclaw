@@ -1,0 +1,53 @@
+---
+title: "Sandbox overview"
+description: "OpenShell sandbox: Linux-native isolation for agent subprocesses with network namespacing, cgroups, and policy-driven allow-lists."
+order: 1
+---
+
+## Overview
+
+DefenseClaw's sandbox support is centered on OpenShell standalone mode. The Python CLI provisions the sandbox user, networking, OpenClaw config, and policy files; the Go gateway CLI provides systemd convenience commands for the running standalone services.
+
+OpenShell standalone mode is Linux-only in the Python setup path. On macOS and Windows, use host mode plus the guardrail, scanners, firewall policy, and audit paths; see [macOS fallback](/docs-site/sandbox/macos-fallback).
+
+## Why a sandbox
+
+Even with the guardrail and scanners, an agent that can run code needs a narrower execution boundary. In the current source, DefenseClaw's owned boundary is the OpenShell standalone integration: sandbox user ownership, OpenShell policy management, network setup, and service lifecycle.
+
+## What DefenseClaw manages
+
+- **Ownership boundary** — `defenseclaw sandbox init` creates or uses the sandbox user and moves OpenClaw ownership into the sandbox home.
+- **Network setup** — `defenseclaw sandbox setup` writes bridge/IP, DNS, guardrail, and OpenClaw gateway settings.
+- **OpenShell policy** — Go code loads and saves `defenseclaw-policy.yaml`, and MCP enforcement can allow or deny endpoints in that policy.
+- **Service lifecycle** — `defenseclaw-gateway sandbox start|stop|restart|status` wraps systemd targets and services.
+
+## Quick start
+
+See [Install](/docs-site/sandbox/install) for the provisioning steps.
+
+```bash
+defenseclaw sandbox init
+defenseclaw sandbox setup --policy permissive --non-interactive
+defenseclaw-gateway sandbox status
+defenseclaw-gateway sandbox exec python -c 'print("hi")'
+```
+
+## Section map
+
+| Page | Purpose |
+|------|---------|
+| [Install](/docs-site/sandbox/install) | Installing the binary and configuring standalone mode |
+| [Monitoring](/docs-site/sandbox/monitoring) | Service health, OpenShell exits, and policy reload signals |
+| [Debugging](/docs-site/sandbox/debugging) | Debugging services, namespaces, and policy reload failures |
+| [Events](/docs-site/sandbox/events) | OpenShell lifecycle/error events and metrics |
+| [macOS fallback](/docs-site/sandbox/macos-fallback) | Unsupported-platform behavior |
+
+## Related
+
+- [Firewall](/docs-site/firewall/index)
+- [sandbox CLI](/docs-site/cli/commands/sandbox)
+- [Setup sandbox](/docs-site/first-setup/setup-sandbox)
+
+---
+
+<!-- generated-from: internal/sandbox/openshell.go, internal/sandbox/policy.go, cli/defenseclaw/commands/cmd_sandbox.py, cli/defenseclaw/commands/cmd_init_sandbox.py, cli/defenseclaw/commands/cmd_setup_sandbox.py, internal/cli/sandbox.go -->

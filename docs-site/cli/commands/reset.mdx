@@ -1,0 +1,58 @@
+---
+title: "defenseclaw reset"
+description: "Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean."
+order: 10
+---
+
+## Overview
+
+`defenseclaw reset` — Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:reset -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw reset [OPTIONS]
+```
+
+### Description
+
+Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean
+
+Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean.
+
+    Keeps binaries and the OpenClaw plugin installed so reinstall is
+    fast. For a full uninstall use 'defenseclaw uninstall --all
+    --binaries'.
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--yes` | boolean | — | — | no | Skip the confirmation prompt. |
+
+<!-- END AUTOGEN:cli_py:reset -->
+
+## Usage
+
+### Reset local DefenseClaw state
+
+```bash
+defenseclaw reset --yes
+```
+
+`reset` is destructive and only exposes the confirmation bypass. Use [Uninstall](/docs-site/cli/commands/uninstall) for dry-run and binary-removal options.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_uninstall.py -->

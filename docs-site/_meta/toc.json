@@ -1,0 +1,310 @@
+{
+  "$schema": "./toc.schema.json",
+  "site": "docs-site/defenseclaw",
+  "version": 1,
+  "groups": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "pages": [
+        { "slug": "index", "title": "DefenseClaw" },
+        { "slug": "production-readiness", "title": "Production readiness" }
+      ]
+    },
+    {
+      "id": "journeys",
+      "label": "User journeys",
+      "path": "journeys",
+      "pages": [
+        { "slug": "index", "title": "User journeys" },
+        { "slug": "platform-engineer", "title": "Platform engineer" },
+        { "slug": "security-team", "title": "Security team" },
+        { "slug": "developer", "title": "Developer" }
+      ]
+    },
+    {
+      "id": "installation",
+      "label": "Installation",
+      "path": "installation",
+      "pages": [
+        { "slug": "index", "title": "Install methods" },
+        { "slug": "prerequisites", "title": "Prerequisites" },
+        { "slug": "curl-install", "title": "Curl installer" },
+        { "slug": "make-install", "title": "Make install" },
+        { "slug": "build-from-source", "title": "Build from source" },
+        { "slug": "upgrade", "title": "Upgrade" },
+        { "slug": "uninstall", "title": "Uninstall" },
+        { "slug": "verify-install", "title": "Verify install" }
+      ]
+    },
+    {
+      "id": "first-setup",
+      "label": "First setup",
+      "path": "first-setup",
+      "pages": [
+        { "slug": "index", "title": "Zero to governed" },
+        { "slug": "init", "title": "defenseclaw init" },
+        { "slug": "setup-skill-scanner", "title": "Skill scanner" },
+        { "slug": "setup-mcp-scanner", "title": "MCP scanner" },
+        { "slug": "setup-guardrail", "title": "LLM guardrail" },
+        { "slug": "setup-gateway", "title": "Gateway sidecar" },
+        { "slug": "setup-provider", "title": "LLM provider keys" },
+        { "slug": "setup-splunk", "title": "Splunk" },
+        { "slug": "setup-webhook", "title": "Webhook sink" },
+        { "slug": "setup-observability", "title": "Observability" },
+        { "slug": "setup-sandbox", "title": "OpenShell sandbox" }
+      ]
+    },
+    {
+      "id": "cli",
+      "label": "CLI",
+      "path": "cli",
+      "pages": [
+        { "slug": "index", "title": "CLI overview" },
+        { "slug": "python-cli", "title": "Python CLI" },
+        { "slug": "gateway-cli", "title": "Gateway CLI" },
+        { "slug": "automation", "title": "Automation" },
+        { "slug": "shell-completions", "title": "Shell completions" }
+      ],
+      "subgroups": [
+        {
+          "id": "commands",
+          "label": "Commands",
+          "path": "cli/commands",
+          "pages": [
+            { "slug": "init", "title": "init" },
+            { "slug": "status", "title": "status" },
+            { "slug": "doctor", "title": "doctor" },
+            { "slug": "alerts", "title": "alerts" },
+            { "slug": "skill", "title": "skill" },
+            { "slug": "mcp", "title": "mcp" },
+            { "slug": "plugin", "title": "plugin" },
+            { "slug": "tool", "title": "tool" },
+            { "slug": "policy", "title": "policy" },
+            { "slug": "aibom", "title": "aibom" },
+            { "slug": "codeguard", "title": "codeguard" },
+            { "slug": "keys", "title": "keys" },
+            { "slug": "audit", "title": "audit" },
+            { "slug": "config", "title": "config" },
+            { "slug": "sandbox", "title": "sandbox" },
+            { "slug": "quickstart", "title": "quickstart" },
+            { "slug": "reset", "title": "reset" },
+            { "slug": "settings", "title": "settings" },
+            { "slug": "setup", "title": "setup" },
+            { "slug": "upgrade", "title": "upgrade" },
+            { "slug": "uninstall", "title": "uninstall" },
+            { "slug": "tui", "title": "tui" },
+            { "slug": "version", "title": "version" }
+          ]
+        },
+        {
+          "id": "gateway-commands",
+          "label": "Gateway commands",
+          "path": "cli/commands-gateway",
+          "pages": [
+            { "slug": "audit", "title": "audit" },
+            { "slug": "policy", "title": "policy" },
+            { "slug": "provenance", "title": "provenance" },
+            { "slug": "restart", "title": "restart" },
+            { "slug": "sandbox", "title": "sandbox" },
+            { "slug": "scan", "title": "scan" },
+            { "slug": "start", "title": "start" },
+            { "slug": "status", "title": "status" },
+            { "slug": "stop", "title": "stop" },
+            { "slug": "tui", "title": "tui" },
+            { "slug": "watchdog", "title": "watchdog" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tui",
+      "label": "TUI",
+      "path": "tui",
+      "pages": [
+        { "slug": "index", "title": "TUI overview" },
+        { "slug": "panels", "title": "Panels" },
+        { "slug": "keybindings", "title": "Keybindings" },
+        { "slug": "command-palette", "title": "Command palette" },
+        { "slug": "cli-parity", "title": "CLI parity" }
+      ]
+    },
+    {
+      "id": "guardrail",
+      "label": "LLM Guardrail",
+      "path": "guardrail",
+      "pages": [
+        { "slug": "index", "title": "Guardrail overview" },
+        { "slug": "architecture", "title": "Architecture" },
+        { "slug": "configuration", "title": "Configuration" },
+        { "slug": "rule-packs", "title": "Rule packs" },
+        { "slug": "writing-rules", "title": "Writing rules" },
+        { "slug": "suppressions", "title": "Suppressions" },
+        { "slug": "sensitive-tools", "title": "Sensitive tools" },
+        { "slug": "judge-vs-regex", "title": "Judge vs regex" },
+        { "slug": "verdict-cache", "title": "Verdict cache" },
+        { "slug": "multi-turn", "title": "Multi-turn detection" },
+        { "slug": "notification-queue", "title": "Notification queue" },
+        { "slug": "providers", "title": "Providers" },
+        { "slug": "streaming", "title": "Streaming" },
+        { "slug": "tuning", "title": "Tuning" },
+        { "slug": "troubleshooting", "title": "Troubleshooting" }
+      ]
+    },
+    {
+      "id": "policy",
+      "label": "Policy",
+      "path": "policy",
+      "pages": [
+        { "slug": "index", "title": "Policy engines" },
+        { "slug": "lifecycle", "title": "Lifecycle" },
+        { "slug": "actions-matrix", "title": "Actions matrix" },
+        { "slug": "writing-rego", "title": "Writing Rego" },
+        { "slug": "data-json", "title": "data.json" },
+        { "slug": "scanner-policies", "title": "Scanner policies" },
+        { "slug": "testing", "title": "Testing policies" },
+        { "slug": "hot-reload", "title": "Hot reload" },
+        { "slug": "examples", "title": "Examples" }
+      ]
+    },
+    {
+      "id": "scanners",
+      "label": "Scanners",
+      "path": "scanners",
+      "pages": [
+        { "slug": "index", "title": "Scanner catalog" },
+        { "slug": "skill-scanner", "title": "Skill scanner" },
+        { "slug": "mcp-scanner", "title": "MCP scanner" },
+        { "slug": "plugin-scanner", "title": "Plugin scanner" },
+        { "slug": "codeguard", "title": "CodeGuard" },
+        { "slug": "clawshield", "title": "ClawShield" },
+        { "slug": "aibom", "title": "AIBOM" },
+        { "slug": "custom-scanners", "title": "Custom scanners" }
+      ]
+    },
+    {
+      "id": "watcher",
+      "label": "Watcher",
+      "path": "watcher",
+      "pages": [
+        { "slug": "index", "title": "Watcher overview" },
+        { "slug": "admission-gate", "title": "Admission gate" },
+        { "slug": "drift-detection", "title": "Drift detection" },
+        { "slug": "rescan", "title": "Periodic rescan" },
+        { "slug": "enforcement", "title": "Enforcement" }
+      ]
+    },
+    {
+      "id": "firewall",
+      "label": "Firewall",
+      "path": "firewall",
+      "pages": [
+        { "slug": "index", "title": "Firewall overview" },
+        { "slug": "rules", "title": "Rule compiler" },
+        { "slug": "egress-observer", "title": "Egress observer" },
+        { "slug": "ssrf-protection", "title": "SSRF protection" }
+      ]
+    },
+    {
+      "id": "sandbox",
+      "label": "Sandbox",
+      "path": "sandbox",
+      "pages": [
+        { "slug": "index", "title": "Sandbox overview" },
+        { "slug": "install", "title": "Install" },
+        { "slug": "monitoring", "title": "Monitoring" },
+        { "slug": "debugging", "title": "Debugging" },
+        { "slug": "events", "title": "Sandbox events" },
+        { "slug": "macos-fallback", "title": "macOS fallback" }
+      ]
+    },
+    {
+      "id": "observability",
+      "label": "Observability",
+      "path": "observability",
+      "pages": [
+        { "slug": "index", "title": "Observability overview" },
+        { "slug": "otel-spec", "title": "OTEL spec" },
+        { "slug": "audit-store", "title": "Audit store" },
+        { "slug": "audit-bridge", "title": "Audit bridge" },
+        { "slug": "gatewaylog-jsonl", "title": "Gateway JSONL log" },
+        { "slug": "sinks", "title": "Sinks" },
+        { "slug": "webhook-dispatcher", "title": "Webhook dispatcher" },
+        { "slug": "redaction", "title": "Redaction" },
+        { "slug": "splunk-app", "title": "Splunk app" },
+        { "slug": "troubleshooting", "title": "Troubleshooting" }
+      ]
+    },
+    {
+      "id": "api",
+      "label": "API",
+      "path": "api",
+      "pages": [
+        { "slug": "index", "title": "API overview" },
+        { "slug": "endpoints", "title": "REST endpoints" },
+        { "slug": "rpc", "title": "WebSocket RPC" },
+        { "slug": "events", "title": "Event stream" },
+        { "slug": "auth", "title": "Authentication" },
+        { "slug": "schemas", "title": "Schemas" }
+      ]
+    },
+    {
+      "id": "reference",
+      "label": "Reference",
+      "path": "reference",
+      "pages": [
+        { "slug": "config-files", "title": "Config files" },
+        { "slug": "env-vars", "title": "Environment variables" },
+        { "slug": "exit-codes", "title": "Exit codes" },
+        { "slug": "glossary", "title": "Glossary" },
+        { "slug": "faq", "title": "FAQ" },
+        { "slug": "troubleshooting", "title": "Troubleshooting" }
+      ]
+    },
+    {
+      "id": "developer",
+      "label": "Developer",
+      "path": "developer",
+      "pages": [
+        { "slug": "index", "title": "Developer overview" },
+        { "slug": "architecture", "title": "Architecture" },
+        { "slug": "packages", "title": "Package tour" },
+        { "slug": "inspection-pipeline", "title": "Inspection pipeline" },
+        { "slug": "bifrost-sdk", "title": "Bifrost SDK" },
+        { "slug": "plugin-protocol", "title": "Plugin protocol" },
+        { "slug": "rpc-contract", "title": "RPC contract" },
+        { "slug": "telemetry-contract", "title": "Telemetry contract" },
+        { "slug": "testing", "title": "Testing" },
+        { "slug": "building", "title": "Building" },
+        { "slug": "release", "title": "Release" },
+        { "slug": "contributing", "title": "Contributing" }
+      ]
+    },
+    {
+      "id": "cookbooks",
+      "label": "Cookbooks",
+      "path": "cookbooks",
+      "pages": [
+        { "slug": "block-webhook-site", "title": "Block webhook.site exfil" },
+        { "slug": "allow-internal-mcp", "title": "Allow internal MCP server" },
+        { "slug": "tune-pii-false-positives", "title": "Tune PII false positives" },
+        { "slug": "add-custom-scanner", "title": "Add a custom scanner" },
+        { "slug": "add-custom-rego", "title": "Add a custom Rego policy" },
+        { "slug": "ship-to-splunk", "title": "Ship events to Splunk" },
+        { "slug": "known-good-configs", "title": "Known-good configs" },
+        { "slug": "mtls-gateway", "title": "mTLS the gateway" },
+        { "slug": "airgapped-install", "title": "Airgapped install" },
+        { "slug": "migrate-from-v6-to-v7", "title": "Migrate v6 to v7" }
+      ]
+    },
+    {
+      "id": "migration",
+      "label": "Migration",
+      "path": "migration",
+      "pages": [
+        { "slug": "from-old-docs", "title": "From docs/*.md" },
+        { "slug": "breaking-changes", "title": "Breaking changes" }
+      ]
+    }
+  ]
+}

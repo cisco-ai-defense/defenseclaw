@@ -1,0 +1,64 @@
+---
+title: "From docs/*.md"
+description: "Where the legacy docs/*.md content lives now in docs-site/."
+order: 1
+---
+
+## Overview
+
+Before `docs-site/`, DefenseClaw documentation lived in `docs/*.md` — a flat set of Markdown files inside the repo. Those files are retained for history but are **not canonical** for v7. Every topic has moved to a dedicated `docs-site/` page with code-accurate generated content.
+
+## Mapping table
+
+| Legacy file | Replacement |
+|-------------|-------------|
+| `docs/README.md` | [docs-site/index.mdx](/docs-site/index) |
+| `docs/INSTALL.md` | [Install methods](/docs-site/installation/index) |
+| `docs/QUICKSTART.md` | [Zero to governed](/docs-site/first-setup/index) |
+| `docs/CLI.md` | [CLI overview](/docs-site/cli/index) and the [commands](/docs-site/cli/commands/init) section |
+| `docs/GUARDRAIL.md` | [Guardrail overview](/docs-site/guardrail/index) |
+| `docs/POLICY.md` | [Policy engines](/docs-site/policy/index) |
+| `docs/SCANNERS.md` | [Scanner catalog](/docs-site/scanners/index) |
+| `docs/WATCHER.md` | [Watcher overview](/docs-site/watcher/index) |
+| `docs/FIREWALL.md` | [Firewall overview](/docs-site/firewall/index) |
+| `docs/SANDBOX.md` | [Sandbox overview](/docs-site/sandbox/index) |
+| `docs/OBSERVABILITY.md` | [Observability overview](/docs-site/observability/index) |
+| `docs/API.md` | [API overview](/docs-site/api/index) |
+| `docs/DEVELOPMENT.md` | [Developer overview](/docs-site/developer/index) |
+| `docs/RELEASE.md` | [Release](/docs-site/developer/release) |
+| `docs/CONTRIBUTING.md` | [Contributing](/docs-site/developer/contributing) |
+| `docs/FAQ.md` | [FAQ](/docs-site/reference/faq) |
+| `docs/GLOSSARY.md` | [Glossary](/docs-site/reference/glossary) |
+| `docs/TROUBLESHOOTING.md` | [Troubleshooting](/docs-site/reference/troubleshooting) |
+| `docs/ARCHITECTURE.md` | [Architecture](/docs-site/developer/architecture) |
+
+## Why move?
+
+1. **MDX over Markdown** — we need callouts, diagrams, and code-reference blocks that Markdown alone doesn't do well.
+2. **Autogeneration** — CLI, schemas, env vars, and telemetry names are now generated directly from code into AUTOGEN blocks. The legacy Markdown would drift within weeks.
+3. **Consistency with cisco-ai-defense.github.io** — we publish docs to the shared site; our format matches the site's conventions.
+4. **Navigation** — `_meta/toc.json` drives the sidebar for everyone. One source of truth.
+
+## What happens to the legacy files?
+
+For v7.0: they still exist, they link to their replacements at the top, and a banner warns they're historical.
+
+For v7.1 and beyond: the `docs/` directory will be emptied except for a `README.md` that points at `docs-site/`. CI will fail PRs that add new files to `docs/`.
+
+## If you had bookmarks
+
+The legacy paths don't redirect automatically (we can't control where your bookmark lives). Use the table above to find the replacement. If you can't find something, it's either:
+
+- In [docs-site/reference](/docs-site/reference/glossary) — we consolidated the small pages.
+- Deprecated — the v7 architecture removed it.
+
+File an issue if a topic you need isn't here. We'd rather add it than leave you stranded.
+
+## Related
+
+- [Breaking changes](/docs-site/migration/breaking-changes)
+- [Migrate v6 to v7](/docs-site/cookbooks/migrate-from-v6-to-v7)
+
+---
+
+<!-- generated-from: docs-site/_meta/toc.json, docs-site/STYLE.md -->

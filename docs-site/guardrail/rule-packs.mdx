@@ -1,0 +1,235 @@
+---
+title: "Rule packs"
+description: "DefenseClaw guardrail rule-pack catalog: default, strict, and permissive."
+order: 4
+---
+
+## Overview
+
+Rule packs are YAML bundles with `rules/*.yaml`, `judge/*.yaml`,
+`suppressions.yaml`, and `sensitive-tools.yaml`. Built-in packs live under
+`policies/guardrail/<pack>/`; embedded fallback files live under
+`internal/guardrail/defaults/`.
+
+A pack is selected at runtime by `guardrail.rule_pack_dir`, not by
+`guardrail.profile`. `internal/guardrail/rulepack.go::LoadRulePack` reads
+the configured directory first and falls back to embedded defaults when a
+file is missing or corrupt.
+
+<Callout type="warning" title="No automatic overlay merge">
+  The loader reads one configured rule-pack directory. To customize a built-in
+  pack, point `guardrail.rule_pack_dir` at a complete directory that contains
+  your desired `rules/`, `judge/`, `suppressions.yaml`, and
+  `sensitive-tools.yaml` files.
+</Callout>
+
+## Reference — pack diff
+
+<!-- BEGIN AUTOGEN:rules:packs_diff -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+**Rule counts by pack**
+
+| Category | default | strict | permissive |
+|---|---|---|---|
+| `c2` | 18 | 18 | 18 |
+| `cognitive-file` | 8 | 8 | 8 |
+| `command` | 26 | 26 | 26 |
+| `enterprise-data` | 16 | 16 | 16 |
+| `local-patterns` | — | — | — |
+| `secret` | 22 | 22 | 22 |
+| `sensitive-path` | 17 | 17 | 17 |
+| `trust-exploit` | 21 | 21 | 21 |
+| **Total rules** | **128** | **128** | **128** |
+| **Suppressions** | 0 | 0 | 0 |
+
+<!-- END AUTOGEN:rules:packs_diff -->
+
+## Reference — default pack, all rules
+
+<!-- BEGIN AUTOGEN:rules:default_rules -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+Every rule in the `default` pack. The `strict` pack adds extra rules and tightens thresholds; the `permissive` pack is a subset. See [Configuration](/docs-site/guardrail/configuration) for `defenseclaw_profile` and per-rule `sample_inline_with_judge` overrides.
+
+### Category `c2` — 18 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `C2-WEBHOOK-SITE` | HIGH | 0.90 | webhook.site (known exfil) | exfiltration, c2 |
+| `C2-NGROK` | HIGH | 0.85 | ngrok tunnel (exfil risk) | exfiltration, c2 |
+| `C2-PIPEDREAM` | HIGH | 0.90 | Pipedream (known exfil) | exfiltration, c2 |
+| `C2-REQUESTBIN` | HIGH | 0.90 | RequestBin (known exfil) | exfiltration, c2 |
+| `C2-HOOKBIN` | HIGH | 0.90 | HookBin (known exfil) | exfiltration, c2 |
+| `C2-BURP` | HIGH | 0.90 | Burp Collaborator (pentest C2) | exfiltration, c2 |
+| `C2-INTERACTSH` | HIGH | 0.90 | interact.sh (OOB exfil) | exfiltration, c2 |
+| `C2-OAST` | HIGH | 0.85 | oast.fun (OOB testing) | exfiltration, c2 |
+| `C2-CANARY` | MEDIUM | 0.75 | Canary Tokens | exfiltration, c2 |
+| `C2-PASTEBIN` | MEDIUM | 0.70 | Pastebin raw fetch | exfiltration, c2 |
+| `C2-METADATA-AWS` | CRITICAL | 0.95 | AWS metadata endpoint (SSRF) | ssrf, credential |
+| `C2-METADATA-GCP` | CRITICAL | 0.95 | GCP metadata endpoint (SSRF) | ssrf, credential |
+| `C2-METADATA-AZURE` | CRITICAL | 0.95 | Azure metadata endpoint (SSRF) | ssrf, credential |
+| `C2-METADATA-HEX` | CRITICAL | 0.95 | AWS metadata endpoint (hex-encoded SSRF) | ssrf, credential |
+| `C2-METADATA-DECIMAL` | CRITICAL | 0.93 | AWS metadata endpoint (decimal-encoded SSRF) | ssrf, credential |
+| `C2-METADATA-OCTAL` | CRITICAL | 0.93 | AWS metadata endpoint (octal-encoded SSRF) | ssrf, credential |
+| `C2-DNS-TUNNEL` | HIGH | 0.78 | DNS TXT query with high-entropy label (tunneling indicator) | exfiltration, dns-tunnel |
+| `C2-DNS-EXFIL` | HIGH | 0.80 | nslookup with hex subdomain (DNS exfil) | exfiltration, dns-tunnel |
+
+### Category `cognitive-file` — 8 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `COG-SOUL` | CRITICAL | 0.95 | SOUL.md access (agent identity) | cognitive-tampering |
+| `COG-IDENTITY` | CRITICAL | 0.95 | IDENTITY.md access | cognitive-tampering |
+| `COG-MEMORY` | HIGH | 0.85 | MEMORY.md access | cognitive-tampering |
+| `COG-CLAUDE-MD` | HIGH | 0.85 | CLAUDE.md access | cognitive-tampering |
+| `COG-TOOLS-MD` | HIGH | 0.80 | TOOLS.md access | cognitive-tampering |
+| `COG-AGENTS-MD` | HIGH | 0.80 | AGENTS.md access | cognitive-tampering |
+| `COG-OPENCLAW-JSON` | HIGH | 0.80 | openclaw.json config access | cognitive-tampering |
+| `COG-GATEWAY-JSON` | HIGH | 0.80 | gateway.json config access | cognitive-tampering |
+
+### Category `command` — 26 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `CMD-REVSHELL-BASH` | CRITICAL | 0.98 | Bash reverse shell | execution, reverse-shell |
+| `CMD-REVSHELL-DEVTCP` | CRITICAL | 0.95 | Reverse shell via /dev/tcp | execution, reverse-shell |
+| `CMD-REVSHELL-NC` | CRITICAL | 0.95 | Netcat reverse shell with -e | execution, reverse-shell |
+| `CMD-REVSHELL-PYTHON` | CRITICAL | 0.90 | Python reverse shell | execution, reverse-shell |
+| `CMD-PIPE-CURL` | CRITICAL | 0.95 | curl piped to shell | execution, download-exec |
+| `CMD-PIPE-WGET` | CRITICAL | 0.95 | wget piped to shell | execution, download-exec |
+| `CMD-PIPE-BASE64` | CRITICAL | 0.95 | base64 decode piped to shell | execution, obfuscation |
+| `CMD-EVAL` | HIGH | 0.85 | Shell eval with dynamic input | execution |
+| `CMD-BASH-C` | LOW | 0.55 | Shell -c execution | execution |
+| `CMD-PYTHON-C` | LOW | 0.55 | Python inline execution | execution |
+| `CMD-PERL-E` | LOW | 0.55 | Perl inline execution | execution |
+| `CMD-RUBY-E` | LOW | 0.55 | Ruby inline execution | execution |
+| `CMD-RM-RF` | CRITICAL | 0.95 | Recursive force delete from critical root path | destructive |
+| `CMD-MKFS` | CRITICAL | 0.90 | Filesystem format command | destructive |
+| `CMD-DD-IF` | HIGH | 0.80 | dd disk write | destructive |
+| `CMD-CHMOD-WORLD` | HIGH | 0.80 | chmod world-writable | privilege |
+| `CMD-CHOWN-ROOT` | HIGH | 0.75 | chown to root | privilege |
+| `CMD-SUDO` | LOW | 0.50 | sudo invocation | privilege |
+| `CMD-ETC-WRITE` | CRITICAL | 0.90 | Write redirect to /etc/ | system-file |
+| `CMD-CRONTAB` | HIGH | 0.75 | Crontab modification | persistence |
+| `CMD-SYSTEMCTL` | HIGH | 0.82 | Suspicious systemd persistence enablement | persistence |
+| `CMD-NETCAT-LISTEN` | HIGH | 0.85 | Netcat listener | network, reverse-shell |
+| `CMD-CURL-UPLOAD` | HIGH | 0.85 | curl file upload | network, exfiltration |
+| `CMD-WGET-POST` | HIGH | 0.85 | wget POST data exfil | network, exfiltration |
+| `CMD-SOCAT-EXEC` | CRITICAL | 0.95 | socat with EXEC (reverse shell) | execution, reverse-shell |
+| `CMD-ENV-DUMP` | HIGH | 0.80 | Environment variable dump | credential |
+
+### Category `enterprise-data` — 16 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `ENT-BULK-SSN` | CRITICAL | 0.85 | US Social Security Number | pii, regulated |
+| `ENT-BULK-SSN-NOHYPHEN` | HIGH | 0.55 | US SSN (no hyphens) | pii, regulated |
+| `ENT-CC-VISA` | CRITICAL | 0.80 | Visa credit card number | pii, pci |
+| `ENT-CC-MC` | CRITICAL | 0.80 | Mastercard credit card number | pii, pci |
+| `ENT-CC-AMEX` | CRITICAL | 0.80 | American Express card number | pii, pci |
+| `ENT-CC-DISCOVER` | CRITICAL | 0.80 | Discover card number | pii, pci |
+| `ENT-IBAN` | HIGH | 0.75 | International Bank Account Number (IBAN) | pii, financial |
+| `ENT-US-PHONE` | MEDIUM | 0.50 | US phone number | pii |
+| `ENT-EMAIL-BULK` | LOW | 0.40 | Email address | pii |
+| `ENT-PASSPORT-US` | HIGH | 0.50 | US passport number pattern | pii, regulated |
+| `ENT-DL-CA` | HIGH | 0.40 | California drivers license pattern | pii, regulated |
+| `ENT-MEDICAL-RECORD` | CRITICAL | 0.70 | Medical record number | pii, hipaa |
+| `ENT-DOB-PATTERN` | HIGH | 0.75 | Date of birth with label | pii, hipaa |
+| `ENT-NHS-NUMBER` | HIGH | 0.40 | UK NHS number pattern | pii, regulated |
+| `ENT-BULK-CSV-PII` | HIGH | 0.80 | CSV/TSV header with multiple PII columns | pii, bulk-data |
+| `ENT-BULK-JSON-PII` | HIGH | 0.75 | JSON field with PII key | pii, bulk-data |
+
+### Category `local-patterns` — 0 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| — | — | — | — | — |
+
+### Category `secret` — 22 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `SEC-AWS-KEY` | CRITICAL | 0.95 | AWS access key | credential |
+| `SEC-AWS-SECRET` | CRITICAL | 0.90 | AWS secret access key | credential |
+| `SEC-ANTHROPIC` | CRITICAL | 0.98 | Anthropic API key | credential |
+| `SEC-OPENAI` | CRITICAL | 0.95 | OpenAI project key | credential |
+| `SEC-OPENAI-V2` | CRITICAL | 0.85 | OpenAI API key (long form) | credential |
+| `SEC-STRIPE` | CRITICAL | 0.95 | Stripe key | credential |
+| `SEC-GITHUB-TOKEN` | CRITICAL | 0.95 | GitHub token | credential |
+| `SEC-GITHUB-PAT` | CRITICAL | 0.95 | GitHub fine-grained PAT | credential |
+| `SEC-GITLAB` | CRITICAL | 0.95 | GitLab personal access token | credential |
+| `SEC-GOOGLE` | HIGH | 0.90 | Google API key | credential |
+| `SEC-SLACK-TOKEN` | HIGH | 0.90 | Slack token | credential |
+| `SEC-SLACK-WEBHOOK` | HIGH | 0.95 | Slack webhook URL | credential |
+| `SEC-DISCORD-WEBHOOK` | HIGH | 0.95 | Discord webhook URL | credential |
+| `SEC-PRIVKEY` | CRITICAL | 0.98 | Private key | credential |
+| `SEC-JWT` | MEDIUM | 0.70 | JWT token | credential |
+| `SEC-CONNSTR` | HIGH | 0.90 | Connection string with credentials | credential |
+| `SEC-BEARER` | HIGH | 0.80 | Bearer token in header | credential |
+| `SEC-SENDGRID` | HIGH | 0.95 | SendGrid API key | credential |
+| `SEC-TWILIO` | HIGH | 0.80 | Twilio API key | credential |
+| `SEC-NPM-TOKEN` | CRITICAL | 0.95 | npm access token | credential |
+| `SEC-PYPI-TOKEN` | CRITICAL | 0.95 | PyPI API token | credential |
+| `SEC-HEX-SECRET` | HIGH | 0.72 | Hex-encoded secret in assignment | credential |
+
+### Category `sensitive-path` — 17 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `PATH-SSH-DIR` | HIGH | 0.95 | SSH directory access | credential, file-sensitive |
+| `PATH-SSH-KEY` | HIGH | 0.90 | SSH key file path | credential, file-sensitive |
+| `PATH-AWS-CREDS` | CRITICAL | 0.98 | AWS credentials file | credential, file-sensitive |
+| `PATH-AWS-CONFIG` | HIGH | 0.85 | AWS config file | credential, file-sensitive |
+| `PATH-KUBE` | HIGH | 0.90 | Kubernetes config | credential, file-sensitive |
+| `PATH-DOCKER` | HIGH | 0.90 | Docker config | credential, file-sensitive |
+| `PATH-GNUPG` | HIGH | 0.95 | GPG keyring access | credential, file-sensitive |
+| `PATH-NPMRC` | MEDIUM | 0.80 | npm config (may contain tokens) | credential, file-sensitive |
+| `PATH-PYPIRC` | MEDIUM | 0.80 | PyPI config (may contain tokens) | credential, file-sensitive |
+| `PATH-GIT-CREDS` | HIGH | 0.95 | Git credentials file | credential, file-sensitive |
+| `PATH-NETRC` | HIGH | 0.90 | netrc credentials file | credential, file-sensitive |
+| `PATH-ENV-FILE` | HIGH | 0.85 | Environment file | credential, file-sensitive |
+| `PATH-ETC-PASSWD` | HIGH | 0.85 | /etc/passwd access | system-file |
+| `PATH-ETC-SHADOW` | CRITICAL | 0.90 | /etc/shadow access | system-file, credential |
+| `PATH-ETC-SUDOERS` | HIGH | 0.85 | /etc/sudoers access | system-file, privilege |
+| `PATH-PROC-ENVIRON` | HIGH | 0.90 | /proc environ access | credential |
+| `PATH-HISTORY` | MEDIUM | 0.80 | Shell history file | credential, file-sensitive |
+
+### Category `trust-exploit` — 21 rules
+
+| Rule ID | Severity | Confidence | Title | Tags |
+|---|---|---|---|---|
+| `TRUST-AUTHORITY` | HIGH | 0.85 | Authority claim in tool args | prompt-injection |
+| `TRUST-MAINTENANCE` | HIGH | 0.85 | Fake mode activation | prompt-injection |
+| `TRUST-SAFETY-OVERRIDE` | CRITICAL | 0.90 | Safety override attempt | prompt-injection |
+| `TRUST-NEW-INSTRUCTIONS` | HIGH | 0.85 | Fake instruction update | prompt-injection |
+| `TRUST-IGNORE-PREVIOUS` | CRITICAL | 0.90 | Ignore previous instructions | prompt-injection |
+| `TRUST-DISREGARD` | CRITICAL | 0.90 | Disregard instructions | prompt-injection |
+| `TRUST-JAILBREAK` | CRITICAL | 0.92 | Jailbreak attempt | prompt-injection |
+| `TRUST-PRETEND` | HIGH | 0.85 | Identity override attempt | prompt-injection |
+| `TRUST-FORGET` | CRITICAL | 0.90 | Forget instructions attack | prompt-injection |
+| `TRUST-NEW-INSTRUCT-PREFIX` | HIGH | 0.85 | Direct instruction injection prefix | prompt-injection |
+| `TRUST-OVERRIDE-INSTRUCT` | CRITICAL | 0.88 | Override instructions | prompt-injection |
+| `TRUST-FROM-NOW-ON` | HIGH | 0.85 | Persistent behavior change | prompt-injection |
+| `TRUST-SWITCH-MODE` | HIGH | 0.85 | Mode/personality switch | prompt-injection |
+| `TRUST-PROMPT-EXTRACT` | MEDIUM | 0.75 | System prompt extraction attempt | prompt-injection |
+| `TRUST-FICTIONAL` | MEDIUM | 0.70 | Fictional framing / purpose laundering | prompt-injection |
+| `TRUST-NO-ETHICS` | HIGH | 0.88 | Ethics removal attempt | prompt-injection |
+| `TRUST-TOOL-MANIP` | HIGH | 0.85 | Tool manipulation directive | prompt-injection |
+| `TRUST-PERSONA` | HIGH | 0.88 | Malicious persona adoption | prompt-injection |
+| `TRUST-DELIMITER` | CRITICAL | 0.93 | Delimiter hijacking / prompt framing escape | prompt-injection |
+| `TRUST-OUTPUT-CONSTRAINT` | HIGH | 0.85 | Forced encoding to bypass filters | prompt-injection, obfuscation |
+| `TRUST-PAYLOAD-SPLIT` | HIGH | 0.87 | Payload splitting / forced compliance prefix | prompt-injection |
+
+<!-- END AUTOGEN:rules:default_rules -->
+
+## Related
+
+- [Writing rules](/docs-site/guardrail/writing-rules)
+- [Suppressions](/docs-site/guardrail/suppressions)
+- [Judge vs regex](/docs-site/guardrail/judge-vs-regex)
+- [Tuning](/docs-site/guardrail/tuning)
+
+---
+
+<!-- generated-from: internal/guardrail/rulepack.go, internal/guardrail/defaults/suppressions.yaml, internal/guardrail/defaults/sensitive-tools.yaml, internal/guardrail/defaults/judge/*.yaml, policies/guardrail/default/rules/*.yaml, policies/guardrail/strict/rules/*.yaml, policies/guardrail/permissive/rules/*.yaml, policies/guardrail/default/suppressions.yaml, policies/guardrail/strict/suppressions.yaml, policies/guardrail/permissive/suppressions.yaml -->

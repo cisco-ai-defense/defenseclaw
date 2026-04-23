@@ -1,0 +1,74 @@
+---
+title: "Hot reload"
+description: "Reload OPA policy data through the running sidecar without restarting the gateway."
+order: 8
+---
+
+## Overview
+
+Policy reload is handled by the Go gateway CLI and the sidecar API. Edit the Rego modules or `data.json`, then ask the running sidecar to re-read its configured policy directory.
+
+```bash
+defenseclaw-gateway policy reload
+```
+
+The command posts to the sidecar's `POST /policy/reload` route. Success returns JSON with `status: "reloaded"` and the configured `policy_dir`. Failure returns a non-zero exit and the sidecar keeps serving with the previous in-memory engine when a shared engine was already wired.
+
+## What reload does
+
+1. Calls `internal/gateway/api.go::handlePolicyReload`.
+2. Uses the registered `policyReloader` callback when the watcher has attached a shared `internal/policy/engine.go::Engine`.
+3. Otherwise creates a throwaway `policy.Engine` and runs `Compile()` as a compatibility validation path.
+4. On success, calls `InvalidateJudgeVerdictCache()` so LLM-judge cache entries do not survive a policy refresh.
+5. Records a policy reload metric and, when an audit logger is configured, writes a `policy-reload` action.
+
+## What reload doesn't do
+
+- Does **not** expose a Python policy reload subcommand; reload belongs to `defenseclaw-gateway policy reload`.
+- Does **not** keep judge verdict cache entries; the reload path explicitly invalidates them.
+- Does **not** run `opa test`; use [Testing policies](/docs-site/policy/testing) for the Rego test command.
+- Does **not** provide snapshot history or rollback commands.
+
+## Engine reload behavior
+
+`internal/policy/engine.go::Reload` loads a fresh OPA store, reads and compiles the modules, then swaps `Engine.store` under the engine write lock. Evaluation calls use the same engine lock discipline, so failed reloads return before the stored policy is replaced.
+
+## Failure modes
+
+| Failure | Behavior |
+|---------|----------|
+| Sidecar unreachable | `defenseclaw-gateway policy reload` reports it cannot reach `http://<bind>:<port>/policy/reload`. |
+| `policy_dir` missing | Sidecar returns HTTP 503 with `policy_dir not configured`. |
+| Rego parse or compile error | Sidecar returns HTTP 500 or 400 with the compile error. |
+| Unsupported method | `GET /policy/reload` returns HTTP 405; reload is `POST` only. |
+
+There is no documented `policy history` or `policy rollback` CLI in the current source. Keep policy files in version control and reload the corrected files.
+
+## Operator pattern
+
+Validate and test before asking the sidecar to reload:
+
+```bash
+defenseclaw policy validate --rego-dir policies/rego
+defenseclaw policy test --rego-dir policies/rego
+
+defenseclaw-gateway policy reload
+```
+
+## Observability
+
+| Signal | Source |
+|--------|--------|
+| `defenseclaw.policy.reloads` | `internal/telemetry/metrics.go::RecordPolicyReload`, labeled by `status` |
+| `policy-reload` audit action | `internal/gateway/api.go::handlePolicyReload` when an audit logger is configured |
+| `policy` lifecycle event | `internal/gateway/api.go::emitLifecycle` |
+
+## Related
+
+- [Lifecycle](/docs-site/policy/lifecycle)
+- [policy CLI](/docs-site/cli/commands/policy)
+- [Verdict cache](/docs-site/guardrail/verdict-cache)
+
+---
+
+<!-- generated-from: internal/policy/engine.go, internal/gateway/api.go, internal/cli/policy.go, cli/defenseclaw/commands/cmd_policy.py, internal/telemetry/metrics.go -->

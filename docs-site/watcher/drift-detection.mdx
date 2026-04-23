@@ -1,0 +1,57 @@
+---
+title: "Drift detection"
+description: "Snapshot-based diffing catches silent modifications to already-approved artifacts."
+order: 3
+---
+
+## Overview
+
+Drift detection runs inside the periodic rescan loop. The watcher stores a baseline snapshot for each target, then compares later snapshots and scan results against that baseline. Differences are emitted as `drift` audit events and can be dispatched through the webhook dispatcher when one is attached.
+
+## What is snapshotted
+
+- Skills and plugins: a whole-tree content hash, dependency manifest hashes, config file hashes, and URLs/IP endpoints extracted from source-like files.
+- MCP servers: the serialized configured server entry, plus the URL as a network endpoint when one exists.
+
+Baselines are stored in the audit database through `SetTargetSnapshot`; they are not a separate `snapshots/` directory.
+
+## Drift findings
+
+When a diff is non-empty the watcher creates one or more `DriftDelta` entries:
+
+| Finding | Meaning |
+|---------|---------|
+| `new_finding` | The latest scanner output contains a finding that the baseline scan did not contain. |
+| `resolved_finding` | A baseline finding is no longer present. |
+| `severity_escalation` | A finding or max severity increased. |
+| `content_change` | The directory content hash changed without dependency, config, or endpoint-specific deltas. |
+| `dependency_change` | A dependency manifest was added, removed, or changed. |
+| `config_mutation` | A tracked config file was added, removed, or changed. |
+| `new_endpoint` | A new URL or IP endpoint was found in scanned source. |
+| `removed_endpoint` | A previously observed endpoint disappeared. |
+
+Each delta records severity plus previous/current values where the comparison has them.
+
+## Decision handling
+
+The drift path emits an audit event; it does not re-run the install-time admission gate for the drift event itself. The rescan code still runs each target's scanner and persists new scan results when baselining or comparing findings.
+
+## Re-baselining
+
+There is no `approve` command for watcher baselines. The next rescan cycle stores the current snapshot after emitting detected deltas. For manual operator state, use the existing allow/block commands:
+
+```bash
+defenseclaw skill allow example-skill --reason "legitimate update"
+defenseclaw plugin allow example-plugin --reason "legitimate update"
+defenseclaw mcp allow https://mcp.example.com/sse --reason "legitimate update"
+```
+
+## Related
+
+- [Admission gate](/docs-site/watcher/admission-gate)
+- [Periodic rescan](/docs-site/watcher/rescan)
+- [Scanners](/docs-site/scanners/index)
+
+---
+
+<!-- generated-from: internal/watcher/rescan.go, internal/watcher/snapshot.go, cli/defenseclaw/commands/cmd_skill.py, cli/defenseclaw/commands/cmd_plugin.py, cli/defenseclaw/commands/cmd_mcp.py -->

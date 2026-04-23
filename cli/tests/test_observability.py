@@ -217,6 +217,21 @@ class WriterOTelPresetTests(unittest.TestCase):
         dotenv = _read_dotenv(tmp)
         self.assertEqual(dotenv.get(PRESETS["datadog"].token_env), "dd-key-abc")
 
+    def test_local_otlp_roundtrip_enables_plaintext_grpc(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        result = apply_preset(
+            "local-otlp",
+            {"endpoint": "127.0.0.1:4317"},
+            tmp,
+            signals=("traces", "metrics", "logs"),
+        )
+
+        self.assertFalse(result.dry_run)
+        doc = _read_yaml(tmp)
+        otel = doc.get("otel") or {}
+        self.assertTrue((otel.get("tls") or {}).get("insecure"))
+        self.assertEqual((otel.get("metrics") or {}).get("endpoint"), "127.0.0.1:4317")
+
     def test_dry_run_does_not_write(self) -> None:
         _, tmp = _make_tmp_ctx()
         before = _read_yaml(tmp)

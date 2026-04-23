@@ -260,6 +260,24 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "gateway.watchdog.debounce":
 		c.Gateway.Watchdog.Debounce = intVal
 
+	// Codex hook bridge.
+	case "codex.enabled":
+		c.Codex.Enabled = boolVal
+	case "codex.mode":
+		c.Codex.Mode = val
+	case "codex.install_scope":
+		c.Codex.InstallScope = val
+	case "codex.fail_closed":
+		c.Codex.FailClosed = boolVal
+	case "codex.scan_on_session_start":
+		c.Codex.ScanOnSessionStart = boolVal
+	case "codex.scan_on_stop":
+		c.Codex.ScanOnStop = boolVal
+	case "codex.component_scan_interval_minutes":
+		c.Codex.ComponentScanIntervalMinutes = intVal
+	case "codex.scan_paths":
+		c.Codex.ScanPaths = splitCSV(val)
+
 	// Audit sinks: declarative list-based config (audit_sinks[]).
 	// Inline single-key edits don't make sense for the new schema —
 	// CRUD lives in the dedicated audit-sinks editor (Phase 3.3, see

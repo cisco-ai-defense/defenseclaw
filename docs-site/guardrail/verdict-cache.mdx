@@ -1,0 +1,56 @@
+---
+title: "Verdict cache"
+description: "The process-local cache used for LLM judge verdicts, including key shape, TTL, and invalidation."
+order: 9
+---
+
+## Overview
+
+`internal/guardrail/verdict_cache.go::VerdictCache` is a correctness-neutral cache for LLM judge outcomes. It is wired from `internal/gateway/llm_judge.go` through `SetJudgeVerdictCache`, `NewJudgeVerdictCache`, and `InvalidateJudgeVerdictCache`.
+
+It does not skip the whole guardrail scanner pipeline. It short-circuits repeated judge calls for the same judge kind, model, direction, and content.
+
+## Key shape
+
+The key is built by `cacheKey(kind, model, direction, content)`:
+
+| Component | Meaning |
+|-----------|---------|
+| `kind` | Judge category such as `injection`, `pii`, or `tool_injection`. |
+| `model` | Judge model string. |
+| `direction` | `prompt`, `completion`, or `tool_call`. |
+| `content` | Full judge input content, or tool name plus arguments for tool-injection checks. |
+
+The stored entry also carries the current cache generation. `Invalidate` increments that generation; older entries remain in the map until eviction but are treated as misses.
+
+## Defaults and eviction
+
+| Setting | Source-backed value |
+|---------|---------------------|
+| TTL | Constructor argument, defaulting to `30s` when non-positive. |
+| Entry cap | `4096` entries by default. |
+| Eviction | On `Put`, expired or generation-mismatched entries are swept first; if still full, one arbitrary map entry is removed. |
+| Metrics | Optional hit/miss callbacks record scanner, verdict, and TTL bucket labels. |
+
+<Callout type="info" title="There is no config block">
+  The code does not expose `guardrail.verdict_cache.enabled`, `size`, or `ttl_seconds` in `GuardrailConfig`.
+</Callout>
+
+## Correctness properties
+
+| Property | Why it matters |
+|----------|----------------|
+| Misses are safe | A miss re-runs the judge. |
+| Expired entries are removed on access | Stale TTL entries do not return verdicts. |
+| Generation mismatch is a miss | Reloads can invalidate old decisions without clearing the map synchronously. |
+| Not LRU | The cache uses a bounded map and arbitrary drop after stale sweep, not an LRU queue. |
+
+## Related
+
+- [Judge vs regex](/docs-site/guardrail/judge-vs-regex)
+- [Configuration](/docs-site/guardrail/configuration)
+- [Tuning](/docs-site/guardrail/tuning)
+
+---
+
+<!-- generated-from: internal/guardrail/verdict_cache.go, internal/gateway/llm_judge.go -->

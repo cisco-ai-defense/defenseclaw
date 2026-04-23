@@ -1,0 +1,53 @@
+---
+title: "macOS fallback"
+description: "What the sandbox can and cannot do on macOS and Windows."
+order: 6
+---
+
+## Overview
+
+OpenShell standalone sandbox setup is Linux-only in the current Python CLI. `defenseclaw sandbox init` and `defenseclaw sandbox setup` both reject non-Linux platforms.
+
+## What works on macOS
+
+- DefenseClaw can still run in host mode.
+- Guardrail inspection, scanners, policy evaluation, audit storage, and webhook/audit sinks remain available when configured.
+- The Go `OpenShell` process check has a macOS-compatible `ps` fallback for PID validation, but that is not the same as supported standalone sandbox setup.
+
+## What does not work on macOS
+
+- `scripts/install-openshell-sandbox.sh` exits unless `uname -s` is `Linux`.
+- The Python sandbox init/setup commands exit with an error on non-Linux systems.
+- The gateway CLI sandbox lifecycle commands wrap systemd and are therefore Linux/systemd-oriented.
+
+## What works on Windows
+
+The source in this repo does not implement a Windows sandbox fallback.
+
+## What does not work on Windows
+
+- OpenShell standalone setup.
+- systemd lifecycle wrappers.
+- The Linux installer script.
+
+## Implications
+
+For production deployments that depend on OpenShell isolation, run the gateway and sandbox on Linux. For developer machines on macOS or Windows, use the non-sandboxed DefenseClaw controls and avoid presenting sandbox isolation as active.
+
+## Detection
+
+```bash
+defenseclaw sandbox init
+```
+
+On non-Linux hosts, the command exits with a Linux-required error. There is no `macos-fallback` or `windows-fallback` mode string in the current sandbox CLI.
+
+## Related
+
+- [Sandbox overview](/docs-site/sandbox/index)
+- [Install](/docs-site/sandbox/install)
+- [Firewall](/docs-site/firewall/index)
+
+---
+
+<!-- generated-from: scripts/install-openshell-sandbox.sh, cli/defenseclaw/commands/cmd_init_sandbox.py, cli/defenseclaw/commands/cmd_setup_sandbox.py, internal/cli/sandbox.go, internal/sandbox/openshell.go -->

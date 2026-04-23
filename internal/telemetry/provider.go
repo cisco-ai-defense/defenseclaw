@@ -35,6 +35,7 @@ import (
 	logNoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/metric"
 	metricNoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -86,6 +87,11 @@ type Provider struct {
 // NewProvider initializes the OTel SDK providers and exporters. When
 // cfg.Enabled is false, it returns a no-op provider safe to call.
 func NewProvider(ctx context.Context, fullCfg *config.Config, version string) (*Provider, error) {
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
 	cfg := fullCfg.OTel
 	if !cfg.Enabled {
 		return &Provider{

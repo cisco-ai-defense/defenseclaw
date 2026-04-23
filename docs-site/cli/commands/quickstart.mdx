@@ -1,0 +1,73 @@
+---
+title: "defenseclaw quickstart"
+description: "Zero-prompt end-to-end setup with safe defaults."
+order: 10
+---
+
+## Overview
+
+`defenseclaw quickstart` — Zero-prompt end-to-end setup with safe defaults.
+
+## Reference
+
+<!-- BEGIN AUTOGEN:cli_py:quickstart -->
+<!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
+
+### Synopsis
+
+```bash
+defenseclaw quickstart [OPTIONS]
+```
+
+### Description
+
+Zero-prompt end-to-end setup with safe defaults
+
+Zero-prompt end-to-end setup with safe defaults.
+
+    Equivalent to running ``init`` → ``setup guardrail`` → ``gateway
+    start`` but with a scripted, non-interactive UX. Missing API keys
+    are listed at the end so the operator knows exactly what (if
+    anything) to wire up before the guardrail becomes useful.
+
+### Options
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--mode` | choice (`observe`, `action`) | `observe` | — | no | Guardrail mode. 'observe' logs findings only; 'action' blocks when critical. |
+| `--scanner` | choice (`local`, `remote`, `both`) | `local` | — | no | Scanner backend. 'local' is the zero-key default; 'remote'/'both' require CISCO_AI_DEFENSE_API_KEY. |
+| `--with-judge, --no-judge` | boolean | — | — | no | Enable the LLM Judge adjudicator (reuses the unified DEFENSECLAW_LLM_KEY). |
+| `--non-interactive` | boolean | — | — | no | Never prompt. Same as --yes; kept for install-script compat. |
+| `--yes` | boolean | — | — | no | Assume yes for confirmations. |
+| `--force` | boolean | — | — | no | Re-run all steps even if the environment is already initialized. |
+| `--skip-gateway` | boolean | — | — | no | Do not start the sidecar at the end of quickstart. |
+
+<!-- END AUTOGEN:cli_py:quickstart -->
+
+## Usage
+
+### Governed local setup
+
+```bash
+defenseclaw quickstart --mode balanced --scanner all --with-judge --yes
+```
+
+`--with-judge` is a boolean switch; provider and model selection come from guardrail/provider configuration.
+
+### Skip gateway startup
+
+```bash
+defenseclaw quickstart --mode strict --skip-gateway --non-interactive
+```
+
+Use this in image builds where the daemon starts later.
+
+## Related
+
+- [Python CLI reference](/docs-site/cli/python-cli)
+- [Exit codes](/docs-site/reference/exit-codes)
+- [Environment variables](/docs-site/reference/env-vars)
+
+---
+
+<!-- generated-from: cli/defenseclaw/commands/cmd_quickstart.py -->
