@@ -359,13 +359,21 @@ def _poll_health(cfg, timeout_seconds: int = 60) -> None:
     client = OrchestratorClient(host=bind, port=api_port, token=token)
 
     deadline = time.monotonic() + timeout_seconds
-    last_state = "starting"
+    # Treat the pre-first-probe window the same way the gateway does so the
+    # first successful "starting" reply is recognized as a state change and
+    # printed. A missing/unreachable endpoint is surfaced as "unreachable" on
+    # the first transient failure instead of being silently swallowed, which
+    # was the #96 gotcha — operators saw no output for the full 60s timeout
+    # when the sidecar crashed mid-upgrade.
+    last_state = ""
+    last_err = ""
     click.echo(f"  → Waiting for gateway to become healthy (timeout {timeout_seconds}s) ...")
 
     while time.monotonic() < deadline:
         try:
             snap = client.health()
             if snap and isinstance(snap, dict):
+                last_err = ""
                 gw_state = snap.get("gateway", {}).get("state", "unknown")
                 if gw_state != last_state:
                     click.echo(f"    gateway: {gw_state}")
@@ -373,8 +381,26 @@ def _poll_health(cfg, timeout_seconds: int = 60) -> None:
                 if gw_state == "running":
                     click.secho("  ✓ Gateway is healthy", fg="green")
                     return
-        except (OSError, ValueError):
-            pass
+            else:
+                # 2xx with an empty/non-dict body — treat like unreachable so
+                # the operator still sees a progress line instead of silence.
+                err_label = "health endpoint returned no payload"
+                if err_label != last_err:
+                    click.echo(f"    gateway: unreachable ({err_label})")
+                    last_err = err_label
+                    last_state = ""
+        except (OSError, ValueError) as exc:
+            # Print the first unreachable reason and any distinct follow-up
+            # so the operator can correlate with gateway.log. We deliberately
+            # don't flood on every retry — only on transitions.
+            err_label = type(exc).__name__
+            detail = str(exc).splitlines()[0] if str(exc) else ""
+            if detail:
+                err_label = f"{err_label}: {detail}"
+            if err_label != last_err:
+                click.echo(f"    gateway: unreachable ({err_label})")
+                last_err = err_label
+                last_state = ""
         time.sleep(2)
 
     click.echo(f"  ⚠ Gateway did not become healthy within {timeout_seconds}s", err=True)

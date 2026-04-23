@@ -347,9 +347,29 @@ if [[ -z "${HEALTH_URL}" ]]; then
     HEALTH_URL="http://127.0.0.1:18970/health"
 fi
 
+# Mirror cmd_upgrade._poll_health: print state transitions in real time
+# (including the first "unreachable" probe after a crashed sidecar) so
+# operators aren't staring at a blank terminal for the full timeout.
+LAST_STATE=""
 while [[ "${ELAPSED}" -lt "${HEALTH_TIMEOUT}" ]]; do
-    STATUS=$(curl -s "${HEALTH_URL}" 2>/dev/null || echo "{}")
-    GW_STATE=$(echo "${STATUS}" | grep -oE '"state":"[^"]*"' | head -1 | grep -oE '"[^"]*"$' | tr -d '"' || echo "unknown")
+    HTTP_CODE=$(curl -s -o /tmp/dc-upgrade-health.$$ -w "%{http_code}" "${HEALTH_URL}" 2>/dev/null || echo "000")
+    STATUS=$(cat /tmp/dc-upgrade-health.$$ 2>/dev/null || echo "")
+    rm -f /tmp/dc-upgrade-health.$$
+
+    if [[ "${HTTP_CODE}" == "200" && -n "${STATUS}" ]]; then
+        GW_STATE=$(echo "${STATUS}" | grep -oE '"state":"[^"]*"' | head -1 | grep -oE '"[^"]*"$' | tr -d '"' || echo "unknown")
+        if [[ -z "${GW_STATE}" ]]; then
+            GW_STATE="unknown"
+        fi
+    else
+        GW_STATE="unreachable"
+    fi
+
+    if [[ "${GW_STATE}" != "${LAST_STATE}" ]]; then
+        info "    gateway: ${GW_STATE}"
+        LAST_STATE="${GW_STATE}"
+    fi
+
     if [[ "${GW_STATE}" == "running" ]]; then
         ok "Gateway is healthy"
         HEALTH_OK=1
