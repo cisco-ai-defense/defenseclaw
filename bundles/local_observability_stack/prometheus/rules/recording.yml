@@ -70,6 +70,27 @@ groups:
       - record: codex:defenseclaw_component_scans:rate5m
         expr: sum by (component, result) (rate(defenseclaw_codex_component_scans_total[5m]))
 
+  - name: defenseclaw.claude_code
+    interval: 30s
+    rules:
+      - record: claude_code:defenseclaw_hook_invocations:rate5m
+        expr: sum by (hook_event, action, mode) (rate(defenseclaw_claude_code_hook_invocations_total[5m]))
+      - record: claude_code:defenseclaw_blocks:rate5m
+        expr: sum by (hook_event, severity, mode) (rate(defenseclaw_claude_code_blocks_total[5m]))
+      - record: claude_code:defenseclaw_would_blocks:rate5m
+        expr: sum by (hook_event, severity, mode) (rate(defenseclaw_claude_code_would_blocks_total[5m]))
+      - record: claude_code:defenseclaw_block_ratio:5m
+        expr: |
+          sum(rate(defenseclaw_claude_code_blocks_total[5m]))
+          /
+          clamp_min(sum(rate(defenseclaw_claude_code_hook_invocations_total[5m])), 0.0001)
+      - record: claude_code:defenseclaw_hook_latency:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, hook_event) (rate(defenseclaw_claude_code_hook_latency_milliseconds_bucket[5m])))
+      - record: claude_code:defenseclaw_component_scans:rate5m
+        expr: sum by (component, result) (rate(defenseclaw_claude_code_component_scans_total[5m]))
+
   - name: defenseclaw.slo.recording
     interval: 30s
     rules:

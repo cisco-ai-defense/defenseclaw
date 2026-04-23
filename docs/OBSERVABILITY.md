@@ -112,6 +112,29 @@ Prometheus recording rules for hook rate, block ratio, and p95 latency.
 Raw prompts, Bash output, and file contents are not written to logs or
 spans outside the existing scanner paths.
 
+### 1.5 Claude Code Hook Observability
+
+`defenseclaw setup claude-code` installs Claude Code command hooks that call
+`defenseclaw claude-code hook`. Runtime decisions are evaluated by
+`POST /api/v1/claude-code/hook`, so Claude Code prompt, tool, session,
+subagent, config, file-watch, compaction, and elicitation events share the same redaction,
+audit, metrics, and trace pipeline as the rest of the gateway.
+
+Claude Code-specific OTel instruments:
+
+| Metric | Purpose |
+|--------|---------|
+| `defenseclaw.claude_code.hook.invocations` | Hook volume by event, action, severity, and mode. |
+| `defenseclaw.claude_code.hook.latency` | Hook evaluation latency in milliseconds. |
+| `defenseclaw.claude_code.blocks` | Enforced action-mode blocks. |
+| `defenseclaw.claude_code.would_blocks` | Observe-mode findings that would block in action mode. |
+| `defenseclaw.claude_code.component_scans` | Skill/plugin/MCP/agent/command/config component scan attempts. |
+
+The local stack ships a `defenseclaw-claude-code.json` Grafana dashboard and
+Prometheus recording rules for hook rate, block ratio, component scans, and
+p95 latency. Raw prompts, tool output, elicitation content, and file contents
+are not written to logs or spans outside the existing scanner paths.
+
 ---
 
 ## 2. Migration from v3 → v4

@@ -31,6 +31,7 @@ from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
+from defenseclaw.commands.cmd_claude_code import claude_code
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_codex import codex
 from defenseclaw.commands.cmd_doctor import doctor
@@ -52,7 +53,7 @@ from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
-SKIP_LOAD_COMMANDS = {"init", "quickstart", "sandbox", "tui", "uninstall", "reset", "version", "codex"}
+SKIP_LOAD_COMMANDS = {"init", "quickstart", "sandbox", "tui", "uninstall", "reset", "version", "codex", "claude-code"}
 
 # Commands that may legitimately run before config.yaml exists or while
 # it is being rewritten. The auto-validate hook below skips them to
@@ -152,6 +153,7 @@ cli.add_command(alerts)
 cli.add_command(audit)
 cli.add_command(codeguard)
 cli.add_command(codex)
+cli.add_command(claude_code)
 cli.add_command(tool)
 cli.add_command(tui)
 cli.add_command(doctor)

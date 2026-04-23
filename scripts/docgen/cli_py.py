@@ -320,6 +320,7 @@ def _cmd_template(name: str, cmd: click.Command) -> str:
     elif cmd.short_help:
         summary = cmd.short_help
     summary_dq = summary.replace('"', '\\"')
+    module_name = name.replace("-", "_")
     return f"""---
 title: "defenseclaw {name}"
 description: "{summary_dq}"
@@ -349,7 +350,7 @@ pages go here._
 
 ---
 
-<!-- generated-from: cli/defenseclaw/commands/cmd_{name}.py -->
+<!-- generated-from: cli/defenseclaw/commands/cmd_{module_name}.py -->
 """
 
 

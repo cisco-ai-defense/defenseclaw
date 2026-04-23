@@ -49,6 +49,7 @@ from defenseclaw.config import (
     _dedup,
     _expand,
     _merge_cisco_ai_defense,
+    _merge_claude_code,
     _merge_gateway_watcher,
     _merge_inspect_llm,
     _merge_mcp_scanner,
@@ -243,6 +244,32 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.gateway.watcher.enabled)
         self.assertTrue(cfg.gateway.watcher.skill.enabled)
         self.assertFalse(cfg.gateway.watcher.skill.take_action)
+        self.assertTrue(cfg.codex.enabled)
+        self.assertEqual(cfg.codex.mode, "inherit")
+        self.assertTrue(cfg.claude_code.enabled)
+        self.assertEqual(cfg.claude_code.mode, "inherit")
+        self.assertEqual(cfg.claude_code.install_scope, "user")
+
+    def test_merge_claude_code_config(self):
+        cfg = _merge_claude_code({
+            "enabled": False,
+            "mode": "action",
+            "install_scope": "repo",
+            "fail_closed": True,
+            "scan_on_session_start": False,
+            "scan_on_stop": False,
+            "component_scan_interval_minutes": 15,
+            "scan_paths": "a.py,b.go",
+        })
+
+        self.assertFalse(cfg.enabled)
+        self.assertEqual(cfg.mode, "action")
+        self.assertEqual(cfg.install_scope, "repo")
+        self.assertTrue(cfg.fail_closed)
+        self.assertFalse(cfg.scan_on_session_start)
+        self.assertFalse(cfg.scan_on_stop)
+        self.assertEqual(cfg.component_scan_interval_minutes, 15)
+        self.assertEqual(cfg.scan_paths, ["a.py", "b.go"])
 
     def test_default_skill_scanner_config(self):
         cfg = default_config()

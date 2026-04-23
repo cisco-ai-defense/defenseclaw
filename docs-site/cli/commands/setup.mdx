@@ -23,6 +23,7 @@ defenseclaw setup [OPTIONS]
 
 | Subcommand | Description |
 |---|---|
+| `claude-code` | Configure DefenseClaw hooks for Claude Code. |
 | `codex` | Configure DefenseClaw hooks for Codex. |
 | `gateway` | Configure gateway connection for the DefenseClaw sidecar. |
 | `guardrail` | Configure the LLM guardrail (routes LLM traffic through the Go proxy for inspection). |
@@ -39,6 +40,25 @@ defenseclaw setup [OPTIONS]
 ### Description
 
 Configure DefenseClaw components
+
+### `defenseclaw setup claude-code`
+
+Configure DefenseClaw hooks for Claude Code
+
+**Options**
+
+| Flag | Type | Default | Env var | Required | Description |
+|---|---|---|---|---|---|
+| `--non-interactive` | boolean | — | — | no | Use defaults instead of prompts. |
+| `--scope` | choice (`user`, `repo`) | — | — | no | Where to install hooks (default from config, then user). |
+| `--scan-on-session-start, --no-scan-on-session-start` | boolean | — | — | no | Enable or disable Claude Code component scans on SessionStart. |
+| `--scan-on-stop, --no-scan-on-stop` | boolean | — | — | no | Enable or disable CodeGuard scans from Stop/SubagentStop/SessionEnd hooks. |
+| `--fail-closed, --fail-open` | boolean | — | — | no | Block eligible events when the hook bridge cannot reach the sidecar. |
+| `--disable` | boolean | — | — | no | Remove DefenseClaw-owned Claude Code hooks. |
+| `--status` | boolean | — | — | no | Show Claude Code integration status. |
+| `--scan-components` | boolean | — | — | no | Ask the sidecar to scan Claude Code skills/plugins/MCP config now. |
+| `--dry-run` | boolean | — | — | no | Show what would change without writing files. |
+| `--force` | boolean | — | — | no | Replace invalid settings JSON instead of failing. |
 
 ### `defenseclaw setup codex`
 

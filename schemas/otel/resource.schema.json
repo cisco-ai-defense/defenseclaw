@@ -52,7 +52,7 @@
     },
     "defenseclaw.claw.mode": {
       "type": "string",
-      "enum": ["openclaw", "nemoclaw", "opencode", "codex"],
+      "enum": ["openclaw", "nemoclaw", "opencode", "codex", "claude-code"],
       "description": "Active agent framework mode."
     },
     "defenseclaw.claw.home_dir": {

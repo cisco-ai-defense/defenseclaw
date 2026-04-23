@@ -129,6 +129,8 @@ SUBSYSTEM_AGENT_REGISTRY: Final[str]  = "agent-registry"
 SUBSYSTEM_SQLITE: Final[str]          = "sqlite"
 SUBSYSTEM_ADMISSION: Final[str]       = "admission"
 SUBSYSTEM_CONFIG_MUTATION: Final[str] = "config_mutation"
+SUBSYSTEM_CODEX: Final[str]           = "codex"
+SUBSYSTEM_CLAUDE_CODE: Final[str]     = "claude-code"
 SUBSYSTEM_GATEWAYLOG: Final[str]      = "gatewaylog"
 
 
@@ -155,5 +157,7 @@ ALL_SUBSYSTEMS: Final[tuple[str, ...]] = (
     SUBSYSTEM_SQLITE,
     SUBSYSTEM_ADMISSION,
     SUBSYSTEM_CONFIG_MUTATION,
+    SUBSYSTEM_CODEX,
+    SUBSYSTEM_CLAUDE_CODE,
     SUBSYSTEM_GATEWAYLOG,
 )

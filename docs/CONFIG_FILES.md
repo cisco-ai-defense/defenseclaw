@@ -287,6 +287,44 @@ codex:
 
 ---
 
+## Claude Code Hook Config
+
+The `claude_code` section controls the thin `defenseclaw claude-code hook`
+bridge installed by `defenseclaw setup claude-code`. Like the Codex bridge,
+it is fail-open by default; policy, scanning, audit, and OTel decisions stay
+in the Go sidecar.
+
+```yaml
+claude_code:
+  enabled: true
+  mode: inherit          # inherit | observe | action
+  install_scope: user    # user | repo
+  fail_closed: false
+  scan_on_session_start: true
+  scan_on_stop: true
+  component_scan_interval_minutes: 60
+  scan_paths: []
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Master switch for sidecar Claude Code hook handling. |
+| `mode` | string | `"inherit"` | `inherit` follows `guardrail.mode`; `observe` records would-blocks; `action` emits blocking decisions when the Claude Code event supports them. |
+| `install_scope` | string | `"user"` | Default setup target: `~/.claude/settings.json` or `<repo>/.claude/settings.local.json`. |
+| `fail_closed` | bool | `false` | When true, bridge failures block eligible prompt/tool/config/stop events. |
+| `scan_on_session_start` | bool | `true` | Run debounced Claude Code skill/plugin/MCP/agent/command/config inventory scans on `SessionStart`. |
+| `scan_on_stop` | bool | `true` | Run CodeGuard over changed files from `Stop`, `SubagentStop`, and `SessionEnd` hooks. |
+| `component_scan_interval_minutes` | int | `60` | Minimum interval between automatic component scans. |
+| `scan_paths` | list | `[]` | Extra files to scan during stop hooks; empty means changed files only. |
+
+| | |
+|---|---|
+| **Set by** | `defenseclaw setup claude-code` and the TUI Setup -> Claude Code wizard/config editor. |
+| **Read by** | Python CLI runtime bridge and Go sidecar `/api/v1/claude-code/hook`. |
+| **Effect** | Claude Code hook events are normalized, inspected through existing scanner/policy paths, logged with redaction, and exported through DefenseClaw observability. |
+
+---
+
 ## Webhook Notification Config
 
 > **Not an audit sink.** `webhooks[]` delivers low-volume, per-event

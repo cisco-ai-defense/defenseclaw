@@ -44,6 +44,7 @@ const (
 	wizardSplunk
 	wizardObservability
 	wizardCodex
+	wizardClaudeCode
 	wizardWebhook
 	wizardSandbox
 	wizardCount
@@ -51,7 +52,7 @@ const (
 
 var wizardNames = [wizardCount]string{
 	"Skill Scanner", "MCP Scanner", "Gateway",
-	"Guardrail", "Splunk", "Observability", "Codex", "Webhooks", "Sandbox",
+	"Guardrail", "Splunk", "Observability", "Codex", "Claude Code", "Webhooks", "Sandbox",
 }
 
 var wizardCommands = [wizardCount][]string{
@@ -64,6 +65,7 @@ var wizardCommands = [wizardCount][]string{
 	// buildWizardArgs from the form's "preset" field.
 	{"setup", "observability", "add"},
 	{"setup", "codex"},
+	{"setup", "claude-code"},
 	// Webhook: channel type is injected positionally from the form's
 	// "type" field. See buildWizardArgs + webhookWizardFields.
 	{"setup", "webhook", "add"},
@@ -78,6 +80,7 @@ var wizardDescriptions = [wizardCount]string{
 	"Configure Splunk HEC integration for SIEM (endpoint, token, index, source).",
 	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
 	"Install DefenseClaw Codex hooks, verify the Codex feature flag, and connect hooks to the local sidecar.",
+	"Install DefenseClaw Claude Code hooks across prompt, tool, session, subagent, config, file-watch, compaction, and elicitation events.",
 	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
 }
@@ -116,6 +119,10 @@ var wizardHowTo = [wizardCount]string{
 	"Runs: defenseclaw setup codex\n" +
 		"What you'll need: Codex installed locally and the DefenseClaw sidecar reachable on gateway.api_port.\n" +
 		"Tip: global hooks live in ~/.codex/hooks.json; start in observe mode before enabling action enforcement.",
+	// Claude Code
+	"Runs: defenseclaw setup claude-code\n" +
+		"What you'll need: Claude Code installed locally and the DefenseClaw sidecar reachable on gateway.api_port.\n" +
+		"Tip: user hooks live in ~/.claude/settings.json; repo hooks live in .claude/settings.local.json.",
 	// Webhook
 	"Runs: defenseclaw setup webhook add <type>\n" +
 		"What you'll need: webhook URL (or env var), HMAC secret env (slack/generic), event filter list.\n" +
@@ -496,6 +503,30 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Component Scan Interval", Key: "codex.component_scan_interval_minutes", Kind: "int", Value: fmt.Sprintf("%d", c.Codex.ComponentScanIntervalMinutes),
 					Hint: "Minimum minutes between automatic Codex component scans."},
 				{Label: "Scan Paths", Key: "codex.scan_paths", Kind: "string", Value: strings.Join(c.Codex.ScanPaths, ","),
+					Hint: "CSV of extra paths CodeGuard scans during Stop. Blank means changed files only."},
+			},
+		},
+		{
+			Name:    "Claude Code",
+			Summary: "Claude Code hooks bridge: rich lifecycle observability and policy checks via the sidecar.",
+			Help: "mode=inherit follows guardrail.mode. observe records would-blocks; action enforces when Claude Code supports decisions. " +
+				"Use the Claude Code wizard to install or remove hooks in ~/.claude/settings.json or repo .claude/settings.local.json.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "claude_code.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.ClaudeCode.Enabled),
+					Hint: "Master switch for Claude Code hook handling. Installed hooks fail open when this is false."},
+				{Label: "Mode", Key: "claude_code.mode", Kind: "choice", Value: c.ClaudeCode.Mode, Options: []string{"inherit", "observe", "action"},
+					Hint: "inherit=guardrail.mode; observe=record only; action=block when policy says block."},
+				{Label: "Install Scope", Key: "claude_code.install_scope", Kind: "choice", Value: c.ClaudeCode.InstallScope, Options: []string{"user", "repo"},
+					Hint: "user writes ~/.claude/settings.json; repo writes <repo>/.claude/settings.local.json."},
+				{Label: "Fail Closed", Key: "claude_code.fail_closed", Kind: "bool", Value: fmt.Sprintf("%v", c.ClaudeCode.FailClosed),
+					Hint: "When true, bridge failures block eligible Claude Code events instead of allowing them."},
+				{Label: "Scan on SessionStart", Key: "claude_code.scan_on_session_start", Kind: "bool", Value: fmt.Sprintf("%v", c.ClaudeCode.ScanOnSessionStart),
+					Hint: "Run debounced skill/plugin/MCP/agent/command/config inventory scans at session start."},
+				{Label: "Scan on Stop", Key: "claude_code.scan_on_stop", Kind: "bool", Value: fmt.Sprintf("%v", c.ClaudeCode.ScanOnStop),
+					Hint: "Run CodeGuard over changed files from Stop/SubagentStop/SessionEnd hooks."},
+				{Label: "Component Scan Interval", Key: "claude_code.component_scan_interval_minutes", Kind: "int", Value: fmt.Sprintf("%d", c.ClaudeCode.ComponentScanIntervalMinutes),
+					Hint: "Minimum minutes between automatic Claude Code component scans."},
+				{Label: "Scan Paths", Key: "claude_code.scan_paths", Kind: "string", Value: strings.Join(c.ClaudeCode.ScanPaths, ","),
 					Hint: "CSV of extra paths CodeGuard scans during Stop. Blank means changed files only."},
 			},
 		},
@@ -1656,6 +1687,16 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 			{Label: "Fail Closed", Flag: "--fail-closed", NoFlag: "--fail-open", Kind: "bool", Default: "no", Value: "no", Hint: "Only enable after validating sidecar availability"},
 			{Label: "Show Status", Flag: "--status", Kind: "bool", Default: "no", Value: "no"},
 			{Label: "Disable", Flag: "--disable", Kind: "bool", Default: "no", Value: "no", Hint: "Remove DefenseClaw-owned Codex hooks"},
+			{Label: "Scan Components Now", Flag: "--scan-components", Kind: "bool", Default: "no", Value: "no"},
+		}
+	case wizardClaudeCode:
+		return []wizardFormField{
+			{Label: "Scope", Flag: "--scope", Kind: "choice", Options: []string{"user", "repo"}, Default: "user", Value: "user", Hint: "user=~/.claude/settings.json; repo=<repo>/.claude/settings.local.json"},
+			{Label: "Scan on SessionStart", Flag: "--scan-on-session-start", NoFlag: "--no-scan-on-session-start", Kind: "bool", Default: "yes", Value: "yes"},
+			{Label: "Scan on Stop", Flag: "--scan-on-stop", NoFlag: "--no-scan-on-stop", Kind: "bool", Default: "yes", Value: "yes"},
+			{Label: "Fail Closed", Flag: "--fail-closed", NoFlag: "--fail-open", Kind: "bool", Default: "no", Value: "no", Hint: "Only enable after validating sidecar availability"},
+			{Label: "Show Status", Flag: "--status", Kind: "bool", Default: "no", Value: "no"},
+			{Label: "Disable", Flag: "--disable", Kind: "bool", Default: "no", Value: "no", Hint: "Remove DefenseClaw-owned Claude Code hooks"},
 			{Label: "Scan Components Now", Flag: "--scan-components", Kind: "bool", Default: "no", Value: "no"},
 		}
 	case wizardWebhook:

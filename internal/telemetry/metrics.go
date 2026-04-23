@@ -73,6 +73,13 @@ type metricsSet struct {
 	codexWouldBlocks     metric.Int64Counter
 	codexComponentScans  metric.Int64Counter
 
+	// Claude Code hook metrics
+	claudeCodeHookInvocations metric.Int64Counter
+	claudeCodeHookLatency     metric.Float64Histogram
+	claudeCodeBlocks          metric.Int64Counter
+	claudeCodeWouldBlocks     metric.Int64Counter
+	claudeCodeComponentScans  metric.Int64Counter
+
 	// Audit store metrics
 	auditDBErrors metric.Int64Counter
 	auditEvents   metric.Int64Counter
@@ -377,6 +384,37 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.codexComponentScans, err = m.Int64Counter("defenseclaw.codex.component_scans",
 		metric.WithUnit("{scan}"),
 		metric.WithDescription("Codex component scan attempts by component/result"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.claudeCodeHookInvocations, err = m.Int64Counter("defenseclaw.claude_code.hook.invocations",
+		metric.WithUnit("{hook}"),
+		metric.WithDescription("Claude Code hook invocations by event/action/mode"))
+	if err != nil {
+		return nil, err
+	}
+	ms.claudeCodeHookLatency, err = m.Float64Histogram("defenseclaw.claude_code.hook.latency",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Claude Code hook evaluation latency"))
+	if err != nil {
+		return nil, err
+	}
+	ms.claudeCodeBlocks, err = m.Int64Counter("defenseclaw.claude_code.blocks",
+		metric.WithUnit("{block}"),
+		metric.WithDescription("Claude Code hook enforcement blocks by event/severity/profile"))
+	if err != nil {
+		return nil, err
+	}
+	ms.claudeCodeWouldBlocks, err = m.Int64Counter("defenseclaw.claude_code.would_blocks",
+		metric.WithUnit("{would_block}"),
+		metric.WithDescription("Claude Code observe-mode findings that would block in action mode"))
+	if err != nil {
+		return nil, err
+	}
+	ms.claudeCodeComponentScans, err = m.Int64Counter("defenseclaw.claude_code.component_scans",
+		metric.WithUnit("{scan}"),
+		metric.WithDescription("Claude Code component scan attempts by component/result"))
 	if err != nil {
 		return nil, err
 	}
@@ -1091,6 +1129,40 @@ func (p *Provider) RecordCodexComponentScan(ctx context.Context, component, resu
 		return
 	}
 	p.metrics.codexComponentScans.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("component", component),
+		attribute.String("result", result),
+	))
+}
+
+// RecordClaudeCodeHook records one Claude Code hook evaluation and its latency.
+func (p *Provider) RecordClaudeCodeHook(ctx context.Context, event, action, severity, mode string, wouldBlock bool, durationMs float64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("hook_event", event),
+		attribute.String("action", action),
+		attribute.String("severity", severity),
+		attribute.String("mode", mode),
+	)
+	p.metrics.claudeCodeHookInvocations.Add(ctx, 1, attrs)
+	p.metrics.claudeCodeHookLatency.Record(ctx, durationMs, metric.WithAttributes(
+		attribute.String("hook_event", event),
+	))
+	if action == "block" {
+		p.metrics.claudeCodeBlocks.Add(ctx, 1, attrs)
+	}
+	if wouldBlock {
+		p.metrics.claudeCodeWouldBlocks.Add(ctx, 1, attrs)
+	}
+}
+
+// RecordClaudeCodeComponentScan records a Claude Code component inventory scan attempt.
+func (p *Provider) RecordClaudeCodeComponentScan(ctx context.Context, component, result string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.claudeCodeComponentScans.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("component", component),
 		attribute.String("result", result),
 	))

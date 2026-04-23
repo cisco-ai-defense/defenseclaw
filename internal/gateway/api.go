@@ -67,8 +67,10 @@ type APIServer struct {
 
 	// codexMu protects component-scan debounce state for Codex
 	// SessionStart hooks, which may run concurrently.
-	codexMu                sync.Mutex
-	codexLastComponentScan time.Time
+	codexMu                     sync.Mutex
+	codexLastComponentScan      time.Time
+	claudeCodeMu                sync.Mutex
+	claudeCodeLastComponentScan time.Time
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -137,6 +139,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
+	mux.HandleFunc("/api/v1/claude-code/hook", a.handleClaudeCodeHook)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 
 	handler := maxBodyMiddleware(mux, 1<<20)

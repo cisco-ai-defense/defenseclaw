@@ -125,6 +125,11 @@ from defenseclaw.commands.cmd_setup_codex import codex_setup  # noqa: E402
 
 setup.add_command(codex_setup)
 
+# Register `defenseclaw setup claude-code` (Claude Code hooks + sidecar bridge).
+from defenseclaw.commands.cmd_setup_claude_code import claude_code_setup  # noqa: E402
+
+setup.add_command(claude_code_setup)
+
 
 # --------------------------------------------------------------------------
 # `defenseclaw setup migrate-llm`

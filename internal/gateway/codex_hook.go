@@ -196,11 +196,11 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
 	}
-	resp.CodexOutput = codexOutput(event, action, rawAction, mode, safeReason, additional)
+	resp.CodexOutput = codexOutput(event, action, safeReason, additional)
 	return resp
 }
 
-func codexOutput(event, action, rawAction, mode, reason, additional string) map[string]interface{} {
+func codexOutput(event, action, reason, additional string) map[string]interface{} {
 	if action == "block" {
 		switch event {
 		case "PreToolUse":

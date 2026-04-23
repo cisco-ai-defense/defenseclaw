@@ -11,7 +11,6 @@ Make targets. It is complementary to docs-gen and dead-link checks.
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import re

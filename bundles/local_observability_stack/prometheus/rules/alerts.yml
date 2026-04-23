@@ -98,6 +98,18 @@ groups:
             DefenseClaw Codex hooks are taking longer than expected.
             Open the Codex dashboard and check hook latency by event.
 
+      - alert: DefenseClawClaudeCodeHookLatencyHigh
+        expr: max(claude_code:defenseclaw_hook_latency:p95_5m) > 5000
+        for: 10m
+        labels:
+          severity: warning
+          surface: claude-code
+        annotations:
+          summary: "Claude Code hook p95 latency above 5s"
+          description: |
+            DefenseClaw Claude Code hooks are taking longer than expected.
+            Open the Claude Code dashboard and check hook latency by event.
+
   - name: defenseclaw.pipeline
     rules:
       - alert: DefenseClawOTLPExporterStalled

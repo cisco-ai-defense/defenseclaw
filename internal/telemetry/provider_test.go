@@ -937,6 +937,97 @@ func TestRecordCodexComponentScan_EmitsMetric(t *testing.T) {
 	}
 }
 
+func TestRecordClaudeCodeHook_EmitsMetrics(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordClaudeCodeHook(ctx, "PreToolUse", "allow", "HIGH", "observe", true, 12.5)
+	p.RecordClaudeCodeHook(ctx, "PermissionRequest", "block", "CRITICAL", "action", false, 7.0)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	invocations := findCounter(rm, "defenseclaw.claude_code.hook.invocations")
+	if invocations == nil {
+		t.Fatal("metric defenseclaw.claude_code.hook.invocations not found")
+	}
+	sum, ok := invocations.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", invocations.Data)
+	}
+	if got := counterValueByAttr(sum, "hook_event", "PreToolUse"); got != 1 {
+		t.Errorf("PreToolUse invocation count=%d want 1", got)
+	}
+
+	wouldBlocks := findCounter(rm, "defenseclaw.claude_code.would_blocks")
+	if wouldBlocks == nil {
+		t.Fatal("metric defenseclaw.claude_code.would_blocks not found")
+	}
+	wouldSum, ok := wouldBlocks.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", wouldBlocks.Data)
+	}
+	if got := counterValueByAttr(wouldSum, "mode", "observe"); got != 1 {
+		t.Errorf("observe would-block count=%d want 1", got)
+	}
+
+	blocks := findCounter(rm, "defenseclaw.claude_code.blocks")
+	if blocks == nil {
+		t.Fatal("metric defenseclaw.claude_code.blocks not found")
+	}
+	blockSum, ok := blocks.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", blocks.Data)
+	}
+	if got := counterValueByAttr(blockSum, "action", "block"); got != 1 {
+		t.Errorf("block count=%d want 1", got)
+	}
+
+	if hist := findHistogram(rm, "defenseclaw.claude_code.hook.latency"); hist == nil {
+		t.Fatal("metric defenseclaw.claude_code.hook.latency not found")
+	}
+}
+
+func TestRecordClaudeCodeComponentScan_EmitsMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordClaudeCodeComponentScan(ctx, "agent", "ok")
+	p.RecordClaudeCodeComponentScan(ctx, "config", "error")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	scans := findCounter(rm, "defenseclaw.claude_code.component_scans")
+	if scans == nil {
+		t.Fatal("metric defenseclaw.claude_code.component_scans not found")
+	}
+	sum, ok := scans.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", scans.Data)
+	}
+	if got := counterValueByAttr(sum, "component", "agent"); got != 1 {
+		t.Errorf("agent component scans=%d want 1", got)
+	}
+	if got := counterValueByAttr(sum, "result", "error"); got != 1 {
+		t.Errorf("error component scans=%d want 1", got)
+	}
+}
+
 func TestRecordGuardrailLatency_EmitsMetric(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	p, err := NewProviderForTest(reader)

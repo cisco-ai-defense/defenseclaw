@@ -165,6 +165,28 @@ func TestDefaultConfig(t *testing.T) {
 	if len(cfg.Codex.ScanPaths) != 0 {
 		t.Errorf("expected empty Codex scan paths, got %v", cfg.Codex.ScanPaths)
 	}
+	if !cfg.ClaudeCode.Enabled {
+		t.Error("expected Claude Code hooks enabled by default")
+	}
+	if cfg.ClaudeCode.Mode != "inherit" {
+		t.Errorf("expected Claude Code mode inherit, got %q", cfg.ClaudeCode.Mode)
+	}
+	if cfg.ClaudeCode.InstallScope != "user" {
+		t.Errorf("expected Claude Code install scope user, got %q", cfg.ClaudeCode.InstallScope)
+	}
+	if cfg.ClaudeCode.FailClosed {
+		t.Error("expected Claude Code fail_closed=false by default")
+	}
+	if !cfg.ClaudeCode.ScanOnSessionStart || !cfg.ClaudeCode.ScanOnStop {
+		t.Errorf("expected Claude Code scan hooks enabled by default, got start=%v stop=%v",
+			cfg.ClaudeCode.ScanOnSessionStart, cfg.ClaudeCode.ScanOnStop)
+	}
+	if cfg.ClaudeCode.ComponentScanIntervalMinutes != 60 {
+		t.Errorf("expected Claude Code component scan interval 60, got %d", cfg.ClaudeCode.ComponentScanIntervalMinutes)
+	}
+	if len(cfg.ClaudeCode.ScanPaths) != 0 {
+		t.Errorf("expected empty Claude Code scan paths, got %v", cfg.ClaudeCode.ScanPaths)
+	}
 }
 
 func TestDefaultGatewayWatcherPluginConfig(t *testing.T) {

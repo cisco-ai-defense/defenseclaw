@@ -278,6 +278,24 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "codex.scan_paths":
 		c.Codex.ScanPaths = splitCSV(val)
 
+	// Claude Code hook bridge.
+	case "claude_code.enabled":
+		c.ClaudeCode.Enabled = boolVal
+	case "claude_code.mode":
+		c.ClaudeCode.Mode = val
+	case "claude_code.install_scope":
+		c.ClaudeCode.InstallScope = val
+	case "claude_code.fail_closed":
+		c.ClaudeCode.FailClosed = boolVal
+	case "claude_code.scan_on_session_start":
+		c.ClaudeCode.ScanOnSessionStart = boolVal
+	case "claude_code.scan_on_stop":
+		c.ClaudeCode.ScanOnStop = boolVal
+	case "claude_code.component_scan_interval_minutes":
+		c.ClaudeCode.ComponentScanIntervalMinutes = intVal
+	case "claude_code.scan_paths":
+		c.ClaudeCode.ScanPaths = splitCSV(val)
+
 	// Audit sinks: declarative list-based config (audit_sinks[]).
 	// Inline single-key edits don't make sense for the new schema —
 	// CRUD lives in the dedicated audit-sinks editor (Phase 3.3, see

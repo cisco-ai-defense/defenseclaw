@@ -32,6 +32,7 @@ Use `<binary> --help` for any command.
 | `setup guardrail` | Configure LLM guardrail (mode, model, port, API key) |
 | `setup splunk` | Configure Splunk HEC / OTLP / local bridge integration |
 | `setup codex` | Install/status/remove Codex hooks and trigger Codex component scans |
+| `setup claude-code` | Install/status/remove Claude Code hooks and trigger Claude Code component scans |
 
 ### skill
 
@@ -122,6 +123,21 @@ DefenseClaw-owned entries into `~/.codex/hooks.json` by default. Use
 installation, `--disable` to remove only DefenseClaw-owned hooks, and
 `--scan-components` to ask the sidecar to scan Codex skills/plugins/MCP
 configuration now.
+
+### claude-code
+
+| Command | Description |
+|---------|-------------|
+| `claude-code hook` | Runtime hook bridge called by Claude Code; reads hook JSON from stdin and emits Claude Code-compatible JSON on stdout |
+
+`defenseclaw setup claude-code --non-interactive` installs
+DefenseClaw-owned entries into `~/.claude/settings.json` by default. Use
+`--scope repo` for `<repo>/.claude/settings.local.json`, `--status` to
+inspect the installation, `--disable` to remove only DefenseClaw-owned
+hooks, and `--scan-components` to ask the sidecar to scan Claude Code
+skills/plugins/MCP/agents/commands/configuration now. The default setup
+intentionally excludes `WorktreeCreate` because that hook replaces
+Claude Code's built-in worktree creation behavior.
 
 ### upgrade
 

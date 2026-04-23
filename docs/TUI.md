@@ -156,6 +156,7 @@ The Setup panel includes distinct mutation surfaces:
 |--------|-------------|---------|
 | Audit Sinks | `defenseclaw setup observability {add,remove,enable,disable,test}` | Forward every audit event to JSONL/HEC/OTLP/HTTP destinations. Bulk export channel. |
 | Codex | `defenseclaw setup codex` | Install user/repo Codex hooks, enable the Codex hook feature flag, view status, disable hooks, and trigger component scans. |
+| Claude Code | `defenseclaw setup claude-code` | Install user/repo Claude Code hooks, view status, disable hooks, and trigger component scans across skills/plugins/MCP/agents/commands/config. |
 | Webhooks | `defenseclaw setup webhook {add,remove,enable,disable,test}` | Per-event chat/incident notifications (Slack/PagerDuty/Webex/HMAC). Cooldowns + per-channel filters. |
 
 These are **not interchangeable**. See `CLAUDE.md` for the full

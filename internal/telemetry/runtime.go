@@ -188,6 +188,33 @@ func (p *Provider) EmitCodexHookSpan(ctx context.Context, event, action, severit
 	return traceID
 }
 
+// EmitClaudeCodeHookSpan creates a span for one Claude Code hook evaluation.
+func (p *Provider) EmitClaudeCodeHookSpan(ctx context.Context, event, action, severity, mode string, wouldBlock bool, durationMs float64) string {
+	if !p.TracesEnabled() {
+		return ""
+	}
+	_, span := p.tracer.Start(ctx, "defenseclaw.claude_code.hook",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithTimestamp(time.Now().Add(-time.Duration(durationMs)*time.Millisecond)),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.claude_code.hook_event", event),
+		attribute.String("defenseclaw.claude_code.action", action),
+		attribute.String("defenseclaw.claude_code.severity", severity),
+		attribute.String("defenseclaw.claude_code.mode", mode),
+		attribute.Bool("defenseclaw.claude_code.would_block", wouldBlock),
+		attribute.Float64("defenseclaw.claude_code.duration_ms", durationMs),
+	)
+	if action == "block" || wouldBlock {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	traceID := span.SpanContext().TraceID().String()
+	span.End()
+	return traceID
+}
+
 // StartAgentSpan starts a new OTel span for an agent invocation session.
 // Follows OTel GenAI semconv: span name = "invoke_agent {agentName}".
 //

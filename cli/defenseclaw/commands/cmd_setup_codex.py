@@ -20,12 +20,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import click
 import requests
+
+# Matches a codex_hooks key line in TOML, tolerating whitespace around the
+# assignment and rejecting similarly-named keys such as `codex_hooks_extra`.
+_CODEX_HOOKS_KEY_RE = re.compile(r"^codex_hooks\s*=")
+# Matches `codex_hooks = true` ignoring surrounding whitespace; used only as
+# a last-resort fallback when tomllib parsing fails on malformed files.
+_CODEX_HOOKS_TRUE_RE = re.compile(r"(?m)^\s*codex_hooks\s*=\s*true\s*$")
 
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
@@ -256,8 +264,14 @@ def _feature_flag_enabled(path: Path) -> bool:
         import tomllib
         data = tomllib.loads(path.read_text())
     except Exception:
-        return "codex_hooks = true" in path.read_text()
-    return bool(data.get("features", {}).get("codex_hooks", False))
+        # Anchored regex so we don't report "enabled" when a comment or
+        # differently-named key happens to contain the substring
+        # `codex_hooks = true`.
+        return bool(_CODEX_HOOKS_TRUE_RE.search(path.read_text()))
+    features = data.get("features")
+    if not isinstance(features, dict):
+        return False
+    return bool(features.get("codex_hooks", False))
 
 
 def _set_feature_flag(path: Path, *, dry_run: bool) -> bool:
@@ -276,7 +290,9 @@ def _set_feature_flag(path: Path, *, dry_run: bool) -> bool:
                 key_seen = True
             in_features = stripped == "[features]"
             features_seen = features_seen or in_features
-        if in_features and stripped.startswith("codex_hooks"):
+        # Exact key match only — `startswith("codex_hooks")` would also
+        # clobber neighbouring keys like `codex_hooks_extra = 1`.
+        if in_features and _CODEX_HOOKS_KEY_RE.match(stripped):
             out.append("codex_hooks = true")
             key_seen = True
             continue

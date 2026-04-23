@@ -141,6 +141,19 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def claude_code_hook(self, payload: dict[str, Any], headers: dict[str, str] | None = None,
+                         timeout: int = 30) -> dict[str, Any]:
+        req_headers = dict(headers or {})
+        req_headers.setdefault("X-DefenseClaw-Client", "claude-code-hook")
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/claude-code/hook",
+            json=payload,
+            headers=req_headers,
+            timeout=max(self.timeout, timeout),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def is_running(self) -> bool:
         try:
             self.health()

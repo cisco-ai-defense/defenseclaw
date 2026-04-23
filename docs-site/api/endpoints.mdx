@@ -32,6 +32,7 @@ This page is generated from the Go HTTP mux registrations. If a route is not lis
 | `/v1/events/egress` | guardrail proxy | `ANY` | `handleEgressEvent` | `internal/gateway/proxy.go` |
 | `/v1/models` | guardrail proxy | `GET` | `handleModels` | `internal/gateway/proxy.go` |
 | `/alerts` | sidecar REST | `GET` | `handleAlerts` | `internal/gateway/api.go` |
+| `/api/v1/claude-code/hook` | sidecar REST | `ANY` | `handleClaudeCodeHook` | `internal/gateway/api.go` |
 | `/api/v1/codex/hook` | sidecar REST | `ANY` | `handleCodexHook` | `internal/gateway/api.go` |
 | `/api/v1/inspect/tool` | sidecar REST | `ANY` | `handleInspectTool` | `internal/gateway/api.go` |
 | `/api/v1/network-egress` | sidecar REST | `ANY` | `handleNetworkEgress` | `internal/gateway/api.go` |

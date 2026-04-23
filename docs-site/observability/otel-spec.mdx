@@ -23,7 +23,7 @@ exporter config.
 <!-- BEGIN AUTOGEN:otel:metrics -->
 <!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
 
-_93 metric instruments registered across `internal/telemetry/`, `internal/gateway/`, `internal/watcher/`, `internal/audit/`, `internal/guardrail/`._
+_98 metric instruments registered across `internal/telemetry/`, `internal/gateway/`, `internal/watcher/`, `internal/audit/`, `internal/guardrail/`._
 
 | Name | Kind | Unit | Description | Source |
 |---|---|---|---|---|
@@ -42,6 +42,11 @@ _93 metric instruments registered across `internal/telemetry/`, `internal/gatewa
 | `defenseclaw.audit.sink.queue.depth` | UpDownCounter | `{event}` |  | `telemetry/metrics.go` |
 | `defenseclaw.cisco.errors` | Counter | `{error}` |  | `telemetry/metrics.go` |
 | `defenseclaw.cisco_inspect.latency` | Histogram | `ms` |  | `telemetry/metrics.go` |
+| `defenseclaw.claude_code.blocks` | Counter | `{block}` |  | `telemetry/metrics.go` |
+| `defenseclaw.claude_code.component_scans` | Counter | `{scan}` |  | `telemetry/metrics.go` |
+| `defenseclaw.claude_code.hook.invocations` | Counter | `{hook}` |  | `telemetry/metrics.go` |
+| `defenseclaw.claude_code.hook.latency` | Histogram | `ms` |  | `telemetry/metrics.go` |
+| `defenseclaw.claude_code.would_blocks` | Counter | `{would_block}` |  | `telemetry/metrics.go` |
 | `defenseclaw.codex.blocks` | Counter | `{block}` |  | `telemetry/metrics.go` |
 | `defenseclaw.codex.component_scans` | Counter | `{scan}` |  | `telemetry/metrics.go` |
 | `defenseclaw.codex.hook.invocations` | Counter | `{hook}` |  | `telemetry/metrics.go` |
@@ -128,10 +133,11 @@ _93 metric instruments registered across `internal/telemetry/`, `internal/gatewa
 <!-- BEGIN AUTOGEN:otel:spans -->
 <!-- Do not edit by hand. Regenerate with `make docs-gen`. -->
 
-_4 span names defined across `internal/telemetry/`, `internal/gateway/`, `internal/watcher/`, `internal/audit/`, `internal/guardrail/`._
+_5 span names defined across `internal/telemetry/`, `internal/gateway/`, `internal/watcher/`, `internal/audit/`, `internal/guardrail/`._
 
 | Span name |
 |---|
+| `defenseclaw.claude_code.hook` |
 | `defenseclaw.codex.hook` |
 | `defenseclaw.guardrail.judge` |
 | `defenseclaw.tui.filter` |
