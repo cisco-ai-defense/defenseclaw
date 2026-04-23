@@ -189,8 +189,11 @@ type Manager struct {
 	// for the same RLock and hammering the downstream sinks' Flush
 	// implementations. The single-flight flag keeps exactly one async
 	// flush in flight; subsequent immediate events within that window
-	// collapse into the already-scheduled flush.
+	// collapse into the already-scheduled flush. The goroutine re-flushes
+	// while the pending counter is non-zero, absorbing entire bursts
+	// without spawning new goroutines.
 	immediateFlushInFlight atomic.Bool
+	immediateFlushPending  atomic.Int64
 
 	// closed is set once Close() completes so Forward short-circuits
 	// even if a concurrent caller captured an older RLock-protected
@@ -315,11 +318,22 @@ func (m *Manager) Forward(ctx context.Context, e Event) map[string]error {
 		// window spawns a goroutine. High-frequency actions
 		// (guardrail-verdict fires on every block decision) would
 		// otherwise leak goroutines and thrash the downstream
-		// sinks' Flush paths.
+		// sinks' Flush paths. The goroutine holds the in-flight
+		// flag for the entire burst: it flushes, then re-checks
+		// the pending counter after a 1ms settle window to absorb
+		// follow-on events before releasing the flag.
+		m.immediateFlushPending.Add(1)
 		if m.immediateFlushInFlight.CompareAndSwap(false, true) {
 			go func() {
 				defer m.immediateFlushInFlight.Store(false)
-				_ = m.FlushAll(context.Background())
+				for {
+					m.immediateFlushPending.Store(0)
+					_ = m.FlushAll(context.Background())
+					time.Sleep(time.Millisecond)
+					if m.immediateFlushPending.Load() == 0 {
+						break
+					}
+				}
 			}()
 		}
 	}

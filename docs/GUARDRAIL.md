@@ -240,6 +240,11 @@ X-DC-Auth:       Bearer <sidecar-token>     ← proxy authorization token
 │  ├── Streaming response inspection (mid-stream + final assembly)   │
 │  ├── OPA policy evaluation in-process (policy.Engine)              │
 │  ├── Hot-reload (proxy reads guardrail_runtime.json with TTL)      │
+│  ├── Multi-turn context tracking (ContextTracker)                  │
+│  ├── Security notification injection (NotificationQueue)           │
+│  ├── Rule pack + suppression engine (internal/guardrail/)          │
+│  ├── Provider fallback chain (Bifrost SDK)                         │
+│  ├── Rate limiting (100/s, burst 200)                              │
 │  ├── Block/allow decision per mode                                 │
 │  └── Audit + OTel via proxy telemetry helpers                      │
 │                                                                     │
@@ -287,7 +292,7 @@ updates come from `guardrail_runtime.json`.
 Mode can be changed at runtime via hot-reload (no restart required):
 
 ```bash
-curl -X PATCH http://127.0.0.1:18790/v1/guardrail/config \
+curl -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
   -H 'Content-Type: application/json' \
   -H 'X-DefenseClaw-Client: cli' \
   -d '{"mode": "action"}'
@@ -516,6 +521,43 @@ to `NewGuardrailProxy` / `GuardrailInspector`; hot-reload via `guardrail_runtime
                             Final verdict
 ```
 
+## Built-in Scanner Catalog
+
+The `internal/scanner/` package implements 9 scanners used by the guardrail
+proxy (inline) and the watcher (admission gate). All share the `Scanner`
+interface: `Name()`, `Version()`, `SupportedTargets()`, `Scan(ctx, target)`.
+
+### ClawShield Scanners (5 built-in, no external dependencies)
+
+| Scanner | Targets | Detection |
+|---------|---------|-----------|
+| **Injection** | skill, code | 3-tier: regex patterns → base64 + entropy analysis → Unicode analysis |
+| **Malware** | skill, code | Magic bytes (ELF/PE/Mach-O/Java/WASM), shebangs, reverse shells, credential harvesters, cryptominers, C2 signatures, high-entropy blobs (threshold: 7.0), zip-slip, nested archives |
+| **PII** | skill, code | 10 categories: credit cards (Luhn validation), SSN, email, phone, IPv4, DOB, passport, driver's license, bank account, medical ID |
+| **Secrets** | skill, code | 13+ providers: AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, Twilio, SendGrid, Mailgun, NPM, PyPI. Also: private keys, JWT, basic auth, bearer tokens, passwords |
+| **Vuln** | skill, code | SQL injection, SSRF, path traversal, command injection, XSS |
+
+### CodeGuard Scanner
+
+Targets: `code`. Scans for hardcoded credentials, unsafe execution, network
+requests, deserialization, SQL injection, weak crypto, and path traversal.
+Ships 10 built-in rules; supports custom YAML rules from
+`~/.defenseclaw/codeguard-rules/` with fields: `id`, `severity`, `title`,
+`pattern`, `remediation`, `extensions`.
+
+### External Scanners (subprocess)
+
+| Scanner | Binary | Config keys | Environment variables |
+|---------|--------|-------------|----------------------|
+| **MCP** | `cisco-ai-mcp-scanner` | `Analyzers`, `ScanPrompts`, `ScanResources`, `ScanInstructions` | `MCP_SCANNER_API_KEY`, `MCP_SCANNER_ENDPOINT`, `MCP_SCANNER_LLM_*` |
+| **Skill** | `cisco-ai-skill-scanner` | `UseLLM`, `UseBehavioral`, `EnableMeta`, `UseTrigger`, `UseVirusTotal`, `UseAIDefense`, `LLMConsensus`, `Policy`, `Lenient` | `SKILL_SCANNER_LLM_*`, `VIRUSTOTAL_API_KEY`, `AI_DEFENSE_API_KEY` |
+| **Plugin** | `defenseclaw plugin scan` | `Policy`, `Profile` | *(none)* |
+
+MCP and Skill scanners have two constructors: a back-compat variant taking
+`InspectLLMConfig` and a preferred `FromLLM` variant taking unified
+`LLMConfig`. Per-scanner LLM config overrides are resolved via
+`cfg.ResolveLLM()`.
+
 ## Cisco AI Defense Integration
 
 The guardrail integrates with Cisco AI Defense's Chat Inspection API
@@ -535,7 +577,7 @@ guardrail:
     endpoint: "https://us.api.inspect.aidefense.security.cisco.com"
     api_key_env: "CISCO_AI_DEFENSE_API_KEY"
     timeout_ms: 3000
-    enabled_rules: []  # empty = send 8 default rules (Prompt Injection, Harassment, etc.)
+    enabled_rules: []  # empty = send 12 default rules (see below)
 ```
 
 The API key is **never hardcoded** — it is read from the environment
@@ -543,17 +585,21 @@ variable specified in `api_key_env`.
 
 ### Default Enabled Rules
 
-When `enabled_rules` is empty (default), the client sends these 8 rules in
+When `enabled_rules` is empty (default), the client sends these 12 rules in
 every API request:
 
 1. Prompt Injection
-2. Harassment
-3. Hate Speech
-4. Profanity
-5. Sexual Content & Exploitation
-6. Social Division & Polarization
-7. Violence & Public Safety Threats
-8. Code Detection
+2. Jailbreak
+3. PII Detection
+4. Sensitive Data
+5. Data Leakage
+6. Harassment
+7. Hate Speech
+8. Profanity
+9. Sexual Content & Exploitation
+10. Social Division & Polarization
+11. Violence & Public Safety Threats
+12. Code Detection
 
 If the API key has pre-configured rules on the Cisco dashboard, the client
 detects the `400 Bad Request` ("already has rules configured") and
@@ -579,6 +625,117 @@ in-process via `policy.Engine.EvaluateGuardrail`, which decides the final verdic
 
 The HTTP endpoint `POST /v1/guardrail/evaluate` exposes the same evaluation
 for external callers; the built-in proxy does not require it for normal operation.
+
+## Multi-Turn Injection Detection
+
+The guardrail proxy integrates with the event router's `ContextTracker`
+(`internal/gateway/context_tracker.go`) to detect injection attacks
+spread across multiple conversation turns.
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `maxTurns` | 10 | Messages per session (FIFO) |
+| `maxSessions` | 200 | Sessions tracked (LRU eviction) |
+| `sessionTTL` | 30 min | Idle session expiry |
+
+When a tool call or exec approval arrives, the router calls
+`HasRepeatedInjection(sessionKey, threshold=3)`. This scans all buffered
+user turns for the session against the active regex pattern set. If 3+
+turns trigger injection patterns, the request is automatically denied.
+
+The context buffer is also fed to the `GuardrailInspector` via
+`RecentMessages()` so the LLM judge can evaluate multi-turn context
+rather than isolated single prompts.
+
+## Security Notification Queue
+
+The proxy maintains a `NotificationQueue` (`internal/gateway/notifications.go`)
+that injects enforcement alerts into LLM requests as system messages.
+
+When the watcher blocks a skill/MCP/plugin, it pushes a
+`SecurityNotification` (subject type, name, severity, findings, actions,
+reason). Before each LLM call, the proxy calls `FormatSystemMessage()` and
+prepends a `[DEFENSECLAW SECURITY ENFORCEMENT]` system message instructing
+the model to inform the user about the action.
+
+- TTL: 2 minutes per notification (not drained on read — all sessions see it)
+- Queue cap: 50 entries (oldest dropped on overflow)
+- Subject types: `skill`, `plugin`, `mcp`, `tool`
+
+## Provider Fallback Chain
+
+The `ChatRequest` struct includes a `Fallbacks` field for model failover:
+
+```json
+{
+  "model": "anthropic/claude-opus-4-5",
+  "fallbacks": ["openai/gpt-4o", "bedrock/claude-3-sonnet"]
+}
+```
+
+When the primary provider returns an error, the proxy can route to fallback
+models in order. The Bifrost SDK handles provider-specific API differences
+for each fallback. Each `(provider, sha256(key), baseURL)` tuple gets a
+dedicated HTTP client with its own connection pool.
+
+Supported providers: openai, anthropic, azure, bedrock, amazon-bedrock,
+gemini, gemini-openai, openrouter, groq, mistral, ollama, vertex, cohere,
+perplexity, cerebras, fireworks, xai, huggingface, replicate, vllm.
+
+Provider inference (when no `provider/` prefix is given):
+- `ABSK` key prefix → bedrock
+- `claude` model prefix or `sk-ant-` key → anthropic
+- `gemini` model prefix or `AIza` key → gemini
+- Default: openai
+
+## Rule Pack System
+
+The `internal/guardrail/` package provides a rule pack system for
+customizing detection behavior:
+
+### RulePack Structure
+
+`LoadRulePack(dir)` loads a rule pack from a directory. Missing files are
+silently skipped; the embedded default pack is used when `dir` is empty.
+
+A rule pack contains:
+
+| Component | Purpose |
+|-----------|---------|
+| **JudgeYAML definitions** | Prompt templates for the LLM judge — `InjectionJudge`, `PIIJudge`, `ToolInjectionJudge` |
+| **Sensitive tool definitions** | Tools that require elevated scrutiny (looked up by `LookupSensitiveTool(name)`) |
+| **Finding suppressions** | Rules to suppress false positives (e.g. platform IDs vs phone numbers) |
+| **Tool suppressions** | Per-tool finding suppression (e.g. suppress PII findings for `read_file`) |
+| **Pre-judge strip rules** | Regex patterns to strip from content before sending to the LLM judge |
+
+### Suppression Engine
+
+The suppression engine (`internal/guardrail/suppress.go`) filters false
+positives from PII and tool-injection findings:
+
+- **Finding suppressions**: `FindingSuppression` matches by `finding_pattern`
+  (anchored regex) + `entity_pattern` (regex) + optional `condition`.
+- **Conditions**: `is_epoch` (Unix timestamp range 2001–2036), `is_platform_id`
+  (channel platform numeric IDs that look like phone numbers).
+- **NANP phone heuristic**: `IsPlatformID` distinguishes real North American
+  phone numbers (valid area/exchange codes) from platform IDs. Fails open
+  for real phones — a 10-digit number with valid NANP structure is surfaced
+  as PII, not suppressed.
+- **Tool suppressions**: `ToolSuppression` matches tool name by regex and
+  suppresses specific finding IDs for that tool.
+- **Pre-judge stripping**: removes noise patterns from content before the
+  LLM judge evaluates it, reducing false positives from code snippets.
+
+### LRU Regex Cache
+
+All suppression patterns are compiled through a global LRU regex cache
+(`compileRegex` in `suppress.go`):
+
+- Max entries: 1024 (far above realistic rule packs)
+- Negative caching: invalid patterns cache a `nil` result to avoid
+  re-compiling on every request
+- Thread-safe: `sync.Mutex` with double-check after reacquiring lock
+- LRU eviction: oldest entries removed when cache is full
 
 ## Component Ownership
 
@@ -615,6 +772,9 @@ for external callers; the built-in proxy does not require it for normal operatio
 │  ├── Cisco AI Defense client (HTTP, in gateway package)             │
 │  ├── OPA policy evaluation in-process (policy.Engine)              │
 │  ├── Verdict merging (mergeVerdicts, mergeWithJudge)               │
+│  ├── Multi-turn injection detection via ContextTracker             │
+│  ├── Security notification queue (inject warnings into LLM calls)  │
+│  ├── Rule pack loading + suppression engine (LRU regex cache)      │
 │  ├── Block/allow decision per mode                                 │
 │  └── Structured logging + audit / OTel via proxy telemetry         │
 └─────────────────────────────────────────────────────────────────────┘
@@ -727,13 +887,13 @@ Mode and scanner_mode can be changed at runtime without restarting:
 
 ```bash
 # Switch from observe to action mode
-curl -X PATCH http://127.0.0.1:18790/v1/guardrail/config \
+curl -X PATCH http://127.0.0.1:18970/v1/guardrail/config \
   -H 'Content-Type: application/json' \
   -H 'X-DefenseClaw-Client: cli' \
   -d '{"mode": "action", "scanner_mode": "both"}'
 
 # Check current config
-curl http://127.0.0.1:18790/v1/guardrail/config
+curl http://127.0.0.1:18970/v1/guardrail/config
 ```
 
 The PATCH endpoint updates the in-memory config and writes

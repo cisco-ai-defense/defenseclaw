@@ -31,7 +31,57 @@ Sink kinds:
 Sinks are independent: you can run zero, one, or many in parallel.
 A failing sink does **not** block a decision — audit remains local-first.
 
-### 1.2 OpenTelemetry
+### 1.2 Structured JSONL Event Log (gatewaylog)
+
+In addition to audit sinks, the gateway writes a structured JSONL event
+stream via `internal/gatewaylog/`. This is a local rotating log file
+(`gateway.jsonl`) managed by lumberjack:
+
+| Setting | Default |
+|---------|---------|
+| Max file size | 50 MB |
+| Max backups | 5 |
+| Max age | 30 days |
+| Compression | gzip |
+
+The gatewaylog writer uses fanout callbacks — each event is written to the
+JSONL file and simultaneously dispatched to registered listeners (audit
+store, sinks, webhooks). This is the primary structured event tier for
+local debugging and log forwarding pipelines that read files directly.
+
+### 1.2.1 Audit Bridge
+
+The `auditBridge` (`internal/gateway/audit_bridge.go`) connects the SQLite
+audit store to the JSONL event stream, ensuring every scan verdict, watcher
+transition, and enforcement action appears in `gateway.jsonl` alongside
+guardrail verdicts — giving operators a single, correlated log instead of
+three partial ones (SQLite, OTel, JSONL).
+
+**Behavior:**
+
+- Registered as a callback on `audit.Logger` — fires on every persisted event.
+- Translates audit `Action` fields into `EventLifecycle` entries with
+  automatic subsystem inference:
+
+  | Action prefix | Subsystem |
+  |---------------|-----------|
+  | `scan` | `scanner` |
+  | `watcher-`, `watch-start`, `watch-stop` | `watcher` |
+  | `sidecar-`, `gateway-ready` | `gateway` |
+  | `api-` | `api` |
+  | `sink-`, `splunk-` | `sinks` |
+  | `otel-`, `telemetry-` | `telemetry` |
+  | `skill-`, `mcp-`, `block-`, `allow-`, `quarantine-` | `enforcement` |
+
+- **Deduplication**: skips `guardrail-verdict` and `llm-judge-response`
+  actions because those already have dedicated structured emissions
+  (`emitVerdict` / `emitJudge`) on the proxy hot path.
+- **Stateless**: relies on `audit.sanitizeEvent` for PII redaction — all
+  text is forwarded verbatim without re-running detection.
+- Details map preserves `target`, `actor`, `details`, `trace_id`,
+  `audit_id`, and `action` for pivot queries between JSONL and SQLite.
+
+### 1.3 OpenTelemetry
 
 `internal/telemetry` is a plain OTLP client — gRPC or HTTP, logs +
 metrics + traces, configurable via `otel:` in the config file or the
@@ -190,6 +240,80 @@ You can also drive the telemetry stack entirely through standard
 `OTEL_EXPORTER_OTLP_*` env vars — the SDK's defaults apply when the
 config is empty.
 
+### 4.1 Span naming hierarchy
+
+The telemetry runtime (`internal/telemetry/runtime.go`) creates nested spans
+for every guardrail evaluation:
+
+| Level | Span name pattern | Purpose |
+|-------|------------------|---------|
+| Stage | `guardrail/{stage}` | Top-level per-evaluation span. Stage = `regex_only`, `regex_judge`, `judge_first`, etc. |
+| Phase | `guardrail.{phase}` | Nested under stage. Phase = `regex`, `cisco_ai_defense`, `judge.pii`, `judge.prompt_injection`, `opa`, `finalize` |
+| Tool | `inspect/{tool}` | Tool call inspection span |
+| Startup | `defenseclaw/startup` | One-shot span emitted on sidecar start |
+
+Stage spans carry `defenseclaw.guardrail.{stage, direction, model, action,
+severity, reason, latency_ms}` attributes. Phase spans carry
+`defenseclaw.guardrail.{phase, action, severity, latency_ms}`.
+
+### 4.2 Metric instruments
+
+The gateway emits the following OTel metrics
+(`internal/telemetry/metrics.go`):
+
+**Verdict and judge:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.gateway.verdicts` | verdict.stage, verdict.action, verdict.severity, policy_id, destination_app |
+| `defenseclaw.gateway.judge.invocations` | judge.kind, judge.action, judge.severity |
+| `defenseclaw.gateway.judge.latency` | judge.kind |
+| `defenseclaw.gateway.judge.errors` | judge.kind, judge.reason (provider \| parse) |
+
+**Guardrail pipeline:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.guardrail.evaluations` | guardrail.scanner, guardrail.action_taken |
+| `defenseclaw.guardrail.latency` | guardrail.scanner |
+| `defenseclaw.guardrail.judge.latency` | gen_ai.request.model, judge.kind |
+| `defenseclaw.guardrail.cache.hits` | scanner, verdict, ttl_bucket |
+| `defenseclaw.guardrail.cache.misses` | scanner, verdict, ttl_bucket |
+
+**Redaction and egress:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.redaction.applied` | detector, field |
+| `defenseclaw.egress.events` | branch (known \| shape \| passthrough), decision (allow \| block), source (go \| ts) |
+
+**Sink delivery:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.audit.sink.batches.delivered` | sink, kind, status_code, retry_count |
+| `defenseclaw.audit.sink.batches.dropped` | sink, kind, status_code, retry_count |
+| `defenseclaw.audit.sink.queue.depth` | sink.kind, sink.name |
+| `defenseclaw.audit.sink.circuit.state` | sink.kind, sink.name (0=closed, 1=open, 2=half-open) |
+| `defenseclaw.audit.sink.delivery.latency` | sink, kind, status_code, retry_count |
+
+**Stream/SSE:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.stream.lifecycle` | http.route, transition (open \| close), outcome |
+| `defenseclaw.stream.bytes_sent` | http.route, outcome |
+| `defenseclaw.stream.duration_ms` | http.route, outcome |
+
+**Schema validation:** `defenseclaw.schema.violations` (event_type, code) —
+see §8.1 below.
+
+### 4.3 Verdict reason truncation
+
+OTel attribute values for `verdict.reason` are capped at 200 bytes
+(`maxReasonAttrBytes`) to avoid oversized span attributes. The full reason
+is always included in the OTLP log body.
+
 ---
 
 ## 5. Event shape (what every sink receives)
@@ -239,6 +363,27 @@ always receive the scrubbed copy.
 Masked placeholders are deterministic (they include a SHA-256 prefix of
 the literal), so SIEM/observability workflows can still correlate on
 identifier hash across events without handling the raw secret.
+
+### Redaction function variants
+
+The `internal/redaction` package provides two tiers of redaction functions:
+
+| Tier | Functions | When used |
+|------|-----------|-----------|
+| **Display** | `String()`, `Entity()`, `Reason()`, `Evidence()` | Stderr logs — respects `DEFENSECLAW_REVEAL_PII` |
+| **ForSink** | `ForSinkString()`, `ForSinkEntity()`, `ForSinkReason()`, `ForSinkEvidence()`, `ForSinkMessageContent()` | SQLite, Splunk HEC, OTLP, webhooks — **always** redacts regardless of reveal flag |
+
+ForSink functions are idempotent — already-placeholdered values are not
+re-redacted.
+
+**Placeholder format:**
+- Values ≥ 10 bytes: `<redacted len=N prefix="X" sha=8hex>`
+- Values < 5 bytes: `<redacted len=N>` (no SHA)
+- Evidence: `<redacted-evidence len=N match=[start:end] sha=8hex>`
+
+**Reason/evidence redaction** preserves safe metadata tokens (rule IDs like
+`SEC-ANTHROPIC`, status codes, severity labels) while masking literal values
+within semicolon/comma-delimited fields.
 
 To opt back into raw evidence for a single `/inspect` HTTP response, use
 the `X-DefenseClaw-Reveal-PII: 1` header documented in `docs/API.md`.
@@ -303,8 +448,7 @@ defenseclaw setup webhook test    <name>   # dispatches a synthetic event
 ```
 
 All secrets are resolved from env vars (never written in `config.yaml`).
-URLs are validated against SSRF (private ranges, localhost, cloud
-metadata endpoints are rejected by default).
+URLs are validated against SSRF (see §7.5 below).
 
 ### 7.2 YAML schema
 
@@ -342,6 +486,62 @@ via single-key form fields).
 - `secret_env` / room_id presence for types that need it
 - reachability (HEAD/OPTIONS) — **never** dispatches live events; use
   `setup webhook test` for an end-to-end synthetic dispatch.
+
+### 7.5 SSRF Protection
+
+`validateWebhookURL` (`internal/gateway/webhook.go`) blocks outbound
+webhook delivery to unsafe destinations. Every webhook URL (at config
+load and at dispatch time) is checked against:
+
+| Blocked range | CIDR | Reason |
+|---------------|------|--------|
+| RFC1918 Class A | `10.0.0.0/8` | Private network |
+| RFC1918 Class B | `172.16.0.0/12` | Private network |
+| RFC1918 Class C | `192.168.0.0/16` | Private network |
+| Loopback | `127.0.0.0/8` | Localhost |
+| Link-local / cloud metadata | `169.254.0.0/16` | AWS/GCP/Azure metadata endpoint |
+| IPv6 loopback | `::1/128` | Localhost |
+| IPv6 unique local | `fc00::/7` | Private network |
+| IPv6 link-local | `fe80::/10` | Link-local |
+
+Additionally:
+- Non-HTTP(S) schemes are rejected.
+- Hostnames are DNS-resolved at config time; if any A/AAAA record points
+  to a private IP, the endpoint is rejected.
+- `localhost` is rejected unless `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1`
+  (for local development only).
+
+### 7.6 HMAC Signing
+
+For `generic` webhook type, payloads are signed with HMAC-SHA256 using
+the secret from `secret_env`. The signature is sent in the
+`X-DefenseClaw-Signature` header as a hex-encoded digest:
+
+```
+X-DefenseClaw-Signature: <hex(HMAC-SHA256(payload, secret))>
+```
+
+Receivers should compute the same HMAC over the raw request body and
+compare using constant-time comparison.
+
+### 7.7 Dispatcher Internals
+
+The `WebhookDispatcher` (`internal/gateway/webhook.go`) manages delivery:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Max retries | 3 | Per delivery attempt |
+| Retry backoff | 2s | Between retries |
+| Max concurrency | 20 | Bounded goroutine pool via semaphore |
+| Default timeout | 10s | Per HTTP request |
+| Default cooldown | 300s (5 min) | Debounce per (webhook, event-category) pair |
+| Retryable status codes | 429, 5xx | All others are terminal failures |
+
+Payload formatters per type:
+- **Slack**: Block Kit attachments with severity color coding
+- **PagerDuty**: Events API v2 format with routing key
+- **Webex**: Adaptive card with room ID targeting
+- **Generic**: Raw JSON audit event with HMAC signature
 
 ---
 
