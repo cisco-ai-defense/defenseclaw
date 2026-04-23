@@ -77,7 +77,7 @@ pre_judge_strips: []
 finding_suppressions:
   - id: SUPP-APP-USERNAME
     finding_pattern: JUDGE-PII-USER
-    entity_pattern: '^(jeschultz65)$'
+    entity_pattern: '^(your-app-username)$'
     reason: "Allowed application username"
 
 tool_suppressions: []
@@ -90,7 +90,8 @@ What each field means:
 - `reason`: why this is safe in your environment
 
 For a username false positive, prefer a narrow exact-match regex like
-`'^(jeschultz65)$'` instead of a broad pattern that could hide real findings.
+`'^(your-app-username)$'` instead of a broad pattern that could hide real
+findings.
 
 ## Restart after editing
 
