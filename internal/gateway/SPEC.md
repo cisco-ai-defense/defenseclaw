@@ -149,6 +149,12 @@ equal `lastSeq+1`, the client writes a warning to stderr:
 | `status` | *(none)* | Fetch gateway runtime status |
 | `tools.catalog` | *(none)* | Fetch the runtime tool catalog with provenance |
 | `exec.approval.resolve` | `{ id, approved, reason }` | Approve or reject an exec request |
+| `sessions.list` | *(none)* | Fetch active sessions |
+| `sessions.subscribe` | `{ sessionId }` | Subscribe to all events (including `session.tool`) for a session |
+| `sessions.messages.subscribe` | `{ sessionId }` | Subscribe to message-level events for a session |
+| `sessions.send` | `{ key, message }` | Send a message to a session (uses session key, not ID) |
+| `skills.status` | *(none)* | List installed skills with current enabled/disabled status |
+| `skills.bins` | *(none)* | List available skill binaries/entries |
 
 ### Event Types
 
@@ -219,6 +225,68 @@ but no gateway action is taken.
 
 Non-skill events (e.g. MCP installs) and non-blocking verdicts (clean,
 allowed, warning) are ignored by the admission handler.
+
+### Watcher Internals
+
+**Debounce:** File system events are debounced before processing. A pending
+map tracks `path → first-seen timestamp`. A ticker fires at the debounce
+interval; events older than the debounce window are processed. Default:
+500ms (configurable via `watch.debounce_ms`; values ≤ 0 fall back to 500ms).
+
+**Admission gate** runs in three phases:
+
+1. **Pre-scan OPA**: checks block/allow lists + fallback profile. Verdicts:
+   `blocked`, `rejected`, `allowed` (skip scan), `scan` (continue).
+2. **Scanning**: selects scanner by install type (skill / MCP / plugin).
+   Timeout: 5 minutes (hardcoded).
+3. **Post-scan OPA**: adds scan findings to policy input, re-evaluates.
+   Falls back to built-in severity logic when OPA is unavailable.
+
+**Verdict types:**
+
+| Verdict | Meaning |
+|---------|---------|
+| `blocked` | On the block list — rejected before scanning |
+| `allowed` | On the allow list — installed without scanning |
+| `clean` | Scan passed with no findings |
+| `rejected` | OPA policy rejected after scan |
+| `warning` | Medium/low findings — installed with warning |
+| `scan_error` | Scanner failed |
+
+**Periodic rescan and drift detection:** When `watch.rescan_enabled` is
+`true` (default), a `rescanLoop` runs every `watch.rescan_interval_min`
+minutes (default: 60). A bootstrap rescan also runs immediately on watcher
+startup. Each cycle snapshots installed targets (content hash, dependency
+hashes, config hashes, network endpoints) and compares against the baseline.
+
+Drift types:
+
+| DriftType | Trigger |
+|-----------|---------|
+| `DriftNewFinding` | New security finding detected |
+| `DriftRemovedFinding` | Finding resolved |
+| `DriftSeverityChange` | Finding severity escalated or downgraded |
+| `DriftContentChange` | Directory code changed outside tracked surfaces |
+| `DriftDependencyChange` | Dependency manifest modified (package.json, requirements.txt, go.mod, etc.) |
+| `DriftConfigMutation` | Config file modified (skill.yaml, .env, config.json, etc.) |
+| `DriftNewEndpoint` | New network endpoint detected in code |
+| `DriftRemovedEndpoint` | Network endpoint removed |
+
+**Policy file watching:** `watchPolicyListsAndYAML` polls block/allow lists
+and policy directory files every 2 seconds, tracking SHA-256 hashes. On
+change, it records an `audit.ActionPolicyReload` event and bumps the version
+generation.
+
+**Enforcement actions** per install type:
+
+| Type | Action | Method |
+|------|--------|--------|
+| Skill | Quarantine | Moves to `<quarantine>/skills/`, removes original |
+| MCP | Block endpoint | Adds to sandbox policy deny list |
+| Plugin | Quarantine | Moves to `<quarantine>/plugins/`, removes original |
+
+Enforcement requires `gateway.watcher.{skill,plugin,mcp}.take_action = true`
+(per-type config). Legacy `watch.auto_block` is a fallback.
 
 ## Guardrail
 

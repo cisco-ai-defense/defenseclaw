@@ -353,8 +353,8 @@ The Go gateway is organized into 19 internal packages:
 | `cli/` | Go CLI (Cobra commands for gateway, policy, etc.) |
 | `config/` | Full config schema with LLM resolution, hot-reload support |
 | `daemon/` | PID file management, process lifecycle, lumberjack log rotation |
-| `enforce/` | Block/allow list PolicyEngine (SQLite JSON actions) — distinct from OPA |
-| `firewall/` | Kernel-level network filtering (iptables on Linux, pfctl on macOS) |
+| `enforce/` | Block/allow list PolicyEngine (SQLite JSON actions) — distinct from OPA. SkillEnforcer/PluginEnforcer (quarantine), MCPEnforcer (endpoint blocking) |
+| `firewall/` | Kernel-level network filtering (iptables/pfctl). Compiler interface, `RulesHash` drift detection (SHA-256, 12-char hex), `Observe` subsystem (lsof + skill domain scanning) |
 | `gatewaylog/` | Structured JSONL event writer with fanout callbacks (rotating, 50MB) |
 | `guardrail/` | RulePack loading, JudgeYAML definitions, LRU-cached suppressions |
 | `inventory/` | Installed skills/MCP server tracking (AIBOM) |
@@ -362,10 +362,10 @@ The Go gateway is organized into 19 internal packages:
 | `policy/` | OPA engine — 7 Rego files (admission, guardrail, firewall, audit, skill_actions, sandbox, openshell), compiled once via `sync.Once` |
 | `redaction/` | Two-layer PII redaction: `<redacted len=N sha=8hex>`, ForSink variants always redact |
 | `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |
-| `scanner/` | Scanner wrapper interfaces |
-| `telemetry/` | OpenTelemetry: resource attributes, spans (tool, approval, LLM, guardrail, agent), GenAI semconv metrics |
+| `scanner/` | 9 built-in scanner implementations: ClawShield (injection, malware, PII, secrets, vuln), CodeGuard, MCP scanner, Skill scanner, Plugin scanner. Common `Scanner` interface |
+| `telemetry/` | OpenTelemetry: `guardrail/{stage}` and `guardrail.{phase}` span hierarchy, `inspect/{tool}` spans, 20+ metric instruments (verdicts, judge latency, cache hits, sink delivery, stream lifecycle) |
 | `tui/` | 12-panel Bubbletea dashboard (Lipgloss + Bubbles) |
-| `watcher/` | File system monitoring for skill installation/removal |
+| `watcher/` | File system monitoring (fsnotify) with 500ms debounce, three-phase admission gate (pre-scan OPA → scan → post-scan OPA), periodic rescan (60-min default) with 8-type drift detection, policy file watching (2s poll) |
 
 ## Multi-Turn Injection Detection
 
@@ -444,6 +444,72 @@ The `plugins/` package provides an extensible scanner plugin system:
 - **Integration**: the TUI Plugins panel shows installed plugins with
   status and install/remove/quarantine actions.
 
+## Built-in Scanner Catalog
+
+The `internal/scanner/` package provides 9 scanner implementations sharing a
+common `Scanner` interface (`Name()`, `Version()`, `SupportedTargets()`,
+`Scan(ctx, target)`):
+
+| Scanner | File | Targets | Detection Method |
+|---------|------|---------|-----------------|
+| ClawShield Injection | `clawshield_injection.go` | skill, code | 3-tier: regex patterns, base64 + entropy analysis, Unicode analysis |
+| ClawShield Malware | `clawshield_malware.go` | skill, code | Magic bytes (ELF/PE/Mach-O/Java/WASM), reverse shells, cryptominers, C2 signatures, high-entropy blobs, zip-slip |
+| ClawShield PII | `clawshield_pii.go` | skill, code | 10 categories: credit cards (Luhn), SSN, email, phone, IPv4, DOB, passport, driver's license, bank account, medical ID |
+| ClawShield Secrets | `clawshield_secrets.go` | skill, code | 13+ providers: AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, Twilio, SendGrid, NPM, PyPI, private keys, JWT, bearer tokens |
+| ClawShield Vuln | `clawshield_vuln.go` | skill, code | SQL injection, SSRF, path traversal, command injection, XSS |
+| CodeGuard | `codeguard.go` | code | 10 built-in rules + custom YAML rules from `~/.defenseclaw/codeguard-rules/`. Hardcoded credentials, unsafe exec, network, deserialization, weak crypto |
+| MCP Scanner | `mcp.go` | mcp | Shells out to `cisco-ai-mcp-scanner` CLI. Config: `Analyzers`, `ScanPrompts`, `ScanResources`, `ScanInstructions`. Env: `MCP_SCANNER_*` |
+| Skill Scanner | `skill.go` | skill | Shells out to `cisco-ai-skill-scanner` CLI. Modes: LLM, behavioral, meta, trigger, VirusTotal, AI Defense. Env: `SKILL_SCANNER_*` |
+| Plugin Scanner | `plugin.go` | plugin | Shells out to `defenseclaw plugin scan` or direct binary. Config: `Policy`, `Profile` |
+
+Scanners are instantiated directly by constructors — there is no centralized
+registry in this package. The watcher selects the scanner by install type;
+the guardrail proxy uses the ClawShield and CodeGuard scanners for inline
+inspection.
+
+## Enforcement Engine
+
+The `internal/enforce/` package provides three enforcers for post-admission
+actions:
+
+| Enforcer | Action | Mechanism |
+|----------|--------|-----------|
+| `SkillEnforcer` | `Quarantine(path)` | Moves skill to `<quarantine>/skills/`, removes original. `Restore()` reverses. `IsQuarantined()` checks status |
+| `MCPEnforcer` | `BlockEndpoint(url)` | Adds URL to sandbox policy deny list. `AllowEndpoint()` reverses |
+| `PluginEnforcer` | `Quarantine(path)` | Same as SkillEnforcer but for `<quarantine>/plugins/` |
+
+This is separate from the OPA policy engine — it manages SQLite-backed
+block/allow lists and filesystem quarantine operations.
+
+## Firewall Subsystem
+
+The `internal/firewall/` package provides kernel-level network filtering:
+
+**Compiler interface:**
+
+| Method | Purpose |
+|--------|---------|
+| `Platform()` | Returns platform name (`pf` or `iptables`) |
+| `Compile(cfg)` | Generates firewall rules from `FirewallConfig` |
+| `ValidateArg(arg)` | Validates a rule argument |
+| `ApplyCommand(path)` | Returns the shell command to apply rules |
+| `RemoveCommand()` | Returns the shell command to remove rules |
+
+**Drift detection:** `RulesHash(rules)` returns a 12-character hex SHA-256
+fingerprint of the active ruleset (comments excluded). `GetStatus()` queries
+the running firewall and returns rule count, anchor name, active state, and
+last-checked timestamp.
+
+**Observation:** `Observe(ctx, skillDirs)` discovers active network
+connections via `lsof`, scans skill source files for URL patterns (`.py`,
+`.js`, `.go`, `.yaml`, `.json`, `.env`), and proposes a deny-by-default
+config with an allowlist. `findWouldBlock()` shows what existing connections
+would be blocked.
+
+**Config defaults:** Anchor name `com.defenseclaw`, default action `allow` or
+`deny`, only `outbound` direction supported. Pre-populated allowlist includes
+Anthropic, OpenAI, GitHub, and other known LLM provider domains.
+
 ## Dual Policy Engines
 
 DefenseClaw has two distinct policy evaluation systems — do not confuse them:
@@ -454,6 +520,32 @@ DefenseClaw has two distinct policy evaluation systems — do not confuse them:
 | **OPA Policy Engine** | `internal/policy/` | Rego-based policy evaluation for admission, guardrail verdicts, firewall rules, sandbox controls | 7 `.rego` files in `policies/rego/` |
 
 The enforcement engine runs first (static block/allow lookup), and if the item is not explicitly listed, the OPA engine evaluates the appropriate Rego policy.
+
+### OPA Admission Methods
+
+| Method | Policy path | Returns |
+|--------|------------|---------|
+| `EvaluateAdmission()` | `data.defenseclaw.admission` | verdict, reason, file_action, install_action, runtime_action |
+| `EvaluateGuardrail()` | `data.defenseclaw.guardrail` | action (allow/alert/block), severity, reason |
+| `EvaluateSkillActions()` | `data.defenseclaw.skill_actions` | runtime_action, file_action, install_action, should_block |
+| `EvaluateFirewall()` | `data.defenseclaw.firewall` | firewall rules output |
+| `EvaluateSandbox()` | `data.defenseclaw.sandbox` | sandbox policy output |
+| `EvaluateAudit()` | `data.defenseclaw.audit` | audit policy output |
+
+### OPA Fallback Profile
+
+When the OPA engine fails to load or evaluate, admission falls back to
+`EvaluateAdmissionFallback()` using a `FallbackProfile` loaded from the
+policy directory:
+
+- `AllowListBypassScan` — allow-listed items skip scanning entirely
+- `ScanOnInstall` — whether to scan on install events
+- `Actions` — maps severity (CRITICAL/HIGH/MEDIUM/LOW/INFO) to per-surface
+  actions (runtime, file, install)
+- `ScannerOverrides` — per-target-type severity overrides (MCP and plugin
+  scanners may have different thresholds than skill scanners)
+- `FirstPartyAllow` — built-in allowlist for DefenseClaw's own plugins/skills
+  with path provenance matching
 
 ## Inspection Pipeline Detail
 
@@ -490,3 +582,117 @@ Stage 4: OPA Policy (guardrail.rego)
   Observe mode: downgrades block → alert
   Output: final verdict (allow / alert / block)
 ```
+
+## Watcher Subsystem Detail
+
+The `internal/watcher/` package monitors skill, MCP, and plugin directories
+for installation events and runs a multi-phase admission gate.
+
+### Event Processing
+
+File system events from fsnotify are debounced via a pending map
+(`path → first-seen timestamp`). Default debounce: 500ms (configurable via
+`watch.debounce_ms`; values ≤ 0 fall back to 500ms). Events are classified
+by install type:
+
+| Type | Classification |
+|------|---------------|
+| `skill` | Default for paths under skill directories |
+| `plugin` | Paths under plugin directories |
+| `mcp` | Enumerated from `openclaw.json` during rescan |
+
+### Three-Phase Admission Gate
+
+```
+Phase 1: Pre-scan OPA
+  ├── Build block/allow lists from SQLite
+  ├── Load fallback profile from policy directory
+  ├── Evaluate pre-scan policy (OPA or fallback)
+  └── Verdict: blocked | rejected | allowed (skip scan) | scan (continue)
+         │
+Phase 2: Scanning (5-minute timeout)
+  ├── Select scanner by install type
+  │   ├── Skill → SkillScannerFromLLM
+  │   ├── MCP → MCPScannerFromLLM
+  │   └── Plugin → PluginScanner
+  └── Per-scanner LLM config overrides via cfg.ResolveLLM()
+         │
+Phase 3: Post-scan OPA
+  ├── Add scan findings to policy input (ScanResultInput)
+  ├── Re-evaluate with findings (OPA or fallback)
+  └── Apply enforcement: file_action, install_action, runtime_action
+```
+
+### Periodic Rescan and Drift Detection
+
+When `watch.rescan_enabled` is `true` (default), a rescan loop runs
+immediately on startup and then every `watch.rescan_interval_min` minutes
+(default: 60). Each cycle:
+
+1. Enumerates all installed targets (skill/plugin child directories + MCP
+   servers from `openclaw.json`).
+2. Takes a `TargetSnapshot` per target: content SHA-256 hash, dependency
+   file hashes (13 patterns: `requirements.txt`, `package.json`, `go.mod`,
+   etc.), config file hashes (10 patterns: `skill.yaml`, `.env`, etc.),
+   and extracted network endpoints.
+3. Compares against the stored baseline to produce drift deltas.
+
+Network endpoint extraction scans code files (`.py`, `.js`, `.ts`, `.go`,
+`.rb`, `.java`, `.rs`, `.php`, `.sh`) up to 512 KB per file, filtering
+localhost/example.com/0.0.0.0 prefixes. Directories `.git`, `node_modules`,
+`__pycache__`, `.venv`, `venv` are skipped.
+
+MCP servers have a special snapshot path: no filesystem walk — the snapshot
+is synthesized from the `openclaw.json` entry with a config hash and URL
+endpoint.
+
+### Policy File Watching
+
+`watchPolicyListsAndYAML` runs independently on a 2-second polling interval,
+monitoring:
+
+- `{datadir}/block_list.yaml` and `allow_list.yaml`
+- All `.yaml`, `.yml`, `.json`, `.rego` files in the policy directory
+
+Changes are detected by SHA-256 hash comparison. On change, the watcher
+records an `audit.ActionPolicyReload` event and bumps the version generation
+via `version.BumpGeneration()`.
+
+## Telemetry Span and Metric Hierarchy
+
+### Span Names
+
+| Span | Pattern | Attributes |
+|------|---------|-----------|
+| Stage-level guardrail | `guardrail/{stage}` | `defenseclaw.guardrail.{stage, direction, model, action, severity, reason, latency_ms}` |
+| Phase-level guardrail | `guardrail.{phase}` | `defenseclaw.guardrail.{phase, action, severity, latency_ms}` |
+| Tool inspection | `inspect/{tool}` | `defenseclaw.inspect.{tool, action, severity, latency_ms}` |
+| Sidecar startup | `defenseclaw/startup` | `defenseclaw.event = "sidecar_start"` |
+
+Guardrail phases: `regex`, `cisco_ai_defense`, `judge.pii`,
+`judge.prompt_injection`, `opa`, `finalize`.
+
+### Metric Instruments
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `defenseclaw.gateway.verdicts` | Counter | verdict.stage, verdict.action, verdict.severity, policy_id, destination_app |
+| `defenseclaw.gateway.judge.invocations` | Counter | judge.kind, judge.action, judge.severity |
+| `defenseclaw.gateway.judge.latency` | Histogram | judge.kind |
+| `defenseclaw.gateway.judge.errors` | Counter | judge.kind, judge.reason (provider \| parse) |
+| `defenseclaw.guardrail.evaluations` | Counter | guardrail.scanner, guardrail.action_taken |
+| `defenseclaw.guardrail.latency` | Histogram | guardrail.scanner |
+| `defenseclaw.guardrail.judge.latency` | Histogram | gen_ai.request.model, judge.kind |
+| `defenseclaw.guardrail.cache.hits` | Counter | scanner, verdict, ttl_bucket |
+| `defenseclaw.guardrail.cache.misses` | Counter | scanner, verdict, ttl_bucket |
+| `defenseclaw.redaction.applied` | Counter | detector, field |
+| `defenseclaw.egress.events` | Counter | branch (known \| shape \| passthrough), decision (allow \| block), source (go \| ts) |
+| `defenseclaw.audit.sink.batches.delivered` | Counter | sink, kind, status_code, retry_count |
+| `defenseclaw.audit.sink.batches.dropped` | Counter | sink, kind, status_code, retry_count |
+| `defenseclaw.audit.sink.queue.depth` | Gauge | sink.kind, sink.name |
+| `defenseclaw.audit.sink.circuit.state` | Gauge | sink.kind, sink.name (0=closed, 1=open, 2=half-open) |
+| `defenseclaw.audit.sink.delivery.latency` | Histogram | sink, kind, status_code, retry_count |
+| `defenseclaw.stream.lifecycle` | Counter | http.route, transition (open \| close), outcome |
+| `defenseclaw.stream.bytes_sent` | Counter | http.route, outcome |
+| `defenseclaw.stream.duration_ms` | Histogram | http.route, outcome |
+| `defenseclaw.schema.violations` | Counter | event_type, code |

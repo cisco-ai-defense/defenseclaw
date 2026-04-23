@@ -240,6 +240,80 @@ You can also drive the telemetry stack entirely through standard
 `OTEL_EXPORTER_OTLP_*` env vars — the SDK's defaults apply when the
 config is empty.
 
+### 4.1 Span naming hierarchy
+
+The telemetry runtime (`internal/telemetry/runtime.go`) creates nested spans
+for every guardrail evaluation:
+
+| Level | Span name pattern | Purpose |
+|-------|------------------|---------|
+| Stage | `guardrail/{stage}` | Top-level per-evaluation span. Stage = `regex_only`, `regex_judge`, `judge_first`, etc. |
+| Phase | `guardrail.{phase}` | Nested under stage. Phase = `regex`, `cisco_ai_defense`, `judge.pii`, `judge.prompt_injection`, `opa`, `finalize` |
+| Tool | `inspect/{tool}` | Tool call inspection span |
+| Startup | `defenseclaw/startup` | One-shot span emitted on sidecar start |
+
+Stage spans carry `defenseclaw.guardrail.{stage, direction, model, action,
+severity, reason, latency_ms}` attributes. Phase spans carry
+`defenseclaw.guardrail.{phase, action, severity, latency_ms}`.
+
+### 4.2 Metric instruments
+
+The gateway emits the following OTel metrics
+(`internal/telemetry/metrics.go`):
+
+**Verdict and judge:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.gateway.verdicts` | verdict.stage, verdict.action, verdict.severity, policy_id, destination_app |
+| `defenseclaw.gateway.judge.invocations` | judge.kind, judge.action, judge.severity |
+| `defenseclaw.gateway.judge.latency` | judge.kind |
+| `defenseclaw.gateway.judge.errors` | judge.kind, judge.reason (provider \| parse) |
+
+**Guardrail pipeline:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.guardrail.evaluations` | guardrail.scanner, guardrail.action_taken |
+| `defenseclaw.guardrail.latency` | guardrail.scanner |
+| `defenseclaw.guardrail.judge.latency` | gen_ai.request.model, judge.kind |
+| `defenseclaw.guardrail.cache.hits` | scanner, verdict, ttl_bucket |
+| `defenseclaw.guardrail.cache.misses` | scanner, verdict, ttl_bucket |
+
+**Redaction and egress:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.redaction.applied` | detector, field |
+| `defenseclaw.egress.events` | branch (known \| shape \| passthrough), decision (allow \| block), source (go \| ts) |
+
+**Sink delivery:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.audit.sink.batches.delivered` | sink, kind, status_code, retry_count |
+| `defenseclaw.audit.sink.batches.dropped` | sink, kind, status_code, retry_count |
+| `defenseclaw.audit.sink.queue.depth` | sink.kind, sink.name |
+| `defenseclaw.audit.sink.circuit.state` | sink.kind, sink.name (0=closed, 1=open, 2=half-open) |
+| `defenseclaw.audit.sink.delivery.latency` | sink, kind, status_code, retry_count |
+
+**Stream/SSE:**
+
+| Metric | Labels |
+|--------|--------|
+| `defenseclaw.stream.lifecycle` | http.route, transition (open \| close), outcome |
+| `defenseclaw.stream.bytes_sent` | http.route, outcome |
+| `defenseclaw.stream.duration_ms` | http.route, outcome |
+
+**Schema validation:** `defenseclaw.schema.violations` (event_type, code) —
+see §8.1 below.
+
+### 4.3 Verdict reason truncation
+
+OTel attribute values for `verdict.reason` are capped at 200 bytes
+(`maxReasonAttrBytes`) to avoid oversized span attributes. The full reason
+is always included in the OTLP log body.
+
 ---
 
 ## 5. Event shape (what every sink receives)
@@ -289,6 +363,27 @@ always receive the scrubbed copy.
 Masked placeholders are deterministic (they include a SHA-256 prefix of
 the literal), so SIEM/observability workflows can still correlate on
 identifier hash across events without handling the raw secret.
+
+### Redaction function variants
+
+The `internal/redaction` package provides two tiers of redaction functions:
+
+| Tier | Functions | When used |
+|------|-----------|-----------|
+| **Display** | `String()`, `Entity()`, `Reason()`, `Evidence()` | Stderr logs — respects `DEFENSECLAW_REVEAL_PII` |
+| **ForSink** | `ForSinkString()`, `ForSinkEntity()`, `ForSinkReason()`, `ForSinkEvidence()`, `ForSinkMessageContent()` | SQLite, Splunk HEC, OTLP, webhooks — **always** redacts regardless of reveal flag |
+
+ForSink functions are idempotent — already-placeholdered values are not
+re-redacted.
+
+**Placeholder format:**
+- Values ≥ 10 bytes: `<redacted len=N prefix="X" sha=8hex>`
+- Values < 5 bytes: `<redacted len=N>` (no SHA)
+- Evidence: `<redacted-evidence len=N match=[start:end] sha=8hex>`
+
+**Reason/evidence redaction** preserves safe metadata tokens (rule IDs like
+`SEC-ANTHROPIC`, status codes, severity labels) while masking literal values
+within semicolon/comma-delimited fields.
 
 To opt back into raw evidence for a single `/inspect` HTTP response, use
 the `X-DefenseClaw-Reveal-PII: 1` header documented in `docs/API.md`.

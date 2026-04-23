@@ -517,6 +517,43 @@ to `NewGuardrailProxy` / `GuardrailInspector`; hot-reload via `guardrail_runtime
                             Final verdict
 ```
 
+## Built-in Scanner Catalog
+
+The `internal/scanner/` package implements 9 scanners used by the guardrail
+proxy (inline) and the watcher (admission gate). All share the `Scanner`
+interface: `Name()`, `Version()`, `SupportedTargets()`, `Scan(ctx, target)`.
+
+### ClawShield Scanners (5 built-in, no external dependencies)
+
+| Scanner | Targets | Detection |
+|---------|---------|-----------|
+| **Injection** | skill, code | 3-tier: regex patterns → base64 + entropy analysis → Unicode analysis |
+| **Malware** | skill, code | Magic bytes (ELF/PE/Mach-O/Java/WASM), shebangs, reverse shells, credential harvesters, cryptominers, C2 signatures, high-entropy blobs (threshold: 7.0), zip-slip, nested archives |
+| **PII** | skill, code | 10 categories: credit cards (Luhn validation), SSN, email, phone, IPv4, DOB, passport, driver's license, bank account, medical ID |
+| **Secrets** | skill, code | 13+ providers: AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, Twilio, SendGrid, Mailgun, NPM, PyPI. Also: private keys, JWT, basic auth, bearer tokens, passwords |
+| **Vuln** | skill, code | SQL injection, SSRF, path traversal, command injection, XSS |
+
+### CodeGuard Scanner
+
+Targets: `code`. Scans for hardcoded credentials, unsafe execution, network
+requests, deserialization, SQL injection, weak crypto, and path traversal.
+Ships 10 built-in rules; supports custom YAML rules from
+`~/.defenseclaw/codeguard-rules/` with fields: `id`, `severity`, `title`,
+`pattern`, `remediation`, `extensions`.
+
+### External Scanners (subprocess)
+
+| Scanner | Binary | Config keys | Environment variables |
+|---------|--------|-------------|----------------------|
+| **MCP** | `cisco-ai-mcp-scanner` | `Analyzers`, `ScanPrompts`, `ScanResources`, `ScanInstructions` | `MCP_SCANNER_API_KEY`, `MCP_SCANNER_ENDPOINT`, `MCP_SCANNER_LLM_*` |
+| **Skill** | `cisco-ai-skill-scanner` | `UseLLM`, `UseBehavioral`, `EnableMeta`, `UseTrigger`, `UseVirusTotal`, `UseAIDefense`, `LLMConsensus`, `Policy`, `Lenient` | `SKILL_SCANNER_LLM_*`, `VIRUSTOTAL_API_KEY`, `AI_DEFENSE_API_KEY` |
+| **Plugin** | `defenseclaw plugin scan` | `Policy`, `Profile` | *(none)* |
+
+MCP and Skill scanners have two constructors: a back-compat variant taking
+`InspectLLMConfig` and a preferred `FromLLM` variant taking unified
+`LLMConfig`. Per-scanner LLM config overrides are resolved via
+`cfg.ResolveLLM()`.
+
 ## Cisco AI Defense Integration
 
 The guardrail integrates with Cisco AI Defense's Chat Inspection API
