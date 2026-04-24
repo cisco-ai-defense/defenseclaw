@@ -109,6 +109,19 @@ curl -s http://localhost:4000/health/liveliness
 # Expected: "I'm alive!"
 ```
 
+## Need to tune a false positive?
+
+If the judge is blocking something safe, like a real application username, do
+not start by turning off all PII detection. Keep the guardrail on and add a
+narrow suppression in the active rule pack instead.
+
+See [Guardrail Rule Packs & Suppressions](GUARDRAIL_RULE_PACKS.md) for:
+
+- the difference between `policy activate strict` and `guardrail.rule_pack_dir`
+- where `suppressions.yaml` lives
+- a minimal username suppression example
+- the restart command after editing
+
 ## 4. Test — Observe Mode
 
 In observe mode the guardrail logs findings but never blocks.

@@ -57,6 +57,35 @@ settings, skill actions, and everything else.
 | **Read by** | **Python CLI** at startup via `config.load()` (`cli/defenseclaw/config.py:426`). **Go sidecar** at startup via `config.Load()` (`internal/config/config.go:262`, Viper). |
 | **NOT read by** | Standalone Python guardrail code paths (none in the default stack); the Go sidecar loads YAML via Viper and passes structs into the proxy. |
 
+For guardrail tuning, `guardrail.rule_pack_dir` inside this file selects the
+active rule-pack directory. This is separate from `defenseclaw policy activate`
+and controls which `judge/*.yaml`, `sensitive_tools.yaml`, and
+`suppressions.yaml` files the sidecar loads.
+
+---
+
+### `~/.defenseclaw/policies/guardrail/<profile>/`
+
+Guardrail rule-pack directory for one profile such as `default`, `strict`, or
+`permissive`. The active profile is whichever directory
+`guardrail.rule_pack_dir` points to.
+
+Typical contents:
+
+- `judge/*.yaml` — judge prompts, categories, severity mappings
+- `sensitive_tools.yaml` — tool-level sensitivity rules
+- `suppressions.yaml` — pre-judge strips, finding suppressions, tool suppressions
+
+| | |
+|---|---|
+| **Created by** | Usually seeded by `defenseclaw init` under `~/.defenseclaw/policies/guardrail/`. |
+| **Read by** | **Go sidecar / guardrail proxy** via `guardrail.LoadRulePack()` (`internal/guardrail/rulepack.go`). |
+| **Fallback behavior** | If a file is missing on disk, DefenseClaw falls back to the built-in embedded default for that file. |
+| **Common operator edit** | Add a narrow entry to `suppressions.yaml` when a known-safe value such as an app username is being flagged. |
+
+See [Guardrail Rule Packs & Suppressions](GUARDRAIL_RULE_PACKS.md) for the
+operator workflow and examples.
+
 ---
 
 ### `~/.defenseclaw/.env`

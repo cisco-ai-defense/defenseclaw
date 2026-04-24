@@ -508,6 +508,11 @@ func (s *Sidecar) Run(ctx context.Context) error {
 // runGatewayLoop connects to the gateway and reconnects on disconnect,
 // running indefinitely until ctx is cancelled.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
+	// Initial connect is the process-boot path, not a reconnect. Only
+	// subsequent successful connects should increment the reconnection
+	// counter so `defenseclaw.watcher.restarts` reflects true recoveries
+	// (transient WS drops, upstream gateway restarts) and not boot churn.
+	firstConnect := true
 	for {
 		s.health.SetGateway(StateReconnecting, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] connecting to %s:%d ...\n", s.cfg.Gateway.Host, s.cfg.Gateway.Port)
@@ -522,6 +527,11 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[sidecar] connect failed: %v (will keep retrying)\n", err)
 			continue
 		}
+
+		if !firstConnect && s.otel != nil {
+			s.otel.RecordWatcherRestart(ctx)
+		}
+		firstConnect = false
 
 		hello := s.client.Hello()
 		s.logHello(hello)

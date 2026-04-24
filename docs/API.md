@@ -1,7 +1,7 @@
 # DefenseClaw Sidecar REST API
 
 The sidecar exposes a localhost-only REST API on `127.0.0.1:{gateway.api_port}`
-(default `18790`). All responses are `application/json`. Mutating requests
+(default `18970`). All responses are `application/json`. Mutating requests
 (POST, PUT, PATCH, DELETE) require the `X-DefenseClaw-Client` header and
 `Content-Type: application/json` (CSRF protection).
 
@@ -29,7 +29,8 @@ Source: `internal/gateway/api.go`, `internal/gateway/inspect.go`
 | `/policy/evaluate/sandbox` | POST | OPA sandbox policy evaluation | No production callers |
 | `/policy/evaluate/audit` | POST | OPA audit retention policy evaluation | No production callers |
 | `/policy/evaluate/skill-actions` | POST | OPA skill-actions policy evaluation | No production callers |
-| `/policy/reload` | POST | Reload OPA policy engine from disk | No production callers |
+| `/policy/reload` | POST | Reload OPA policy engine from disk | Go CLI (`internal/cli/policy.go`) |
+| `/api/v1/network-egress` | GET/POST | Network egress policy management | Go CLI, TS plugin |
 | `/scan/result` | POST | Store scan result in audit log | TS plugin (`enforcer.ts`, `client.ts`) |
 | `/v1/skill/scan` | POST | Run skill scanner on a local path | Python CLI (`gateway.py`, `cmd_skill.py`) |
 | `/v1/mcp/scan` | POST | Run MCP scanner on a local path | No production callers |

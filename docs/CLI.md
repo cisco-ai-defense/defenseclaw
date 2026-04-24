@@ -91,6 +91,12 @@ Use `<binary> --help` for any command.
 | `policy edit guardrail` | Edit guardrail policy (thresholds, Cisco trust, patterns) |
 | `policy edit firewall` | Edit firewall policy (domains, ports, blocklists) |
 
+`policy activate <name>` updates the OPA-backed policy, but it does not switch
+the active guardrail rule pack. If you also need `strict` / `default` /
+`permissive` judge prompts and suppressions, point `guardrail.rule_pack_dir`
+at the matching profile. See
+[Guardrail Rule Packs & Suppressions](GUARDRAIL_RULE_PACKS.md).
+
 ### aibom
 
 | Command | Description |
