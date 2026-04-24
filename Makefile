@@ -25,7 +25,7 @@ DIST_DIR    := dist
 #
 #   make all
 #
-# to reach a working guardrail. Everything downstream (install.sh,
+# to install DefenseClaw and attempt guardrail activation. Everything downstream (install.sh,
 # install-dev.sh, `defenseclaw quickstart`) is wired to behave the
 # same way non-interactively, so CI and local dev share one codepath.
 #
@@ -42,7 +42,8 @@ DIST_DIR    := dist
 all: install path quickstart llm-setup
 	@echo ""
 	@echo "╭────────────────────────────────────────────────────────────╮"
-	@echo "│  DefenseClaw is installed and ready.                       │"
+	@echo "│  DefenseClaw is installed. Check quickstart output above   │"
+	@echo "│  to confirm whether the guardrail is active yet.           │"
 	@echo "╰────────────────────────────────────────────────────────────╯"
 	@echo ""
 	@echo "Try it out:"

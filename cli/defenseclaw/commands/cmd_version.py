@@ -32,7 +32,6 @@ Exit codes:
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,6 +39,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import __version__
+from defenseclaw.gateway import resolve_gateway_binary
 from defenseclaw.paths import bundled_extensions_dir
 
 
@@ -82,12 +82,12 @@ def _gateway_component() -> Component:
     before Cobra touches any state, but a misconfigured shim could
     still hang.
     """
-    bin_path = shutil.which("defenseclaw-gateway")
+    bin_path = resolve_gateway_binary()
     if not bin_path:
         return Component(
             name="gateway",
             version="(not installed)",
-            origin="PATH",
+            origin="PATH or ~/.local/bin",
             status="missing",
         )
 

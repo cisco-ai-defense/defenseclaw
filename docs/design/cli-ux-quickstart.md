@@ -118,8 +118,8 @@ already picked).
 | `defenseclaw config show` | Render active config with secrets redacted. | Never writes. |
 | `defenseclaw config validate` | Load + schema-validate config.yaml. | Never writes. |
 | `defenseclaw doctor --fix` | Run modular fixers (stale PIDs, gateway token, dotenv perms, pristine openclaw.json backup). | Each fixer is independent; a failure in one does not abort the rest. Honours `--yes` / no-op otherwise. |
-| `defenseclaw uninstall --dry-run` | Preview what would be removed. | Default is dry-run. |
-| `defenseclaw uninstall --confirm` | Remove the plugin, restore pristine `openclaw.json`, delete `~/.defenseclaw/`. | Refuses if the target dir lacks DefenseClaw marker files (`config.yaml`, `audit.db`, `policies/`, `quarantine/`). |
+| `defenseclaw uninstall --dry-run` | Preview what would be removed. | Read-only preview. |
+| `defenseclaw uninstall --yes` | Remove the plugin, restore pristine `openclaw.json`, delete `~/.defenseclaw/` when paired with `--all` / `--data` options. | Without `--yes`, prompts before mutating state; refuses if the target dir lacks DefenseClaw marker files (`config.yaml`, `audit.db`, `policies/`, `quarantine/`). |
 | `defenseclaw reset` | `uninstall` + `init` in one, for "wipe and start over" flows. | Same safety rails as `uninstall`. |
 | `defenseclaw version` | CLI / gateway / plugin versions, with drift warnings. | Read-only. |
 

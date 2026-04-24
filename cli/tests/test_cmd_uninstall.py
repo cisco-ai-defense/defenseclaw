@@ -94,6 +94,32 @@ class UninstallCommandTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             exec_mock.assert_called_once()
 
+    def test_stop_gateway_uses_resolver_path(self):
+        with patch(
+            "defenseclaw.commands.cmd_uninstall.resolve_gateway_binary",
+            return_value="/custom/defenseclaw-gateway",
+        ), patch(
+            "defenseclaw.commands.cmd_uninstall.subprocess.run",
+        ) as run_mock:
+            cmd_uninstall._stop_gateway()
+
+        run_mock.assert_called_once()
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["/custom/defenseclaw-gateway", "stop"],
+        )
+
+    def test_stop_gateway_skips_when_binary_missing(self):
+        with patch(
+            "defenseclaw.commands.cmd_uninstall.resolve_gateway_binary",
+            return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_uninstall.subprocess.run",
+        ) as run_mock:
+            cmd_uninstall._stop_gateway()
+
+        run_mock.assert_not_called()
+
 
 class ResetCommandTests(unittest.TestCase):
     def test_reset_yes_executes_plan_with_wipe_and_keep_plugin(self):
