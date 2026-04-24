@@ -354,6 +354,195 @@ func TestOpenClaw_Authenticate_NoCredentials(t *testing.T) {
 	}
 }
 
+func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
+	// Enabling the OpenClaw connector must be sufficient to make OpenClaw
+	// route through DefenseClaw — no separate `defenseclaw setup guardrail`
+	// step. Setup() therefore has to copy the extension into OpenClaw's
+	// extensions directory AND register it in openclaw.json.
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	// Start with a realistic non-empty config so we can verify we don't
+	// clobber unrelated sections.
+	os.WriteFile(configPath, []byte(`{
+		"version": 1,
+		"models": {"default": "openai/gpt-4"},
+		"plugins": {"allow": ["somebody-else"]}
+	}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// Extension directory exists with the required runtime files.
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	for _, rel := range []string{
+		"package.json",
+		"openclaw.plugin.json",
+		"dist/index.js",
+	} {
+		p := filepath.Join(extDir, rel)
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("missing %s: %v", rel, err)
+		}
+	}
+
+	// openclaw.json is patched: plugin allowed, enabled, load path added.
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after Setup: %v", err)
+	}
+	plugins, ok := cfg["plugins"].(map[string]interface{})
+	if !ok {
+		t.Fatal("plugins section missing")
+	}
+	allow, _ := plugins["allow"].([]interface{})
+	foundDefenseClaw := false
+	foundSomebodyElse := false
+	for _, v := range allow {
+		if s, _ := v.(string); s == "defenseclaw" {
+			foundDefenseClaw = true
+		}
+		if s, _ := v.(string); s == "somebody-else" {
+			foundSomebodyElse = true
+		}
+	}
+	if !foundDefenseClaw {
+		t.Error("plugins.allow does not include defenseclaw")
+	}
+	if !foundSomebodyElse {
+		t.Error("plugins.allow clobbered the pre-existing entry")
+	}
+	entries, _ := plugins["entries"].(map[string]interface{})
+	if entry, ok := entries["defenseclaw"].(map[string]interface{}); !ok || entry["enabled"] != true {
+		t.Errorf("plugins.entries.defenseclaw not enabled, got %v", entries["defenseclaw"])
+	}
+	load, _ := plugins["load"].(map[string]interface{})
+	paths, _ := load["paths"].([]interface{})
+	foundPath := false
+	for _, v := range paths {
+		if s, _ := v.(string); s == extDir {
+			foundPath = true
+		}
+	}
+	if !foundPath {
+		t.Errorf("plugins.load.paths missing %s, got %v", extDir, paths)
+	}
+	// Unrelated sections untouched.
+	if cfg["version"] != float64(1) {
+		t.Errorf("version clobbered: got %v", cfg["version"])
+	}
+	if models, _ := cfg["models"].(map[string]interface{}); models == nil || models["default"] != "openai/gpt-4" {
+		t.Errorf("models section clobbered: got %v", cfg["models"])
+	}
+}
+
+func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
+	// Sidecar boots many times. Re-running Setup must leave the config in
+	// the same shape (single allow entry, single load path), not produce
+	// duplicates.
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	json.Unmarshal(data, &cfg)
+	plugins := cfg["plugins"].(map[string]interface{})
+
+	allow := plugins["allow"].([]interface{})
+	dcCount := 0
+	for _, v := range allow {
+		if s, _ := v.(string); s == "defenseclaw" {
+			dcCount++
+		}
+	}
+	if dcCount != 1 {
+		t.Errorf("plugins.allow has %d defenseclaw entries after two Setups, want 1", dcCount)
+	}
+
+	paths := plugins["load"].(map[string]interface{})["paths"].([]interface{})
+	pathCount := 0
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	for _, v := range paths {
+		if s, _ := v.(string); s == extDir {
+			pathCount++
+		}
+	}
+	if pathCount != 1 {
+		t.Errorf("plugins.load.paths has %d entries after two Setups, want 1", pathCount)
+	}
+}
+
+func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{"plugins":{"allow":["somebody-else"]}}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	if _, err := os.Stat(extDir); !os.IsNotExist(err) {
+		t.Errorf("extension dir still present after Teardown: err=%v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	json.Unmarshal(data, &cfg)
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	allow, _ := plugins["allow"].([]interface{})
+	for _, v := range allow {
+		if s, _ := v.(string); s == "defenseclaw" {
+			t.Errorf("plugins.allow still contains defenseclaw after Teardown")
+		}
+	}
+	// Pre-existing unrelated entry preserved.
+	found := false
+	for _, v := range allow {
+		if s, _ := v.(string); s == "somebody-else" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Teardown clobbered unrelated plugins.allow entry")
+	}
+}
+
 func TestOpenClaw_Route(t *testing.T) {
 	c := NewOpenClawConnector()
 	body := []byte(`{"model":"gpt-4o","stream":true,"messages":[]}`)

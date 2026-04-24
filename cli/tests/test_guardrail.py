@@ -44,7 +44,6 @@ from defenseclaw.guardrail import (
     _unregister_plugin_from_config,
     detect_api_key_env,
     detect_current_model,
-    install_openclaw_plugin,
     model_to_proxy_name,
     patch_openclaw_config,
     restore_openclaw_config,
@@ -176,128 +175,9 @@ class TestDetectCurrentModel(unittest.TestCase):
             self.assertEqual(provider, "defenseclaw")
 
 
-# ---------------------------------------------------------------------------
-# install_openclaw_plugin
-# ---------------------------------------------------------------------------
-
-class TestInstallOpenclawPlugin(unittest.TestCase):
-    def _make_built_plugin(self, tmpdir):
-        """Create a fake built plugin tree with dist/, manifest, and node_modules/."""
-        plugin_dir = os.path.join(tmpdir, "extensions", "defenseclaw")
-        dist_dir = os.path.join(plugin_dir, "dist")
-        os.makedirs(dist_dir)
-        with open(os.path.join(plugin_dir, "package.json"), "w") as f:
-            json.dump({"name": "@defenseclaw/openclaw-plugin", "version": "0.2.0", "main": "dist/index.js"}, f)
-        with open(os.path.join(plugin_dir, "openclaw.plugin.json"), "w") as f:
-            json.dump({"id": "defenseclaw", "configSchema": {"type": "object"}}, f)
-        with open(os.path.join(dist_dir, "index.js"), "w") as f:
-            f.write("// compiled plugin\n")
-
-        nm = os.path.join(plugin_dir, "node_modules")
-        for dep in ("js-yaml", "argparse"):
-            dep_dir = os.path.join(nm, dep)
-            os.makedirs(dep_dir)
-            with open(os.path.join(dep_dir, "index.js"), "w") as f:
-                f.write(f"// {dep}\n")
-        return plugin_dir
-
-    def _make_oc_home(self, tmpdir):
-        """Create a fake openclaw home with openclaw.json."""
-        oc_home = os.path.join(tmpdir, "openclaw-home")
-        os.makedirs(oc_home)
-        with open(os.path.join(oc_home, "openclaw.json"), "w") as f:
-            json.dump({"plugins": {}}, f)
-        return oc_home
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_manual_fallback_installs_to_openclaw_extensions(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            self.assertIn("not found", cli_error)
-            target = os.path.join(oc_home, "extensions", "defenseclaw")
-            self.assertTrue(os.path.isfile(os.path.join(target, "package.json")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "openclaw.plugin.json")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "dist", "index.js")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "node_modules", "js-yaml", "index.js")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "node_modules", "argparse", "index.js")))
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_manual_fallback_registers_in_config(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            install_openclaw_plugin(plugin_dir, oc_home)
-
-            with open(os.path.join(oc_home, "openclaw.json")) as f:
-                cfg = json.load(f)
-            plugins = cfg["plugins"]
-            self.assertIn("defenseclaw", plugins.get("entries", {}))
-            self.assertTrue(plugins["entries"]["defenseclaw"]["enabled"])
-            self.assertIn("defenseclaw", plugins.get("installs", {}))
-            install_path = os.path.join(oc_home, "extensions", "defenseclaw")
-            self.assertIn(install_path, plugins.get("load", {}).get("paths", []))
-
-    @patch("defenseclaw.guardrail.subprocess.run")
-    @patch("defenseclaw.config.openclaw_bin", return_value="openclaw")
-    def test_cli_install_when_openclaw_available(self, _mock_bin, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "cli")
-            self.assertEqual(cli_error, "")
-            mock_run.assert_called_once()
-            cmd = mock_run.call_args[0][0]
-            self.assertEqual(cmd, ["openclaw", "plugins", "install", plugin_dir])
-
-    def test_returns_empty_when_not_built(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = os.path.join(tmpdir, "extensions", "defenseclaw")
-            os.makedirs(plugin_dir)
-            with open(os.path.join(plugin_dir, "package.json"), "w") as f:
-                f.write("{}")
-
-            method, _ = install_openclaw_plugin(plugin_dir, os.path.join(tmpdir, "oc"))
-            self.assertEqual(method, "")
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_reinstall_replaces_existing(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            install_openclaw_plugin(plugin_dir, oc_home)
-
-            stale = os.path.join(oc_home, "extensions", "defenseclaw", "stale.txt")
-            with open(stale, "w") as f:
-                f.write("old")
-
-            install_openclaw_plugin(plugin_dir, oc_home)
-            self.assertFalse(os.path.exists(stale))
-            self.assertTrue(os.path.isfile(
-                os.path.join(oc_home, "extensions", "defenseclaw", "dist", "index.js"),
-            ))
-
-    @patch("defenseclaw.guardrail.subprocess.run")
-    def test_manual_fallback_shows_cli_error(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="plugin validation failed", stdout="")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            self.assertIn("plugin validation failed", cli_error)
+# install_openclaw_plugin was removed — the gateway's OpenClaw connector
+# performs the install at sidecar boot via embedded files. See
+# TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig in the Go tests.
 
 
 # ---------------------------------------------------------------------------
@@ -849,67 +729,6 @@ class TestDetectApiKeyEnvEdgeCases(unittest.TestCase):
 
     def test_o1_model(self):
         self.assertEqual(detect_api_key_env("openai/o1-preview"), "OPENAI_API_KEY")
-
-
-# ---------------------------------------------------------------------------
-# install_openclaw_plugin edge cases
-# ---------------------------------------------------------------------------
-
-class TestInstallOpenclawPluginEdgeCases(unittest.TestCase):
-    def _make_built_plugin(self, tmpdir):
-        plugin_dir = os.path.join(tmpdir, "extensions", "defenseclaw")
-        dist_dir = os.path.join(plugin_dir, "dist")
-        os.makedirs(dist_dir)
-        with open(os.path.join(plugin_dir, "package.json"), "w") as f:
-            json.dump({"name": "defenseclaw", "main": "dist/index.js"}, f)
-        with open(os.path.join(plugin_dir, "openclaw.plugin.json"), "w") as f:
-            json.dump({"id": "defenseclaw"}, f)
-        with open(os.path.join(dist_dir, "index.js"), "w") as f:
-            f.write("// compiled plugin\n")
-        return plugin_dir
-
-    def _make_oc_home(self, tmpdir):
-        oc_home = os.path.join(tmpdir, "openclaw-home")
-        os.makedirs(oc_home)
-        with open(os.path.join(oc_home, "openclaw.json"), "w") as f:
-            json.dump({"plugins": {}}, f)
-        return oc_home
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="openclaw", timeout=60))
-    def test_cli_timeout_falls_back_to_manual(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            self.assertIn("timed out", cli_error)
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    @patch("defenseclaw.guardrail.shutil.copytree", side_effect=OSError("permission denied"))
-    def test_manual_copy_failure_returns_error(self, _mock_copy, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "error")
-            self.assertIn("manual copy failed", cli_error)
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_manual_copy_without_node_modules(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, _ = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            target = os.path.join(oc_home, "extensions", "defenseclaw")
-            self.assertTrue(os.path.isfile(os.path.join(target, "dist", "index.js")))
-            self.assertFalse(os.path.isdir(os.path.join(target, "node_modules")))
 
 
 # ---------------------------------------------------------------------------

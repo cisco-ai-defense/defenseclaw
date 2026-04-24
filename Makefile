@@ -179,11 +179,47 @@ dev-pycli: pycli
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw --help"
 
-gateway:
+gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY) ./cmd/defenseclaw
 	@echo "Built $(GATEWAY)"
 	@echo "  Run with: ./$(GATEWAY)"
 	@echo "  Check status: ./$(GATEWAY) status"
+
+# sync-openclaw-extension copies the runtime files of the DefenseClaw
+# OpenClaw plugin into internal/gateway/connector/openclaw_extension so
+# //go:embed picks them up at build time. Running it each build keeps the
+# embedded tree in lockstep with extensions/defenseclaw/ — no separate
+# install step required to enable inspection.
+#
+# The copy preserves the directory layout under dist/ (policy/,
+# scanners/plugin_scanner/, etc.) because dist/index.js imports siblings
+# by relative path. Flattening the tree silently breaks plugin load.
+sync-openclaw-extension:
+	@rm -rf internal/gateway/connector/openclaw_extension
+	@mkdir -p internal/gateway/connector/openclaw_extension/node_modules
+	@cp $(PLUGIN_DIR)/package.json internal/gateway/connector/openclaw_extension/
+	@cp $(PLUGIN_DIR)/openclaw.plugin.json internal/gateway/connector/openclaw_extension/
+	@# rsync preserves tree structure AND skips dev artifacts (tests, .d.ts,
+	@# source maps) in a single pass. Fall back to find-based copy when
+	@# rsync is unavailable (shouldn't happen on macOS / linux dev).
+	@if command -v rsync >/dev/null 2>&1; then \
+	  rsync -a \
+	    --exclude='__tests__' --exclude='*.d.ts' --exclude='*.d.ts.map' --exclude='*.js.map' \
+	    $(PLUGIN_DIR)/dist/ internal/gateway/connector/openclaw_extension/dist/; \
+	else \
+	  mkdir -p internal/gateway/connector/openclaw_extension/dist; \
+	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print0 \
+	    | while IFS= read -r -d '' f; do \
+	        mkdir -p "../../../internal/gateway/connector/openclaw_extension/dist/$$(dirname "$$f")"; \
+	        cp "$$f" "../../../internal/gateway/connector/openclaw_extension/dist/$$f"; \
+	      done); \
+	fi
+	@for dep in js-yaml argparse; do \
+	  if [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ]; then \
+	    cp -R "$(PLUGIN_DIR)/node_modules/$$dep" internal/gateway/connector/openclaw_extension/node_modules/; \
+	  fi; \
+	done
+	@echo "  • Synced OpenClaw extension → internal/gateway/connector/openclaw_extension/"
 
 gateway-cross:
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
