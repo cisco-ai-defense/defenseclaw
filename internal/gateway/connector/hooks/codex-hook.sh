@@ -6,10 +6,17 @@ set -euo pipefail
 
 PAYLOAD=$(cat)
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-{{.APIToken}}}"
+
+AUTH_HEADER_ARGS=()
+if [ -n "${API_TOKEN}" ]; then
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
 
 RESULT=$(curl -s -X POST "http://${API_ADDR}/api/v1/codex/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: codex-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

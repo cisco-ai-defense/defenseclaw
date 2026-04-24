@@ -64,6 +64,7 @@ type SetupOpts struct {
 	DataDir     string // ~/.defenseclaw/
 	ProxyAddr   string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
+	APIToken    string // gateway bearer token; baked into hook curl -H
 	Interactive bool
 }
 

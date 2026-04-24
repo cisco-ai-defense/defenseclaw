@@ -1886,18 +1886,49 @@ def _restart_services(
     oc_port: int = 18789,
     connector: str = "openclaw",
 ) -> None:
-    """Restart defenseclaw-gateway and, for OpenClaw, verify its gateway health."""
+    """Restart defenseclaw-gateway and, when OpenClaw is the selected
+    connector, restart the OpenClaw gateway too so it picks up the
+    freshly-registered defenseclaw plugin. Other connectors manage
+    their own processes; defenseclaw-gateway is the only process we
+    always need to bounce."""
     click.echo("  Restarting services...")
     click.echo("  ──────────────────────")
 
     _restart_defense_gateway(data_dir)
 
     if connector == "openclaw":
+        _restart_openclaw_gateway()
         _check_openclaw_gateway(oc_host, oc_port)
     else:
         click.echo(f"  {connector} connector: traffic will route through defenseclaw-gateway proxy.")
 
     click.echo()
+
+
+def _restart_openclaw_gateway() -> None:
+    """Ask OpenClaw to restart its gateway service so the updated
+    plugin registration (written by OpenClawConnector.Setup) takes
+    effect. No-op when the `openclaw` CLI isn't on PATH — operators
+    using a non-standard OpenClaw install can restart manually."""
+    click.echo("  openclaw-gateway: restarting...", nl=False)
+    try:
+        result = subprocess.run(
+            ["openclaw", "gateway", "restart"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            click.echo(" ✓")
+        else:
+            click.echo(" ✗")
+            err = (result.stderr or result.stdout or "").strip()
+            if err:
+                for line in err.splitlines()[:3]:
+                    click.echo(f"    {line}")
+    except FileNotFoundError:
+        click.echo(" ✗ (openclaw CLI not found)")
+        click.echo("    Install OpenClaw or restart its gateway manually.")
+    except subprocess.TimeoutExpired:
+        click.echo(" ✗ (timed out)")
 
 
 def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> None:

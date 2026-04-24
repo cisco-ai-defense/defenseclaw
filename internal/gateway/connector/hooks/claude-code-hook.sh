@@ -6,10 +6,21 @@ set -euo pipefail
 
 PAYLOAD=$(cat)
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-{{.APIToken}}}"
+
+# Build curl auth header only when a token is actually available.
+# Empty header would trip the API auth middleware's "invalid_token"
+# branch instead of falling through to loopback-allow when no token
+# was ever configured.
+AUTH_HEADER_ARGS=()
+if [ -n "${API_TOKEN}" ]; then
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
 
 RESULT=$(curl -s -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {
