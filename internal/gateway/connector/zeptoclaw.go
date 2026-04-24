@@ -129,8 +129,7 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 type zeptoClawBackup struct {
 	OriginalProviders json.RawMessage `json:"original_providers"`
 	OriginalHooks     json.RawMessage `json:"original_hooks"`
-	OriginalAPIBase   string          `json:"original_api_base,omitempty"`
-	HadAPIBase        bool            `json:"had_api_base"`
+	OriginalSafety    json.RawMessage `json:"original_safety,omitempty"`
 }
 
 func (c *ZeptoClawConnector) saveBackup(dataDir string, backup zeptoClawBackup) error {
@@ -161,7 +160,9 @@ func zeptoClawConfigPath() string {
 }
 
 // patchZeptoClawConfig reads ZeptoClaw's config.json, backs up the original
-// provider and hook settings, and sets api_base + before_tool hook.
+// provider, hook, and safety settings, then patches each provider's api_base to
+// route through the proxy and sets safety.allow_private_endpoints so the
+// localhost proxy URL passes SSRF validation.
 func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	configPath := zeptoClawConfigPath()
 
@@ -177,10 +178,6 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	}
 
 	backup := zeptoClawBackup{}
-	if apiBase, ok := config["api_base"].(string); ok {
-		backup.HadAPIBase = true
-		backup.OriginalAPIBase = apiBase
-	}
 	if providers, ok := config["providers"]; ok {
 		raw, _ := json.Marshal(providers)
 		backup.OriginalProviders = raw
@@ -189,13 +186,43 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 		raw, _ := json.Marshal(hooks)
 		backup.OriginalHooks = raw
 	}
+	if safety, ok := config["safety"]; ok {
+		raw, _ := json.Marshal(safety)
+		backup.OriginalSafety = raw
+	}
 
 	if err := c.saveBackup(opts.DataDir, backup); err != nil {
 		return fmt.Errorf("save zeptoclaw backup: %w", err)
 	}
 
 	proxyURL := "http://" + opts.ProxyAddr + "/c/zeptoclaw"
-	config["api_base"] = proxyURL
+
+	// Patch each configured provider's api_base to route through proxy.
+	providers, _ := config["providers"].(map[string]interface{})
+	if providers == nil {
+		providers = map[string]interface{}{}
+	}
+	for name, val := range providers {
+		prov, ok := val.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Skip non-provider keys (retry, fallback, rotation, plugins).
+		switch name {
+		case "retry", "fallback", "rotation", "plugins":
+			continue
+		}
+		prov["api_base"] = proxyURL
+	}
+	config["providers"] = providers
+
+	// Allow the localhost proxy URL to pass SSRF validation.
+	safety, _ := config["safety"].(map[string]interface{})
+	if safety == nil {
+		safety = map[string]interface{}{}
+	}
+	safety["allow_private_endpoints"] = true
+	config["safety"] = safety
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	config["hooks"] = map[string]interface{}{
@@ -234,12 +261,6 @@ func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) {
 		return
 	}
 
-	if backup.HadAPIBase {
-		config["api_base"] = backup.OriginalAPIBase
-	} else {
-		delete(config, "api_base")
-	}
-
 	if len(backup.OriginalProviders) > 0 && string(backup.OriginalProviders) != "null" {
 		var orig interface{}
 		json.Unmarshal(backup.OriginalProviders, &orig)
@@ -254,6 +275,14 @@ func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) {
 		config["hooks"] = orig
 	} else {
 		delete(config, "hooks")
+	}
+
+	if len(backup.OriginalSafety) > 0 && string(backup.OriginalSafety) != "null" {
+		var orig interface{}
+		json.Unmarshal(backup.OriginalSafety, &orig)
+		config["safety"] = orig
+	} else {
+		delete(config, "safety")
 	}
 
 	out, _ := json.MarshalIndent(config, "", "  ")

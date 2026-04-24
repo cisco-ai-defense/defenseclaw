@@ -1372,7 +1372,14 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 	configDir := filepath.Join(dir, "zeptoclaw-config")
 	os.MkdirAll(configDir, 0o755)
 	configPath := filepath.Join(configDir, "config.json")
-	os.WriteFile(configPath, []byte(`{"model": "gpt-4o"}`), 0o644)
+	original := `{
+		"providers": {
+			"anthropic": {"api_key": "sk-ant-test", "api_base": "https://api.anthropic.com"},
+			"openai": {"api_key": "sk-test"}
+		},
+		"agents": {"model": "gpt-4o"}
+	}`
+	os.WriteFile(configPath, []byte(original), 0o644)
 
 	ZeptoClawConfigPathOverride = configPath
 	defer func() { ZeptoClawConfigPathOverride = "" }()
@@ -1391,15 +1398,35 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 	var config map[string]interface{}
 	json.Unmarshal(data, &config)
 
-	apiBase, ok := config["api_base"].(string)
+	providers, ok := config["providers"].(map[string]interface{})
 	if !ok {
-		t.Fatal("api_base not set in config")
+		t.Fatal("providers not set in config")
 	}
-	if !strings.Contains(apiBase, "/c/zeptoclaw") {
-		t.Errorf("api_base = %q, missing /c/zeptoclaw prefix", apiBase)
+	for _, name := range []string{"anthropic", "openai"} {
+		prov, ok := providers[name].(map[string]interface{})
+		if !ok {
+			t.Fatalf("provider %s missing", name)
+		}
+		apiBase, ok := prov["api_base"].(string)
+		if !ok {
+			t.Fatalf("provider %s missing api_base", name)
+		}
+		if !strings.Contains(apiBase, "/c/zeptoclaw") {
+			t.Errorf("providers.%s.api_base = %q, missing /c/zeptoclaw prefix", name, apiBase)
+		}
 	}
-	if config["model"] != "gpt-4o" {
-		t.Error("model was clobbered")
+
+	safety, ok := config["safety"].(map[string]interface{})
+	if !ok {
+		t.Fatal("safety not set in config")
+	}
+	if safety["allow_private_endpoints"] != true {
+		t.Error("safety.allow_private_endpoints should be true")
+	}
+
+	agents, ok := config["agents"].(map[string]interface{})
+	if !ok || agents["model"] != "gpt-4o" {
+		t.Error("agents.model was clobbered")
 	}
 
 	hooks := config["hooks"].(map[string]interface{})
@@ -1414,7 +1441,13 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 	configDir := filepath.Join(dir, "zeptoclaw-config")
 	os.MkdirAll(configDir, 0o755)
 	configPath := filepath.Join(configDir, "config.json")
-	os.WriteFile(configPath, []byte(`{"model": "gpt-4o"}`), 0o644)
+	original := `{
+		"providers": {
+			"anthropic": {"api_key": "sk-ant-test", "api_base": "https://api.anthropic.com"}
+		},
+		"agents": {"model": "gpt-4o"}
+	}`
+	os.WriteFile(configPath, []byte(original), 0o644)
 
 	ZeptoClawConfigPathOverride = configPath
 	defer func() { ZeptoClawConfigPathOverride = "" }()
@@ -1432,14 +1465,31 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 	var config map[string]interface{}
 	json.Unmarshal(data, &config)
 
-	if _, exists := config["api_base"]; exists {
-		t.Error("api_base should be removed after teardown")
-	}
 	if _, exists := config["hooks"]; exists {
 		t.Error("hooks should be removed when none existed before setup")
 	}
-	if config["model"] != "gpt-4o" {
-		t.Error("model was clobbered by teardown")
+	if _, exists := config["safety"]; exists {
+		t.Error("safety should be removed when none existed before setup")
+	}
+
+	providers, ok := config["providers"].(map[string]interface{})
+	if !ok {
+		t.Fatal("providers should be restored")
+	}
+	anthropic, ok := providers["anthropic"].(map[string]interface{})
+	if !ok {
+		t.Fatal("anthropic provider should be restored")
+	}
+	if anthropic["api_base"] != "https://api.anthropic.com" {
+		t.Errorf("anthropic api_base = %v, want original", anthropic["api_base"])
+	}
+	if anthropic["api_key"] != "sk-ant-test" {
+		t.Errorf("anthropic api_key = %v, want original", anthropic["api_key"])
+	}
+
+	agents, ok := config["agents"].(map[string]interface{})
+	if !ok || agents["model"] != "gpt-4o" {
+		t.Error("agents.model was clobbered by teardown")
 	}
 }
 
