@@ -115,7 +115,7 @@ func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request)
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
 	mode := a.claudeCodeMode()
-	if a.scannerCfg != nil && !a.scannerCfg.ClaudeCode.Enabled {
+	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 
@@ -166,6 +166,23 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		action = "allow"
 	}
 	return claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+}
+
+// claudeCodeEnabled returns true when the claude-code hook handler
+// should evaluate inspection rules. Selecting the claudecode connector
+// is a sufficient opt-in — no second `claude_code.enabled: true` is
+// needed — because the connector's Setup() has already installed the
+// hooks into ~/.claude/settings.json. An explicit claude_code.enabled
+// flag still wins for operators who run claudecode alongside a
+// different selected connector (e.g. test harnesses).
+func (a *APIServer) claudeCodeEnabled() bool {
+	if a.scannerCfg == nil {
+		return false
+	}
+	if a.scannerCfg.ClaudeCode.Enabled {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "claudecode")
 }
 
 func (a *APIServer) claudeCodeMode() string {
