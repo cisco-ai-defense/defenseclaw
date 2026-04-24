@@ -91,7 +91,7 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 
 func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest) codexHookResponse {
 	mode := a.codexMode()
-	if a.scannerCfg != nil && !a.scannerCfg.Codex.Enabled {
+	if a.scannerCfg != nil && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 
@@ -143,6 +143,21 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 		action = "allow"
 	}
 	return codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+}
+
+// codexEnabled mirrors claudeCodeEnabled: selecting the codex connector
+// is a sufficient opt-in — the connector's Setup() has already written
+// the codex-hook.sh script and (on Codex's side) registered it. An
+// explicit codex.enabled flag still wins for operators running codex
+// alongside a different selected connector.
+func (a *APIServer) codexEnabled() bool {
+	if a.scannerCfg == nil {
+		return false
+	}
+	if a.scannerCfg.Codex.Enabled {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
 }
 
 func (a *APIServer) codexMode() string {
