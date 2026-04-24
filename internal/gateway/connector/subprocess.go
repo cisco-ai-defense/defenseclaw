@@ -37,7 +37,8 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr string
+	APIAddr  string
+	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -88,22 +89,31 @@ var hookScripts = []string{
 }
 
 // WriteHookScript generates the shared inspect-tool.sh hook script.
-// Kept for backward compatibility — calls WriteAllHookScripts internally.
+// Kept for backward compatibility — calls WriteHookScriptsWithToken with
+// an empty token (loopback-allow path).
 func WriteHookScript(hookDir, apiAddr string) error {
-	return WriteAllHookScripts(hookDir, apiAddr)
+	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
 }
 
-// WriteAllHookScripts generates all four hook scripts into hookDir:
-//   - inspect-tool.sh       (pre-tool: inspect tool args before execution)
-//   - inspect-request.sh    (pre-request: inspect user query before LLM call)
-//   - inspect-response.sh   (post-response: inspect LLM response)
-//   - inspect-tool-response.sh (post-tool: inspect tool output before LLM sees it)
-func WriteAllHookScripts(hookDir, apiAddr string) error {
+// WriteHookScriptsWithToken generates every hook script into hookDir,
+// baking the gateway bearer token into the curl Authorization header so
+// the API server's auth middleware accepts the hook's POST. When token
+// is empty the scripts omit the header entirely so the middleware's
+// loopback-allow branch still applies.
+//
+// Hook scripts generated:
+//   - inspect-tool.sh          (pre-tool)
+//   - inspect-request.sh       (pre-request)
+//   - inspect-response.sh      (post-response)
+//   - inspect-tool-response.sh (post-tool)
+//   - claude-code-hook.sh      (Claude Code lifecycle events)
+//   - codex-hook.sh            (Codex lifecycle events)
+func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	if err := os.MkdirAll(hookDir, 0o755); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr}
+	data := templateData{APIAddr: apiAddr, APIToken: token}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -123,6 +133,14 @@ func WriteAllHookScripts(hookDir, apiAddr string) error {
 	}
 
 	return nil
+}
+
+// WriteAllHookScripts generates every hook script with no gateway token
+// baked in (loopback-allow path). Kept for connectors that don't need
+// the API bearer — e.g. the inspect-* hooks reach the chat-completions
+// proxy on port 4000, which has its own X-DC-Auth path.
+func WriteAllHookScripts(hookDir, apiAddr string) error {
+	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
 }
 
 // HookScripts returns the list of hook script names that are generated.

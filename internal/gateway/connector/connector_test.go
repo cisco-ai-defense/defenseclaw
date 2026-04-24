@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1311,6 +1312,108 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 			t.Errorf("hook %s does not contain inspect API path", name)
 		}
 	}
+}
+
+func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
+	// The claude-code hook posts to /api/v1/claude-code/hook, which the API
+	// server's auth middleware guards with a bearer token. Without the
+	// header the request is 401'd, the hook script fails-open, and no
+	// inspection happens — which is exactly how claude-code queries
+	// silently slipped through. Run the generated script so we exercise
+	// the real runtime auth wiring, not the template shape.
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-abcdef123"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	if !containsAuthBearer(out, "tok-abcdef123") {
+		t.Errorf("claude-code-hook.sh curl invocation missing `Authorization: Bearer tok-abcdef123`; got curl args:\n%s", out)
+	}
+}
+
+func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
+	// Operators who never set DEFENSECLAW_GATEWAY_TOKEN rely on the
+	// loopback fallback; emitting an empty Authorization header would
+	// make the API middleware reject with "invalid_token" instead of
+	// falling through to the loopback allow path. So the hook must omit
+	// the header entirely when no token is configured.
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", ""); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	if containsAuthBearer(out, "") {
+		t.Errorf("claude-code-hook.sh should not emit an Authorization header when token is empty; got curl args:\n%s", out)
+	}
+}
+
+func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
+	// If the operator rotates DEFENSECLAW_GATEWAY_TOKEN without
+	// regenerating hook scripts, the env var must win so the hook keeps
+	// working across rotations. ${DEFENSECLAW_GATEWAY_TOKEN:-<baked>} in
+	// the script expresses that.
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "baked-stale"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "claude-code-hook.sh"),
+		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "from-env"})
+	if !containsAuthBearer(out, "from-env") {
+		t.Errorf("env var should win over baked token; got curl args:\n%s", out)
+	}
+}
+
+// runHookAndReturnCurlArgs executes the given hook script with `curl`
+// replaced by a stub that writes its argv, one per line, to a file. The
+// hook script pipes curl's stderr to /dev/null, so stdout/stderr capture
+// would lose the evidence — the stub persists it out-of-band. This lets
+// us assert on the real argv curl would have seen, including the
+// runtime-computed Authorization header.
+func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[string]string) string {
+	t.Helper()
+	stubDir := t.TempDir()
+	argFile := filepath.Join(stubDir, "curl-args.txt")
+	stub := filepath.Join(stubDir, "curl")
+	stubSrc := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argFile + "; done\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(), "PATH="+stubDir+":"+os.Getenv("PATH"))
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook script run: %v", err)
+	}
+	data, err := os.ReadFile(argFile)
+	if err != nil {
+		t.Fatalf("curl stub never recorded args: %v", err)
+	}
+	return string(data)
+}
+
+// containsAuthBearer returns true if the stubbed curl argv lines contain
+// an `Authorization: Bearer <token>` header. When token is empty, returns
+// true whenever ANY Authorization: Bearer header is present.
+func containsAuthBearer(curlArgs, token string) bool {
+	for _, line := range strings.Split(curlArgs, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Authorization: Bearer") {
+			continue
+		}
+		if token == "" {
+			return true
+		}
+		if line == "Authorization: Bearer "+token {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHookScripts_ReturnsList(t *testing.T) {

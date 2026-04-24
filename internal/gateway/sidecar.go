@@ -958,6 +958,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			DataDir:   s.cfg.DataDir,
 			ProxyAddr: proxyAddr,
 			APIAddr:   apiAddr,
+			// Bake the gateway token into hook scripts so claude-code-hook.sh
+			// and codex-hook.sh can authenticate against the API server's
+			// auth middleware. ResolvedToken checks env vars first, then
+			// config — same source the proxy uses for credential wiring
+			// below, so the baked value and the value accepted by the API
+			// middleware stay in lockstep.
+			APIToken: s.cfg.Gateway.ResolvedToken(),
 		}
 		if err := conn.Setup(ctx, setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)

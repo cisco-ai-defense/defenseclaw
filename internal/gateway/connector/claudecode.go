@@ -56,7 +56,7 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScript(hookDir, opts.APIAddr); err != nil {
+	if err := WriteHookScriptsWithToken(hookDir, opts.APIAddr, opts.APIToken); err != nil {
 		return fmt.Errorf("claudecode hook script: %w", err)
 	}
 
