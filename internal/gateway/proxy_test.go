@@ -3109,3 +3109,33 @@ func TestResponsesTextFromContent_PrettyPrintedArray(t *testing.T) {
 		t.Errorf("responsesTextFromContent with leading whitespace = %q, want %q", got, "hello")
 	}
 }
+
+func TestConnectorPrefixStripper(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"/c/claudecode/v1/messages", "/v1/messages"},
+		{"/c/zeptoclaw/v1/chat/completions", "/v1/chat/completions"},
+		{"/c/codex/v1/responses", "/v1/responses"},
+		{"/c/openclaw/v1/messages", "/v1/messages"},
+		{"/v1/messages", "/v1/messages"},
+		{"/v1/chat/completions", "/v1/chat/completions"},
+		{"/health", "/health"},
+		{"/c/", "/c/"},
+		{"/c/claudecode", "/c/claudecode"},
+	}
+
+	for _, tc := range cases {
+		var got string
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+		})
+		handler := connectorPrefixStripper(inner)
+		req, _ := http.NewRequest("POST", "http://localhost"+tc.path, nil)
+		handler.ServeHTTP(nil, req)
+		if got != tc.want {
+			t.Errorf("connectorPrefixStripper(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
