@@ -1,3 +1,13 @@
+```text
+     ____         ____                       ____  _
+    / __ \  ___  / __/___   ___   ___  ___  / ___|| | __ _ __      __
+   / / / / / _ \/ /_// _ \ / _ \ / __|/ _ \| |    | |/ _` |\ \ /\ / /
+  / /_/ / /  __/ __//  __/| | | |\__ \  __/| |___ | | (_| | \ V  V /
+ /_____/  \___/_/   \___/ |_| |_||___/\___| \____||_|\__,_|  \_/\_/
+
+          Security governance for agentic AI runtimes
+```
+
 # DefenseClaw [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/) [![Go 1.26.2](https://img.shields.io/badge/go-1.26.2-00ADD8.svg)](https://go.dev/) [![CI](https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml) [![Discord](https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&logoColor=white)](https://discord.com/invite/nKWtDcXxtx) [![Cisco AI Defense](https://img.shields.io/badge/Cisco-AI%20Defense-049fd9?logo=cisco&logoColor=white)](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) [![AI Security Framework](https://img.shields.io/badge/AI%20Security-Framework-orange)](https://learn-cloudsecurity.cisco.com/ai-security-framework) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cisco-ai-defense/defenseclaw)
 
 Security governance for OpenClaw and agentic AI runtimes. DefenseClaw scans skills, MCP servers, plugins, and generated code before use; inspects LLM and tool traffic at runtime; and exports audit evidence to local dashboards, SIEM, and OpenTelemetry pipelines.
