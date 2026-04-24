@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/time/rate"
 )
 
@@ -3107,6 +3108,48 @@ func TestResponsesTextFromContent_PrettyPrintedArray(t *testing.T) {
 	got := responsesTextFromContent(content)
 	if got != "hello" {
 		t.Errorf("responsesTextFromContent with leading whitespace = %q, want %q", got, "hello")
+	}
+}
+
+// hydrateConnectorSignals must let a native-binary connector (zeptoclaw —
+// no fetch interceptor) supply the upstream URL and provider key that the
+// rest of the proxy's header-based resolver needs. Returning empty strings
+// means "leave req.TargetURL / req.TargetAPIKey alone", so fetch-interceptor
+// paths are not affected.
+func TestHydrateConnectorSignals_UsesConnectorRoute(t *testing.T) {
+	conn := connector.NewZeptoClawConnector()
+	conn.SetProviderSnapshot(map[string]connector.ZeptoClawProviderEntry{
+		"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-test"},
+	})
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"anthropic/claude-sonnet-4.5"}`)))
+	body := []byte(`{"model":"anthropic/claude-sonnet-4.5"}`)
+
+	upstream, key := hydrateConnectorSignals(conn, r, body)
+	if upstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("upstream = %q, want openrouter fallback", upstream)
+	}
+	if key != "sk-or-test" {
+		t.Errorf("key = %q, want openrouter snapshot key", key)
+	}
+}
+
+func TestHydrateConnectorSignals_NilConnectorIsNoOp(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{}`)))
+	upstream, key := hydrateConnectorSignals(nil, r, []byte(`{}`))
+	if upstream != "" || key != "" {
+		t.Errorf("nil connector should return empty, got upstream=%q key=%q", upstream, key)
+	}
+}
+
+func TestHydrateConnectorSignals_NoSnapshotIsNoOp(t *testing.T) {
+	// OpenClaw uses fetch-interceptor headers; its Route() does not emit
+	// RawUpstream. Hydration must leave req.TargetURL alone in that case.
+	conn := connector.NewOpenClawConnector()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"gpt-4"}`)))
+	upstream, key := hydrateConnectorSignals(conn, r, []byte(`{"model":"gpt-4"}`))
+	if upstream != "" || key != "" {
+		t.Errorf("fetch-interceptor connector should emit no upstream, got upstream=%q key=%q", upstream, key)
 	}
 }
 

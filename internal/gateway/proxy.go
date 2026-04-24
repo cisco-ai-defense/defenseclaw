@@ -1344,6 +1344,22 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	return provider
 }
 
+// hydrateConnectorSignals lets a connector whose agent has no fetch
+// interceptor (native binaries like ZeptoClaw) supply the upstream URL and
+// provider key that X-DC-Target-URL / X-AI-Auth would otherwise carry.
+// Returning ("", "") means "no opinion" — the caller must leave req.TargetURL
+// / req.TargetAPIKey alone so fetch-interceptor paths still work.
+func hydrateConnectorSignals(conn connector.Connector, r *http.Request, body []byte) (string, string) {
+	if conn == nil {
+		return "", ""
+	}
+	cs, err := conn.Route(r, body)
+	if err != nil || cs == nil {
+		return "", ""
+	}
+	return cs.RawUpstream, cs.RawAPIKey
+}
+
 // resolveProviderFromHeaders selects the upstream LLMProvider for the given
 // request. The fetch interceptor sets X-DC-Target-URL on every outbound LLM
 // call; we infer the provider from that URL and use X-AI-Auth as the API key.
@@ -1439,6 +1455,19 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// the provider SDK originally used (Authorization, x-api-key, api-key).
 	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
 		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+	}
+
+	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
+	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
+	// connector to resolve them from its captured config snapshot. Existing
+	// header values win — fetch-interceptor paths are unchanged.
+	if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
+		if req.TargetURL == "" {
+			req.TargetURL = connUpstream
+		}
+		if req.TargetAPIKey == "" {
+			req.TargetAPIKey = connKey
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] parsed: model=%q stream=%v messages=%d\n",

@@ -775,22 +775,43 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 	c := NewZeptoClawConnector()
 	c.SetCredentials("my-token", "my-master")
 
+	// Loopback is trusted even when the gateway token is set, because
+	// ZeptoClaw is a native binary with no fetch interceptor to inject
+	// X-DC-Auth. Zeptoclaw forwards the real upstream provider key in
+	// Authorization (e.g. "Bearer sk-or-..."), which the connector
+	// deliberately ignores for auth purposes — it's an upstream key,
+	// not DefenseClaw's. The proxy binds loopback-only, which is the
+	// operative security boundary here.
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
-	if c.Authenticate(r) {
-		t.Error("expected auth to fail without token when token configured")
+	r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
+	if !c.Authenticate(r) {
+		t.Error("expected loopback auth to pass even when token configured (ZeptoClaw has no way to carry X-DC-Auth)")
 	}
 
+	// A valid X-DC-Auth still works on loopback.
 	r.Header.Set("X-DC-Auth", "my-token")
 	if !c.Authenticate(r) {
-		t.Error("expected auth to pass with correct token")
+		t.Error("expected auth to pass with correct X-DC-Auth token")
 	}
 
+	// The master key via Authorization still works (documented fallback
+	// for non-loopback sandbox/bridge deployments).
 	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r2.RemoteAddr = "127.0.0.1:54321"
 	r2.Header.Set("Authorization", "Bearer my-master")
 	if !c.Authenticate(r2) {
 		t.Error("expected auth to pass with master key")
+	}
+
+	// Non-loopback must still be strict: without a valid X-DC-Auth or
+	// master-key bearer, reject. Protects sandbox / bridge deployments
+	// where the proxy is exposed beyond localhost.
+	r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r3.RemoteAddr = "10.0.0.5:54321"
+	r3.Header.Set("Authorization", "Bearer sk-or-upstream-key")
+	if c.Authenticate(r3) {
+		t.Error("expected non-loopback auth to fail with only an upstream bearer token")
 	}
 }
 
@@ -810,8 +831,163 @@ func TestZeptoClaw_Route(t *testing.T) {
 	if cs.RawAPIKey != "sk-openai-key" {
 		t.Errorf("RawAPIKey = %q", cs.RawAPIKey)
 	}
+	// No provider snapshot loaded → no upstream to resolve; proxy will fall
+	// back to configured-model / default-provider paths as before.
 	if cs.RawUpstream != "" {
-		t.Errorf("RawUpstream = %q, want empty", cs.RawUpstream)
+		t.Errorf("RawUpstream = %q, want empty when no provider snapshot", cs.RawUpstream)
+	}
+}
+
+func TestZeptoClaw_Route_MapsProviderPrefixToSnapshotUpstream(t *testing.T) {
+	// Zeptoclaw submits model="openrouter/deepseek/deepseek-chat" and only
+	// `openrouter` is configured in the user's zeptoclaw config. Route()
+	// must resolve the upstream to that provider's real api_base and its
+	// api_key so the proxy can forward.
+	c := NewZeptoClawConnector()
+	c.SetProviderSnapshot(map[string]ZeptoClawProviderEntry{
+		"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-test"},
+		"anthropic":  {APIBase: "https://api.anthropic.com", APIKey: "sk-ant-test"},
+	})
+	body := []byte(`{"model":"openrouter/deepseek/deepseek-chat","stream":true}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer ignored-client-key")
+
+	cs, err := c.Route(r, body)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if cs.RawUpstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("RawUpstream = %q, want openrouter api_base", cs.RawUpstream)
+	}
+	if cs.RawAPIKey != "sk-or-test" {
+		t.Errorf("RawAPIKey = %q, want openrouter key from snapshot", cs.RawAPIKey)
+	}
+}
+
+func TestZeptoClaw_Route_FallsBackToSingleConfiguredProvider(t *testing.T) {
+	// The user's real zeptoclaw config only has `openrouter` configured, but
+	// zeptoclaw still sends model="anthropic/claude-sonnet-4.5" because
+	// anthropic is openrouter's upstream via its model router. When the
+	// model's provider prefix isn't in the snapshot, fall back to the sole
+	// configured provider so the request gets routed somewhere valid.
+	c := NewZeptoClawConnector()
+	c.SetProviderSnapshot(map[string]ZeptoClawProviderEntry{
+		"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-test"},
+	})
+	body := []byte(`{"model":"anthropic/claude-sonnet-4.5"}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+
+	cs, err := c.Route(r, body)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if cs.RawUpstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("RawUpstream = %q, want fallback to openrouter", cs.RawUpstream)
+	}
+	if cs.RawAPIKey != "sk-or-test" {
+		t.Errorf("RawAPIKey = %q, want fallback openrouter key", cs.RawAPIKey)
+	}
+}
+
+func TestZeptoClaw_Route_SkipsEntriesWithNoAPIKey(t *testing.T) {
+	// ZeptoClaw's config seeds every provider slot with nulls (e.g.
+	// "anthropic": {"api_key": null}) even when the user has not configured
+	// that provider. Such entries must not count as "configured" for routing.
+	c := NewZeptoClawConnector()
+	c.SetProviderSnapshot(map[string]ZeptoClawProviderEntry{
+		"anthropic":  {APIBase: "", APIKey: ""},
+		"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-test"},
+	})
+	body := []byte(`{"model":"anthropic/claude-sonnet-4.5"}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+
+	cs, err := c.Route(r, body)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if cs.RawAPIKey != "sk-or-test" {
+		t.Errorf("RawAPIKey = %q, want fallback to openrouter (skipping keyless anthropic entry)", cs.RawAPIKey)
+	}
+}
+
+func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
+	// On every sidecar boot, Setup runs. If it overwrites the backup each
+	// time, the second boot captures the already-patched api_base (the
+	// proxy URL) as the "original", losing the user's real upstream. The
+	// snapshot used by Route() must still point at the real upstream after
+	// a second Setup call.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	os.WriteFile(configPath, []byte(`{
+		"providers": {
+			"openrouter": {"api_key": "sk-or-pristine", "api_base": "https://openrouter.ai/api/v1"}
+		}
+	}`), 0o644)
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+
+	// First Setup (simulates first boot).
+	c1 := NewZeptoClawConnector()
+	if err := c1.Setup(nil, opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+
+	// Second Setup on a fresh connector instance, same data dir. The
+	// config on disk is now patched (api_base=proxy URL). A naive Setup
+	// would read the patched config and record the proxy URL in the
+	// backup, but the snapshot must still reflect the pristine upstream.
+	c2 := NewZeptoClawConnector()
+	if err := c2.Setup(nil, opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+
+	snap := c2.ProviderSnapshot()
+	entry, ok := snap["openrouter"]
+	if !ok {
+		t.Fatal("openrouter missing from snapshot after second Setup")
+	}
+	if entry.APIBase != "https://openrouter.ai/api/v1" {
+		t.Errorf("APIBase = %q, want pristine upstream (not the proxy URL)", entry.APIBase)
+	}
+	if entry.APIKey != "sk-or-pristine" {
+		t.Errorf("APIKey = %q, want pristine key", entry.APIKey)
+	}
+}
+
+func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
+	// After Setup(), the connector must retain the user's provider table
+	// in memory so Route() can look up upstreams. Otherwise we'd have to
+	// re-read the (already-patched) config file on every request.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	os.WriteFile(configPath, []byte(`{
+		"providers": {
+			"openrouter": {"api_key": "sk-or-test", "api_base": null}
+		}
+	}`), 0o644)
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+
+	c := NewZeptoClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	snap := c.ProviderSnapshot()
+	entry, ok := snap["openrouter"]
+	if !ok {
+		t.Fatal("openrouter not in snapshot after Setup")
+	}
+	if entry.APIKey != "sk-or-test" {
+		t.Errorf("APIKey = %q, want sk-or-test", entry.APIKey)
+	}
+	// api_base is null in the source config; the snapshot should fall back
+	// to the provider's well-known default so Route() has somewhere to send.
+	if entry.APIBase == "" {
+		t.Error("APIBase must default to the provider's well-known upstream when config has null")
 	}
 }
 
@@ -1134,11 +1310,21 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 			t.Errorf("%s: master key should authenticate", c.Name())
 		}
 
-		// No creds should fail
+		// No creds should fail — except for native-binary connectors
+		// that have no way to carry DefenseClaw credentials and must
+		// trust loopback. Gate the assertion off .Name() rather than
+		// silently weakening the invariant across the board.
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
-		if c.Authenticate(r3) {
-			t.Errorf("%s: should fail without credentials when token configured", c.Name())
+		switch c.Name() {
+		case "zeptoclaw":
+			if !c.Authenticate(r3) {
+				t.Errorf("%s: loopback must be trusted (no fetch interceptor to inject X-DC-Auth)", c.Name())
+			}
+		default:
+			if c.Authenticate(r3) {
+				t.Errorf("%s: should fail without credentials when token configured", c.Name())
+			}
 		}
 	}
 }
@@ -1429,9 +1615,57 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 		t.Error("agents.model was clobbered")
 	}
 
-	hooks := config["hooks"].(map[string]interface{})
-	if !strings.Contains(hooks["before_tool"].(string), "inspect-tool.sh") {
-		t.Errorf("hooks.before_tool = %q", hooks["before_tool"])
+	// Setup must NOT write config["hooks"]. ZeptoClaw's hooks schema is a
+	// notification config (before_tool/after_tool = []HookRule, each with
+	// tools/level/target_channel fields), not a script-path map. Writing a
+	// string path there makes ZeptoClaw's deserializer fail with
+	// "expected a sequence". Tool-call inspection is handled by the proxy
+	// route (/c/zeptoclaw) via the LLM stream; no config hook is needed.
+	if _, exists := config["hooks"]; exists {
+		t.Errorf("hooks should not be written by zeptoclaw Setup, got %v", config["hooks"])
+	}
+}
+
+func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	// ZeptoClaw's real hooks schema: before_tool/after_tool are arrays.
+	original := `{
+		"providers": {"anthropic": {"api_key": "sk-ant-test"}},
+		"hooks": {
+			"enabled": false,
+			"before_tool": [],
+			"after_tool": [],
+			"on_error": []
+		}
+	}`
+	os.WriteFile(configPath, []byte(original), 0o644)
+
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+
+	c := NewZeptoClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("config is not valid JSON after Setup: %v", err)
+	}
+
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatal("existing hooks section was removed")
+	}
+	// before_tool must remain an array to satisfy ZeptoClaw's schema.
+	if _, ok := hooks["before_tool"].([]interface{}); !ok {
+		t.Errorf("hooks.before_tool must stay a sequence, got %T", hooks["before_tool"])
+	}
+	if _, ok := hooks["after_tool"].([]interface{}); !ok {
+		t.Errorf("hooks.after_tool must stay a sequence, got %T", hooks["after_tool"])
 	}
 }
 
@@ -1493,7 +1727,12 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 	}
 }
 
-func TestZeptoClaw_Setup_WritesAllHookPaths(t *testing.T) {
+func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
+	// Regression test: before the fix, Setup wrote config["hooks"] as
+	// {before_tool: <string path>, ...}, which ZeptoClaw rejected with
+	// "expected a sequence" because its HooksConfig defines before_tool as
+	// Vec<HookRule>. The connector must leave the hooks section alone so
+	// ZeptoClaw's own defaults remain valid.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	os.WriteFile(configPath, []byte(`{}`), 0o644)
@@ -1512,22 +1751,20 @@ func TestZeptoClaw_Setup_WritesAllHookPaths(t *testing.T) {
 
 	data, _ := os.ReadFile(configPath)
 	var config map[string]interface{}
-	json.Unmarshal(data, &config)
-
-	hooks, ok := config["hooks"].(map[string]interface{})
-	if !ok {
-		t.Fatal("hooks not set in config")
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("Setup produced invalid JSON: %v", err)
 	}
-	expectedHooks := []string{"before_tool", "before_request", "after_response", "after_tool"}
-	for _, hk := range expectedHooks {
-		v, ok := hooks[hk]
-		if !ok {
-			t.Errorf("missing hook %s in config", hk)
-			continue
-		}
-		path, _ := v.(string)
-		if !strings.Contains(path, "hooks/") {
-			t.Errorf("hook %s does not point to hooks dir: %s", hk, path)
+
+	// If hooks is written, every before_*/after_* entry must be a sequence
+	// (ZeptoClaw's HookRule array), never a string path.
+	if hooks, ok := config["hooks"].(map[string]interface{}); ok {
+		for k, v := range hooks {
+			if k == "enabled" {
+				continue
+			}
+			if _, isString := v.(string); isString {
+				t.Errorf("hooks[%q] = string %v — ZeptoClaw expects a sequence", k, v)
+			}
 		}
 	}
 }

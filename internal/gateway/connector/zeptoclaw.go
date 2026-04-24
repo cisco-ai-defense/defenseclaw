@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ZeptoClawConnector handles LLM traffic routing and tool inspection for ZeptoClaw.
@@ -33,6 +34,35 @@ import (
 type ZeptoClawConnector struct {
 	gatewayToken string
 	masterKey    string
+
+	// snapshotMu protects providers.
+	snapshotMu sync.RWMutex
+	providers  map[string]ZeptoClawProviderEntry
+}
+
+// ZeptoClawProviderEntry is a resolved provider record captured at Setup time
+// from ~/.zeptoclaw/config.json. ZeptoClaw is a native binary with no fetch
+// interceptor, so the connector must synthesize the X-DC-Target-URL /
+// X-AI-Auth that the proxy's provider-resolution chain expects. The snapshot
+// holds the real upstream and key for every provider the user configured.
+type ZeptoClawProviderEntry struct {
+	APIBase string
+	APIKey  string
+}
+
+// zeptoClawDefaultAPIBase maps provider names to well-known upstream URLs so a
+// snapshot entry whose api_base was null in the source config can still be
+// routed. Kept intentionally small — only providers ZeptoClaw lists as
+// top-level keys in its config schema.
+var zeptoClawDefaultAPIBase = map[string]string{
+	"anthropic":  "https://api.anthropic.com",
+	"openai":     "https://api.openai.com/v1",
+	"openrouter": "https://openrouter.ai/api/v1",
+	"groq":       "https://api.groq.com/openai/v1",
+	"deepseek":   "https://api.deepseek.com",
+	"gemini":     "https://generativelanguage.googleapis.com/v1beta",
+	"xai":        "https://api.x.ai/v1",
+	"novita":     "https://api.novita.ai/v3/openai",
 }
 
 // NewZeptoClawConnector creates a new ZeptoClaw connector.
@@ -91,7 +121,13 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if isLoopback && c.gatewayToken == "" {
+	// Loopback clients are trusted unconditionally. ZeptoClaw is a native
+	// binary with no fetch interceptor, so it cannot inject X-DC-Auth and
+	// the Authorization bearer it sends is the *upstream* provider key,
+	// not DefenseClaw's. The proxy binds 127.0.0.1 only, so loopback is
+	// the effective boundary; out-of-loopback callers (sandbox / bridge)
+	// still have to present X-DC-Auth or the master key above.
+	if isLoopback {
 		return true
 	}
 
@@ -108,6 +144,86 @@ func (c *ZeptoClawConnector) SetCredentials(gatewayToken, masterKey string) {
 	c.masterKey = masterKey
 }
 
+// SetProviderSnapshot stores the user's resolved provider table. Called by
+// Setup() after reading ~/.zeptoclaw/config.json, and exposed so tests can
+// seed it directly.
+func (c *ZeptoClawConnector) SetProviderSnapshot(snap map[string]ZeptoClawProviderEntry) {
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+	c.providers = snap
+}
+
+// ProviderSnapshot returns a copy of the provider table.
+func (c *ZeptoClawConnector) ProviderSnapshot() map[string]ZeptoClawProviderEntry {
+	c.snapshotMu.RLock()
+	defer c.snapshotMu.RUnlock()
+	out := make(map[string]ZeptoClawProviderEntry, len(c.providers))
+	for k, v := range c.providers {
+		out[k] = v
+	}
+	return out
+}
+
+// resolveUpstream picks the upstream api_base and key for a given model.
+//
+//   - Model strings look like "anthropic/claude-sonnet-4.5" or plain
+//     "gpt-4o". If the prefix matches a configured provider with a usable
+//     key, use it directly.
+//   - Otherwise (no prefix, unknown prefix, or the matching entry has no
+//     key because the user never configured that slot), fall back to the
+//     single configured provider. ZeptoClaw's built-in model router takes
+//     a "provider/model" string that crosses its configured providers, so
+//     an OpenRouter-only config can still legitimately send
+//     "anthropic/claude-*" — that request must go to OpenRouter upstream.
+//
+// Returns ("", "") when no usable provider is configured; the caller then
+// leaves RawUpstream empty and the proxy's default resolver kicks in.
+func (c *ZeptoClawConnector) resolveUpstream(model string) (string, string) {
+	c.snapshotMu.RLock()
+	defer c.snapshotMu.RUnlock()
+
+	if prefix, _, ok := splitZeptoClawModel(model); ok {
+		if e, found := c.providers[prefix]; found && e.APIKey != "" {
+			return zeptoClawBaseOrDefault(prefix, e.APIBase), e.APIKey
+		}
+	}
+
+	// No direct hit; fall back to the sole configured provider. If the
+	// user has configured several, we have no preference — return the
+	// first one with a key. A richer policy (e.g. rotation order from the
+	// config) would go here.
+	for name, e := range c.providers {
+		if e.APIKey == "" {
+			continue
+		}
+		return zeptoClawBaseOrDefault(name, e.APIBase), e.APIKey
+	}
+
+	return "", ""
+}
+
+// splitZeptoClawModel splits "prefix/tail" into ("prefix", "tail", true) if
+// the prefix is a ZeptoClaw-known provider name. Returns ("", model, false)
+// otherwise so plain model strings like "gpt-4o" are treated as unprefixed.
+func splitZeptoClawModel(model string) (prefix, tail string, ok bool) {
+	i := strings.IndexByte(model, '/')
+	if i < 0 {
+		return "", model, false
+	}
+	p := model[:i]
+	if _, known := zeptoClawDefaultAPIBase[p]; !known {
+		return "", model, false
+	}
+	return p, model[i+1:], true
+}
+
+func zeptoClawBaseOrDefault(provider, configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return zeptoClawDefaultAPIBase[provider]
+}
+
 func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
 	cs := &ConnectorSignals{
 		ConnectorName: "zeptoclaw",
@@ -116,6 +232,18 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 		RawModel:      ParseModelFromBody(body),
 		Stream:        ParseStreamFromBody(body),
 		ExtraHeaders:  map[string]string{},
+	}
+
+	// ZeptoClaw is a native binary with no fetch interceptor to set
+	// X-DC-Target-URL / X-AI-Auth. Resolve the real upstream from the
+	// provider snapshot captured at Setup; the request that actually
+	// hits the proxy then carries the inbound client key, so prefer the
+	// snapshot key when present and fall back to the inbound header.
+	if upstream, key := c.resolveUpstream(cs.RawModel); upstream != "" {
+		cs.RawUpstream = upstream
+		if key != "" {
+			cs.RawAPIKey = key
+		}
 	}
 
 	if !isChatPath(r.URL.Path) {
@@ -128,7 +256,6 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 // zeptoClawBackup stores the original config for teardown.
 type zeptoClawBackup struct {
 	OriginalProviders json.RawMessage `json:"original_providers"`
-	OriginalHooks     json.RawMessage `json:"original_hooks"`
 	OriginalSafety    json.RawMessage `json:"original_safety,omitempty"`
 }
 
@@ -163,6 +290,11 @@ func zeptoClawConfigPath() string {
 // provider, hook, and safety settings, then patches each provider's api_base to
 // route through the proxy and sets safety.allow_private_endpoints so the
 // localhost proxy URL passes SSRF validation.
+//
+// Idempotency: on re-entry (second sidecar boot), the on-disk config already
+// contains the patched api_base. Writing a fresh backup from that state would
+// lose the user's pristine upstream forever. We therefore keep the first
+// backup we wrote and source the snapshot from it when it exists.
 func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	configPath := zeptoClawConfigPath()
 
@@ -177,25 +309,66 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 		}
 	}
 
-	backup := zeptoClawBackup{}
-	if providers, ok := config["providers"]; ok {
-		raw, _ := json.Marshal(providers)
-		backup.OriginalProviders = raw
-	}
-	if hooks, ok := config["hooks"]; ok {
-		raw, _ := json.Marshal(hooks)
-		backup.OriginalHooks = raw
-	}
-	if safety, ok := config["safety"]; ok {
-		raw, _ := json.Marshal(safety)
-		backup.OriginalSafety = raw
+	backupPath := filepath.Join(opts.DataDir, "zeptoclaw_backup.json")
+	_, backupStatErr := os.Stat(backupPath)
+	backupExists := backupStatErr == nil
+
+	// pristineProviders is the source of truth for the snapshot: the
+	// existing backup on re-entry, or the current config on first boot.
+	pristineProviders := map[string]interface{}{}
+	if backupExists {
+		if bk, err := c.loadBackup(opts.DataDir); err == nil && len(bk.OriginalProviders) > 0 {
+			_ = json.Unmarshal(bk.OriginalProviders, &pristineProviders)
+		}
+	} else {
+		if p, ok := config["providers"].(map[string]interface{}); ok {
+			pristineProviders = p
+		}
 	}
 
-	if err := c.saveBackup(opts.DataDir, backup); err != nil {
-		return fmt.Errorf("save zeptoclaw backup: %w", err)
+	// Only write the backup once. Subsequent boots keep the first one.
+	if !backupExists {
+		backup := zeptoClawBackup{}
+		if providers, ok := config["providers"]; ok {
+			raw, _ := json.Marshal(providers)
+			backup.OriginalProviders = raw
+		}
+		if safety, ok := config["safety"]; ok {
+			raw, _ := json.Marshal(safety)
+			backup.OriginalSafety = raw
+		}
+		if err := c.saveBackup(opts.DataDir, backup); err != nil {
+			return fmt.Errorf("save zeptoclaw backup: %w", err)
+		}
 	}
 
 	proxyURL := "http://" + opts.ProxyAddr + "/c/zeptoclaw"
+
+	// Build the in-memory snapshot from the pristine providers (either the
+	// first-boot config or the saved backup). Route() uses this to map
+	// model prefixes to real upstream URLs and keys.
+	snapshot := map[string]ZeptoClawProviderEntry{}
+	for name, val := range pristineProviders {
+		prov, ok := val.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch name {
+		case "retry", "fallback", "rotation", "plugins":
+			continue
+		}
+		entry := ZeptoClawProviderEntry{
+			APIBase: zeptoClawDefaultAPIBase[name],
+		}
+		if base, ok := prov["api_base"].(string); ok && base != "" {
+			entry.APIBase = base
+		}
+		if key, ok := prov["api_key"].(string); ok {
+			entry.APIKey = key
+		}
+		snapshot[name] = entry
+	}
+	c.SetProviderSnapshot(snapshot)
 
 	// Patch each configured provider's api_base to route through proxy.
 	providers, _ := config["providers"].(map[string]interface{})
@@ -207,7 +380,6 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 		if !ok {
 			continue
 		}
-		// Skip non-provider keys (retry, fallback, rotation, plugins).
 		switch name {
 		case "retry", "fallback", "rotation", "plugins":
 			continue
@@ -224,13 +396,10 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	safety["allow_private_endpoints"] = true
 	config["safety"] = safety
 
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	config["hooks"] = map[string]interface{}{
-		"before_tool":    filepath.Join(hookDir, "inspect-tool.sh"),
-		"before_request": filepath.Join(hookDir, "inspect-request.sh"),
-		"after_response": filepath.Join(hookDir, "inspect-response.sh"),
-		"after_tool":     filepath.Join(hookDir, "inspect-tool-response.sh"),
-	}
+	// ZeptoClaw's hooks config is a notification system (before_tool/after_tool
+	// are []HookRule with channel/level fields), not a script-runner. Tool-call
+	// inspection is performed at the proxy (/c/zeptoclaw) by observing tool_use
+	// messages in the LLM stream, so no config["hooks"] mutation is needed.
 
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -267,14 +436,6 @@ func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) {
 		config["providers"] = orig
 	} else {
 		delete(config, "providers")
-	}
-
-	if len(backup.OriginalHooks) > 0 && string(backup.OriginalHooks) != "null" {
-		var orig interface{}
-		json.Unmarshal(backup.OriginalHooks, &orig)
-		config["hooks"] = orig
-	} else {
-		delete(config, "hooks")
 	}
 
 	if len(backup.OriginalSafety) > 0 && string(backup.OriginalSafety) != "null" {
