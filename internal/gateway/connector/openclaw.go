@@ -18,11 +18,40 @@ package connector
 
 import (
 	"context"
+	"embed"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 )
+
+// openClawExtensionFS holds the runtime files of the DefenseClaw OpenClaw
+// plugin. The tree is synced from extensions/defenseclaw/ by `make
+// sync-openclaw-extension` before every gateway build, so the embedded
+// contents always match the TypeScript source. Nothing else under
+// extensions/ belongs here — only the files OpenClaw actually loads at
+// runtime (package.json, openclaw.plugin.json, dist/*.js, and the
+// subset of node_modules the plugin requires).
+//
+//go:embed all:openclaw_extension
+var openClawExtensionFS embed.FS
+
+// openClawPluginRoot names the root directory inside openClawExtensionFS.
+const openClawPluginRoot = "openclaw_extension"
+
+// OpenClawHomeOverride lets tests redirect the OpenClaw home directory so
+// Setup/Teardown write into a scratch path instead of ~/.openclaw.
+var OpenClawHomeOverride string
+
+func openClawHome() string {
+	if OpenClawHomeOverride != "" {
+		return OpenClawHomeOverride
+	}
+	return filepath.Join(os.Getenv("HOME"), ".openclaw")
+}
 
 // OpenClawConnector handles LLM traffic routing and tool inspection for OpenClaw.
 // LLM traffic: fetch interceptor plugin patches globalThis.fetch to route
@@ -47,13 +76,20 @@ func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
 }
 
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	// Surface 3: Plugin subprocess enforcement
+	// Surface 1: Install the embedded plugin into OpenClaw and register it
+	// in openclaw.json. Enabling the connector is the *only* step an
+	// operator needs — no separate `defenseclaw setup guardrail` phase.
+	if err := installOpenClawExtension(openClawHome()); err != nil {
+		return fmt.Errorf("openclaw extension install: %w", err)
+	}
+
+	// Surface 2: Plugin subprocess enforcement
 	policy := ResolveSubprocessPolicy(SubprocessSandbox)
 	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}
 
-	// Write hook script for tool inspection
+	// Surface 3: Hook script for tool inspection
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScript(hookDir, opts.APIAddr); err != nil {
 		return fmt.Errorf("openclaw hook script: %w", err)
@@ -63,8 +99,166 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {
+	uninstallOpenClawExtension(openClawHome())
 	TeardownSubprocessEnforcement(opts)
 	return nil
+}
+
+// installOpenClawExtension writes the embedded plugin files to
+// <ocHome>/extensions/defenseclaw and registers the plugin in
+// <ocHome>/openclaw.json. Idempotent: re-running leaves the config in the
+// same shape (single allow entry, single load path, enabled=true).
+func installOpenClawExtension(ocHome string) error {
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+
+	// Blow away any prior install so stale files never linger across
+	// gateway upgrades. The embedded tree is the authoritative source.
+	_ = os.RemoveAll(extDir)
+	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir); err != nil {
+		return fmt.Errorf("write plugin files: %w", err)
+	}
+
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	if err := patchOpenClawConfig(configPath, extDir); err != nil {
+		return fmt.Errorf("patch openclaw.json: %w", err)
+	}
+	return nil
+}
+
+// writeEmbeddedTree walks fsys under srcRoot and mirrors every file into
+// dstRoot with the same relative layout, creating directories as needed.
+func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string) error {
+	return fs.WalkDir(fsys, srcRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dstRoot, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := fsys.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+}
+
+// patchOpenClawConfig reads openclaw.json (creates it if missing), ensures
+// the DefenseClaw plugin is allowed, enabled, and has its extension path
+// in plugins.load.paths. Other sections are left untouched.
+func patchOpenClawConfig(configPath, extDir string) error {
+	cfg := map[string]interface{}{}
+	if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("parse %s: %w", configPath, err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", configPath, err)
+	}
+
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	if plugins == nil {
+		plugins = map[string]interface{}{}
+	}
+
+	plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+
+	entries, _ := plugins["entries"].(map[string]interface{})
+	if entries == nil {
+		entries = map[string]interface{}{}
+	}
+	entries["defenseclaw"] = map[string]interface{}{"enabled": true}
+	plugins["entries"] = entries
+
+	load, _ := plugins["load"].(map[string]interface{})
+	if load == nil {
+		load = map[string]interface{}{}
+	}
+	load["paths"] = appendUniqueString(load["paths"], extDir)
+	plugins["load"] = load
+
+	cfg["plugins"] = plugins
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", configPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(configPath, append(out, '\n'), 0o644)
+}
+
+// uninstallOpenClawExtension removes the extension directory and deletes
+// the DefenseClaw entries from openclaw.json, leaving unrelated plugins
+// untouched.
+func uninstallOpenClawExtension(ocHome string) {
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	_ = os.RemoveAll(extDir)
+
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	cfg := map[string]interface{}{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return
+	}
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	if plugins == nil {
+		return
+	}
+	plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
+	if entries, ok := plugins["entries"].(map[string]interface{}); ok {
+		delete(entries, "defenseclaw")
+		plugins["entries"] = entries
+	}
+	if load, ok := plugins["load"].(map[string]interface{}); ok {
+		load["paths"] = removeString(load["paths"], extDir)
+		plugins["load"] = load
+	}
+	cfg["plugins"] = plugins
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(configPath, append(out, '\n'), 0o644)
+}
+
+// appendUniqueString returns a []interface{} with s appended if it is not
+// already present. Accepts any upstream interface{} shape (nil, missing,
+// or the usual []interface{} JSON produces).
+func appendUniqueString(existing interface{}, s string) []interface{} {
+	list, _ := existing.([]interface{})
+	for _, v := range list {
+		if cur, ok := v.(string); ok && cur == s {
+			return list
+		}
+	}
+	return append(list, s)
+}
+
+// removeString returns a []interface{} with every occurrence of s removed.
+func removeString(existing interface{}, s string) []interface{} {
+	list, _ := existing.([]interface{})
+	out := make([]interface{}, 0, len(list))
+	for _, v := range list {
+		if cur, ok := v.(string); ok && cur == s {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 func (c *OpenClawConnector) Authenticate(r *http.Request) bool {

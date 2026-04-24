@@ -152,84 +152,12 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
     return True
 
 
-def install_openclaw_plugin(source_dir: str, openclaw_home: str) -> tuple[str, str]:
-    """Install the built DefenseClaw plugin into OpenClaw.
-
-    The *source_dir* is typically ``~/.defenseclaw/extensions/defenseclaw``
-    (a stable staging directory populated by ``make plugin-install`` or
-    future PyPI packaging).
-
-    Tries ``openclaw plugins install <source_dir>`` first (copies files
-    into OpenClaw's extensions directory and registers in openclaw.json).
-    Falls back to a manual file copy + config patching if the ``openclaw``
-    CLI is not available.
-
-    Returns:
-        ("cli", "")          — installed via openclaw CLI
-        ("manual", reason)   — fell back to manual copy, reason explains why
-        ("error", reason)    — both methods failed
-        ("", "")             — plugin not built (dist/index.js missing)
-    """
-    dist_entry = os.path.join(source_dir, "dist", "index.js")
-    if not os.path.isfile(dist_entry):
-        return ("", "")
-
-    oc_home = _expand(openclaw_home)
-    oc_config = os.path.join(oc_home, "openclaw.json")
-
-    # --- Try openclaw CLI (no -l: copies files, registers in config) ---
-    cli_error = ""
-    try:
-        target_dir = os.path.join(oc_home, "extensions", "defenseclaw")
-        if os.path.isdir(target_dir):
-            shutil.rmtree(target_dir)
-
-        _remove_from_plugins_allow(oc_config, "defenseclaw")
-
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
-        result = subprocess.run(
-            [*prefix, openclaw_bin(), "plugins", "install", source_dir],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode == 0:
-            return ("cli", "")
-        cli_error = (result.stderr or result.stdout or "").strip()
-    except FileNotFoundError:
-        cli_error = "openclaw CLI not found on PATH"
-    except subprocess.TimeoutExpired:
-        cli_error = "timed out"
-
-    # --- Fallback: manual copy + config registration ---
-    target_dir = os.path.join(oc_home, "extensions", "defenseclaw")
-
-    try:
-        if os.path.isdir(target_dir):
-            shutil.rmtree(target_dir)
-        os.makedirs(target_dir, exist_ok=True)
-
-        shutil.copy2(os.path.join(source_dir, "package.json"), target_dir)
-
-        manifest = os.path.join(source_dir, "openclaw.plugin.json")
-        if os.path.isfile(manifest):
-            shutil.copy2(manifest, target_dir)
-
-        shutil.copytree(os.path.join(source_dir, "dist"), os.path.join(target_dir, "dist"))
-
-        src_nm = os.path.join(source_dir, "node_modules")
-        if os.path.isdir(src_nm):
-            dst_nm = os.path.join(target_dir, "node_modules")
-            os.makedirs(dst_nm, exist_ok=True)
-            for dep in ("js-yaml", "argparse"):
-                src = os.path.join(src_nm, dep)
-                if os.path.isdir(src):
-                    shutil.copytree(src, os.path.join(dst_nm, dep))
-
-        _register_plugin_in_config(oc_config, source_dir)
-
-        return ("manual", cli_error)
-    except OSError as exc:
-        return ("error", f"manual copy failed: {exc}")
+# NOTE: install_openclaw_plugin lived here previously. The gateway's
+# OpenClawConnector.Setup() now installs the embedded plugin directly
+# into ~/.openclaw/extensions/defenseclaw and patches openclaw.json on
+# every sidecar boot, so there is no separate Python-side install step.
+# `uninstall_openclaw_plugin` is kept for `defenseclaw uninstall`, which
+# has to revert the plugin even if the gateway is already gone.
 
 
 def uninstall_openclaw_plugin(openclaw_home: str) -> str:
