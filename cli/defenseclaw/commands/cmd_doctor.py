@@ -971,7 +971,9 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         click.echo()
         click.echo("  ── Services ──")
     _check_sidecar(cfg, r)
-    _check_openclaw_gateway(cfg, r)
+    active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
+    if active_connector == "openclaw":
+        _check_openclaw_gateway(cfg, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
         click.echo()
@@ -1141,6 +1143,10 @@ def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
 
 def _fix_openclaw_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
     """Re-sync OPENCLAW_GATEWAY_TOKEN from openclaw.json."""
+    active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
+    if active_connector != "openclaw":
+        return ("skip", f"connector is {active_connector}, not openclaw")
+
     from defenseclaw.commands.cmd_setup import (
         _detect_openclaw_gateway_token,
         _save_secret_to_dotenv,
@@ -1198,6 +1204,10 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     create one. It never *overwrites* an existing entry.
     """
     del assume_yes  # unused: capturing a snapshot is always safe
+    active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
+    if active_connector != "openclaw":
+        return ("skip", f"connector is {active_connector}, not openclaw")
+
     from defenseclaw.guardrail import (
         pristine_backup_path,
         record_pristine_backup,

@@ -75,6 +75,13 @@ from defenseclaw.context import AppContext
     help="Re-run all steps even if the environment is already initialized.",
 )
 @click.option(
+    "--agent",
+    "agent_name",
+    type=click.Choice(["openclaw", "zeptoclaw", "claudecode", "codex"], case_sensitive=False),
+    default=None,
+    help="Agent framework connector (default: auto-detect or openclaw).",
+)
+@click.option(
     "--skip-gateway",
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
@@ -86,6 +93,7 @@ def quickstart_cmd(
     non_interactive: bool,
     yes: bool,
     force: bool,
+    agent_name: str | None,
     skip_gateway: bool,
 ) -> None:
     """Zero-prompt end-to-end setup with safe defaults.
@@ -106,6 +114,8 @@ def quickstart_cmd(
     from defenseclaw.credentials import mask
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
+
+    connector = agent_name or "openclaw"
 
     click.echo()
     click.echo(f"  DefenseClaw v{__version__} — quickstart")
@@ -144,25 +154,30 @@ def quickstart_cmd(
         # Bootstrap doesn't close store/logger — we'll reuse both below.
         pass
 
-    # --- Step 3: OpenClaw gateway token auto-detection ---
+    # --- Step 3: Gateway token auto-detection ---
     click.echo()
-    click.echo("  [3/5] Detecting OpenClaw gateway token…")
-    token = _detect_openclaw_gateway_token(cfg.claw.config_file)
-    if token:
-        click.echo(f"        ✓ OPENCLAW_GATEWAY_TOKEN = {mask(token)}")
-        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+    click.echo(f"  [3/5] Detecting gateway token (connector: {connector})…")
+    if connector == "openclaw":
+        token = _detect_openclaw_gateway_token(cfg.claw.config_file)
+        if token:
+            click.echo(f"        ✓ OPENCLAW_GATEWAY_TOKEN = {mask(token)}")
+            cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        else:
+            click.echo("        ⚠ No OpenClaw token detected.")
+            click.echo("          This is expected if you're running DefenseClaw before OpenClaw")
+            click.echo("          is set up. Re-run 'defenseclaw quickstart' after installing OpenClaw.")
     else:
-        click.echo("        ⚠ No OpenClaw token detected.")
-        click.echo("          This is expected if you're running DefenseClaw before OpenClaw")
-        click.echo("          is set up. Re-run 'defenseclaw quickstart' after installing OpenClaw.")
+        click.echo(f"        ℹ Token auto-detection skipped for {connector} connector.")
+        click.echo("          The gateway will use loopback auth or credentials set via setup.")
 
     # --- Step 4: apply safe guardrail defaults + execute setup ---
     click.echo()
-    click.echo(f"  [4/5] Configuring guardrail (mode={mode}, scanner={scanner_mode})…")
+    click.echo(f"  [4/5] Configuring guardrail (mode={mode}, scanner={scanner_mode}, connector={connector})…")
     gc = cfg.guardrail
     gc.enabled = True
     gc.mode = mode
     gc.scanner_mode = scanner_mode
+    gc.connector = connector
     gc.judge.enabled = with_judge
 
     app = AppContext()
@@ -170,22 +185,24 @@ def quickstart_cmd(
     app.store = store
     app.logger = logger
 
-    # Ensure the OpenClaw config file path is accessible before we try
-    # to patch it — otherwise execute_guardrail_setup prints a hard
-    # error. For quickstart we want a softer hint instead.
-    oc_path = (
-        os.path.expanduser(cfg.claw.config_file)
-        if cfg.claw.config_file.startswith("~/")
-        else cfg.claw.config_file
-    )
-    if not os.path.isfile(oc_path):
-        click.echo(f"        ⚠ OpenClaw config not found at {cfg.claw.config_file}")
-        click.echo("          Guardrail will be saved but not activated. Run 'defenseclaw setup guardrail'")
-        click.echo("          after installing OpenClaw to patch its config.")
-        gc.enabled = False
-        cfg.save()
-        guardrail_ok = False
-        warnings: list[str] = [f"OpenClaw config missing at {cfg.claw.config_file}"]
+    # For OpenClaw connector, verify its config file exists before patching.
+    # Other connectors handle their own setup in the Go gateway.
+    if connector == "openclaw":
+        oc_path = (
+            os.path.expanduser(cfg.claw.config_file)
+            if cfg.claw.config_file.startswith("~/")
+            else cfg.claw.config_file
+        )
+        if not os.path.isfile(oc_path):
+            click.echo(f"        ⚠ OpenClaw config not found at {cfg.claw.config_file}")
+            click.echo("          Guardrail will be saved but not activated. Run 'defenseclaw setup guardrail'")
+            click.echo("          after installing OpenClaw to patch its config.")
+            gc.enabled = False
+            cfg.save()
+            guardrail_ok = False
+            warnings: list[str] = [f"OpenClaw config missing at {cfg.claw.config_file}"]
+        else:
+            guardrail_ok, warnings = execute_guardrail_setup(app, save_config=True)
     else:
         guardrail_ok, warnings = execute_guardrail_setup(app, save_config=True)
 

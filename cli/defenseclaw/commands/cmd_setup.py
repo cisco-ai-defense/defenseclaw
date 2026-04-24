@@ -1159,7 +1159,7 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 # Connector metadata (mirrors internal/gateway/connector/*.go)
 # ---------------------------------------------------------------------------
 
-_CONNECTOR_NAMES = ["openclaw", "zeptoclaw", "claudecode", "codex", "cursor", "opencode"]
+_CONNECTOR_NAMES = ["openclaw", "zeptoclaw", "claudecode", "codex"]
 
 _CONNECTOR_META: dict[str, dict[str, str]] = {
     "openclaw": {
@@ -1183,18 +1183,6 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "codex": {
         "label": "Codex",
         "description": "env var + hook script + response-scan",
-        "tool_mode": "both",
-        "subprocess_policy": "sandbox",
-    },
-    "cursor": {
-        "label": "Cursor",
-        "description": "proxy override + hook script + response-scan",
-        "tool_mode": "both",
-        "subprocess_policy": "sandbox",
-    },
-    "opencode": {
-        "label": "OpenCode",
-        "description": "config patch + hook command",
         "tool_mode": "both",
         "subprocess_policy": "sandbox",
     },
