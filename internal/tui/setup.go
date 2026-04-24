@@ -95,7 +95,7 @@ var wizardHowTo = [wizardCount]string{
 		"Tip: scan_instructions catches malicious server-side directives that prompts/resources miss.",
 	// Gateway
 	"Runs: defenseclaw setup gateway\n" +
-		"What you'll need: host + port the gateway should bind, TLS preference, OPENCLAW_GATEWAY_TOKEN env.\n" +
+		"What you'll need: host + port the gateway should bind, TLS preference, DEFENSECLAW_GATEWAY_TOKEN env.\n" +
 		"Tip: for non-loopback hosts, TLS is auto-enabled — supply a cert path or turn skip-verify on for dev only.",
 	// Guardrail
 	"Runs: defenseclaw setup guardrail\n" +
@@ -344,8 +344,8 @@ func (p *SetupPanel) loadSections() {
 		{
 			Name:    "Claw",
 			Summary: "Which agent framework DefenseClaw defends (skill/MCP directory resolution derives from this).",
-			Help: "Currently only 'openclaw' is supported; future modes (nemoclaw, opencode, claudecode) will " +
-				"change where skills/MCPs are discovered. Changing this without also migrating content will orphan scans.",
+			Help: "Controls where skills/MCPs are discovered. " +
+				"Changing this without also migrating content will orphan scans.",
 			Fields: []configField{
 				{Label: "Mode", Key: "claw.mode", Kind: "string", Value: string(c.Claw.Mode),
 					Hint: "openclaw (default). Controls skill/MCP dir resolution — see internal/config/claw.go."},
@@ -383,7 +383,7 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Approval Timeout (s)", Key: "gateway.approval_timeout_s", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.ApprovalTimeout),
 					Hint: "How long the gateway waits for an operator approval before failing closed (seconds)."},
 				{Label: "Token Env", Key: "gateway.token_env", Kind: "string", Value: c.Gateway.TokenEnv,
-					Hint: "Env var NAME holding the gateway auth token (default OPENCLAW_GATEWAY_TOKEN). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
+					Hint: "Env var NAME holding the gateway auth token (default DEFENSECLAW_GATEWAY_TOKEN). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
 				{Label: "Device Key File", Key: "gateway.device_key_file", Kind: "string", Value: c.Gateway.DeviceKeyFile,
 					Hint: "Path to the per-machine private key used to derive master secrets (default ~/.defenseclaw/device.key)."},
 			},

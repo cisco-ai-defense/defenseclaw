@@ -68,6 +68,11 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
+
+	claudeCodeMu                sync.Mutex
+	claudeCodeLastComponentScan time.Time
+	codexMu                     sync.Mutex
+	codexLastComponentScan      time.Time
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events
@@ -130,8 +135,13 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
+	mux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
+	mux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
+	mux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
+	mux.HandleFunc("/api/v1/claude-code/hook", a.handleClaudeCodeHook)
+	mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
 
 	handler := maxBodyMiddleware(mux, 1<<20)
 	handler = a.apiCSRFProtect(handler)

@@ -779,6 +779,7 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
+    connector: str = "openclaw"             # active connector: openclaw | zeptoclaw | claudecode | codex | cursor | opencode
 
 
 @dataclass
@@ -1341,6 +1342,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
+        connector=raw.get("connector", "openclaw"),
     )
 
 

@@ -57,6 +57,22 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 			t.Errorf("got %q, want fallback", got)
 		}
 	})
+	t.Run("defenseclaw env takes priority over openclaw env", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "new-style")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "old-style")
+		g := GatewayConfig{TokenEnv: "", Token: ""}
+		if got := g.ResolvedToken(); got != "new-style" {
+			t.Errorf("got %q, want new-style", got)
+		}
+	})
+	t.Run("empty defenseclaw env falls back to openclaw env", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "legacy-token")
+		g := GatewayConfig{TokenEnv: "", Token: ""}
+		if got := g.ResolvedToken(); got != "legacy-token" {
+			t.Errorf("got %q, want legacy-token", got)
+		}
+	})
 }
 
 func TestDefaultDataPath(t *testing.T) {

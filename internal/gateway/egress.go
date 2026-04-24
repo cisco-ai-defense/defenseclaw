@@ -35,7 +35,7 @@ import (
 // Shape:
 //
 //	POST /v1/events/egress
-//	X-DC-Auth: Bearer <OPENCLAW_GATEWAY_TOKEN>
+//	X-DC-Auth: Bearer <DEFENSECLAW_GATEWAY_TOKEN>
 //	Content-Type: application/json
 //	{
 //	  "target_host": "api.novelai.net",

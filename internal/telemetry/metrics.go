@@ -1760,3 +1760,4 @@ func (p *Provider) RecordGuardrailCacheMiss(ctx context.Context, scanner, verdic
 		attribute.String("cache", "verdict"),
 	))
 }
+

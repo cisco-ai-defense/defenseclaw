@@ -1156,11 +1156,107 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 
 
 # ---------------------------------------------------------------------------
+# Connector metadata (mirrors internal/gateway/connector/*.go)
+# ---------------------------------------------------------------------------
+
+_CONNECTOR_NAMES = ["openclaw", "zeptoclaw", "claudecode", "codex", "cursor", "opencode"]
+
+_CONNECTOR_META: dict[str, dict[str, str]] = {
+    "openclaw": {
+        "label": "OpenClaw",
+        "description": "fetch interceptor + before_tool_call plugin",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "zeptoclaw": {
+        "label": "ZeptoClaw",
+        "description": "api_base redirect + before_tool hook",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "claudecode": {
+        "label": "Claude Code",
+        "description": "env var + PreToolUse hook script",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "codex": {
+        "label": "Codex",
+        "description": "env var + hook script + response-scan",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "cursor": {
+        "label": "Cursor",
+        "description": "proxy override + hook script + response-scan",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "opencode": {
+        "label": "OpenCode",
+        "description": "config patch + hook command",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+}
+
+
+def _select_connector_interactive(current: str) -> str:
+    """Present a numbered menu and return the selected connector name."""
+    click.echo()
+    click.echo("  Which agent framework are you using?")
+    click.echo()
+    for i, name in enumerate(_CONNECTOR_NAMES, 1):
+        meta = _CONNECTOR_META[name]
+        marker = " *" if name == current else ""
+        click.echo(f"    {i}. {meta['label']:<14s} — {meta['description']}{marker}")
+    click.echo()
+    raw = click.prompt(
+        "  Selection",
+        type=click.IntRange(1, len(_CONNECTOR_NAMES)),
+    )
+    return _CONNECTOR_NAMES[raw - 1]
+
+
+def _print_connector_info(name: str) -> None:
+    """Print connector details after selection."""
+    meta = _CONNECTOR_META.get(name, {})
+    if not meta:
+        return
+    tool_mode = meta["tool_mode"]
+    if tool_mode == "both":
+        tool_display = "pre-execution + response-scan"
+    else:
+        tool_display = tool_mode
+    click.echo(f"    Connector:         {meta['label']} ({name})")
+    click.echo(f"    Tool inspection:   {tool_display}")
+    click.echo(f"    Subprocess policy: {meta['subprocess_policy']}")
+    if tool_mode == "response-scan":
+        click.echo()
+        click.secho(
+            f"    Warning: {meta['label']} does not support pre-execution tool hooks.",
+            fg="yellow",
+        )
+        click.echo(
+            "      Tool calls are scanned in LLM responses only (response-scan mode)."
+        )
+        click.echo(
+            "      DefenseClaw can block the response but cannot prevent individual"
+        )
+        click.echo(
+            "      tool execution if the response has already been delivered."
+        )
+
+
+# ---------------------------------------------------------------------------
 # setup guardrail
 # ---------------------------------------------------------------------------
 
 @setup.command("guardrail")
 @click.option("--disable", is_flag=True, help="Disable guardrail and revert OpenClaw config")
+@click.option("--agent", "agent_name",
+              type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False), default=None,
+              help="Agent framework connector (e.g. openclaw, claudecode, codex)")
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
 @click.option("--scanner-mode", type=click.Choice(["local", "remote"]), default=None,
@@ -1187,6 +1283,7 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 def setup_guardrail(
     app: AppContext,
     disable: bool,
+    agent_name: str | None,
     guard_mode, guard_port,
     scanner_mode, cisco_endpoint, cisco_api_key_env, cisco_timeout_ms,
     block_message,
@@ -1200,6 +1297,11 @@ def setup_guardrail(
     Routes all LLM traffic through the built-in Go guardrail proxy.
     Every prompt and response is inspected for prompt injection, secrets,
     PII, and data exfiltration patterns.
+
+    Use --agent to select the agent framework connector (openclaw,
+    claudecode, codex, etc.). The connector determines how LLM traffic
+    is intercepted, how tool calls are inspected, and what subprocess
+    enforcement policy is applied.
 
     Two modes:
       observe — log findings, never block (default, recommended to start)
@@ -1220,6 +1322,8 @@ def setup_guardrail(
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
+        if agent_name:
+            gc.connector = agent_name
         gc.mode = guard_mode or gc.mode or "observe"
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
@@ -1278,7 +1382,7 @@ def setup_guardrail(
                 gc.scanner_mode = "local"
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
-        _interactive_guardrail_setup(app, gc)
+        _interactive_guardrail_setup(app, gc, agent_name=agent_name)
 
     if not gc.enabled:
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
@@ -1292,7 +1396,9 @@ def setup_guardrail(
 
     # --- Summary ---
     click.echo()
+    connector_label = _CONNECTOR_META.get(gc.connector or "openclaw", {}).get("label", gc.connector)
     rows = [
+        ("guardrail.connector", f"{connector_label} ({gc.connector})"),
         ("guardrail.mode", gc.mode),
         ("guardrail.port", str(gc.port)),
         ("guardrail.model", gc.model),
@@ -1331,7 +1437,12 @@ def setup_guardrail(
         click.echo()
 
     if restart:
-        _restart_services(app.cfg.data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
+        _restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=gc.connector or "openclaw",
+        )
     else:
         click.echo("  Next steps:")
         click.echo("    Restart the defenseclaw sidecar for changes to take effect:")
@@ -1354,97 +1465,39 @@ def execute_guardrail_setup(
     *,
     save_config: bool = True,
 ) -> tuple[bool, list[str]]:
-    """Run guardrail setup steps 0–7.
+    """Run guardrail setup steps.
 
     Returns (success, warnings).  When *save_config* is False the caller
     is responsible for calling ``app.cfg.save()`` (used by ``init`` which
     saves once at the end).
-    """
-    from defenseclaw.guardrail import (
-        _derive_master_key,
-        install_openclaw_plugin,
-        patch_openclaw_config,
-    )
 
+    All connector-specific setup (plugin install, config patching, hook
+    scripts, subprocess shims/sandbox) is handled by the Go gateway's
+    ``Connector.Setup()`` at sidecar startup. This function only persists
+    the Python-side config and writes the guardrail runtime JSON.
+    """
     gc = app.cfg.guardrail
     warnings: list[str] = []
+    connector_name = gc.connector or "openclaw"
 
-    standalone = app.cfg.openshell.is_standalone()
-
-    # --- Pre-flight checks ---
-    if not standalone:
-        claw_cfg_file = app.cfg.claw.config_file
-        oc_config_path = (
-            os.path.expanduser(claw_cfg_file) if claw_cfg_file.startswith("~/") else claw_cfg_file
-        )
-        if not os.path.isfile(oc_config_path):
-            click.echo(f"  ✗ OpenClaw config not found: {app.cfg.claw.config_file}")
-            click.echo("    Make sure OpenClaw is installed and initialized.")
-            click.echo("    Expected location: ~/.openclaw/openclaw.json")
-            return False, warnings
-
-    # No model validation — the fetch interceptor scans all models automatically.
     click.echo()
 
-    click.echo("  ✓ Guardrail proxy is built into the Go binary (no Python deps)")
-
-    if standalone:
-        click.echo("  ⚠ Sandbox mode: skipping OpenClaw plugin install and config patch")
-        click.echo("    Run 'defenseclaw sandbox setup' to install the guardrail plugin into the sandbox")
+    meta = _CONNECTOR_META.get(connector_name, {})
+    if meta:
+        tool_mode = meta["tool_mode"]
+        if tool_mode == "both":
+            tool_display = "pre-execution + response-scan"
+        else:
+            tool_display = tool_mode
+        click.echo(f"  ✓ Connector: {meta.get('label', connector_name)} ({connector_name})")
+        click.echo(f"  ✓ Tool inspection: {tool_display}")
+        click.echo(f"  ✓ Subprocess policy: {meta['subprocess_policy']}")
     else:
-        # --- Step 1: Install OpenClaw plugin ---
-        plugin_source = _find_plugin_source()
-        if plugin_source:
-            openclaw_home = app.cfg.claw.home_dir
-            method, cli_error = install_openclaw_plugin(plugin_source, openclaw_home)
-            if method == "cli":
-                click.echo("  ✓ OpenClaw plugin installed (via openclaw CLI)")
-            elif method == "manual":
-                click.echo("  ✓ OpenClaw plugin installed to extensions/")
-            elif method == "error":
-                click.echo(f"  ✗ OpenClaw plugin installation failed: {cli_error}")
-                warnings.append(
-                    "Plugin not installed — tool interception will not work. "
-                    "Try: make plugin-install && defenseclaw setup guardrail"
-                )
-            else:
-                click.echo("  ⚠ OpenClaw plugin not built — run 'make plugin && make plugin-install'")
-                warnings.append(
-                    "Plugin not built — tool interception will not work. "
-                    "Build with: make plugin && make plugin-install"
-                )
-        else:
-            click.echo("  ⚠ OpenClaw plugin not found at ~/.defenseclaw/extensions/")
-            warnings.append(
-                "Plugin not found — run 'make plugin-install' to stage it, "
-                "then re-run setup"
-            )
+        click.echo(f"  ✓ Connector: {connector_name} (plugin)")
 
-        # --- Step 2: Patch OpenClaw config ---
-        master_key = _derive_master_key(app.cfg.gateway.device_key_file)
+    click.echo("  ✓ Connector setup will run automatically when the gateway starts")
 
-        prev_model = patch_openclaw_config(
-            openclaw_config_file=app.cfg.claw.config_file,
-            model_name=gc.model_name,
-            proxy_port=gc.port,
-            master_key=master_key,
-            original_model=gc.original_model,
-            guardrail_host=gc.host or "localhost",
-            data_dir=app.cfg.data_dir,
-        )
-        if prev_model is not None:
-            click.echo(f"  ✓ OpenClaw config patched: {app.cfg.claw.config_file}")
-            if prev_model and not gc.original_model:
-                gc.original_model = prev_model
-        else:
-            click.echo(f"  ✗ Failed to patch OpenClaw config: {app.cfg.claw.config_file}")
-            click.echo("    File may be malformed or unreadable. Check the JSON syntax.")
-            warnings.append(
-                "OpenClaw config not patched — LLM traffic will not be routed through the guardrail. "
-                f"Fix {app.cfg.claw.config_file} and re-run setup"
-            )
-
-    # --- Step 3: Save DefenseClaw config ---
+    # --- Save DefenseClaw config ---
     if save_config:
         try:
             app.cfg.save()
@@ -1453,43 +1506,15 @@ def execute_guardrail_setup(
             click.echo(f"  ✗ Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
 
-    if gc.original_model:
-        click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
-
-    # --- Step 4: Auto-detect Azure endpoints and write to .env ---
-    # No provider API keys needed — the fetch interceptor reads them from
-    # OpenClaw's auth-profiles.json at runtime. Azure endpoints are the
-    # exception: they're customer-specific URLs we detect from openclaw.json
-    # and write to .env so the proxy knows where to forward Azure requests.
-    from defenseclaw.guardrail import detect_azure_endpoints
-    azure_endpoints = detect_azure_endpoints(app.cfg.claw.config_file)
-    if azure_endpoints:
-        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
-        existing_dotenv = _load_dotenv(dotenv_path)
-        # Write the first Azure endpoint as AZURE_OPENAI_ENDPOINT
-        first_name, first_url = next(iter(azure_endpoints.items()))
-        existing_dotenv["AZURE_OPENAI_ENDPOINT"] = first_url
-        _write_dotenv(dotenv_path, existing_dotenv)
-        click.echo(f"  ✓ Azure endpoint saved: {first_url[:60]}...")
-
-    # --- Step 5: Write guardrail_runtime.json ---
+    # --- Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
-
-    # --- Step 6: Sandbox-specific setup (plugin + iptables scripts) ---
-    if standalone:
-        click.echo()
-        click.echo(click.style(
-            "  ** Re-run 'defenseclaw sandbox setup' to install the guardrail plugin "
-            "and restart the sandbox. **", fg="yellow",
-        ))
-    else:
-        from defenseclaw.commands.cmd_setup_sandbox import restore_sandbox_ownership_if_needed
-        restore_sandbox_ownership_if_needed(app.cfg)
 
     return True, warnings
 
 
-def _interactive_guardrail_setup(app: AppContext, gc) -> None:
+def _interactive_guardrail_setup(
+    app: AppContext, gc, *, agent_name: str | None = None,
+) -> None:
 
     click.echo()
     click.echo("  LLM Guardrail Setup")
@@ -1500,6 +1525,15 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
     click.echo("    • Secrets, API keys, and credentials")
     click.echo("    • PII leakage (names, emails, SSNs, credit cards)")
     click.echo("    • Data exfiltration patterns")
+    click.echo()
+
+    # --- Step 0: Connector selection ---
+    if agent_name and agent_name in _CONNECTOR_META:
+        gc.connector = agent_name
+    else:
+        gc.connector = _select_connector_interactive(gc.connector or "openclaw")
+    click.echo()
+    _print_connector_info(gc.connector)
     click.echo()
 
     model_name = gc.model_name or gc.model or ""
@@ -1742,81 +1776,31 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
-    from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
-
-    standalone = app.cfg.openshell.is_standalone()
+    connector_name = gc.connector or "openclaw"
+    meta = _CONNECTOR_META.get(connector_name, {})
 
     click.echo()
     click.echo("  Disabling LLM guardrail...")
-    warnings: list[str] = []
-
-    if standalone:
-        click.echo("  ⚠ Sandbox mode: skipping OpenClaw config restore and plugin removal")
-        click.echo("    Run 'defenseclaw sandbox setup' to remove the guardrail plugin from the sandbox")
-    else:
-        # Remove defenseclaw plugin entries from openclaw.json
-        if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
-            click.echo(f"  ✓ OpenClaw plugin removed from: {app.cfg.claw.config_file}")
-        else:
-            click.echo(f"  ✗ Could not update OpenClaw config: {app.cfg.claw.config_file}")
-            warnings.append(f"Manually remove defenseclaw from plugins.allow in {app.cfg.claw.config_file}")
-
-        # Uninstall OpenClaw plugin
-        openclaw_home = app.cfg.claw.home_dir
-        result = uninstall_openclaw_plugin(openclaw_home)
-        if result == "cli":
-            click.echo("  ✓ OpenClaw plugin uninstalled (via openclaw CLI)")
-        elif result == "manual":
-            click.echo("  ✓ OpenClaw plugin removed from extensions/")
-        elif result == "error":
-            ext_dir = os.path.join(os.path.expanduser(openclaw_home), "extensions", "defenseclaw")
-            click.echo(f"  ✗ Could not remove OpenClaw plugin at {ext_dir}")
-            warnings.append(f"Manually delete: rm -rf {ext_dir}")
-        else:
-            click.echo("  ✓ OpenClaw plugin not installed (nothing to remove)")
+    if meta:
+        click.echo(f"  Connector: {meta.get('label', connector_name)} ({connector_name})")
 
     gc.enabled = False
 
     try:
         app.cfg.save()
         click.echo("  ✓ Config saved")
-        if standalone:
-            click.echo()
-            click.echo(click.style(
-                "  ** Re-run 'defenseclaw sandbox setup' to remove the guardrail plugin "
-                "and restart the sandbox. **", fg="yellow",
-            ))
     except OSError as exc:
         click.echo(f"  ✗ Failed to save config: {exc}")
-        warnings.append("Config not saved — guardrail may re-enable on next run")
+        click.echo("    Guardrail may re-enable on next run")
 
-    if warnings:
-        click.echo()
-        click.echo("  ── Manual steps required ─────────────────────────────")
-        for w in warnings:
-            click.echo(f"  ⚠ {w}")
-
-    # Restart OpenClaw so it reloads without the plugin — this stops the
-    # fetch interceptor immediately. Plugin was already uninstalled above.
+    click.echo("  ✓ Connector teardown will run when the gateway restarts")
     click.echo()
-    click.echo("  Restarting OpenClaw gateway to unload the plugin...")
-    try:
-        result = subprocess.run(
-            ["openclaw", "gateway", "restart"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            click.echo("  ✓ OpenClaw gateway restarted — traffic flows directly to providers")
-        else:
-            click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
-            click.echo("    Run manually: openclaw gateway restart")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
-        click.echo("    Run manually: openclaw gateway restart")
+    click.echo("  Restart the gateway for the change to take effect:")
+    click.echo("    defenseclaw-gateway restart")
     click.echo()
 
     if app.logger:
-        app.logger.log_action("setup-guardrail", "config", "disabled")
+        app.logger.log_action("setup-guardrail", "config", f"disabled connector={connector_name}")
 
 
 def _write_guardrail_runtime(data_dir: str, gc) -> None:
@@ -1908,13 +1892,22 @@ def _is_pid_alive(pid_file: str) -> bool:
         return False
 
 
-def _restart_services(data_dir: str, oc_host: str = "127.0.0.1", oc_port: int = 18789) -> None:
-    """Restart defenseclaw-gateway and verify openclaw gateway health."""
+def _restart_services(
+    data_dir: str,
+    oc_host: str = "127.0.0.1",
+    oc_port: int = 18789,
+    connector: str = "openclaw",
+) -> None:
+    """Restart defenseclaw-gateway and, for OpenClaw, verify its gateway health."""
     click.echo("  Restarting services...")
     click.echo("  ──────────────────────")
 
     _restart_defense_gateway(data_dir)
-    _check_openclaw_gateway(oc_host, oc_port)
+
+    if connector == "openclaw":
+        _check_openclaw_gateway(oc_host, oc_port)
+    else:
+        click.echo(f"  {connector} connector: traffic will route through defenseclaw-gateway proxy.")
 
     click.echo()
 
@@ -2047,7 +2040,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
     recovery_timeout = 60
     poll_interval = 3
 
-    click.echo("  openclaw gateway: monitoring...", nl=False)
+    click.echo("  agent gateway: monitoring...", nl=False)
 
     start = time.monotonic()
 
@@ -2062,7 +2055,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
     if not healthy:
         click.echo(" not running")
         click.echo("    Gateway did not respond within 30s.")
-        click.echo("    Start manually: openclaw gateway")
+        click.echo("    Start manually: defenseclaw-gateway start")
         return
 
     # Phase 2 — confirm stability for stable_window seconds
@@ -2099,8 +2092,8 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
         elapsed = int(time.monotonic() - start)
         click.echo(f" ✗ (unhealthy after {elapsed}s)")
         click.echo("    Gateway did not recover after config-triggered restart.")
-        click.echo("    Check: openclaw gateway status")
-        click.echo("    Logs: ~/.openclaw/logs/gateway.err.log")
+        click.echo("    Check: defenseclaw-gateway status")
+        click.echo("    Logs: ~/.defenseclaw/logs/gateway.err.log")
 
 
 def _looks_like_secret(value: str) -> bool:

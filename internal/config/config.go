@@ -59,7 +59,7 @@ type ClawMode string
 
 const (
 	ClawOpenClaw ClawMode = "openclaw"
-	// Future: ClawNemoClaw, ClawOpenCode, ClawClaudeCode
+	// Future: ClawNemoClaw
 )
 
 type ClawConfig struct {
@@ -164,6 +164,8 @@ type Config struct {
 	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	ClaudeCode     AgentHookConfig      `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex          AgentHookConfig      `mapstructure:"codex"            yaml:"codex,omitempty"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
@@ -591,6 +593,15 @@ func (c *WebhookConfig) ResolvedSecret() string {
 	return ""
 }
 
+type AgentHookConfig struct {
+	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
+	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
+	ScanOnSessionStart           bool     `mapstructure:"scan_on_session_start"           yaml:"scan_on_session_start,omitempty"`
+	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
+	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
+	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
+}
+
 type WatchConfig struct {
 	DebounceMs          int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
 	AutoBlock           bool `mapstructure:"auto_block"             yaml:"auto_block"`
@@ -774,6 +785,11 @@ type GuardrailConfig struct {
 	Host        string `mapstructure:"host"                 yaml:"host,omitempty"`
 	Port        int    `mapstructure:"port"                 yaml:"port"`
 
+	// Connector selects the active agent framework adapter. Written by
+	// `defenseclaw setup` and read by the sidecar at boot. When empty,
+	// defaults to "openclaw" for backward compatibility.
+	Connector string `mapstructure:"connector"            yaml:"connector,omitempty"`
+
 	// LLM overrides the top-level llm: block for the guardrail upstream
 	// (the model that DefenseClaw proxies client traffic to). Prefer
 	// Config.ResolveLLM("guardrail") over reading LLM / legacy Model
@@ -941,19 +957,30 @@ type WatchdogConfig struct {
 	Debounce int  `mapstructure:"debounce" yaml:"debounce"` // consecutive failures before alert, default 2
 }
 
-// defaultOpenClawGatewayTokenEnv matches gateway.auth.token when copied to ~/.defenseclaw/.env.
-const defaultOpenClawGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+// defaultGatewayTokenEnv is the canonical env var for the gateway auth token.
+const defaultGatewayTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
+
+// legacyGatewayTokenEnv is the old env var name, still consulted for
+// backward compatibility with existing .env files.
+const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 
 // ResolvedToken returns the gateway token from the env var (if set) or the direct value.
-// When token_env is empty (legacy configs), OPENCLAW_GATEWAY_TOKEN is still consulted so
-// secrets loaded from ~/.defenseclaw/.env by the sidecar are visible.
+// When token_env is empty (default config), checks DEFENSECLAW_GATEWAY_TOKEN first, then
+// falls back to OPENCLAW_GATEWAY_TOKEN for backward compatibility. When token_env is set
+// to a custom var, only that var is consulted — it does not fall through to the global
+// env vars, preserving operator intent.
 func (g *GatewayConfig) ResolvedToken() string {
 	if g.TokenEnv != "" {
 		if v := os.Getenv(g.TokenEnv); v != "" {
 			return v
 		}
-	} else if v := os.Getenv(defaultOpenClawGatewayTokenEnv); v != "" {
-		return v
+	} else {
+		if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
+			return v
+		}
+		if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
+			return v
+		}
 	}
 	return g.Token
 }
@@ -1705,6 +1732,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
 	viper.SetDefault("guardrail.scanner_mode", "both")
+	viper.SetDefault("guardrail.connector", "openclaw")
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
@@ -1743,7 +1771,7 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
-	viper.SetDefault("gateway.token_env", "OPENCLAW_GATEWAY_TOKEN")
+	viper.SetDefault("gateway.token_env", "DEFENSECLAW_GATEWAY_TOKEN")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)

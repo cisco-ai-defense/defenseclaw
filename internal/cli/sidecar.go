@@ -53,7 +53,7 @@ The sidecar must be running for this command to work.`,
 func init() {
 	rootCmd.Flags().StringVar(&sidecarToken, "token", "",
 		"DEPRECATED: gateway auth token. Passing secrets on the command line exposes them to ps/procfs. "+
-			"Use OPENCLAW_GATEWAY_TOKEN env or gateway.token in config instead.")
+			"Use DEFENSECLAW_GATEWAY_TOKEN env or gateway.token in config instead.")
 	// Hide from default help so we don't advertise the insecure path, but
 	// keep it working so existing scripts don't break. We emit a one-line
 	// deprecation warning at runtime when it's actually used.
@@ -70,7 +70,7 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
 				"Secrets on argv are visible to any local user via ps(1) / /proc/<pid>/cmdline. "+
-				"Set OPENCLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
+				"Set DEFENSECLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
 		cfg.Gateway.Token = sidecarToken
 	}
 	if sidecarHost != "" {

@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -39,7 +40,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Sidecar is the long-running process that connects to the OpenClaw gateway,
+// Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
 	cfg      *config.Config
@@ -125,7 +126,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	SetRetainJudgeBodies(retainJudge)
 
 	// In standalone sandbox mode the veth link is point-to-point;
-	// TLS is not needed and OpenClaw serves plain WS.
+	// TLS is not needed and the gateway serves plain WS.
 	if !cfg.Gateway.RequiresTLSWithMode(&cfg.OpenShell) {
 		cfg.Gateway.NoTLS = true
 	}
@@ -925,6 +926,44 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
 	}
 
+	// Load the active connector from the registry. The connector name is
+	// written by `defenseclaw setup` into guardrail.connector (defaults
+	// to "openclaw" for backward compat).
+	registry := connector.NewDefaultRegistry()
+	if s.cfg.PluginDir != "" {
+		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
+		}
+	}
+	connectorName := s.cfg.Guardrail.Connector
+	if connectorName == "" {
+		connectorName = "openclaw"
+	}
+	conn, ok := registry.Get(connectorName)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %q not found in registry, falling back to openclaw\n", connectorName)
+		conn, _ = registry.Get("openclaw")
+	}
+	if conn != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
+
+		proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+		apiBind := "127.0.0.1"
+		if s.cfg.Gateway.APIBind != "" {
+			apiBind = s.cfg.Gateway.APIBind
+		}
+		apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
+
+		setupOpts := connector.SetupOpts{
+			DataDir:   s.cfg.DataDir,
+			ProxyAddr: proxyAddr,
+			APIAddr:   apiAddr,
+		}
+		if err := conn.Setup(ctx, setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)
+		}
+	}
+
 	proxy, err := NewGuardrailProxy(
 		&s.cfg.Guardrail,
 		&s.cfg.CiscoAIDefense,
@@ -937,6 +976,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.notify,
 		rp,
 		s.cfg.ResolveLLM("guardrail.judge"),
+		conn,
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)
@@ -988,7 +1028,7 @@ func (s *Sidecar) subscribeToSessions(ctx context.Context) {
 		return
 	}
 
-	// OpenClaw returns sessions as either an array or an object keyed by
+	// The gateway returns sessions as either an array or an object keyed by
 	// session ID. Try both formats.
 	type sessionEntry struct {
 		ID   string `json:"id"`
@@ -1078,8 +1118,8 @@ func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
 	}
 
 	details := map[string]interface{}{
-		"sandbox_ip":    s.cfg.Gateway.Host,
-		"openclaw_port": s.cfg.Gateway.Port,
+		"sandbox_ip":   s.cfg.Gateway.Host,
+		"gateway_port": s.cfg.Gateway.Port,
 	}
 	s.health.SetSandbox(StateStarting, "", details)
 
