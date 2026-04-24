@@ -223,21 +223,61 @@ func claudeCodeSettingsPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
 }
 
-// hookGroups defines the Claude Code events to register, grouped by hook type.
-// Each group has an optional matcher (for tool-specific events) and a timeout.
+// fileChangedMatcher targets config files that affect Claude Code's
+// behavior or the sandbox's trust boundary. Regular source file writes
+// are already covered by PostToolUse — narrowing FileChanged keeps the
+// hook bus from thundering on every edit.
+const fileChangedMatcher = "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
+
+// hookGroups defines the full Claude Code event coverage. Mirrors the
+// _CLAUDE_CODE_EVENTS list established by PR #140 so every server case
+// in internal/gateway/claude_code_hook.go has a matching client
+// registration.
+//
+// Matcher policy:
+//   - Tool-use events: "*" so new Claude tools are inspected by default.
+//     Hard-coded tool regexes silently drop coverage as Claude ships new
+//     tools (Skill, ToolSearch, etc. appeared mid-release cycle).
+//   - SessionStart: the four lifecycle phases worth observing.
+//   - FileChanged: config-file allowlist — see fileChangedMatcher above.
+//
+// Timeouts in milliseconds. Slow events get a larger budget:
+//   - PostToolBatch summarizes many tool results → 90s.
+//   - Stop / SubagentStop run Stop-time CodeGuard scans → 90s.
+//   - SessionEnd can persist session-level audit → 60s.
+//   - Everything else: 30s.
 var hookGroups = []struct {
 	eventType string
 	matcher   string
 	timeout   int
 }{
-	{"PreToolUse", "Bash|Read|Edit|Write|Agent|WebFetch|WebSearch|NotebookEdit|Skill|ToolSearch", 30000},
-	{"PostToolUse", "Bash|Read|Edit|Write|Agent|WebFetch|WebSearch|NotebookEdit|Skill|ToolSearch", 30000},
-	{"PreCompact", "", 30000},
-	{"PostCompact", "", 30000},
+	{"SessionStart", "startup|resume|clear|compact", 30000},
+	{"InstructionsLoaded", "*", 30000},
 	{"UserPromptSubmit", "", 30000},
-	{"SessionStart", "", 30000},
-	{"Stop", "", 30000},
-	{"SubagentStop", "", 30000},
+	{"UserPromptExpansion", "", 30000},
+	{"PreToolUse", "*", 30000},
+	{"PermissionRequest", "*", 30000},
+	{"PostToolUse", "*", 30000},
+	{"PostToolUseFailure", "*", 30000},
+	{"PostToolBatch", "", 90000},
+	{"PermissionDenied", "*", 30000},
+	{"Notification", "*", 30000},
+	{"SubagentStart", "*", 30000},
+	{"SubagentStop", "*", 90000},
+	{"TaskCreated", "", 30000},
+	{"TaskCompleted", "", 30000},
+	{"Stop", "", 90000},
+	{"StopFailure", "*", 30000},
+	{"TeammateIdle", "", 30000},
+	{"ConfigChange", "*", 30000},
+	{"CwdChanged", "", 30000},
+	{"FileChanged", fileChangedMatcher, 30000},
+	{"WorktreeRemove", "", 30000},
+	{"PreCompact", "*", 30000},
+	{"PostCompact", "*", 30000},
+	{"SessionEnd", "", 60000},
+	{"Elicitation", "*", 30000},
+	{"ElicitationResult", "*", 30000},
 }
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original

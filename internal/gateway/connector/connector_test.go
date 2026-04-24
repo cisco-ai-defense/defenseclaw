@@ -711,6 +711,97 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 	}
 }
 
+// TestClaudeCode_Setup_RegistersFullEventCoverage verifies the Claude
+// Code hook registration matches the coverage established by PR #140:
+// 27 events across the full Claude Code lifecycle, with the event-type
+// specific matchers Claude Code expects.
+//
+// The earlier 8-event registration missed major surfaces — in particular
+// tool-use events were gated on a hard-coded regex of tool names that
+// silently dropped any tool Claude added post-release (Skill, ToolSearch,
+// etc. appeared and disappeared from the list over time). The PR #140
+// design uses matcher "*" for tool events so new Claude tools get
+// inspected by default.
+func TestClaudeCode_Setup_RegistersFullEventCoverage(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	os.WriteFile(settingsPath, []byte(`{}`), 0o644)
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, _ := os.ReadFile(settingsPath)
+	var settings map[string]interface{}
+	json.Unmarshal(data, &settings)
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatal("hooks section missing")
+	}
+
+	// Full event coverage (PR #140's _CLAUDE_CODE_EVENTS, minus
+	// WorktreeCreate which is intentionally excluded). Every server-side
+	// case in internal/gateway/claude_code_hook.go must have a matching
+	// client registration; otherwise we rely on events Claude never fires.
+	wanted := []string{
+		"SessionStart", "InstructionsLoaded", "UserPromptSubmit",
+		"UserPromptExpansion", "PreToolUse", "PermissionRequest",
+		"PostToolUse", "PostToolUseFailure", "PostToolBatch",
+		"PermissionDenied", "Notification", "SubagentStart", "SubagentStop",
+		"TaskCreated", "TaskCompleted", "Stop", "StopFailure", "TeammateIdle",
+		"ConfigChange", "CwdChanged", "FileChanged", "WorktreeRemove",
+		"PreCompact", "PostCompact", "SessionEnd", "Elicitation",
+		"ElicitationResult",
+	}
+	for _, evt := range wanted {
+		if _, ok := hooks[evt]; !ok {
+			t.Errorf("missing hook event %q", evt)
+		}
+	}
+
+	// Matcher invariants per PR #140.
+	// Tool-use events must use "*" so we never drop coverage when
+	// Claude Code adds a new builtin tool. Hard-coded tool regexes
+	// silently fail to gate new tools.
+	for _, evt := range []string{"PreToolUse", "PostToolUse", "PermissionRequest", "PostToolUseFailure", "PermissionDenied"} {
+		m := firstMatcher(hooks[evt])
+		if m != "*" {
+			t.Errorf("%s matcher = %q, want \"*\" (PR #140 pattern)", evt, m)
+		}
+	}
+
+	// SessionStart has distinct phases — matcher selects which to
+	// observe. All four are worth inspecting for lifecycle events.
+	if m := firstMatcher(hooks["SessionStart"]); m != "startup|resume|clear|compact" {
+		t.Errorf("SessionStart matcher = %q, want startup|resume|clear|compact", m)
+	}
+
+	// FileChanged narrows to config files only; generic file writes
+	// are already covered by PostToolUse.
+	if m := firstMatcher(hooks["FileChanged"]); !strings.Contains(m, "CLAUDE.md") {
+		t.Errorf("FileChanged matcher = %q, want config-file matcher including CLAUDE.md", m)
+	}
+}
+
+// firstMatcher returns the "matcher" field of the first entry in a
+// Claude Code hook event array, or "" when absent.
+func firstMatcher(eventEntries interface{}) string {
+	arr, ok := eventEntries.([]interface{})
+	if !ok || len(arr) == 0 {
+		return ""
+	}
+	entry, ok := arr[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	m, _ := entry["matcher"].(string)
+	return m
+}
+
 func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
