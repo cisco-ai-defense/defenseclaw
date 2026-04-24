@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -33,7 +34,9 @@ import (
 // This lets clients that use http.proxy as a forward proxy tunnel their TLS
 // connections through DefenseClaw. The tunnel is opaque — we log the target
 // host for audit but do not decrypt the traffic.
-func connectHandler(inner http.Handler, logger interface{ LogAction(action, target, details string) error }) http.Handler {
+func connectHandler(inner http.Handler, logger interface {
+	LogAction(action, target, details string) error
+}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			inner.ServeHTTP(w, r)
@@ -44,7 +47,9 @@ func connectHandler(inner http.Handler, logger interface{ LogAction(action, targ
 	})
 }
 
-func handleConnect(w http.ResponseWriter, r *http.Request, logger interface{ LogAction(action, target, details string) error }) {
+func handleConnect(w http.ResponseWriter, r *http.Request, logger interface {
+	LogAction(action, target, details string) error
+}) {
 	targetHost := r.Host
 	if targetHost == "" {
 		targetHost = r.URL.Host
@@ -55,6 +60,11 @@ func handleConnect(w http.ResponseWriter, r *http.Request, logger interface{ Log
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] CONNECT tunnel → %s (from %s)\n", targetHost, r.RemoteAddr)
+
+	emitLifecycle(context.Background(), "connect-tunnel", "open", map[string]string{
+		"target": targetHost,
+		"remote": r.RemoteAddr,
+	})
 
 	if logger != nil {
 		_ = logger.LogAction("connect-tunnel", targetHost, fmt.Sprintf("remote=%s", r.RemoteAddr))

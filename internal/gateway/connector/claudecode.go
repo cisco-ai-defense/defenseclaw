@@ -41,8 +41,10 @@ func NewClaudeCodeConnector() *ClaudeCodeConnector {
 	return &ClaudeCodeConnector{}
 }
 
-func (c *ClaudeCodeConnector) Name() string        { return "claudecode" }
-func (c *ClaudeCodeConnector) Description() string  { return "env var + settings.json hooks (20+ events, component scanning)" }
+func (c *ClaudeCodeConnector) Name() string { return "claudecode" }
+func (c *ClaudeCodeConnector) Description() string {
+	return "env var + settings.json hooks (20+ events, component scanning)"
+}
 func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)

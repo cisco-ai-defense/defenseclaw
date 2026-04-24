@@ -39,8 +39,8 @@ func NewOpenClawConnector() *OpenClawConnector {
 	return &OpenClawConnector{}
 }
 
-func (c *OpenClawConnector) Name() string        { return "openclaw" }
-func (c *OpenClawConnector) Description() string  { return "fetch interceptor plugin" }
+func (c *OpenClawConnector) Name() string                           { return "openclaw" }
+func (c *OpenClawConnector) Description() string                    { return "fetch interceptor plugin" }
 func (c *OpenClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
@@ -134,5 +134,3 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 
 	return cs, nil
 }
-
-

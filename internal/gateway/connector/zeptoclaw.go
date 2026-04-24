@@ -40,8 +40,8 @@ func NewZeptoClawConnector() *ZeptoClawConnector {
 	return &ZeptoClawConnector{}
 }
 
-func (c *ZeptoClawConnector) Name() string        { return "zeptoclaw" }
-func (c *ZeptoClawConnector) Description() string  { return "api_base redirect + config hooks" }
+func (c *ZeptoClawConnector) Name() string                           { return "zeptoclaw" }
+func (c *ZeptoClawConnector) Description() string                    { return "api_base redirect + config hooks" }
 func (c *ZeptoClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *ZeptoClawConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
@@ -199,10 +199,10 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	config["hooks"] = map[string]interface{}{
-		"before_tool":      filepath.Join(hookDir, "inspect-tool.sh"),
-		"before_request":   filepath.Join(hookDir, "inspect-request.sh"),
-		"after_response":   filepath.Join(hookDir, "inspect-response.sh"),
-		"after_tool":       filepath.Join(hookDir, "inspect-tool-response.sh"),
+		"before_tool":    filepath.Join(hookDir, "inspect-tool.sh"),
+		"before_request": filepath.Join(hookDir, "inspect-request.sh"),
+		"after_response": filepath.Join(hookDir, "inspect-response.sh"),
+		"after_tool":     filepath.Join(hookDir, "inspect-tool-response.sh"),
 	}
 
 	out, err := json.MarshalIndent(config, "", "  ")

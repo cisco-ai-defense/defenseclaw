@@ -950,7 +950,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(setup, ["guardrail", "--disable"], obj=self.app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Disabling", result.output)
-        self.assertIn("OpenClaw plugin removed", result.output)
+        self.assertIn("Config saved", result.output)
 
     def test_non_interactive_with_model(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -964,7 +964,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
         self.assertIn("Config saved", result.output)
 
         import yaml
@@ -973,7 +973,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["enabled"])
         self.assertEqual(raw["guardrail"]["mode"], "observe")
 
-    def test_preflight_aborts_when_openclaw_config_missing(self):
+    def test_setup_succeeds_without_openclaw_config(self):
+        """Setup no longer requires OpenClaw config — connector setup runs at gateway start."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -986,9 +987,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw config not found", result.output)
-        self.assertIn("Make sure OpenClaw is installed", result.output)
-        self.assertNotIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
+        self.assertIn("Connector setup will run automatically", result.output)
 
     def test_preflight_succeeds_with_empty_model(self):
         """Model is no longer required — fetch interceptor scans all models."""
@@ -1003,7 +1003,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         # Setup proceeds without model — all models scanned automatically
-        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
 
     def test_api_key_env_warning_when_not_set(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1020,9 +1020,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
 
-    def test_openclaw_config_patched_output(self):
+    def test_setup_shows_connector_info(self):
+        """Setup shows connector details instead of OpenClaw-specific patching."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1034,8 +1035,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw config patched", result.output)
-        self.assertIn("Original model saved for revert", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
+        self.assertIn("Connector setup will run automatically", result.output)
 
     def test_shows_disable_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1298,41 +1299,32 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
 
-    def test_disable_restarts_openclaw(self):
-        """Disabling always restarts OpenClaw gateway to unload the plugin."""
+    def test_disable_shows_restart_instructions(self):
+        """Disabling shows restart instructions (connector teardown runs at gateway start)."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
         self.app.cfg.guardrail.original_model = "anthropic/claude-opus-4-5"
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup,
-                ["guardrail", "--disable"],
-                obj=self.app,
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        # Verify openclaw gateway restart was attempted
-        calls = [str(c) for c in mock_run.call_args_list]
-        self.assertTrue(
-            any("openclaw" in c and "gateway" in c and "restart" in c for c in calls),
-            f"Expected openclaw gateway restart call. Got: {calls}"
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable"],
+            obj=self.app,
         )
-        self.assertIn("OpenClaw gateway restarted", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertIn("defenseclaw-gateway restart", result.output)
 
-    def test_disable_without_restart_shows_instructions(self):
-        """--disable always restarts OpenClaw; no separate --restart flag needed."""
+    def test_disable_shows_connector_teardown_message(self):
+        """--disable shows connector teardown message."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup,
-                ["guardrail", "--disable"],
-                obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable"],
+            obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw plugin removed", result.output)
-        self.assertIn("Restarting OpenClaw gateway", result.output)
+        self.assertIn("Config saved", result.output)
+        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
 
     def test_help_shows_restart_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1379,63 +1371,54 @@ class TestDisableGuardrailFlow(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def test_successful_restore_with_original_model(self):
+    def test_successful_disable_saves_config(self):
+        """Disable saves config and shows teardown message. OpenClaw config is
+        no longer modified — connector teardown runs at gateway restart."""
         from defenseclaw.commands.cmd_setup import setup
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup, ["guardrail", "--disable"], obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup, ["guardrail", "--disable"], obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Config saved", result.output)
-        self.assertNotIn("Manual steps required", result.output)
+        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertFalse(self.app.cfg.guardrail.enabled)
 
-        with open(self.oc_path) as f:
-            cfg = json.load(f)
-        # Primary model untouched — setup no longer changes it
-        self.assertNotIn("litellm", cfg["models"]["providers"])
-        # Plugin removed
-        self.assertNotIn("defenseclaw", cfg.get("plugins", {}).get("allow", []))
-
-    def test_restore_failure_shows_manual_steps(self):
+    def test_disable_works_without_openclaw_config(self):
+        """Disable no longer needs OpenClaw config — connector teardown is at gateway level."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.claw.config_file = "/nonexistent/openclaw.json"
         result = self.runner.invoke(
             setup, ["guardrail", "--disable"], obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Could not update OpenClaw config", result.output)
-        self.assertIn("Manual steps required", result.output)
-        self.assertIn("Manually remove defenseclaw", result.output)
+        self.assertIn("Config saved", result.output)
+        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
 
-    def test_uninstalls_plugin_during_disable(self):
-        from unittest.mock import patch
+    def test_disable_does_not_touch_extensions(self):
+        """Plugin cleanup is now handled by connector teardown at gateway restart,
+        not by the CLI disable command."""
         from defenseclaw.commands.cmd_setup import setup
         ext = os.path.join(self.tmp_dir, "extensions", "defenseclaw")
         os.makedirs(ext)
         with open(os.path.join(ext, "index.js"), "w") as f:
             f.write("// plugin")
 
-        with patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError):
-            result = self.runner.invoke(
-                setup, ["guardrail", "--disable"], obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup, ["guardrail", "--disable"], obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("plugin removed from extensions", result.output)
-        self.assertFalse(os.path.exists(ext))
+        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
 
     def test_no_original_model_still_disables(self):
         """Disable works without original_model since we no longer change the model."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.original_model = ""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup, ["guardrail", "--disable"], obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup, ["guardrail", "--disable"], obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw plugin removed", result.output)
-        self.assertIn("Restarting OpenClaw gateway", result.output)
+        self.assertIn("Config saved", result.output)
+        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
 
     def test_disable_sets_enabled_false(self):
         from defenseclaw.commands.cmd_setup import setup

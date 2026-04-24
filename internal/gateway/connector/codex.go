@@ -40,8 +40,10 @@ func NewCodexConnector() *CodexConnector {
 	return &CodexConnector{}
 }
 
-func (c *CodexConnector) Name() string        { return "codex" }
-func (c *CodexConnector) Description() string  { return "env var + hook script (6 events, component scanning)" }
+func (c *CodexConnector) Name() string { return "codex" }
+func (c *CodexConnector) Description() string {
+	return "env var + hook script (6 events, component scanning)"
+}
 func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)

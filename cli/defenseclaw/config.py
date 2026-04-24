@@ -779,7 +779,7 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
-    connector: str = "openclaw"             # active connector: openclaw | zeptoclaw | claudecode | codex | cursor | opencode
+    connector: str = "openclaw"  # openclaw | zeptoclaw | claudecode | codex | cursor | opencode
 
 
 @dataclass

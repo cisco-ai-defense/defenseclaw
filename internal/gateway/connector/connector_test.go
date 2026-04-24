@@ -1005,8 +1005,8 @@ func TestTeardownSubprocessEnforcement(t *testing.T) {
 
 func TestSecuritySurfaceCoverage(t *testing.T) {
 	type expectation struct {
-		name     string
-		toolMode ToolInspectionMode
+		name      string
+		toolMode  ToolInspectionMode
 		wantShims bool
 	}
 
