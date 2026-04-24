@@ -1029,6 +1029,52 @@ class TestRestartDefenseGateway(unittest.TestCase):
             _restart_defense_gateway(tmpdir)
 
 
+class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
+    """_restart_services should actively restart the agent-framework
+    gateway (not just monitor it) when the selected connector manages
+    its own gateway process — e.g. OpenClaw. Before this test, the
+    call was a passive health probe, so operators had to remember a
+    separate `openclaw gateway restart` step that was easy to skip."""
+
+    @patch("defenseclaw.commands.cmd_setup._check_openclaw_gateway")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_openclaw_connector_runs_openclaw_gateway_restart(
+        self, mock_run, _mock_dc, _mock_check,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="openclaw")
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertIn(
+            ["openclaw", "gateway", "restart"],
+            commands,
+            f"expected `openclaw gateway restart` to be invoked, got {commands}",
+        )
+
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_non_openclaw_connector_does_not_run_openclaw_gateway_restart(
+        self, mock_run, _mock_dc,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="zeptoclaw")
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        for cmd in commands:
+            self.assertNotEqual(
+                cmd[:3] if isinstance(cmd, list) else None,
+                ["openclaw", "gateway", "restart"],
+                f"must not restart openclaw when a different connector is selected; got {commands}",
+            )
+
+
 class TestCheckOpenclawGateway(unittest.TestCase):
     def _fast_monotonic(self, step=5):
         """Return a side_effect that advances time by *step* seconds per call."""
