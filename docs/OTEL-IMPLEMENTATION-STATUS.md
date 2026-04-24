@@ -167,11 +167,14 @@ empty rather than being faked. **v7** adds `agent_id` and
 4. OTel spans — `StartToolSpan` and `StartApprovalSpan` take a
    `telemetry.ToolSpanContext` that carries the correlation fields
    onto span attributes (`gen_ai.tool.call.id`,
-   `defenseclaw.tool.id`, `gen_ai.conversation.id`,
-   `defenseclaw.session.id`, `defenseclaw.run.id`,
+   `gen_ai.conversation.id`, `defenseclaw.run.id`,
    `defenseclaw.destination.app`, `defenseclaw.policy.id`,
    `gen_ai.agent.name`, `gen_ai.agent.id`,
    `defenseclaw.agent.instance_id`).
+
+`gen_ai.agent.id` is intended to carry the logical stable `agent_id` when
+known. The session-scoped instance identity remains in
+`defenseclaw.agent.instance_id`.
 
 **Best-effort correlation for approvals:** exec approval events don't
 carry `run_id`/`session_id` on the wire. `EventRouter.activeAgentCorrelation()`

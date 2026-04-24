@@ -75,7 +75,7 @@
           "unit": "{call}",
           "description": "Total tool calls observed.",
           "attributes": {
-            "tool.name": { "type": "string", "description": "Tool name." },
+            "gen_ai.tool.name": { "type": "string", "description": "Tool name." },
             "tool.provider": { "type": "string", "enum": ["skill", "builtin", "mcp"] },
             "dangerous": { "type": "boolean" }
           }
@@ -86,7 +86,7 @@
           "unit": "ms",
           "description": "Tool call duration distribution.",
           "attributes": {
-            "tool.name": { "type": "string" },
+            "gen_ai.tool.name": { "type": "string" },
             "tool.provider": { "type": "string", "enum": ["skill", "builtin", "mcp"] }
           }
         },
@@ -96,7 +96,7 @@
           "unit": "{error}",
           "description": "Tool calls that returned non-zero exit codes.",
           "attributes": {
-            "tool.name": { "type": "string" },
+            "gen_ai.tool.name": { "type": "string" },
             "exit_code": { "type": "integer" }
           }
         },
