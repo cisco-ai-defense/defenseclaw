@@ -221,7 +221,7 @@ sync-openclaw-extension:
 	done
 	@echo "  • Synced OpenClaw extension → internal/gateway/connector/openclaw_extension/"
 
-gateway-cross:
+gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
@@ -346,13 +346,13 @@ cli-test:
 cli-test-cov:
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-gateway-test:
+gateway-test: sync-openclaw-extension
 	go test -race ./internal/gateway/ ./internal/tui/ ./test/... -v
 
 tui-test:
 	go test -race -count=1 ./internal/tui/ -v
 
-go-test-cov:
+go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
 
 ts-test:
@@ -412,7 +412,7 @@ lint: py-lint go-lint
 py-lint:
 	$(VENV)/bin/ruff check cli/defenseclaw/
 
-go-lint:
+go-lint: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast
 	@# on it before running the heavier analyzers.
 	@unformatted=$$(gofmt -l . 2>/dev/null); \
