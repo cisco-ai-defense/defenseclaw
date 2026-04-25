@@ -103,7 +103,10 @@ jobs:
       # (the latest as of this commit) still pins python-dotenv==1.2.1.
       # CVE-2026-28684: python-dotenv 1.2.1 — pulled in only via out-of-process
       # Python scanner subprocesses, not linked into the gateway.
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684
+      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip version is
+      # released. No fix version available as of 2026-04-24. pip is only used
+      # by pip-audit itself, not by DefenseClaw at runtime.
+      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
 
   ts-build-test:
     name: TypeScript Build & Test
