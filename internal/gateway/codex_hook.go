@@ -78,12 +78,29 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	t0 := time.Now()
 	resp := a.evaluateCodexHook(r.Context(), req)
+	elapsed := time.Since(t0)
+
+	if a.health != nil {
+		a.health.RecordConnectorRequest()
+		if resp.Action == "block" {
+			a.health.RecordToolBlock()
+		}
+		if isToolInspectionEvent(req.HookEventName) {
+			a.health.RecordToolInspection()
+		}
+	}
+
+	if a.otel != nil {
+		a.otel.RecordInspectEvaluation(r.Context(), "codex:"+req.HookEventName, resp.Action, resp.Severity)
+		a.otel.RecordInspectLatency(r.Context(), "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
+	}
 
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), "codex-hook", req.HookEventName,
-			fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v",
-				resp.Action, resp.Severity, resp.Mode, resp.WouldBlock))
+			fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
+				resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed))
 	}
 
 	a.writeJSON(w, http.StatusOK, resp)

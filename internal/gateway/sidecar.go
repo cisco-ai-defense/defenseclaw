@@ -977,6 +977,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)
 			}
 		}
+
+		s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 	}
 
 	proxy, err := NewGuardrailProxy(
