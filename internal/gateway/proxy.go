@@ -3059,8 +3059,8 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// metrics→traces join for every guardrail observation —
 		// operators following a span from traces could not see
 		// the accompanying latency / token histogram data points.
-		p.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", verdict.Action)
-		p.otel.RecordGuardrailLatency(ctx, "guardrail-proxy", elapsedMs)
+		p.otel.RecordGuardrailEvaluation(ctx, p.connectorName()+":guardrail-proxy", verdict.Action)
+		p.otel.RecordGuardrailLatency(ctx, p.connectorName()+":guardrail-proxy", elapsedMs)
 		if verdict.CiscoElapsedMs > 0 {
 			p.otel.RecordGuardrailLatency(ctx, "cisco-ai-defense", verdict.CiscoElapsedMs)
 			p.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", verdict.Action)
@@ -3472,7 +3472,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	}
 
 	if p.otel != nil {
-		p.otel.RecordGuardrailEvaluation(ctx, "tool-call-inspect", action)
+		p.otel.RecordGuardrailEvaluation(ctx, p.connectorName()+":tool-call-inspect", action)
 	}
 
 	return &ScanVerdict{

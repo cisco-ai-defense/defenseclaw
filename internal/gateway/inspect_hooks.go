@@ -100,8 +100,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	auditAction := "inspect-request-" + verdict.Action
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
-		a.otel.RecordInspectEvaluation(context.Background(), "pre-request", verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), "pre-request", elapsedMs)
+		tool := a.connectorName() + ":pre-request"
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
 	requestID := RequestIDFromContext(r.Context())
@@ -163,8 +164,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	auditAction := "inspect-response-" + verdict.Action
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
-		a.otel.RecordInspectEvaluation(context.Background(), "post-response", verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), "post-response", elapsedMs)
+		tool := a.connectorName() + ":post-response"
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
 	requestID := RequestIDFromContext(r.Context())
@@ -228,8 +230,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	auditAction := "inspect-tool-response-" + verdict.Action
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
-		a.otel.RecordInspectEvaluation(context.Background(), "post-tool-"+req.Tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), "post-tool-"+req.Tool, elapsedMs)
+		tool := a.connectorName() + ":post-tool-" + req.Tool
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
 	requestID := RequestIDFromContext(r.Context())

@@ -308,10 +308,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
-		a.otel.RecordInspectEvaluation(context.Background(), req.Tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), req.Tool, elapsedMs)
-		a.otel.RecordGuardrailEvaluation(context.Background(), "policy-rules", verdict.Action)
-		a.otel.RecordGuardrailLatency(context.Background(), "policy-rules", elapsedMs)
+		tool := a.connectorName() + ":" + req.Tool
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
+		a.otel.RecordGuardrailEvaluation(context.Background(), a.connectorName()+":policy-rules", verdict.Action)
+		a.otel.RecordGuardrailLatency(context.Background(), a.connectorName()+":policy-rules", elapsedMs)
 		// Inspect span is emitted for its side effect on the span
 		// exporter — trace_id is now pulled from r.Context() by
 		// LogActionCtx (the gateway CorrelationMiddleware seeded

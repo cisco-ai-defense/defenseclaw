@@ -81,6 +81,15 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
 }
 
+func (a *APIServer) connectorName() string {
+	if a.scannerCfg != nil {
+		if c := strings.TrimSpace(a.scannerCfg.Guardrail.Connector); c != "" {
+			return strings.ToLower(c)
+		}
+	}
+	return "openclaw"
+}
+
 // SetPolicyReloader registers a callback that atomically reloads the
 // shared OPA policy engine.  It is called by the /policy/reload handler.
 func (a *APIServer) SetPolicyReloader(fn func() error) {
