@@ -24,7 +24,7 @@ dev = [
     "pytest==9.0.3",
     "pytest-cov==7.1.0",
     "jsonschema>=4.23.0",
-    "ruff==0.15.7",
+    "ruff==0.15.12",
     "opentelemetry-api>=1.28.0",
     "opentelemetry-sdk>=1.28.0",
 ]
