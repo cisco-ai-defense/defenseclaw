@@ -1776,15 +1776,24 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     try:
         app.cfg.save()
-        click.echo("  ✓ Config saved")
+        click.echo("  ✓ Config saved (guardrail.enabled = false)")
     except OSError as exc:
         click.echo(f"  ✗ Failed to save config: {exc}")
         click.echo("    Guardrail may re-enable on next run")
 
-    click.echo("  ✓ Connector teardown will run when the gateway restarts")
+    # Restart the gateway so it runs conn.Teardown() — the sidecar checks
+    # guardrail.enabled on boot and calls Teardown instead of Setup when
+    # disabled. This restores agent configs (hooks, api_base, plugins,
+    # shims) to their pre-DefenseClaw state.
     click.echo()
-    click.echo("  Restart the gateway for the change to take effect:")
-    click.echo("    defenseclaw-gateway restart")
+    click.echo("  Restarting gateway to run connector teardown...")
+    _restart_services(
+        app.cfg.data_dir,
+        app.cfg.gateway.host,
+        app.cfg.gateway.port,
+        connector=connector_name,
+    )
+    click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
     click.echo()
 
     if app.logger:

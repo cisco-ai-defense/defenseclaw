@@ -966,8 +966,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			// middleware stay in lockstep.
 			APIToken: s.cfg.Gateway.ResolvedToken(),
 		}
-		if err := conn.Setup(ctx, setupOpts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)
+
+		if !s.cfg.Guardrail.Enabled {
+			fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
+			if err := conn.Teardown(ctx, setupOpts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
+			}
+		} else {
+			if err := conn.Setup(ctx, setupOpts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)
+			}
 		}
 	}
 

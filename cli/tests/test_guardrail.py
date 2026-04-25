@@ -1164,8 +1164,9 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
 
-    def test_disable_shows_restart_instructions(self):
-        """Disabling shows restart instructions (connector teardown runs at gateway start)."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_restarts_gateway_for_teardown(self, mock_restart):
+        """Disabling restarts the gateway so connector teardown runs immediately."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
         self.app.cfg.guardrail.original_model = "anthropic/claude-opus-4-5"
@@ -1175,11 +1176,12 @@ class TestSetupGuardrailRestart(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
-        self.assertIn("defenseclaw-gateway restart", result.output)
+        self.assertIn("connector teardown", result.output.lower())
+        mock_restart.assert_called_once()
 
-    def test_disable_shows_connector_teardown_message(self):
-        """--disable shows connector teardown message."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_shows_teardown_complete(self, mock_restart):
+        """--disable runs teardown and shows completion message."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
         result = self.runner.invoke(
@@ -1189,7 +1191,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Config saved", result.output)
-        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
     def test_help_shows_restart_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1236,20 +1238,22 @@ class TestDisableGuardrailFlow(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def test_successful_disable_saves_config(self):
-        """Disable saves config and shows teardown message. OpenClaw config is
-        no longer modified — connector teardown runs at gateway restart."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_successful_disable_saves_config_and_runs_teardown(self, mock_restart):
+        """Disable saves config and restarts gateway to run connector teardown."""
         from defenseclaw.commands.cmd_setup import setup
         result = self.runner.invoke(
             setup, ["guardrail", "--disable"], obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Config saved", result.output)
-        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertIn("teardown complete", result.output.lower())
         self.assertFalse(self.app.cfg.guardrail.enabled)
+        mock_restart.assert_called_once()
 
-    def test_disable_works_without_openclaw_config(self):
-        """Disable no longer needs OpenClaw config — connector teardown is at gateway level."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_works_without_openclaw_config(self, mock_restart):
+        """Disable works without OpenClaw config — teardown runs at gateway level."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.claw.config_file = "/nonexistent/openclaw.json"
         result = self.runner.invoke(
@@ -1257,11 +1261,12 @@ class TestDisableGuardrailFlow(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Config saved", result.output)
-        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
-    def test_disable_does_not_touch_extensions(self):
-        """Plugin cleanup is now handled by connector teardown at gateway restart,
-        not by the CLI disable command."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_does_not_touch_extensions(self, mock_restart):
+        """Plugin cleanup runs via connector teardown in the gateway,
+        not directly by the CLI disable command."""
         from defenseclaw.commands.cmd_setup import setup
         ext = os.path.join(self.tmp_dir, "extensions", "defenseclaw")
         os.makedirs(ext)
@@ -1272,9 +1277,10 @@ class TestDisableGuardrailFlow(unittest.TestCase):
             setup, ["guardrail", "--disable"], obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
-    def test_no_original_model_still_disables(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_no_original_model_still_disables(self, mock_restart):
         """Disable works without original_model since we no longer change the model."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.original_model = ""
@@ -1283,9 +1289,10 @@ class TestDisableGuardrailFlow(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Config saved", result.output)
-        self.assertIn("Connector teardown will run when the gateway restarts", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
-    def test_disable_sets_enabled_false(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_sets_enabled_false(self, mock_restart):
         from defenseclaw.commands.cmd_setup import setup
         self.assertTrue(self.app.cfg.guardrail.enabled)
         self.runner.invoke(

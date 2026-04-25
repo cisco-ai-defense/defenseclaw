@@ -344,9 +344,6 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
 	withRequestID := p.requestIDMiddleware(withCorr)
 	handler := otelHTTPServerMiddleware("guardrail-proxy", withRequestID)
-	// Wrap with CONNECT handler so forward-proxy clients can tunnel TLS
-	// connections through the guardrail proxy.
-	handler = connectHandler(handler, p.logger)
 	srv := &http.Server{Addr: addr, Handler: handler}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
