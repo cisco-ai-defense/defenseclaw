@@ -91,7 +91,10 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
     "cryptography>=46.0.7",   # CVE-2026-39892 fixed in 46.0.7
-    "litellm==1.83.0",        # CVE-2026-35029, CVE-2026-35030
+    "litellm==1.83.7",        # GHSA-xqmj-j6mv-4862 fixed in 1.83.7
+    "click>=8.1.8",           # litellm 1.83.7 pins 8.1.8, scanner pins 8.3.1
+    "openai>=2.15.0",         # litellm 1.83.7 pins 2.30.0, scanner pins 2.15.0
+    "python-dotenv>=1.0.1",   # litellm pins 1.0.1, scanner pins 1.2.1
     "python-multipart>=0.0.26", # CVE-2026-40347 fixed in 0.0.26
 ]
 
