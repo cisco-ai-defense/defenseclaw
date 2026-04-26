@@ -1835,7 +1835,9 @@ phase_aibom() {
     sz=$(wc -c <"$out_file" | tr -d ' ')
     echo "[aibom] scan output: ${sz} bytes"
     if [ "${sz:-0}" -le 524288 ]; then
-        cat "$out_file"
+        # GHA (and some terminals) can return EAGAIN on large stdout writes; a failed
+        # `cat` must not abort the whole E2E run with set -e.
+        cat "$out_file" 2>/dev/null || true
     else
         echo "[aibom] eliding full output from CI log (${sz} bytes); validating from temp copy"
     fi
