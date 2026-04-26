@@ -809,7 +809,7 @@ func (p *Provider) RecordToolCall(ctx context.Context, tool, provider string, da
 		return
 	}
 	p.metrics.toolCalls.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("tool.name", tool),
+		attribute.String("gen_ai.tool.name", tool),
 		attribute.String("tool.provider", provider),
 		attribute.Bool("dangerous", dangerous),
 	))
@@ -821,7 +821,7 @@ func (p *Provider) RecordToolDuration(ctx context.Context, tool, provider string
 		return
 	}
 	p.metrics.toolDuration.Record(ctx, durationMs, metric.WithAttributes(
-		attribute.String("tool.name", tool),
+		attribute.String("gen_ai.tool.name", tool),
 		attribute.String("tool.provider", provider),
 	))
 }
@@ -832,7 +832,7 @@ func (p *Provider) RecordToolError(ctx context.Context, tool string, exitCode in
 		return
 	}
 	p.metrics.toolErrors.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("tool.name", tool),
+		attribute.String("gen_ai.tool.name", tool),
 		attribute.Int("exit_code", exitCode),
 	))
 }
