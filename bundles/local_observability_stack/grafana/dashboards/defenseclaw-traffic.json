@@ -112,14 +112,14 @@
       "title": "Tool invocations by tool + provider",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 40, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (tool_name, tool_provider) (rate(defenseclaw_tool_calls_total[$__rate_interval]))", "legendFormat": "{{tool_name}} · {{tool_provider}}", "refId": "A"}]
+      "targets": [{"expr": "sum by (gen_ai_tool_name, tool_provider) (rate(defenseclaw_tool_calls_total[$__rate_interval]))", "legendFormat": "{{gen_ai_tool_name}} · {{tool_provider}}", "refId": "A"}]
     },
     {
       "type": "timeseries",
       "title": "Tool duration p95",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 40, "w": 12, "h": 8},
-      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, tool_name) (rate(defenseclaw_tool_duration_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{tool_name}} p95", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(defenseclaw_tool_duration_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{gen_ai_tool_name}} p95", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ms"}}
     },
     {
@@ -128,8 +128,8 @@
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 48, "w": 12, "h": 8},
       "targets": [
-        {"expr": "sum by (tool_name) (rate(defenseclaw_tool_errors_total[$__rate_interval]))", "legendFormat": "err · {{tool_name}}", "refId": "A"},
-        {"expr": "sum by (tool_name) (rate(defenseclaw_tool_calls_total{dangerous=\"true\"}[$__rate_interval]))", "legendFormat": "dangerous · {{tool_name}}", "refId": "B"}
+        {"expr": "sum by (gen_ai_tool_name) (rate(defenseclaw_tool_errors_total[$__rate_interval]))", "legendFormat": "err · {{gen_ai_tool_name}}", "refId": "A"},
+        {"expr": "sum by (gen_ai_tool_name) (rate(defenseclaw_tool_calls_total{dangerous=\"true\"}[$__rate_interval]))", "legendFormat": "dangerous · {{gen_ai_tool_name}}", "refId": "B"}
       ]
     },
     {
