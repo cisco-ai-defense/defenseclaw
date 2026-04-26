@@ -85,7 +85,12 @@ jobs:
       # (the latest as of this commit) still pins python-dotenv==1.2.1.
       # CVE-2026-28684: python-dotenv 1.2.1 — pulled in only via out-of-process
       # Python scanner subprocesses, not linked into the gateway.
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684
+      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip is released.
+      # CVE-2026-3219: pip's interpretation conflict with concatenated tar/ZIP
+      # archives. Medium severity; impacts only attacker-supplied package
+      # archives. We install exclusively from PyPI via uv with locked hashes
+      # (uv.lock), so this attack surface is not exposed in CI or runtime.
+      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
 
   ts-build-test:
     name: TypeScript Build & Test
