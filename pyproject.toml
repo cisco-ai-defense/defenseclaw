@@ -91,7 +91,18 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
     "cryptography>=46.0.7",   # CVE-2026-39892 fixed in 46.0.7
-    "litellm==1.83.0",        # CVE-2026-35029, CVE-2026-35030
+    "litellm>=1.83.7",        # CVE-2026-35029, CVE-2026-35030, GHSA-xqmj-j6mv-4862
+    # python-dotenv: forced compatible version. litellm 1.83.7-1.83.13
+    # transitively pin python-dotenv==1.0.1 while cisco-ai-skill-scanner
+    # 2.0.8 pins ==1.2.1; override to break the conflict. CVE-2026-28684
+    # in 1.2.1 is ignored upstream in CI because python-dotenv only loads
+    # via out-of-process scanner subprocesses, not the gateway runtime.
+    "python-dotenv>=1.2.1",
+    # litellm 1.83.7-1.83.13 transitively pin click==8.1.8 and openai==2.30.0,
+    # which conflict with cisco-ai-skill-scanner 2.0.8's openai==2.15.0 and
+    # the project's click==8.3.1. Override to break the conflict.
+    "click>=8.1.8",
+    "openai>=2.15.0",
     "python-multipart>=0.0.26", # CVE-2026-40347 fixed in 0.0.26
 ]
 
