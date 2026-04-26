@@ -549,6 +549,20 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
+	// AWS Bedrock uses SigV4: the canonical signature covers the request
+	// body hash, the Host header, x-amz-* headers, the Authorization line,
+	// and (depending on the SDK) Content-Length. Any mutation between sign
+	// and send — including notification injection, history laundering, or
+	// a re-emitted Authorization header with a different byte sequence —
+	// invalidates the signature and AWS rejects the request with
+	//   "The request signature we calculated does not match the signature
+	//    you provided. Check your AWS Secret Access Key and signing
+	//    method."
+	// For these requests we skip every mutating step and forward the
+	// already-signed bytes verbatim. Inspection still runs (it only reads
+	// the body); only post-inspection mutation is suppressed.
+	isAWSSigV4 := provider == "bedrock"
+
 	userText := lastUserText(partial.Messages)
 	if userText == "" && partial.System != "" {
 		userText = partial.System
@@ -678,11 +692,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// enqueueBlockNotification above) is the canonical channel for
 	// informing the LLM about past enforcement actions, so we don't
 	// lose any security context by dropping these echo turns.
-	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); stripped > 0 {
-		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
-		body = []byte(launderedBody)
-		if p.logger != nil {
-			_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
+	if !isAWSSigV4 {
+		if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); stripped > 0 {
+			fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
+			body = []byte(launderedBody)
+			if p.logger != nil {
+				_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
+			}
 		}
 	}
 
@@ -697,7 +713,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// notice on the next turn. With this block, every supported provider
 	// surface carries the notification forward as either a system
 	// message or merged instructions string.
-	if p.notify != nil {
+	if !isAWSSigV4 && p.notify != nil {
 		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
 			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
@@ -778,31 +794,57 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	//   - W3C trace context (traceparent/tracestate) is also internal and
 	//     not meaningful to upstream providers; strip to avoid cross-tenant
 	//     trace correlation leakage.
-	for k, vs := range r.Header {
-		lk := strings.ToLower(k)
-		switch lk {
-		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
-			"authorization", "x-api-key", "api-key", "content-length",
-			"traceparent", "tracestate":
-			continue
+	if isAWSSigV4 {
+		// AWS-aware passthrough: preserve every header the AWS SDK signed
+		// (Authorization, x-amz-*, content-length, host-derived-from-URL).
+		// We only strip our own proxy-hop headers and DefenseClaw-internal
+		// correlation headers, which the SDK never signed and which must
+		// not leak to AWS regardless.
+		for k, vs := range r.Header {
+			lk := strings.ToLower(k)
+			switch lk {
+			case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host":
+				continue
+			}
+			if strings.HasPrefix(lk, "x-dc-") || strings.HasPrefix(lk, "x-defenseclaw-") {
+				continue
+			}
+			for _, v := range vs {
+				upstreamReq.Header.Add(k, v)
+			}
 		}
-		if strings.HasPrefix(lk, "x-dc-") || strings.HasPrefix(lk, "x-defenseclaw-") {
-			continue
+		// The fetch interceptor copies the original Authorization line
+		// into X-AI-Auth as a uniform carrier so all proxy paths can read
+		// auth from one place. For Bedrock the original Authorization is
+		// also still present in r.Header (already added to upstreamReq
+		// above) — which is exactly what we want.
+	} else {
+		for k, vs := range r.Header {
+			lk := strings.ToLower(k)
+			switch lk {
+			case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
+				"authorization", "x-api-key", "api-key", "content-length",
+				"traceparent", "tracestate":
+				continue
+			}
+			if strings.HasPrefix(lk, "x-dc-") || strings.HasPrefix(lk, "x-defenseclaw-") {
+				continue
+			}
+			for _, v := range vs {
+				upstreamReq.Header.Add(k, v)
+			}
 		}
-		for _, v := range vs {
-			upstreamReq.Header.Add(k, v)
-		}
-	}
-	// Set the single resolved auth header for the upstream provider.
-	if upstreamAuth != "" {
-		// Anthropic expects x-api-key, Azure expects api-key, others use Authorization.
-		switch provider {
-		case "anthropic":
-			upstreamReq.Header.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		case "azure":
-			upstreamReq.Header.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		default:
-			upstreamReq.Header.Set("Authorization", upstreamAuth)
+		// Set the single resolved auth header for the upstream provider.
+		if upstreamAuth != "" {
+			// Anthropic expects x-api-key, Azure expects api-key, others use Authorization.
+			switch provider {
+			case "anthropic":
+				upstreamReq.Header.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+			case "azure":
+				upstreamReq.Header.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+			default:
+				upstreamReq.Header.Set("Authorization", upstreamAuth)
+			}
 		}
 	}
 
