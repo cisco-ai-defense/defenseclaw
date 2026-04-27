@@ -1,18 +1,25 @@
 import Foundation
 
-/// HTTP client for the DefenseClaw sidecar REST API at localhost:18970.
+/// HTTP client for the DefenseClaw sidecar REST API.
 public actor SidecarClient {
     private let baseURL: URL
     private let session: URLSession
     private let decoder: JSONDecoder
     private let authToken: String?
 
-    public init(host: String = "127.0.0.1", port: Int = 18970) {
-        self.baseURL = URL(string: "http://\(host):\(port)")!
+    public init(host: String? = nil, port: Int? = nil) {
         // Load gateway token — check multiple sources (matches Go sidecar behavior)
         var token: String? = nil
+        var resolvedHost = host ?? "127.0.0.1"
+        var resolvedPort = port ?? 18970
         do {
             let config = try ConfigManager().load()
+            if host == nil, let bind = config.gateway?.apiBind, !bind.isEmpty {
+                resolvedHost = bind
+            }
+            if port == nil, let apiPort = config.gateway?.apiPort, apiPort > 0 {
+                resolvedPort = apiPort
+            }
             token = config.gateway?.token
             // Support token_env: read token from named environment variable
             if token == nil || token?.isEmpty == true, let envName = config.gateway?.tokenEnv, !envName.isEmpty {
@@ -32,6 +39,7 @@ public actor SidecarClient {
         } else {
             log.warn("sidecar", "No auth token found — sidecar requests will be unauthenticated")
         }
+        self.baseURL = URL(string: "http://\(resolvedHost):\(resolvedPort)")!
         self.session = URLSession(configuration: .ephemeral)
         let dec = JSONDecoder()
         // Sidecar returns dates like "2026-04-02T21:00:25.796086-07:00"

@@ -270,7 +270,8 @@ Right-click the app > Open, or allow it in System Settings > Privacy & Security.
 
 **Sidecar connection refused**
 Make sure the DefenseClaw gateway is running: `defenseclaw-gateway start`.
-The app connects to `localhost:18970` by default.
+The app reads `gateway.api_bind` / `gateway.api_port` from
+`~/.defenseclaw/config.yaml` and falls back to `localhost:18970`.
 
 **Build fails with "no such module 'DefenseClawKit'"**
 Ensure you're building from `apps/appkit-app/` (not the repo root). The

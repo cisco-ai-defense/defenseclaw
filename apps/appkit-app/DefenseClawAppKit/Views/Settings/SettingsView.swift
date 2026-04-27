@@ -30,7 +30,7 @@ struct SettingsView: View {
                     Label("Diagnostics", systemImage: "stethoscope")
                 }
         }
-        .frame(width: 700, height: 550)
+        .frame(minWidth: 700, idealWidth: 760, minHeight: 550, idealHeight: 620)
     }
 }
 
@@ -42,10 +42,12 @@ struct GatewaySettingsView: View {
     @State private var statusMessage = ""
     @State private var isLoading = false
     @State private var sidecarRunning = false
+    @State private var openClawGatewayRunning = false
     @State private var isRestarting = false
 
     private let configManager = ConfigManager()
     private let launchAgent = LaunchAgentManager()
+    private let sidecarClient = SidecarClient()
 
     var body: some View {
         Form {
@@ -89,13 +91,13 @@ struct GatewaySettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
                             Circle()
-                                .fill(Color.gray)
+                                .fill(openClawGatewayRunning ? Color.green : Color.gray)
                                 .frame(width: 8, height: 8)
                             Text("OpenClaw Gateway")
                                 .font(.subheadline)
                                 .fontWeight(.medium)
                         }
-                        Text("Managed by sidecar")
+                        Text(openClawGatewayRunning ? "Running" : "Managed by sidecar")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -149,6 +151,21 @@ struct GatewaySettingsView: View {
 
     private func refreshStatus() {
         sidecarRunning = launchAgent.isRunning
+        Task {
+            let launchAgentRunning = launchAgent.isRunning
+            do {
+                let health = try await sidecarClient.health()
+                await MainActor.run {
+                    sidecarRunning = true
+                    openClawGatewayRunning = health.gateway.state == .running
+                }
+            } catch {
+                await MainActor.run {
+                    sidecarRunning = launchAgentRunning
+                    openClawGatewayRunning = false
+                }
+            }
+        }
     }
 
     private func loadSettings() {
@@ -890,7 +907,7 @@ struct DiagnosticsView: View {
                         subsystemRow(name: "API", health: h.api)
                         subsystemRow(name: "Guardrail", health: h.guardrail)
                         subsystemRow(name: "Telemetry", health: h.telemetry)
-                        subsystemRow(name: "Splunk", health: h.splunk)
+                        subsystemRow(name: "Sinks", health: h.splunk)
                         if let sandbox = h.sandbox {
                             subsystemRow(name: "Sandbox", health: sandbox)
                         }

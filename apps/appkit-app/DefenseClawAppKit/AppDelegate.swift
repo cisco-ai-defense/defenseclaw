@@ -33,6 +33,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         mainWindowController?.showWindow(nil)
         statusBarController = StatusBarController(appViewModel: appViewModel)
         log.info("app", "Main window and status bar ready")
+
+        if ProcessInfo.processInfo.arguments.contains("--qa-open-all-windows") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.openAllQAWindows()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -72,6 +78,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Window Management
 
+    private func openAllQAWindows() {
+        showSettings()
+        showScan()
+        showPolicy()
+        showAlerts()
+        showTools()
+        showLogs()
+        mainWindowController?.showWindow(nil)
+    }
+
     @objc func showSettings() {
         log.info("app", "Opening Settings window")
         if settingsWindow == nil {
@@ -79,8 +95,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let hostingController = NSHostingController(rootView: settingsView)
             let window = NSWindow(contentViewController: hostingController)
             window.title = "Settings"
-            window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 600, height: 500))
+            window.styleMask = [.titled, .closable, .resizable]
+            window.setContentSize(NSSize(width: 760, height: 620))
+            window.minSize = NSSize(width: 700, height: 580)
             window.center()
             settingsWindow = window
         }
