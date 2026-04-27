@@ -5,12 +5,6 @@ import DefenseClawKit
 class AppDelegate: NSObject, NSApplicationDelegate {
     var mainWindowController: MainWindowController?
     var statusBarController: StatusBarController?
-    var settingsWindow: NSWindow?
-    var scanWindow: NSWindow?
-    var policyWindow: NSWindow?
-    var toolsWindow: NSWindow?
-    var alertsWindow: NSWindow?
-    var logsWindow: NSWindow?
     var appViewModel = AppViewModel()
 
     private let log = AppLogger.shared
@@ -34,9 +28,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController = StatusBarController(appViewModel: appViewModel)
         log.info("app", "Main window and status bar ready")
 
-        if ProcessInfo.processInfo.arguments.contains("--qa-open-all-windows") {
+        if let qaSection = qaSectionArgument() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.openAllQAWindows()
+                self?.showSection(qaSection)
             }
         }
     }
@@ -78,110 +72,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Window Management
 
-    private func openAllQAWindows() {
-        showSettings()
-        showScan()
-        showPolicy()
-        showAlerts()
-        showTools()
-        showLogs()
-        mainWindowController?.showWindow(nil)
+    private func qaSectionArgument() -> OperatorSection? {
+        let arguments = ProcessInfo.processInfo.arguments
+
+        if let index = arguments.firstIndex(of: "--qa-section"),
+           arguments.indices.contains(index + 1) {
+            return OperatorSection(rawValue: arguments[index + 1])
+        }
+
+        if let argument = arguments.first(where: { $0.hasPrefix("--qa-section=") }) {
+            return OperatorSection(rawValue: String(argument.dropFirst("--qa-section=".count)))
+        }
+
+        return nil
+    }
+
+    private func showSection(_ section: OperatorSection) {
+        log.info("app", "Showing operator section", details: section.rawValue)
+        mainWindowController?.showSection(section)
+    }
+
+    @objc func showHome() {
+        showSection(.home)
     }
 
     @objc func showSettings() {
-        log.info("app", "Opening Settings window")
-        if settingsWindow == nil {
-            let settingsView = SettingsView()
-            let hostingController = NSHostingController(rootView: settingsView)
-            let window = NSWindow(contentViewController: hostingController)
-            window.title = "Settings"
-            window.styleMask = [.titled, .closable, .resizable]
-            window.setContentSize(NSSize(width: 760, height: 620))
-            window.minSize = NSSize(width: 700, height: 580)
-            window.center()
-            settingsWindow = window
-        }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showSection(.settings)
     }
 
     @objc func showScan() {
-        log.info("app", "Opening Scan window")
-        if scanWindow == nil {
-            let scanView = ScanView()
-            let hostingController = NSHostingController(rootView: scanView)
-            let window = NSWindow(contentViewController: hostingController)
-            window.title = "Security Scan"
-            window.styleMask = [.titled, .closable, .resizable]
-            window.setContentSize(NSSize(width: 600, height: 500))
-            window.center()
-            scanWindow = window
-        }
-        scanWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showSection(.scan)
     }
 
     @objc func showPolicy() {
-        log.info("app", "Opening Policy window")
-        if policyWindow == nil {
-            let policyView = PolicyView()
-            let hostingController = NSHostingController(rootView: policyView)
-            let window = NSWindow(contentViewController: hostingController)
-            window.title = "Policies"
-            window.styleMask = [.titled, .closable, .resizable]
-            window.setContentSize(NSSize(width: 600, height: 500))
-            window.center()
-            policyWindow = window
-        }
-        policyWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showSection(.policy)
     }
 
     @objc func showAlerts() {
-        log.info("app", "Opening Alerts window")
-        if alertsWindow == nil {
-            let alertsView = AlertsView()
-            let hostingController = NSHostingController(rootView: alertsView)
-            let window = NSWindow(contentViewController: hostingController)
-            window.title = "Alerts"
-            window.styleMask = [.titled, .closable, .resizable]
-            window.setContentSize(NSSize(width: 700, height: 500))
-            window.center()
-            alertsWindow = window
-        }
-        alertsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showSection(.alerts)
     }
 
     @objc func showTools() {
-        log.info("app", "Opening Tools window")
-        if toolsWindow == nil {
-            let toolsView = ToolsCatalogView()
-            let hostingController = NSHostingController(rootView: toolsView)
-            let window = NSWindow(contentViewController: hostingController)
-            window.title = "Tools Catalog"
-            window.styleMask = [.titled, .closable, .resizable]
-            window.setContentSize(NSSize(width: 700, height: 600))
-            window.center()
-            toolsWindow = window
-        }
-        toolsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showSection(.tools)
     }
 
     @objc func showLogs() {
-        log.info("app", "Opening Logs window")
-        if logsWindow == nil {
-            let logsView = LogsView()
-            let hostingController = NSHostingController(rootView: logsView)
-            let window = NSWindow(contentViewController: hostingController)
-            window.title = "Application Logs"
-            window.styleMask = [.titled, .closable, .resizable]
-            window.setContentSize(NSSize(width: 900, height: 600))
-            window.center()
-            logsWindow = window
-        }
-        logsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showSection(.logs)
     }
 }
