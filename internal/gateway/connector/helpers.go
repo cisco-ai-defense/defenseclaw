@@ -17,11 +17,21 @@
 package connector
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
 )
+
+// SecureTokenMatch compares two token strings in constant time to prevent
+// timing-based token extraction attacks.
+func SecureTokenMatch(a, b string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
 
 // ExtractBearerKey extracts the API key from an Authorization header value,
 // stripping the "Bearer " prefix. Returns empty string if no key found.

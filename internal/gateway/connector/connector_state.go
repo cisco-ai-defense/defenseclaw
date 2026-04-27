@@ -51,7 +51,7 @@ func SaveActiveConnector(dataDir, name string) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(dataDir, activeConnectorFile), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, activeConnectorFile), data, 0o600)
 }
 
 // ClearActiveConnector removes the state file (used on full teardown

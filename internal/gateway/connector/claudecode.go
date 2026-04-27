@@ -85,14 +85,14 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
-		if c.gatewayToken != "" && token == c.gatewayToken {
+		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
 			return true
 		}
 	}
 
 	if c.masterKey != "" {
 		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == c.masterKey {
+		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
 	}
@@ -179,7 +179,7 @@ func (c *ClaudeCodeConnector) saveBackup(dataDir string, backup claudeCodeBackup
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(dataDir, "claudecode_backup.json"), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, "claudecode_backup.json"), data, 0o600)
 }
 
 func (c *ClaudeCodeConnector) loadBackup(dataDir string) (claudeCodeBackup, error) {

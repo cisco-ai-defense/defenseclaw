@@ -78,14 +78,14 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
-		if c.gatewayToken != "" && token == c.gatewayToken {
+		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
 			return true
 		}
 	}
 
 	if c.masterKey != "" {
 		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == c.masterKey {
+		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
 	}
@@ -153,7 +153,7 @@ func (c *CodexConnector) saveBackup(dataDir string, backup codexBackup) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(dataDir, "codex_backup.json"), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, "codex_backup.json"), data, 0o600)
 }
 
 const codexEnvFileName = "codex_env.sh"

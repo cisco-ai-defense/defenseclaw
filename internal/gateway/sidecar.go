@@ -976,10 +976,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		} else {
 			teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx)
 			if err := conn.Setup(ctx, setupOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)
-			}
-			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+				fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
+			} else {
+				if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+				}
 			}
 		}
 

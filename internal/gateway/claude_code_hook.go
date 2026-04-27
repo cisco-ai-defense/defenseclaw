@@ -470,6 +470,11 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	if !filepath.IsAbs(target) && req.CWD != "" {
 		target = filepath.Join(req.CWD, target)
 	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return nil
+	}
+	target = resolved
 	info, err := os.Stat(target)
 	if err != nil || info.IsDir() {
 		return nil

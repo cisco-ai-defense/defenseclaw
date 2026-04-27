@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2664,24 +2665,22 @@ func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Requ
 
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
-		if p.gatewayToken != "" && token == p.gatewayToken {
+		if p.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.gatewayToken)) == 1 {
 			return true
 		}
 	}
 
 	if p.masterKey != "" {
 		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == p.masterKey {
+		if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(p.masterKey)) == 1 {
 			return true
 		}
 	}
 
-	if isLoopback && p.gatewayToken == "" {
-		return true
-	}
-
+	// No token configured: allow only loopback callers. Non-loopback traffic
+	// is denied by default until the operator explicitly sets a gateway token.
 	if p.gatewayToken == "" && p.masterKey == "" {
-		return true
+		return isLoopback
 	}
 
 	reason := "invalid_token"
@@ -2802,18 +2801,26 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	ctx := context.Background()
+	oldConn := p.connector
 
-	if p.connector != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", p.connector.Name())
-		if err := p.connector.Teardown(ctx, p.setupOpts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] teardown %s: %v\n", p.connector.Name(), err)
+	newConn.SetCredentials(p.gatewayToken, p.masterKey)
+
+	if oldConn != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", oldConn.Name())
+		if err := oldConn.Teardown(ctx, p.setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown %s: %v\n", oldConn.Name(), err)
 		}
 	}
 
-	newConn.SetCredentials(p.gatewayToken, p.masterKey)
 	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: setting up %s\n", newName)
 	if err := newConn.Setup(ctx, p.setupOpts); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] setup %s: %v\n", newName, err)
+		fmt.Fprintf(os.Stderr, "[guardrail] setup %s failed: %v — rolling back to %s\n", newName, err, oldConn.Name())
+		if oldConn != nil {
+			if reErr := oldConn.Setup(ctx, p.setupOpts); reErr != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] rollback setup %s also failed: %v\n", oldConn.Name(), reErr)
+			}
+		}
+		return
 	}
 
 	p.connector = newConn

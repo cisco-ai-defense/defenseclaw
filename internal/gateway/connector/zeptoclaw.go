@@ -109,14 +109,14 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
-		if c.gatewayToken != "" && token == c.gatewayToken {
+		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
 			return true
 		}
 	}
 
 	if c.masterKey != "" {
 		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == c.masterKey {
+		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
 	}
@@ -258,7 +258,7 @@ func (c *ZeptoClawConnector) saveBackup(dataDir string, backup zeptoClawBackup) 
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(dataDir, "zeptoclaw_backup.json"), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, "zeptoclaw_backup.json"), data, 0o600)
 }
 
 func (c *ZeptoClawConnector) loadBackup(dataDir string) (zeptoClawBackup, error) {
