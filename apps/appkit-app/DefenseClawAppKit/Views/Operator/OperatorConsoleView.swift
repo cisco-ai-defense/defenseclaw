@@ -2,6 +2,7 @@ import SwiftUI
 
 enum OperatorSection: String, CaseIterable, Identifiable {
     case home
+    case setup
     case settings
     case scan
     case policy
@@ -14,6 +15,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .home: return "Home"
+        case .setup: return "Setup"
         case .settings: return "Settings"
         case .scan: return "Scans"
         case .policy: return "Policy"
@@ -26,6 +28,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .home: return "Health and posture"
+        case .setup: return "Wizards and integrations"
         case .settings: return "Gateway, guardrail, enforcement"
         case .scan: return "Skills, MCPs, plugins, code"
         case .policy: return "Policy viewer and evaluator"
@@ -38,6 +41,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .home: return "shield.lefthalf.filled"
+        case .setup: return "wand.and.stars"
         case .settings: return "slider.horizontal.3"
         case .scan: return "magnifyingglass"
         case .policy: return "doc.text.magnifyingglass"
@@ -91,6 +95,8 @@ struct OperatorConsoleView: View {
         switch navigation.selection {
         case .home:
             DashboardView()
+        case .setup:
+            SetupView()
         case .settings:
             SettingsView()
         case .scan:
