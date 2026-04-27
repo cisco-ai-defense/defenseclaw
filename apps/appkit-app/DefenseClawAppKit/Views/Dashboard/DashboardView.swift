@@ -88,10 +88,10 @@ struct DashboardView: View {
         ) {
             MetricTile(
                 title: "Active Alerts",
-                value: "\(viewModel.alerts.count)",
-                subtitle: viewModel.alerts.isEmpty ? "No active findings" : "Needs review",
+                value: viewModel.alertsMetricValue,
+                subtitle: viewModel.alertsMetricSubtitle,
                 systemImage: "bell.badge",
-                tint: viewModel.alerts.isEmpty ? .green : .orange
+                tint: viewModel.alertsError == nil && viewModel.alerts.isEmpty ? .green : .orange
             )
 
             MetricTile(
@@ -112,8 +112,8 @@ struct DashboardView: View {
 
             MetricTile(
                 title: "Tools",
-                value: "\(viewModel.tools.count)",
-                subtitle: viewModel.tools.isEmpty ? "Gateway catalog unavailable" : "Runtime catalog",
+                value: viewModel.toolsMetricValue,
+                subtitle: viewModel.toolsMetricSubtitle,
                 systemImage: "wrench.and.screwdriver",
                 tint: .blue
             )
@@ -211,7 +211,14 @@ struct DashboardView: View {
 
     private var recentAlertsCard: some View {
         DashboardCard(title: "Recent Alerts", systemImage: "bell.badge", tint: .orange) {
-            if viewModel.alerts.isEmpty {
+            if let alertsError = viewModel.alertsError {
+                OfflineStateView(
+                    title: "Alerts unavailable",
+                    message: viewModel.shortError(alertsError),
+                    systemImage: "exclamationmark.triangle.fill",
+                    tint: .orange
+                )
+            } else if viewModel.alerts.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.shield.fill")
                         .foregroundStyle(.green)
@@ -319,6 +326,7 @@ final class DashboardViewModel {
     var allowedCount = 0
     var policySummary = "Not loaded"
     var errorMessage: String?
+    var alertsError: String?
     var skillsError: String?
     var mcpError: String?
     var toolsError: String?
@@ -351,6 +359,15 @@ final class DashboardViewModel {
         skills.filter { $0.lastScan != nil }.count
     }
 
+    var alertsMetricValue: String {
+        alertsError == nil ? "\(alerts.count)" : "!"
+    }
+
+    var alertsMetricSubtitle: String {
+        if let alertsError { return "Load failed: \(shortError(alertsError))" }
+        return alerts.isEmpty ? "No active findings" : "Needs review"
+    }
+
     var skillsMetricValue: String {
         skillsError == nil ? "\(skills.count)" : "!"
     }
@@ -380,6 +397,15 @@ final class DashboardViewModel {
         if let allowedError { return "Allowed failed: \(shortError(allowedError))" }
         if blockedCount + allowedCount == 0 { return "No explicit overrides" }
         return "\(blockedCount) blocked, \(allowedCount) allowed"
+    }
+
+    var toolsMetricValue: String {
+        toolsError == nil ? "\(tools.count)" : "!"
+    }
+
+    var toolsMetricSubtitle: String {
+        if let toolsError { return "Load failed: \(shortError(toolsError))" }
+        return tools.isEmpty ? "No runtime tools reported" : "Runtime catalog"
     }
 
     var scannerCoverageText: String {
@@ -456,7 +482,13 @@ final class DashboardViewModel {
             log.warn("dashboard", "Health poll failed", details: "\(error.localizedDescription)")
         }
 
-        do { alerts = try await sidecarClient.alerts() } catch { alerts = [] }
+        do {
+            alerts = try await sidecarClient.alerts()
+            alertsError = nil
+        } catch {
+            alertsError = error.localizedDescription
+            log.warn("dashboard", "Alerts load failed", details: error.localizedDescription)
+        }
         do {
             skills = try await sidecarClient.skills()
             skillsError = nil
@@ -523,7 +555,7 @@ final class DashboardViewModel {
         }
     }
 
-    private func shortError(_ error: String) -> String {
+    func shortError(_ error: String) -> String {
         let cleaned = error.replacingOccurrences(of: "\n", with: " ")
         if cleaned.count <= 42 { return cleaned }
         return String(cleaned.prefix(39)) + "..."

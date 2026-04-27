@@ -110,7 +110,7 @@ PLIST
 
 open_app() {
   ensure_sidecar
-  /usr/bin/open -n "$APP_BUNDLE"
+  (cd "$HOME" && /usr/bin/open -n "$APP_BUNDLE")
 }
 
 open_app_qa() {
@@ -118,9 +118,9 @@ open_app_qa() {
   local detail="${2:-}"
   ensure_sidecar
   if [[ -n "$detail" ]]; then
-    /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section" --qa-settings-tab "$detail" --qa-setup-group "$detail"
+    (cd "$HOME" && /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section" --qa-settings-tab "$detail" --qa-setup-group "$detail")
   else
-    /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section"
+    (cd "$HOME" && /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section")
   fi
 }
 

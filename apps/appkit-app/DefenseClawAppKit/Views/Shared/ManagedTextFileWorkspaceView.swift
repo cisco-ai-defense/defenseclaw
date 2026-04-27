@@ -7,6 +7,7 @@ struct ManagedTextFileWorkspaceView: View {
     let subtitle: String
     let emptyMessage: String
     var accessory: AnyView?
+    @State private var editorMode = ManagedDocumentEditorMode.rich
 
     init<Accessory: View>(
         model: TextFileEditorModel,
@@ -38,16 +39,17 @@ struct ManagedTextFileWorkspaceView: View {
     var body: some View {
         HSplitView {
             sidebar
-                .frame(minWidth: 300, idealWidth: 340, maxWidth: 440)
+                .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
 
             editor
-                .frame(minWidth: 560)
+                .frame(minWidth: 440)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: model.categoryFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
         .onChange(of: model.sourceFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
         .onChange(of: model.kindFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
         .onChange(of: model.searchText) { _, _ in model.selectFirstFilteredIfNeeded() }
+        .onChange(of: model.selectedFileID) { _, _ in editorMode = .rich }
     }
 
     private var sidebar: some View {
@@ -137,22 +139,33 @@ struct ManagedTextFileWorkspaceView: View {
 
     private var filters: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+            Text("Filters")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 8) {
                 filterPicker(title: "Category", selection: $model.categoryFilter, options: model.categoryOptions)
                 filterPicker(title: "Source", selection: $model.sourceFilter, options: model.sourceOptions)
+                filterPicker(title: "Format", selection: $model.kindFilter, options: model.kindOptions)
             }
-            filterPicker(title: "Format", selection: $model.kindFilter, options: model.kindOptions)
         }
     }
 
     private func filterPicker(title: String, selection: Binding<String>, options: [String]) -> some View {
-        Picker(title, selection: selection) {
-            ForEach(options, id: \.self) { option in
-                Text(option).tag(option)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Picker(title, selection: selection) {
+                ForEach(options, id: \.self) { option in
+                    Text(option).tag(option)
+                }
             }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
         .frame(maxWidth: .infinity)
         .help(title)
     }
@@ -225,7 +238,7 @@ struct ManagedTextFileWorkspaceView: View {
             if let file = model.selectedFile {
                 editorHeader(for: file)
                 Divider()
-                textEditor(for: file)
+                editorBody(for: file)
                 Divider()
                 editorFooter(for: file)
             } else {
@@ -242,7 +255,7 @@ struct ManagedTextFileWorkspaceView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
+                HStack(spacing: 8) {
                         Text(file.displayName)
                             .font(.title3.weight(.semibold))
                             .lineLimit(1)
@@ -273,7 +286,18 @@ struct ManagedTextFileWorkspaceView: View {
 
                 Spacer()
 
-                HStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                    if supportsRichEditor(file) {
+                        Picker("Editor", selection: $editorMode) {
+                            ForEach(ManagedDocumentEditorMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 180)
+                        .help("Switch between rich controls and source editing")
+                    }
+
                     Button {
                         reveal(file)
                     } label: {
@@ -329,6 +353,33 @@ struct ManagedTextFileWorkspaceView: View {
             }
         }
         .padding(18)
+    }
+
+    @ViewBuilder
+    private func editorBody(for file: ManagedTextFile) -> some View {
+        if editorMode == .rich, supportsRichEditor(file) {
+            switch file.kind {
+            case .yaml, .json:
+                StructuredDocumentEditorView(
+                    content: $model.content,
+                    kind: file.kind,
+                    isEditable: file.isEditable,
+                    documentTitle: richEditorTitle(for: file),
+                    documentSummary: richEditorSummary(for: file),
+                    openSource: { editorMode = .source }
+                )
+            case .rego:
+                RegoPolicyRichEditorView(
+                    content: $model.content,
+                    isEditable: file.isEditable,
+                    openSource: { editorMode = .source }
+                )
+            case .text:
+                textEditor(for: file)
+            }
+        } else {
+            textEditor(for: file)
+        }
     }
 
     private func textEditor(for file: ManagedTextFile) -> some View {
@@ -457,6 +508,62 @@ struct ManagedTextFileWorkspaceView: View {
         NSPasteboard.general.setString(file.fullPath, forType: .string)
         model.statusMessage = "Copied \(file.displayName) path"
     }
+
+    private func supportsRichEditor(_ file: ManagedTextFile) -> Bool {
+        switch file.kind {
+        case .yaml, .json, .rego:
+            return true
+        case .text:
+            return false
+        }
+    }
+
+    private func richEditorTitle(for file: ManagedTextFile) -> String {
+        let path = file.relativePath.lowercased()
+        if path.contains("suppress") {
+            return "Suppression Rules Editor"
+        }
+        if path.contains("regex") || path.contains("rules") {
+            return "Guardrail Regex Rules Editor"
+        }
+        if path.contains("firewall") {
+            return "Firewall Policy Editor"
+        }
+        if path.contains("judge") {
+            return "Guardrail Judge Editor"
+        }
+        if file.kind == .json {
+            return "JSON Rich Editor"
+        }
+        return "YAML Rich Editor"
+    }
+
+    private func richEditorSummary(for file: ManagedTextFile) -> String {
+        let path = file.relativePath.lowercased()
+        if path.contains("suppress") {
+            return "Edit suppression entries as structured fields: scope, reason, expiration, and matching criteria."
+        }
+        if path.contains("regex") || path.contains("rules") {
+            return "Edit rule categories, severities, match patterns, and policy metadata without hand-editing indentation."
+        }
+        if path.contains("firewall") {
+            return "Edit default action, allowlists, deny rules, domains, and network destinations as structured policy data."
+        }
+        if path.contains("judge") {
+            return "Edit judge prompts, categories, finding ids, severities, and model-facing policy text in structured sections."
+        }
+        if file.kind == .json {
+            return "Edit objects, arrays, toggles, numbers, and strings in a structured view. Secret-like values are masked."
+        }
+        return "Edit fields, lists, toggles, and nested policy objects in a structured view. Secret-like values are masked."
+    }
+}
+
+private enum ManagedDocumentEditorMode: String, CaseIterable, Identifiable {
+    case rich = "Rich"
+    case source = "Source"
+
+    var id: String { rawValue }
 }
 
 private struct ManagedTextFileRow: View {

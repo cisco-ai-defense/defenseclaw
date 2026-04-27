@@ -25,6 +25,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         mainWindowController = MainWindowController(appViewModel: appViewModel)
         mainWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
         statusBarController = StatusBarController(appViewModel: appViewModel)
         log.info("app", "Main window and status bar ready")
 
@@ -77,14 +78,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let index = arguments.firstIndex(of: "--qa-section"),
            arguments.indices.contains(index + 1) {
-            return OperatorSection(rawValue: arguments[index + 1])
+            return operatorSection(for: arguments[index + 1])
         }
 
         if let argument = arguments.first(where: { $0.hasPrefix("--qa-section=") }) {
-            return OperatorSection(rawValue: String(argument.dropFirst("--qa-section=".count)))
+            return operatorSection(for: String(argument.dropFirst("--qa-section=".count)))
         }
 
         return nil
+    }
+
+    private func operatorSection(for rawValue: String) -> OperatorSection? {
+        if let section = OperatorSection(rawValue: rawValue) {
+            return section
+        }
+
+        switch rawValue {
+        case "settings", "tools":
+            return .advanced
+        case "logs", "diagnostics":
+            return .operations
+        case "scans":
+            return .scan
+        default:
+            return nil
+        }
     }
 
     private func showSection(_ section: OperatorSection) {
@@ -101,7 +119,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func showSettings() {
-        showSection(.settings)
+        showSection(.advanced)
+    }
+
+    @objc func showProtection() {
+        showSection(.protection)
     }
 
     @objc func showScan() {
@@ -117,10 +139,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func showTools() {
-        showSection(.tools)
+        showSection(.advanced)
     }
 
     @objc func showLogs() {
-        showSection(.logs)
+        showSection(.operations)
+    }
+
+    @objc func showOperations() {
+        showSection(.operations)
+    }
+
+    @objc func showAdvanced() {
+        showSection(.advanced)
     }
 }

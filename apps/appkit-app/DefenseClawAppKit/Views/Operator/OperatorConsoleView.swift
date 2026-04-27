@@ -3,12 +3,12 @@ import SwiftUI
 enum OperatorSection: String, CaseIterable, Identifiable {
     case home
     case setup
-    case settings
+    case protection
     case scan
     case policy
     case alerts
-    case tools
-    case logs
+    case operations
+    case advanced
 
     var id: String { rawValue }
 
@@ -16,12 +16,12 @@ enum OperatorSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "Home"
         case .setup: return "Setup"
-        case .settings: return "Settings"
+        case .protection: return "Protection"
         case .scan: return "Scans"
         case .policy: return "Policy"
         case .alerts: return "Alerts"
-        case .tools: return "Tools"
-        case .logs: return "Logs"
+        case .operations: return "Operations"
+        case .advanced: return "Advanced"
         }
     }
 
@@ -29,12 +29,12 @@ enum OperatorSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "Health and posture"
         case .setup: return "Wizards and integrations"
-        case .settings: return "Gateway, guardrail, enforcement"
+        case .protection: return "Guardrails and enforcement"
         case .scan: return "Skills, MCPs, plugins, code"
-        case .policy: return "Policy viewer and evaluator"
+        case .policy: return "Rich policy editors"
         case .alerts: return "Audit and findings"
-        case .tools: return "Runtime tool catalog"
-        case .logs: return "Application and gateway logs"
+        case .operations: return "Diagnostics, logs, services"
+        case .advanced: return "Raw files and tools"
         }
     }
 
@@ -42,12 +42,12 @@ enum OperatorSection: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "shield.lefthalf.filled"
         case .setup: return "wand.and.stars"
-        case .settings: return "slider.horizontal.3"
+        case .protection: return "shield.checkered"
         case .scan: return "magnifyingglass"
         case .policy: return "doc.text.magnifyingglass"
         case .alerts: return "bell.badge"
-        case .tools: return "wrench.and.screwdriver"
-        case .logs: return "terminal"
+        case .operations: return "stethoscope"
+        case .advanced: return "slider.horizontal.3"
         }
     }
 }
@@ -58,6 +58,7 @@ final class OperatorNavigationModel {
 }
 
 struct OperatorConsoleView: View {
+    @Environment(AppViewModel.self) private var appViewModel
     let navigation: OperatorNavigationModel
 
     private var selection: Binding<OperatorSection?> {
@@ -72,20 +73,26 @@ struct OperatorConsoleView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: selection) {
-                Section("DefenseClaw") {
-                    ForEach(OperatorSection.allCases) { section in
-                        OperatorSidebarRow(section: section)
-                            .tag(section)
+        Group {
+            if appViewModel.firstRunCompleted {
+                NavigationSplitView {
+                    List(selection: selection) {
+                        Section("DefenseClaw") {
+                            ForEach(OperatorSection.allCases) { section in
+                                OperatorSidebarRow(section: section)
+                                    .tag(section)
+                            }
+                        }
                     }
+                    .listStyle(.sidebar)
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+                } detail: {
+                    detailView
+                        .navigationTitle(navigation.selection.title)
                 }
+            } else {
+                FirstRunSetupView(navigation: navigation, appViewModel: appViewModel)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
-        } detail: {
-            detailView
-                .navigationTitle(navigation.selection.title)
         }
         .frame(minWidth: 1040, minHeight: 720)
     }
@@ -97,18 +104,18 @@ struct OperatorConsoleView: View {
             DashboardView()
         case .setup:
             SetupView()
-        case .settings:
-            SettingsView()
+        case .protection:
+            ProtectionView()
         case .scan:
             ScanView()
         case .policy:
             PolicyView()
         case .alerts:
             AlertsView()
-        case .tools:
-            ToolsCatalogView()
-        case .logs:
-            LogsView()
+        case .operations:
+            OperationsView()
+        case .advanced:
+            AdvancedView()
         }
     }
 }

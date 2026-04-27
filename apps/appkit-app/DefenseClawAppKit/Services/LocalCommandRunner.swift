@@ -24,25 +24,60 @@ actor LocalCommandRunner {
         let process = Process()
         let output = Pipe()
         let error = Pipe()
+        let resolved = resolveExecutable(executable, arguments: arguments)
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [executable] + arguments
+        process.executableURL = resolved.url
+        process.arguments = resolved.arguments
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardOutput = output
         process.standardError = error
 
         try process.run()
+        async let stdout = readPipe(output)
+        async let stderr = readPipe(error)
         process.waitUntilExit()
-
-        let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stdoutText = await stdout
+        let stderrText = await stderr
 
         return LocalCommandResult(
             executable: executable,
             arguments: arguments,
             exitCode: process.terminationStatus,
-            standardOutput: redact(stdout),
-            standardError: redact(stderr)
+            standardOutput: redact(stdoutText),
+            standardError: redact(stderrText)
         )
+    }
+
+    private func resolveExecutable(_ executable: String, arguments: [String]) -> (url: URL, arguments: [String]) {
+        if executable.contains("/") {
+            return (URL(fileURLWithPath: executable), arguments)
+        }
+
+        var candidates: [String] = []
+        if let resourcePath = Bundle.main.resourcePath {
+            candidates.append("\(resourcePath)/\(executable)")
+            candidates.append("\(resourcePath)/bin/\(executable)")
+        }
+        candidates.append(contentsOf: [
+            "\(NSHomeDirectory())/.local/bin/\(executable)",
+            "/opt/homebrew/bin/\(executable)",
+            "/usr/local/bin/\(executable)",
+            "/usr/bin/\(executable)",
+            "/bin/\(executable)"
+        ])
+
+        if let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return (URL(fileURLWithPath: path), arguments)
+        }
+
+        return (URL(fileURLWithPath: "/usr/bin/env"), [executable] + arguments)
+    }
+
+    private nonisolated func readPipe(_ pipe: Pipe) async -> String {
+        await Task.detached(priority: .utility) {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8) ?? ""
+        }.value
     }
 
     private func redact(_ text: String) -> String {

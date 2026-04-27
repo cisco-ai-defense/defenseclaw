@@ -54,6 +54,35 @@ private struct MCPServerListResponse: Decodable {
     }
 }
 
+struct ScanResultResponse: Decodable {
+    let result: ScanResult
+
+    private enum CodingKeys: String, CodingKey {
+        case result
+        case data
+    }
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if let decoded = try? single.decode(ScanResult.self) {
+            result = decoded
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let decoded = try container.decodeIfPresent(ScanResult.self, forKey: .result)
+            ?? container.decodeIfPresent(ScanResult.self, forKey: .data) {
+            result = decoded
+            return
+        }
+
+        throw DecodingError.keyNotFound(
+            CodingKeys.result,
+            DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Expected scan result or result envelope")
+        )
+    }
+}
+
 /// HTTP client for the DefenseClaw sidecar REST API.
 public actor SidecarClient {
     private let baseURL: URL
@@ -128,7 +157,10 @@ public actor SidecarClient {
     }
     public func disableSkill(key: String) async throws { try await postVoid("/skill/disable", body: ["skill_key": key]) }
     public func enableSkill(key: String) async throws { try await postVoid("/skill/enable", body: ["skill_key": key]) }
-    public func scanSkill(path: String) async throws -> ScanResult { try await post("/v1/skill/scan", body: ["path": path]) }
+    public func scanSkill(path: String) async throws -> ScanResult {
+        let response: ScanResultResponse = try await post("/v1/skill/scan", body: ["target": path])
+        return response.result
+    }
     public func fetchSkill(url: String) async throws -> [String: AnyCodable] { try await post("/v1/skill/fetch", body: ["url": url]) }
     public func disablePlugin(key: String) async throws { try await postVoid("/plugin/disable", body: ["plugin_key": key]) }
     public func enablePlugin(key: String) async throws { try await postVoid("/plugin/enable", body: ["plugin_key": key]) }
@@ -136,7 +168,10 @@ public actor SidecarClient {
         let response: MCPServerListResponse = try await get("/mcps")
         return response.items
     }
-    public func scanMCP(url: String) async throws -> ScanResult { try await post("/v1/mcp/scan", body: ["url": url]) }
+    public func scanMCP(url: String) async throws -> ScanResult {
+        let response: ScanResultResponse = try await post("/v1/mcp/scan", body: ["target": url])
+        return response.result
+    }
     /// Fetch runtime tool catalog from sidecar.
     ///
     /// **Chain**: macOS app → GET /tools/catalog → Go sidecar → WS RPC `tools.catalog` → OpenClaw gateway
@@ -191,7 +226,10 @@ public actor SidecarClient {
         log.info("sidecar", "POST /api/v1/inspect/tool OK", details: "tool=\(name) keys=\(result.keys.sorted())")
         return result
     }
-    public func scanCode(path: String) async throws -> ScanResult { try await post("/api/v1/scan/code", body: ["path": path]) }
+    public func scanCode(path: String) async throws -> ScanResult {
+        let response: ScanResultResponse = try await post("/api/v1/scan/code", body: ["path": path])
+        return response.result
+    }
     public func block(_ request: EnforceRequest) async throws { try await postVoid("/enforce/block", body: request) }
     public func allow(_ request: EnforceRequest) async throws { try await postVoid("/enforce/allow", body: request) }
     public func unblock(_ request: EnforceRequest) async throws { try await deleteVoid("/enforce/block", body: request) }

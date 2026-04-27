@@ -4,6 +4,8 @@ import Observation
 @MainActor
 @Observable
 final class SetupWorkspaceModel {
+    static let hubGroupID = "hub"
+
     let groups = SetupCatalog.groups
     var selectedGroupID = SetupWorkspaceModel.qaDefaultGroupID
     var textValues: [String: String] = [:]
@@ -38,11 +40,15 @@ final class SetupWorkspaceModel {
             }
         }
 
-        return SetupCatalog.groups.first?.id ?? "llm"
+        return hubGroupID
     }
 
     var selectedGroup: SetupGroup {
         groups.first { $0.id == selectedGroupID } ?? groups[0]
+    }
+
+    var isHubSelected: Bool {
+        selectedGroupID == Self.hubGroupID
     }
 
     var changedCount: Int {
@@ -216,6 +222,22 @@ final class SetupWorkspaceModel {
         "defenseclaw " + buildArguments(for: workflow).arguments.joined(separator: " ")
     }
 
+    func visibleGroups(includeAdvanced: Bool) -> [SetupGroup] {
+        includeAdvanced ? groups : groups.filter { !$0.isAdvanced }
+    }
+
+    func selectGroup(_ groupID: String) {
+        selectedGroupID = groupID
+    }
+
+    func group(withID groupID: String) -> SetupGroup? {
+        groups.first { $0.id == groupID }
+    }
+
+    func workflow(withID workflowID: String) -> SetupWorkflow? {
+        groups.flatMap(\.workflows).first { $0.id == workflowID }
+    }
+
     func primaryFields(for group: SetupGroup) -> [SetupField] {
         let primaryPaths = Self.primaryFieldPaths[group.id, default: []]
         return group.fields.filter { primaryPaths.contains($0.path) }
@@ -263,6 +285,7 @@ final class SetupWorkspaceModel {
             "llm.provider",
             "llm.model",
             "llm.api_key_env",
+            "llm.api_key",
             "claw.mode"
         ],
         "gateway": [

@@ -115,6 +115,25 @@ struct SetupGroup: Identifiable, Hashable {
     let systemImage: String
     let fields: [SetupField]
     let workflows: [SetupWorkflow]
+    let isAdvanced: Bool
+
+    init(
+        id: String,
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        fields: [SetupField],
+        workflows: [SetupWorkflow],
+        isAdvanced: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.fields = fields
+        self.workflows = workflows
+        self.isAdvanced = isAdvanced
+    }
 }
 
 enum SetupCatalog {
@@ -134,7 +153,7 @@ enum SetupCatalog {
                 SetupField("LLM Provider", path: "llm.provider", kind: .choice, options: providerOptions, help: "Shared provider used by scanners and guardrail when no component override is set."),
                 SetupField("LLM Model", path: "llm.model", placeholder: "gpt-4o, claude-3-5-sonnet, llama3.1"),
                 SetupField("API Key Env", path: "llm.api_key_env", placeholder: "DEFENSECLAW_LLM_KEY", help: "Preferred way to configure the DefenseClaw LLM key without writing the secret into config.yaml."),
-                SetupField("Inline API Key", path: "llm.api_key", kind: .password, help: "Write-only. Leave blank to keep the existing value; prefer API Key Env for normal operation.", secretWriteOnly: true),
+                SetupField("DefenseClaw LLM API Key", path: "llm.api_key", kind: .password, help: "Write-only setup field used by guardrail, skill scanner, MCP scanner, and plugin scanner. Leave blank to keep the existing key; use API Key Env for team-managed secrets.", secretWriteOnly: true),
                 SetupField("Base URL", path: "llm.base_url", placeholder: "https://api.example.com"),
                 SetupField("Timeout Seconds", path: "llm.timeout", kind: .integer),
                 SetupField("Max Retries", path: "llm.max_retries", kind: .integer),
@@ -337,7 +356,8 @@ enum SetupCatalog {
                     SetupField("Rescan Enabled", path: "watch.rescan_enabled", kind: .toggle),
                     SetupField("Rescan Interval Minutes", path: "watch.rescan_interval_min", kind: .integer)
                 ],
-            workflows: []
+            workflows: [],
+            isAdvanced: true
         ),
         SetupGroup(
             id: "sandbox",
@@ -372,7 +392,8 @@ enum SetupCatalog {
                         SetupWorkflowField("Disable", flag: "--disable", kind: .toggle)
                     ]
                 )
-            ]
+            ],
+            isAdvanced: true
         )
     ]
 
@@ -412,7 +433,8 @@ enum SetupCatalog {
             workflows: observabilityWorkflows + [
                 SetupWorkflow(id: "observability-list", title: "List Destinations", subtitle: "Show OTel plus audit_sinks destinations as JSON.", command: ["setup", "observability", "list", "--json"]),
                 SetupWorkflow(id: "observability-migrate-splunk", title: "Migrate Legacy Splunk", subtitle: "Convert old splunk: config into audit_sinks without losing existing sinks.", command: ["setup", "observability", "migrate-splunk", "--apply"])
-            ]
+            ],
+            isAdvanced: true
         )
     }
 
@@ -425,7 +447,8 @@ enum SetupCatalog {
             fields: [],
             workflows: webhookWorkflows + [
                 SetupWorkflow(id: "webhook-list", title: "List Webhooks", subtitle: "Show configured notifier webhooks as JSON.", command: ["setup", "webhook", "list", "--json"])
-            ]
+            ],
+            isAdvanced: true
         )
     }
 
