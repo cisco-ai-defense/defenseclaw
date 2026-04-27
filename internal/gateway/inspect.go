@@ -67,14 +67,67 @@ type ToolInspectRequest struct {
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
+//
+// Observe-mode contract:
+//
+//   - Action is the value the hook script consumes. When the operator
+//     has set guardrail.mode=observe (or the per-component mode is
+//     not "action"), Action is downgraded to "allow" by applyMode()
+//     so the hook script does not exit non-zero, mirroring the
+//     evaluate{Codex,ClaudeCode}Hook handlers.
+//   - RawAction preserves what the rule scanner would have decided
+//     before the mode downgrade, so audit, OTel, and dashboards can
+//     still see the latent verdict.
+//   - WouldBlock=true means rawAction was "block" but mode≠"action"
+//     suppressed the kill switch. Operators reading the response can
+//     surface "we would have blocked this" without actually killing
+//     the agent's request.
+//
+// This shape is deliberately the same observe-aware schema the codex
+// and claude-code hook responses use so a future generic inspect
+// hook script can read .raw_action / .would_block uniformly.
 type ToolInspectVerdict struct {
 	Action           string        `json:"action"`
+	RawAction        string        `json:"raw_action,omitempty"`
 	Severity         string        `json:"severity"`
 	Confidence       float64       `json:"confidence"`
 	Reason           string        `json:"reason"`
 	Findings         []string      `json:"findings"`
 	DetailedFindings []RuleFinding `json:"detailed_findings,omitempty"`
 	Mode             string        `json:"mode"`
+	WouldBlock       bool          `json:"would_block,omitempty"`
+}
+
+// applyMode stamps the active guardrail mode onto the verdict and,
+// when mode is anything other than "action" (typically "observe"),
+// downgrades a "block" or "alert" verdict to "allow" while preserving
+// the original decision in RawAction and setting WouldBlock for
+// "block" downgrades.
+//
+// The hook scripts at internal/gateway/connector/hooks/inspect-*.sh
+// inspect the .action field and exit 2 when it is "block"; the codex
+// and claude-code hook handlers already perform an equivalent
+// downgrade. Without this helper, operators who configured
+// guardrail.mode=observe were silently still being blocked because
+// the OpenClaw inspect handlers (handleInspect{Tool,Request,Response,
+// ToolResponse}) emitted action=block regardless of mode.
+func (v *ToolInspectVerdict) applyMode(mode string) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "observe"
+	}
+	v.Mode = mode
+	v.RawAction = v.Action
+	if mode == "action" {
+		return
+	}
+	switch v.Action {
+	case "block":
+		v.WouldBlock = true
+		v.Action = "allow"
+	case "alert":
+		v.Action = "allow"
+	}
 }
 
 // inspectToolPolicy runs all rule categories against the tool args.
@@ -267,14 +320,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		verdict = a.inspectToolPolicy(&req)
 	}
 
-	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = a.scannerCfg.Guardrail.Mode
-	}
-	if mode == "" {
-		mode = "observe"
-	}
-	verdict.Mode = mode
+	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
 
@@ -284,8 +330,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// the rule-id allow-list — we still route through the helper
 	// so any future reason-building logic that embeds literals
 	// picks up the scrub automatically.
-	fmt.Fprintf(os.Stderr, "[inspect] <<< tool=%q action=%s severity=%s mode=%s confidence=%.2f elapsed=%s reason=%q findings=%v\n",
-		req.Tool, verdict.Action, verdict.Severity, verdict.Mode, verdict.Confidence, elapsed,
+	fmt.Fprintf(os.Stderr, "[inspect] <<< tool=%q action=%s raw_action=%s severity=%s mode=%s would_block=%v confidence=%.2f elapsed=%s reason=%q findings=%v\n",
+		req.Tool, verdict.Action, verdict.RawAction, verdict.Severity, verdict.Mode, verdict.WouldBlock,
+		verdict.Confidence, elapsed,
 		redaction.Reason(verdict.Reason), verdict.Findings)
 
 	switch verdict.Action {
@@ -295,6 +342,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	case "alert":
 		fmt.Fprintf(os.Stderr, "[inspect] ALERT tool=%q severity=%s reason=%q\n",
 			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
+	default:
+		if verdict.WouldBlock {
+			fmt.Fprintf(os.Stderr, "[inspect] OBSERVED tool=%q severity=%s reason=%q (would-block in action mode)\n",
+				req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
+		}
 	}
 
 	var auditAction string
@@ -321,8 +373,8 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := RequestIDFromContext(r.Context())
-	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
-		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode)
+	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
+		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}

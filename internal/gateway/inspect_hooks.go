@@ -25,8 +25,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
+
+// inspectMode returns the operator-selected guardrail mode (action or
+// observe) that handleInspect{Request,Response,ToolResponse} use to
+// drive the ToolInspectVerdict.applyMode downgrade.
+//
+// Mirroring evaluateCodexHook / evaluateClaudeCodeHook semantics:
+//   - nil/zero config → "observe" (fail-safe-for-the-user)
+//   - explicit "" or whitespace → "observe"
+//   - any value other than "action" → "observe" so the only path
+//     that actually blocks the agent is the explicit operator opt-in.
+func inspectMode(cfg *config.Config) string {
+	mode := ""
+	if cfg != nil {
+		mode = strings.TrimSpace(cfg.Guardrail.Mode)
+	}
+	if mode != "action" {
+		return "observe"
+	}
+	return mode
+}
 
 const (
 	maxInspectContentLen = 256 * 1024 // 256 KiB per field
@@ -114,23 +135,19 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	verdict := buildVerdict(ruleFindings, "prompt")
-
-	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = a.scannerCfg.Guardrail.Mode
-	}
-	if mode == "" {
-		mode = "observe"
-	}
-	verdict.Mode = mode
+	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
 
-	fmt.Fprintf(os.Stderr, "[inspect] <<< pre-request action=%s severity=%s mode=%s elapsed=%s reason=%q\n",
-		verdict.Action, verdict.Severity, verdict.Mode, elapsed, redaction.Reason(verdict.Reason))
+	fmt.Fprintf(os.Stderr, "[inspect] <<< pre-request action=%s raw_action=%s severity=%s mode=%s would_block=%v elapsed=%s reason=%q\n",
+		verdict.Action, verdict.RawAction, verdict.Severity, verdict.Mode, verdict.WouldBlock, elapsed,
+		redaction.Reason(verdict.Reason))
 
 	if verdict.Action == "block" {
 		fmt.Fprintf(os.Stderr, "[inspect] BLOCKED pre-request severity=%s reason=%q\n",
+			verdict.Severity, redaction.Reason(verdict.Reason))
+	} else if verdict.WouldBlock {
+		fmt.Fprintf(os.Stderr, "[inspect] OBSERVED pre-request severity=%s reason=%q (would-block in action mode)\n",
 			verdict.Severity, redaction.Reason(verdict.Reason))
 	}
 
@@ -143,8 +160,8 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	}
 
 	requestID := RequestIDFromContext(r.Context())
-	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s model=%s",
-		verdict.Severity, elapsed, mode, req.Model)
+	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s model=%s",
+		verdict.Severity, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction, req.Model)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
@@ -184,23 +201,19 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 	verdict := buildVerdict(ruleFindings, "completion")
-
-	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = a.scannerCfg.Guardrail.Mode
-	}
-	if mode == "" {
-		mode = "observe"
-	}
-	verdict.Mode = mode
+	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
 
-	fmt.Fprintf(os.Stderr, "[inspect] <<< post-response action=%s severity=%s mode=%s elapsed=%s reason=%q\n",
-		verdict.Action, verdict.Severity, verdict.Mode, elapsed, redaction.Reason(verdict.Reason))
+	fmt.Fprintf(os.Stderr, "[inspect] <<< post-response action=%s raw_action=%s severity=%s mode=%s would_block=%v elapsed=%s reason=%q\n",
+		verdict.Action, verdict.RawAction, verdict.Severity, verdict.Mode, verdict.WouldBlock, elapsed,
+		redaction.Reason(verdict.Reason))
 
 	if verdict.Action == "block" {
 		fmt.Fprintf(os.Stderr, "[inspect] BLOCKED post-response severity=%s reason=%q\n",
+			verdict.Severity, redaction.Reason(verdict.Reason))
+	} else if verdict.WouldBlock {
+		fmt.Fprintf(os.Stderr, "[inspect] OBSERVED post-response severity=%s reason=%q (would-block in action mode)\n",
 			verdict.Severity, redaction.Reason(verdict.Reason))
 	}
 
@@ -213,8 +226,8 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	}
 
 	requestID := RequestIDFromContext(r.Context())
-	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s model=%s",
-		verdict.Severity, elapsed, mode, req.Model)
+	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s model=%s",
+		verdict.Severity, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction, req.Model)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
@@ -255,23 +268,19 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		return
 	}
 	verdict := buildVerdict(ruleFindings, "tool_response")
-
-	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = a.scannerCfg.Guardrail.Mode
-	}
-	if mode == "" {
-		mode = "observe"
-	}
-	verdict.Mode = mode
+	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
 
-	fmt.Fprintf(os.Stderr, "[inspect] <<< post-tool tool=%q action=%s severity=%s mode=%s elapsed=%s reason=%q\n",
-		req.Tool, verdict.Action, verdict.Severity, verdict.Mode, elapsed, redaction.Reason(verdict.Reason))
+	fmt.Fprintf(os.Stderr, "[inspect] <<< post-tool tool=%q action=%s raw_action=%s severity=%s mode=%s would_block=%v elapsed=%s reason=%q\n",
+		req.Tool, verdict.Action, verdict.RawAction, verdict.Severity, verdict.Mode, verdict.WouldBlock, elapsed,
+		redaction.Reason(verdict.Reason))
 
 	if verdict.Action == "block" {
 		fmt.Fprintf(os.Stderr, "[inspect] BLOCKED post-tool tool=%q severity=%s reason=%q\n",
+			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
+	} else if verdict.WouldBlock {
+		fmt.Fprintf(os.Stderr, "[inspect] OBSERVED post-tool tool=%q severity=%s reason=%q (would-block in action mode)\n",
 			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
 	}
 
@@ -284,8 +293,8 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	}
 
 	requestID := RequestIDFromContext(r.Context())
-	auditDetails := fmt.Sprintf("tool=%s severity=%s elapsed=%s mode=%s exit_code=%d",
-		req.Tool, verdict.Severity, elapsed, mode, req.ExitCode)
+	auditDetails := fmt.Sprintf("tool=%s severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s exit_code=%d",
+		req.Tool, verdict.Severity, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction, req.ExitCode)
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
