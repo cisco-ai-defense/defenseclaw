@@ -57,7 +57,10 @@ capture_section() {
     exit 1
   fi
 
-  screencapture -x -l "$window_id" "$output"
+  if ! screencapture -x -l "$window_id" "$output" >/dev/null 2>&1; then
+    echo "Window capture failed for section '$section'; falling back to full-screen capture" >&2
+    screencapture -x "$output"
+  fi
   if [[ ! -s "$output" ]]; then
     echo "Screenshot was empty for section: $section" >&2
     exit 1

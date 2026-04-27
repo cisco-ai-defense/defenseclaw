@@ -5,6 +5,11 @@ import AppKit
 struct SettingsView: View {
     var body: some View {
         TabView {
+            ConfigFilesView()
+                .tabItem {
+                    Label("Config Files", systemImage: "doc.text.magnifyingglass")
+                }
+
             GatewaySettingsView()
                 .tabItem {
                     Label("Gateway", systemImage: "network")
@@ -30,7 +35,20 @@ struct SettingsView: View {
                     Label("Diagnostics", systemImage: "stethoscope")
                 }
         }
-        .frame(minWidth: 700, idealWidth: 760, minHeight: 550, idealHeight: 620)
+        .frame(minWidth: 980, idealWidth: 1080, minHeight: 650, idealHeight: 740)
+    }
+}
+
+struct ConfigFilesView: View {
+    @State private var model = TextFileEditorModel(mode: .configuration)
+
+    var body: some View {
+        ManagedTextFileWorkspaceView(
+            model: model,
+            title: "Config Files",
+            subtitle: "Edit DefenseClaw, OpenClaw, coding-agent, scanner, and observability configuration files from one workspace.",
+            emptyMessage: "No config files found"
+        )
     }
 }
 
