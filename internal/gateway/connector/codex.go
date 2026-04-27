@@ -508,10 +508,15 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	if err != nil {
 		return fmt.Errorf("marshal codex config: %w", err)
 	}
+	// Atomic + 0o600: a partial write of config.toml can brick Codex
+	// (it's the only file Codex reads at startup), and the file may
+	// carry env-var bindings that resolve to provider API keys at
+	// runtime. atomicWriteFile uses CreateTemp + Rename + Chmod so a
+	// crash mid-write leaves the previous config in place. See S0.11.
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("create codex config dir: %w", err)
 	}
-	if err := os.WriteFile(configPath, out, 0o644); err != nil {
+	if err := atomicWriteFile(configPath, out, 0o600); err != nil {
 		return fmt.Errorf("write codex config: %w", err)
 	}
 
@@ -629,7 +634,11 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	}
 
 	if out, err := toml.Marshal(cfg); err == nil {
-		_ = os.WriteFile(configPath, out, 0o644)
+		// Best-effort restore path: if rewrite fails we leave the
+		// existing (already-patched) config in place rather than the
+		// half-written attempt. atomicWriteFile guarantees that
+		// invariant. See S0.11.
+		_ = atomicWriteFile(configPath, out, 0o600)
 	}
 
 	// Remove any stale hooks.json from an earlier version that

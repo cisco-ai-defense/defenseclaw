@@ -1188,6 +1188,51 @@ env_key = "OPENAI_API_KEY"
 	}
 }
 
+// TestCodex_Setup_ConfigTomlIsModeChmod600 pins the file mode of
+// the patched ~/.codex/config.toml. Codex's config.toml carries
+// env_key bindings and (after Setup) the DefenseClaw proxy URL. On
+// shared dev hosts the historical 0o644 mode let any local user
+// read those bindings — which is enough to derive provider keys
+// from the matching env files. S0.15 / S0.11: the patcher must
+// write the file via atomicWriteFile at 0o600.
+//
+// Note: the test runs *after* Setup, so it asserts the mode of
+// the rewritten file (the input we wrote at 0o644 above is fine —
+// Setup must clobber both the contents and the mode).
+func TestCodex_Setup_ConfigTomlIsModeChmod600(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model_provider = "openai"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat config.toml: %v", err)
+	}
+	// Mask off the file-type bits — only the permission bits matter
+	// here. We assert exactly 0o600: any group/world bit means a
+	// shared-host user can read provider env-var names + base URLs.
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config.toml mode = %#o, want 0o600", mode)
+	}
+}
+
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
 // covering all five Codex events and pointing at the generated
