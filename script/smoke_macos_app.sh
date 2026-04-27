@@ -46,8 +46,9 @@ SWIFT
 capture_section() {
   local section="$1"
   local output="$2"
+  local settings_tab="${3:-}"
 
-  "$ROOT_DIR/script/build_and_run.sh" --qa "$section"
+  "$ROOT_DIR/script/build_and_run.sh" --qa "$section" "$settings_tab"
   sleep 4
 
   local window_id
@@ -74,9 +75,21 @@ for index in "${!sections[@]}"; do
   capture_section "$section" "$SCREENSHOT_DIR/$number-$section.png"
 done
 
+settings_tabs=(config gateway guardrails enforcement scanners diagnostics)
+for index in "${!settings_tabs[@]}"; do
+  tab="${settings_tabs[$index]}"
+  number="$(printf '%02d' "$((index + 9))")"
+  capture_section "settings" "$SCREENSHOT_DIR/$number-settings-$tab.png" "$tab"
+done
+
 echo "Captured DefenseClaw main-window sections in $SCREENSHOT_DIR:"
 for index in "${!sections[@]}"; do
   section="${sections[$index]}"
   number="$(printf '%02d' "$((index + 1))")"
   echo "  - $section: $SCREENSHOT_DIR/$number-$section.png"
+done
+for index in "${!settings_tabs[@]}"; do
+  tab="${settings_tabs[$index]}"
+  number="$(printf '%02d' "$((index + 9))")"
+  echo "  - settings/$tab: $SCREENSHOT_DIR/$number-settings-$tab.png"
 done

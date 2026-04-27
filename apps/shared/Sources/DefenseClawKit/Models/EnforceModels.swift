@@ -15,7 +15,7 @@ public struct EnforceRequest: Codable, Sendable {
 }
 
 public struct BlockEntry: Codable, Identifiable, Sendable {
-    public let entryId: Int?
+    public let entryId: String?
     public let targetType: String
     public let targetName: String
     public let reason: String?
@@ -32,7 +32,7 @@ public struct BlockEntry: Codable, Identifiable, Sendable {
 }
 
 public struct AllowEntry: Codable, Identifiable, Sendable {
-    public let entryId: Int?
+    public let entryId: String?
     public let targetType: String
     public let targetName: String
     public let reason: String?

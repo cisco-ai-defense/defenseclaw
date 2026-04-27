@@ -9,6 +9,9 @@ final class TextFileEditorModel {
     var files: [ManagedTextFile] = []
     var selectedFileID: ManagedTextFile.ID?
     var searchText = ""
+    var categoryFilter = "All"
+    var sourceFilter = "All"
+    var kindFilter = "All"
     var content = ""
     var originalContent = ""
     var validation: ManagedFileValidation = .idle
@@ -27,12 +30,19 @@ final class TextFileEditorModel {
 
     var filteredFiles: [ManagedTextFile] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else {
-            return files
-        }
 
         return files.filter { file in
-            [
+            let matchesCategory = categoryFilter == "All" || file.category == categoryFilter
+            let matchesSource = sourceFilter == "All" || file.source.rawValue == sourceFilter
+            let matchesKind = kindFilter == "All" || file.kind.rawValue == kindFilter
+            guard matchesCategory, matchesSource, matchesKind else {
+                return false
+            }
+            guard !query.isEmpty else {
+                return true
+            }
+
+            return [
                 file.displayName,
                 file.relativePath,
                 file.category,
@@ -66,6 +76,42 @@ final class TextFileEditorModel {
             .sorted { $0.0 < $1.0 }
     }
 
+    var categoryOptions: [String] {
+        ["All"] + Set(files.map(\.category)).sorted()
+    }
+
+    var sourceOptions: [String] {
+        ["All"] + Set(files.map { $0.source.rawValue }).sorted()
+    }
+
+    var kindOptions: [String] {
+        ["All"] + Set(files.map { $0.kind.rawValue }).sorted()
+    }
+
+    var editableCount: Int {
+        files.filter(\.isEditable).count
+    }
+
+    var readOnlyCount: Int {
+        files.count - editableCount
+    }
+
+    var activeFilterCount: Int {
+        [categoryFilter, sourceFilter, kindFilter].filter { $0 != "All" }.count
+            + (searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : 1)
+    }
+
+    var contentLineCount: Int {
+        guard !content.isEmpty else {
+            return 0
+        }
+        return content.split(separator: "\n", omittingEmptySubsequences: false).count
+    }
+
+    var contentCharacterCount: Int {
+        content.count
+    }
+
     func reloadFiles(selectFirst: Bool = false) {
         let previousSelection = selectedFileID
         files = TextFileWorkspace.discover(mode: mode)
@@ -78,6 +124,23 @@ final class TextFileEditorModel {
 
         loadSelectedFile()
         statusMessage = "\(files.count) files discovered"
+    }
+
+    func clearFilters() {
+        searchText = ""
+        categoryFilter = "All"
+        sourceFilter = "All"
+        kindFilter = "All"
+        selectFirstFilteredIfNeeded()
+    }
+
+    func selectFirstFilteredIfNeeded() {
+        guard let current = selectedFileID,
+              filteredFiles.contains(where: { $0.id == current }) else {
+            selectedFileID = filteredFiles.first?.id
+            loadSelectedFile()
+            return
+        }
     }
 
     func select(_ file: ManagedTextFile) {

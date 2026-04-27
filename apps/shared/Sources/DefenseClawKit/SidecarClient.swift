@@ -1,5 +1,59 @@
 import Foundation
 
+private struct SkillListResponse: Decodable {
+    let items: [Skill]
+
+    private enum CodingKeys: String, CodingKey {
+        case skills
+        case items
+    }
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if single.decodeNil() {
+            items = []
+            return
+        }
+        if let decoded = try? single.decode([Skill].self) {
+            items = decoded
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items = try container.decodeIfPresent([Skill].self, forKey: .skills)
+            ?? container.decodeIfPresent([Skill].self, forKey: .items)
+            ?? []
+    }
+}
+
+private struct MCPServerListResponse: Decodable {
+    let items: [MCPServer]
+
+    private enum CodingKeys: String, CodingKey {
+        case mcps
+        case servers
+        case items
+    }
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if single.decodeNil() {
+            items = []
+            return
+        }
+        if let decoded = try? single.decode([MCPServer].self) {
+            items = decoded
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items = try container.decodeIfPresent([MCPServer].self, forKey: .mcps)
+            ?? container.decodeIfPresent([MCPServer].self, forKey: .servers)
+            ?? container.decodeIfPresent([MCPServer].self, forKey: .items)
+            ?? []
+    }
+}
+
 /// HTTP client for the DefenseClaw sidecar REST API.
 public actor SidecarClient {
     private let baseURL: URL
@@ -24,9 +78,20 @@ public actor SidecarClient {
             // Support token_env: read token from named environment variable
             if token == nil || token?.isEmpty == true, let envName = config.gateway?.tokenEnv, !envName.isEmpty {
                 token = ProcessInfo.processInfo.environment[envName]
+                    ?? SidecarClient.readDefenseClawDotEnvValue(envName)
             }
         } catch {
             // Config may not exist — sidecar may not require auth
+        }
+        if token == nil || token?.isEmpty == true {
+            for envName in ["OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", "DEFENSECLAW_TOKEN"] {
+                if let candidate = ProcessInfo.processInfo.environment[envName]
+                    ?? SidecarClient.readDefenseClawDotEnvValue(envName),
+                   !candidate.isEmpty {
+                    token = candidate
+                    break
+                }
+            }
         }
         // Fallback: read from OpenClaw config (~/.openclaw/openclaw.json → gateway.auth.token)
         if token == nil || token?.isEmpty == true {
@@ -61,14 +126,20 @@ public actor SidecarClient {
     public func health() async throws -> HealthSnapshot { try await get("/health") }
     public func status() async throws -> [String: AnyCodable] { try await get("/status") }
     public func alerts() async throws -> [Alert] { try await get("/alerts") }
-    public func skills() async throws -> [Skill] { try await get("/skills") }
+    public func skills() async throws -> [Skill] {
+        let response: SkillListResponse = try await get("/skills")
+        return response.items
+    }
     public func disableSkill(key: String) async throws { try await postVoid("/skill/disable", body: ["skill_key": key]) }
     public func enableSkill(key: String) async throws { try await postVoid("/skill/enable", body: ["skill_key": key]) }
     public func scanSkill(path: String) async throws -> ScanResult { try await post("/v1/skill/scan", body: ["path": path]) }
     public func fetchSkill(url: String) async throws -> [String: AnyCodable] { try await post("/v1/skill/fetch", body: ["url": url]) }
     public func disablePlugin(key: String) async throws { try await postVoid("/plugin/disable", body: ["plugin_key": key]) }
     public func enablePlugin(key: String) async throws { try await postVoid("/plugin/enable", body: ["plugin_key": key]) }
-    public func mcpServers() async throws -> [MCPServer] { try await get("/mcps") }
+    public func mcpServers() async throws -> [MCPServer] {
+        let response: MCPServerListResponse = try await get("/mcps")
+        return response.items
+    }
     public func scanMCP(url: String) async throws -> ScanResult { try await post("/v1/mcp/scan", body: ["url": url]) }
     /// Fetch runtime tool catalog from sidecar.
     ///
@@ -279,6 +350,39 @@ public actor SidecarClient {
             return nil
         }
         return token
+    }
+
+    static func readDefenseClawDotEnvValue(_ name: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let paths = [
+            "\(home)/.defenseclaw/.env",
+            "\(home)/.openclaw/.env"
+        ]
+
+        for path in paths {
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+                continue
+            }
+            for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !line.isEmpty, !line.hasPrefix("#") else {
+                    continue
+                }
+                let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2,
+                      parts[0].trimmingCharacters(in: .whitespacesAndNewlines) == name else {
+                    continue
+                }
+                let value = parts[1]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                if !value.isEmpty {
+                    return value
+                }
+            }
+        }
+
+        return nil
     }
 }
 
