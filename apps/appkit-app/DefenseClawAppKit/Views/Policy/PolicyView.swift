@@ -2,172 +2,182 @@ import SwiftUI
 import DefenseClawKit
 
 struct PolicyView: View {
-    @State private var policyContent = ""
-    @State private var isLoading = false
-    @State private var isDryRun = false
-    @State private var dryRunResults = ""
-    @State private var error: String?
+    @State private var model = TextFileEditorModel(mode: .policy)
     @State private var evalTargetType = "skill"
     @State private var evalTargetName = ""
+    @State private var evalSeverity = "MEDIUM"
+    @State private var evalFindings = 0
+    @State private var evaluationResult = ""
+    @State private var reloadMessage = ""
+    @State private var isEvaluating = false
+    @State private var isReloading = false
 
-    private let targetTypes = ["skill", "mcp", "plugin"]
+    private let targetTypes = ["skill", "mcp", "plugin", "tool"]
+    private let severityLevels = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    private let sidecarClient = SidecarClient()
 
     var body: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Text("Policy Viewer")
-                    .font(.headline)
+        ManagedTextFileWorkspaceView(
+            model: model,
+            title: "Policy Editor",
+            subtitle: "Edit admission, guardrail, scanner, firewall, sandbox, and Rego policy files without leaving the app.",
+            emptyMessage: "No policy files found"
+        ) {
+            policyControls
+        }
+        .navigationTitle("Policy")
+    }
+
+    private var policyControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Button {
+                    reloadRuntimePolicy()
+                } label: {
+                    Label("Reload Runtime Policy", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(isReloading)
+
+                if isReloading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Text(reloadMessage)
+                    .font(.caption)
+                    .foregroundStyle(reloadMessage.lowercased().contains("failed") ? .red : .secondary)
+                    .lineLimit(1)
 
                 Spacer()
-
-                Button("Load Policy") {
-                    loadPolicy()
-                }
-                .disabled(isLoading)
-
-                Button("Reload Policy") {
-                    reloadPolicy()
-                }
-                .disabled(isLoading)
-            }
-            .padding()
-
-            if let error = error {
-                Text("Error: \(error)")
-                    .foregroundStyle(.red)
-                    .padding()
             }
 
-            ScrollView {
-                TextEditor(text: $policyContent)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 200)
-                    .padding()
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                    )
-            }
-            .padding()
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Evaluate Current Policy")
+                    .font(.subheadline.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Policy Evaluation")
-                    .font(.headline)
-
-                HStack {
-                    Picker("Target Type", selection: $evalTargetType) {
+                HStack(spacing: 10) {
+                    Picker("Target", selection: $evalTargetType) {
                         ForEach(targetTypes, id: \.self) { type in
                             Text(type.capitalized).tag(type)
                         }
                     }
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+
+                    TextField("Target name or path", text: $evalTargetName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 220)
+                        .layoutPriority(1)
+                }
+
+                HStack(spacing: 10) {
+                    Picker("Severity", selection: $evalSeverity) {
+                        ForEach(severityLevels, id: \.self) { severity in
+                            Text(severity).tag(severity)
+                        }
+                    }
                     .frame(width: 150)
 
-                    TextField("Target Name", text: $evalTargetName)
+                    Stepper("Findings \(evalFindings)", value: $evalFindings, in: 0...100)
+                        .frame(width: 150)
 
-                    Button("Evaluate") {
+                    Button {
                         runEvaluation()
+                    } label: {
+                        Label("Evaluate", systemImage: "play.circle")
                     }
-                    .disabled(evalTargetName.isEmpty || isDryRun)
-                }
-            }
-            .padding()
+                    .buttonStyle(.borderedProminent)
+                    .disabled(evalTargetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isEvaluating)
 
-            if !dryRunResults.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Evaluation Results")
-                        .font(.headline)
-
-                    ScrollView {
-                        Text(dryRunResults)
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .cornerRadius(8)
+                    if isEvaluating {
+                        ProgressView()
+                            .controlSize(.small)
                     }
+
+                    Spacer()
                 }
-                .padding()
-            }
 
-            Spacer()
-        }
-        .navigationTitle("Policies")
-        .task { loadPolicy() }
-    }
-
-    private func loadPolicy() {
-        isLoading = true
-        error = nil
-
-        Task {
-            let client = SidecarClient()
-            do {
-                let policy = try await client.policyShow()
-                await MainActor.run {
-                    policyContent = policy
-                    isLoading = false
-                }
-            } catch {
-                await MainActor.run {
-                    self.error = error.localizedDescription
-                    isLoading = false
+                if !evaluationResult.isEmpty {
+                    Text(evaluationResult)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(5)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
         }
     }
 
-    private func reloadPolicy() {
-        isLoading = true
-        error = nil
+    private func reloadRuntimePolicy() {
+        isReloading = true
+        reloadMessage = ""
 
         Task {
-            let client = SidecarClient()
             do {
-                try await client.policyReload()
+                try await sidecarClient.policyReload()
                 await MainActor.run {
-                    isLoading = false
+                    reloadMessage = "Runtime policy reloaded"
+                    isReloading = false
                 }
-                // Reload the policy content after reload
-                loadPolicy()
             } catch {
                 await MainActor.run {
-                    self.error = error.localizedDescription
-                    isLoading = false
+                    reloadMessage = "Reload failed: \(error.localizedDescription)"
+                    isReloading = false
                 }
             }
         }
     }
 
     private func runEvaluation() {
-        isDryRun = true
-        dryRunResults = ""
-        error = nil
+        let targetName = evalTargetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetName.isEmpty else {
+            return
+        }
+
+        isEvaluating = true
+        evaluationResult = ""
 
         Task {
-            let client = SidecarClient()
+            let input = AdmissionInput(
+                targetType: evalTargetType,
+                targetName: targetName,
+                severity: evalSeverity,
+                findings: evalFindings
+            )
+
             do {
-                let result = try await client.policyEvaluate(targetType: evalTargetType, targetName: evalTargetName)
+                let result = try await sidecarClient.policyEvaluate(input: input)
                 await MainActor.run {
-                    dryRunResults = "Verdict: \(result.verdict)\n"
-                    dryRunResults += "Allowed: \(result.allow)\n"
-                    if let reason = result.reason {
-                        dryRunResults += "Reason: \(reason)\n"
-                    }
-                    if let fa = result.fileAction {
-                        dryRunResults += "File Action: \(fa)\n"
-                    }
-                    if let ia = result.installAction {
-                        dryRunResults += "Install Action: \(ia)\n"
-                    }
-                    isDryRun = false
+                    evaluationResult = format(result)
+                    isEvaluating = false
                 }
             } catch {
                 await MainActor.run {
-                    self.error = error.localizedDescription
-                    dryRunResults = "Evaluation failed: \(error.localizedDescription)"
-                    isDryRun = false
+                    evaluationResult = "Evaluation failed: \(error.localizedDescription)"
+                    isEvaluating = false
                 }
             }
         }
+    }
+
+    private func format(_ result: AdmissionOutput) -> String {
+        var lines = [
+            "Verdict: \(result.verdict)",
+            "Allowed: \(result.allow ? "yes" : "no")"
+        ]
+
+        if let reason = result.reason, !reason.isEmpty {
+            lines.append("Reason: \(reason)")
+        }
+        if let fileAction = result.fileAction, !fileAction.isEmpty {
+            lines.append("File action: \(fileAction)")
+        }
+        if let installAction = result.installAction, !installAction.isEmpty {
+            lines.append("Install action: \(installAction)")
+        }
+
+        return lines.joined(separator: "\n")
     }
 }

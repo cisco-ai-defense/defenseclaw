@@ -9,10 +9,11 @@ MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGE_DIR="$ROOT_DIR/apps/appkit-app"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="${DEFENSECLAW_DIST_DIR:-/tmp/defenseclaw-dist}"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 
@@ -65,9 +66,17 @@ if [[ -d "$APP_BUNDLE" ]]; then
   find "$APP_BUNDLE" -depth -mindepth 1 -delete
   rmdir "$APP_BUNDLE"
 fi
-mkdir -p "$APP_MACOS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+
+if [[ -d "$ROOT_DIR/policies" ]]; then
+  ditto "$ROOT_DIR/policies" "$APP_RESOURCES/policies"
+fi
+
+if [[ -d "$ROOT_DIR/bundles" ]]; then
+  ditto "$ROOT_DIR/bundles" "$APP_RESOURCES/bundles"
+fi
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

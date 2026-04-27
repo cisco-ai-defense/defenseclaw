@@ -150,9 +150,13 @@ public actor SidecarClient {
             "\(home)/.defenseclaw/policies/rego/data.json",
             "\(home)/.defenseclaw/policies/data.json",
         ]
-        // Also check relative to current working directory (dev mode)
-        let cwd = FileManager.default.currentDirectoryPath
-        candidates.append("\(cwd)/policies/rego/data.json")
+        if let resourcePath = Bundle.main.resourcePath {
+            candidates.append("\(resourcePath)/policies/rego/data.json")
+        }
+        if let projectRoot = ProcessInfo.processInfo.environment["DEFENSECLAW_DESKTOP_PROJECT_ROOT"],
+           !projectRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            candidates.append("\(projectRoot)/policies/rego/data.json")
+        }
         for path in candidates {
             if FileManager.default.fileExists(atPath: path) {
                 let data = try Data(contentsOf: URL(fileURLWithPath: path))
