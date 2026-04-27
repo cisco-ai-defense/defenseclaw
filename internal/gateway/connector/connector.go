@@ -86,6 +86,14 @@ type Connector interface {
 	// implementation causes a compile-time error rather than a silent
 	// runtime auth bypass via the old type-assertion path.
 	SetCredentials(gatewayToken, masterKey string)
+
+	// VerifyClean checks that the connector's teardown left no stale
+	// artifacts (hooks, env files, config patches, shims). Returns nil
+	// when the agent framework's configuration is free of DefenseClaw
+	// state; returns a descriptive error listing residual artifacts.
+	// Called after Teardown and before a new connector's Setup to
+	// guarantee a clean handoff.
+	VerifyClean(opts SetupOpts) error
 }
 
 // HookEventHandler — optional, connectors that handle agent lifecycle

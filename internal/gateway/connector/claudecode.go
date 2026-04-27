@@ -74,9 +74,63 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) error {
-	c.restoreClaudeCodeHooks(opts)
+	var errs []string
+
+	if err := c.restoreClaudeCodeHooks(opts); err != nil {
+		errs = append(errs, fmt.Sprintf("restore hooks: %v", err))
+	}
+
 	c.removeEnvOverride(opts)
-	TeardownSubprocessEnforcement(opts)
+
+	if err := TeardownSubprocessEnforcement(opts); err != nil {
+		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
+	var residual []string
+
+	// Check env override files
+	for _, name := range []string{claudeCodeEnvFileName, "claudecode.env"} {
+		if _, err := os.Stat(filepath.Join(opts.DataDir, name)); err == nil {
+			residual = append(residual, name)
+		}
+	}
+
+	// Check for owned hooks still present in settings.json
+	settingsPath := claudeCodeSettingsPath()
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		var settings map[string]interface{}
+		if json.Unmarshal(data, &settings) == nil {
+			hooksDir := filepath.Join(opts.DataDir, "hooks")
+			if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
+				for eventType, val := range hooks {
+					list, _ := val.([]interface{})
+					for _, entry := range list {
+						if isOwnedHook(entry, hooksDir) {
+							residual = append(residual, fmt.Sprintf("settings.json hooks[%s] still contains defenseclaw hook", eventType))
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check shims directory
+	shimDir := filepath.Join(opts.DataDir, "shims")
+	if entries, err := os.ReadDir(shimDir); err == nil && len(entries) > 0 {
+		residual = append(residual, fmt.Sprintf("shims/ still has %d entries", len(entries)))
+	}
+
+	if len(residual) > 0 {
+		return fmt.Errorf("claudecode teardown incomplete: %s", strings.Join(residual, "; "))
+	}
 	return nil
 }
 
@@ -97,9 +151,11 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// No token configured: allow only loopback callers. Non-loopback traffic
-	// is denied by default until the operator explicitly sets a gateway token.
-	if c.gatewayToken == "" && c.masterKey == "" {
+	// No gateway token configured: trust loopback callers. The masterKey is
+	// an alternative credential for programmatic/remote access — its presence
+	// alone should not revoke loopback trust. The operator opts into requiring
+	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	if c.gatewayToken == "" {
 		return isLoopback
 	}
 
@@ -334,34 +390,48 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
-func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) {
+// Uses file locking to match patchClaudeCodeHooks and prevent corruption.
+func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	backup, err := c.loadBackup(opts.DataDir)
 	if err != nil {
-		return
+		return fmt.Errorf("load claudecode backup: %w", err)
 	}
 
 	settingsPath := claudeCodeSettingsPath()
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return
-	}
 
-	settings := map[string]interface{}{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return
-	}
+	return withFileLock(settingsPath, func() error {
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			return fmt.Errorf("read claude settings for restore: %w", err)
+		}
 
-	if backup.HadHooksKey && len(backup.OriginalHooks) > 0 && string(backup.OriginalHooks) != "null" {
-		var orig interface{}
-		json.Unmarshal(backup.OriginalHooks, &orig)
-		settings["hooks"] = orig
-	} else {
-		delete(settings, "hooks")
-	}
+		settings := map[string]interface{}{}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("parse claude settings for restore: %w", err)
+		}
 
-	out, _ := json.MarshalIndent(settings, "", "  ")
-	os.WriteFile(settingsPath, out, 0o644)
-	os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
+		if backup.HadHooksKey && len(backup.OriginalHooks) > 0 && string(backup.OriginalHooks) != "null" {
+			var orig interface{}
+			if err := json.Unmarshal(backup.OriginalHooks, &orig); err != nil {
+				return fmt.Errorf("unmarshal original hooks from backup: %w", err)
+			}
+			settings["hooks"] = orig
+		} else {
+			delete(settings, "hooks")
+		}
+
+		out, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal restored settings: %w", err)
+		}
+
+		if err := atomicWriteFile(settingsPath, out, 0o644); err != nil {
+			return fmt.Errorf("write restored settings: %w", err)
+		}
+
+		os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
+		return nil
+	})
 }
 
 // hookMarker is written on line 2 of every generated hook script.

@@ -972,9 +972,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			if err := conn.Teardown(ctx, setupOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
 			}
+			if err := conn.VerifyClean(setupOpts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
+			}
 			connector.ClearActiveConnector(s.cfg.DataDir)
 		} else {
-			teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx)
+			if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
+			}
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
 			} else {
@@ -1026,22 +1031,30 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 // teardownPreviousConnector checks if a different connector was previously
 // active (persisted in active_connector.json) and runs its Teardown so
 // hooks, env overrides, and config patches from the old connector are
-// cleaned up before the new one is set up. This prevents stale state
-// when an operator switches e.g. from "claudecode" to "openclaw".
-func teardownPreviousConnector(registry *connector.Registry, newName string, opts connector.SetupOpts, ctx context.Context) {
+// cleaned up before the new one is set up. After teardown, VerifyClean
+// confirms no stale artifacts remain. Returns an error if verification
+// fails — the caller can decide whether to proceed with the new setup.
+func teardownPreviousConnector(registry *connector.Registry, newName string, opts connector.SetupOpts, ctx context.Context) error {
 	prev := connector.LoadActiveConnector(opts.DataDir)
 	if prev == "" || prev == newName {
-		return
+		return nil
 	}
 	old, ok := registry.Get(prev)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "[guardrail] previous connector %q not in registry — skipping teardown\n", prev)
-		return
+		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector changed %s → %s — tearing down %s\n", prev, newName, prev)
 	if err := old.Teardown(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, err)
 	}
+
+	if err := old.VerifyClean(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: previous connector %s left stale state: %v\n", prev, err)
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
+	return nil
 }
 
 // runAPI starts the REST API server.

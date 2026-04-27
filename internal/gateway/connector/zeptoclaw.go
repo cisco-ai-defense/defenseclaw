@@ -99,8 +99,60 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {
-	c.restoreZeptoClawConfig(opts)
-	TeardownSubprocessEnforcement(opts)
+	var errs []string
+
+	if err := c.restoreZeptoClawConfig(opts); err != nil {
+		errs = append(errs, fmt.Sprintf("restore config: %v", err))
+	}
+
+	if err := TeardownSubprocessEnforcement(opts); err != nil {
+		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {
+	var residual []string
+
+	// Check if config.json still has proxy api_base
+	proxyURL := "http://" + opts.ProxyAddr + "/c/zeptoclaw"
+	configPath := zeptoClawConfigPath()
+	if data, err := os.ReadFile(configPath); err == nil {
+		var config map[string]interface{}
+		if json.Unmarshal(data, &config) == nil {
+			if providers, ok := config["providers"].(map[string]interface{}); ok {
+				for name, val := range providers {
+					prov, ok := val.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if base, ok := prov["api_base"].(string); ok && base == proxyURL {
+						residual = append(residual, fmt.Sprintf("providers.%s.api_base still points to proxy", name))
+					}
+				}
+			}
+		}
+	}
+
+	// Check backup file (should be removed after clean teardown)
+	backupPath := filepath.Join(opts.DataDir, "zeptoclaw_backup.json")
+	if _, err := os.Stat(backupPath); err == nil {
+		residual = append(residual, "zeptoclaw_backup.json still exists")
+	}
+
+	// Check shims directory
+	shimDir := filepath.Join(opts.DataDir, "shims")
+	if entries, err := os.ReadDir(shimDir); err == nil && len(entries) > 0 {
+		residual = append(residual, fmt.Sprintf("shims/ still has %d entries", len(entries)))
+	}
+
+	if len(residual) > 0 {
+		return fmt.Errorf("zeptoclaw teardown incomplete: %s", strings.Join(residual, "; "))
+	}
 	return nil
 }
 
@@ -121,11 +173,13 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// No token configured: allow only loopback callers. Non-loopback traffic
-	// is denied by default until the operator explicitly sets a gateway token.
+	// No gateway token configured: trust loopback callers. The masterKey is
+	// an alternative credential for programmatic/remote access — its presence
+	// alone should not revoke loopback trust. The operator opts into requiring
+	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
 	// ZeptoClaw is a native binary that cannot inject X-DC-Auth, so the
-	// loopback fallback is its authentication path when no token is set.
-	if c.gatewayToken == "" && c.masterKey == "" {
+	// loopback fallback is its primary authentication path.
+	if c.gatewayToken == "" {
 		return isLoopback
 	}
 
@@ -400,40 +454,55 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	})
 }
 
-func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) {
+func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) error {
 	backup, err := c.loadBackup(opts.DataDir)
 	if err != nil {
-		return
+		return fmt.Errorf("load zeptoclaw backup: %w", err)
 	}
 
 	configPath := zeptoClawConfigPath()
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return
-	}
 
-	config := map[string]interface{}{}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return
-	}
+	return withFileLock(configPath, func() error {
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return fmt.Errorf("read zeptoclaw config for restore: %w", err)
+		}
 
-	if len(backup.OriginalProviders) > 0 && string(backup.OriginalProviders) != "null" {
-		var orig interface{}
-		json.Unmarshal(backup.OriginalProviders, &orig)
-		config["providers"] = orig
-	} else {
-		delete(config, "providers")
-	}
+		config := map[string]interface{}{}
+		if err := json.Unmarshal(data, &config); err != nil {
+			return fmt.Errorf("parse zeptoclaw config for restore: %w", err)
+		}
 
-	if len(backup.OriginalSafety) > 0 && string(backup.OriginalSafety) != "null" {
-		var orig interface{}
-		json.Unmarshal(backup.OriginalSafety, &orig)
-		config["safety"] = orig
-	} else {
-		delete(config, "safety")
-	}
+		if len(backup.OriginalProviders) > 0 && string(backup.OriginalProviders) != "null" {
+			var orig interface{}
+			if err := json.Unmarshal(backup.OriginalProviders, &orig); err != nil {
+				return fmt.Errorf("unmarshal original providers: %w", err)
+			}
+			config["providers"] = orig
+		} else {
+			delete(config, "providers")
+		}
 
-	out, _ := json.MarshalIndent(config, "", "  ")
-	os.WriteFile(configPath, out, 0o644)
-	os.Remove(filepath.Join(opts.DataDir, "zeptoclaw_backup.json"))
+		if len(backup.OriginalSafety) > 0 && string(backup.OriginalSafety) != "null" {
+			var orig interface{}
+			if err := json.Unmarshal(backup.OriginalSafety, &orig); err != nil {
+				return fmt.Errorf("unmarshal original safety: %w", err)
+			}
+			config["safety"] = orig
+		} else {
+			delete(config, "safety")
+		}
+
+		out, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal restored config: %w", err)
+		}
+
+		if err := atomicWriteFile(configPath, out, 0o644); err != nil {
+			return fmt.Errorf("write restored config: %w", err)
+		}
+
+		os.Remove(filepath.Join(opts.DataDir, "zeptoclaw_backup.json"))
+		return nil
+	})
 }

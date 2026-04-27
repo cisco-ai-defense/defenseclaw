@@ -99,8 +99,19 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {
-	uninstallOpenClawExtension(openClawHome())
-	TeardownSubprocessEnforcement(opts)
+	var errs []string
+
+	if err := uninstallOpenClawExtension(openClawHome()); err != nil {
+		errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
+	}
+
+	if err := TeardownSubprocessEnforcement(opts); err != nil {
+		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("openclaw teardown errors: %s", strings.Join(errs, "; "))
+	}
 	return nil
 }
 
@@ -237,41 +248,60 @@ func patchOpenClawConfig(configPath, extDir string) error {
 
 // uninstallOpenClawExtension removes the extension directory and deletes
 // the DefenseClaw entries from openclaw.json, leaving unrelated plugins
-// untouched.
-func uninstallOpenClawExtension(ocHome string) {
+// untouched. Returns an error if cleanup fails so the caller can log or
+// retry.
+func uninstallOpenClawExtension(ocHome string) error {
+	var errs []string
+
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
 	parentDir := filepath.Join(ocHome, "extensions")
-	_ = safeRemoveAll(extDir, parentDir)
+	if err := safeRemoveAll(extDir, parentDir); err != nil {
+		errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
+	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			if len(errs) > 0 {
+				return fmt.Errorf("%s", strings.Join(errs, "; "))
+			}
+			return nil
+		}
+		return fmt.Errorf("read openclaw.json: %w", err)
 	}
+
 	cfg := map[string]interface{}{}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return
+		return fmt.Errorf("parse openclaw.json: %w", err)
 	}
+
 	plugins, _ := cfg["plugins"].(map[string]interface{})
-	if plugins == nil {
-		return
+	if plugins != nil {
+		plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
+		if entries, ok := plugins["entries"].(map[string]interface{}); ok {
+			delete(entries, "defenseclaw")
+			plugins["entries"] = entries
+		}
+		if load, ok := plugins["load"].(map[string]interface{}); ok {
+			load["paths"] = removeString(load["paths"], extDir)
+			plugins["load"] = load
+		}
+		cfg["plugins"] = plugins
 	}
-	plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
-	if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-		delete(entries, "defenseclaw")
-		plugins["entries"] = entries
-	}
-	if load, ok := plugins["load"].(map[string]interface{}); ok {
-		load["paths"] = removeString(load["paths"], extDir)
-		plugins["load"] = load
-	}
-	cfg["plugins"] = plugins
 
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshal openclaw.json: %w", err)
 	}
-	_ = os.WriteFile(configPath, append(out, '\n'), 0o644)
+	if err := atomicWriteFile(configPath, append(out, '\n'), 0o644); err != nil {
+		errs = append(errs, fmt.Sprintf("write openclaw.json: %v", err))
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // appendUniqueString returns a []interface{} with s appended if it is not
@@ -300,6 +330,49 @@ func removeString(existing interface{}, s string) []interface{} {
 	return out
 }
 
+func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
+	var residual []string
+
+	// Check extension directory
+	extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
+	if _, err := os.Stat(extDir); err == nil {
+		residual = append(residual, "extensions/defenseclaw still exists")
+	}
+
+	// Check openclaw.json for defenseclaw entries
+	configPath := filepath.Join(openClawHome(), "openclaw.json")
+	if data, err := os.ReadFile(configPath); err == nil {
+		var cfg map[string]interface{}
+		if json.Unmarshal(data, &cfg) == nil {
+			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
+				if entries, ok := plugins["entries"].(map[string]interface{}); ok {
+					if _, found := entries["defenseclaw"]; found {
+						residual = append(residual, "openclaw.json still has defenseclaw plugin entry")
+					}
+				}
+				if allow, ok := plugins["allow"].([]interface{}); ok {
+					for _, v := range allow {
+						if s, ok := v.(string); ok && s == "defenseclaw" {
+							residual = append(residual, "openclaw.json allow list still contains defenseclaw")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check shims directory
+	shimDir := filepath.Join(opts.DataDir, "shims")
+	if entries, err := os.ReadDir(shimDir); err == nil && len(entries) > 0 {
+		residual = append(residual, fmt.Sprintf("shims/ still has %d entries", len(entries)))
+	}
+
+	if len(residual) > 0 {
+		return fmt.Errorf("openclaw teardown incomplete: %s", strings.Join(residual, "; "))
+	}
+	return nil
+}
+
 func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 	isLoopback := IsLoopback(r)
 
@@ -319,9 +392,11 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// No token configured: allow only loopback callers. Non-loopback traffic
-	// is denied by default until the operator explicitly sets a gateway token.
-	if c.gatewayToken == "" && c.masterKey == "" {
+	// No gateway token configured: trust loopback callers. The masterKey is
+	// an alternative credential for programmatic/remote access — its presence
+	// alone should not revoke loopback trust. The operator opts into requiring
+	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	if c.gatewayToken == "" {
 		return isLoopback
 	}
 

@@ -2677,9 +2677,11 @@ func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// No token configured: allow only loopback callers. Non-loopback traffic
-	// is denied by default until the operator explicitly sets a gateway token.
-	if p.gatewayToken == "" && p.masterKey == "" {
+	// No gateway token configured: trust loopback callers. The masterKey is
+	// an alternative credential for programmatic/remote access — its presence
+	// alone should not revoke loopback trust. The operator opts into requiring
+	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	if p.gatewayToken == "" {
 		return isLoopback
 	}
 
@@ -2809,6 +2811,9 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", oldConn.Name())
 		if err := oldConn.Teardown(ctx, p.setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] teardown %s: %v\n", oldConn.Name(), err)
+		}
+		if err := oldConn.VerifyClean(p.setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %s teardown left stale state: %v\n", oldConn.Name(), err)
 		}
 	}
 

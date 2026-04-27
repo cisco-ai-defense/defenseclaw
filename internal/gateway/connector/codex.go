@@ -69,7 +69,32 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	c.removeEnvOverride(opts)
-	TeardownSubprocessEnforcement(opts)
+
+	if err := TeardownSubprocessEnforcement(opts); err != nil {
+		return fmt.Errorf("codex teardown: subprocess enforcement: %w", err)
+	}
+	return nil
+}
+
+func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
+	var residual []string
+
+	// Check env override files
+	for _, name := range []string{codexEnvFileName, "codex.env"} {
+		if _, err := os.Stat(filepath.Join(opts.DataDir, name)); err == nil {
+			residual = append(residual, name)
+		}
+	}
+
+	// Check shims directory
+	shimDir := filepath.Join(opts.DataDir, "shims")
+	if entries, err := os.ReadDir(shimDir); err == nil && len(entries) > 0 {
+		residual = append(residual, fmt.Sprintf("shims/ still has %d entries", len(entries)))
+	}
+
+	if len(residual) > 0 {
+		return fmt.Errorf("codex teardown incomplete: %s", strings.Join(residual, "; "))
+	}
 	return nil
 }
 
@@ -90,9 +115,11 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// No token configured: allow only loopback callers. Non-loopback traffic
-	// is denied by default until the operator explicitly sets a gateway token.
-	if c.gatewayToken == "" && c.masterKey == "" {
+	// No gateway token configured: trust loopback callers. The masterKey is
+	// an alternative credential for programmatic/remote access — its presence
+	// alone should not revoke loopback trust. The operator opts into requiring
+	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	if c.gatewayToken == "" {
 		return isLoopback
 	}
 
