@@ -59,7 +59,15 @@ type ClawMode string
 
 const (
 	ClawOpenClaw ClawMode = "openclaw"
-	// Future: ClawNemoClaw
+	// Other recognised connector names (kept in sync with
+	// Connector.Name() in internal/gateway/connector and with the
+	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
+	// "zeptoclaw", "claudecode", "codex". Constants for those modes
+	// are intentionally not introduced here yet — Config.Claw.Mode
+	// is currently only used by SkillDirsForMode (OpenClaw-specific)
+	// and by the OTel resource attribute. Promoting them to typed
+	// constants is part of S1.2 and tracked in the claw-agnostic
+	// refactor plan.
 )
 
 type ClawConfig struct {

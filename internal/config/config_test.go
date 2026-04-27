@@ -1232,7 +1232,11 @@ func TestConfig_Save_BumpsProvenance(t *testing.T) {
 	// Mutate the config and save again; both hash and generation
 	// must advance. Pinning this guards the "ContentHash stable
 	// across identical saves, fresh per mutation" invariant.
-	cfg.Claw.Mode = "nemoclaw"
+	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw
+	// connector — kept aligned with the canonical four-connector
+	// enum in schemas/otel/resource.schema.json so this test
+	// doesn't bake a stale legacy mode string.
+	cfg.Claw.Mode = "zeptoclaw"
 	if err := cfg.Save(); err != nil {
 		t.Fatalf("Save() (2) returned error: %v", err)
 	}

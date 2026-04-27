@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.dev/schemas/otel/runtime-llm-span.schema.json",
   "title": "DefenseClaw Runtime LLM Call Span",
-  "description": "OTEL Span representing an LLM request/response lifecycle. Uses OTEL GenAI semantic conventions (gen_ai.* namespace). Emitted when OpenClaw hooks or the LLM gateway proxy capture LLM calls.",
+  "description": "OTEL Span representing an LLM request/response lifecycle. Uses OTEL GenAI semantic conventions (gen_ai.* namespace). Emitted when any connector's hook scripts (openclaw, zeptoclaw, claudecode, codex) or the LLM gateway proxy capture LLM calls.",
   "type": "object",
   "required": ["name", "kind", "startTimeUnixNano", "attributes"],
   "properties": {
