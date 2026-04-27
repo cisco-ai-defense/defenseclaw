@@ -147,6 +147,46 @@ func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	}
 }
 
+// TestConnector_AllowedHostsProvider_AllBuiltinsImplement is the
+// contract test for S3.3 / F26: every built-in connector must
+// expose AllowedHosts() so the firewall layer can fold its
+// per-connector hostnames into the static deny-by-default
+// allow-list at boot. A future connector that forgets to
+// implement this interface would silently fall through to "no
+// extra hosts" — instead of failing here, that connector's users
+// would see DNS-blocked errors on first chat.
+//
+// We assert two things: (1) every built-in implements the
+// interface; (2) the returned list is non-empty. An empty list
+// is allowed by the contract but for the four shipping
+// connectors it would be meaningless (every one talks to a
+// non-baseline host).
+func TestConnector_AllowedHostsProvider_AllBuiltinsImplement(t *testing.T) {
+	r := NewDefaultRegistry()
+	for _, name := range []string{"openclaw", "zeptoclaw", "claudecode", "codex"} {
+		conn, ok := r.Get(name)
+		if !ok {
+			t.Fatalf("registry missing %q", name)
+		}
+		provider, ok := conn.(AllowedHostsProvider)
+		if !ok {
+			t.Errorf("connector %q does not implement AllowedHostsProvider", name)
+			continue
+		}
+		hosts := provider.AllowedHosts()
+		if len(hosts) == 0 {
+			t.Errorf("connector %q AllowedHosts() returned empty slice", name)
+		}
+		// Guardrail against accidental empty/whitespace entries
+		// landing in the firewall allow-list.
+		for _, h := range hosts {
+			if h == "" {
+				t.Errorf("connector %q AllowedHosts() includes an empty string", name)
+			}
+		}
+	}
+}
+
 func TestRegistry_Available_SortOrder(t *testing.T) {
 	r := NewDefaultRegistry()
 	avail := r.Available()

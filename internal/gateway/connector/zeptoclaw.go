@@ -79,6 +79,20 @@ func (c *ZeptoClawConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
 }
 
+// AllowedHosts returns ZeptoClaw's upstream LLM hosts that the
+// firewall layer must allow when the user has BYOK'd against
+// non-OpenAI/Anthropic providers. The default ZeptoClaw config ships
+// with OpenRouter and Together AI as commonly-used cheap upstream
+// brokers. Without these in the firewall allow-list, a default-deny
+// firewall blocks every chat at L4 and the user sees "DNS lookup
+// blocked" instead of a clean "no API key" error. See S3.3 / F26.
+func (c *ZeptoClawConnector) AllowedHosts() []string {
+	return []string{
+		"openrouter.ai",
+		"api.together.xyz",
+	}
+}
+
 func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// Surface 1: Patch ZeptoClaw config to route api_base through proxy.
 	if err := c.patchZeptoClawConfig(opts); err != nil {

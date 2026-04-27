@@ -50,6 +50,21 @@ func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
 }
 
+// AllowedHosts returns the Anthropic CDN hostnames Claude Code
+// touches outside the LLM endpoint itself — skill manifests,
+// plugin registry, telemetry. api.anthropic.com is already in the
+// firewall's static defaults; this list adds the auxiliary hosts.
+// See S3.3 / F26.
+func (c *ClaudeCodeConnector) AllowedHosts() []string {
+	return []string{
+		// Skill/plugin registry CDN.
+		"claude.ai",
+		// Marketplace + docs CDN.
+		"docs.anthropic.com",
+		"console.anthropic.com",
+	}
+}
+
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := c.writeEnvOverride(opts); err != nil {
 		return fmt.Errorf("claudecode env override: %w", err)
