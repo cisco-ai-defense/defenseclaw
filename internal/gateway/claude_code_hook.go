@@ -101,6 +101,9 @@ func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request)
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
 		return
 	}
+	req.CWD = sanitizeHookCWD(req.CWD)
+	req.NewCWD = sanitizeHookCWD(req.NewCWD)
+	req.OldCWD = sanitizeHookCWD(req.OldCWD)
 
 	t0 := time.Now()
 	resp := a.evaluateClaudeCodeHook(r.Context(), req)

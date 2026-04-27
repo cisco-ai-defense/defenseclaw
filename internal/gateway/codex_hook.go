@@ -77,6 +77,7 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
 		return
 	}
+	req.CWD = sanitizeHookCWD(req.CWD)
 
 	t0 := time.Now()
 	resp := a.evaluateCodexHook(r.Context(), req)
@@ -451,6 +452,29 @@ func gitChangedFiles(ctx context.Context, cwd string) ([]string, error) {
 		return nil, fmt.Errorf("git commands failed: %v", errs)
 	}
 	return files, nil
+}
+
+// sanitizeHookCWD resolves symlinks and ensures the cwd is an absolute,
+// existing directory. Returns the canonicalized path, or empty string if
+// the input is blank or invalid. Used at hook handler entry to sanitize
+// the caller-supplied cwd before it flows into filepath.Join / cmd.Dir.
+func sanitizeHookCWD(cwd string) string {
+	s := strings.TrimSpace(cwd)
+	if s == "" {
+		return ""
+	}
+	if !filepath.IsAbs(s) {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(s)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return resolved
 }
 
 // validateGitCwd resolves symlinks and ensures the cwd is a real directory.

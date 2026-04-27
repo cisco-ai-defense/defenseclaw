@@ -250,21 +250,36 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stderr is operator-facing: honor the Reveal flag via the
-	// Reveal-aware String/MessageContent helpers. Args are
-	// MessageContent-shaped (raw tool inputs, often containing the
-	// offending value), Content is exactly an LLM message body.
+	ctx, cancel := context.WithTimeout(r.Context(), inspectScanTimeout)
+	defer cancel()
+
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
 		req.Tool, redaction.MessageContent(string(req.Args)), len(req.Content), req.Direction)
 
 	t0 := time.Now()
 
-	var verdict *ToolInspectVerdict
+	type verdictResult struct {
+		v *ToolInspectVerdict
+	}
+	ch := make(chan verdictResult, 1)
+	go func() {
+		var v *ToolInspectVerdict
+		if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
+			v = a.inspectMessageContent(&req)
+		} else {
+			v = a.inspectToolPolicy(&req)
+		}
+		ch <- verdictResult{v}
+	}()
 
-	if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
-		verdict = a.inspectMessageContent(&req)
-	} else {
-		verdict = a.inspectToolPolicy(&req)
+	var verdict *ToolInspectVerdict
+	select {
+	case res := <-ch:
+		verdict = res.v
+	case <-ctx.Done():
+		fmt.Fprintf(os.Stderr, "[inspect] tool scan timeout after %s\n", time.Since(t0))
+		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+		return
 	}
 
 	mode := "observe"

@@ -342,7 +342,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// Strip /c/<connector>/ prefix so connector-routed traffic
 	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
 	// handlers as fetch-interceptor traffic.
-	stripped := connectorPrefixStripper(mux)
+	stripped := connectorPrefixStripper(mux, p.registry)
 	limited := p.rateLimitMiddleware(stripped)
 	logged := p.requestLogger(limited)
 	// Middleware ordering matters for v7 correlation: request_id
@@ -438,18 +438,36 @@ func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
 // http://proxy:4000/c/claudecode; the SDK then POSTs to
 // /c/claudecode/v1/messages. This middleware rewrites that to /v1/messages.
 //
-// The connector name is validated against a strict [a-z0-9-] charset with a
-// max length of 64 to prevent path traversal and log injection via crafted
-// prefixes.
-func connectorPrefixStripper(next http.Handler) http.Handler {
+// Security: the connector name must pass charset validation AND exist in
+// the registry. Paths containing percent-encoded slashes (%2f/%2F) or
+// dot-dot segments are rejected before any stripping occurs.
+func connectorPrefixStripper(next http.Handler, reg *connector.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
+
+		if strings.Contains(r.URL.RawPath, "%2f") || strings.Contains(r.URL.RawPath, "%2F") ||
+			strings.Contains(r.URL.RawPath, "%5c") || strings.Contains(r.URL.RawPath, "%5C") {
+			http.Error(w, "encoded path separators not allowed", http.StatusBadRequest)
+			return
+		}
+
+		if strings.Contains(p, "..") {
+			http.Error(w, "path traversal not allowed", http.StatusBadRequest)
+			return
+		}
+
 		if strings.HasPrefix(p, "/c/") {
 			if idx := strings.Index(p[3:], "/"); idx >= 0 {
 				name := p[3 : 3+idx]
 				if !isValidConnectorName(name) {
 					http.Error(w, "invalid connector name", http.StatusBadRequest)
 					return
+				}
+				if reg != nil {
+					if _, ok := reg.Get(name); !ok {
+						http.Error(w, "unknown connector", http.StatusNotFound)
+						return
+					}
 				}
 				r.URL.Path = p[3+idx:]
 				r.URL.RawPath = ""

@@ -3154,19 +3154,24 @@ func TestHydrateConnectorSignals_NoSnapshotIsNoOp(t *testing.T) {
 }
 
 func TestConnectorPrefixStripper(t *testing.T) {
+	reg := connector.NewDefaultRegistry()
+
 	cases := []struct {
-		path string
-		want string
+		path       string
+		want       string
+		wantStatus int
 	}{
-		{"/c/claudecode/v1/messages", "/v1/messages"},
-		{"/c/zeptoclaw/v1/chat/completions", "/v1/chat/completions"},
-		{"/c/codex/v1/responses", "/v1/responses"},
-		{"/c/openclaw/v1/messages", "/v1/messages"},
-		{"/v1/messages", "/v1/messages"},
-		{"/v1/chat/completions", "/v1/chat/completions"},
-		{"/health", "/health"},
-		{"/c/", "/c/"},
-		{"/c/claudecode", "/c/claudecode"},
+		{"/c/claudecode/v1/messages", "/v1/messages", 0},
+		{"/c/zeptoclaw/v1/chat/completions", "/v1/chat/completions", 0},
+		{"/c/codex/v1/responses", "/v1/responses", 0},
+		{"/c/openclaw/v1/messages", "/v1/messages", 0},
+		{"/v1/messages", "/v1/messages", 0},
+		{"/v1/chat/completions", "/v1/chat/completions", 0},
+		{"/health", "/health", 0},
+		{"/c/", "/c/", 0},
+		{"/c/claudecode", "/c/claudecode", 0},
+		{"/c/unknown/v1/messages", "", http.StatusNotFound},
+		{"/c/../v1/messages", "", http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -3174,10 +3179,16 @@ func TestConnectorPrefixStripper(t *testing.T) {
 		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			got = r.URL.Path
 		})
-		handler := connectorPrefixStripper(inner)
+		handler := connectorPrefixStripper(inner, reg)
 		req, _ := http.NewRequest("POST", "http://localhost"+tc.path, nil)
-		handler.ServeHTTP(nil, req)
-		if got != tc.want {
+		rec := httptest.NewRecorder()
+		got = ""
+		handler.ServeHTTP(rec, req)
+		if tc.wantStatus != 0 {
+			if rec.Code != tc.wantStatus {
+				t.Errorf("connectorPrefixStripper(%q) status = %d, want %d", tc.path, rec.Code, tc.wantStatus)
+			}
+		} else if got != tc.want {
 			t.Errorf("connectorPrefixStripper(%q) = %q, want %q", tc.path, got, tc.want)
 		}
 	}
