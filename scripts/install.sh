@@ -263,7 +263,7 @@ verify_checksum() {
             || { warn "Could not download checksums.txt — skipping verification"; return 0; }
     fi
     local expected actual
-    expected="$(grep "  ${filename}" "${CHECKSUMS_FILE}" | awk '{print $1}')"
+    expected="$(awk -v f="${filename}" '$2 == f {print $1; exit}' "${CHECKSUMS_FILE}")"
     if [[ -z "${expected}" ]]; then
         warn "No checksum entry for ${filename} — skipping verification"
         return 0
