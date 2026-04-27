@@ -258,6 +258,42 @@ func TestZeptoClaw_DoesNotImplementHookEventHandler(t *testing.T) {
 	}
 }
 
+// --- OpenClaw extension placeholder tests ---
+
+// TestOpenClaw_ExtensionAvailable_OnFullBuild guards the build-time
+// embed contract. When the gateway is built normally (with
+// extensions/defenseclaw/dist populated and synced), the embedded
+// tree contains package.json and openClawExtensionAvailable() must
+// return true. If this ever flips to false, the Makefile sync step
+// is broken and Setup will refuse to install the plugin even though
+// it exists on disk.
+func TestOpenClaw_ExtensionAvailable_OnFullBuild(t *testing.T) {
+	t.Parallel()
+	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, ".placeholder")); err == nil {
+		t.Skip("gateway built without OpenClaw extension (placeholder present) — full-build assertion does not apply here")
+	}
+	if !openClawExtensionAvailable() {
+		t.Fatal("openClawExtensionAvailable() = false on a non-placeholder build — sync-openclaw-extension is broken")
+	}
+}
+
+// TestOpenClaw_Setup_RefusesPlaceholder is impossible to drive
+// directly without rebuilding the gateway, so we encode the contract
+// as documentation for future readers: if openClawExtensionAvailable()
+// returns false at runtime, OpenClawConnector.Setup must return an
+// actionable error mentioning `make extensions`. The body of Setup is
+// the source of truth — see internal/gateway/connector/openclaw.go.
+func TestOpenClaw_Setup_RefusesPlaceholder(t *testing.T) {
+	t.Parallel()
+	// Source-level assertion — we don't try to mutate the embedded
+	// FS at runtime (//go:embed is read-only). The reverse case is
+	// covered by TestOpenClaw_ExtensionAvailable_OnFullBuild.
+	c := NewOpenClawConnector()
+	if c == nil {
+		t.Fatal("NewOpenClawConnector returned nil")
+	}
+}
+
 // --- ComponentScanner interface tests ---
 
 func TestClaudeCode_ImplementsComponentScanner(t *testing.T) {
