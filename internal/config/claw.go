@@ -75,15 +75,31 @@ func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 	return &oc, nil
 }
 
+// activeConnector returns the resolved connector name for this config.
+// Precedence: explicit guardrail.connector → claw.mode → "openclaw".
+//
+// This is the single decision point for "which agent framework is this
+// sidecar running against?" — every polymorphic reader (SkillDirs,
+// PluginDirs, ReadMCPServers) goes through it so a future connector
+// is wired in by adding one switch arm, not by editing N call sites.
+func (c *Config) activeConnector() string {
+	if c == nil {
+		return "openclaw"
+	}
+	if name := strings.TrimSpace(c.Guardrail.Connector); name != "" {
+		return name
+	}
+	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
+		return mode
+	}
+	return "openclaw"
+}
+
 // ReadMCPServers returns the MCP servers for the active connector.
 // When guardrail.connector is set, it dispatches to the connector-specific
 // reader. Falls back to the OpenClaw path for backward compatibility.
 func (c *Config) ReadMCPServers() ([]MCPServerEntry, error) {
-	connector := c.Guardrail.Connector
-	if connector == "" {
-		connector = string(c.Claw.Mode)
-	}
-	return c.ReadMCPServersForConnector(connector)
+	return c.ReadMCPServersForConnector(c.activeConnector())
 }
 
 // ReadMCPServersForConnector returns MCP servers for a specific connector.
@@ -188,11 +204,10 @@ func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	return filepath.Join(workspace, "skills")
 }
 
-// SkillDirs returns the skill directories for the active claw mode.
-// Order: workspace/skills → extraDirs from openclaw.json → home_dir/skills.
-// OpenClaw defaults the workspace to ~/.openclaw/workspace even when the
-// path is omitted from openclaw.json, so we always include that fallback.
-func (c *Config) SkillDirs() []string {
+// skillDirsOpenClaw returns the OpenClaw-specific skill directory list.
+// Kept private so SkillDirsForConnector's "openclaw" / default branch
+// can call it without re-entering the polymorphic SkillDirs() dispatcher.
+func (c *Config) skillDirsOpenClaw() []string {
 	homeDir := expandPath(c.Claw.HomeDir)
 	var dirs []string
 
@@ -210,11 +225,33 @@ func (c *Config) SkillDirs() []string {
 	return dedup(dirs)
 }
 
-// PluginDirs returns the plugin directories for the active claw mode.
-// For OpenClaw, plugins (extensions) live under claw_home/extensions.
-func (c *Config) PluginDirs() []string {
+// pluginDirsOpenClaw returns the OpenClaw-specific plugin (extension) dirs.
+// Private for the same reason as skillDirsOpenClaw — avoids recursion when
+// PluginDirsForConnector falls into its default arm.
+func (c *Config) pluginDirsOpenClaw() []string {
 	homeDir := expandPath(c.Claw.HomeDir)
 	return []string{filepath.Join(homeDir, "extensions")}
+}
+
+// SkillDirs returns the skill directories for the active connector.
+//
+// Dispatches via activeConnector() — when guardrail.connector is set
+// (claudecode, codex, zeptoclaw), the connector-specific paths are
+// returned. With no connector configured, falls back to the OpenClaw
+// layout (workspace/skills → extraDirs from openclaw.json → home_dir/skills),
+// preserving backward compatibility for pre-S1.x deployments.
+func (c *Config) SkillDirs() []string {
+	return c.SkillDirsForConnector(c.activeConnector())
+}
+
+// PluginDirs returns the plugin directories for the active connector.
+//
+// Dispatches via activeConnector() — when guardrail.connector is set,
+// the connector-specific layout is returned (e.g. ~/.codex/plugins
+// for Codex). With no connector configured, falls back to the OpenClaw
+// extensions directory (claw_home/extensions).
+func (c *Config) PluginDirs() []string {
+	return c.PluginDirsForConnector(c.activeConnector())
 }
 
 // InstalledSkillCandidates returns possible on-disk paths for a named skill,
@@ -277,12 +314,18 @@ func SkillDirsForMode(mode ClawMode, homeDir string) []string {
 	return dedup(dirs)
 }
 
-// SkillDirsForConnector returns skill directories for a specific connector.
+// SkillDirsForConnector returns skill directories for a specific connector,
+// independent of the config's active connector.
+//
+// Used by callers that need to enumerate paths for a connector other than
+// the running one (e.g. multi-connector audits, doctor). Unknown connector
+// names — including "" and "openclaw" — fall through to the OpenClaw
+// layout via skillDirsOpenClaw().
 func (c *Config) SkillDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
 
-	switch connector {
+	switch strings.TrimSpace(connector) {
 	case "claudecode":
 		return dedup([]string{
 			filepath.Join(home, ".claude", "skills"),
@@ -299,15 +342,17 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			filepath.Join(cwd, ".zeptoclaw", "skills"),
 		})
 	default:
-		return c.SkillDirs()
+		return c.skillDirsOpenClaw()
 	}
 }
 
-// PluginDirsForConnector returns plugin directories for a specific connector.
+// PluginDirsForConnector returns plugin directories for a specific connector,
+// independent of the config's active connector. Unknown / empty / "openclaw"
+// fall through to the OpenClaw extensions layout.
 func (c *Config) PluginDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 
-	switch connector {
+	switch strings.TrimSpace(connector) {
 	case "claudecode":
 		return []string{
 			filepath.Join(home, ".claude", "plugins"),
@@ -321,7 +366,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".zeptoclaw", "plugins"),
 		}
 	default:
-		return c.PluginDirs()
+		return c.pluginDirsOpenClaw()
 	}
 }
 
