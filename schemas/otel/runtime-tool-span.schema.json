@@ -90,7 +90,7 @@
       "type": "object",
       "description": "Semantic definition of all span attributes.",
       "properties": {
-        "defenseclaw.tool.name": {
+        "gen_ai.tool.name": {
           "type": "string",
           "description": "Tool name as reported by the agent framework.",
           "examples": ["shell", "read_file", "web_search"]

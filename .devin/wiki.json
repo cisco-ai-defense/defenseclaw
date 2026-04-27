@@ -1,0 +1,125 @@
+{
+  "repo_notes": [
+    {
+      "content": "DefenseClaw is a security governance layer for OpenClaw and agentic AI runtimes. It scans skills, MCP servers, plugins, and agent-generated code before use; inspects prompts, completions, and tool calls at runtime; enforces policy through block/allow actions; and exports durable audit evidence through SQLite, JSONL, OTLP, Splunk, webhooks, and a TUI.",
+      "author": "Maintainer"
+    },
+    {
+      "content": "The codebase is organized into these main areas:\n- cli/defenseclaw/ - Python operator CLI, config loading, scanner wrappers, observability setup, webhook helpers, and commands.\n- cmd/defenseclaw/ - Go gateway executable entry point.\n- internal/gateway/ - Go sidecar, REST API, WebSocket bridge, guardrail proxy, provider adapters, inspection pipeline, hooks, webhooks, and gateway events.\n- internal/scanner/ - Go scanner wrappers and normalized scan result types.\n- internal/audit/, internal/gatewaylog/, internal/telemetry/ - audit persistence, structured runtime logs, metrics, traces, and schema emission.\n- internal/tui/ - terminal dashboard for alerts, scans, tools, policy, setup, observability, and health.\n- internal/policy/, policies/rego/, policies/guardrail/, policies/scanners/ - policy evaluation, Rego modules, guardrail rule packs, suppressions, and scanner profiles.\n- extensions/defenseclaw/ - OpenClaw TypeScript plugin, fetch interception, tool-call inspection hooks, provider detection, and plugin tests.\n- bundles/ - package-local local observability and Splunk bridge assets.\n- docs/ - central Markdown documentation.",
+      "author": "Maintainer"
+    },
+    {
+      "content": "Documentation should prioritize practical operator flows: installation, quick start, scanner usage, guardrail setup and tuning, sandbox setup, observability, Splunk/local Grafana, TUI operation, policy authoring, plugin development, and testing. Keep durable Markdown docs under docs/ and keep package-local READMEs beside bundles or examples that need local context.",
+      "author": "Maintainer"
+    },
+    {
+      "content": "Important source-of-truth values: default gateway API port is 18970, default guardrail proxy port is 4000, Go version is 1.26.2, Python supports 3.10+, package version is in pyproject.toml and Makefile, and the local config directory is ~/.defenseclaw/.",
+      "author": "Maintainer"
+    },
+    {
+      "content": "Do not create dedicated wiki pages for local caches, generated build output, node_modules, .venv, .gocache, tmp, .cursor, .devin, or cli/defenseclaw/_data generated bundle copies. Mention these only when explaining build, packaging, or docs workflows.",
+      "author": "Maintainer"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Home",
+      "purpose": "High-level overview of DefenseClaw: what it protects, the governance problem it solves, the Python CLI + Go gateway + OpenClaw plugin architecture, key capabilities, limitations, and links to the rest of the wiki. Reference README.md, docs/README.md, pyproject.toml, Makefile, and go.mod."
+    },
+    {
+      "title": "Key Concepts and Security Model",
+      "purpose": "Explain core concepts: skills, MCP servers, plugins, agent-generated code, admission control, observe vs action mode, scan verdicts, block/allow policy, runtime guardrails, sandboxing, audit evidence, and the limits of automated security controls. Reference docs/ARCHITECTURE.md, docs/GUARDRAIL.md, docs/SANDBOX.md, internal/policy/, and policies/.",
+      "parent": "Home"
+    },
+    {
+      "title": "Quick Start",
+      "purpose": "Step-by-step setup for a local developer or operator: prerequisites, install, defenseclaw init --enable-guardrail, defenseclaw doctor, basic skill/MCP/plugin scans, starting the gateway, launching the TUI, and where logs/audit data appear. Reference README.md, docs/QUICKSTART.md, docs/INSTALL.md, cli/defenseclaw/commands/cmd_quickstart.py, and cli/defenseclaw/commands/cmd_init.py.",
+      "parent": "Home"
+    },
+    {
+      "title": "Installation and Configuration",
+      "purpose": "Comprehensive install and config guide: source install, Makefile targets, release script, PATH setup, config directory, config.yaml, .env secret loading, scanner policy defaults, guardrail settings, gateway ports, and provider configuration. Reference docs/INSTALL.md, docs/CONFIG_FILES.md, Makefile, scripts/install.sh, cli/defenseclaw/config.py, internal/config/, and policies/.",
+      "parent": "Home"
+    },
+    {
+      "title": "Architecture",
+      "purpose": "System architecture for the Python CLI, Go gateway sidecar, OpenClaw plugin, policy engine, scanner wrappers, guardrail proxy, audit store, telemetry exporters, and sandbox integration. Include component boundaries and request/data flow. Reference docs/ARCHITECTURE.md, docs/reference/GATEWAY_SPEC.md, internal/gateway/, internal/scanner/, internal/audit/, internal/telemetry/, and extensions/defenseclaw/src/.",
+      "parent": "Home"
+    },
+    {
+      "title": "CLI and Gateway Commands",
+      "purpose": "Operator guide for defenseclaw CLI commands and defenseclaw-gateway commands: init, doctor, setup, skill, mcp, plugin, codeguard, policy, audit, alerts, tui, sandbox, status, start/stop/restart, scan, watchdog, and provenance. Reference docs/CLI.md, internal/cli/, cli/defenseclaw/commands/, and cmd/defenseclaw/main.go.",
+      "parent": "Home"
+    },
+    {
+      "title": "Scanners and CodeGuard",
+      "purpose": "Explain scanner surfaces and result normalization: skill scanner, MCP scanner, plugin scanner, AIBOM/inventory, CodeGuard static analysis, scan policies, findings, severities, SARIF/JSON-style outputs, and how scans feed admission decisions and audit events. Reference docs/CLI.md, docs/PLUGINS.md, skills/codeguard/, cli/defenseclaw/scanner/, internal/scanner/, policies/scanners/, and schemas/scan-result.json.",
+      "parent": "Home"
+    },
+    {
+      "title": "Runtime Guardrail",
+      "purpose": "Complete guide to the guardrail proxy and runtime inspection: provider adapters, prompt/completion inspection, tool call inspection, rule packs, suppressions, verdict cache, LLM judge, Cisco inspection, notification queue, action vs observe mode, and tuning false positives. Reference docs/GUARDRAIL.md, docs/GUARDRAIL_RULE_PACKS.md, docs/GUARDRAIL_QUICKSTART.md, internal/gateway/guardrail.go, internal/gateway/proxy.go, internal/gateway/inspect.go, internal/guardrail/, and policies/guardrail/.",
+      "parent": "Home"
+    },
+    {
+      "title": "Admission Gate and Watcher",
+      "purpose": "Document filesystem watcher behavior, rescan/drift detection, policy actions, skill/MCP/plugin block and allow flows, quarantine/restore behavior, audit emission, and how gateway/client/plugin interactions enforce decisions. Reference internal/watcher/, internal/enforce/, internal/policy/, internal/gateway/sidecar.go, cli/defenseclaw/enforce/, and policies/rego/.",
+      "parent": "Architecture"
+    },
+    {
+      "title": "Policy and Rego",
+      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, sandbox/firewall Rego modules, data files, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
+      "parent": "Home"
+    },
+    {
+      "title": "Sandbox and Firewall",
+      "purpose": "Explain OpenShell sandbox setup, Linux system requirements, network namespace behavior, firewall policy, sandbox events, monitoring, debugging, and macOS fallback boundaries. Reference docs/SANDBOX.md, docs/SANDBOX_ARCHITECTURE.md, docs/SANDBOX_SETUP.md, docs/SANDBOX_MONITORING.md, docs/SANDBOX_DEBUGGING.md, docs/OPENSHELL_SANDBOX_EVENTS.md, internal/sandbox/, internal/firewall/, and policies/openshell/.",
+      "parent": "Home"
+    },
+    {
+      "title": "Observability, Audit, and SIEM",
+      "purpose": "Explain audit persistence, JSONL gateway events, event schemas, redaction, OTLP metrics/logs/traces, Splunk HEC, webhook notifications, local observability stack, dashboards, and runbooks. Reference docs/OBSERVABILITY.md, docs/OBSERVABILITY-CONTRACT.md, docs/OTEL.md, docs/SPLUNK_APP.md, internal/audit/, internal/gatewaylog/, internal/telemetry/, internal/redaction/, cli/defenseclaw/observability/, and bundles/local_observability_stack/.",
+      "parent": "Home"
+    },
+    {
+      "title": "Splunk Local Bridge",
+      "purpose": "Focused guide for the bundled local Splunk bridge: Free-from-day-1 behavior, compose profiles, local app packaging, HEC/index defaults, license boundaries, and operator workflow. Reference docs/SPLUNK_APP.md, docs/requirements/FREE_FROM_DAY1.md, bundles/splunk_local_bridge/compose/README.md, bundles/splunk_local_bridge/splunk/README.md, and cli/defenseclaw/observability/.",
+      "parent": "Observability, Audit, and SIEM"
+    },
+    {
+      "title": "TUI",
+      "purpose": "Operator guide to the terminal dashboard: panels, navigation, alerts, scan views, inventory, tools, policy editing, setup flows, observability setup, webhook setup, and health checks. Reference docs/TUI.md and internal/tui/.",
+      "parent": "Home"
+    },
+    {
+      "title": "API Reference",
+      "purpose": "Document local gateway REST API surfaces, health/status endpoints, scan/codeguard endpoints, config mutation, provider listing, authentication token behavior, schemas, and client usage from the CLI/plugin. Reference docs/API.md, internal/gateway/api.go, internal/gateway/providers_endpoint.go, cli/defenseclaw/gateway.py, and schemas/.",
+      "parent": "Home"
+    },
+    {
+      "title": "OpenClaw Plugin",
+      "purpose": "Explain the TypeScript plugin: fetch interception, provider detection, sidecar config, tool-call inspection hooks, health monitoring, correlation headers, slash commands, packaging, tests, and how it communicates with the Go gateway. Reference extensions/defenseclaw/src/, extensions/defenseclaw/openclaw.plugin.json, and extensions/defenseclaw/package.json.",
+      "parent": "Architecture"
+    },
+    {
+      "title": "Developer Guide",
+      "purpose": "Development workflow: repo layout, build targets, local installs, generated data bundles, docs generation, code style, common scripts, release artifacts, and contribution conventions. Reference docs/CONTRIBUTING.md, docs/development/DEVELOPER_SPEC.md, Makefile, scripts/, pyproject.toml, .github/workflows/, and .goreleaser.yaml.",
+      "parent": "Home"
+    },
+    {
+      "title": "Testing and CI",
+      "purpose": "Testing guide for Python CLI tests, Go race tests, TypeScript Vitest, Rego OPA tests, docs generation/dead-link checks, E2E harnesses, parity gates, and CI workflow responsibilities. Reference docs/TESTING.md, docs/E2E.md, Makefile, cli/tests/, internal/** tests, extensions/defenseclaw/src/__tests__/, policies/rego/*_test.rego, scripts/check_*.py, and .github/workflows/.",
+      "parent": "Developer Guide"
+    },
+    {
+      "title": "Plugin Development",
+      "purpose": "How to develop and test custom scanner plugins and OpenClaw plugins: example scaffold, scanner wrapper behavior, plugin scan JSON output, policies, installation paths, and local validation commands. Reference docs/PLUGINS.md, plugins/examples/custom-scanner/, cli/defenseclaw/commands/cmd_plugin.py, cli/defenseclaw/scanner/plugin.py, internal/scanner/plugin.go, and policies/scanners/plugin-scanner/.",
+      "parent": "Developer Guide"
+    },
+    {
+      "title": "Documentation Layout",
+      "purpose": "Explain the docs/ Markdown layout, package-local README exceptions, archived design/spec notes, DeepWiki configuration, and link hygiene expectations. Reference README.md, docs/README.md, .devin/wiki.json, bundles/*/README.md, and plugins/examples/custom-scanner/README.md.",
+      "parent": "Developer Guide"
+    }
+  ]
+}

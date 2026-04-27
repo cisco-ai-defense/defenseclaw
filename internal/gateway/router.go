@@ -1012,7 +1012,8 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 					context.Background(),
 					conversationID,           // conversation.id
 					r.agentNameForStream(""), // agent name (claw mode fallback)
-					"",                       // provider filled on session.message
+					SharedAgentRegistry().AgentID(),
+					"", // provider filled on session.message
 				)
 				r.spanMu.Lock()
 				r.activeAgentSpans[se.RunID] = &activeAgent{
@@ -1199,6 +1200,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				DestinationApp: toolDestinationApp("builtin", ""),
 				PolicyID:       r.defaultPolicyID,
 				AgentName:      agentName,
+				AgentID:        SharedAgentRegistry().AgentID(),
 			},
 		)
 		r.spanMu.Lock()
@@ -1401,6 +1403,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 				DestinationApp: toolDestinationApp("builtin", ""),
 				PolicyID:       r.defaultPolicyID,
 				AgentName:      r.agentNameForStream(""),
+				AgentID:        SharedAgentRegistry().AgentID(),
 			},
 		)
 	}

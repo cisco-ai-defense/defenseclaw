@@ -53,55 +53,23 @@ jobs:
 
       - name: Clean DefenseClaw
         run: |
-          defenseclaw-gateway stop 2>/dev/null || true
-          openclaw gateway stop 2>/dev/null || true
           if [ -f "${SPLUNK_MOCK_PID_FILE}" ]; then
             kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
             rm -f "${SPLUNK_MOCK_PID_FILE}"
           fi
-          pkill -f splunk_hec_mock.py 2>/dev/null || true
           rm -f "${SPLUNK_MOCK_LOG}"
 
-          echo "--- Disk before cleanup ---"
-          df -h / | tail -1
-
+          # Bring down the Splunk compose stack from any prior run BEFORE
+          # the host-wide reclaim, so docker can release its volumes.
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
             export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
-          # Aggressive docker reclaim: `docker system prune --volumes` only
-          # removes DANGLING images, which leaves in-use images (Splunk ~4 GB,
-          # the compose stack, etc.) on disk across runs. `image prune -a`
-          # removes every unused image; `builder prune -a` flushes BuildKit.
-          docker container prune -f 2>/dev/null || true
-          docker volume prune -f 2>/dev/null || true
-          docker image prune -a -f 2>/dev/null || true
-          docker builder prune -a -f 2>/dev/null || true
 
-          # Runner-level caches that accumulate across every job that ever ran
-          # on this self-hosted runner. Setup-job "No space left on device"
-          # failures are caused by these paths filling up silently.
-          RUNNER_ROOT="$(dirname "$(dirname "${RUNNER_WORKSPACE:-/home/ubuntu/actions-runner/_work/defenseclaw}")")"
-          find "$RUNNER_ROOT/_work/_actions" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_work/_tool" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_diag" -type f -mtime +1 -delete 2>/dev/null || true
-
-          # Language / package caches filled by `make install`
-          go clean -cache 2>/dev/null || true
-          rm -rf ~/.cache/uv/* ~/.cache/pip/* 2>/dev/null || true
-
-          # /tmp artifacts from any previous run (not just this run's prefix)
-          rm -rf /tmp/defenseclaw-logs-* /tmp/splunk-mock-*.log \
-                 /tmp/splunk-mock.stdout /tmp/opa 2>/dev/null || true
-
-          # systemd user journal grows unbounded on long-running runners
-          journalctl --user --vacuum-time=1h 2>/dev/null || true
-
-          echo "--- Disk after cleanup ---"
-          df -h / | tail -1
+          # Generic host-wide cleanup (docker reclaim, runner _work TTL,
+          # /tmp/go-build* etc.) — see scripts/runner-cleanup.sh.
+          bash scripts/runner-cleanup.sh
 
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
@@ -173,14 +141,15 @@ jobs:
               print("OpenClaw config already clean")
           PY
 
-          # Fail fast if cleanup couldn't buy back enough headroom. This turns
-          # silent drift (each run leaves the runner slightly fuller than the
-          # last) into a loud error BEFORE we burn 20 minutes booting Splunk,
-          # installing toolchains, and then 503'ing during the E2E suite.
+          # Fail fast if cleanup couldn't buy back enough headroom. The
+          # previous threshold of 8 GB still allowed the disk to fill mid-run
+          # because Splunk's working set + go build temp dirs + checkout
+          # consume ~9-10 GB at peak. Bumping to 10 GB gives us the headroom
+          # to survive a worst-case run.
           FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
           echo "--- Final free space: ${FREE_GB}G ---"
-          if [ "${FREE_GB:-0}" -lt 8 ]; then
-            echo "::error::Runner disk below 8 GB free after cleanup (${FREE_GB}G)."
+          if [ "${FREE_GB:-0}" -lt 10 ]; then
+            echo "::error::Runner disk below 10 GB free after cleanup (${FREE_GB}G)."
             echo "::error::Runner needs maintenance: install an ACTIONS_RUNNER_HOOK_JOB_STARTED"
             echo "::error::script on the host, or grow the root disk. See e2e.yml 'Clean DefenseClaw'."
             exit 1
@@ -485,53 +454,23 @@ jobs:
       - name: Post-run cleanup
         if: always()
         run: |
-          echo "--- Disk before post-run cleanup ---"
-          df -h / | tail -1
-
-          defenseclaw-gateway stop 2>/dev/null || true
-
-          # Stop the Splunk HEC mock first so residual POSTs from the
-          # sidecar don't keep its socket open and block the runner.
           if [ -f "${SPLUNK_MOCK_PID_FILE:-}" ]; then
             kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
             rm -f "${SPLUNK_MOCK_PID_FILE}"
           fi
-          pkill -f splunk_hec_mock.py 2>/dev/null || true
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
             export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
-          # Aggressive docker reclaim (see Clean DefenseClaw for rationale).
-          docker container prune -f 2>/dev/null || true
-          docker volume prune -f 2>/dev/null || true
-          docker image prune -a -f 2>/dev/null || true
-          docker builder prune -a -f 2>/dev/null || true
 
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
-          go clean -cache 2>/dev/null || true
-          rm -rf ~/.cache/uv/* ~/.cache/pip/* 2>/dev/null || true
 
-          # Runner-level caches (see Clean DefenseClaw for rationale).
-          RUNNER_ROOT="$(dirname "$(dirname "${RUNNER_WORKSPACE:-/home/ubuntu/actions-runner/_work/defenseclaw}")")"
-          find "$RUNNER_ROOT/_work/_actions" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_work/_tool" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_diag" -type f -mtime +1 -delete 2>/dev/null || true
-
-          # /tmp artifacts from any previous run
-          rm -rf /tmp/defenseclaw-logs-* /tmp/splunk-mock-*.log \
-                 /tmp/splunk-mock.stdout /tmp/opa 2>/dev/null || true
-
-          # systemd user journal
-          journalctl --user --vacuum-time=1h 2>/dev/null || true
-
-          echo "--- Disk after post-run cleanup ---"
-          df -h / | tail -1
+          # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
+          bash scripts/runner-cleanup.sh
 
   full-live:
     name: Full Live E2E
@@ -603,7 +542,6 @@ jobs:
             kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
             rm -f "${SPLUNK_MOCK_PID_FILE}"
           fi
-          pkill -f splunk_hec_mock.py 2>/dev/null || true
           rm -f "${SPLUNK_MOCK_LOG}"
 
           if [ -f "${OPENCLAW_MODEL_BACKUP_PATH}" ]; then
@@ -621,49 +559,16 @@ jobs:
             rm -f "${OPENCLAW_AUTH_BACKUP_MISSING_PATH}"
           fi
 
-          defenseclaw-gateway stop 2>/dev/null || true
-          openclaw gateway stop 2>/dev/null || true
-
-          echo "--- Disk before cleanup ---"
-          df -h / | tail -1
-
+          # Bring down any leftover Splunk compose stack BEFORE host-wide
+          # reclaim so docker can release its volumes.
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
             export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
-          # Aggressive docker reclaim: `docker system prune --volumes` only
-          # removes DANGLING images, which leaves in-use images (Splunk ~4 GB,
-          # the compose stack, etc.) on disk across runs. `image prune -a`
-          # removes every unused image; `builder prune -a` flushes BuildKit.
-          docker container prune -f 2>/dev/null || true
-          docker volume prune -f 2>/dev/null || true
-          docker image prune -a -f 2>/dev/null || true
-          docker builder prune -a -f 2>/dev/null || true
 
-          # Runner-level caches that accumulate across every job that ever ran
-          # on this self-hosted runner. Setup-job "No space left on device"
-          # failures are caused by these paths filling up silently.
-          RUNNER_ROOT="$(dirname "$(dirname "${RUNNER_WORKSPACE:-/home/ubuntu/actions-runner/_work/defenseclaw}")")"
-          find "$RUNNER_ROOT/_work/_actions" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_work/_tool" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_diag" -type f -mtime +1 -delete 2>/dev/null || true
-
-          # Language / package caches filled by `make install`
-          go clean -cache 2>/dev/null || true
-          rm -rf ~/.cache/uv/* ~/.cache/pip/* 2>/dev/null || true
-
-          # /tmp artifacts from any previous run (not just this run's prefix)
-          rm -rf /tmp/defenseclaw-logs-* /tmp/splunk-mock-*.log \
-                 /tmp/splunk-mock.stdout /tmp/opa 2>/dev/null || true
-
-          # systemd user journal grows unbounded on long-running runners
-          journalctl --user --vacuum-time=1h 2>/dev/null || true
-
-          echo "--- Disk after cleanup ---"
-          df -h / | tail -1
+          # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
+          bash scripts/runner-cleanup.sh
 
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
@@ -735,14 +640,15 @@ jobs:
               print("OpenClaw config already clean")
           PY
 
-          # Fail fast if cleanup couldn't buy back enough headroom. This turns
-          # silent drift (each run leaves the runner slightly fuller than the
-          # last) into a loud error BEFORE we burn 20 minutes booting Splunk,
-          # installing toolchains, and then 503'ing during the E2E suite.
+          # Fail fast if cleanup couldn't buy back enough headroom. The
+          # previous threshold of 8 GB still allowed the disk to fill mid-run
+          # because Splunk's working set + go build temp dirs + checkout
+          # consume ~9-10 GB at peak. Bumping to 10 GB gives us the headroom
+          # to survive a worst-case run.
           FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
           echo "--- Final free space: ${FREE_GB}G ---"
-          if [ "${FREE_GB:-0}" -lt 8 ]; then
-            echo "::error::Runner disk below 8 GB free after cleanup (${FREE_GB}G)."
+          if [ "${FREE_GB:-0}" -lt 10 ]; then
+            echo "::error::Runner disk below 10 GB free after cleanup (${FREE_GB}G)."
             echo "::error::Runner needs maintenance: install an ACTIONS_RUNNER_HOOK_JOB_STARTED"
             echo "::error::script on the host, or grow the root disk. See e2e.yml 'Clean DefenseClaw'."
             exit 1
@@ -1320,51 +1226,23 @@ jobs:
       - name: Post-run cleanup
         if: always()
         run: |
-          echo "--- Disk before post-run cleanup ---"
-          df -h / | tail -1
-
-          defenseclaw-gateway stop 2>/dev/null || true
-
           if [ -f "${SPLUNK_MOCK_PID_FILE:-}" ]; then
             kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
             rm -f "${SPLUNK_MOCK_PID_FILE}"
           fi
-          pkill -f splunk_hec_mock.py 2>/dev/null || true
 
           cd bundles/splunk_local_bridge/compose 2>/dev/null && {
             export SPLUNK_IMAGE=splunk/splunk-claw-bridge:10.2.0
             docker compose -f docker-compose.ci.yml down -v 2>/dev/null || true
             cd -
           } || true
-          # Aggressive docker reclaim (see Clean DefenseClaw for rationale).
-          docker container prune -f 2>/dev/null || true
-          docker volume prune -f 2>/dev/null || true
-          docker image prune -a -f 2>/dev/null || true
-          docker builder prune -a -f 2>/dev/null || true
 
           rm -rf ~/.defenseclaw
           rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
-          go clean -cache 2>/dev/null || true
-          rm -rf ~/.cache/uv/* ~/.cache/pip/* 2>/dev/null || true
 
-          # Runner-level caches (see Clean DefenseClaw for rationale).
-          RUNNER_ROOT="$(dirname "$(dirname "${RUNNER_WORKSPACE:-/home/ubuntu/actions-runner/_work/defenseclaw}")")"
-          find "$RUNNER_ROOT/_work/_actions" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_work/_tool" -mindepth 2 -maxdepth 3 \
-               -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
-          find "$RUNNER_ROOT/_diag" -type f -mtime +1 -delete 2>/dev/null || true
-
-          # /tmp artifacts from any previous run
-          rm -rf /tmp/defenseclaw-logs-* /tmp/splunk-mock-*.log \
-                 /tmp/splunk-mock.stdout /tmp/opa 2>/dev/null || true
-
-          # systemd user journal
-          journalctl --user --vacuum-time=1h 2>/dev/null || true
-
-          echo "--- Disk after post-run cleanup ---"
-          df -h / | tail -1
+          # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
+          bash scripts/runner-cleanup.sh
 
   e2e-required:
     name: E2E Required

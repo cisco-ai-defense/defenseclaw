@@ -164,16 +164,14 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 // StartAgentSpan starts a new OTel span for an agent invocation session.
 // Follows OTel GenAI semconv: span name = "invoke_agent {agentName}".
 //
-// conversationID is mapped to both gen_ai.conversation.id (for OTel
-// semconv consumers) and defenseclaw.session.id (for our internal
-// SIEM dashboards which key on session_id across traces + logs).
-// agentInstanceID is additionally resolved from the process-level
-// default when the caller leaves it blank; this keeps every span
-// carrying a stable identifier even on the non-session code paths
-// (guardrail proxy bootstrap, diagnostic invocations).
+// conversationID is mapped to gen_ai.conversation.id.
+// agentID is the logical stable agent identity and maps to
+// gen_ai.agent.id when present. agentInstanceID is separately
+// resolved from the process-level default and emitted only via the
+// DefenseClaw-specific defenseclaw.agent.instance_id attribute.
 func (p *Provider) StartAgentSpan(
 	ctx context.Context,
-	conversationID, agentName, provider string,
+	conversationID, agentName, agentID, provider string,
 ) (context.Context, trace.Span) {
 	if !p.TracesEnabled() {
 		return ctx, nil
@@ -193,16 +191,15 @@ func (p *Provider) StartAgentSpan(
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 		attribute.String("gen_ai.agent.name", agentName),
 		attribute.String("gen_ai.conversation.id", conversationID),
-		attribute.String("defenseclaw.session.id", conversationID),
 	)
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
 	}
+	if agentID != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.id", agentID))
+	}
 	if inst := p.AgentInstanceID(); inst != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.agent.id", inst),
-			attribute.String("defenseclaw.agent.instance_id", inst),
-		)
+		span.SetAttributes(attribute.String("defenseclaw.agent.instance_id", inst))
 	}
 
 	return ctx, span
@@ -239,8 +236,7 @@ type ToolSpanContext struct {
 	ToolID string
 
 	// SessionID is the conversation / sessionKey this tool call
-	// belongs to. Mirrored to both the OTel conversation id and
-	// the DefenseClaw session id attributes.
+	// belongs to. It maps to gen_ai.conversation.id.
 	SessionID string
 
 	// RunID is the sidecar-process run identifier (DEFENSECLAW_RUN_ID).
@@ -261,6 +257,11 @@ type ToolSpanContext struct {
 	// Derived from the incoming stream event (if present) or from
 	// cfg.Claw.Mode.
 	AgentName string
+
+	// AgentID is the logical agent identity when known. Unlike
+	// AgentInstanceID, this is stable across restarts and sessions.
+	// It maps to gen_ai.agent.id when present.
+	AgentID string
 }
 
 // StartToolSpan starts a new OTel span for a tool_call event.
@@ -307,16 +308,10 @@ func (p *Provider) StartToolSpan(
 	}
 
 	if cor.ToolID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.tool.call.id", cor.ToolID),
-			attribute.String("defenseclaw.tool.id", cor.ToolID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.tool.call.id", cor.ToolID))
 	}
 	if cor.SessionID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.conversation.id", cor.SessionID),
-			attribute.String("defenseclaw.session.id", cor.SessionID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", cor.SessionID))
 	}
 	if cor.RunID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.run.id", cor.RunID))
@@ -330,11 +325,11 @@ func (p *Provider) StartToolSpan(
 	if cor.AgentName != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
 	}
+	if cor.AgentID != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.id", cor.AgentID))
+	}
 	if inst := p.AgentInstanceID(); inst != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.agent.id", inst),
-			attribute.String("defenseclaw.agent.instance_id", inst),
-		)
+		span.SetAttributes(attribute.String("defenseclaw.agent.instance_id", inst))
 	}
 
 	if flaggedPattern != "" {
@@ -406,16 +401,10 @@ func (p *Provider) StartApprovalSpan(
 		attribute.Int("defenseclaw.approval.argc", len(argv)),
 	)
 	if cor.ToolID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.tool.call.id", cor.ToolID),
-			attribute.String("defenseclaw.tool.id", cor.ToolID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.tool.call.id", cor.ToolID))
 	}
 	if cor.SessionID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.conversation.id", cor.SessionID),
-			attribute.String("defenseclaw.session.id", cor.SessionID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", cor.SessionID))
 	}
 	if cor.RunID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.run.id", cor.RunID))
@@ -429,11 +418,11 @@ func (p *Provider) StartApprovalSpan(
 	if cor.AgentName != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
 	}
+	if cor.AgentID != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.id", cor.AgentID))
+	}
 	if inst := p.AgentInstanceID(); inst != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.agent.id", inst),
-			attribute.String("defenseclaw.agent.instance_id", inst),
-		)
+		span.SetAttributes(attribute.String("defenseclaw.agent.instance_id", inst))
 	}
 
 	return ctx, span
