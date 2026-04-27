@@ -274,7 +274,6 @@ tool/{tool_name}                            ✓ from tool_call → tool_result W
 | `gen_ai.operation.name` | string | `execute_tool` |
 | `gen_ai.tool.name` | string | tool name |
 | `gen_ai.tool.type` | string | `function` |
-| `defenseclaw.tool.name` | string | tool name (e.g. `shell`) |
 | `defenseclaw.tool.status` | string | status from `tool_call` payload |
 | `defenseclaw.tool.args_length` | int | byte length of arguments |
 | `defenseclaw.tool.exit_code` | int | from `tool_result` |
@@ -424,6 +423,7 @@ trace.
 | Attribute | Type | Description |
 |---|---|---|
 | `gen_ai.operation.name` | string | `invoke_agent` |
+| `gen_ai.agent.id` | string | logical stable agent id, when known |
 | `gen_ai.agent.name` | string | agent name (e.g. `openclaw`) |
 | `gen_ai.conversation.id` | string | conversation/session identifier |
 | `gen_ai.provider.name` | string | provider (if set) |
@@ -538,9 +538,9 @@ All metrics use the `defenseclaw.*` namespace.
 
 | Metric | Type | Unit | Attributes |
 |---|---|---|---|
-| `defenseclaw.tool.calls` | Counter | `{call}` | `tool.name`, `tool.provider`, `dangerous` |
-| `defenseclaw.tool.duration` | Histogram | `ms` | `tool.name`, `tool.provider` |
-| `defenseclaw.tool.errors` | Counter | `{error}` | `tool.name`, `exit_code` |
+| `defenseclaw.tool.calls` | Counter | `{call}` | `gen_ai.tool.name`, `tool.provider`, `dangerous` |
+| `defenseclaw.tool.duration` | Histogram | `ms` | `gen_ai.tool.name`, `tool.provider` |
+| `defenseclaw.tool.errors` | Counter | `{error}` | `gen_ai.tool.name`, `exit_code` |
 | `defenseclaw.approval.count` | Counter | `{request}` | `result`, `auto`, `dangerous` |
 
 ### GenAI Semconv Metrics
@@ -786,7 +786,7 @@ Observer jumps to the trace that triggered it.
 
 ### Cardinality Guidance
 
-- `defenseclaw.tool.name` — bounded by OpenClaw's tool catalog (typically < 50)
+- `gen_ai.tool.name` — bounded by OpenClaw's tool catalog (typically < 50)
 - `gen_ai.request.model` — bounded by provider model count (< 20)
 - `defenseclaw.scan.target` — can grow; use `target_type` for dashboard grouping
 - `defenseclaw.alert.type` — fixed enum (6 values)
