@@ -2,38 +2,69 @@ import SwiftUI
 import DefenseClawKit
 import AppKit
 
+private enum SettingsTab: String {
+    case config
+    case gateway
+    case guardrails
+    case enforcement
+    case scanners
+    case diagnostics
+
+    static var qaDefault: SettingsTab {
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--qa-settings-tab"),
+           arguments.indices.contains(index + 1),
+           let tab = SettingsTab(rawValue: arguments[index + 1]) {
+            return tab
+        }
+        if let argument = arguments.first(where: { $0.hasPrefix("--qa-settings-tab=") }),
+           let tab = SettingsTab(rawValue: String(argument.dropFirst("--qa-settings-tab=".count))) {
+            return tab
+        }
+        return .config
+    }
+}
+
 struct SettingsView: View {
+    @State private var selectedTab = SettingsTab.qaDefault
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             ConfigFilesView()
                 .tabItem {
                     Label("Config Files", systemImage: "doc.text.magnifyingglass")
                 }
+                .tag(SettingsTab.config)
 
             GatewaySettingsView()
                 .tabItem {
                     Label("Gateway", systemImage: "network")
                 }
+                .tag(SettingsTab.gateway)
 
             GuardrailSettingsView()
                 .tabItem {
                     Label("Guardrails", systemImage: "shield")
                 }
+                .tag(SettingsTab.guardrails)
 
             EnforcementView()
                 .tabItem {
                     Label("Enforcement", systemImage: "lock.shield")
                 }
+                .tag(SettingsTab.enforcement)
 
             ScannersView()
                 .tabItem {
                     Label("Scanners", systemImage: "magnifyingglass")
                 }
+                .tag(SettingsTab.scanners)
 
             DiagnosticsView()
                 .tabItem {
                     Label("Diagnostics", systemImage: "stethoscope")
                 }
+                .tag(SettingsTab.diagnostics)
         }
         .frame(minWidth: 980, idealWidth: 1080, minHeight: 650, idealHeight: 740)
     }
@@ -548,228 +579,648 @@ struct GuardrailSettingsView: View {
 struct EnforcementView: View {
     @State private var blockedList: [BlockEntry] = []
     @State private var allowedList: [AllowEntry] = []
+    @State private var skills: [Skill] = []
+    @State private var mcpServers: [MCPServer] = []
+    @State private var tools: [ToolEntry] = []
     @State private var isLoading = false
     @State private var errorMessage = ""
-    @State private var showingAddBlock = false
-    @State private var showingAddAllow = false
+    @State private var searchText = ""
+    @State private var statusFilter = "All"
+    @State private var selectedItemID: String?
+    @State private var newEntryAction = "block"
     @State private var newEntryType = "skill"
     @State private var newEntryName = ""
     @State private var newEntryReason = ""
 
     private let sidecarClient = SidecarClient()
-    private let entryTypes = ["skill", "mcp", "plugin"]
+    private let entryTypes = ["skill", "mcp", "plugin", "tool"]
+    private let statusOptions = ["All", "Blocked", "Allowed", "Quarantined", "Monitored"]
+
+    private var items: [EnforcementItem] {
+        EnforcementItem.merge(
+            blocked: blockedList,
+            allowed: allowedList,
+            skills: skills,
+            mcpServers: mcpServers,
+            tools: tools
+        )
+    }
+
+    private var filteredItems: [EnforcementItem] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return items.filter { item in
+            let matchesStatus = statusFilter == "All" || item.status == statusFilter
+            guard matchesStatus else {
+                return false
+            }
+            guard !query.isEmpty else {
+                return true
+            }
+            return [
+                item.name,
+                item.type,
+                item.source,
+                item.detail,
+                item.reason ?? ""
+            ].contains { $0.lowercased().contains(query) }
+        }
+        .sorted {
+            if $0.statusRank != $1.statusRank {
+                return $0.statusRank < $1.statusRank
+            }
+            if $0.type != $1.type {
+                return $0.type < $1.type
+            }
+            return $0.name < $1.name
+        }
+    }
+
+    private var selectedItem: EnforcementItem? {
+        guard let selectedItemID else {
+            return filteredItems.first
+        }
+        return items.first { $0.id == selectedItemID } ?? filteredItems.first
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Block & Allow Lists")
-                    .font(.headline)
-                Spacer()
-                Button("Refresh") {
-                    Task { await loadLists() }
-                }
-            }
-            .padding()
-
-            if !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .foregroundColor(.red)
-                    .font(.caption)
-                    .padding(.horizontal)
-            }
+            header
+            Divider()
 
             HSplitView {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Blocked (\(blockedList.count))")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Button(action: { showingAddBlock = true }) {
-                            Image(systemName: "plus.circle")
-                        }
-                    }
-                    .padding(.horizontal)
+                itemList
+                    .frame(minWidth: 520)
 
-                    List {
-                        ForEach(blockedList) { entry in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(entry.name)
-                                    .font(.system(.body, design: .monospaced))
-                                HStack {
-                                    Text(entry.type)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    if let reason = entry.reason {
-                                        Text("• \(reason)")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                            .contextMenu {
-                                Button("Remove", role: .destructive) {
-                                    Task { await removeBlocked(entry) }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Allowed (\(allowedList.count))")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Button(action: { showingAddAllow = true }) {
-                            Image(systemName: "plus.circle")
-                        }
-                    }
-                    .padding(.horizontal)
-
-                    List {
-                        ForEach(allowedList) { entry in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(entry.name)
-                                    .font(.system(.body, design: .monospaced))
-                                HStack {
-                                    Text(entry.type)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    if let reason = entry.reason {
-                                        Text("• \(reason)")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                            .contextMenu {
-                                Button("Remove", role: .destructive) {
-                                    Task { await removeAllowed(entry) }
-                                }
-                            }
-                        }
-                    }
-                }
+                detailPanel
+                    .frame(minWidth: 360, idealWidth: 420)
             }
         }
-        .onAppear {
-            Task { await loadLists() }
-        }
-        .sheet(isPresented: $showingAddBlock) {
-            addEntrySheet(isBlock: true)
-        }
-        .sheet(isPresented: $showingAddAllow) {
-            addEntrySheet(isBlock: false)
+        .task {
+            await loadData()
         }
     }
 
-    private func addEntrySheet(isBlock: Bool) -> some View {
-        VStack(spacing: 16) {
-            Text(isBlock ? "Add Blocked Entry" : "Add Allowed Entry")
-                .font(.headline)
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Enforcement")
+                        .font(.title2.weight(.semibold))
+                    Text("Block, allow, unblock, and review skills, MCP servers, plugins, and tools from one operator surface.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .layoutPriority(1)
 
-            Form {
-                Picker("Type", selection: $newEntryType) {
-                    ForEach(entryTypes, id: \.self) { t in
-                        Text(t.capitalized).tag(t)
+                Spacer()
+
+                Button {
+                    Task { await loadData() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh enforcement data")
+                .disabled(isLoading)
+            }
+
+            HStack(spacing: 10) {
+                countChip("Items", items.count, .blue)
+                countChip("Blocked", blockedList.count, .red)
+                countChip("Allowed", allowedList.count, .green)
+
+                Spacer()
+
+                Picker("Status", selection: $statusFilter) {
+                    ForEach(statusOptions, id: \.self) { option in
+                        Text(option).tag(option)
                     }
                 }
-                TextField("Name", text: $newEntryName)
-                TextField("Reason (optional)", text: $newEntryReason)
+                .frame(width: 140)
+
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                if !errorMessage.isEmpty {
+                    Label("Partial data", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.caption.weight(.semibold))
+                }
             }
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search name, source, reason", text: $searchText)
+                    .textFieldStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(18)
+        .padding(.leading, 128)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var itemList: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Text("TYPE")
+                    .frame(width: 86, alignment: .leading)
+                Text("STATUS")
+                    .frame(width: 104, alignment: .leading)
+                Text("NAME")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("SOURCE")
+                    .frame(width: 150, alignment: .leading)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            Divider()
+
+            if filteredItems.isEmpty {
+                ContentUnavailableView(
+                    items.isEmpty ? "No enforcement inventory loaded" : "No entries match these filters",
+                    systemImage: "lock.shield",
+                    description: Text(items.isEmpty
+                                      ? "Refresh to load explicit allow/block lists plus discovered skills, MCP servers, and tools."
+                                      : "Clear search or status filters to show every enforcement item.")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(filteredItems) { item in
+                            EnforcementRow(item: item, isSelected: item.id == selectedItem?.id)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedItemID = item.id
+                                }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
+    private var detailPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if !errorMessage.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Some runtime data could not be loaded", systemImage: "exclamationmark.triangle.fill")
+                            .font(.headline)
+                            .foregroundStyle(.orange)
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(12)
+                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                if let item = selectedItem {
+                    selectedItemCard(item)
+                } else {
+                    ContentUnavailableView(
+                        "Select an item",
+                        systemImage: "target",
+                        description: Text("Status, source details, and enforcement actions appear here.")
+                    )
+                }
+
+                inlineAddCard
+            }
+            .padding(18)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func selectedItemCard(_ item: EnforcementItem) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(item.name)
+                    .font(.headline)
+                    .lineLimit(2)
+                Text("\(item.type.capitalized) • \(item.source)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                statusBadge(item.status)
+            }
+
+            detailRow("Detail", item.detail)
+            if let reason = item.reason, !reason.isEmpty {
+                detailRow("Reason", reason)
+            }
+            detailRow("Identifier", item.id)
 
             HStack {
-                Button("Cancel") {
-                    if isBlock {
-                        showingAddBlock = false
-                    } else {
-                        showingAddAllow = false
-                    }
-                    resetNewEntry()
+                Button {
+                    Task { await block(item) }
+                } label: {
+                    Label("Block", systemImage: "hand.raised.fill")
                 }
-                Spacer()
-                Button(isBlock ? "Block" : "Allow") {
-                    Task {
-                        if isBlock {
-                            await addBlocked()
-                        } else {
-                            await addAllowed()
-                        }
-                    }
+                .disabled(item.isBlocked)
+
+                Button {
+                    Task { await allow(item) }
+                } label: {
+                    Label("Allow", systemImage: "checkmark.shield")
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(newEntryName.isEmpty)
+                .disabled(item.isAllowed)
+
+                Button(role: .destructive) {
+                    Task { await unblock(item) }
+                } label: {
+                    Label("Unblock", systemImage: "xmark.shield")
+                }
+                .disabled(!item.isBlocked)
+
+                Button {
+                    Task { await unallow(item) }
+                } label: {
+                    Label("Remove Allow", systemImage: "minus.circle")
+                }
+                .disabled(!item.isAllowed)
             }
         }
-        .padding()
-        .frame(width: 400, height: 250)
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func loadLists() async {
+    private var inlineAddCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add Enforcement Entry")
+                .font(.headline)
+
+            Picker("Action", selection: $newEntryAction) {
+                Text("Block").tag("block")
+                Text("Allow").tag("allow")
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Type", selection: $newEntryType) {
+                ForEach(entryTypes, id: \.self) { type in
+                    Text(type.capitalized).tag(type)
+                }
+            }
+
+            TextField("Target name", text: $newEntryName)
+                .textFieldStyle(.roundedBorder)
+            TextField("Reason", text: $newEntryReason)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button {
+                    Task { await addEntry() }
+                } label: {
+                    Label(newEntryAction == "block" ? "Block Target" : "Allow Target", systemImage: newEntryAction == "block" ? "hand.raised.fill" : "checkmark.shield")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newEntryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Spacer()
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func countChip(_ label: String, _ value: Int, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)")
+                .font(.headline.monospacedDigit())
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 70, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func statusBadge(_ status: String) -> some View {
+        Text(status)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(statusColor(status))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(statusColor(status).opacity(0.12), in: Capsule())
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value.isEmpty ? "Not reported" : value)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func loadData() async {
         isLoading = true
         errorMessage = ""
+        var errors: [String] = []
+
         do {
-            async let blocked = sidecarClient.blockedList()
-            async let allowed = sidecarClient.allowedList()
-            (blockedList, allowedList) = try await (blocked, allowed)
+            blockedList = try await sidecarClient.blockedList()
         } catch {
-            errorMessage = "Error loading lists: \(error.localizedDescription)"
+            errors.append("Blocked list: \(error.localizedDescription)")
+        }
+
+        do {
+            allowedList = try await sidecarClient.allowedList()
+        } catch {
+            errors.append("Allowed list: \(error.localizedDescription)")
+        }
+
+        do {
+            skills = try await sidecarClient.skills()
+        } catch {
+            errors.append("Skills: \(error.localizedDescription)")
+        }
+
+        do {
+            mcpServers = try await sidecarClient.mcpServers()
+        } catch {
+            errors.append("MCP servers: \(error.localizedDescription)")
+        }
+
+        do {
+            tools = try await sidecarClient.toolsCatalog()
+        } catch {
+            errors.append("Tools: \(error.localizedDescription)")
+        }
+
+        errorMessage = errors.joined(separator: "\n")
+        if let selectedItemID, !items.contains(where: { $0.id == selectedItemID }) {
+            self.selectedItemID = filteredItems.first?.id
+        } else if selectedItemID == nil {
+            selectedItemID = filteredItems.first?.id
         }
         isLoading = false
     }
 
-    private func addBlocked() async {
+    private func addEntry() async {
+        let name = newEntryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return
+        }
+
+        let request = EnforceRequest(
+            type: newEntryType,
+            name: name,
+            reason: newEntryReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : newEntryReason
+        )
+
         do {
-            let req = EnforceRequest(type: newEntryType, name: newEntryName, reason: newEntryReason.isEmpty ? nil : newEntryReason)
-            try await sidecarClient.block(req)
-            showingAddBlock = false
-            resetNewEntry()
-            await loadLists()
+            if newEntryAction == "block" {
+                try await sidecarClient.block(request)
+            } else {
+                try await sidecarClient.allow(request)
+            }
+            newEntryName = ""
+            newEntryReason = ""
+            await loadData()
         } catch {
-            errorMessage = "Error adding blocked entry: \(error.localizedDescription)"
+            errorMessage = "Enforcement update failed: \(error.localizedDescription)"
         }
     }
 
-    private func addAllowed() async {
+    private func block(_ item: EnforcementItem) async {
         do {
-            let req = EnforceRequest(type: newEntryType, name: newEntryName, reason: newEntryReason.isEmpty ? nil : newEntryReason)
-            try await sidecarClient.allow(req)
-            showingAddAllow = false
-            resetNewEntry()
-            await loadLists()
+            try await sidecarClient.block(EnforceRequest(type: item.type, name: item.name))
+            await loadData()
         } catch {
-            errorMessage = "Error adding allowed entry: \(error.localizedDescription)"
+            errorMessage = "Block failed: \(error.localizedDescription)"
         }
     }
 
-    private func removeBlocked(_ entry: BlockEntry) async {
-        errorMessage = ""
+    private func allow(_ item: EnforcementItem) async {
         do {
-            let req = EnforceRequest(type: entry.targetType, name: entry.targetName)
-            try await sidecarClient.unblock(req)
-            await loadLists()
+            try await sidecarClient.allow(EnforceRequest(type: item.type, name: item.name))
+            await loadData()
         } catch {
-            errorMessage = "Error removing blocked entry: \(error.localizedDescription)"
+            errorMessage = "Allow failed: \(error.localizedDescription)"
         }
     }
 
-    private func removeAllowed(_ entry: AllowEntry) async {
-        errorMessage = ""
+    private func unblock(_ item: EnforcementItem) async {
         do {
-            let req = EnforceRequest(type: entry.targetType, name: entry.targetName)
-            try await sidecarClient.unallow(req)
-            await loadLists()
+            try await sidecarClient.unblock(EnforceRequest(type: item.type, name: item.name))
+            await loadData()
         } catch {
-            errorMessage = "Error removing allowed entry: \(error.localizedDescription)"
+            errorMessage = "Unblock failed: \(error.localizedDescription)"
         }
     }
 
-    private func resetNewEntry() {
-        newEntryType = "skill"
-        newEntryName = ""
-        newEntryReason = ""
+    private func unallow(_ item: EnforcementItem) async {
+        do {
+            try await sidecarClient.unallow(EnforceRequest(type: item.type, name: item.name))
+            await loadData()
+        } catch {
+            errorMessage = "Remove allow failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func statusColor(_ status: String) -> Color {
+        switch status {
+        case "Blocked":
+            return .red
+        case "Allowed":
+            return .green
+        case "Quarantined":
+            return .orange
+        default:
+            return .secondary
+        }
+    }
+}
+
+private struct EnforcementRow: View {
+    let item: EnforcementItem
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(item.type.capitalized)
+                .frame(width: 86, alignment: .leading)
+            Label(item.status, systemImage: item.statusIcon)
+                .foregroundStyle(item.statusColor)
+                .frame(width: 104, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .lineLimit(1)
+                Text(item.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(item.source)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 150, alignment: .leading)
+        }
+        .font(.caption)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+    }
+}
+
+private struct EnforcementItem: Identifiable {
+    let type: String
+    let name: String
+    let source: String
+    let detail: String
+    let reason: String?
+    let isBlocked: Bool
+    let isAllowed: Bool
+    let isQuarantined: Bool
+
+    var id: String { "\(type):\(name)" }
+
+    var status: String {
+        if isQuarantined {
+            return "Quarantined"
+        }
+        if isBlocked {
+            return "Blocked"
+        }
+        if isAllowed {
+            return "Allowed"
+        }
+        return "Monitored"
+    }
+
+    var statusRank: Int {
+        switch status {
+        case "Blocked":
+            return 0
+        case "Quarantined":
+            return 1
+        case "Allowed":
+            return 2
+        default:
+            return 3
+        }
+    }
+
+    var statusIcon: String {
+        switch status {
+        case "Blocked":
+            return "hand.raised.fill"
+        case "Allowed":
+            return "checkmark.shield"
+        case "Quarantined":
+            return "archivebox.fill"
+        default:
+            return "eye"
+        }
+    }
+
+    var statusColor: Color {
+        switch status {
+        case "Blocked":
+            return .red
+        case "Allowed":
+            return .green
+        case "Quarantined":
+            return .orange
+        default:
+            return .secondary
+        }
+    }
+
+    static func merge(
+        blocked: [BlockEntry],
+        allowed: [AllowEntry],
+        skills: [Skill],
+        mcpServers: [MCPServer],
+        tools: [ToolEntry]
+    ) -> [EnforcementItem] {
+        var merged: [String: EnforcementItem] = [:]
+        let blockedMap = Dictionary(uniqueKeysWithValues: blocked.map { ($0.id, $0) })
+        let allowedMap = Dictionary(uniqueKeysWithValues: allowed.map { ($0.id, $0) })
+
+        func add(
+            type: String,
+            name: String,
+            source: String,
+            detail: String,
+            reason: String? = nil,
+            blocked: Bool = false,
+            allowed: Bool = false,
+            quarantined: Bool = false
+        ) {
+            let key = "\(type):\(name)"
+            let blockEntry = blockedMap[key]
+            let allowEntry = allowedMap[key]
+            merged[key] = EnforcementItem(
+                type: type,
+                name: name,
+                source: source,
+                detail: detail,
+                reason: blockEntry?.reason ?? allowEntry?.reason ?? reason,
+                isBlocked: blocked || blockEntry != nil,
+                isAllowed: allowed || allowEntry != nil,
+                isQuarantined: quarantined
+            )
+        }
+
+        for skill in skills {
+            add(
+                type: "skill",
+                name: skill.name,
+                source: "Skills",
+                detail: skill.path ?? "No path reported",
+                blocked: skill.blocked,
+                allowed: skill.allowed,
+                quarantined: skill.quarantined
+            )
+        }
+
+        for server in mcpServers {
+            add(
+                type: "mcp",
+                name: server.name,
+                source: "MCP Servers",
+                detail: server.command ?? server.url,
+                blocked: server.blocked,
+                allowed: server.allowed
+            )
+        }
+
+        for tool in tools {
+            add(
+                type: "tool",
+                name: tool.name,
+                source: tool.group ?? tool.source ?? "Tools",
+                detail: tool.description ?? tool.id,
+                blocked: tool.blocked ?? false
+            )
+        }
+
+        for entry in blocked where merged[entry.id] == nil {
+            add(type: entry.targetType, name: entry.targetName, source: "Manual Block", detail: "Explicit block entry", reason: entry.reason, blocked: true)
+        }
+
+        for entry in allowed where merged[entry.id] == nil {
+            add(type: entry.targetType, name: entry.targetName, source: "Manual Allow", detail: "Explicit allow entry", reason: entry.reason, allowed: true)
+        }
+
+        return Array(merged.values)
     }
 }
 
@@ -882,101 +1333,330 @@ struct ScannersView: View {
 
 struct DiagnosticsView: View {
     @State private var health: HealthSnapshot?
+    @State private var statusPayload: [String: AnyCodable] = [:]
     @State private var isLoading = false
     @State private var errorMessage = ""
+    @State private var doctorOutput = ""
+    @State private var isRunningDoctor = false
+    @State private var lastRefresh: Date?
 
     private let sidecarClient = SidecarClient()
+    private let commandRunner = LocalCommandRunner()
     private let log = AppLogger.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("System Diagnostics")
-                    .font(.headline)
-                Spacer()
-                Button("Refresh") {
-                    Task { await refreshDiagnostics() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+
+                if !errorMessage.isEmpty {
+                    diagnosticErrorCard
                 }
-                Button("Export Logs") {
-                    exportLogs()
+
+                if let health {
+                    summaryGrid(health)
+                    subsystemGrid(health)
+                } else if isLoading {
+                    ProgressView("Checking DefenseClaw backend...")
+                        .frame(maxWidth: .infinity, minHeight: 180)
+                } else {
+                    backendOfflineCard
                 }
-                Button("View Logs") {
-                    (NSApp.delegate as? AppDelegate)?.showLogs()
-                }
+
+                statusPayloadCard
+                doctorCard
+                logLocationsCard
             }
-
-            if isLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .foregroundColor(.red)
-                    .font(.caption)
-            } else if let h = health {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        diagnosticSection(title: "Uptime", value: formatUptime(h.uptimeMs))
-                        diagnosticSection(title: "Started At", value: formatDate(h.startedAt))
-
-                        Divider()
-
-                        subsystemRow(name: "Gateway", health: h.gateway)
-                        subsystemRow(name: "Watcher", health: h.watcher)
-                        subsystemRow(name: "API", health: h.api)
-                        subsystemRow(name: "Guardrail", health: h.guardrail)
-                        subsystemRow(name: "Telemetry", health: h.telemetry)
-                        subsystemRow(name: "Sinks", health: h.splunk)
-                        if let sandbox = h.sandbox {
-                            subsystemRow(name: "Sandbox", health: sandbox)
-                        }
-                    }
-                    .padding()
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .cornerRadius(8)
-                }
-            }
+            .padding(18)
         }
-        .padding()
         .onAppear {
             Task { await refreshDiagnostics() }
         }
     }
 
-    private func diagnosticSection(title: String, value: String) -> some View {
-        HStack {
-            Text("\(title):")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 100, alignment: .trailing)
-            Text(value)
-                .font(.system(.caption, design: .monospaced))
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("System Diagnostics")
+                        .font(.title2.weight(.semibold))
+                    Text("Install, backend health, subsystem status, logs, and repair commands for a self-contained macOS app.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if let lastRefresh {
+                    Text("Updated \(lastRefresh.formatted(date: .omitted, time: .standard))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    Task { await refreshDiagnostics() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(isLoading)
+
+                Button {
+                    exportLogs()
+                } label: {
+                    Label("Export Logs", systemImage: "square.and.arrow.up")
+                }
+
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showLogs()
+                } label: {
+                    Label("View Logs", systemImage: "doc.text.magnifyingglass")
+                }
+            }
+
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            }
         }
     }
 
-    private func subsystemRow(name: String, health: SubsystemHealth) -> some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(stateColor(health.state))
-                .frame(width: 10, height: 10)
-            Text(name)
-                .font(.system(.body, design: .monospaced))
-                .frame(width: 100, alignment: .leading)
-            Text(health.state.rawValue)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
+    private var diagnosticErrorCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Backend health check failed", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text(errorMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            HStack {
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showSetup()
+                } label: {
+                    Label("Open Setup", systemImage: "list.clipboard")
+                }
+                Button {
+                    Task { await runDoctor() }
+                } label: {
+                    Label("Run Doctor", systemImage: "stethoscope")
+                }
+                .disabled(isRunningDoctor)
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showLogs()
+                } label: {
+                    Label("Open Logs", systemImage: "doc.text")
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var backendOfflineCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("DefenseClaw backend is not reporting health", systemImage: "wifi.exclamationmark")
+                .font(.headline)
+            Text("A downloaded app user should not have to fix this in a terminal. Use Setup to install or repair the backend, then re-run diagnostics here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showSetup()
+                } label: {
+                    Label("Install or Repair Backend", systemImage: "wrench.and.screwdriver")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    Task { await refreshDiagnostics() }
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func summaryGrid(_ health: HealthSnapshot) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
+            summaryCard("Backend", health.isHealthy ? "healthy" : "degraded", health.isHealthy ? .green : .orange, "Overall helper state")
+            summaryCard("Uptime", formatUptime(health.uptimeMs), .blue, "Started \(formatDate(health.startedAt))")
+            summaryCard("Gateway", health.gateway.state.rawValue, stateColor(health.gateway.state), health.gateway.lastError ?? "OpenClaw connection")
+            summaryCard("Guardrail", health.guardrail.state.rawValue, stateColor(health.guardrail.state), health.guardrail.lastError ?? "Request scanner")
+        }
+    }
+
+    private func summaryCard(_ title: String, _ value: String, _ color: Color, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline)
+                .foregroundStyle(color)
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func subsystemGrid(_ health: HealthSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Subsystems")
+                .font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
+                subsystemCard("Gateway", health.gateway)
+                subsystemCard("Watcher", health.watcher)
+                subsystemCard("API", health.api)
+                subsystemCard("Guardrail", health.guardrail)
+                subsystemCard("Telemetry", health.telemetry)
+                subsystemCard("Sinks", health.splunk)
+                if let sandbox = health.sandbox {
+                    subsystemCard("Sandbox", sandbox)
+                }
+            }
+        }
+    }
+
+    private func subsystemCard(_ name: String, _ health: SubsystemHealth) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Circle()
+                    .fill(stateColor(health.state))
+                    .frame(width: 9, height: 9)
+                Text(name)
+                    .font(.headline)
+                Spacer()
+                Text(health.state.rawValue)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(stateColor(health.state))
+            }
+
+            Text(health.lastError ?? "No subsystem detail reported")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+
+            Text("Since \(formatDate(health.since))")
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var statusPayloadCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Raw Status Snapshot")
+                    .font(.headline)
+                Spacer()
+                Text("\(statusPayload.count) keys")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if statusPayload.isEmpty {
+                Text("No /status payload available yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: [GridItem(.fixed(180), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 8) {
+                    ForEach(statusPayload.keys.sorted(), id: \.self) { key in
+                        Text(key)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(statusPayload[key]?.description ?? "")
+                            .font(.caption.monospaced())
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var doctorCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Doctor")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await runDoctor() }
+                } label: {
+                    Label("Run Doctor", systemImage: "stethoscope")
+                }
+                .disabled(isRunningDoctor)
+            }
+
+            if isRunningDoctor {
+                ProgressView("Running diagnostics...")
+            } else if doctorOutput.isEmpty {
+                Text("Run doctor from the app to verify install state, gateway, scanner setup, policies, and observability prerequisites.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    Text(doctorOutput)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(minHeight: 120, maxHeight: 240)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var logLocationsCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Local Files")
+                .font(.headline)
+            diagnosticPath("Config", "~/.defenseclaw/config.yaml")
+            diagnosticPath("Environment", "~/.defenseclaw/.env")
+            diagnosticPath("Gateway log", "~/.defenseclaw/gateway.log")
+            diagnosticPath("Policies", "~/.defenseclaw/policies")
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func diagnosticPath(_ label: String, _ path: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 110, alignment: .leading)
+            Text(path)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
             Spacer()
-            Text(formatDate(health.since))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
         }
     }
 
     private func stateColor(_ state: SubsystemState) -> Color {
         switch state {
-        case .running: return .green
-        case .starting, .reconnecting: return .yellow
-        case .stopped, .disabled: return .gray
-        case .error: return .red
+        case .running:
+            return .green
+        case .starting, .reconnecting:
+            return .yellow
+        case .stopped, .disabled:
+            return .gray
+        case .error:
+            return .red
         }
     }
 
@@ -1006,13 +1686,38 @@ struct DiagnosticsView: View {
     private func refreshDiagnostics() async {
         isLoading = true
         errorMessage = ""
+
         do {
-            health = try await sidecarClient.health()
+            async let healthSnapshot = sidecarClient.health()
+            async let status = sidecarClient.status()
+            let (resolvedHealth, resolvedStatus) = try await (healthSnapshot, status)
+            health = resolvedHealth
+            statusPayload = resolvedStatus
         } catch {
-            errorMessage = "Error fetching health: \(error.localizedDescription)"
+            errorMessage = "Error fetching backend diagnostics: \(error.localizedDescription)"
             health = nil
+            do {
+                statusPayload = try await sidecarClient.status()
+            } catch {
+                statusPayload = [:]
+            }
         }
+
+        lastRefresh = Date()
         isLoading = false
+    }
+
+    private func runDoctor() async {
+        isRunningDoctor = true
+        doctorOutput = ""
+        do {
+            let result = try await commandRunner.run("defenseclaw", arguments: ["doctor"])
+            let output = result.combinedOutput.isEmpty ? "Doctor exited with code \(result.exitCode)." : result.combinedOutput
+            doctorOutput = "$ \(result.commandLine)\nexit \(result.exitCode)\n\n\(output)"
+        } catch {
+            doctorOutput = "Could not run defenseclaw doctor from the app: \(error.localizedDescription)\n\nUse Setup to install or repair the bundled backend."
+        }
+        isRunningDoctor = false
     }
 
     private func exportLogs() {
@@ -1030,7 +1735,6 @@ struct DiagnosticsView: View {
             guard response == .OK, let url = panel.url else { return }
 
             do {
-                // Combine app logs + gateway log into one export
                 var combined = "=== DefenseClaw App Logs ===\n"
                 combined += log.exportLogContent()
 

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ManagedTextFileWorkspaceView: View {
@@ -37,17 +38,21 @@ struct ManagedTextFileWorkspaceView: View {
     var body: some View {
         HSplitView {
             sidebar
-                .frame(minWidth: 260, idealWidth: 310, maxWidth: 380)
+                .frame(minWidth: 300, idealWidth: 340, maxWidth: 440)
 
             editor
-                .frame(minWidth: 520)
+                .frame(minWidth: 560)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(of: model.categoryFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
+        .onChange(of: model.sourceFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
+        .onChange(of: model.kindFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
+        .onChange(of: model.searchText) { _, _ in model.selectFirstFilteredIfNeeded() }
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(title)
                     .font(.title3.weight(.semibold))
                 Text(subtitle)
@@ -57,15 +62,18 @@ struct ManagedTextFileWorkspaceView: View {
             }
 
             searchField
+            filters
             fileStats
 
             Divider()
 
             if model.groupedFiles.isEmpty {
                 ContentUnavailableView(
-                    emptyMessage,
+                    model.files.isEmpty ? emptyMessage : "No files match these filters",
                     systemImage: "doc.text.magnifyingglass",
-                    description: Text("Try refreshing discovery or checking the runtime data directory.")
+                    description: Text(model.files.isEmpty
+                                      ? "Try refreshing discovery or checking the runtime data directory."
+                                      : "Clear search and filters to show every managed file.")
                 )
             } else {
                 ScrollView {
@@ -85,6 +93,12 @@ struct ManagedTextFileWorkspaceView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
 
+                if model.activeFilterCount > 0 {
+                    Button("Clear") {
+                        model.clearFilters()
+                    }
+                }
+
                 Spacer()
 
                 Text(model.statusMessage)
@@ -100,7 +114,7 @@ struct ManagedTextFileWorkspaceView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-            TextField("Search files, sources, paths", text: $model.searchText)
+            TextField("Search files, categories, paths", text: $model.searchText)
                 .textFieldStyle(.plain)
             if !model.searchText.isEmpty {
                 Button {
@@ -121,18 +135,50 @@ struct ManagedTextFileWorkspaceView: View {
         )
     }
 
+    private var filters: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                filterPicker(title: "Category", selection: $model.categoryFilter, options: model.categoryOptions)
+                filterPicker(title: "Source", selection: $model.sourceFilter, options: model.sourceOptions)
+            }
+            filterPicker(title: "Format", selection: $model.kindFilter, options: model.kindOptions)
+        }
+    }
+
+    private func filterPicker(title: String, selection: Binding<String>, options: [String]) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(options, id: \.self) { option in
+                Text(option).tag(option)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(maxWidth: .infinity)
+        .help(title)
+    }
+
     private var fileStats: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 statChip(label: "Files", value: "\(model.files.count)")
-                ForEach(model.kindCounts.prefix(3), id: \.0) { kind, count in
-                    statChip(label: kind, value: "\(count)")
+                statChip(label: "Shown", value: "\(model.filteredFiles.count)")
+                statChip(label: "Writable", value: "\(model.editableCount)")
+                if model.readOnlyCount > 0 {
+                    statChip(label: "Read-only", value: "\(model.readOnlyCount)")
+                }
+            }
+
+            if !model.kindCounts.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(model.kindCounts.prefix(3), id: \.0) { kind, count in
+                        statChip(label: kind, value: "\(count)")
+                    }
                 }
             }
 
             if !model.sourceCounts.isEmpty {
                 HStack(spacing: 8) {
-                    ForEach(model.sourceCounts, id: \.0) { source, count in
+                    ForEach(model.sourceCounts.prefix(3), id: \.0) { source, count in
                         statChip(label: source, value: "\(count)")
                     }
                 }
@@ -216,39 +262,64 @@ struct ManagedTextFileWorkspaceView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+
+                    HStack(spacing: 12) {
+                        Label(file.category, systemImage: "folder")
+                        Label(file.group, systemImage: "square.grid.2x2")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
                 HStack(spacing: 8) {
                     Button {
+                        reveal(file)
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .help("Reveal in Finder")
+
+                    Button {
+                        copyPath(file)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .help("Copy path")
+
+                    Button {
                         model.loadSelectedFile()
                     } label: {
-                        Label("Reload", systemImage: "arrow.clockwise")
+                        Image(systemName: "arrow.clockwise")
                     }
                     .disabled(model.isLoading)
+                    .help("Reload file")
 
                     Button {
                         model.validateContent()
                     } label: {
-                        Label("Validate", systemImage: "checkmark.seal")
+                        Image(systemName: "checkmark.seal")
                     }
+                    .help("Validate")
 
                     Button {
                         model.revert()
                     } label: {
-                        Label("Revert", systemImage: "arrow.uturn.backward")
+                        Image(systemName: "arrow.uturn.backward")
                     }
                     .disabled(!model.isDirty)
+                    .help("Revert changes")
 
                     if file.isEditable {
                         Button {
                             model.save()
                         } label: {
-                            Label("Save", systemImage: "square.and.arrow.down")
+                            Image(systemName: "square.and.arrow.down")
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(!model.isDirty || model.isSaving)
+                        .help("Save")
                     }
                 }
             }
@@ -273,28 +344,60 @@ struct ManagedTextFileWorkspaceView: View {
                 ProgressView()
                     .padding(18)
             }
+
+            if !file.isEditable {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock")
+                    Text("Read-only reference file")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                .padding(16)
+            }
         }
     }
 
     private func editorFooter(for file: ManagedTextFile) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: validationIcon(model.validation.state))
-                .foregroundStyle(validationColor(model.validation.state))
-            Text(model.validation.message)
-                .foregroundStyle(model.validation.state == .invalid ? .red : .secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: validationIcon(model.validation.state))
+                    .foregroundStyle(validationColor(model.validation.state))
+                Text(model.validation.message)
+                    .foregroundStyle(model.validation.state == .invalid ? .red : .secondary)
+                    .lineLimit(2)
 
-            Spacer()
+                Spacer()
 
-            Text(file.fullPath)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                Text("\(model.contentLineCount) lines")
+                Text("\(model.contentCharacterCount) chars")
+                Text(file.isEditable ? "Writable" : "Read-only")
+            }
+
+            HStack(spacing: 12) {
+                metadataChip("Path", file.fullPath)
+                metadataChip("Source", file.source.rawValue)
+                metadataChip("Format", file.kind.rawValue)
+            }
         }
         .font(.caption)
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func metadataChip(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospaced())
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
     }
 
     private func fileBadge(_ text: String, color: Color) -> some View {
@@ -344,6 +447,16 @@ struct ManagedTextFileWorkspaceView: View {
             return .red
         }
     }
+
+    private func reveal(_ file: ManagedTextFile) {
+        NSWorkspace.shared.activateFileViewerSelecting([file.url])
+    }
+
+    private func copyPath(_ file: ManagedTextFile) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(file.fullPath, forType: .string)
+        model.statusMessage = "Copied \(file.displayName) path"
+    }
 }
 
 private struct ManagedTextFileRow: View {
@@ -372,25 +485,31 @@ private struct ManagedTextFileRow: View {
                     }
 
                     Text(file.relativePath)
-                        .font(.caption)
+                        .font(.caption2.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+
+                    HStack(spacing: 6) {
+                        Text(file.kind.rawValue)
+                        Text(file.source.rawValue)
+                        if !file.isEditable {
+                            Text("Read-only")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
 
                 Spacer()
-
-                Text(file.kind.rawValue)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 8)
             .contentShape(Rectangle())
             .background(
                 isSelected
-                ? Color.accentColor.opacity(0.14)
-                : Color(nsColor: .controlBackgroundColor).opacity(0.55),
+                    ? Color.accentColor.opacity(0.14)
+                    : Color(nsColor: .controlBackgroundColor).opacity(0.55),
                 in: RoundedRectangle(cornerRadius: 8)
             )
             .overlay(
@@ -408,7 +527,7 @@ private struct ManagedTextFileRow: View {
         case .json:
             return "curlybraces"
         case .rego:
-            return "function"
+            return "checklist.checked"
         case .text:
             return "doc.text"
         }

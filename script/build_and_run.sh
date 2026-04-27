@@ -114,8 +114,13 @@ open_app() {
 
 open_app_qa() {
   local section="${1:-home}"
+  local settings_tab="${2:-}"
   ensure_sidecar
-  /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section"
+  if [[ -n "$settings_tab" ]]; then
+    /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section" --qa-settings-tab "$settings_tab"
+  else
+    /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section"
+  fi
 }
 
 case "$MODE" in
@@ -139,7 +144,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   --qa|qa)
-    open_app_qa "${2:-home}"
+    open_app_qa "${2:-home}" "${3:-}"
     sleep 2
     pgrep -x "$APP_NAME" >/dev/null
     ;;
