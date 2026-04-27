@@ -164,8 +164,9 @@ type Config struct {
 	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
-	ClaudeCode     AgentHookConfig      `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
-	Codex          AgentHookConfig      `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ClaudeCode     AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex          AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
@@ -609,6 +610,24 @@ func (c AgentHookConfig) EffectiveFailMode() string {
 		return "open"
 	}
 	return "closed"
+}
+
+// ConnectorHookConfig returns the AgentHookConfig for a named connector.
+// It checks ConnectorHooks first, then falls back to the legacy
+// ClaudeCode/Codex top-level fields for backward compatibility.
+func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
+	if c.ConnectorHooks != nil {
+		if h, ok := c.ConnectorHooks[name]; ok {
+			return h
+		}
+	}
+	switch name {
+	case "claudecode", "claude_code":
+		return c.ClaudeCode
+	case "codex":
+		return c.Codex
+	}
+	return AgentHookConfig{}
 }
 
 type WatchConfig struct {

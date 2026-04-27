@@ -594,7 +594,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	var compTargets map[string][]string
 	connectorName := s.cfg.Guardrail.Connector
 	if connectorName == "" {
-		connectorName = "openclaw"
+		connectorName = "unknown"
 	}
 	reg := connector.NewDefaultRegistry()
 	if conn, ok := reg.Get(connectorName); ok {
@@ -950,7 +950,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	// Load the active connector from the registry. The connector name is
 	// written by `defenseclaw setup` into guardrail.connector (defaults
-	// to "openclaw" for backward compat).
+	// written by `defenseclaw setup`).
 	registry := connector.NewDefaultRegistry()
 	if s.cfg.PluginDir != "" {
 		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
@@ -959,12 +959,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	}
 	connectorName := s.cfg.Guardrail.Connector
 	if connectorName == "" {
-		connectorName = "openclaw"
+		return fmt.Errorf("guardrail.connector is not set; run `defenseclaw setup guardrail` first")
 	}
 	conn, ok := registry.Get(connectorName)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %q not found in registry, falling back to openclaw\n", connectorName)
-		conn, _ = registry.Get("openclaw")
+		return fmt.Errorf("connector %q not found in registry (available: %v)", connectorName, registry.Names())
 	}
 	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
 	apiBind := "127.0.0.1"

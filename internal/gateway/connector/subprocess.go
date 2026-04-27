@@ -80,15 +80,34 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 	return nil
 }
 
-// hookScripts lists all hook scripts that are generated at setup time.
-var hookScripts = []string{
+// genericHookScripts are agent-agnostic inspection scripts generated for
+// every connector.
+var genericHookScripts = []string{
 	"inspect-tool.sh",
 	"inspect-request.sh",
 	"inspect-response.sh",
 	"inspect-tool-response.sh",
-	"claude-code-hook.sh",
-	"codex-hook.sh",
 }
+
+// connectorHookScripts maps connector names to their agent-specific
+// lifecycle hook scripts. Only the matching connector's scripts are
+// written during setup.
+var connectorHookScripts = map[string][]string{
+	"claudecode": {"claude-code-hook.sh"},
+	"codex":      {"codex-hook.sh"},
+}
+
+// hookScripts returns the full list of hook scripts (generic + all
+// connector-specific) for backward compatibility with tests and
+// teardown logic that enumerate all possible scripts.
+var hookScripts = func() []string {
+	all := make([]string, len(genericHookScripts))
+	copy(all, genericHookScripts)
+	for _, scripts := range connectorHookScripts {
+		all = append(all, scripts...)
+	}
+	return all
+}()
 
 // WriteHookScript generates the shared inspect-tool.sh hook script.
 // Kept for backward compatibility — calls WriteHookScriptsWithToken with
@@ -154,6 +173,46 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 // proxy on port 4000, which has its own X-DC-Auth path.
 func WriteAllHookScripts(hookDir, apiAddr string) error {
 	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
+}
+
+// WriteHookScriptsForConnector generates the generic inspection scripts
+// plus only the connector-specific lifecycle script for the named
+// connector. Avoids writing vendor-specific scripts (e.g. codex-hook.sh)
+// into hook directories of unrelated connectors.
+func WriteHookScriptsForConnector(hookDir, apiAddr, token, connectorName string) error {
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("create hook dir: %w", err)
+	}
+
+	tokenPath := filepath.Join(hookDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write hook token file: %w", err)
+	}
+
+	data := templateData{APIAddr: apiAddr, APIToken: ""}
+
+	scripts := make([]string, len(genericHookScripts))
+	copy(scripts, genericHookScripts)
+	if extra, ok := connectorHookScripts[connectorName]; ok {
+		scripts = append(scripts, extra...)
+	}
+
+	for _, name := range scripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return fmt.Errorf("read hook template %s: %w", name, err)
+		}
+		rendered, err := renderTemplate(string(content), data)
+		if err != nil {
+			return fmt.Errorf("render hook %s: %w", name, err)
+		}
+		hookPath := filepath.Join(hookDir, name)
+		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // HookScripts returns the list of hook script names that are generated.

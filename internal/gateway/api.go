@@ -91,7 +91,7 @@ func (a *APIServer) connectorName() string {
 			return strings.ToLower(c)
 		}
 	}
-	return "openclaw"
+	return "unknown"
 }
 
 // SetPolicyReloader registers a callback that atomically reloads the
@@ -104,6 +104,44 @@ func (a *APIServer) SetPolicyReloader(fn func() error) {
 // /v1/connectors endpoint can list available connectors.
 func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 	a.connectorRegistry = reg
+}
+
+// hookHandlers maps connector names to their gateway-side HTTP handlers.
+// The handler bodies remain in the gateway package (they need the full
+// policy engine); only the route registration is data-driven so adding
+// a new connector no longer requires editing this file.
+var hookHandlers = map[string]string{
+	"claudecode": "handleClaudeCodeHook",
+	"codex":      "handleCodexHook",
+}
+
+// registerConnectorHookRoutes dynamically registers hook endpoints for
+// connectors that implement the HookEndpoint interface.
+func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
+	if a.connectorRegistry == nil {
+		mux.HandleFunc("/api/v1/claude-code/hook", a.handleClaudeCodeHook)
+		mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
+		return
+	}
+
+	for _, name := range a.connectorRegistry.Names() {
+		conn, ok := a.connectorRegistry.Get(name)
+		if !ok {
+			continue
+		}
+		he, ok := conn.(connector.HookEndpoint)
+		if !ok {
+			continue
+		}
+		path := he.HookAPIPath()
+		switch name {
+		case "claudecode":
+			mux.HandleFunc(path, a.handleClaudeCodeHook)
+		case "codex":
+			mux.HandleFunc(path, a.handleCodexHook)
+		}
+		fmt.Fprintf(os.Stderr, "[api] registered hook endpoint: %s → %s\n", name, path)
+	}
 }
 
 // NewAPIServer creates the REST API server bound to the given address.
@@ -159,8 +197,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
-	mux.HandleFunc("/api/v1/claude-code/hook", a.handleClaudeCodeHook)
-	mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
+	a.registerConnectorHookRoutes(mux)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
 
 	handler := maxBodyMiddleware(mux, 1<<20)
@@ -1403,7 +1440,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", SharedAgentRegistry().AgentID(), tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, a.connectorName(), SharedAgentRegistry().AgentID(), tIn, tOut)
 		}
 	}
 

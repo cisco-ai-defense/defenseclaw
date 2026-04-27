@@ -116,7 +116,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.Codex.ScanOnSessionStart) {
+		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
 			count := a.scanCodexComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -146,7 +146,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Direction: "tool_result",
 		})
 	case "Stop":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.Codex.ScanOnStop {
+		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
 		}
 	}
@@ -172,7 +172,7 @@ func (a *APIServer) codexEnabled() bool {
 	if a.scannerCfg == nil {
 		return false
 	}
-	if a.scannerCfg.Codex.Enabled {
+	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
@@ -181,7 +181,7 @@ func (a *APIServer) codexEnabled() bool {
 func (a *APIServer) codexMode() string {
 	mode := "observe"
 	if a.scannerCfg != nil {
-		mode = strings.TrimSpace(a.scannerCfg.Codex.Mode)
+		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
 			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
 		}
@@ -412,7 +412,7 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 		}
 	}
 	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.Codex.ScanPaths {
+		for _, p := range a.scannerCfg.ConnectorHookConfig("codex").ScanPaths {
 			add(p)
 		}
 	}
@@ -547,8 +547,8 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 
 func (a *APIServer) codexComponentScanDue() bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.Codex.ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.Codex.ComponentScanIntervalMinutes) * time.Minute
+	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.codexMu.Lock()
 	defer a.codexMu.Unlock()

@@ -1159,7 +1159,35 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 # Connector metadata (mirrors internal/gateway/connector/*.go)
 # ---------------------------------------------------------------------------
 
-_CONNECTOR_NAMES = ["openclaw", "zeptoclaw", "claudecode", "codex"]
+_CONNECTOR_NAMES_FALLBACK = ["openclaw", "zeptoclaw", "claudecode", "codex"]
+
+
+def _fetch_connector_names(cfg=None) -> list[str]:
+    """Query the sidecar /v1/connectors endpoint for available connectors.
+
+    Falls back to the hardcoded list if the sidecar is unreachable.
+    """
+    import urllib.request
+
+    host = "127.0.0.1"
+    port = 0
+    if cfg and hasattr(cfg, "guardrail"):
+        host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+        port = getattr(cfg.guardrail, "port", 0) or 0
+    if not port:
+        return list(_CONNECTOR_NAMES_FALLBACK)
+    try:
+        url = f"http://{host}:{port}/v1/connectors"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = _json.loads(resp.read())
+            names = [c.get("name") or c.get("id") for c in data.get("connectors", [])]
+            return [n for n in names if n] or list(_CONNECTOR_NAMES_FALLBACK)
+    except Exception:
+        return list(_CONNECTOR_NAMES_FALLBACK)
+
+
+_CONNECTOR_NAMES = _CONNECTOR_NAMES_FALLBACK
 
 _CONNECTOR_META: dict[str, dict[str, str]] = {
     "openclaw": {

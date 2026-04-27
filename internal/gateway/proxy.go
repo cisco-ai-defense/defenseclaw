@@ -158,12 +158,11 @@ func (p *GuardrailProxy) agentIDForRequest() string {
 }
 
 // connectorName returns the active connector's name for telemetry labels.
-// Falls back to "openclaw" when no connector is wired (backward compat).
 func (p *GuardrailProxy) connectorName() string {
 	if p.connector != nil {
 		return p.connector.Name()
 	}
-	return "openclaw"
+	return "unknown"
 }
 
 // shouldScanResponseToolCalls returns true when the proxy should inspect

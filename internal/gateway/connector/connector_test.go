@@ -121,6 +121,11 @@ func TestIsLoopback(t *testing.T) {
 		{"[::1]:54321", true},
 		{"192.168.1.5:54321", false},
 		{"10.0.0.1:8080", false},
+		{"[::ffff:127.0.0.1]:9090", true},
+		{"::1", true},
+		{"[::ffff:10.0.0.1]:9090", false},
+		{"", false},
+		{"garbage", false},
 	}
 	for _, tt := range tests {
 		r := httptest.NewRequest("GET", "/", nil)

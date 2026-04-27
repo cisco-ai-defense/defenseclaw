@@ -137,6 +137,21 @@ func (r *Registry) Len() int {
 	return len(r.builtins) + len(r.plugins)
 }
 
+// Names returns a sorted list of all registered connector names.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.builtins)+len(r.plugins))
+	for n := range r.builtins {
+		names = append(names, n)
+	}
+	for n := range r.plugins {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // NewDefaultRegistry creates a registry pre-loaded with all built-in connectors.
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()

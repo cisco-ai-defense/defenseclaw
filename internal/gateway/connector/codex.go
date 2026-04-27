@@ -62,7 +62,8 @@ func NewCodexConnector() *CodexConnector {
 	return &CodexConnector{}
 }
 
-func (c *CodexConnector) Name() string { return "codex" }
+func (c *CodexConnector) Name() string        { return "codex" }
+func (c *CodexConnector) HookAPIPath() string  { return "/api/v1/codex/hook" }
 func (c *CodexConnector) Description() string {
 	return "env var + hook script (6 events, component scanning)"
 }
@@ -77,7 +78,7 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsWithToken(hookDir, opts.APIAddr, opts.APIToken); err != nil {
+	if err := WriteHookScriptsForConnector(hookDir, opts.APIAddr, opts.APIToken, c.Name()); err != nil {
 		return fmt.Errorf("codex hook script: %w", err)
 	}
 

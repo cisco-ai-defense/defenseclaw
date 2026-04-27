@@ -75,16 +75,37 @@ func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 	return &oc, nil
 }
 
-// ReadMCPServers returns the MCP servers configured under mcp.servers in
-// openclaw.json. It tries `openclaw config get mcp.servers` first (safe,
-// schema-validated) and falls back to reading the file directly when the
-// CLI is unavailable or returns an error (e.g. OpenClaw < 2026.3.24).
+// ReadMCPServers returns the MCP servers for the active connector.
+// When guardrail.connector is set, it dispatches to the connector-specific
+// reader. Falls back to the OpenClaw path for backward compatibility.
 func (c *Config) ReadMCPServers() ([]MCPServerEntry, error) {
+	connector := c.Guardrail.Connector
+	if connector == "" {
+		connector = string(c.Claw.Mode)
+	}
+	return c.ReadMCPServersForConnector(connector)
+}
+
+// ReadMCPServersForConnector returns MCP servers for a specific connector.
+func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry, error) {
+	switch connector {
+	case "claudecode":
+		return readMCPServersClaudeCode()
+	case "codex":
+		return readMCPServersCodex()
+	case "zeptoclaw":
+		return readMCPServersZeptoClaw()
+	default:
+		return readMCPServersOpenClaw(c.Claw.ConfigFile)
+	}
+}
+
+func readMCPServersOpenClaw(configFile string) ([]MCPServerEntry, error) {
 	entries, err := readMCPServersViaCLI()
 	if err == nil {
 		return entries, nil
 	}
-	return readMCPServersFromFile(c.Claw.ConfigFile)
+	return readMCPServersFromFile(configFile)
 }
 
 func readMCPServersViaCLI() ([]MCPServerEntry, error) {
@@ -254,4 +275,214 @@ func SkillDirsForMode(mode ClawMode, homeDir string) []string {
 
 	dirs = append(dirs, filepath.Join(homeDir, "skills"))
 	return dedup(dirs)
+}
+
+// SkillDirsForConnector returns skill directories for a specific connector.
+func (c *Config) SkillDirsForConnector(connector string) []string {
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+
+	switch connector {
+	case "claudecode":
+		return dedup([]string{
+			filepath.Join(home, ".claude", "skills"),
+			filepath.Join(cwd, ".claude", "skills"),
+		})
+	case "codex":
+		return dedup([]string{
+			filepath.Join(home, ".codex", "skills"),
+			filepath.Join(cwd, ".codex", "skills"),
+		})
+	case "zeptoclaw":
+		return dedup([]string{
+			filepath.Join(home, ".zeptoclaw", "skills"),
+			filepath.Join(cwd, ".zeptoclaw", "skills"),
+		})
+	default:
+		return c.SkillDirs()
+	}
+}
+
+// PluginDirsForConnector returns plugin directories for a specific connector.
+func (c *Config) PluginDirsForConnector(connector string) []string {
+	home, _ := os.UserHomeDir()
+
+	switch connector {
+	case "claudecode":
+		return []string{
+			filepath.Join(home, ".claude", "plugins"),
+		}
+	case "codex":
+		return []string{
+			filepath.Join(home, ".codex", "plugins"),
+		}
+	case "zeptoclaw":
+		return []string{
+			filepath.Join(home, ".zeptoclaw", "plugins"),
+		}
+	default:
+		return c.PluginDirs()
+	}
+}
+
+// --- Connector-specific MCP readers ---
+
+func readMCPServersClaudeCode() ([]MCPServerEntry, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	cwd, _ := os.Getwd()
+
+	var entries []MCPServerEntry
+
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
+		entries = append(entries, e...)
+	}
+
+	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+		entries = append(entries, e...)
+	}
+
+	return dedupMCPEntries(entries), nil
+}
+
+func readMCPServersCodex() ([]MCPServerEntry, error) {
+	cwd, _ := os.Getwd()
+
+	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+	return readMCPFromDotMCPJSON(mcpJsonPath)
+}
+
+func readMCPServersZeptoClaw() ([]MCPServerEntry, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	cwd, _ := os.Getwd()
+
+	var entries []MCPServerEntry
+
+	configPath := filepath.Join(home, ".zeptoclaw", "config.json")
+	if e, err := readMCPFromZeptoConfig(configPath); err == nil {
+		entries = append(entries, e...)
+	}
+
+	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+		entries = append(entries, e...)
+	}
+
+	return dedupMCPEntries(entries), nil
+}
+
+func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var settings struct {
+		MCPServers map[string]struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, err
+	}
+
+	entries := make([]MCPServerEntry, 0, len(settings.MCPServers))
+	for name, s := range settings.MCPServers {
+		entries = append(entries, MCPServerEntry{
+			Name:    name,
+			Command: s.Command,
+			Args:    s.Args,
+			Env:     s.Env,
+		})
+	}
+	return entries, nil
+}
+
+func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var dotMCP struct {
+		MCPServers map[string]struct {
+			Command   string            `json:"command"`
+			Args      []string          `json:"args"`
+			Env       map[string]string `json:"env"`
+			URL       string            `json:"url"`
+			Transport string            `json:"transport"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &dotMCP); err != nil {
+		return nil, err
+	}
+
+	entries := make([]MCPServerEntry, 0, len(dotMCP.MCPServers))
+	for name, s := range dotMCP.MCPServers {
+		entries = append(entries, MCPServerEntry{
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Transport,
+		})
+	}
+	return entries, nil
+}
+
+func readMCPFromZeptoConfig(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg struct {
+		MCP struct {
+			Servers map[string]struct {
+				Command   string            `json:"command"`
+				Args      []string          `json:"args"`
+				Env       map[string]string `json:"env"`
+				URL       string            `json:"url"`
+				Transport string            `json:"transport"`
+			} `json:"servers"`
+		} `json:"mcp"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+
+	entries := make([]MCPServerEntry, 0, len(cfg.MCP.Servers))
+	for name, s := range cfg.MCP.Servers {
+		entries = append(entries, MCPServerEntry{
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Transport,
+		})
+	}
+	return entries, nil
+}
+
+func dedupMCPEntries(entries []MCPServerEntry) []MCPServerEntry {
+	seen := make(map[string]bool, len(entries))
+	out := make([]MCPServerEntry, 0, len(entries))
+	for _, e := range entries {
+		if !seen[e.Name] {
+			seen[e.Name] = true
+			out = append(out, e)
+		}
+	}
+	return out
 }

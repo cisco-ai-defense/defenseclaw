@@ -41,7 +41,8 @@ func NewClaudeCodeConnector() *ClaudeCodeConnector {
 	return &ClaudeCodeConnector{}
 }
 
-func (c *ClaudeCodeConnector) Name() string { return "claudecode" }
+func (c *ClaudeCodeConnector) Name() string        { return "claudecode" }
+func (c *ClaudeCodeConnector) HookAPIPath() string  { return "/api/v1/claude-code/hook" }
 func (c *ClaudeCodeConnector) Description() string {
 	return "env var + settings.json hooks (20+ events, component scanning)"
 }
@@ -56,7 +57,7 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsWithToken(hookDir, opts.APIAddr, opts.APIToken); err != nil {
+	if err := WriteHookScriptsForConnector(hookDir, opts.APIAddr, opts.APIToken, c.Name()); err != nil {
 		return fmt.Errorf("claudecode hook script: %w", err)
 	}
 

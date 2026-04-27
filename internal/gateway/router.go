@@ -612,7 +612,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				finishReasons, toolCallCount,
 				"none", "",
 				system, now,
-				"openclaw",
+				r.defaultAgentName,
 				SharedAgentRegistry().AgentID(),
 			)
 

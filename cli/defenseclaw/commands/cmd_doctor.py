@@ -320,6 +320,71 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
 
 
+def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
+    settings_path = os.path.expanduser("~/.claude/settings.json")
+    if not os.path.isfile(settings_path):
+        _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
+        return
+    try:
+        with open(settings_path, encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        _emit("fail", "Claude Code hooks", f"cannot read {settings_path}: {exc}", r=r)
+        return
+    hooks = settings.get("hooks", {})
+    if not hooks:
+        _emit("fail", "Claude Code hooks", "no hooks registered in settings.json", r=r)
+        return
+    dc_hooks = 0
+    for _event, entries in hooks.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
+            for h in hook_list:
+                cmd = h.get("command", "") if isinstance(h, dict) else ""
+                if "defenseclaw" in cmd or "claude-code-hook" in cmd:
+                    dc_hooks += 1
+    if dc_hooks > 0:
+        _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
+    else:
+        _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
+
+
+def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
+    hook_dir = os.path.join(cfg.data_dir, "hooks")
+    hook_script = os.path.join(hook_dir, "codex-hook.sh")
+    if os.path.isfile(hook_script):
+        _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
+    else:
+        _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
+
+
+def _check_zeptoclaw_config(cfg, r: _DoctorResult) -> None:
+    config_path = os.path.expanduser("~/.zeptoclaw/config.json")
+    if not os.path.isfile(config_path):
+        _emit("fail", "ZeptoClaw config", f"{config_path} not found", r=r)
+        return
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            zcfg = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        _emit("fail", "ZeptoClaw config", f"cannot read {config_path}: {exc}", r=r)
+        return
+    providers = zcfg.get("providers", {})
+    proxy_count = 0
+    for name, prov in providers.items():
+        if not isinstance(prov, dict):
+            continue
+        api_base = prov.get("api_base", "")
+        if "defenseclaw" in api_base or "/c/zeptoclaw" in api_base:
+            proxy_count += 1
+    if proxy_count > 0:
+        _emit("pass", "ZeptoClaw config", f"{proxy_count} provider(s) routed through proxy", r=r)
+    else:
+        _emit("fail", "ZeptoClaw config", "no providers routed through DefenseClaw proxy", r=r)
+
+
 def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     if not cfg.guardrail.enabled:
         _emit("skip", "Guardrail proxy", "disabled", r=r)
@@ -974,6 +1039,12 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
     if active_connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
+    elif active_connector == "claudecode":
+        _check_claudecode_hooks(cfg, r)
+    elif active_connector == "codex":
+        _check_codex_hooks(cfg, r)
+    elif active_connector == "zeptoclaw":
+        _check_zeptoclaw_config(cfg, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
         click.echo()
@@ -1077,15 +1148,15 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
     """Run each fixer in sequence, narrating what changed.
 
     Fixers are intentionally *small* and independent — none of them
-    restart the sidecar or mutate openclaw.json beyond what setup
+    restart the sidecar or mutate connector configs beyond what setup
     already would. Anything that needs a full re-patch is deferred to
     the human.
     """
     fixers = [
         ("stale gateway PID file",   _fix_stale_pid),
-        ("OpenClaw gateway token",   _fix_openclaw_token),
+        ("gateway token",            _fix_gateway_token),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
-        ("pristine openclaw.json backup", _fix_pristine_backup),
+        ("pristine config backup",   _fix_pristine_backup),
     ]
 
     for title, fn in fixers:
@@ -1141,33 +1212,38 @@ def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("fail", f"could not remove {pid_file}: {exc}")
 
 
-def _fix_openclaw_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Re-sync OPENCLAW_GATEWAY_TOKEN from openclaw.json."""
+def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Re-sync gateway token from the active connector's config."""
     active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
-    if active_connector != "openclaw":
-        return ("skip", f"connector is {active_connector}, not openclaw")
 
-    from defenseclaw.commands.cmd_setup import (
-        _detect_openclaw_gateway_token,
-        _save_secret_to_dotenv,
-    )
+    if active_connector == "openclaw":
+        from defenseclaw.commands.cmd_setup import (
+            _detect_openclaw_gateway_token,
+            _save_secret_to_dotenv,
+        )
+        token = _detect_openclaw_gateway_token(cfg.claw.config_file)
+        if not token:
+            return ("skip", "no token in openclaw.json")
+        env_var = "OPENCLAW_GATEWAY_TOKEN"
+        current = os.environ.get(env_var, "")
+        if current == token:
+            return ("skip", "token already in sync")
+        if not assume_yes and not click.confirm(
+            f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
+            default=True,
+        ):
+            return ("skip", "declined by user")
+        _save_secret_to_dotenv(env_var, token, cfg.data_dir)
+        return ("pass", f"{env_var} updated from openclaw.json")
 
-    token = _detect_openclaw_gateway_token(cfg.claw.config_file)
-    if not token:
-        return ("skip", "no token in openclaw.json")
-
-    current = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-    if current == token:
-        return ("skip", "token already in sync")
-
-    if not assume_yes and not click.confirm(
-        "    Update OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env from OpenClaw?",
-        default=True,
-    ):
-        return ("skip", "declined by user")
-
-    _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
-    return ("pass", "OPENCLAW_GATEWAY_TOKEN updated from openclaw.json")
+    env_var = "DEFENSECLAW_GATEWAY_TOKEN"
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    if not os.path.isfile(dotenv_path):
+        return ("skip", f"no .env at {dotenv_path}")
+    current = os.environ.get(env_var, "")
+    if current:
+        return ("skip", f"{env_var} already set")
+    return ("skip", f"connector {active_connector} — set {env_var} manually if needed")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -1197,33 +1273,43 @@ def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
 
 
 def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Capture a pristine backup of openclaw.json if one isn't recorded yet.
+    """Capture a pristine backup of the active connector's config if one
+    isn't recorded yet.
 
-    This runs on every ``doctor --fix`` so operators who installed
-    DefenseClaw before the backup index existed can retroactively
-    create one. It never *overwrites* an existing entry.
+    For openclaw: backs up openclaw.json via the guardrail module.
+    For other connectors: checks for their respective backup files in
+    the data directory.
     """
     del assume_yes  # unused: capturing a snapshot is always safe
     active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
-    if active_connector != "openclaw":
-        return ("skip", f"connector is {active_connector}, not openclaw")
 
-    from defenseclaw.guardrail import (
-        pristine_backup_path,
-        record_pristine_backup,
-    )
+    if active_connector == "openclaw":
+        from defenseclaw.guardrail import (
+            pristine_backup_path,
+            record_pristine_backup,
+        )
+        oc_path = cfg.claw.config_file
+        if not oc_path:
+            return ("skip", "no openclaw.json configured")
+        if not os.path.isfile(os.path.expanduser(oc_path)):
+            return ("skip", "openclaw.json not present")
+        existing = pristine_backup_path(oc_path, cfg.data_dir)
+        if existing:
+            return ("skip", f"already captured at {existing}")
+        created = record_pristine_backup(oc_path, cfg.data_dir)
+        if created:
+            return ("pass", f"captured pristine backup at {created}")
+        return ("warn", "could not capture backup (permissions?)")
 
-    oc_path = cfg.claw.config_file
-    if not oc_path:
-        return ("skip", "no openclaw.json configured")
-    if not os.path.isfile(os.path.expanduser(oc_path)):
-        return ("skip", "openclaw.json not present")
-
-    existing = pristine_backup_path(oc_path, cfg.data_dir)
-    if existing:
-        return ("skip", f"already captured at {existing}")
-
-    created = record_pristine_backup(oc_path, cfg.data_dir)
-    if created:
-        return ("pass", f"captured pristine backup at {created}")
-    return ("warn", "could not capture backup (permissions?)")
+    backup_map = {
+        "claudecode": "claudecode_backup.json",
+        "codex": "codex_backup.json",
+        "zeptoclaw": "zeptoclaw_backup.json",
+    }
+    backup_name = backup_map.get(active_connector)
+    if not backup_name:
+        return ("skip", f"no backup strategy for connector {active_connector}")
+    backup_path = os.path.join(cfg.data_dir, backup_name)
+    if os.path.isfile(backup_path):
+        return ("skip", f"backup exists at {backup_path}")
+    return ("skip", f"no backup found — run `defenseclaw setup guardrail` to create one")

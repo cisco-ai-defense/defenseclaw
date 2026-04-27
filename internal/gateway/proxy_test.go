@@ -3172,6 +3172,9 @@ func TestConnectorPrefixStripper(t *testing.T) {
 		{"/c/claudecode", "/c/claudecode", 0},
 		{"/c/unknown/v1/messages", "", http.StatusNotFound},
 		{"/c/../v1/messages", "", http.StatusBadRequest},
+		{"/c//claudecode/v1/messages", "", http.StatusBadRequest},
+		{"/c/foo%2f..%2fadmin", "", http.StatusBadRequest},
+		{"/c/claudecode%2f..%2fadmin/v1/messages", "", http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {

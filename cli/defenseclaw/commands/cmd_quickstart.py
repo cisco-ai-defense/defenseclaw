@@ -77,7 +77,10 @@ from defenseclaw.context import AppContext
 @click.option(
     "--agent",
     "agent_name",
-    type=click.Choice(["openclaw", "zeptoclaw", "claudecode", "codex"], case_sensitive=False),
+    type=click.Choice(
+        ["openclaw", "zeptoclaw", "claudecode", "codex"],
+        case_sensitive=False,
+    ),
     default=None,
     help="Agent framework connector (default: auto-detect or openclaw).",
 )

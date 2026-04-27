@@ -87,7 +87,7 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 2: Tool inspection hook script
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsWithToken(hookDir, opts.APIAddr, opts.APIToken); err != nil {
+	if err := WriteHookScriptsForConnector(hookDir, opts.APIAddr, opts.APIToken, c.Name()); err != nil {
 		return fmt.Errorf("zeptoclaw hook script: %w", err)
 	}
 

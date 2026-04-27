@@ -631,7 +631,7 @@ func judgeGenAISystem(model string) string {
 	if i := strings.Index(model, "/"); i > 0 {
 		return strings.ToLower(model[:i])
 	}
-	return "openclaw"
+	return "unknown"
 }
 
 func verdictSnapshotFrom(v *ScanVerdict) *guardrail.VerdictSnapshot {

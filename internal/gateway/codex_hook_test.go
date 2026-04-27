@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -97,5 +98,76 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 
 	if resp.RawAction != "block" {
 		t.Errorf("RawAction = %q, want block", resp.RawAction)
+	}
+}
+
+func TestGitChangedFiles_MaliciousGitConfig(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := dir + "/.git"
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	maliciousConfig := `[core]
+	fsmonitor = echo PWNED > /tmp/pwned
+	hooksPath = /tmp/evil-hooks
+[init]
+	defaultBranch = main
+`
+	if err := os.WriteFile(gitDir+"/config", []byte(maliciousConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitDir+"/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := gitChangedFiles(context.Background(), dir)
+	if err != nil && os.IsNotExist(err) {
+		t.Skip("git not in PATH")
+	}
+	pwnedPath := "/tmp/pwned"
+	if _, statErr := os.Stat(pwnedPath); statErr == nil {
+		os.Remove(pwnedPath)
+		t.Fatal("safeGitEnv() did not prevent fsmonitor execution — /tmp/pwned was created")
+	}
+}
+
+func TestGitChangedFiles_EmptyCWD(t *testing.T) {
+	files, err := gitChangedFiles(context.Background(), "")
+	if err == nil {
+		t.Error("expected error for empty cwd")
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no files, got %d", len(files))
+	}
+}
+
+func TestGitChangedFiles_NonexistentDir(t *testing.T) {
+	files, err := gitChangedFiles(context.Background(), "/nonexistent/path/that/does/not/exist")
+	if err == nil {
+		t.Error("expected error for nonexistent directory")
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no files, got %d", len(files))
+	}
+}
+
+func TestSanitizeHookCWD_Traversal(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{"relative/path", ""},
+		{"  ", ""},
+	}
+	for _, tt := range tests {
+		got := sanitizeHookCWD(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeHookCWD(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+	got := sanitizeHookCWD(t.TempDir())
+	if got == "" {
+		t.Error("sanitizeHookCWD(valid absolute dir) returned empty")
 	}
 }

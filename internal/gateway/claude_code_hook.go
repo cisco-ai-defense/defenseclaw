@@ -150,7 +150,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ClaudeCode.ScanOnSessionStart) {
+		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
 			count := a.scanClaudeCodeComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -168,7 +168,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result"})
 	case "Stop", "SubagentStop", "SessionEnd":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ClaudeCode.ScanOnStop {
+		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
 		}
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
@@ -207,7 +207,8 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if a.scannerCfg == nil {
 		return false
 	}
-	if a.scannerCfg.ClaudeCode.Enabled {
+	hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	if hookCfg.Enabled {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "claudecode")
@@ -216,7 +217,8 @@ func (a *APIServer) claudeCodeEnabled() bool {
 func (a *APIServer) claudeCodeMode() string {
 	mode := "observe"
 	if a.scannerCfg != nil {
-		mode = strings.TrimSpace(a.scannerCfg.ClaudeCode.Mode)
+		hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || mode == "inherit" {
 			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
 		}
@@ -584,7 +586,7 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 		}
 	}
 	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ClaudeCode.ScanPaths {
+		for _, p := range a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths {
 			add(p)
 		}
 	}
@@ -625,8 +627,8 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 
 func (a *APIServer) claudeCodeComponentScanDue() bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ClaudeCode.ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ClaudeCode.ComponentScanIntervalMinutes) * time.Minute
+	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.claudeCodeMu.Lock()
 	defer a.claudeCodeMu.Unlock()

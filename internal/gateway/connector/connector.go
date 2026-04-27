@@ -108,6 +108,13 @@ type HookEventHandler interface {
 	HandleHookEvent(ctx context.Context, payload []byte) ([]byte, error)
 }
 
+// HookEndpoint — optional, connectors that receive lifecycle events
+// from agents declare which API path they need. The gateway registers
+// the route dynamically at boot instead of hardcoding paths in api.go.
+type HookEndpoint interface {
+	HookAPIPath() string
+}
+
 // ComponentScanner — optional, connectors that support scanning
 // agent-specific skills, plugins, MCP servers implement this.
 type ComponentScanner interface {
