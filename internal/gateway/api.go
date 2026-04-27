@@ -75,6 +75,8 @@ type APIServer struct {
 	claudeCodeLastComponentScan time.Time
 	codexMu                     sync.Mutex
 	codexLastComponentScan      time.Time
+
+	connectorRegistry *connector.Registry
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events
@@ -96,6 +98,12 @@ func (a *APIServer) connectorName() string {
 // shared OPA policy engine.  It is called by the /policy/reload handler.
 func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
+}
+
+// SetConnectorRegistry attaches the connector registry so the
+// /v1/connectors endpoint can list available connectors.
+func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
+	a.connectorRegistry = reg
 }
 
 // NewAPIServer creates the REST API server bound to the given address.
@@ -153,6 +161,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/claude-code/hook", a.handleClaudeCodeHook)
 	mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
+	mux.HandleFunc("/v1/connectors", a.handleConnectors)
 
 	handler := maxBodyMiddleware(mux, 1<<20)
 	handler = a.apiCSRFProtect(handler)
@@ -218,6 +227,40 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	body["provenance"] = version.Current()
 	a.writeJSON(w, http.StatusOK, body)
+}
+
+func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	reg := a.connectorRegistry
+	if reg == nil {
+		reg = connector.NewDefaultRegistry()
+	}
+	type connectorEntry struct {
+		Name               string `json:"name"`
+		Description        string `json:"description"`
+		Source             string `json:"source"`
+		ToolInspectionMode string `json:"tool_inspection_mode"`
+		SubprocessPolicy   string `json:"subprocess_policy"`
+	}
+	avail := reg.Available()
+	entries := make([]connectorEntry, len(avail))
+	for i, info := range avail {
+		entries[i] = connectorEntry{
+			Name:               info.Name,
+			Description:        info.Description,
+			Source:             info.Source,
+			ToolInspectionMode: string(info.ToolInspectionMode),
+			SubprocessPolicy:   string(info.SubprocessPolicy),
+		}
+	}
+	resp := map[string]interface{}{
+		"active":     a.connectorName(),
+		"connectors": entries,
+	}
+	a.writeJSON(w, http.StatusOK, resp)
 }
 
 func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -1170,7 +1170,7 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "zeptoclaw": {
         "label": "ZeptoClaw",
-        "description": "api_base redirect + before_tool hook",
+        "description": "api_base redirect + proxy response-scan",
         "tool_mode": "both",
         "subprocess_policy": "sandbox",
     },
@@ -1189,19 +1189,37 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
 }
 
 
+def _detect_connector() -> str | None:
+    """Guess the active agent framework from filesystem indicators."""
+    home = os.path.expanduser("~")
+    if os.path.isdir(os.path.join(home, ".claude")):
+        return "claudecode"
+    if os.path.isdir(os.path.join(home, ".codex")):
+        return "codex"
+    if os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")):
+        return "zeptoclaw"
+    return None
+
+
 def _select_connector_interactive(current: str) -> str:
     """Present a numbered menu and return the selected connector name."""
+    detected = _detect_connector()
+    default = current
+    if not default or default == "openclaw":
+        default = detected or "openclaw"
     click.echo()
     click.echo("  Which agent framework are you using?")
     click.echo()
     for i, name in enumerate(_CONNECTOR_NAMES, 1):
         meta = _CONNECTOR_META[name]
-        marker = " *" if name == current else ""
+        marker = " *" if name == default else ""
         click.echo(f"    {i}. {meta['label']:<14s} — {meta['description']}{marker}")
     click.echo()
+    default_idx = _CONNECTOR_NAMES.index(default) + 1 if default in _CONNECTOR_NAMES else None
     raw = click.prompt(
         "  Selection",
         type=click.IntRange(1, len(_CONNECTOR_NAMES)),
+        default=default_idx,
     )
     return _CONNECTOR_NAMES[raw - 1]
 

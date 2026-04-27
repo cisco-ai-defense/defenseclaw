@@ -1093,6 +1093,11 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}
+	reg := connector.NewDefaultRegistry()
+	if s.cfg.PluginDir != "" {
+		_ = reg.DiscoverPlugins(s.cfg.PluginDir)
+	}
+	api.SetConnectorRegistry(reg)
 	return api.Run(ctx)
 }
 

@@ -207,29 +207,6 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
         return "error"
 
 
-def detect_azure_endpoints(openclaw_config_file: str) -> dict[str, str]:
-    """Read Azure OpenAI base URLs from openclaw.json providers.
-
-    Returns {provider_name: base_url} for any provider whose baseUrl contains
-    'openai.azure.com'. Written to ~/.defenseclaw/.env during setup so the
-    guardrail proxy can forward Azure requests to the correct endpoint without
-    any manual configuration.
-    """
-    path = _expand(openclaw_config_file)
-    try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-    result = {}
-    for name, prov in cfg.get("models", {}).get("providers", {}).items():
-        base_url = prov.get("baseUrl", "")
-        if "openai.azure.com" in base_url:
-            result[name] = base_url
-    return result
-
-
 def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     """Read the current model from openclaw.json. Returns (model_id, provider_prefix)."""
     path = _expand(openclaw_config_file)
@@ -313,22 +290,6 @@ def model_to_proxy_name(model: str) -> str:
     return name
 
 
-
-
-# Known provider prefixes for model name heuristics.
-KNOWN_PROVIDERS = ["anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai"]
-
-
-def guess_provider(model: str) -> str:
-    """Best-effort guess of the provider from a bare model name (no / prefix)."""
-    lower = model.lower()
-    if lower.startswith("claude"):
-        return "anthropic"
-    if lower.startswith(("gpt", "o1", "o3", "o4")):
-        return "openai"
-    if lower.startswith("gemini"):
-        return "gemini"
-    return ""
 
 
 

@@ -820,6 +820,16 @@ class Config:
         return _expand(self.claw.home_dir)
 
     def skill_dirs(self) -> list[str]:
+        conn = self.guardrail.connector.lower()
+        if conn == "claudecode":
+            return _connector_skill_dirs_claudecode()
+        if conn == "codex":
+            return _connector_skill_dirs_codex()
+        if conn == "zeptoclaw":
+            return _connector_skill_dirs_zeptoclaw()
+        return self._skill_dirs_openclaw()
+
+    def _skill_dirs_openclaw(self) -> list[str]:
         home = self.claw_home_dir()
         dirs: list[str] = []
         oc = _read_openclaw_config(self.claw.config_file)
@@ -837,20 +847,24 @@ class Config:
         return _dedup(dirs)
 
     def plugin_dirs(self) -> list[str]:
-        """Return plugin directories for the active claw mode.
-
-        For OpenClaw, plugins (extensions) live under claw_home/extensions.
-        """
+        conn = self.guardrail.connector.lower()
+        if conn == "claudecode":
+            return _connector_plugin_dirs_claudecode()
+        if conn == "codex":
+            return _connector_plugin_dirs_codex()
+        if conn == "zeptoclaw":
+            return _connector_plugin_dirs_zeptoclaw()
         home = self.claw_home_dir()
         return [os.path.join(home, "extensions")]
 
     def mcp_servers(self) -> list[MCPServerEntry]:
-        """Return MCP servers from openclaw.json mcp.servers.
-
-        Tries ``openclaw config get mcp.servers`` first (safe, schema-
-        validated).  Falls back to reading the file directly when the CLI
-        is unavailable or returns an error (OpenClaw < 2026.3.24).
-        """
+        conn = self.guardrail.connector.lower()
+        if conn == "claudecode":
+            return _read_mcp_servers_claudecode()
+        if conn == "codex":
+            return _read_mcp_servers_codex()
+        if conn == "zeptoclaw":
+            return _read_mcp_servers_zeptoclaw()
         servers = _read_mcp_servers_via_cli()
         if servers is not None:
             return servers
@@ -1067,6 +1081,151 @@ def _dedup(paths: list[str]) -> list[str]:
             seen.add(p)
             out.append(p)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Connector-specific helpers — skill dirs, plugin dirs, MCP server discovery.
+# Each set mirrors the Go-side ComponentTargets() for its connector.
+# ---------------------------------------------------------------------------
+
+def _connector_skill_dirs_claudecode() -> list[str]:
+    home = str(_home())
+    user_dir = os.path.join(home, ".claude")
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(user_dir, "skills"),
+        os.path.join(cwd, ".claude", "skills"),
+    ])
+
+
+def _connector_skill_dirs_codex() -> list[str]:
+    home = str(_home())
+    codex_dir = os.path.join(home, ".codex")
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(codex_dir, "skills"),
+        os.path.join(cwd, ".codex", "skills"),
+    ])
+
+
+def _connector_skill_dirs_zeptoclaw() -> list[str]:
+    home = str(_home())
+    zepto_dir = os.path.join(home, ".zeptoclaw")
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(zepto_dir, "skills"),
+        os.path.join(cwd, ".zeptoclaw", "skills"),
+    ])
+
+
+def _connector_plugin_dirs_claudecode() -> list[str]:
+    home = str(_home())
+    user_dir = os.path.join(home, ".claude")
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(user_dir, "plugins"),
+        os.path.join(cwd, ".claude", "plugins"),
+    ])
+
+
+def _connector_plugin_dirs_codex() -> list[str]:
+    home = str(_home())
+    codex_dir = os.path.join(home, ".codex")
+    return _dedup([
+        os.path.join(codex_dir, "plugins"),
+        os.path.join(codex_dir, "plugins", "cache"),
+    ])
+
+
+def _connector_plugin_dirs_zeptoclaw() -> list[str]:
+    home = str(_home())
+    zepto_dir = os.path.join(home, ".zeptoclaw")
+    return _dedup([
+        os.path.join(zepto_dir, "plugins"),
+        os.path.join(zepto_dir, "plugins", "cache"),
+    ])
+
+
+def _read_mcp_servers_claudecode() -> list[MCPServerEntry]:
+    home = str(_home())
+    cwd = os.getcwd()
+    servers: list[MCPServerEntry] = []
+    settings_path = os.path.join(home, ".claude", "settings.json")
+    try:
+        with open(settings_path) as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            mcp = data.get("mcpServers")
+            if isinstance(mcp, dict):
+                servers.extend(_parse_mcp_servers_dict(mcp))
+    except (OSError, json.JSONDecodeError):
+        pass
+    mcp_json = os.path.join(cwd, ".mcp.json")
+    try:
+        with open(mcp_json) as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            mcp = data.get("mcpServers", data)
+            if isinstance(mcp, dict):
+                servers.extend(_parse_mcp_servers_dict(mcp))
+    except (OSError, json.JSONDecodeError):
+        pass
+    seen: set[str] = set()
+    deduped: list[MCPServerEntry] = []
+    for s in servers:
+        if s.name not in seen:
+            seen.add(s.name)
+            deduped.append(s)
+    return deduped
+
+
+def _read_mcp_servers_codex() -> list[MCPServerEntry]:
+    cwd = os.getcwd()
+    servers: list[MCPServerEntry] = []
+    mcp_json = os.path.join(cwd, ".mcp.json")
+    try:
+        with open(mcp_json) as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            mcp = data.get("mcpServers", data)
+            if isinstance(mcp, dict):
+                servers.extend(_parse_mcp_servers_dict(mcp))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return servers
+
+
+def _read_mcp_servers_zeptoclaw() -> list[MCPServerEntry]:
+    home = str(_home())
+    cwd = os.getcwd()
+    servers: list[MCPServerEntry] = []
+    config_path = os.path.join(home, ".zeptoclaw", "config.json")
+    try:
+        with open(config_path) as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            mcp = data.get("mcp", {}).get("servers")
+            if isinstance(mcp, dict):
+                servers.extend(_parse_mcp_servers_dict(mcp))
+    except (OSError, json.JSONDecodeError):
+        pass
+    mcp_json = os.path.join(cwd, ".mcp.json")
+    try:
+        with open(mcp_json) as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            mcp = data.get("mcpServers", data)
+            if isinstance(mcp, dict):
+                servers.extend(_parse_mcp_servers_dict(mcp))
+    except (OSError, json.JSONDecodeError):
+        pass
+    seen: set[str] = set()
+    deduped: list[MCPServerEntry] = []
+    for s in servers:
+        if s.name not in seen:
+            seen.add(s.name)
+            deduped.append(s)
+    return deduped
 
 
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:

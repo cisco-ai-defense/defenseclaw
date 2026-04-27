@@ -96,9 +96,13 @@ type Connector interface {
 	VerifyClean(opts SetupOpts) error
 }
 
-// HookEventHandler — optional, connectors that handle agent lifecycle
-// events (Claude Code, Codex) implement this. The gateway registers
-// the hook endpoint automatically.
+// HookEventHandler — reserved for future use. No built-in connector
+// implements this; hook handling lives in the gateway's per-connector
+// handlers (handleClaudeCodeHook, handleCodexHook) which have access
+// to the full policy engine. A stub implementation was removed in M8
+// because it returned hardcoded "allow", creating a silent fail-open
+// risk. If a plugin connector needs custom hook handling, it can
+// implement this interface and the gateway will route to it.
 type HookEventHandler interface {
 	HookEndpointPath() string
 	HandleHookEvent(ctx context.Context, payload []byte) ([]byte, error)
