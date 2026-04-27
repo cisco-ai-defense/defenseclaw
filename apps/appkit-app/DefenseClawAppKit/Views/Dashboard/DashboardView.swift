@@ -96,16 +96,16 @@ struct DashboardView: View {
 
             MetricTile(
                 title: "Skills",
-                value: "\(viewModel.skills.count)",
-                subtitle: "\(viewModel.blockedSkillsCount) blocked",
+                value: viewModel.skillsMetricValue,
+                subtitle: viewModel.skillsMetricSubtitle,
                 systemImage: "wand.and.stars",
                 tint: .purple
             )
 
             MetricTile(
                 title: "MCP Servers",
-                value: "\(viewModel.mcpServers.count)",
-                subtitle: "\(viewModel.runningMCPCount) running",
+                value: viewModel.mcpMetricValue,
+                subtitle: viewModel.mcpMetricSubtitle,
                 systemImage: "server.rack",
                 tint: .teal
             )
@@ -120,8 +120,8 @@ struct DashboardView: View {
 
             MetricTile(
                 title: "Enforcement",
-                value: "\(viewModel.blockedCount)",
-                subtitle: "\(viewModel.allowedCount) allowed overrides",
+                value: viewModel.enforcementMetricValue,
+                subtitle: viewModel.enforcementMetricSubtitle,
                 systemImage: "lock.shield",
                 tint: .red
             )
@@ -181,8 +181,8 @@ struct DashboardView: View {
                 )
                 PostureRow(
                     title: "Scanner Coverage",
-                    value: "\(viewModel.scannedSkillsCount) scanned skills",
-                    stateColor: viewModel.scannedSkillsCount > 0 ? .green : .secondary
+                    value: viewModel.scannerCoverageText,
+                    stateColor: viewModel.scannerCoverageColor
                 )
                 PostureRow(
                     title: "Policy",
@@ -319,6 +319,11 @@ final class DashboardViewModel {
     var allowedCount = 0
     var policySummary = "Not loaded"
     var errorMessage: String?
+    var skillsError: String?
+    var mcpError: String?
+    var toolsError: String?
+    var blockedError: String?
+    var allowedError: String?
 
     private let sidecarClient = SidecarClient()
     private let log = AppLogger.shared
@@ -344,6 +349,50 @@ final class DashboardViewModel {
 
     var scannedSkillsCount: Int {
         skills.filter { $0.lastScan != nil }.count
+    }
+
+    var skillsMetricValue: String {
+        skillsError == nil ? "\(skills.count)" : "!"
+    }
+
+    var skillsMetricSubtitle: String {
+        if let skillsError { return "Load failed: \(shortError(skillsError))" }
+        if skills.isEmpty { return "No runtime skills reported" }
+        return "\(blockedSkillsCount) blocked"
+    }
+
+    var mcpMetricValue: String {
+        mcpError == nil ? "\(mcpServers.count)" : "!"
+    }
+
+    var mcpMetricSubtitle: String {
+        if let mcpError { return "Load failed: \(shortError(mcpError))" }
+        if mcpServers.isEmpty { return "No MCP servers configured" }
+        return "\(runningMCPCount) running"
+    }
+
+    var enforcementMetricValue: String {
+        blockedError == nil && allowedError == nil ? "\(blockedCount + allowedCount)" : "!"
+    }
+
+    var enforcementMetricSubtitle: String {
+        if let blockedError { return "Blocked failed: \(shortError(blockedError))" }
+        if let allowedError { return "Allowed failed: \(shortError(allowedError))" }
+        if blockedCount + allowedCount == 0 { return "No explicit overrides" }
+        return "\(blockedCount) blocked, \(allowedCount) allowed"
+    }
+
+    var scannerCoverageText: String {
+        if let skillsError { return "Skills unavailable: \(shortError(skillsError))" }
+        if skills.isEmpty { return "No runtime skills reported" }
+        if scannedSkillsCount == 0 { return "\(skills.count) skills, scan state pending" }
+        return "\(scannedSkillsCount) of \(skills.count) scanned"
+    }
+
+    var scannerCoverageColor: Color {
+        if skillsError != nil { return .red }
+        if scannedSkillsCount > 0 { return .green }
+        return skills.isEmpty ? .secondary : .orange
     }
 
     var gatewayPostureText: String {
@@ -408,22 +457,53 @@ final class DashboardViewModel {
         }
 
         do { alerts = try await sidecarClient.alerts() } catch { alerts = [] }
-        do { skills = try await sidecarClient.skills() } catch { skills = [] }
-        do { mcpServers = try await sidecarClient.mcpServers() } catch { mcpServers = [] }
-        do { tools = try await sidecarClient.toolsCatalog() } catch { tools = [] }
+        do {
+            skills = try await sidecarClient.skills()
+            skillsError = nil
+            log.info("dashboard", "Skills loaded", details: "count=\(skills.count)")
+        } catch {
+            skills = []
+            skillsError = error.localizedDescription
+            log.warn("dashboard", "Skills load failed", details: error.localizedDescription)
+        }
+        do {
+            mcpServers = try await sidecarClient.mcpServers()
+            mcpError = nil
+            log.info("dashboard", "MCP servers loaded", details: "count=\(mcpServers.count)")
+        } catch {
+            mcpServers = []
+            mcpError = error.localizedDescription
+            log.warn("dashboard", "MCP load failed", details: error.localizedDescription)
+        }
+        do {
+            tools = try await sidecarClient.toolsCatalog()
+            toolsError = nil
+        } catch {
+            tools = []
+            toolsError = error.localizedDescription
+            log.warn("dashboard", "Tools load failed", details: error.localizedDescription)
+        }
 
         do {
             let blocked = try await sidecarClient.blockedList()
             blockedCount = blocked.count
+            blockedError = nil
+            log.info("dashboard", "Blocked enforcement loaded", details: "count=\(blocked.count)")
         } catch {
             blockedCount = 0
+            blockedError = error.localizedDescription
+            log.warn("dashboard", "Blocked enforcement load failed", details: error.localizedDescription)
         }
 
         do {
             let allowed = try await sidecarClient.allowedList()
             allowedCount = allowed.count
+            allowedError = nil
+            log.info("dashboard", "Allowed enforcement loaded", details: "count=\(allowed.count)")
         } catch {
             allowedCount = 0
+            allowedError = error.localizedDescription
+            log.warn("dashboard", "Allowed enforcement load failed", details: error.localizedDescription)
         }
 
         do {
@@ -441,6 +521,12 @@ final class DashboardViewModel {
         case .disabled, .stopped: return .secondary
         case .error: return .red
         }
+    }
+
+    private func shortError(_ error: String) -> String {
+        let cleaned = error.replacingOccurrences(of: "\n", with: " ")
+        if cleaned.count <= 42 { return cleaned }
+        return String(cleaned.prefix(39)) + "..."
     }
 }
 

@@ -108,16 +108,12 @@ public actor SidecarClient {
         self.session = URLSession(configuration: .ephemeral)
         let dec = JSONDecoder()
         // Sidecar returns dates like "2026-04-02T21:00:25.796086-07:00"
-        // Swift's .iso8601 can't handle fractional seconds, so use a custom strategy
+        // Swift's .iso8601 is picky about fractional precision, so use a
+        // tolerant strategy for Go/Python/RFC3339 timestamps.
         dec.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let str = try container.decode(String.self)
-            let fmtWithFrac = ISO8601DateFormatter()
-            fmtWithFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let fmtWithout = ISO8601DateFormatter()
-            fmtWithout.formatOptions = [.withInternetDateTime]
-            if let d = fmtWithFrac.date(from: str) { return d }
-            if let d = fmtWithout.date(from: str) { return d }
+            if let d = SidecarClient.parseDate(str) { return d }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Cannot decode date: \(str)")
         }
         self.decoder = dec
@@ -165,8 +161,7 @@ public actor SidecarClient {
             log.error("sidecar", "GET /tools/catalog failed", details: "status=\((response as? HTTPURLResponse)?.statusCode ?? 0) body=\(msg.prefix(500))")
             throw SidecarError.requestFailed(endpoint: "/tools/catalog", detail: msg)
         }
-        let rawBody = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-        log.info("sidecar", "GET /tools/catalog raw response", details: "\(data.count) bytes: \(rawBody.prefix(1000))")
+        log.info("sidecar", "GET /tools/catalog response received", details: "\(data.count) bytes")
         // Try grouped format first (OpenClaw gateway: { agentId, groups: [{ tools: [...] }] })
         if let catalog = try? decoder.decode(ToolsCatalogResponse.self, from: data) {
             let tools = catalog.flattenedTools()
@@ -179,7 +174,7 @@ public actor SidecarClient {
             log.info("sidecar", "GET /tools/catalog decoded OK (flat)", details: "\(tools.count) tools")
             return tools
         } catch {
-            log.error("sidecar", "GET /tools/catalog DECODE FAILED (tried grouped + flat)", details: "error=\(error) raw=\(rawBody.prefix(500))")
+            log.error("sidecar", "GET /tools/catalog DECODE FAILED (tried grouped + flat)", details: "error=\(error)")
             throw SidecarError.decodingFailed(endpoint: "/tools/catalog", underlying: error)
         }
     }
@@ -281,7 +276,12 @@ public actor SidecarClient {
             throw SidecarError.requestFailed(endpoint: path, detail: msg)
         }
         log.debug("sidecar", "GET \(path) OK", details: "\(data.count) bytes")
-        return try decoder.decode(T.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            log.error("sidecar", "GET \(path) decode failed", details: "\(error)")
+            throw SidecarError.decodingFailed(endpoint: path, underlying: error)
+        }
     }
 
     private func post<B: Encodable, T: Decodable>(_ path: String, body: B) async throws -> T {
@@ -299,7 +299,12 @@ public actor SidecarClient {
             throw SidecarError.requestFailed(endpoint: path, detail: msg)
         }
         log.debug("sidecar", "POST \(path) OK", details: "\(data.count) bytes")
-        return try decoder.decode(T.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            log.error("sidecar", "POST \(path) decode failed", details: "\(error)")
+            throw SidecarError.decodingFailed(endpoint: path, underlying: error)
+        }
     }
 
     private func postVoid<B: Encodable>(_ path: String, body: B) async throws {
@@ -382,6 +387,37 @@ public actor SidecarClient {
             }
         }
 
+        return nil
+    }
+
+    static func parseDate(_ value: String) -> Date? {
+        let isoOptions: [ISO8601DateFormatter.Options] = [
+            [.withInternetDateTime, .withFractionalSeconds],
+            [.withInternetDateTime]
+        ]
+        for options in isoOptions {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = options
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
+
+        let formats = [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+            "yyyy-MM-dd HH:mm:ss.SSSSSSXXXXX",
+            "yyyy-MM-dd HH:mm:ssXXXXX"
+        ]
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
         return nil
     }
 }
