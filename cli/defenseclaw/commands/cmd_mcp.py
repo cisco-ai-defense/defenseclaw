@@ -28,6 +28,7 @@ import subprocess
 
 import click
 
+from defenseclaw import connector_paths
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
@@ -92,12 +93,18 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
         click.echo(json.dumps(out, indent=2))
         return
 
+    connector = app.cfg.active_connector()
     if not servers:
-        click.echo("No MCP servers configured in openclaw.json (mcp.servers).")
+        click.echo(
+            f"No MCP servers configured for connector={connector!r} "
+            "(checked the connector-specific source: openclaw.json / "
+            ".claude/settings.json / .mcp.json / "
+            ".zeptoclaw/config.json).",
+        )
         return
 
     console = Console()
-    table = Table(title="MCP Servers (from openclaw.json)")
+    table = Table(title=f"MCP Servers (connector={connector})")
     table.add_column("Name", style="bold")
     table.add_column("Transport")
     table.add_column("Command")
@@ -473,8 +480,17 @@ def unblock(app: AppContext, target: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# set / unset  — delegate writes to ``openclaw config set/unset``
+# set / unset  — connector-aware: delegate writes to the active
+# connector's preferred surface.
 # ---------------------------------------------------------------------------
+#
+# OpenClaw uses ``openclaw config set/unset`` (schema-validated +
+# hot-reloaded). Claude Code and Codex have no equivalent CLI, so
+# we patch ``~/.claude/settings.json`` and ``./.mcp.json`` directly
+# via the atomic JSON helpers in :mod:`defenseclaw.connector_paths`.
+# ZeptoClaw owns its config.json from the TUI and does not expose a
+# safe write surface — we surface a clear error rather than racing
+# ZeptoClaw's autosave.
 
 def _openclaw_config_set(path: str, value: str) -> None:
     """Write a value via ``openclaw config set`` (schema-validated, hot-reloaded)."""
@@ -500,6 +516,38 @@ def _openclaw_config_unset(path: str) -> None:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise click.ClickException(f"openclaw config unset failed: {detail}")
+
+
+def _set_mcp_via_connector(cfg, name: str, entry: dict) -> None:
+    """Dispatch ``mcp set`` to the active connector's write surface.
+
+    Translates :class:`connector_paths.MCPWriteUnsupportedError` into a
+    user-friendly :class:`click.ClickException` so the CLI exits 1
+    with a clean error instead of a stack trace.
+    """
+    try:
+        connector_paths.set_mcp_server(
+            cfg.active_connector(),
+            name,
+            entry,
+            openclaw_config_setter=_openclaw_config_set,
+        )
+    except connector_paths.MCPWriteUnsupportedError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _unset_mcp_via_connector(cfg, name: str) -> None:
+    """Dispatch ``mcp unset`` to the active connector's write surface.
+    Symmetric with :func:`_set_mcp_via_connector`.
+    """
+    try:
+        connector_paths.unset_mcp_server(
+            cfg.active_connector(),
+            name,
+            openclaw_config_unsetter=_openclaw_config_unset,
+        )
+    except connector_paths.MCPWriteUnsupportedError as e:
+        raise click.ClickException(str(e)) from e
 
 
 @mcp.command("set")
@@ -627,7 +675,7 @@ def set_server(
         else:
             click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
 
-    _openclaw_config_set(f"mcp.servers.{name}", json.dumps(entry))
+    _set_mcp_via_connector(app.cfg, name, entry)
 
     if scan_required:
         post_decision = evaluate_admission(
@@ -659,10 +707,11 @@ def unset_server(app: AppContext, name: str) -> None:
     servers = app.cfg.mcp_servers()
     if not any(s.name == name for s in servers):
         raise click.ClickException(
-            f"MCP server {name!r} not found in openclaw.json."
+            f"MCP server {name!r} not found for connector="
+            f"{app.cfg.active_connector()!r}."
         )
 
-    _openclaw_config_unset(f"mcp.servers.{name}")
+    _unset_mcp_via_connector(app.cfg, name)
     click.secho(f"Removed MCP server: {name}", fg="yellow")
 
     if app.logger:

@@ -521,3 +521,216 @@ def _dedup_mcp_entries(entries: list[MCPServerEntry]) -> list[MCPServerEntry]:
         seen.add(e.name)
         out.append(e)
     return out
+
+
+# ---------------------------------------------------------------------------
+# MCP server WRITES — connector-specific set / unset adapters (S4.2)
+# ---------------------------------------------------------------------------
+
+class MCPWriteUnsupportedError(RuntimeError):
+    """Raised when MCP set/unset is requested for a connector that
+    doesn't expose a programmatic write surface.
+
+    Today this fires for ZeptoClaw — its config.json is owned by the
+    ZeptoClaw TUI and rewriting it from outside the application can
+    race with on-disk autosave. Operators should add the server inside
+    the ZeptoClaw UI and re-run ``defenseclaw mcp scan`` to pick it
+    up via the read path.
+    """
+
+
+def set_mcp_server(
+    connector: str | None,
+    name: str,
+    entry: dict[str, Any],
+    *,
+    openclaw_config_setter: Any = None,
+) -> None:
+    """Add or update an MCP server in the active connector's registry.
+
+    *entry* is a dict shaped per the connector's on-disk schema —
+    typically containing ``command``, ``args``, ``url``, ``env``,
+    ``transport`` keys (extra keys are preserved verbatim so newer
+    schemas pass through unchanged).
+
+    Per-connector write surfaces:
+
+    * OpenClaw     — delegated to ``openclaw config set
+                     mcp.servers.<name> <json>`` via
+                     *openclaw_config_setter* (callable taking
+                     ``(path, json_value_str)``). Caller injects this
+                     so we can keep subprocess access out of this
+                     module.
+    * Claude Code  — ``$HOME/.claude/settings.json[mcpServers][name]``
+                     via :func:`_atomic_json_merge`.
+    * Codex        — ``./.mcp.json[mcpServers][name]``
+                     via :func:`_atomic_json_merge`.
+    * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
+    """
+    name_n = normalize(connector)
+    if name_n == "openclaw":
+        if openclaw_config_setter is None:
+            raise RuntimeError(
+                "openclaw_config_setter not provided — set_mcp_server "
+                "for openclaw requires the caller to inject the "
+                "openclaw config-set shim",
+            )
+        openclaw_config_setter(f"mcp.servers.{name}", json.dumps(entry))
+        return
+    if name_n == "claudecode":
+        path = os.path.join(str(Path.home()), ".claude", "settings.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "codex":
+        path = os.path.join(os.getcwd(), ".mcp.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "zeptoclaw":
+        raise MCPWriteUnsupportedError(
+            "zeptoclaw does not expose a programmatic MCP write surface. "
+            "Add the server inside the ZeptoClaw UI and re-run "
+            "`defenseclaw mcp scan` to discover it via the read path.",
+        )
+    # Anything else — treat as an unknown framework. Refuse rather than
+    # silently writing to the OpenClaw config.
+    raise MCPWriteUnsupportedError(
+        f"set_mcp_server: unknown connector {connector!r}; "
+        f"expected one of {KNOWN_CONNECTORS}",
+    )
+
+
+def unset_mcp_server(
+    connector: str | None,
+    name: str,
+    *,
+    openclaw_config_unsetter: Any = None,
+) -> None:
+    """Remove an MCP server from the active connector's registry.
+
+    Mirrors :func:`set_mcp_server` and uses :func:`_atomic_json_delete`
+    on Claude Code / Codex; OpenClaw delegates to the injected
+    *openclaw_config_unsetter*; ZeptoClaw raises
+    :class:`MCPWriteUnsupportedError`.
+    """
+    name_n = normalize(connector)
+    if name_n == "openclaw":
+        if openclaw_config_unsetter is None:
+            raise RuntimeError(
+                "openclaw_config_unsetter not provided — unset_mcp_server "
+                "for openclaw requires the caller to inject the "
+                "openclaw config-unset shim",
+            )
+        openclaw_config_unsetter(f"mcp.servers.{name}")
+        return
+    if name_n == "claudecode":
+        path = os.path.join(str(Path.home()), ".claude", "settings.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "codex":
+        path = os.path.join(os.getcwd(), ".mcp.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "zeptoclaw":
+        raise MCPWriteUnsupportedError(
+            "zeptoclaw does not expose a programmatic MCP write surface. "
+            "Remove the server inside the ZeptoClaw UI.",
+        )
+    raise MCPWriteUnsupportedError(
+        f"unset_mcp_server: unknown connector {connector!r}; "
+        f"expected one of {KNOWN_CONNECTORS}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Atomic JSON read-modify-write helpers
+# ---------------------------------------------------------------------------
+#
+# These mirror the Go-side atomicWriteFile pattern in
+# internal/gateway/connector/codex.go: write to a tempfile in the same
+# directory, fsync, then os.replace. Permissions are forced to 0o600
+# because the targets (~/.claude/settings.json, ./.mcp.json) frequently
+# carry credentials in the env: block.
+
+def _atomic_json_merge(
+    path: str,
+    keys: tuple[str, ...],
+    value: dict[str, Any],
+) -> None:
+    """Read *path* (or start from {}), set ``data[keys[0]][keys[1]]...
+    = value``, then atomically replace *path* with the new content.
+
+    Creates parent directory if missing. Permissions are forced to
+    0o600 on every write — these files commonly contain API keys
+    in the ``env`` block.
+    """
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    data: dict[str, Any]
+    try:
+        with open(path) as f:
+            loaded = json.load(f)
+        data = loaded if isinstance(loaded, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    cursor = data
+    for k in keys[:-1]:
+        node = cursor.get(k)
+        if not isinstance(node, dict):
+            node = {}
+            cursor[k] = node
+        cursor = node
+    cursor[keys[-1]] = value
+    _atomic_write_json(path, data)
+
+
+def _atomic_json_delete(
+    path: str,
+    keys: tuple[str, ...],
+) -> bool:
+    """Delete ``data[keys[0]][keys[1]]...`` from *path* and atomically
+    rewrite. Returns True iff the key existed and was removed.
+
+    Missing files / missing keys are no-ops returning False.
+    """
+    try:
+        with open(path) as f:
+            loaded = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    cursor: Any = loaded
+    for k in keys[:-1]:
+        if not isinstance(cursor, dict) or k not in cursor:
+            return False
+        cursor = cursor[k]
+    if not isinstance(cursor, dict) or keys[-1] not in cursor:
+        return False
+    del cursor[keys[-1]]
+    _atomic_write_json(path, loaded)
+    return True
+
+
+def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
+    """Write *data* to *path* atomically with 0o600 permissions.
+
+    Uses tempfile in the same directory + ``os.replace`` so a crash
+    never leaves a half-written file. Mirrors the Go gateway's
+    atomicWriteFile contract for connector config patches.
+    """
+    import tempfile
+    parent = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-", dir=parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
