@@ -1,9 +1,9 @@
 import SwiftUI
 import DefenseClawKit
 
-/// Alerts window — matches the DefenseClaw TUI alerts panel layout:
+/// Alerts view — matches the DefenseClaw TUI alerts panel layout:
 /// Table with SEVERITY | TIME | ACTION | TARGET columns,
-/// selected-row highlight, and detail modal on click.
+/// selected-row highlight, and inline detail inspection.
 struct AlertsView: View {
     @State private var alerts: [DefenseClawKit.Alert] = []
     @State private var selectedAlert: DefenseClawKit.Alert?
@@ -92,6 +92,13 @@ struct AlertsView: View {
                 }
             }
 
+            if let selectedAlert {
+                Divider()
+                AlertDetailPanel(alert: selectedAlert) {
+                    self.selectedAlert = nil
+                }
+            }
+
             // Status bar — matches TUI status bar
             HStack {
                 Text("showing 1-\(alerts.count) of \(alerts.count)")
@@ -109,11 +116,6 @@ struct AlertsView: View {
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
         }
         .frame(minWidth: 600, minHeight: 400)
-        .sheet(item: $selectedAlert) { alert in
-            AlertDetailModal(alert: alert) {
-                selectedAlert = nil
-            }
-        }
         .task {
             await loadAlerts()
             pollingTask = Task {
@@ -194,63 +196,58 @@ struct AlertTableRow: View {
     }
 }
 
-// MARK: - Detail Modal (matches TUI detail modal)
+// MARK: - Inline Detail Panel
 
-struct AlertDetailModal: View {
+struct AlertDetailPanel: View {
     let alert: DefenseClawKit.Alert
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Alert: \(alert.action)")
-                .font(.system(.headline, design: .monospaced))
-                .fontWeight(.bold)
-                .foregroundStyle(Color(nsColor: .systemBlue))
-
-            Divider()
-
-            detailRow("Severity:", alert.severity.rawValue.uppercased(), color: severityColor)
-            detailRow("Action:", alert.action)
-            detailRow("Target:", alert.target)
-            detailRow("Details:", alert.details)
-            detailRow("Actor:", alert.actor)
-            detailRow("Timestamp:", formatTimestamp(alert.timestamp))
-
-            Spacer()
-
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("press esc or enter to close")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                Text("Alert Details")
+                    .font(.system(.headline, design: .monospaced))
+                    .fontWeight(.bold)
+                    .foregroundStyle(Color(nsColor: .systemBlue))
                 Spacer()
-                Button("Close") { onDismiss() }
-                    .keyboardShortcut(.return, modifiers: [])
-                    .keyboardShortcut(.escape, modifiers: [])
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            LazyVGrid(columns: [GridItem(.fixed(90), alignment: .trailing), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 8) {
+                detailRow("Severity", alert.severity.rawValue.uppercased(), color: severityColor)
+                detailRow("Action", alert.action)
+                detailRow("Target", alert.target)
+                detailRow("Details", alert.details)
+                detailRow("Actor", alert.actor)
+                detailRow("Timestamp", formatTimestamp(alert.timestamp))
             }
         }
-        .padding(20)
-        .frame(width: 500, height: 300)
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    @ViewBuilder
     private func detailRow(_ label: String, _ value: String, color: Color? = nil) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(label)
+        Text(label)
+            .font(.system(.caption, design: .monospaced))
+            .fontWeight(.bold)
+            .foregroundStyle(.secondary)
+
+        if let color {
+            Text(value)
                 .font(.system(.caption, design: .monospaced))
                 .fontWeight(.bold)
-                .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .trailing)
-
-            if let color {
-                Text(value)
-                    .font(.system(.caption, design: .monospaced))
-                    .fontWeight(.bold)
-                    .foregroundStyle(color)
-            } else {
-                Text(value)
-                    .font(.system(.caption, design: .monospaced))
-            }
-
-            Spacer()
+                .foregroundStyle(color)
+                .textSelection(.enabled)
+        } else {
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
         }
     }
 

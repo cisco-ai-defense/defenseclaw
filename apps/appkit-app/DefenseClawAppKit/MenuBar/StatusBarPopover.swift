@@ -6,8 +6,10 @@ struct StatusBarPopover: View {
     let appViewModel: AppViewModel
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .foregroundStyle(.blue)
                 Text("DefenseClaw")
                     .font(.headline)
                 Spacer()
@@ -16,35 +18,26 @@ struct StatusBarPopover: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Sessions: \(appViewModel.sessions.count)")
-                    .font(.caption)
+            Text(statusSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-                if let index = appViewModel.activeSessionIndex {
-                    Text("Active: Session \(index + 1)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("No active session")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            Button {
+                route(.home)
+            } label: {
+                Label("Open Console", systemImage: "rectangle.split.2x1")
             }
+            .buttonStyle(.borderedProminent)
 
-            Divider()
-
-            Button("New Session...") {
-                appViewModel.showNewSessionSheet = true
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                if let window = NSApplication.shared.windows.first(where: { $0.isVisible }) {
-                    window.makeKeyAndOrderFront(nil)
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    navButton("Settings", "slider.horizontal.3", .settings)
+                    navButton("Alerts", "bell.badge", .alerts)
                 }
-            }
-
-            Button("Open Window") {
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                if let window = NSApplication.shared.windows.first(where: { $0.isVisible }) {
-                    window.makeKeyAndOrderFront(nil)
+                HStack(spacing: 6) {
+                    navButton("Scans", "magnifyingglass", .scan)
+                    navButton("Logs", "terminal", .logs)
                 }
             }
 
@@ -53,9 +46,10 @@ struct StatusBarPopover: View {
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
-        .frame(width: 250)
+        .frame(width: 280)
     }
 
     private var statusIndicator: some View {
@@ -66,6 +60,46 @@ struct StatusBarPopover: View {
             Text(appViewModel.isHealthy ? "Running" : "Offline")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private var statusSummary: String {
+        guard let health = appViewModel.healthSnapshot else {
+            return "The local helper is not reachable. Open the console for diagnostics and logs."
+        }
+        if health.isGatewayConnected {
+            return "Gateway connected. Guardrails and operator views are available in the main console."
+        }
+        return "Helper is running, but the gateway is still \(health.gateway.state.rawValue)."
+    }
+
+    private func navButton(_ title: String, _ systemImage: String, _ section: OperatorSection) -> some View {
+        Button {
+            route(section)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func route(_ section: OperatorSection) {
+        dismiss()
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
+        switch section {
+        case .home:
+            appDelegate.showHome()
+        case .settings:
+            appDelegate.showSettings()
+        case .scan:
+            appDelegate.showScan()
+        case .policy:
+            appDelegate.showPolicy()
+        case .alerts:
+            appDelegate.showAlerts()
+        case .tools:
+            appDelegate.showTools()
+        case .logs:
+            appDelegate.showLogs()
         }
     }
 }

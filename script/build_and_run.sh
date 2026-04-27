@@ -18,6 +18,46 @@ INFO_PLIST="$APP_CONTENTS/Info.plist"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
+ensure_sidecar() {
+  if ! command -v defenseclaw-gateway >/dev/null 2>&1; then
+    echo "warning: defenseclaw-gateway not found; launching app without local sidecar" >&2
+    return
+  fi
+
+  local host="127.0.0.1"
+  local port="18970"
+  local config_file="$HOME/.defenseclaw/config.yaml"
+  if [[ -r "$config_file" ]]; then
+    local in_gateway=0
+    local line
+    while IFS= read -r line; do
+      case "$line" in
+        gateway:*) in_gateway=1 ;;
+        [![:space:]]*) in_gateway=0 ;;
+      esac
+      if (( in_gateway )); then
+        if [[ "$line" =~ ^[[:space:]]*api_bind: ]]; then
+          local value="${line#*:}"
+          value="${value%%#*}"
+          value="${value//[[:space:]\'\"]/}"
+          if [[ -n "$value" ]]; then
+            host="$value"
+          fi
+        elif [[ "$line" =~ ^[[:space:]]*api_port:[[:space:]]*([0-9]+) ]]; then
+          port="${BASH_REMATCH[1]}"
+        fi
+      fi
+    done <"$config_file"
+  fi
+
+  if curl -fsS --max-time 1 "http://$host:$port/health" >/dev/null 2>&1; then
+    return
+  fi
+
+  defenseclaw-gateway start
+  sleep 2
+}
+
 swift build --package-path "$PACKAGE_DIR"
 BUILD_BINARY="$(swift build --package-path "$PACKAGE_DIR" --show-bin-path)/$PRODUCT_NAME"
 
@@ -59,11 +99,14 @@ cat >"$INFO_PLIST" <<PLIST
 PLIST
 
 open_app() {
+  ensure_sidecar
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
 open_app_qa() {
-  /usr/bin/open -n "$APP_BUNDLE" --args --qa-open-all-windows
+  local section="${1:-home}"
+  ensure_sidecar
+  /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section"
 }
 
 case "$MODE" in
@@ -87,12 +130,12 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   --qa|qa)
-    open_app_qa
+    open_app_qa "${2:-home}"
     sleep 2
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--qa]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--qa [section]]" >&2
     exit 2
     ;;
 esac
