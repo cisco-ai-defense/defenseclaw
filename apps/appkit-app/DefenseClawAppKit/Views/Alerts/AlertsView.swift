@@ -299,7 +299,9 @@ struct AlertsView: View {
                 alerts = fetched
                 if let selectedAlert,
                    !fetched.contains(where: { $0.id == selectedAlert.id }) {
-                    self.selectedAlert = nil
+                    self.selectedAlert = fetched.sorted { $0.timestamp > $1.timestamp }.first
+                } else if selectedAlert == nil {
+                    self.selectedAlert = fetched.sorted { $0.timestamp > $1.timestamp }.first
                 }
                 errorMessage = ""
                 lastRefresh = Date()

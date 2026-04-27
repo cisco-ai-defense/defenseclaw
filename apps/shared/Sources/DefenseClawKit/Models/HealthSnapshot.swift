@@ -112,17 +112,35 @@ public struct AnyCodable: Codable, @unchecked Sendable, CustomStringConvertible 
         case let i as Int: return "\(i)"
         case let d as Double: return "\(d)"
         case let b as Bool: return b ? "true" : "false"
+        case let array as [Any]:
+            return Self.prettyJSON(array)
+        case let dict as [String: Any]:
+            return Self.prettyJSON(dict)
+        case _ as NSNull:
+            return "null"
         default: return String(describing: value)
         }
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        if let s = try? container.decode(String.self) { value = s }
-        else if let i = try? container.decode(Int.self) { value = i }
-        else if let d = try? container.decode(Double.self) { value = d }
-        else if let b = try? container.decode(Bool.self) { value = b }
-        else { value = "unknown" }
+        if container.decodeNil() {
+            value = NSNull()
+        } else if let s = try? container.decode(String.self) {
+            value = s
+        } else if let i = try? container.decode(Int.self) {
+            value = i
+        } else if let d = try? container.decode(Double.self) {
+            value = d
+        } else if let b = try? container.decode(Bool.self) {
+            value = b
+        } else if let array = try? container.decode([AnyCodable].self) {
+            value = array.map(\.value)
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues(\.value)
+        } else {
+            value = "unknown"
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -132,7 +150,22 @@ public struct AnyCodable: Codable, @unchecked Sendable, CustomStringConvertible 
         case let i as Int: try container.encode(i)
         case let d as Double: try container.encode(d)
         case let b as Bool: try container.encode(b)
+        case let array as [Any]:
+            try container.encode(array.map(AnyCodable.init))
+        case let dict as [String: Any]:
+            try container.encode(dict.mapValues(AnyCodable.init))
+        case _ as NSNull:
+            try container.encodeNil()
         default: try container.encode(String(describing: value))
         }
+    }
+
+    private static func prettyJSON(_ value: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return String(describing: value)
+        }
+        return text
     }
 }

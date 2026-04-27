@@ -25,6 +25,13 @@ struct SetupView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("Setup")
+        .onChange(of: showAdvanced) { _, includeAdvanced in
+            if !includeAdvanced,
+               let group = model.group(withID: model.selectedGroupID),
+               group.isAdvanced {
+                model.selectGroup(SetupWorkspaceModel.hubGroupID)
+            }
+        }
     }
 
     private var sidebar: some View {
@@ -39,9 +46,15 @@ struct SetupView: View {
             }
 
             List(selection: selection) {
+                Section("Start") {
+                    Label("Overview", systemImage: "checklist")
+                        .tag(Optional(SetupWorkspaceModel.hubGroupID))
+                }
                 ForEach(model.groups) { group in
-                    SetupSidebarRow(group: group)
-                        .tag(Optional(group.id))
+                    if model.visibleGroups(includeAdvanced: showAdvanced).contains(group) {
+                        SetupSidebarRow(group: group)
+                            .tag(Optional(group.id))
+                    }
                 }
             }
             .listStyle(.sidebar)
@@ -69,59 +82,311 @@ struct SetupView: View {
 
     private var detail: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Label(model.selectedGroup.title, systemImage: model.selectedGroup.systemImage)
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                Toggle(isOn: $showAdvanced) {
-                    Label("Advanced", systemImage: "slider.horizontal.3")
-                }
-                .toggleStyle(.button)
-                .controlSize(.small)
-                Button {
-                    model.load()
-                } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
-                }
-                Button {
-                    model.saveChanges()
-                } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.changedCount == 0 || model.isSaving)
-            }
-            .padding(18)
+            detailToolbar
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(model.selectedGroup.subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-
-                    if !model.selectedGroup.fields.isEmpty {
-                        SetupFieldSection(model: model, group: model.selectedGroup, showAdvanced: showAdvanced)
-                    }
-
-                    let visibleWorkflows = model.visibleWorkflows(for: model.selectedGroup, includeAdvanced: showAdvanced)
-                    if !visibleWorkflows.isEmpty {
-                        SetupWorkflowSection(
-                            model: model,
-                            group: model.selectedGroup,
-                            workflows: visibleWorkflows,
-                            showAdvanced: showAdvanced
-                        )
-                    }
-
-                    if let result = model.lastTaskResult {
-                        SetupTaskResultView(result: result)
-                    }
-                }
-                .padding(18)
+            if model.isHubSelected {
+                SetupHubView(model: model, showAdvanced: $showAdvanced)
+            } else {
+                groupDetail
             }
         }
+    }
+
+    private var detailToolbar: some View {
+        HStack(spacing: 12) {
+            Label(model.isHubSelected ? "Guided Setup" : model.selectedGroup.title,
+                  systemImage: model.isHubSelected ? "checklist" : model.selectedGroup.systemImage)
+                .font(.title2.weight(.semibold))
+            Spacer()
+            Toggle(isOn: $showAdvanced) {
+                Label("Advanced", systemImage: "slider.horizontal.3")
+            }
+            .toggleStyle(.button)
+            .controlSize(.small)
+            Button {
+                model.load()
+            } label: {
+                Label("Reload", systemImage: "arrow.clockwise")
+            }
+            Button {
+                model.saveChanges()
+            } label: {
+                Label("Save", systemImage: "square.and.arrow.down")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.changedCount == 0 || model.isSaving)
+        }
+        .padding(18)
+    }
+
+    private var groupDetail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text(model.selectedGroup.subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                if !model.selectedGroup.fields.isEmpty {
+                    SetupFieldSection(model: model, group: model.selectedGroup, showAdvanced: showAdvanced)
+                }
+
+                let visibleWorkflows = model.visibleWorkflows(for: model.selectedGroup, includeAdvanced: showAdvanced)
+                if !visibleWorkflows.isEmpty {
+                    SetupWorkflowSection(
+                        model: model,
+                        group: model.selectedGroup,
+                        workflows: visibleWorkflows,
+                        showAdvanced: showAdvanced
+                    )
+                }
+
+                if let result = model.lastTaskResult {
+                    SetupTaskResultView(result: result)
+                }
+            }
+            .padding(18)
+        }
+    }
+}
+
+private struct SetupHubView: View {
+    @Bindable var model: SetupWorkspaceModel
+    @Binding var showAdvanced: Bool
+
+    private let primarySteps: [SetupHubStep] = [
+        SetupHubStep(
+            title: "1. Add LLM and agent basics",
+            subtitle: "Provider, model, DefenseClaw LLM key reference, and coding-agent discovery.",
+            systemImage: "brain.head.profile",
+            tint: .blue,
+            groupID: "llm",
+            workflowID: "doctor"
+        ),
+        SetupHubStep(
+            title: "2. Connect the local gateway",
+            subtitle: "Configure the helper, API bind, watchers, and OpenClaw connection.",
+            systemImage: "network",
+            tint: .teal,
+            groupID: "gateway",
+            workflowID: "gateway-setup"
+        ),
+        SetupHubStep(
+            title: "3. Enable scanner coverage",
+            subtitle: "Prepare skill and MCP scanners before trusting scan counts.",
+            systemImage: "magnifyingglass",
+            tint: .purple,
+            groupID: "scanners",
+            workflowID: "skill-scanner"
+        ),
+        SetupHubStep(
+            title: "4. Turn on guardrails",
+            subtitle: "Start in observe mode, choose local or remote scanning, then verify.",
+            systemImage: "shield",
+            tint: .green,
+            groupID: "guardrail",
+            workflowID: "guardrail-setup"
+        )
+    ]
+
+    private let optionalSteps: [SetupHubStep] = [
+        SetupHubStep(
+            title: "Observability",
+            subtitle: "Splunk, Datadog, Honeycomb, New Relic, Grafana, or generic OTLP.",
+            systemImage: "waveform.path.ecg",
+            tint: .orange,
+            groupID: "observability",
+            workflowID: "obs-splunk-o11y"
+        ),
+        SetupHubStep(
+            title: "Webhooks",
+            subtitle: "Slack, PagerDuty, Webex, and generic HMAC notifications.",
+            systemImage: "bell.and.waves.left.and.right",
+            tint: .indigo,
+            groupID: "webhooks",
+            workflowID: "webhook-slack"
+        ),
+        SetupHubStep(
+            title: "Enforcement defaults",
+            subtitle: "Severity matrices for skill, MCP, and plugin admission.",
+            systemImage: "lock.shield",
+            tint: .red,
+            groupID: "enforcement",
+            workflowID: nil
+        ),
+        SetupHubStep(
+            title: "Sandbox",
+            subtitle: "OpenShell policy setup. Runtime execution remains Linux-only.",
+            systemImage: "shippingbox",
+            tint: .brown,
+            groupID: "sandbox",
+            workflowID: "sandbox-setup"
+        )
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                hero
+                stepSection("Essentials", steps: primarySteps)
+                optionalSection
+
+                if let result = model.lastTaskResult {
+                    SetupTaskResultView(result: result)
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Start with the essentials, then add integrations when you need them.")
+                .font(.title3.weight(.semibold))
+            Text("This hub keeps first-time setup focused. Every config field still exists, but advanced groups are hidden until you enable Advanced.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button {
+                    if let doctor = model.workflow(withID: "doctor") {
+                        model.run(doctor)
+                    }
+                } label: {
+                    Label("Run Doctor", systemImage: "stethoscope")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.runningWorkflowID != nil)
+
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showPolicy()
+                } label: {
+                    Label("Open Policy Editor", systemImage: "doc.text.magnifyingglass")
+                }
+
+                Button {
+                    showAdvanced.toggle()
+                } label: {
+                    Label(showAdvanced ? "Hide Advanced" : "Show Advanced", systemImage: "slider.horizontal.3")
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.5)
+        )
+    }
+
+    private func stepSection(_ title: String, steps: [SetupHubStep]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 12)], spacing: 12) {
+                ForEach(steps) { step in
+                    SetupHubStepCard(model: model, step: step, showAdvanced: $showAdvanced)
+                }
+            }
+        }
+    }
+
+    private var optionalSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Optional and Advanced")
+                    .font(.headline)
+                Spacer()
+                if !showAdvanced {
+                    Text("Hidden in normal mode")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if showAdvanced {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 280), spacing: 12)], spacing: 12) {
+                    ForEach(optionalSteps) { step in
+                        SetupHubStepCard(model: model, step: step, showAdvanced: $showAdvanced)
+                    }
+                }
+            } else {
+                SetupHiddenAdvancedNotice(
+                    count: optionalSteps.count,
+                    label: "optional setup areas hidden until Advanced is enabled"
+                )
+            }
+        }
+    }
+}
+
+private struct SetupHubStep: Identifiable {
+    let id = UUID()
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let tint: Color
+    let groupID: String
+    let workflowID: String?
+}
+
+private struct SetupHubStepCard: View {
+    @Bindable var model: SetupWorkspaceModel
+    let step: SetupHubStep
+    @Binding var showAdvanced: Bool
+
+    private var workflow: SetupWorkflow? {
+        step.workflowID.flatMap { model.workflow(withID: $0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: step.systemImage)
+                    .foregroundStyle(step.tint)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(step.title)
+                        .font(.headline)
+                    Text(step.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack {
+                Button {
+                    showAdvanced = showAdvanced || (model.group(withID: step.groupID)?.isAdvanced == true)
+                    model.selectGroup(step.groupID)
+                } label: {
+                    Label("Configure", systemImage: "slider.horizontal.3")
+                }
+
+                if let workflow {
+                    Button {
+                        model.run(workflow)
+                    } label: {
+                        Label(model.runningWorkflowID == workflow.id ? "Running" : "Run", systemImage: "play.fill")
+                    }
+                    .disabled(model.runningWorkflowID != nil)
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.5)
+        )
     }
 }
 

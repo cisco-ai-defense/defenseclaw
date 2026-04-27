@@ -79,4 +79,25 @@ final class HealthSnapshotTests: XCTestCase {
         XCTAssertTrue(Severity.none < Severity.info)
         XCTAssertTrue(Severity.critical > Severity.medium)
     }
+
+    func testAnyCodableDecodesNestedStatusPayloads() throws {
+        let json = """
+        {
+            "health": {
+                "gateway": {"state": "running"},
+                "checks": ["config", "policy"]
+            },
+            "provenance": {"enabled": true},
+            "count": 2
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode([String: AnyCodable].self, from: json)
+
+        let health = try XCTUnwrap(decoded["health"]?.value as? [String: Any])
+        let checks = try XCTUnwrap(health["checks"] as? [Any])
+        XCTAssertEqual(checks.count, 2)
+        XCTAssertTrue(decoded["health"]?.description.contains("\"gateway\"") == true)
+        XCTAssertEqual(decoded["count"]?.description, "2")
+    }
 }

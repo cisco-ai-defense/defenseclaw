@@ -67,4 +67,31 @@ final class SetupCatalogTests: XCTestCase {
             gatewayWorkflow.fields.count
         )
     }
+
+    @MainActor
+    func testLLMSetupShowsAPIKeyInRecommendedFields() throws {
+        let model = SetupWorkspaceModel()
+        let llm = try XCTUnwrap(SetupCatalog.groups.first { $0.id == "llm" })
+        let recommendedPaths = Set(model.primaryFields(for: llm).map(\.path))
+
+        XCTAssertTrue(recommendedPaths.contains("llm.api_key_env"))
+        XCTAssertTrue(recommendedPaths.contains("llm.api_key"))
+    }
+
+    @MainActor
+    func testNormalSetupModeHidesAdvancedGroupsFromSidebar() {
+        let model = SetupWorkspaceModel()
+        let normalIDs = Set(model.visibleGroups(includeAdvanced: false).map(\.id))
+        let advancedIDs = Set(model.visibleGroups(includeAdvanced: true).map(\.id))
+
+        XCTAssertTrue(normalIDs.contains("llm"))
+        XCTAssertTrue(normalIDs.contains("gateway"))
+        XCTAssertTrue(normalIDs.contains("scanners"))
+        XCTAssertTrue(normalIDs.contains("guardrail"))
+        XCTAssertFalse(normalIDs.contains("observability"))
+        XCTAssertFalse(normalIDs.contains("webhooks"))
+        XCTAssertFalse(normalIDs.contains("enforcement"))
+        XCTAssertFalse(normalIDs.contains("sandbox"))
+        XCTAssertTrue(advancedIDs.isSuperset(of: ["observability", "webhooks", "enforcement", "sandbox"]))
+    }
 }

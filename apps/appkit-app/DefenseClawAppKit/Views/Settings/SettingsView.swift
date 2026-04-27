@@ -89,14 +89,28 @@ struct SettingsView: View {
 }
 
 struct ConfigFilesView: View {
-    @State private var model = TextFileEditorModel(mode: .configuration)
+    @State private var model: TextFileEditorModel
+    private let title: String
+    private let subtitle: String
+    private let emptyMessage: String
+
+    init(
+        title: String = "Config Files",
+        subtitle: String = "Edit DefenseClaw, OpenClaw, coding-agent, scanner, and observability configuration files from one workspace.",
+        emptyMessage: String = "No config files found"
+    ) {
+        _model = State(initialValue: TextFileEditorModel(mode: .configuration))
+        self.title = title
+        self.subtitle = subtitle
+        self.emptyMessage = emptyMessage
+    }
 
     var body: some View {
         ManagedTextFileWorkspaceView(
             model: model,
-            title: "Config Files",
-            subtitle: "Edit DefenseClaw, OpenClaw, coding-agent, scanner, and observability configuration files from one workspace.",
-            emptyMessage: "No config files found"
+            title: title,
+            subtitle: subtitle,
+            emptyMessage: emptyMessage
         )
     }
 }
@@ -599,6 +613,7 @@ struct EnforcementView: View {
     @State private var allowedList: [AllowEntry] = []
     @State private var skills: [Skill] = []
     @State private var mcpServers: [MCPServer] = []
+    @State private var plugins: [Plugin] = []
     @State private var tools: [ToolEntry] = []
     @State private var isLoading = false
     @State private var errorMessage = ""
@@ -611,6 +626,7 @@ struct EnforcementView: View {
     @State private var newEntryReason = ""
 
     private let sidecarClient = SidecarClient()
+    private let commandRunner = LocalCommandRunner()
     private let entryTypes = ["skill", "mcp", "plugin", "tool"]
     private let statusOptions = ["All", "Blocked", "Allowed", "Quarantined", "Monitored"]
 
@@ -620,6 +636,7 @@ struct EnforcementView: View {
             allowed: allowedList,
             skills: skills,
             mcpServers: mcpServers,
+            plugins: plugins,
             tools: tools
         )
     }
@@ -665,14 +682,19 @@ struct EnforcementView: View {
             header
             Divider()
 
-            HSplitView {
-                itemList
-                    .frame(minWidth: 520)
+            if items.isEmpty, !errorMessage.isEmpty, !isLoading {
+                enforcementUnavailable
+            } else {
+                HSplitView {
+                    itemList
+                        .frame(minWidth: 520)
 
-                detailPanel
-                    .frame(minWidth: 360, idealWidth: 420)
+                    detailPanel
+                        .frame(minWidth: 360, idealWidth: 420)
+                }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task {
             await loadData()
         }
@@ -705,6 +727,7 @@ struct EnforcementView: View {
                 countChip("Items", items.count, .blue)
                 countChip("Blocked", blockedList.count, .red)
                 countChip("Allowed", allowedList.count, .green)
+                countChip("Plugins", plugins.count, .purple)
 
                 Spacer()
 
@@ -738,8 +761,52 @@ struct EnforcementView: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(18)
-        .padding(.leading, 128)
+        .padding(.leading, 72)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var enforcementUnavailable: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "network.slash")
+                .font(.system(size: 34))
+                .foregroundStyle(.orange)
+            Text("Enforcement data is unavailable")
+                .font(.title3.weight(.semibold))
+            Text("DefenseClaw could not load allow/block lists or runtime inventory. Start the helper from Setup or Operations, then refresh this view.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 560)
+            Text(errorMessage)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: 680, alignment: .leading)
+                .padding(12)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            HStack {
+                Button {
+                    Task { await loadData() }
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showSetup()
+                } label: {
+                    Label("Open Setup", systemImage: "wand.and.stars")
+                }
+
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showOperations()
+                } label: {
+                    Label("Open Diagnostics", systemImage: "stethoscope")
+                }
+            }
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var itemList: some View {
@@ -767,7 +834,7 @@ struct EnforcementView: View {
                     items.isEmpty ? "No enforcement inventory loaded" : "No entries match these filters",
                     systemImage: "lock.shield",
                     description: Text(items.isEmpty
-                                      ? "Refresh to load explicit allow/block lists plus discovered skills, MCP servers, and tools."
+                                      ? "Refresh to load explicit allow/block lists plus discovered skills, MCP servers, plugins, and tools."
                                       : "Clear search or status filters to show every enforcement item.")
                 )
             } else {
@@ -953,30 +1020,42 @@ struct EnforcementView: View {
         do {
             blockedList = try await sidecarClient.blockedList()
         } catch {
+            blockedList = []
             errors.append("Blocked list: \(error.localizedDescription)")
         }
 
         do {
             allowedList = try await sidecarClient.allowedList()
         } catch {
+            allowedList = []
             errors.append("Allowed list: \(error.localizedDescription)")
         }
 
         do {
             skills = try await sidecarClient.skills()
         } catch {
+            skills = []
             errors.append("Skills: \(error.localizedDescription)")
         }
 
         do {
             mcpServers = try await sidecarClient.mcpServers()
         } catch {
+            mcpServers = []
             errors.append("MCP servers: \(error.localizedDescription)")
+        }
+
+        do {
+            plugins = try await loadPlugins()
+        } catch {
+            plugins = []
+            errors.append("Plugins: \(error.localizedDescription)")
         }
 
         do {
             tools = try await sidecarClient.toolsCatalog()
         } catch {
+            tools = []
             errors.append("Tools: \(error.localizedDescription)")
         }
 
@@ -987,6 +1066,24 @@ struct EnforcementView: View {
             selectedItemID = filteredItems.first?.id
         }
         isLoading = false
+    }
+
+    private func loadPlugins() async throws -> [Plugin] {
+        let result = try await commandRunner.run("defenseclaw", arguments: ["plugin", "list", "--json"])
+        guard result.exitCode == 0 else {
+            throw EnforcementCommandError.failed(result.combinedOutput)
+        }
+
+        let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard output.first == "[" || output.first == "{" else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        if let items = try? decoder.decode([Plugin].self, from: Data(output.utf8)) {
+            return items
+        }
+        return try decoder.decode(EnforcementPluginListResponse.self, from: Data(output.utf8)).items
     }
 
     private func addEntry() async {
@@ -1061,6 +1158,41 @@ struct EnforcementView: View {
             return .orange
         default:
             return .secondary
+        }
+    }
+}
+
+private struct EnforcementPluginListResponse: Decodable {
+    let items: [Plugin]
+
+    private enum CodingKeys: String, CodingKey {
+        case plugins
+        case items
+        case data
+    }
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if let decoded = try? single.decode([Plugin].self) {
+            items = decoded
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items = try container.decodeIfPresent([Plugin].self, forKey: .plugins)
+            ?? container.decodeIfPresent([Plugin].self, forKey: .items)
+            ?? container.decodeIfPresent([Plugin].self, forKey: .data)
+            ?? []
+    }
+}
+
+private enum EnforcementCommandError: LocalizedError {
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .failed(let output):
+            return output.isEmpty ? "Command failed without output." : output
         }
     }
 }
@@ -1166,6 +1298,7 @@ private struct EnforcementItem: Identifiable {
         allowed: [AllowEntry],
         skills: [Skill],
         mcpServers: [MCPServer],
+        plugins: [Plugin],
         tools: [ToolEntry]
     ) -> [EnforcementItem] {
         var merged: [String: EnforcementItem] = [:]
@@ -1217,6 +1350,21 @@ private struct EnforcementItem: Identifiable {
                 detail: server.command ?? server.url,
                 blocked: server.blocked,
                 allowed: server.allowed
+            )
+        }
+
+        for plugin in plugins {
+            add(
+                type: "plugin",
+                name: plugin.id,
+                source: plugin.source ?? "Plugins",
+                detail: [plugin.name, plugin.pluginDescription ?? plugin.path]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " - "),
+                blocked: plugin.blocked,
+                allowed: plugin.allowed,
+                quarantined: plugin.quarantined
             )
         }
 
