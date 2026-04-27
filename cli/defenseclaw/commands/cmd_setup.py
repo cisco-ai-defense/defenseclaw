@@ -1189,8 +1189,54 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
 }
 
 
-def _detect_connector() -> str | None:
-    """Guess the active agent framework from filesystem indicators."""
+def _read_picked_connector(data_dir: str | None) -> str | None:
+    """Read the connector hint written by ``scripts/install.sh``.
+
+    The installer records the operator's chosen connector at
+    ``<data_dir>/picked_connector`` (a single-line plaintext file) so
+    that subsequent CLI invocations can default to it without
+    re-prompting. We treat the file as advisory: the canonical runtime
+    value lives in ``guardrail.connector`` once setup has run, but the
+    hint lets the *first* `defenseclaw setup guardrail` after install
+    pick up the operator's intent.
+
+    The function is intentionally tolerant — a missing file, an
+    unreadable file, or an unrecognized value all yield ``None`` so
+    callers can fall through to detection / defaults.
+    """
+    if not data_dir:
+        return None
+    path = os.path.join(data_dir, "picked_connector")
+    try:
+        # Bound the read to defend against a tampered or accidentally
+        # huge file: the legitimate contents are a 4-10 byte connector
+        # name. We never interpret the file as code.
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read(64)
+    except OSError:
+        return None
+    name = raw.strip().lower()
+    if name in _CONNECTOR_NAMES:
+        return name
+    return None
+
+
+def _detect_connector(data_dir: str | None = None) -> str | None:
+    """Guess the active agent framework, preferring the install-time hint.
+
+    Resolution order:
+      1. ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
+         --connector ...``) — the operator's explicit choice at install
+         time.
+      2. Filesystem heuristics over the agent's own state directories
+         (``~/.claude``, ``~/.codex``, ``~/.zeptoclaw/config.json``).
+
+    Returns ``None`` when neither source is conclusive so the caller
+    can fall back to ``"openclaw"``.
+    """
+    picked = _read_picked_connector(data_dir)
+    if picked:
+        return picked
     home = os.path.expanduser("~")
     if os.path.isdir(os.path.join(home, ".claude")):
         return "claudecode"
@@ -1201,9 +1247,17 @@ def _detect_connector() -> str | None:
     return None
 
 
-def _select_connector_interactive(current: str) -> str:
-    """Present a numbered menu and return the selected connector name."""
-    detected = _detect_connector()
+def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
+    """Present a numbered menu and return the selected connector name.
+
+    ``data_dir`` is forwarded to ``_detect_connector`` so the install-time
+    ``picked_connector`` hint can seed the menu's default. We only
+    override ``current`` when it is empty or still the historical
+    fallback ("openclaw") — operators who already configured a non-
+    default connector should not see their choice silently flipped by
+    a leftover hint file.
+    """
+    detected = _detect_connector(data_dir)
     default = current
     if not default or default == "openclaw":
         default = detected or "openclaw"
@@ -1260,9 +1314,17 @@ def _print_connector_info(name: str) -> None:
 
 @setup.command("guardrail")
 @click.option("--disable", is_flag=True, help="Disable guardrail and revert OpenClaw config")
-@click.option("--agent", "agent_name",
+# ``--connector`` is the canonical name (matches scripts/install.sh and
+# /v1/connectors). ``--agent`` is kept as an alias for backward
+# compatibility with existing scripts and docs. Both bind to the same
+# ``agent_name`` parameter; supplying both flags will simply use the
+# last one parsed by Click, which is consistent with Click's standard
+# behavior for aliased options.
+@click.option("--connector", "--agent", "agent_name",
               type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False), default=None,
-              help="Agent framework connector (e.g. openclaw, claudecode, codex)")
+              help="Agent framework connector (openclaw, claudecode, codex, zeptoclaw). "
+                   "Alias: --agent. Defaults to <data_dir>/picked_connector when set "
+                   "by the installer, else filesystem auto-detection, else openclaw.")
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
 @click.option("--scanner-mode", type=click.Choice(["local", "remote"]), default=None,
@@ -1304,10 +1366,14 @@ def setup_guardrail(
     Every prompt and response is inspected for prompt injection, secrets,
     PII, and data exfiltration patterns.
 
-    Use --agent to select the agent framework connector (openclaw,
-    claudecode, codex, etc.). The connector determines how LLM traffic
-    is intercepted, how tool calls are inspected, and what subprocess
-    enforcement policy is applied.
+    Use --connector (alias: --agent) to select the agent framework
+    connector (openclaw, claudecode, codex, zeptoclaw). The connector
+    determines how LLM traffic is intercepted, how tool calls are
+    inspected, and what subprocess enforcement policy is applied. When
+    omitted, the value defaults to the install-time hint at
+    ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
+    --connector ...``), then to any previously saved choice in
+    ``guardrail.connector``, then to ``openclaw``.
 
     Two modes:
       observe — log findings, never block (default, recommended to start)
@@ -1328,8 +1394,26 @@ def setup_guardrail(
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
+        # Connector resolution order in non-interactive mode:
+        #   1. explicit --connector / --agent flag (operator intent always wins)
+        #   2. existing gc.connector if already set to a non-default value
+        #      (preserves prior `setup guardrail` choice across re-runs)
+        #   3. <data_dir>/picked_connector hint written by install.sh
+        #      (operator intent at install time)
+        #   4. fallback to "openclaw" (historical default)
+        # We deliberately do NOT run filesystem auto-detect (the
+        # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
+        # those directories often pre-exist on developer workstations
+        # and would silently flip the connector behind the operator's
+        # back during scripted installs. Filesystem detection is only
+        # used in the interactive picker where the operator can see and
+        # confirm the suggested default.
         if agent_name:
             gc.connector = agent_name
+        elif not gc.connector or gc.connector == "openclaw":
+            picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
+            if picked:
+                gc.connector = picked
         gc.mode = guard_mode or gc.mode or "observe"
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
@@ -1537,7 +1621,10 @@ def _interactive_guardrail_setup(
     if agent_name and agent_name in _CONNECTOR_META:
         gc.connector = agent_name
     else:
-        gc.connector = _select_connector_interactive(gc.connector or "openclaw")
+        gc.connector = _select_connector_interactive(
+            gc.connector or "openclaw",
+            data_dir=getattr(app.cfg, "data_dir", None),
+        )
     click.echo()
     _print_connector_info(gc.connector)
     click.echo()
