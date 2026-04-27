@@ -944,37 +944,42 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %q not found in registry, falling back to openclaw\n", connectorName)
 		conn, _ = registry.Get("openclaw")
 	}
+	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+	apiBind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		apiBind = s.cfg.Gateway.APIBind
+	}
+	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
+
+	setupOpts := connector.SetupOpts{
+		DataDir:   s.cfg.DataDir,
+		ProxyAddr: proxyAddr,
+		APIAddr:   apiAddr,
+		// Bake the gateway token into hook scripts so claude-code-hook.sh
+		// and codex-hook.sh can authenticate against the API server's
+		// auth middleware. ResolvedToken checks env vars first, then
+		// config — same source the proxy uses for credential wiring
+		// below, so the baked value and the value accepted by the API
+		// middleware stay in lockstep.
+		APIToken: s.cfg.Gateway.ResolvedToken(),
+	}
+
 	if conn != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
-
-		proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
-		apiBind := "127.0.0.1"
-		if s.cfg.Gateway.APIBind != "" {
-			apiBind = s.cfg.Gateway.APIBind
-		}
-		apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
-
-		setupOpts := connector.SetupOpts{
-			DataDir:   s.cfg.DataDir,
-			ProxyAddr: proxyAddr,
-			APIAddr:   apiAddr,
-			// Bake the gateway token into hook scripts so claude-code-hook.sh
-			// and codex-hook.sh can authenticate against the API server's
-			// auth middleware. ResolvedToken checks env vars first, then
-			// config — same source the proxy uses for credential wiring
-			// below, so the baked value and the value accepted by the API
-			// middleware stay in lockstep.
-			APIToken: s.cfg.Gateway.ResolvedToken(),
-		}
 
 		if !s.cfg.Guardrail.Enabled {
 			fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 			if err := conn.Teardown(ctx, setupOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
 			}
+			connector.ClearActiveConnector(s.cfg.DataDir)
 		} else {
+			teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx)
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] connector setup: %v\n", err)
+			}
+			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 			}
 		}
 
@@ -1001,6 +1006,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if err == nil && proxy != nil {
 		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		proxy.SetConnectorSwitchState(registry, setupOpts)
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -1014,6 +1020,27 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		return err
 	}
 	return proxy.Run(ctx)
+}
+
+// teardownPreviousConnector checks if a different connector was previously
+// active (persisted in active_connector.json) and runs its Teardown so
+// hooks, env overrides, and config patches from the old connector are
+// cleaned up before the new one is set up. This prevents stale state
+// when an operator switches e.g. from "claudecode" to "openclaw".
+func teardownPreviousConnector(registry *connector.Registry, newName string, opts connector.SetupOpts, ctx context.Context) {
+	prev := connector.LoadActiveConnector(opts.DataDir)
+	if prev == "" || prev == newName {
+		return
+	}
+	old, ok := registry.Get(prev)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[guardrail] previous connector %q not in registry — skipping teardown\n", prev)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector changed %s → %s — tearing down %s\n", prev, newName, prev)
+	if err := old.Teardown(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, err)
+	}
 }
 
 // runAPI starts the REST API server.

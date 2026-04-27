@@ -3183,6 +3183,109 @@ func TestConnectorPrefixStripper(t *testing.T) {
 	}
 }
 
+func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+
+	// Start with codex as the active connector.
+	codexConn, _ := reg.Get("codex")
+	codexConn.SetCredentials("tok", "mk")
+
+	p := &GuardrailProxy{
+		connector:    codexConn,
+		registry:     reg,
+		gatewayToken: "tok",
+		masterKey:    "mk",
+		setupOpts: connector.SetupOpts{
+			DataDir:   dir,
+			ProxyAddr: "127.0.0.1:4000",
+			APIAddr:   "127.0.0.1:18970",
+		},
+		health: NewSidecarHealth(),
+	}
+
+	if p.connector.Name() != "codex" {
+		t.Fatalf("initial connector = %q, want codex", p.connector.Name())
+	}
+
+	// Switch to openclaw via runtime config.
+	p.switchConnectorLocked("openclaw")
+
+	if p.connector.Name() != "openclaw" {
+		t.Errorf("connector after switch = %q, want openclaw", p.connector.Name())
+	}
+
+	saved := connector.LoadActiveConnector(dir)
+	if saved != "openclaw" {
+		t.Errorf("persisted state = %q, want openclaw", saved)
+	}
+}
+
+func TestSwitchConnectorLocked_SameConnectorIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+	}
+
+	// No state file should be written for a no-op switch.
+	p.switchConnectorLocked("codex")
+
+	if saved := connector.LoadActiveConnector(dir); saved != "" {
+		t.Errorf("no-op switch should not write state, got %q", saved)
+	}
+}
+
+func TestSwitchConnectorLocked_UnknownConnectorIgnored(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+	}
+
+	p.switchConnectorLocked("nonexistent")
+
+	if p.connector.Name() != "codex" {
+		t.Errorf("connector should remain codex after unknown switch, got %q", p.connector.Name())
+	}
+}
+
+func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+	codexConn.SetCredentials("tok", "mk")
+
+	p := &GuardrailProxy{
+		connector:    codexConn,
+		registry:     reg,
+		gatewayToken: "tok",
+		masterKey:    "mk",
+		setupOpts: connector.SetupOpts{
+			DataDir:   dir,
+			ProxyAddr: "127.0.0.1:4000",
+			APIAddr:   "127.0.0.1:18970",
+		},
+		health:    NewSidecarHealth(),
+		inspector: NewGuardrailInspector("local", nil, nil, ""),
+	}
+
+	cfg := map[string]string{"connector": "openclaw"}
+	p.applyRuntime(cfg)
+
+	if p.connector.Name() != "openclaw" {
+		t.Errorf("connector after applyRuntime = %q, want openclaw", p.connector.Name())
+	}
+}
+
 func TestIsValidConnectorName(t *testing.T) {
 	tests := []struct {
 		name  string

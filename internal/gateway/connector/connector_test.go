@@ -2356,3 +2356,76 @@ func TestAllConnectors_ImplementSetCredentials(t *testing.T) {
 		conn.SetCredentials("test-token", "test-master")
 	}
 }
+
+func TestConnectorState_SaveLoadClear(t *testing.T) {
+	dir := t.TempDir()
+
+	if got := LoadActiveConnector(dir); got != "" {
+		t.Errorf("LoadActiveConnector on empty dir = %q, want empty", got)
+	}
+
+	if err := SaveActiveConnector(dir, "claudecode"); err != nil {
+		t.Fatalf("SaveActiveConnector: %v", err)
+	}
+	if got := LoadActiveConnector(dir); got != "claudecode" {
+		t.Errorf("LoadActiveConnector = %q, want %q", got, "claudecode")
+	}
+
+	if err := SaveActiveConnector(dir, "openclaw"); err != nil {
+		t.Fatalf("SaveActiveConnector overwrite: %v", err)
+	}
+	if got := LoadActiveConnector(dir); got != "openclaw" {
+		t.Errorf("LoadActiveConnector after overwrite = %q, want %q", got, "openclaw")
+	}
+
+	ClearActiveConnector(dir)
+	if got := LoadActiveConnector(dir); got != "" {
+		t.Errorf("LoadActiveConnector after clear = %q, want empty", got)
+	}
+}
+
+func TestConnectorState_CorruptedFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "active_connector.json"), []byte("not json"), 0o644)
+	if got := LoadActiveConnector(dir); got != "" {
+		t.Errorf("LoadActiveConnector on corrupt file = %q, want empty", got)
+	}
+}
+
+func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := SaveActiveConnector(dir, "codex"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	reg := NewDefaultRegistry()
+	prev := LoadActiveConnector(dir)
+	if prev != "codex" {
+		t.Fatalf("expected codex, got %q", prev)
+	}
+
+	oldConn, ok := reg.Get(prev)
+	if !ok {
+		t.Fatal("codex not in registry")
+	}
+
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := oldConn.Teardown(nil, opts); err != nil {
+		t.Errorf("Teardown of previous connector: %v", err)
+	}
+
+	newConn, _ := reg.Get("claudecode")
+	ClaudeCodeSettingsPathOverride = filepath.Join(dir, "settings.json")
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	if err := newConn.Setup(nil, opts); err != nil {
+		t.Errorf("Setup of new connector: %v", err)
+	}
+	if err := SaveActiveConnector(dir, "claudecode"); err != nil {
+		t.Fatalf("save new: %v", err)
+	}
+	if got := LoadActiveConnector(dir); got != "claudecode" {
+		t.Errorf("active after switch = %q, want claudecode", got)
+	}
+}

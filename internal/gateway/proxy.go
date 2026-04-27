@@ -112,6 +112,11 @@ type GuardrailProxy struct {
 	mode         string
 	blockMessage string
 
+	// registry + setupOpts enable runtime connector hot-swap when the
+	// "connector" key appears in guardrail_runtime.json.
+	registry *connector.Registry
+	setupOpts connector.SetupOpts
+
 	// Observability defaults set at bootstrap. defaultAgentName
 	// falls back to cfg.Claw.Mode ("openclaw") when the request
 	// does not carry an agent identifier; defaultPolicyID is the
@@ -279,6 +284,13 @@ func NewGuardrailProxy(
 	}
 	p.resolveProviderFn = p.resolveProviderFromHeaders
 	return p, nil
+}
+
+// SetConnectorSwitchState stores the registry and setup options so the proxy
+// can hot-swap connectors at runtime when guardrail_runtime.json changes.
+func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts connector.SetupOpts) {
+	p.registry = reg
+	p.setupOpts = opts
 }
 
 // SetWebhookDispatcher attaches a webhook dispatcher for guardrail block notifications.
@@ -2769,6 +2781,50 @@ func (p *GuardrailProxy) applyRuntime(cfg map[string]string) {
 	if bm, ok := cfg["block_message"]; ok {
 		p.blockMessage = bm
 	}
+	if newName, ok := cfg["connector"]; ok {
+		p.switchConnectorLocked(newName)
+	}
+}
+
+// switchConnectorLocked tears down the current connector and sets up the
+// new one. Must be called with rtMu held.
+func (p *GuardrailProxy) switchConnectorLocked(newName string) {
+	if p.registry == nil {
+		return
+	}
+	if p.connector != nil && p.connector.Name() == newName {
+		return
+	}
+	newConn, ok := p.registry.Get(newName)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: %q not in registry — ignoring\n", newName)
+		return
+	}
+
+	ctx := context.Background()
+
+	if p.connector != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", p.connector.Name())
+		if err := p.connector.Teardown(ctx, p.setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown %s: %v\n", p.connector.Name(), err)
+		}
+	}
+
+	newConn.SetCredentials(p.gatewayToken, p.masterKey)
+	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: setting up %s\n", newName)
+	if err := newConn.Setup(ctx, p.setupOpts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] setup %s: %v\n", newName, err)
+	}
+
+	p.connector = newConn
+	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+	}
+
+	if p.health != nil {
+		p.health.SetConnector(newConn.Name(), newConn.ToolInspectionMode(), newConn.SubprocessPolicy())
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch complete: %s (%s)\n", newConn.Name(), newConn.Description())
 }
 
 // ---------------------------------------------------------------------------
