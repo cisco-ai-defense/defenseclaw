@@ -5,13 +5,14 @@ import Observation
 @Observable
 final class SetupWorkspaceModel {
     let groups = SetupCatalog.groups
-    var selectedGroupID = SetupCatalog.groups.first?.id ?? "llm"
+    var selectedGroupID = SetupWorkspaceModel.qaDefaultGroupID
     var textValues: [String: String] = [:]
     var boolValues: [String: Bool] = [:]
     var workflowTextValues: [String: [String: String]] = [:]
     var workflowBoolValues: [String: [String: Bool]] = [:]
     var statusMessage = ""
     var commandOutput = ""
+    var lastTaskResult: SetupTaskResult?
     var isLoading = false
     var isSaving = false
     var runningWorkflowID: String?
@@ -20,6 +21,25 @@ final class SetupWorkspaceModel {
     private var originalBoolValues: [String: Bool] = [:]
     private var store = YAMLConfigStore()
     private let runner = LocalCommandRunner()
+
+    private static var qaDefaultGroupID: String {
+        let arguments = ProcessInfo.processInfo.arguments
+
+        if let index = arguments.firstIndex(of: "--qa-setup-group"),
+           arguments.indices.contains(index + 1),
+           SetupCatalog.groups.contains(where: { $0.id == arguments[index + 1] }) {
+            return arguments[index + 1]
+        }
+
+        if let argument = arguments.first(where: { $0.hasPrefix("--qa-setup-group=") }) {
+            let groupID = String(argument.dropFirst("--qa-setup-group=".count))
+            if SetupCatalog.groups.contains(where: { $0.id == groupID }) {
+                return groupID
+            }
+        }
+
+        return SetupCatalog.groups.first?.id ?? "llm"
+    }
 
     var selectedGroup: SetupGroup {
         groups.first { $0.id == selectedGroupID } ?? groups[0]
@@ -167,14 +187,16 @@ final class SetupWorkspaceModel {
         }
 
         runningWorkflowID = workflow.id
-        statusMessage = "Running defenseclaw \(built.arguments.joined(separator: " "))"
+        statusMessage = "Running \(workflow.title)"
         commandOutput = ""
+        lastTaskResult = nil
 
         Task {
             do {
                 let result = try await runner.run("defenseclaw", arguments: built.arguments)
                 await MainActor.run {
                     commandOutput = format(result)
+                    lastTaskResult = SetupTaskResult(workflowTitle: workflow.title, result: result)
                     statusMessage = result.exitCode == 0 ? "\(workflow.title) finished" : "\(workflow.title) failed with exit \(result.exitCode)"
                     runningWorkflowID = nil
                     load()
@@ -182,6 +204,7 @@ final class SetupWorkspaceModel {
             } catch {
                 await MainActor.run {
                     commandOutput = error.localizedDescription
+                    lastTaskResult = SetupTaskResult(workflowTitle: workflow.title, startError: error)
                     statusMessage = "\(workflow.title) could not start"
                     runningWorkflowID = nil
                 }
@@ -193,9 +216,139 @@ final class SetupWorkspaceModel {
         "defenseclaw " + buildArguments(for: workflow).arguments.joined(separator: " ")
     }
 
+    func primaryFields(for group: SetupGroup) -> [SetupField] {
+        let primaryPaths = Self.primaryFieldPaths[group.id, default: []]
+        return group.fields.filter { primaryPaths.contains($0.path) }
+    }
+
+    func advancedFields(for group: SetupGroup) -> [SetupField] {
+        let primaryPaths = Self.primaryFieldPaths[group.id, default: []]
+        return group.fields.filter { !primaryPaths.contains($0.path) }
+    }
+
+    func visibleWorkflows(for group: SetupGroup, includeAdvanced: Bool) -> [SetupWorkflow] {
+        if includeAdvanced {
+            return group.workflows
+        }
+        return group.workflows.filter { !Self.advancedWorkflowIDs.contains($0.id) }
+    }
+
+    func hiddenWorkflowCount(for group: SetupGroup, includeAdvanced: Bool) -> Int {
+        includeAdvanced ? 0 : group.workflows.count - visibleWorkflows(for: group, includeAdvanced: false).count
+    }
+
+    func visibleWorkflowFields(
+        for workflow: SetupWorkflow,
+        includeAdvanced: Bool
+    ) -> [SetupWorkflowField] {
+        if includeAdvanced {
+            return workflow.fields
+        }
+
+        return workflow.fields.filter { field in
+            isPrimaryWorkflowField(field, workflow: workflow)
+        }
+    }
+
+    func hiddenWorkflowFieldCount(for workflow: SetupWorkflow, includeAdvanced: Bool) -> Int {
+        includeAdvanced ? 0 : workflow.fields.count - visibleWorkflowFields(for: workflow, includeAdvanced: false).count
+    }
+
     private var allFields: [SetupField] {
         groups.flatMap(\.fields)
     }
+
+    private static let primaryFieldPaths: [String: Set<String>] = [
+        "llm": [
+            "llm.provider",
+            "llm.model",
+            "llm.api_key_env",
+            "claw.mode"
+        ],
+        "gateway": [
+            "gateway.watcher.enabled",
+            "gateway.watcher.skill.enabled",
+            "gateway.watcher.skill.take_action",
+            "gateway.watcher.plugin.enabled",
+            "gateway.watcher.plugin.take_action",
+            "gateway.watcher.mcp.take_action",
+            "gateway.auto_approve_safe"
+        ],
+        "scanners": [
+            "scanners.skill_scanner.policy",
+            "scanners.skill_scanner.lenient",
+            "scanners.skill_scanner.use_llm",
+            "scanners.skill_scanner.use_behavioral",
+            "scanners.skill_scanner.use_virustotal",
+            "scanners.skill_scanner.use_aidefense",
+            "scanners.mcp_scanner.scan_prompts",
+            "scanners.mcp_scanner.scan_resources",
+            "scanners.mcp_scanner.scan_instructions"
+        ],
+        "guardrail": [
+            "guardrail.enabled",
+            "guardrail.mode",
+            "guardrail.scanner_mode",
+            "guardrail.block_message",
+            "guardrail.judge.enabled",
+            "guardrail.judge.injection",
+            "guardrail.judge.pii"
+        ],
+        "observability": [
+            "otel.enabled",
+            "otel.endpoint",
+            "otel.protocol",
+            "otel.traces.enabled",
+            "otel.logs.enabled",
+            "otel.metrics.enabled"
+        ],
+        "enforcement": [
+            "watch.auto_block",
+            "watch.allow_list_bypass_scan",
+            "watch.rescan_enabled"
+        ],
+        "sandbox": [
+            "openshell.mode",
+            "openshell.policy_dir",
+            "openshell.host_networking"
+        ]
+    ]
+
+    private static let advancedWorkflowIDs: Set<String> = [
+        "observability-list",
+        "observability-migrate-splunk"
+    ]
+
+    private static let primaryWorkflowFieldIDs: [String: Set<String>] = [
+        "gateway-setup": ["--remote", "--verify"],
+        "skill-scanner": [
+            "--policy",
+            "--use-behavioral",
+            "--use-llm",
+            "--use-virustotal",
+            "--use-aidefense",
+            "--verify"
+        ],
+        "mcp-scanner": [
+            "--scan-prompts",
+            "--scan-resources",
+            "--scan-instructions",
+            "--verify"
+        ],
+        "guardrail-setup": [
+            "--mode",
+            "--scanner-mode",
+            "--provider",
+            "--model",
+            "--api-key-env",
+            "--judge",
+            "--verify"
+        ],
+        "sandbox-setup": [
+            "--policy",
+            "--disable"
+        ]
+    ]
 
     private func seedWorkflowDefaults() {
         for workflow in groups.flatMap(\.workflows) {
@@ -265,5 +418,167 @@ final class SetupWorkspaceModel {
 
     private func parseBool(_ value: String) -> Bool {
         ["true", "yes", "1", "on"].contains(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    private func isPrimaryWorkflowField(_ field: SetupWorkflowField, workflow: SetupWorkflow) -> Bool {
+        if workflow.id == "gateway-setup",
+           ["--host", "--port", "--api-port", "--token"].contains(field.flag),
+           workflowBoolValue(workflow, field: SetupWorkflowField("Remote Mode", flag: "--remote", kind: .toggle)) {
+            return true
+        }
+
+        if let explicit = Self.primaryWorkflowFieldIDs[workflow.id] {
+            return explicit.contains(field.id)
+        }
+
+        if field.required || field.secret {
+            return true
+        }
+
+        let coreFlags: Set<String> = [
+            "--enabled",
+            "--signals",
+            "--site",
+            "--realm",
+            "--host",
+            "--port",
+            "--index",
+            "--source",
+            "--sourcetype",
+            "--endpoint",
+            "--protocol",
+            "--target",
+            "--url",
+            "--method",
+            "--verify-tls",
+            "--min-severity",
+            "--secret-env",
+            "--room-id"
+        ]
+        return coreFlags.contains(field.flag)
+    }
+}
+
+enum SetupTaskState: String {
+    case passed = "PASS"
+    case warning = "WARN"
+    case failed = "FAIL"
+    case skipped = "SKIP"
+
+    var label: String {
+        switch self {
+        case .passed: return "Passed"
+        case .warning: return "Warning"
+        case .failed: return "Failed"
+        case .skipped: return "Skipped"
+        }
+    }
+}
+
+struct SetupTaskCheck: Identifiable, Hashable {
+    let id = UUID()
+    let state: SetupTaskState
+    let message: String
+}
+
+struct SetupTaskResult: Identifiable, Hashable {
+    let id = UUID()
+    let workflowTitle: String
+    let commandLine: String
+    let exitCode: Int
+    let rawOutput: String
+    let checks: [SetupTaskCheck]
+    let startError: String?
+
+    init(workflowTitle: String, result: LocalCommandResult) {
+        self.workflowTitle = workflowTitle
+        self.commandLine = result.commandLine
+        self.exitCode = Int(result.exitCode)
+        self.rawOutput = result.combinedOutput
+        self.checks = Self.parseChecks(result.combinedOutput)
+        self.startError = nil
+    }
+
+    init(workflowTitle: String, startError error: Error) {
+        self.workflowTitle = workflowTitle
+        self.commandLine = ""
+        self.exitCode = -1
+        self.rawOutput = error.localizedDescription
+        self.checks = []
+        self.startError = error.localizedDescription
+    }
+
+    var succeeded: Bool {
+        exitCode == 0 && startError == nil
+    }
+
+    var headline: String {
+        if let startError {
+            return "Could not start: \(startError)"
+        }
+        if succeeded {
+            return "\(workflowTitle) completed"
+        }
+        return "\(workflowTitle) needs attention"
+    }
+
+    var summary: String {
+        if checks.isEmpty {
+            return succeeded ? "No issues were reported." : "Review the technical output for details."
+        }
+
+        let failed = count(.failed)
+        let warnings = count(.warning)
+        let skipped = count(.skipped)
+        let passed = count(.passed)
+
+        var parts: [String] = []
+        if failed > 0 { parts.append("\(failed) failed") }
+        if warnings > 0 { parts.append("\(warnings) warnings") }
+        if skipped > 0 { parts.append("\(skipped) skipped") }
+        if passed > 0 { parts.append("\(passed) passed") }
+        return parts.joined(separator: ", ")
+    }
+
+    var prioritizedChecks: [SetupTaskCheck] {
+        checks.sorted { left, right in
+            Self.rank(left.state) < Self.rank(right.state)
+        }
+    }
+
+    func count(_ state: SetupTaskState) -> Int {
+        checks.filter { $0.state == state }.count
+    }
+
+    private static func parseChecks(_ output: String) -> [SetupTaskCheck] {
+        output
+            .split(separator: "\n")
+            .compactMap { line -> SetupTaskCheck? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                let states: [(String, SetupTaskState)] = [
+                    ("[FAIL]", .failed),
+                    ("[WARN]", .warning),
+                    ("[PASS]", .passed),
+                    ("[SKIP]", .skipped)
+                ]
+
+                guard let match = states.first(where: { trimmed.hasPrefix($0.0) }) else {
+                    return nil
+                }
+
+                let message = trimmed
+                    .dropFirst(match.0.count)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " \t-"))
+                return SetupTaskCheck(state: match.1, message: message.isEmpty ? match.1.label : message)
+            }
+    }
+
+    private static func rank(_ state: SetupTaskState) -> Int {
+        switch state {
+        case .failed: return 0
+        case .warning: return 1
+        case .skipped: return 2
+        case .passed: return 3
+        }
     }
 }

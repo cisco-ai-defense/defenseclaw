@@ -46,9 +46,12 @@ SWIFT
 capture_section() {
   local section="$1"
   local output="$2"
-  local settings_tab="${3:-}"
+  local detail="${3:-}"
 
-  "$ROOT_DIR/script/build_and_run.sh" --qa "$section" "$settings_tab"
+  osascript -e 'tell application "DefenseClaw" to quit' >/dev/null 2>&1 || true
+  sleep 1
+
+  "$ROOT_DIR/script/build_and_run.sh" --qa "$section" "$detail"
   sleep 4
 
   local window_id
@@ -75,10 +78,17 @@ for index in "${!sections[@]}"; do
   capture_section "$section" "$SCREENSHOT_DIR/$number-$section.png"
 done
 
+setup_groups=(llm gateway scanners guardrail enforcement sandbox observability webhooks)
+for index in "${!setup_groups[@]}"; do
+  group="${setup_groups[$index]}"
+  number="$(printf '%02d' "$((index + 9))")"
+  capture_section "setup" "$SCREENSHOT_DIR/$number-setup-$group.png" "$group"
+done
+
 settings_tabs=(config gateway guardrails enforcement scanners diagnostics)
 for index in "${!settings_tabs[@]}"; do
   tab="${settings_tabs[$index]}"
-  number="$(printf '%02d' "$((index + 9))")"
+  number="$(printf '%02d' "$((index + 17))")"
   capture_section "settings" "$SCREENSHOT_DIR/$number-settings-$tab.png" "$tab"
 done
 
@@ -88,8 +98,13 @@ for index in "${!sections[@]}"; do
   number="$(printf '%02d' "$((index + 1))")"
   echo "  - $section: $SCREENSHOT_DIR/$number-$section.png"
 done
+for index in "${!setup_groups[@]}"; do
+  group="${setup_groups[$index]}"
+  number="$(printf '%02d' "$((index + 9))")"
+  echo "  - setup/$group: $SCREENSHOT_DIR/$number-setup-$group.png"
+done
 for index in "${!settings_tabs[@]}"; do
   tab="${settings_tabs[$index]}"
-  number="$(printf '%02d' "$((index + 9))")"
+  number="$(printf '%02d' "$((index + 17))")"
   echo "  - settings/$tab: $SCREENSHOT_DIR/$number-settings-$tab.png"
 done

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SetupView: View {
     @State private var model = SetupWorkspaceModel()
+    @State private var showAdvanced = false
 
     private var selection: Binding<String?> {
         Binding(
@@ -31,7 +32,7 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Setup")
                     .font(.title3.weight(.semibold))
-                Text("TUI wizard parity for scanners, gateway, guardrail, sinks, webhooks, and sandbox.")
+                Text("Guided setup for protection, scanners, integrations, and runtime services.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -40,7 +41,7 @@ struct SetupView: View {
             List(selection: selection) {
                 ForEach(model.groups) { group in
                     SetupSidebarRow(group: group)
-                        .tag(group.id)
+                        .tag(Optional(group.id))
                 }
             }
             .listStyle(.sidebar)
@@ -72,6 +73,11 @@ struct SetupView: View {
                 Label(model.selectedGroup.title, systemImage: model.selectedGroup.systemImage)
                     .font(.title2.weight(.semibold))
                 Spacer()
+                Toggle(isOn: $showAdvanced) {
+                    Label("Advanced", systemImage: "slider.horizontal.3")
+                }
+                .toggleStyle(.button)
+                .controlSize(.small)
                 Button {
                     model.load()
                 } label: {
@@ -96,37 +102,25 @@ struct SetupView: View {
                         .foregroundStyle(.secondary)
 
                     if !model.selectedGroup.fields.isEmpty {
-                        SetupFieldSection(model: model, group: model.selectedGroup)
+                        SetupFieldSection(model: model, group: model.selectedGroup, showAdvanced: showAdvanced)
                     }
 
-                    if !model.selectedGroup.workflows.isEmpty {
-                        SetupWorkflowSection(model: model, group: model.selectedGroup)
+                    let visibleWorkflows = model.visibleWorkflows(for: model.selectedGroup, includeAdvanced: showAdvanced)
+                    if !visibleWorkflows.isEmpty {
+                        SetupWorkflowSection(
+                            model: model,
+                            group: model.selectedGroup,
+                            workflows: visibleWorkflows,
+                            showAdvanced: showAdvanced
+                        )
                     }
 
-                    if !model.commandOutput.isEmpty {
-                        commandOutput
+                    if let result = model.lastTaskResult {
+                        SetupTaskResultView(result: result)
                     }
                 }
                 .padding(18)
             }
-        }
-    }
-
-    private var commandOutput: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Task Output", systemImage: "terminal")
-                .font(.headline)
-            Text(model.commandOutput)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                )
         }
     }
 }
@@ -156,16 +150,49 @@ private struct SetupSidebarRow: View {
 private struct SetupFieldSection: View {
     @Bindable var model: SetupWorkspaceModel
     let group: SetupGroup
+    let showAdvanced: Bool
+
+    private var primaryFields: [SetupField] {
+        model.primaryFields(for: group)
+    }
+
+    private var advancedFields: [SetupField] {
+        model.advancedFields(for: group)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Configuration", systemImage: "slider.horizontal.3")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 14) {
+            if !primaryFields.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Recommended Settings", systemImage: "checkmark.seal")
+                        .font(.headline)
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 12)], spacing: 12) {
-                ForEach(group.fields) { field in
-                    SetupFieldCard(model: model, field: field)
+                    fieldGrid(primaryFields, showPath: false)
                 }
+            }
+
+            if !advancedFields.isEmpty {
+                if showAdvanced {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Advanced Settings", systemImage: "wrench.and.screwdriver")
+                            .font(.headline)
+
+                        fieldGrid(advancedFields, showPath: true)
+                    }
+                } else {
+                    SetupHiddenAdvancedNotice(
+                        count: advancedFields.count,
+                        label: "advanced settings hidden in normal mode"
+                    )
+                }
+            }
+        }
+    }
+
+    private func fieldGrid(_ fields: [SetupField], showPath: Bool) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 12)], spacing: 12) {
+            ForEach(fields) { field in
+                SetupFieldCard(model: model, field: field, showPath: showPath)
             }
         }
     }
@@ -174,6 +201,7 @@ private struct SetupFieldSection: View {
 private struct SetupFieldCard: View {
     @Bindable var model: SetupWorkspaceModel
     let field: SetupField
+    let showPath: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -182,11 +210,13 @@ private struct SetupFieldCard: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Spacer()
-                Text(field.path)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if showPath {
+                    Text(field.path)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
 
             control
@@ -246,14 +276,24 @@ private struct SetupFieldCard: View {
 private struct SetupWorkflowSection: View {
     @Bindable var model: SetupWorkspaceModel
     let group: SetupGroup
+    let workflows: [SetupWorkflow]
+    let showAdvanced: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Guided Workflows", systemImage: "play.circle")
+            Label("Setup Actions", systemImage: "play.circle")
                 .font(.headline)
 
-            ForEach(group.workflows) { workflow in
-                SetupWorkflowCard(model: model, workflow: workflow)
+            ForEach(workflows) { workflow in
+                SetupWorkflowCard(model: model, workflow: workflow, showAdvanced: showAdvanced)
+            }
+
+            let hidden = model.hiddenWorkflowCount(for: group, includeAdvanced: showAdvanced)
+            if hidden > 0 {
+                SetupHiddenAdvancedNotice(
+                    count: hidden,
+                    label: "support workflows hidden in normal mode"
+                )
             }
         }
     }
@@ -262,9 +302,14 @@ private struct SetupWorkflowSection: View {
 private struct SetupWorkflowCard: View {
     @Bindable var model: SetupWorkspaceModel
     let workflow: SetupWorkflow
+    let showAdvanced: Bool
 
     private var isRunning: Bool {
         model.runningWorkflowID == workflow.id
+    }
+
+    private var visibleFields: [SetupWorkflowField] {
+        model.visibleWorkflowFields(for: workflow, includeAdvanced: showAdvanced)
     }
 
     var body: some View {
@@ -294,19 +339,29 @@ private struct SetupWorkflowCard: View {
                 .disabled(model.runningWorkflowID != nil)
             }
 
-            if !workflow.fields.isEmpty {
+            if !visibleFields.isEmpty {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 10)], spacing: 10) {
-                    ForEach(workflow.fields) { field in
+                    ForEach(visibleFields) { field in
                         workflowField(field)
                     }
                 }
             }
 
-            Text(model.commandPreview(for: workflow))
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
+            let hidden = model.hiddenWorkflowFieldCount(for: workflow, includeAdvanced: showAdvanced)
+            if hidden > 0 {
+                SetupHiddenAdvancedNotice(
+                    count: hidden,
+                    label: "advanced workflow options hidden in normal mode"
+                )
+            }
+
+            if showAdvanced {
+                Text(model.commandPreview(for: workflow))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -356,6 +411,135 @@ private struct SetupWorkflowCard: View {
                 ))
                 .textFieldStyle(.roundedBorder)
             }
+        }
+    }
+}
+
+private struct SetupHiddenAdvancedNotice: View {
+    let count: Int
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(.blue)
+            Text("\(count) \(label).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct SetupTaskResultView: View {
+    let result: SetupTaskResult
+    @State private var showTechnicalOutput = false
+
+    private var tint: Color {
+        result.succeeded ? .green : .orange
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Last Run", systemImage: result.succeeded ? "checkmark.circle" : "exclamationmark.triangle")
+                .font(.headline)
+                .foregroundStyle(tint)
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: result.succeeded ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(tint)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(result.headline)
+                            .font(.headline)
+                        Text(result.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+
+                if !result.prioritizedChecks.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(result.prioritizedChecks.prefix(10)) { check in
+                            SetupTaskCheckRow(check: check)
+                        }
+
+                        if result.prioritizedChecks.count > 10 {
+                            Text("\(result.prioritizedChecks.count - 10) more checks are available in technical output.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+
+                DisclosureGroup(isExpanded: $showTechnicalOutput) {
+                    Text(technicalOutput)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        )
+                } label: {
+                    Text("Technical Output")
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            )
+        }
+    }
+
+    private var technicalOutput: String {
+        if result.commandLine.isEmpty {
+            return result.rawOutput
+        }
+        return """
+        $ \(result.commandLine)
+        exit \(result.exitCode)
+
+        \(result.rawOutput.isEmpty ? "(no output)" : result.rawOutput)
+        """
+    }
+}
+
+private struct SetupTaskCheckRow: View {
+    let check: SetupTaskCheck
+
+    private var color: Color {
+        switch check.state {
+        case .passed: return .green
+        case .warning: return .orange
+        case .failed: return .red
+        case .skipped: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(check.state.label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(color)
+                .frame(width: 52, alignment: .leading)
+            Text(check.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
     }
 }
