@@ -101,9 +101,12 @@ def scan_plugin(
             confidence=1.0,
             title="No plugin manifest found",
             description=(
-                "Plugin directory lacks a package.json, manifest.json, plugin.json, "
-                "or openclaw.plugin.json. Cannot verify plugin identity, version, "
-                "or declared permissions. Source scanning will still run."
+                "Plugin directory lacks a recognised manifest "
+                "(package.json, manifest.json, plugin.json, "
+                "openclaw.plugin.json, .codex-plugin/plugin.json, "
+                "or .claude-plugin/plugin.json). Cannot verify plugin "
+                "identity, version, or declared permissions. Source "
+                "scanning will still run."
             ),
             location=target,
             remediation="Add a package.json with name, version, and permissions fields.",
@@ -176,13 +179,47 @@ def scan_plugin(
 # ---------------------------------------------------------------------------
 
 
+# Manifest candidates checked in order. The first hit wins. Each entry
+# is (relative_path, source_label):
+#
+#   * relative_path is the path relative to the plugin directory the
+#     scanner is targeting (e.g. ".codex-plugin/plugin.json" for the
+#     Codex per-plugin manifest convention).
+#   * source_label is what gets recorded in PluginManifest.source so
+#     downstream analyzers can reason about which schema produced
+#     the data.
+#
+# Order is "generic-first": package.json wins when both it and a
+# connector-specific manifest are present, because most plugins
+# bundle their node deps via npm and the npm schema has more useful
+# fields for security analysis (dependencies, scripts, etc.).
+# Connector-specific manifests are fallbacks that only kick in when
+# no generic packaging is present — that's how OpenClaw-only plugins
+# got rescued before this change, and Codex/Claude plugins follow
+# the same precedence so a future Codex plugin that ships a
+# package.json doesn't suddenly get scanned under a different
+# schema. See S2.3 / F8 and `test_package_json_still_takes_precedence`.
+_MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
+    # Generic packaging — preferred when present.
+    ("package.json", "package.json"),
+    ("manifest.json", "manifest.json"),
+    ("plugin.json", "plugin.json"),
+    # Connector-specific fallbacks. Order within this group is alpha
+    # for stability; none takes precedence over another in practice
+    # because each lives in a distinct plugin layout.
+    ("openclaw.plugin.json", "openclaw.plugin.json"),
+    (os.path.join(".claude-plugin", "plugin.json"), "claude.plugin.json"),
+    (os.path.join(".codex-plugin", "plugin.json"), "codex.plugin.json"),
+)
+
+
 def _load_manifest(directory: str) -> PluginManifest | None:
-    # Include openclaw.plugin.json so OpenClaw-only plugins get a full scan
-    for name in ("package.json", "manifest.json", "plugin.json", "openclaw.plugin.json"):
+    for rel_path, source_label in _MANIFEST_CANDIDATES:
+        candidate = os.path.join(directory, rel_path)
         try:
-            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+            with open(candidate, encoding="utf-8") as fh:
                 raw = json.loads(fh.read())
-            return _normalize_manifest(raw, name)
+            return _normalize_manifest(raw, source_label)
         except (OSError, json.JSONDecodeError):
             continue
     return None
