@@ -164,11 +164,12 @@ cli.add_command(version_cmd, "version")
 
 
 def _ensure_codeguard_skill(cfg) -> None:
-    """Install CodeGuard skill if OpenClaw appeared since last init."""
+    """Install CodeGuard skill if the agent appeared since last init."""
     try:
         from defenseclaw.codeguard_skill import ensure_codeguard_skill
 
-        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file)
+        connector = getattr(cfg.guardrail, "connector", "") or ""
+        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file, connector)
     except Exception:
         pass
 

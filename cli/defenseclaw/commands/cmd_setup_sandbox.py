@@ -151,6 +151,16 @@ def setup_sandbox(
         app.store = Store(app.cfg.audit_db)
         app.logger = Logger(app.store, app.cfg.splunk)
 
+    connector = (app.cfg.guardrail.connector or "openclaw").lower()
+    if connector != "openclaw" and not disable:
+        click.echo(
+            f"  ERROR: Sandbox setup currently requires the OpenClaw connector.\n"
+            f"  Active connector: {connector}\n"
+            f"  Change with: defenseclaw setup guardrail --connector openclaw",
+            err=True,
+        )
+        raise SystemExit(1)
+
     if disable:
         _ensure_sudo_cache()
         _disable_sandbox(app)

@@ -612,6 +612,7 @@ def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:
         from defenseclaw.config import load
 
         cfg = load()
-        ensure_codeguard_skill(cfg.claw_home_dir(), openclaw_config_file)
+        connector = getattr(cfg.guardrail, "connector", "") or ""
+        ensure_codeguard_skill(cfg.claw_home_dir(), openclaw_config_file, connector)
     except Exception:
         pass

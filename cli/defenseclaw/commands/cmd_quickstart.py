@@ -170,8 +170,10 @@ def quickstart_cmd(
             click.echo("          This is expected if you're running DefenseClaw before OpenClaw")
             click.echo("          is set up. Re-run 'defenseclaw quickstart' after installing OpenClaw.")
     else:
-        click.echo(f"        ℹ Token auto-detection skipped for {connector} connector.")
-        click.echo("          The gateway will use loopback auth or credentials set via setup.")
+        if not cfg.gateway.device_key_file:
+            cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
+        click.echo(f"        ℹ {connector} connector uses device-key auth (no token needed).")
+        click.echo(f"        device key: {cfg.gateway.device_key_file}")
 
     # --- Step 4: apply safe guardrail defaults + execute setup ---
     click.echo()

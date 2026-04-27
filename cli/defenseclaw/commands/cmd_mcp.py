@@ -502,6 +502,105 @@ def _openclaw_config_unset(path: str) -> None:
         raise click.ClickException(f"openclaw config unset failed: {detail}")
 
 
+# -- Connector-aware config writers ----------------------------------------
+
+_CONNECTOR_CONFIG_PATHS: dict[str, str] = {
+    "claudecode": "~/.claude/settings.json",
+    "codex": ".mcp.json",
+    "zeptoclaw": "~/.zeptoclaw/config.json",
+}
+
+
+def _connector_config_set_mcp(connector: str, name: str, entry_json: str) -> None:
+    """Write an MCP server entry to the active connector's config file."""
+    if connector in ("", "openclaw"):
+        _openclaw_config_set(f"mcp.servers.{name}", entry_json)
+        return
+
+    import os
+    from pathlib import Path
+
+    entry = json.loads(entry_json)
+    path_template = _CONNECTOR_CONFIG_PATHS.get(connector)
+    if path_template is None:
+        raise click.ClickException(
+            f"MCP config write is not supported for connector {connector!r}. "
+            "Add it manually to your agent's config file."
+        )
+
+    if path_template.startswith("~"):
+        config_path = str(Path.home() / path_template[2:])
+    elif not os.path.isabs(path_template):
+        config_path = os.path.join(os.getcwd(), path_template)
+    else:
+        config_path = path_template
+
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {}
+    except json.JSONDecodeError:
+        raise click.ClickException(f"Cannot parse {config_path} as JSON")
+
+    if connector == "claudecode":
+        data.setdefault("mcpServers", {})[name] = entry
+    elif connector == "codex":
+        data.setdefault("mcpServers", {})[name] = entry
+    elif connector == "zeptoclaw":
+        data.setdefault("mcp", {}).setdefault("servers", {})[name] = entry
+
+    os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def _connector_config_unset_mcp(connector: str, name: str) -> None:
+    """Remove an MCP server entry from the active connector's config file."""
+    if connector in ("", "openclaw"):
+        _openclaw_config_unset(f"mcp.servers.{name}")
+        return
+
+    import os
+    from pathlib import Path
+
+    path_template = _CONNECTOR_CONFIG_PATHS.get(connector)
+    if path_template is None:
+        raise click.ClickException(
+            f"MCP config write is not supported for connector {connector!r}. "
+            "Remove it manually from your agent's config file."
+        )
+
+    if path_template.startswith("~"):
+        config_path = str(Path.home() / path_template[2:])
+    elif not os.path.isabs(path_template):
+        config_path = os.path.join(os.getcwd(), path_template)
+    else:
+        config_path = path_template
+
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raise click.ClickException(f"Cannot read {config_path}")
+
+    removed = False
+    if connector == "claudecode":
+        removed = data.get("mcpServers", {}).pop(name, None) is not None
+    elif connector == "codex":
+        removed = data.get("mcpServers", {}).pop(name, None) is not None
+    elif connector == "zeptoclaw":
+        removed = data.get("mcp", {}).get("servers", {}).pop(name, None) is not None
+
+    if not removed:
+        raise click.ClickException(f"MCP server {name!r} not found in {config_path}")
+
+    with open(config_path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
 @mcp.command("set")
 @click.argument("name")
 @click.option("--command", "cmd", default="", help="Server command (e.g. npx, uvx)")
@@ -521,7 +620,7 @@ def set_server(
     env_pairs: tuple[str, ...],
     skip_scan: bool,
 ) -> None:
-    """Add or update an MCP server in OpenClaw config.
+    """Add or update an MCP server in the active connector's config.
 
     Scans the server before adding unless --skip-scan is set.
     Rejects servers with HIGH/CRITICAL findings.
@@ -627,7 +726,8 @@ def set_server(
         else:
             click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
 
-    _openclaw_config_set(f"mcp.servers.{name}", json.dumps(entry))
+    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    _connector_config_set_mcp(connector, name, json.dumps(entry))
 
     if scan_required:
         post_decision = evaluate_admission(
@@ -655,14 +755,16 @@ def set_server(
 @click.argument("name")
 @pass_ctx
 def unset_server(app: AppContext, name: str) -> None:
-    """Remove an MCP server from OpenClaw config."""
+    """Remove an MCP server from the active connector's config."""
     servers = app.cfg.mcp_servers()
     if not any(s.name == name for s in servers):
+        connector = app.cfg.guardrail.connector or "openclaw"
         raise click.ClickException(
-            f"MCP server {name!r} not found in openclaw.json."
+            f"MCP server {name!r} not found in {connector} config."
         )
 
-    _openclaw_config_unset(f"mcp.servers.{name}")
+    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    _connector_config_unset_mcp(connector, name)
     click.secho(f"Removed MCP server: {name}", fg="yellow")
 
     if app.logger:

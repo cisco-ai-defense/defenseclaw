@@ -79,15 +79,22 @@ def build_claw_aibom(
     live: bool = True,
     categories: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Collect the OpenClaw inventory.
+    """Collect the agent inventory.
 
-    When *live* is True (default), runs ``openclaw … --json`` commands in
-    parallel and merges results.  Use *categories* to restrict which sections
-    are collected (default: all).
+    For the OpenClaw connector (default), runs ``openclaw … --json`` commands
+    in parallel and merges results. For other connectors, builds the inventory
+    from the filesystem using ``cfg.skill_dirs()``, ``cfg.plugin_dirs()``,
+    and ``cfg.mcp_servers()``.
+
+    Use *categories* to restrict which sections are collected (default: all).
     """
+    connector = (cfg.guardrail.connector or "openclaw").lower()
     cats = _resolve_categories(categories)
     claw_home = cfg.claw_home_dir()
     now = datetime.now(timezone.utc).isoformat()
+
+    if connector != "openclaw":
+        return _build_filesystem_aibom(cfg, cats, claw_home, now)
 
     if live:
         cache, errors = _fetch_all(_needed_commands(cats))
@@ -97,6 +104,7 @@ def build_claw_aibom(
     out: dict[str, Any] = {
         "version": INVENTORY_VERSION,
         "generated_at": now,
+        "connector": connector,
         "openclaw_config": _expand(cfg.claw.config_file),
         "claw_home": claw_home,
         "claw_mode": cfg.claw.mode,
@@ -121,6 +129,65 @@ def build_claw_aibom(
         ),
         "memory": _parse_memory(cache.get("memory_status")) if "memory" in cats else [],
         "errors": errors,
+    }
+    out["summary"] = _build_summary(out)
+    return out
+
+
+def _build_filesystem_aibom(
+    cfg: Config,
+    cats: set[str],
+    claw_home: str,
+    now: str,
+) -> dict[str, Any]:
+    """Build inventory from the filesystem for non-OpenClaw connectors."""
+    import os
+
+    connector = (cfg.guardrail.connector or "unknown").lower()
+    skills: list[dict[str, Any]] = []
+    if "skills" in cats:
+        for skill_dir in cfg.skill_dirs():
+            if not os.path.isdir(skill_dir):
+                continue
+            for entry in sorted(os.listdir(skill_dir)):
+                path = os.path.join(skill_dir, entry)
+                if os.path.isdir(path):
+                    skills.append({"name": entry, "baseDir": path, "source": "directory"})
+
+    plugins: list[dict[str, Any]] = []
+    if "plugins" in cats or "tools" in cats:
+        for plugin_dir in cfg.plugin_dirs():
+            if not os.path.isdir(plugin_dir):
+                continue
+            for entry in sorted(os.listdir(plugin_dir)):
+                path = os.path.join(plugin_dir, entry)
+                if os.path.isdir(path):
+                    plugins.append({"id": entry, "name": entry, "source": "directory"})
+
+    mcp_entries: list[dict[str, Any]] = []
+    if "mcp" in cats:
+        for s in cfg.mcp_servers():
+            mcp_entries.append({
+                "name": s.name,
+                "transport": s.transport,
+                "command": s.command,
+                "url": s.url,
+            })
+
+    out: dict[str, Any] = {
+        "version": INVENTORY_VERSION,
+        "generated_at": now,
+        "connector": connector,
+        "claw_home": claw_home,
+        "live": False,
+        "skills": skills if "skills" in cats else [],
+        "plugins": plugins if "plugins" in cats else [],
+        "mcp": mcp_entries if "mcp" in cats else [],
+        "agents": [],
+        "tools": [],
+        "model_providers": [],
+        "memory": [],
+        "errors": [],
     }
     out["summary"] = _build_summary(out)
     return out

@@ -115,10 +115,20 @@ def sandbox_init_cmd(app: AppContext) -> None:
         click.echo("         Run 'defenseclaw init' first.", err=True)
         raise SystemExit(1)
 
-    _ensure_sudo_cache()
-
     cfg = app.cfg or load()
     app.cfg = cfg
+
+    connector = (cfg.guardrail.connector or "openclaw").lower()
+    if connector != "openclaw":
+        click.echo(
+            f"  ERROR: Sandbox init currently requires the OpenClaw connector.\n"
+            f"  Active connector: {connector}\n"
+            f"  Change with: defenseclaw setup guardrail --connector openclaw",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    _ensure_sudo_cache()
 
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger

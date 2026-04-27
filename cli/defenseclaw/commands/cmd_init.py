@@ -441,28 +441,52 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
     return result
 
 
-def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
-    """Resolve gateway settings from OpenClaw and display them.
+def _resolve_gateway_for_connector(cfg) -> dict[str, str | int]:
+    """Resolve gateway host/port/token based on the active connector.
 
-    Only applies OpenClaw values (host/port/token) when creating a new config.
+    OpenClaw: reads from openclaw.json.
+    Others: return loopback defaults (no token — rely on device key auth).
+    """
+    connector = (cfg.guardrail.connector or "openclaw").lower()
+
+    if connector == "openclaw":
+        return _resolve_openclaw_gateway(cfg.claw.config_file)
+
+    return {
+        "host": "127.0.0.1",
+        "port": 18789,
+        "token": "",
+    }
+
+
+def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
+    """Resolve gateway settings from the active connector and display them.
+
+    Only applies connector values (host/port/token) when creating a new config.
     Existing configs preserve user-customized gateway settings.
     """
-    oc_gw = _resolve_openclaw_gateway(cfg.claw.config_file)
+    connector = (cfg.guardrail.connector or "openclaw").lower()
+    gw_info = _resolve_gateway_for_connector(cfg)
     token_configured = False
     if is_new_config:
-        cfg.gateway.host = oc_gw["host"]
-        cfg.gateway.port = oc_gw["port"]
+        cfg.gateway.host = gw_info["host"]
+        cfg.gateway.port = gw_info["port"]
 
-    # Always re-sync the token from openclaw.json — it may have changed
-    # after re-onboarding or OpenClaw restart.
-    if oc_gw["token"]:
+    if connector == "openclaw" and gw_info["token"]:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
-        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", oc_gw["token"], cfg.data_dir)
+        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", gw_info["token"], cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         token_configured = True
+    elif gw_info["token"]:
+        from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+        env_name = f"{connector.upper()}_GATEWAY_TOKEN"
+        _save_secret_to_dotenv(env_name, gw_info["token"], cfg.data_dir)
+        cfg.gateway.token = ""
+        cfg.gateway.token_env = env_name
+        token_configured = True
     else:
-        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        cfg.gateway.token_env = cfg.gateway.token_env or "OPENCLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
 
     if not cfg.gateway.device_key_file:
@@ -470,8 +494,8 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
 
     _ensure_device_key(cfg.gateway.device_key_file)
 
-    click.echo(f"  OpenClaw:      {cfg.gateway.host}:{cfg.gateway.port}")
-    token_status = "configured" if token_configured else "none (local)"
+    click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
+    token_status = "configured" if token_configured else "none (loopback auth)"
     click.echo(f"  Token:         {token_status}")
     click.echo(f"  API port:      {cfg.gateway.api_port}")
     click.echo(f"  Watcher:       enabled={cfg.gateway.watcher.enabled}")

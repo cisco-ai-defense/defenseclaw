@@ -36,7 +36,7 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def skill() -> None:
-    """Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
+    """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
 
 
 # ---------------------------------------------------------------------------
@@ -182,24 +182,64 @@ def _list_skills_via_sidecar(app: AppContext) -> dict[str, Any] | None:
         return None
 
 
+def _list_skills_from_dirs(cfg) -> dict[str, Any]:
+    """Build a skill list by scanning the connector-aware skill directories."""
+    skills: list[dict[str, Any]] = []
+    for skill_dir in cfg.skill_dirs():
+        if not os.path.isdir(skill_dir):
+            continue
+        for entry in sorted(os.listdir(skill_dir)):
+            path = os.path.join(skill_dir, entry)
+            if not os.path.isdir(path):
+                continue
+            skills.append({
+                "name": entry,
+                "description": "",
+                "emoji": "",
+                "eligible": True,
+                "disabled": False,
+                "blockedByAllowlist": False,
+                "source": "directory",
+                "bundled": False,
+                "homepage": "",
+                "baseDir": path,
+            })
+    return {"skills": skills}
+
+
 def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get the full skill list — tries sidecar API first, then local binary."""
+    """Get the full skill list — tries sidecar API first, then local binary.
+
+    For non-OpenClaw connectors, skips the openclaw CLI fallback and uses
+    filesystem-based enumeration via ``cfg.skill_dirs()``.
+    """
     if app is not None:
         result = _list_skills_via_sidecar(app)
         if result is not None:
             return result
 
-    out = _run_openclaw("skills", "list", "--json")
-    if out is None:
-        return None
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return None
+    is_openclaw = app is None or app.cfg.guardrail.connector.lower() in ("", "openclaw")
+
+    if is_openclaw:
+        out = _run_openclaw("skills", "list", "--json")
+        if out is not None:
+            try:
+                return json.loads(out)
+            except json.JSONDecodeError:
+                pass
+
+    if app is not None:
+        return _list_skills_from_dirs(app.cfg)
+
+    return None
 
 
 def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get info for a single skill — tries sidecar first, then local binary."""
+    """Get info for a single skill — tries sidecar first, then local binary.
+
+    For non-OpenClaw connectors, resolves the skill from the filesystem
+    using ``cfg.skill_dirs()`` instead of shelling out to the openclaw CLI.
+    """
     if app is not None:
         full = _list_skills_via_sidecar(app)
         if full is not None:
@@ -207,13 +247,22 @@ def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[s
                 if s.get("name") == name:
                     return s
 
-    out = _run_openclaw("skills", "info", name, "--json")
-    if out is None:
-        return None
-    try:
-        return json.loads(out)
-    except json.JSONDecodeError:
-        return None
+    is_openclaw = app is None or app.cfg.guardrail.connector.lower() in ("", "openclaw")
+
+    if is_openclaw:
+        out = _run_openclaw("skills", "info", name, "--json")
+        if out is not None:
+            try:
+                return json.loads(out)
+            except json.JSONDecodeError:
+                pass
+
+    if app is not None:
+        for candidate in app.cfg.installed_skill_candidates(name):
+            if os.path.isdir(candidate):
+                return {"name": name, "baseDir": candidate, "source": "directory"}
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +367,7 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 @click.option("--json", "as_json", is_flag=True, help="Output merged skill list as JSON")
 @pass_ctx
 def list_skills(app: AppContext, as_json: bool) -> None:
-    """List all OpenClaw skills with their latest scan severity."""
+    """List all skills with their latest scan severity."""
 
     oc_list = _list_openclaw_skills_full(app)
     skills = oc_list.get("skills", []) if oc_list else []
@@ -330,7 +379,8 @@ def list_skills(app: AppContext, as_json: bool) -> None:
         if as_json:
             click.echo("[]")
             return
-        click.echo("No skills found. Is openclaw installed?")
+        connector = app.cfg.guardrail.connector or "openclaw"
+        click.echo(f"No skills found. Check your {connector} installation and skill directories.")
         return
 
     known_names = {s.get("name", "") for s in skills}
@@ -1344,11 +1394,11 @@ def allow(app: AppContext, name: str, reason: str) -> None:
 @click.option("--reason", default="", help="Reason for disabling")
 @pass_ctx
 def disable(app: AppContext, name: str, reason: str) -> None:
-    """Disable a skill at runtime via the OpenClaw gateway.
+    """Disable a skill at runtime via the gateway.
 
-    Sends a skills.update RPC to prevent the agent from using the skill's
-    tools until re-enabled. This is runtime-only — it does not block install
-    or quarantine files.
+    Sends an RPC to prevent the agent from using the skill's tools until
+    re-enabled. This is runtime-only — it does not block install or
+    quarantine files.
 
     Requires the gateway to be running.
     """
@@ -1382,7 +1432,7 @@ def disable(app: AppContext, name: str, reason: str) -> None:
 @click.argument("name")
 @pass_ctx
 def enable(app: AppContext, name: str) -> None:
-    """Enable a previously disabled skill via the OpenClaw gateway.
+    """Enable a previously disabled skill via the gateway.
 
     This is a runtime-only action.
     """
