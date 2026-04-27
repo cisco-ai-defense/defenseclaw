@@ -519,19 +519,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	targetOrigin := r.Header.Get("X-DC-Target-URL")
-	if targetOrigin == "" {
-		// No target URL — not from the fetch interceptor; reject.
-		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
-		return
-	}
-
-	// The fetch interceptor sets X-DC-Target-URL to the request origin only
-	// (scheme://host). Rejoin the incoming request path so that path-prefixed
-	// provider entries in providers.json (e.g. "chatgpt.com/backend-api") can
-	// be matched correctly by the allowlist and the provider inference.
-	targetForMatch := targetOrigin + r.URL.Path
-
 	// Peek the body once so the shape classifier can run even when the
 	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
@@ -539,6 +526,32 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+
+	targetOrigin := r.Header.Get("X-DC-Target-URL")
+	// Native-binary connectors (codex, zeptoclaw) can't inject
+	// X-DC-Target-URL. Ask the active connector to resolve the
+	// upstream from its provider snapshot before bailing.
+	connForwardKey := ""
+	if targetOrigin == "" {
+		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
+			targetOrigin = connUpstream
+			connForwardKey = connKey
+		}
+	}
+	if targetOrigin == "" {
+		// No target URL from fetch interceptor or connector snapshot; reject.
+		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
+		return
+	}
+	if connForwardKey != "" && r.Header.Get("X-AI-Auth") == "" {
+		r.Header.Set("X-AI-Auth", "Bearer "+connForwardKey)
+	}
+
+	// The fetch interceptor sets X-DC-Target-URL to the request origin only
+	// (scheme://host). Rejoin the incoming request path so that path-prefixed
+	// provider entries in providers.json (e.g. "chatgpt.com/backend-api") can
+	// be matched correctly by the allowlist and the provider inference.
+	targetForMatch := targetOrigin + r.URL.Path
 
 	// Three-branch passthrough policy:
 	//   known       → forward and audit as normal (legacy behavior)

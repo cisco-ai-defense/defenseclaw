@@ -156,8 +156,21 @@ func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {
 	return nil
 }
 
+// Authenticate trusts loopback callers unconditionally. ZeptoClaw is
+// a native Rust binary with no fetch interceptor: its Authorization
+// header carries the upstream provider API key, never DefenseClaw's
+// gateway token, and it has no way to inject X-DC-Auth. Denying
+// loopback when a gateway token is configured would make zeptoclaw
+// fundamentally unroutable — every request would 401 before guardrail
+// inspection ran.
+//
+// Non-loopback callers (bridge / remote deployments) are still gated
+// on X-DC-Auth or the master key. The gateway token exists to protect
+// those paths, not to break the local-only native binary path.
 func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
-	isLoopback := IsLoopback(r)
+	if IsLoopback(r) {
+		return true
+	}
 
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
@@ -171,16 +184,6 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
-	}
-
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
-	// ZeptoClaw is a native binary that cannot inject X-DC-Auth, so the
-	// loopback fallback is its primary authentication path.
-	if c.gatewayToken == "" {
-		return isLoopback
 	}
 
 	return false
