@@ -59,8 +59,8 @@
     }
   },
   "first_party_allow_list": [
-    {"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": [".defenseclaw", "extensions/defenseclaw"]},
-    {"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard"]}
+    {"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": [".defenseclaw", "extensions/defenseclaw", ".openclaw/extensions", ".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin"]},
+    {"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": [".defenseclaw", "workspace/skills/codeguard", "skills/codeguard", ".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills", ".codex/skills"]}
   ],
   "severity_ranking": {
     "CRITICAL": 5,
