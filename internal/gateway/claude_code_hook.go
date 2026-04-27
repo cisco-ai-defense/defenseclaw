@@ -634,6 +634,11 @@ func (a *APIServer) claudeCodeComponentScanDue() bool {
 	return true
 }
 
+// claudeCodeComponentTargets returns expanded, deduplicated targets for
+// runtime scanning. This is the detailed counterpart of
+// ClaudeCodeConnector.ComponentTargets() (which returns structural parent
+// directories for the fsnotify watcher and CLI). Changes to the directory
+// layout should be reflected in both places.
 func claudeCodeComponentTargets(cwd string) map[string][]string {
 	targets := map[string][]string{
 		"skill":   {},

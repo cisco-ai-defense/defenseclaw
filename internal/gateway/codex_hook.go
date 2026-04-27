@@ -535,6 +535,11 @@ func (a *APIServer) codexComponentScanDue() bool {
 	return true
 }
 
+// codexComponentTargets returns expanded, deduplicated targets for runtime
+// scanning. This is the detailed counterpart of
+// CodexConnector.ComponentTargets() (which returns structural parent
+// directories for the fsnotify watcher and CLI). Changes to the directory
+// layout should be reflected in both places.
 func codexComponentTargets(cwd string) map[string][]string {
 	targets := map[string][]string{
 		"skill":  {},

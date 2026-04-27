@@ -438,3 +438,21 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 
 	return cs, nil
 }
+
+// --- ComponentScanner interface ---
+
+func (c *OpenClawConnector) SupportsComponentScanning() bool { return true }
+
+func (c *OpenClawConnector) ComponentTargets(cwd string) map[string][]string {
+	home := os.Getenv("HOME")
+	openclawHome := filepath.Join(home, ".openclaw")
+	workspace := filepath.Join(openclawHome, "workspace")
+
+	targets := map[string][]string{
+		"skill":  {filepath.Join(workspace, "skills"), filepath.Join(openclawHome, "skills")},
+		"plugin": {filepath.Join(openclawHome, "extensions")},
+		"mcp":    {filepath.Join(openclawHome, "openclaw.json")},
+		"config": {filepath.Join(openclawHome, "openclaw.json")},
+	}
+	return targets
+}

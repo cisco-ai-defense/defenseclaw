@@ -290,6 +290,36 @@ func TestCodex_ImplementsComponentScanner(t *testing.T) {
 	}
 }
 
+func TestOpenClaw_ImplementsComponentScanner(t *testing.T) {
+	c := NewOpenClawConnector()
+	var _ ComponentScanner = c
+	if !c.SupportsComponentScanning() {
+		t.Error("expected SupportsComponentScanning to be true")
+	}
+	targets := c.ComponentTargets("/tmp/workspace")
+	expectedTypes := []string{"skill", "plugin", "mcp", "config"}
+	for _, tp := range expectedTypes {
+		if _, ok := targets[tp]; !ok {
+			t.Errorf("missing component type %q", tp)
+		}
+	}
+}
+
+func TestZeptoClaw_ImplementsComponentScanner(t *testing.T) {
+	c := NewZeptoClawConnector()
+	var _ ComponentScanner = c
+	if !c.SupportsComponentScanning() {
+		t.Error("expected SupportsComponentScanning to be true")
+	}
+	targets := c.ComponentTargets("/tmp/workspace")
+	expectedTypes := []string{"skill", "plugin", "mcp", "config"}
+	for _, tp := range expectedTypes {
+		if _, ok := targets[tp]; !ok {
+			t.Errorf("missing component type %q", tp)
+		}
+	}
+}
+
 // --- StopScanner interface tests ---
 
 func TestClaudeCode_ImplementsStopScanner(t *testing.T) {

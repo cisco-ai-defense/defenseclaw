@@ -588,12 +588,31 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		return nil
 	}
 
-	// Resolve skill dirs: explicit config overrides autodiscovery
+	// Resolve the active connector to get connector-specific component
+	// directories. Falls back to cfg.SkillDirs()/PluginDirs() (OpenClaw
+	// paths) when the connector does not implement ComponentScanner.
+	var compTargets map[string][]string
+	connectorName := s.cfg.Guardrail.Connector
+	if connectorName == "" {
+		connectorName = "openclaw"
+	}
+	reg := connector.NewDefaultRegistry()
+	if conn, ok := reg.Get(connectorName); ok {
+		if scanner, ok := conn.(connector.ComponentScanner); ok && scanner.SupportsComponentScanning() {
+			compTargets = scanner.ComponentTargets("")
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using %s connector ComponentTargets\n", connectorName)
+		}
+	}
+
+	// Resolve skill dirs: explicit config overrides connector autodiscovery
 	var skillDirs []string
 	if wcfg.Skill.Enabled {
 		if len(wcfg.Skill.Dirs) > 0 {
 			skillDirs = wcfg.Skill.Dirs
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using configured skill dirs: %v\n", skillDirs)
+		} else if paths := compTargets["skill"]; len(paths) > 0 {
+			skillDirs = paths
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector-discovered skill dirs: %v\n", skillDirs)
 		} else {
 			skillDirs = s.cfg.SkillDirs()
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher: autodiscovered skill dirs: %v\n", skillDirs)
@@ -602,12 +621,15 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")
 	}
 
-	// Plugin dirs: explicit config overrides autodiscovery from claw mode
+	// Plugin dirs: explicit config overrides connector autodiscovery
 	var pluginDirs []string
 	if wcfg.Plugin.Enabled {
 		if len(wcfg.Plugin.Dirs) > 0 {
 			pluginDirs = wcfg.Plugin.Dirs
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using configured plugin dirs: %v\n", pluginDirs)
+		} else if paths := compTargets["plugin"]; len(paths) > 0 {
+			pluginDirs = paths
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector-discovered plugin dirs: %v\n", pluginDirs)
 		} else {
 			pluginDirs = s.cfg.PluginDirs()
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher: autodiscovered plugin dirs: %v\n", pluginDirs)

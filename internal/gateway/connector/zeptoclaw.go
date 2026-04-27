@@ -29,8 +29,10 @@ import (
 
 // ZeptoClawConnector handles LLM traffic routing and tool inspection for ZeptoClaw.
 // LLM traffic: patches api_base in ~/.zeptoclaw/config.json to route through proxy.
-// Tool inspection: adds before_tool hook to ZeptoClaw's config.json that gates
-// every tool execution via /api/v1/inspect/tool.
+// Tool inspection: proxy-side response-scan — the proxy inspects tool_calls in the
+// LLM response stream. ZeptoClaw's hooks schema (before_tool/after_tool) expects
+// structured HookRule objects, not script paths, so config-based hook wiring is not
+// used. Hook scripts are still written to disk for subprocess enforcement.
 type ZeptoClawConnector struct {
 	gatewayToken string
 	masterKey    string
@@ -71,7 +73,7 @@ func NewZeptoClawConnector() *ZeptoClawConnector {
 }
 
 func (c *ZeptoClawConnector) Name() string                           { return "zeptoclaw" }
-func (c *ZeptoClawConnector) Description() string                    { return "api_base redirect + config hooks" }
+func (c *ZeptoClawConnector) Description() string                    { return "api_base redirect + proxy response-scan" }
 func (c *ZeptoClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *ZeptoClawConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
@@ -85,7 +87,7 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 2: Tool inspection hook script
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScript(hookDir, opts.APIAddr); err != nil {
+	if err := WriteHookScriptsWithToken(hookDir, opts.APIAddr, opts.APIToken); err != nil {
 		return fmt.Errorf("zeptoclaw hook script: %w", err)
 	}
 
@@ -302,6 +304,23 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 	}
 
 	return cs, nil
+}
+
+// --- ComponentScanner interface ---
+
+func (c *ZeptoClawConnector) SupportsComponentScanning() bool { return true }
+
+func (c *ZeptoClawConnector) ComponentTargets(cwd string) map[string][]string {
+	home := os.Getenv("HOME")
+	zeptoDir := filepath.Join(home, ".zeptoclaw")
+
+	targets := map[string][]string{
+		"skill":  {filepath.Join(zeptoDir, "skills"), filepath.Join(cwd, ".zeptoclaw", "skills")},
+		"plugin": {filepath.Join(zeptoDir, "plugins"), filepath.Join(zeptoDir, "plugins", "cache")},
+		"mcp":    {filepath.Join(zeptoDir, "config.json"), filepath.Join(cwd, ".mcp.json")},
+		"config": {filepath.Join(zeptoDir, "config.json")},
+	}
+	return targets
 }
 
 // zeptoClawBackup stores the original config for teardown.
