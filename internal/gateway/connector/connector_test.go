@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // --- Helper tests ---
@@ -818,22 +820,25 @@ func TestCodex_Authenticate_Token(t *testing.T) {
 	c := NewCodexConnector()
 	c.SetCredentials("my-token", "my-master")
 
+	// Loopback is trusted unconditionally — see TestCodex_Authenticate_NativeBinaryLoopback
+	// for the rationale. Token-based auth is exercised on non-loopback
+	// addresses, which is what the gateway token actually protects.
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r.RemoteAddr = "127.0.0.1:54321"
+	r.RemoteAddr = "10.0.0.5:54321"
 	if c.Authenticate(r) {
-		t.Error("expected auth to fail without token")
+		t.Error("expected non-loopback auth to fail without token")
 	}
 
 	r.Header.Set("X-DC-Auth", "my-token")
 	if !c.Authenticate(r) {
-		t.Error("expected auth to pass with correct X-DC-Auth")
+		t.Error("expected non-loopback auth to pass with correct X-DC-Auth")
 	}
 
 	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r2.RemoteAddr = "127.0.0.1:54321"
+	r2.RemoteAddr = "10.0.0.5:54321"
 	r2.Header.Set("Authorization", "Bearer my-master")
 	if !c.Authenticate(r2) {
-		t.Error("expected auth to pass with master key")
+		t.Error("expected non-loopback auth to pass with master key")
 	}
 }
 
@@ -862,11 +867,39 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 		t.Error("expected non-loopback auth to fail when token configured")
 	}
 
-	// With token — loopback without token also fails
+	// With token — loopback WITHOUT X-DC-Auth must still pass because
+	// codex-cli is a native Rust binary with no fetch interceptor that
+	// could inject X-DC-Auth. Its Authorization header carries the
+	// upstream provider API key, never the gateway token. Denying
+	// loopback when a gateway token is configured would make codex
+	// fundamentally unroutable. Non-loopback callers still require
+	// the token — bridge/remote deployments stay protected.
 	r4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r4.RemoteAddr = "127.0.0.1:54321"
-	if c.Authenticate(r4) {
-		t.Error("expected loopback auth to fail when token configured but not provided")
+	if !c.Authenticate(r4) {
+		t.Error("loopback must be trusted for codex even when gateway token is set — codex cannot inject X-DC-Auth")
+	}
+}
+
+// TestCodex_Authenticate_NativeBinaryLoopback documents the critical
+// end-to-end auth path: codex routes LLM traffic to /c/codex/responses
+// on loopback with an Authorization: Bearer <provider-api-key> header.
+// DefenseClaw must accept this (stripping the provider key for
+// inspection and forwarding to upstream) regardless of whether a
+// gateway token is configured — otherwise codex sees a 401 and no
+// traffic is ever inspected.
+func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
+	c := NewCodexConnector()
+	c.SetCredentials("gw-tok-5c80", "")
+
+	r := httptest.NewRequest("POST", "/c/codex/responses", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	r.Header.Set("Authorization", "Bearer sk-or-v1-real-openrouter-key")
+	// Note: no X-DC-Auth — native binary has no way to inject it.
+
+	if !c.Authenticate(r) {
+		t.Fatal("codex loopback with provider Authorization must be accepted; " +
+			"otherwise codex → proxy traffic gets 401'd and guardrail never runs")
 	}
 }
 
@@ -960,6 +993,8 @@ func TestCodex_Route_ResponsesAPI(t *testing.T) {
 
 func TestCodex_Setup(t *testing.T) {
 	dir := t.TempDir()
+	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
 	opts := SetupOpts{
 		DataDir:   dir,
@@ -987,6 +1022,8 @@ func TestCodex_Setup(t *testing.T) {
 
 func TestCodex_Setup_WritesConnectorPrefix(t *testing.T) {
 	dir := t.TempDir()
+	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(nil, opts); err != nil {
@@ -1004,8 +1041,248 @@ func TestCodex_Setup_WritesConnectorPrefix(t *testing.T) {
 	}
 }
 
+// TestCodex_Route_ResolvesUpstreamFromSnapshot documents the
+// critical native-binary routing path: codex sends LLM requests with
+// no X-DC-Target-URL header (it's a Rust binary with no fetch
+// interceptor). Route() must synthesize RawUpstream from the provider
+// snapshot captured at Setup — otherwise the proxy's passthrough
+// handler rejects the request with "missing X-DC-Target-URL".
+func TestCodex_Route_ResolvesUpstreamFromSnapshot(t *testing.T) {
+	c := NewCodexConnector()
+	c.SetProviderSnapshot(map[string]CodexProviderEntry{
+		"openrouter": {BaseURL: "https://openrouter.ai/api/v1", APIKey: "sk-or-snap"},
+	})
+	body := []byte(`{"model":"openai/gpt-4o-mini"}`)
+	r := httptest.NewRequest("POST", "/responses", nil)
+	r.Header.Set("Authorization", "Bearer incoming-client-key")
+
+	cs, err := c.Route(r, body)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if cs.RawUpstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("RawUpstream = %q, want snapshot base_url", cs.RawUpstream)
+	}
+	if cs.RawAPIKey != "sk-or-snap" {
+		t.Errorf("RawAPIKey = %q, want snapshot api_key", cs.RawAPIKey)
+	}
+}
+
+// TestCodex_Setup_CapturesProviderSnapshot verifies Setup reads each
+// [model_providers.*] entry from config.toml, resolves its env_key to
+// a live API key from the environment, and populates the in-memory
+// snapshot before overwriting base_url with the proxy URL.
+func TestCodex_Setup_CapturesProviderSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+`
+	os.WriteFile(configPath, []byte(original), 0o644)
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-live-test-value")
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	snap := c.ProviderSnapshot()
+	entry, ok := snap["openrouter"]
+	if !ok {
+		t.Fatalf("snapshot missing openrouter entry; got %v", snap)
+	}
+	if entry.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Errorf("snapshot BaseURL = %q, want original openrouter URL (NOT proxy)", entry.BaseURL)
+	}
+	if entry.APIKey != "sk-or-live-test-value" {
+		t.Errorf("snapshot APIKey = %q, want resolved from OPENROUTER_API_KEY env", entry.APIKey)
+	}
+}
+
+// TestCodex_Setup_RewritesModelProvidersBaseURL verifies the Codex
+// connector rewrites each [model_providers.*] base_url in
+// ~/.codex/config.toml to route through DefenseClaw's proxy. The env
+// var OPENAI_BASE_URL is NOT sufficient because Codex honors the
+// per-provider TOML value first, which means non-default providers
+// (openrouter, ollama, lmstudio) otherwise skip the proxy entirely.
+func TestCodex_Setup_RewritesModelProvidersBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	rewritten := string(data)
+	proxy := "http://127.0.0.1:4000/c/codex"
+	// Accept either single- or double-quoted TOML string form.
+	proxyHits := strings.Count(rewritten, "base_url = '"+proxy+"'") +
+		strings.Count(rewritten, `base_url = "`+proxy+`"`)
+	if proxyHits != 2 {
+		t.Errorf("expected 2 base_url lines rewritten to proxy, got %d\nfile:\n%s",
+			proxyHits, rewritten)
+	}
+	if strings.Contains(rewritten, "openrouter.ai/api/v1") {
+		t.Error("original openrouter base_url still present — not rewritten")
+	}
+	if strings.Contains(rewritten, "api.openai.com/v1") {
+		t.Error("original openai base_url still present — not rewritten")
+	}
+}
+
+// TestCodex_Setup_RegistersHooksInline verifies the Codex connector
+// writes an inline [hooks] HookEventsToml struct into config.toml
+// covering all five Codex events and pointing at the generated
+// codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
+// that would trigger a TOML parse error at codex startup.
+func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o644)
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// A stale hooks.json from the file-path approach must NOT be
+	// created — codex rejects it with "invalid type: string" at startup.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(configPath), "hooks.json")); err == nil {
+		t.Error("hooks.json was written — should be inline in config.toml instead")
+	}
+
+	raw, _ := os.ReadFile(configPath)
+	content := string(raw)
+
+	// The [hooks] table must be present with each of the five events
+	// listed as sub-tables.
+	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
+			// Accept either dotted or nested rendering.
+			if !strings.Contains(content, evt) {
+				t.Errorf("config.toml missing event %q\nfile:\n%s", evt, content)
+			}
+		}
+	}
+	if !strings.Contains(content, "codex-hook.sh") {
+		t.Errorf("config.toml [hooks] missing codex-hook.sh reference\nfile:\n%s", content)
+	}
+
+	// Re-parse to ensure it's valid TOML and codex's expected shape
+	// (hooks is a table, not a string).
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("config.toml did not round-trip as valid TOML: %v", err)
+	}
+	if _, isString := parsed["hooks"].(string); isString {
+		t.Error("hooks key is a string — codex requires HookEventsToml struct")
+	}
+	if _, isTable := parsed["hooks"].(map[string]interface{}); !isTable {
+		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
+	}
+}
+
+// TestCodex_Setup_EnablesHooksFeature confirms the connector writes
+// features.codex_hooks = true into config.toml. Without this, Codex
+// ignores any registered hooks because the feature gate defaults to
+// off.
+func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o644)
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	content := string(data)
+	if !strings.Contains(content, "codex_hooks") {
+		t.Errorf("config.toml missing codex_hooks feature flag\nfile:\n%s", content)
+	}
+}
+
+// TestCodex_Teardown_RestoresConfig verifies Teardown restores the
+// original base_urls and removes the hooks.json + feature flag.
+func TestCodex_Teardown_RestoresConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model_provider = "openai"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`
+	os.WriteFile(configPath, []byte(original), 0o644)
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	rewritten := string(data)
+	if !strings.Contains(rewritten, "api.openai.com/v1") {
+		t.Errorf("Teardown did not restore original base_url\nfile:\n%s", rewritten)
+	}
+	if strings.Contains(rewritten, "/c/codex") {
+		t.Error("Teardown left proxy base_url in config.toml")
+	}
+	// The inline [hooks] table we added must be gone after Teardown
+	// so the operator's config.toml returns to its pre-setup shape.
+	if strings.Contains(rewritten, "codex-hook.sh") {
+		t.Errorf("Teardown left hook script reference in config.toml\nfile:\n%s", rewritten)
+	}
+}
+
 func TestCodex_Teardown(t *testing.T) {
 	dir := t.TempDir()
+	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
 	opts := SetupOpts{
 		DataDir:   dir,
@@ -1049,39 +1326,61 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 	c := NewZeptoClawConnector()
 	c.SetCredentials("my-token", "my-master")
 
-	// When a token is configured, loopback callers without X-DC-Auth or
-	// master key are denied. The upstream provider key in Authorization
-	// is not DefenseClaw's token and should not grant access.
+	// ZeptoClaw is a native binary with no fetch interceptor (same
+	// shape as codex) — its Authorization header carries the upstream
+	// provider key, never DefenseClaw's gateway token. Loopback is
+	// therefore trusted unconditionally; denying it would make
+	// zeptoclaw fundamentally unroutable. Non-loopback callers still
+	// require X-DC-Auth or the master key.
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
 	r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
-	if c.Authenticate(r) {
-		t.Error("expected loopback auth to fail when token configured but not presented")
-	}
-
-	// A valid X-DC-Auth still works on loopback.
-	r.Header.Set("X-DC-Auth", "my-token")
 	if !c.Authenticate(r) {
-		t.Error("expected auth to pass with correct X-DC-Auth token")
+		t.Error("loopback must be trusted for zeptoclaw — native binary has no way to inject X-DC-Auth")
 	}
 
-	// The master key via Authorization still works (documented fallback
-	// for non-loopback sandbox/bridge deployments).
-	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r2.RemoteAddr = "127.0.0.1:54321"
-	r2.Header.Set("Authorization", "Bearer my-master")
-	if !c.Authenticate(r2) {
-		t.Error("expected auth to pass with master key")
-	}
-
-	// Non-loopback must still be strict: without a valid X-DC-Auth or
-	// master-key bearer, reject. Protects sandbox / bridge deployments
-	// where the proxy is exposed beyond localhost.
+	// Non-loopback: upstream bearer is NOT a valid DefenseClaw
+	// credential, must reject.
 	r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r3.RemoteAddr = "10.0.0.5:54321"
 	r3.Header.Set("Authorization", "Bearer sk-or-upstream-key")
 	if c.Authenticate(r3) {
 		t.Error("expected non-loopback auth to fail with only an upstream bearer token")
+	}
+
+	// Non-loopback: valid X-DC-Auth → accept.
+	r4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r4.RemoteAddr = "10.0.0.5:54321"
+	r4.Header.Set("X-DC-Auth", "my-token")
+	if !c.Authenticate(r4) {
+		t.Error("expected non-loopback auth to pass with correct X-DC-Auth token")
+	}
+
+	// Non-loopback: master key → accept.
+	r5 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r5.RemoteAddr = "10.0.0.5:54321"
+	r5.Header.Set("Authorization", "Bearer my-master")
+	if !c.Authenticate(r5) {
+		t.Error("expected non-loopback auth to pass with master key")
+	}
+}
+
+// TestZeptoClaw_Authenticate_NativeBinaryLoopback mirrors the codex
+// test: the critical end-to-end path is zeptoclaw → proxy on loopback
+// with an Authorization: Bearer <provider-api-key> header. Denying
+// this 401s every request before guardrail inspection even runs, so
+// loopback trust is structural not optional.
+func TestZeptoClaw_Authenticate_NativeBinaryLoopback(t *testing.T) {
+	c := NewZeptoClawConnector()
+	c.SetCredentials("gw-tok-5c80", "")
+
+	r := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	r.Header.Set("Authorization", "Bearer sk-or-v1-real-openrouter-key")
+
+	if !c.Authenticate(r) {
+		t.Fatal("zeptoclaw loopback with provider Authorization must be accepted; " +
+			"otherwise zeptoclaw → proxy traffic gets 401'd and guardrail never runs")
 	}
 }
 
@@ -1682,11 +1981,24 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 			t.Errorf("%s: master key should authenticate", c.Name())
 		}
 
-		// No creds on loopback should fail for all connectors when
-		// token is configured — closes the local-process bypass vector.
+		// No creds on loopback should fail for connectors with a fetch
+		// interceptor — closes the local-process bypass vector.
+		//
+		// Exception: native-binary connectors (codex, zeptoclaw) have
+		// no fetch interceptor and cannot inject X-DC-Auth. Their
+		// primary authentication path IS loopback trust; denying it
+		// would make them fundamentally unroutable through the proxy.
+		// Bridge / remote deployments still require X-DC-Auth or the
+		// master key — the token protects those paths.
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
-		if c.Authenticate(r3) {
+		accepted := c.Authenticate(r3)
+		nativeBinary := c.Name() == "codex" || c.Name() == "zeptoclaw"
+		if nativeBinary {
+			if !accepted {
+				t.Errorf("%s: loopback must be trusted so native-binary traffic can reach the proxy", c.Name())
+			}
+		} else if accepted {
 			t.Errorf("%s: should fail without credentials when token configured", c.Name())
 		}
 	}
@@ -1731,6 +2043,8 @@ func TestDiscoverPlugins_NonexistentDir(t *testing.T) {
 
 func TestCodex_Setup_Surface1_WritesEnvFiles(t *testing.T) {
 	dir := t.TempDir()
+	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
 	opts := SetupOpts{
 		DataDir:   dir,
@@ -1777,6 +2091,8 @@ func TestCodex_Setup_Surface1_WritesEnvFiles(t *testing.T) {
 
 func TestCodex_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 	dir := t.TempDir()
+	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
 	opts := SetupOpts{
 		DataDir:   dir,
@@ -1805,6 +2121,8 @@ func TestCodex_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 
 func TestCodex_Setup_Surface1_BackupsExistingEnv(t *testing.T) {
 	dir := t.TempDir()
+	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
 	t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 	c := NewCodexConnector()
