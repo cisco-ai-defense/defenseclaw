@@ -32,11 +32,15 @@ struct StatusBarPopover: View {
 
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
+                    navButton("Setup", "wand.and.stars", .setup)
                     navButton("Settings", "slider.horizontal.3", .settings)
-                    navButton("Alerts", "bell.badge", .alerts)
                 }
                 HStack(spacing: 6) {
+                    navButton("Alerts", "bell.badge", .alerts)
                     navButton("Scans", "magnifyingglass", .scan)
+                }
+                HStack(spacing: 6) {
+                    navButton("Policy", "doc.text.magnifyingglass", .policy)
                     navButton("Logs", "terminal", .logs)
                 }
             }
@@ -88,6 +92,8 @@ struct StatusBarPopover: View {
         switch section {
         case .home:
             appDelegate.showHome()
+        case .setup:
+            appDelegate.showSetup()
         case .settings:
             appDelegate.showSettings()
         case .scan:

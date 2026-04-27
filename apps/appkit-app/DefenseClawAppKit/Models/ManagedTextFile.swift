@@ -3,6 +3,7 @@ import Foundation
 enum ManagedWorkspaceMode {
     case configuration
     case policy
+    case guardrailPolicy
 }
 
 enum ManagedTextFileKind: String, CaseIterable {

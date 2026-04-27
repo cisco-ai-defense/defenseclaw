@@ -11,6 +11,8 @@ struct TextFileWorkspace {
             return discoverConfigurationFiles()
         case .policy:
             return discoverPolicyFiles()
+        case .guardrailPolicy:
+            return discoverGuardrailPolicyFiles()
         }
     }
 
@@ -197,6 +199,17 @@ struct TextFileWorkspace {
         }
 
         return uniqueSorted(files)
+    }
+
+    private static func discoverGuardrailPolicyFiles() -> [ManagedTextFile] {
+        discoverPolicyFiles().filter { file in
+            let path = file.relativePath.lowercased()
+            let name = file.displayName.lowercased()
+            return path.contains("/guardrail/")
+                || path.contains("guardrail")
+                || name == "suppressions.yaml"
+                || name == "suppressions.yml"
+        }
     }
 
     private static func appendIfPresent(

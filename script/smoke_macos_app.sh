@@ -67,7 +67,7 @@ capture_section() {
   fi
 }
 
-sections=(home settings scan policy alerts tools logs)
+sections=(home setup settings scan policy alerts tools logs)
 for index in "${!sections[@]}"; do
   section="${sections[$index]}"
   number="$(printf '%02d' "$((index + 1))")"

@@ -96,6 +96,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         showSection(.home)
     }
 
+    @objc func showSetup() {
+        showSection(.setup)
+    }
+
     @objc func showSettings() {
         showSection(.settings)
     }

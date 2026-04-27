@@ -3,6 +3,7 @@ import DefenseClawKit
 
 struct PolicyView: View {
     @State private var model = TextFileEditorModel(mode: .policy)
+    @State private var guardrailModel = TextFileEditorModel(mode: .guardrailPolicy)
     @State private var evalTargetType = "skill"
     @State private var evalTargetName = ""
     @State private var evalSeverity = "MEDIUM"
@@ -17,13 +18,30 @@ struct PolicyView: View {
     private let sidecarClient = SidecarClient()
 
     var body: some View {
-        ManagedTextFileWorkspaceView(
-            model: model,
-            title: "Policy Editor",
-            subtitle: "Edit admission, guardrail, scanner, firewall, sandbox, and Rego policy files without leaving the app.",
-            emptyMessage: "No policy files found"
-        ) {
-            policyControls
+        TabView {
+            ManagedTextFileWorkspaceView(
+                model: model,
+                title: "Policy Editor",
+                subtitle: "Edit admission, scanner, firewall, sandbox, guardrail, and Rego policy files without leaving the app.",
+                emptyMessage: "No policy files found"
+            ) {
+                policyControls
+            }
+            .tabItem {
+                Label("All Policies", systemImage: "doc.text.magnifyingglass")
+            }
+
+            ManagedTextFileWorkspaceView(
+                model: guardrailModel,
+                title: "Guardrail Rule Pack",
+                subtitle: "Edit suppressions.yaml, regex rule YAML, and judge prompt files from the active guardrail policy tree.",
+                emptyMessage: "No guardrail rule-pack files found"
+            ) {
+                guardrailControls
+            }
+            .tabItem {
+                Label("Guardrail Rules", systemImage: "shield.lefthalf.filled")
+            }
         }
         .navigationTitle("Policy")
     }
@@ -107,6 +125,39 @@ struct PolicyView: View {
                         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
+        }
+    }
+
+    private var guardrailControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Label("Suppressions", systemImage: "text.badge.minus")
+                Label("Regex Rules", systemImage: "textformat.abc.dottedunderline")
+                Label("Judge Prompts", systemImage: "brain.head.profile")
+                Spacer()
+                Button {
+                    guardrailModel.searchText = "suppressions"
+                } label: {
+                    Label("Suppressions", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                Button {
+                    guardrailModel.searchText = "rules"
+                } label: {
+                    Label("Rules", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                Button {
+                    guardrailModel.searchText = "judge"
+                } label: {
+                    Label("Judge", systemImage: "line.3.horizontal.decrease.circle")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Text("Runtime files are editable. Bundled rule packs are shown read-only so you can compare defaults before copying changes into ~/.defenseclaw/policies.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
