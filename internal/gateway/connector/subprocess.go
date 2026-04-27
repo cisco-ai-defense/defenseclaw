@@ -165,10 +165,10 @@ func HookScripts() []string {
 
 type sandboxPolicy struct {
 	Sandbox struct {
-		Mode       string          `yaml:"mode"`
-		Exec       sandboxExec     `yaml:"exec"`
-		Network    sandboxNetwork  `yaml:"network"`
-		Filesystem sandboxFilesys  `yaml:"filesystem"`
+		Mode       string         `yaml:"mode"`
+		Exec       sandboxExec    `yaml:"exec"`
+		Network    sandboxNetwork `yaml:"network"`
+		Filesystem sandboxFilesys `yaml:"filesystem"`
 	} `yaml:"sandbox"`
 }
 

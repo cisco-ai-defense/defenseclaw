@@ -115,7 +115,7 @@ type GuardrailProxy struct {
 
 	// registry + setupOpts enable runtime connector hot-swap when the
 	// "connector" key appears in guardrail_runtime.json.
-	registry *connector.Registry
+	registry  *connector.Registry
 	setupOpts connector.SetupOpts
 
 	// Observability defaults set at bootstrap. defaultAgentName
