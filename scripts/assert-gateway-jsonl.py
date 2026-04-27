@@ -73,6 +73,10 @@ REQUIRED_EVENT_FIELDS = {
     # identify the mutation; before/after/diff are optional because
     # create/delete mutations legitimately drop one side.
     "activity":   {"actor", "action", "target_type", "target_id"},
+    # v7.1 egress (Layer-3 proxy observability). Target host/path and
+    # body-shape are optional on some paths; branch/decision/source are
+    # always present per EgressPayload in internal/gatewaylog/events.go.
+    "egress":     {"branch", "decision", "source"},
 }
 
 VALID_EVENT_TYPES = set(REQUIRED_EVENT_FIELDS.keys())
