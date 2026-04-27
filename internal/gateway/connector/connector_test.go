@@ -1050,24 +1050,55 @@ func TestCodex_Setup(t *testing.T) {
 	}
 }
 
-func TestCodex_Setup_WritesConnectorPrefix(t *testing.T) {
+// TestCodex_Setup_PatchesConnectorPrefixInConfigToml verifies the
+// /c/codex routing prefix lands in the only place codex-cli reads it:
+// [model_providers.*].base_url in ~/.codex/config.toml. We
+// intentionally do NOT write a global OPENAI_BASE_URL anymore (see
+// S8.1 / F31 in claw-agnostic-refactor) — exporting that env var
+// would silently route every other OpenAI-SDK client on the host
+// through this proxy.
+func TestCodex_Setup_PatchesConnectorPrefixInConfigToml(t *testing.T) {
 	dir := t.TempDir()
-	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
+	configPath := filepath.Join(dir, "config.toml")
+	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
+
+	// Seed a model_providers entry so the codex flow has something to
+	// rewrite (otherwise patchCodexConfig synthesizes a default openai
+	// entry, which would also pass — but we want to pin the patch
+	// path explicitly).
+	original := `model_provider = "openai"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed config.toml: %v", err)
+	}
+
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
-	envData, _ := os.ReadFile(filepath.Join(dir, "codex_env.sh"))
-	if !strings.Contains(string(envData), "/c/codex") {
-		t.Error("env file missing /c/codex prefix")
+	patched, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	if !strings.Contains(string(patched), "/c/codex") {
+		t.Errorf("config.toml missing /c/codex prefix after Setup; got:\n%s", patched)
 	}
 
-	dotenvData, _ := os.ReadFile(filepath.Join(dir, "codex.env"))
-	if !strings.Contains(string(dotenvData), "/c/codex") {
-		t.Error(".env file missing /c/codex prefix")
+	// Negative assertion: the legacy global env files MUST NOT
+	// be written. This is the F31 contract.
+	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); !os.IsNotExist(err) {
+		t.Errorf("codex_env.sh must not be written (S8.1 / F31)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "codex.env")); !os.IsNotExist(err) {
+		t.Errorf("codex.env must not be written (S8.1 / F31)")
 	}
 }
 
@@ -2070,8 +2101,15 @@ func TestDiscoverPlugins_NonexistentDir(t *testing.T) {
 }
 
 // --- Surface 1: LLM traffic routing tests ---
+//
+// Surface 1 is the codex-cli LLM-traffic redirection: codex must hit
+// the DefenseClaw proxy and not the upstream provider directly. The
+// canonical path is the [model_providers.*].base_url rewrite in
+// ~/.codex/config.toml; we explicitly DO NOT export a global
+// OPENAI_BASE_URL because that would co-route every other OpenAI-SDK
+// client on the host (see S8.1 / F31).
 
-func TestCodex_Setup_Surface1_WritesEnvFiles(t *testing.T) {
+func TestCodex_Setup_Surface1_DoesNotExportGlobalEnv(t *testing.T) {
 	dir := t.TempDir()
 	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
 	defer func() { CodexConfigPathOverride = "" }()
@@ -2085,41 +2123,46 @@ func TestCodex_Setup_Surface1_WritesEnvFiles(t *testing.T) {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
-	// Check shell env file
-	envData, err := os.ReadFile(filepath.Join(dir, "codex_env.sh"))
-	if err != nil {
-		t.Fatalf("env file not created: %v", err)
+	// F31 contract: legacy env-override files MUST NOT be written.
+	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); !os.IsNotExist(err) {
+		t.Errorf("codex_env.sh must not exist after Setup (S8.1 / F31)")
 	}
-	envContent := string(envData)
-	if !strings.Contains(envContent, "OPENAI_BASE_URL") {
-		t.Error("env file missing OPENAI_BASE_URL")
-	}
-	if !strings.Contains(envContent, "/c/codex") {
-		t.Errorf("env file missing /c/codex prefix: %s", envContent)
+	if _, err := os.Stat(filepath.Join(dir, "codex.env")); !os.IsNotExist(err) {
+		t.Errorf("codex.env must not exist after Setup (S8.1 / F31)")
 	}
 
-	// Check dotenv file
-	dotenvData, err := os.ReadFile(filepath.Join(dir, "codex.env"))
-	if err != nil {
-		t.Fatalf("dotenv file not created: %v", err)
-	}
-	if !strings.Contains(string(dotenvData), "/c/codex") {
-		t.Errorf("dotenv missing /c/codex prefix: %s", string(dotenvData))
-	}
-
-	// Check backup
+	// Check forensic backup is still recorded — even though we no
+	// longer overwrite the env, the backup gives Teardown / audit a
+	// pristine record of whether the operator already had
+	// OPENAI_BASE_URL set.
 	backupData, err := os.ReadFile(filepath.Join(dir, "codex_backup.json"))
 	if err != nil {
 		t.Fatalf("backup not saved: %v", err)
 	}
 	var backup codexBackup
-	json.Unmarshal(backupData, &backup)
+	if err := json.Unmarshal(backupData, &backup); err != nil {
+		t.Fatalf("decode backup: %v", err)
+	}
 	if backup.HadBaseURL {
 		t.Error("backup.HadBaseURL should be false when env not set")
 	}
+
+	// Check the routing actually landed in config.toml — that's the
+	// only place codex reads provider URLs from.
+	patched, err := os.ReadFile(filepath.Join(dir, "config.toml"))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if !strings.Contains(string(patched), "/c/codex") {
+		t.Errorf("config.toml missing /c/codex prefix; got:\n%s", patched)
+	}
 }
 
-func TestCodex_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
+// TestCodex_Teardown_RemovesLegacyEnvFiles guarantees that an
+// upgrade-then-uninstall flow ends with the operator's host pristine:
+// even if a previous DefenseClaw release wrote codex_env.sh /
+// codex.env, today's Teardown removes them.
+func TestCodex_Teardown_RemovesLegacyEnvFiles(t *testing.T) {
 	dir := t.TempDir()
 	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
 	defer func() { CodexConfigPathOverride = "" }()
@@ -2129,23 +2172,27 @@ func TestCodex_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	c.Setup(nil, opts)
-
-	// Verify files exist
-	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); err != nil {
-		t.Fatal("env file not created")
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
 	}
 
-	c.Teardown(nil, opts)
+	// Simulate an old install that left these files behind.
+	for _, name := range []string{"codex_env.sh", "codex.env"} {
+		if err := os.WriteFile(filepath.Join(dir, name),
+			[]byte("# stale legacy override\nexport OPENAI_BASE_URL=stale\n"),
+			0o644); err != nil {
+			t.Fatalf("seed legacy %s: %v", name, err)
+		}
+	}
 
-	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); !os.IsNotExist(err) {
-		t.Error("codex_env.sh should be removed after teardown")
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "codex.env")); !os.IsNotExist(err) {
-		t.Error("codex.env should be removed after teardown")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "codex_backup.json")); !os.IsNotExist(err) {
-		t.Error("codex_backup.json should be removed after teardown")
+
+	for _, name := range []string{"codex_env.sh", "codex.env", "codex_backup.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed after Teardown", name)
+		}
 	}
 }
 
