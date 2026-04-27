@@ -115,10 +115,10 @@ open_app() {
 
 open_app_qa() {
   local section="${1:-home}"
-  local settings_tab="${2:-}"
+  local detail="${2:-}"
   ensure_sidecar
-  if [[ -n "$settings_tab" ]]; then
-    /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section" --qa-settings-tab "$settings_tab"
+  if [[ -n "$detail" ]]; then
+    /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section" --qa-settings-tab "$detail" --qa-setup-group "$detail"
   else
     /usr/bin/open -n "$APP_BUNDLE" --args --qa-section "$section"
   fi
@@ -150,7 +150,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--qa [section]]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--qa [section] [detail]]" >&2
     exit 2
     ;;
 esac

@@ -185,7 +185,7 @@ enum SetupCatalog {
                 SetupWorkflow(
                     id: "gateway-setup",
                     title: "Configure Gateway",
-                    subtitle: "Run the same non-interactive gateway setup flow exposed by the TUI.",
+                    subtitle: "Start local background protection and connect DefenseClaw to OpenClaw.",
                     command: ["setup", "gateway", "--non-interactive"],
                     fields: [
                         SetupWorkflowField("Remote Mode", flag: "--remote", kind: .toggle),
@@ -227,7 +227,7 @@ enum SetupCatalog {
                 SetupWorkflow(
                     id: "skill-scanner",
                     title: "Skill Scanner Setup",
-                    subtitle: "Configure behavioral, metadata, trigger, VirusTotal, LLM, and AI Defense analyzers.",
+                    subtitle: "Choose the scanner policy and optional analyzers used for skill review.",
                     command: ["setup", "skill-scanner", "--non-interactive"],
                     fields: [
                         SetupWorkflowField("Behavioral Analyzer", flag: "--use-behavioral", kind: .toggle),
@@ -247,7 +247,7 @@ enum SetupCatalog {
                 SetupWorkflow(
                     id: "mcp-scanner",
                     title: "MCP Scanner Setup",
-                    subtitle: "Configure analyzers plus prompt, resource, and instruction scanning.",
+                    subtitle: "Choose which MCP surfaces DefenseClaw should inspect.",
                     command: ["setup", "mcp-scanner", "--non-interactive"],
                     fields: [
                         SetupWorkflowField("Analyzers", flag: "--analyzers", defaultValue: "yara,api,llm,behavioral,readiness", alwaysPass: true),
@@ -306,7 +306,7 @@ enum SetupCatalog {
                 SetupWorkflow(
                     id: "guardrail-setup",
                     title: "Guardrail Setup",
-                    subtitle: "Configure local regex/judge scanning and optional remote AI Defense mode.",
+                    subtitle: "Choose protection mode, scanner source, and optional judge behavior.",
                     command: ["setup", "guardrail", "--non-interactive"],
                     fields: [
                         SetupWorkflowField("Mode", flag: "--mode", kind: .choice, options: ["observe", "action"], defaultValue: "observe"),
@@ -357,7 +357,7 @@ enum SetupCatalog {
                 SetupWorkflow(
                     id: "sandbox-setup",
                     title: "Sandbox Setup",
-                    subtitle: "Write OpenShell policy YAML. Runtime checks are skipped on macOS.",
+                    subtitle: "Prepare OpenShell policy files. Runtime execution remains Linux-only.",
                     command: ["sandbox", "setup"],
                     fields: [
                         SetupWorkflowField("Sandbox IP", flag: "--sandbox-ip", defaultValue: "10.200.0.2"),
