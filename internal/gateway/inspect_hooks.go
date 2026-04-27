@@ -28,6 +28,37 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
+const (
+	maxInspectContentLen = 256 * 1024 // 256 KiB per field
+	inspectScanTimeout   = 5 * time.Second
+)
+
+// scanWithTimeout runs ScanAllRules under a context deadline. Returns partial
+// results if the deadline fires — the caller should treat a timeout as a
+// high-severity finding.
+func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Duration) ([]RuleFinding, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ch := make(chan []RuleFinding, 1)
+	go func() {
+		ch <- ScanAllRules(text, toolName)
+	}()
+	select {
+	case findings := <-ch:
+		return findings, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func truncateInspectContent(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
 // RequestInspectRequest is the payload for POST /api/v1/inspect/request.
 // Called before the user query is sent to the LLM.
 type RequestInspectRequest struct {
@@ -65,6 +96,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
+	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
 	if req.Content == "" {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
 		return
@@ -75,7 +107,12 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 
 	t0 := time.Now()
 
-	ruleFindings := ScanAllRules(req.Content, "user-request")
+	ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", inspectScanTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[inspect] pre-request scan timeout after %s\n", time.Since(t0))
+		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+		return
+	}
 	verdict := buildVerdict(ruleFindings, "prompt")
 
 	mode := "observe"
@@ -129,6 +166,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
+	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
 	if req.Content == "" {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
 		return
@@ -139,7 +177,12 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 
 	t0 := time.Now()
 
-	ruleFindings := ScanAllRules(req.Content, "llm-response")
+	ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", inspectScanTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[inspect] post-response scan timeout after %s\n", time.Since(t0))
+		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+		return
+	}
 	verdict := buildVerdict(ruleFindings, "completion")
 
 	mode := "observe"
@@ -198,14 +241,19 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	outputStr := string(req.Output)
+	outputStr := truncateInspectContent(string(req.Output), maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
 		req.Tool, len(outputStr), req.ExitCode)
 
 	t0 := time.Now()
 
-	ruleFindings := ScanAllRules(outputStr, req.Tool+"-response")
+	ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
+		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+		return
+	}
 	verdict := buildVerdict(ruleFindings, "tool_response")
 
 	mode := "observe"

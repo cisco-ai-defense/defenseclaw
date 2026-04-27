@@ -580,7 +580,11 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 			add(p)
 		}
 	}
-	for _, p := range gitChangedFiles(ctx, req.CWD) {
+	changedFiles, gitErr := gitChangedFiles(ctx, req.CWD)
+	if gitErr != nil {
+		fmt.Fprintf(os.Stderr, "[claude-code-hook] WARNING: git scan failed: %v — scanning configured paths only\n", gitErr)
+	}
+	for _, p := range changedFiles {
 		add(p)
 	}
 	if len(out) > 200 {

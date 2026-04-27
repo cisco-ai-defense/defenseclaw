@@ -30,7 +30,7 @@ import (
 // LLM traffic: sets ANTHROPIC_BASE_URL to route through proxy.
 // Tool inspection: registers hooks in ~/.claude/settings.json pointing to
 // claude-code-hook.sh which calls /api/v1/claude-code/hook.
-// Implements HookEventHandler, ComponentScanner, StopScanner.
+// Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
 	gatewayToken string
 	masterKey    string
@@ -97,12 +97,10 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if isLoopback && c.gatewayToken == "" {
-		return true
-	}
-
+	// No token configured: allow only loopback callers. Non-loopback traffic
+	// is denied by default until the operator explicitly sets a gateway token.
 	if c.gatewayToken == "" && c.masterKey == "" {
-		return true
+		return isLoopback
 	}
 
 	return false
@@ -136,26 +134,6 @@ func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSig
 	}
 
 	return cs, nil
-}
-
-// --- HookEventHandler interface ---
-
-func (c *ClaudeCodeConnector) HookEndpointPath() string {
-	return "/api/v1/claude-code/hook"
-}
-
-func (c *ClaudeCodeConnector) HandleHookEvent(ctx context.Context, payload []byte) ([]byte, error) {
-	var req struct {
-		HookEventName string `json:"hook_event_name"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return nil, fmt.Errorf("parse hook event: %w", err)
-	}
-
-	resp := map[string]interface{}{
-		"action": "allow",
-	}
-	return json.Marshal(resp)
 }
 
 // --- ComponentScanner interface ---
@@ -201,7 +179,7 @@ func (c *ClaudeCodeConnector) saveBackup(dataDir string, backup claudeCodeBackup
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, "claudecode_backup.json"), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, "claudecode_backup.json"), data, 0o644)
 }
 
 func (c *ClaudeCodeConnector) loadBackup(dataDir string) (claudeCodeBackup, error) {
@@ -282,76 +260,77 @@ var hookGroups = []struct {
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original
 // hooks, and registers DefenseClaw hooks for all Claude Code events.
+// The read-modify-write cycle is protected by an advisory file lock to
+// prevent corruption from concurrent gateway starts.
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
 	settingsPath := claudeCodeSettingsPath()
 
-	settings := map[string]interface{}{}
-	data, err := os.ReadFile(settingsPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read claude settings: %w", err)
-	}
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("parse claude settings: %w", err)
+	return withFileLock(settingsPath, func() error {
+		settings := map[string]interface{}{}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read claude settings: %w", err)
 		}
-	}
-
-	backupPath := filepath.Join(opts.DataDir, "claudecode_backup.json")
-	if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
-		backup := claudeCodeBackup{}
-		if v := os.Getenv("ANTHROPIC_BASE_URL"); v != "" {
-			backup.HadBaseURL = true
-			backup.OldBaseURL = v
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return fmt.Errorf("parse claude settings: %w", err)
+			}
 		}
-		if hooks, ok := settings["hooks"]; ok {
-			raw, _ := json.Marshal(hooks)
-			backup.OriginalHooks = raw
-			backup.HadHooksKey = true
+
+		backupPath := filepath.Join(opts.DataDir, "claudecode_backup.json")
+		if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
+			backup := claudeCodeBackup{}
+			if v := os.Getenv("ANTHROPIC_BASE_URL"); v != "" {
+				backup.HadBaseURL = true
+				backup.OldBaseURL = v
+			}
+			if hooks, ok := settings["hooks"]; ok {
+				raw, _ := json.Marshal(hooks)
+				backup.OriginalHooks = raw
+				backup.HadHooksKey = true
+			}
+			if err := c.saveBackup(opts.DataDir, backup); err != nil {
+				return fmt.Errorf("save claudecode backup: %w", err)
+			}
 		}
-		if err := c.saveBackup(opts.DataDir, backup); err != nil {
-			return fmt.Errorf("save claudecode backup: %w", err)
+
+		hooks, _ := settings["hooks"].(map[string]interface{})
+		if hooks == nil {
+			hooks = map[string]interface{}{}
 		}
-	}
 
-	hooks, _ := settings["hooks"].(map[string]interface{})
-	if hooks == nil {
-		hooks = map[string]interface{}{}
-	}
+		hooksDir := filepath.Join(opts.DataDir, "hooks")
+		for key, hk := range hooks {
+			hooks[key] = removeOwnedHooks(hk, hooksDir)
+		}
 
-	for key, hk := range hooks {
-		hooks[key] = removeOwnedHooks(hk)
-	}
-
-	for _, group := range hookGroups {
-		entry := map[string]interface{}{
-			"hooks": []interface{}{
-				map[string]interface{}{
-					"type":    "command",
-					"command": hookScript,
-					"timeout": group.timeout,
+		for _, group := range hookGroups {
+			entry := map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": hookScript,
+						"timeout": group.timeout,
+					},
 				},
-			},
+			}
+			if group.matcher != "" {
+				entry["matcher"] = group.matcher
+			}
+
+			existing, _ := hooks[group.eventType].([]interface{})
+			hooks[group.eventType] = append(existing, entry)
 		}
-		if group.matcher != "" {
-			entry["matcher"] = group.matcher
+
+		settings["hooks"] = hooks
+
+		out, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal claude settings: %w", err)
 		}
 
-		existing, _ := hooks[group.eventType].([]interface{})
-		hooks[group.eventType] = append(existing, entry)
-	}
-
-	settings["hooks"] = hooks
-
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal claude settings: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		return fmt.Errorf("create claude settings dir: %w", err)
-	}
-
-	return os.WriteFile(settingsPath, out, 0o644)
+		return atomicWriteFile(settingsPath, out, 0o644)
+	})
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
@@ -385,8 +364,15 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) {
 	os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
 }
 
-// isOwnedHook returns true if a hook entry's command path contains "defenseclaw".
-func isOwnedHook(hookEntry interface{}) bool {
+// hookMarker is written on line 2 of every generated hook script.
+// isOwnedHook checks for this marker instead of a substring match to
+// avoid accidentally claiming hooks from unrelated tools whose paths
+// happen to contain "defenseclaw".
+const hookMarker = "# defenseclaw-managed-hook v1"
+
+// isOwnedHook returns true if a hook entry was generated by DefenseClaw.
+// It checks both the script marker and the hook directory path.
+func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 	m, ok := hookEntry.(map[string]interface{})
 	if !ok {
 		return false
@@ -395,23 +381,43 @@ func isOwnedHook(hookEntry interface{}) bool {
 	for _, h := range hooksList {
 		hm, _ := h.(map[string]interface{})
 		cmd, _ := hm["command"].(string)
-		if strings.Contains(cmd, "defenseclaw") {
+		if cmd == "" {
+			continue
+		}
+		if hooksDir != "" && strings.HasPrefix(cmd, hooksDir+"/") {
+			return true
+		}
+		if scriptHasMarker(cmd) {
 			return true
 		}
 	}
 	return false
 }
 
+// scriptHasMarker reads the first 512 bytes of a file and checks for the
+// defenseclaw-managed-hook marker. Returns false on any I/O error (the
+// file may have been deleted between runs).
+func scriptHasMarker(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	return strings.Contains(string(buf[:n]), hookMarker)
+}
+
 // removeOwnedHooks removes DefenseClaw-owned entries from a hook event's list
 // and returns the compacted slice.
-func removeOwnedHooks(hookEventValue interface{}) []interface{} {
+func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{} {
 	list, ok := hookEventValue.([]interface{})
 	if !ok {
 		return nil
 	}
 	n := 0
 	for _, entry := range list {
-		if !isOwnedHook(entry) {
+		if !isOwnedHook(entry, hooksDir) {
 			list[n] = entry
 			n++
 		}

@@ -121,18 +121,12 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// Loopback clients are trusted unconditionally. ZeptoClaw is a native
-	// binary with no fetch interceptor, so it cannot inject X-DC-Auth and
-	// the Authorization bearer it sends is the *upstream* provider key,
-	// not DefenseClaw's. The proxy binds 127.0.0.1 only, so loopback is
-	// the effective boundary; out-of-loopback callers (sandbox / bridge)
-	// still have to present X-DC-Auth or the master key above.
-	if isLoopback {
-		return true
-	}
-
+	// No token configured: allow only loopback callers. Non-loopback traffic
+	// is denied by default until the operator explicitly sets a gateway token.
+	// ZeptoClaw is a native binary that cannot inject X-DC-Auth, so the
+	// loopback fallback is its authentication path when no token is set.
 	if c.gatewayToken == "" && c.masterKey == "" {
-		return true
+		return isLoopback
 	}
 
 	return false
@@ -264,7 +258,7 @@ func (c *ZeptoClawConnector) saveBackup(dataDir string, backup zeptoClawBackup) 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, "zeptoclaw_backup.json"), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, "zeptoclaw_backup.json"), data, 0o644)
 }
 
 func (c *ZeptoClawConnector) loadBackup(dataDir string) (zeptoClawBackup, error) {
@@ -298,119 +292,112 @@ func zeptoClawConfigPath() string {
 func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	configPath := zeptoClawConfigPath()
 
-	config := map[string]interface{}{}
-	data, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read zeptoclaw config: %w", err)
-	}
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &config); err != nil {
-			return fmt.Errorf("parse zeptoclaw config: %w", err)
+	return withFileLock(configPath, func() error {
+		config := map[string]interface{}{}
+		data, err := os.ReadFile(configPath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read zeptoclaw config: %w", err)
 		}
-	}
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &config); err != nil {
+				return fmt.Errorf("parse zeptoclaw config: %w", err)
+			}
+		}
 
-	backupPath := filepath.Join(opts.DataDir, "zeptoclaw_backup.json")
-	_, backupStatErr := os.Stat(backupPath)
-	backupExists := backupStatErr == nil
+		backupPath := filepath.Join(opts.DataDir, "zeptoclaw_backup.json")
+		_, backupStatErr := os.Stat(backupPath)
+		backupExists := backupStatErr == nil
 
-	// pristineProviders is the source of truth for the snapshot: the
-	// existing backup on re-entry, or the current config on first boot.
-	pristineProviders := map[string]interface{}{}
-	if backupExists {
-		if bk, err := c.loadBackup(opts.DataDir); err == nil && len(bk.OriginalProviders) > 0 {
-			_ = json.Unmarshal(bk.OriginalProviders, &pristineProviders)
+		pristineProviders := map[string]interface{}{}
+		if backupExists {
+			if bk, err := c.loadBackup(opts.DataDir); err == nil && len(bk.OriginalProviders) > 0 {
+				_ = json.Unmarshal(bk.OriginalProviders, &pristineProviders)
+			}
+		} else {
+			if p, ok := config["providers"].(map[string]interface{}); ok {
+				pristineProviders = p
+			}
 		}
-	} else {
-		if p, ok := config["providers"].(map[string]interface{}); ok {
-			pristineProviders = p
-		}
-	}
 
-	// Only write the backup once. Subsequent boots keep the first one.
-	if !backupExists {
-		backup := zeptoClawBackup{}
-		if providers, ok := config["providers"]; ok {
-			raw, _ := json.Marshal(providers)
-			backup.OriginalProviders = raw
+		if !backupExists {
+			backup := zeptoClawBackup{}
+			if providers, ok := config["providers"]; ok {
+				raw, _ := json.Marshal(providers)
+				backup.OriginalProviders = raw
+			}
+			if safety, ok := config["safety"]; ok {
+				raw, _ := json.Marshal(safety)
+				backup.OriginalSafety = raw
+			}
+			if err := c.saveBackup(opts.DataDir, backup); err != nil {
+				return fmt.Errorf("save zeptoclaw backup: %w", err)
+			}
 		}
-		if safety, ok := config["safety"]; ok {
-			raw, _ := json.Marshal(safety)
-			backup.OriginalSafety = raw
-		}
-		if err := c.saveBackup(opts.DataDir, backup); err != nil {
-			return fmt.Errorf("save zeptoclaw backup: %w", err)
-		}
-	}
 
-	proxyURL := "http://" + opts.ProxyAddr + "/c/zeptoclaw"
+		proxyURL := "http://" + opts.ProxyAddr + "/c/zeptoclaw"
 
-	// Build the in-memory snapshot from the pristine providers (either the
-	// first-boot config or the saved backup). Route() uses this to map
-	// model prefixes to real upstream URLs and keys.
-	snapshot := map[string]ZeptoClawProviderEntry{}
-	for name, val := range pristineProviders {
-		prov, ok := val.(map[string]interface{})
-		if !ok {
-			continue
+		snapshot := map[string]ZeptoClawProviderEntry{}
+		for name, val := range pristineProviders {
+			prov, ok := val.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch name {
+			case "retry", "fallback", "rotation", "plugins":
+				continue
+			}
+			entry := ZeptoClawProviderEntry{
+				APIBase: zeptoClawDefaultAPIBase[name],
+			}
+			if base, ok := prov["api_base"].(string); ok && base != "" {
+				entry.APIBase = base
+			}
+			if key, ok := prov["api_key"].(string); ok {
+				entry.APIKey = key
+			}
+			snapshot[name] = entry
 		}
-		switch name {
-		case "retry", "fallback", "rotation", "plugins":
-			continue
-		}
-		entry := ZeptoClawProviderEntry{
-			APIBase: zeptoClawDefaultAPIBase[name],
-		}
-		if base, ok := prov["api_base"].(string); ok && base != "" {
-			entry.APIBase = base
-		}
-		if key, ok := prov["api_key"].(string); ok {
-			entry.APIKey = key
-		}
-		snapshot[name] = entry
-	}
-	c.SetProviderSnapshot(snapshot)
+		c.SetProviderSnapshot(snapshot)
 
-	// Patch each configured provider's api_base to route through proxy.
-	providers, _ := config["providers"].(map[string]interface{})
-	if providers == nil {
-		providers = map[string]interface{}{}
-	}
-	for name, val := range providers {
-		prov, ok := val.(map[string]interface{})
-		if !ok {
-			continue
+		if len(snapshot) == 0 {
+			if backupExists {
+				fmt.Fprintf(os.Stderr, "[zeptoclaw] WARNING: backup at %s exists but yielded no usable providers — config may be corrupted\n", backupPath)
+			}
+			return fmt.Errorf("zeptoclaw: no usable providers found in %s (backup exists: %v) — cannot route LLM traffic",
+				configPath, backupExists)
 		}
-		switch name {
-		case "retry", "fallback", "rotation", "plugins":
-			continue
+
+		providers, _ := config["providers"].(map[string]interface{})
+		if providers == nil {
+			providers = map[string]interface{}{}
 		}
-		prov["api_base"] = proxyURL
-	}
-	config["providers"] = providers
+		for name, val := range providers {
+			prov, ok := val.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch name {
+			case "retry", "fallback", "rotation", "plugins":
+				continue
+			}
+			prov["api_base"] = proxyURL
+		}
+		config["providers"] = providers
 
-	// Allow the localhost proxy URL to pass SSRF validation.
-	safety, _ := config["safety"].(map[string]interface{})
-	if safety == nil {
-		safety = map[string]interface{}{}
-	}
-	safety["allow_private_endpoints"] = true
-	config["safety"] = safety
+		safety, _ := config["safety"].(map[string]interface{})
+		if safety == nil {
+			safety = map[string]interface{}{}
+		}
+		safety["allow_private_endpoints"] = true
+		config["safety"] = safety
 
-	// ZeptoClaw's hooks config is a notification system (before_tool/after_tool
-	// are []HookRule with channel/level fields), not a script-runner. Tool-call
-	// inspection is performed at the proxy (/c/zeptoclaw) by observing tool_use
-	// messages in the LLM stream, so no config["hooks"] mutation is needed.
+		out, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal zeptoclaw config: %w", err)
+		}
 
-	out, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal zeptoclaw config: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		return fmt.Errorf("create zeptoclaw config dir: %w", err)
-	}
-
-	return os.WriteFile(configPath, out, 0o644)
+		return atomicWriteFile(configPath, out, 0o644)
+	})
 }
 
 func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) {

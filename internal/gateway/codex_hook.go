@@ -415,7 +415,11 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 			add(p)
 		}
 	}
-	for _, p := range gitChangedFiles(ctx, req.CWD) {
+	changedFiles, gitErr := gitChangedFiles(ctx, req.CWD)
+	if gitErr != nil {
+		fmt.Fprintf(os.Stderr, "[codex-hook] WARNING: git scan failed: %v — scanning configured paths only\n", gitErr)
+	}
+	for _, p := range changedFiles {
 		add(p)
 	}
 	if len(out) > 200 {
@@ -424,23 +428,66 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 	return out
 }
 
-func gitChangedFiles(ctx context.Context, cwd string) []string {
-	if cwd == "" {
-		cwd = "."
+func gitChangedFiles(ctx context.Context, cwd string) ([]string, error) {
+	safeCwd, err := validateGitCwd(cwd)
+	if err != nil {
+		return nil, err
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	files := runGitList(cmdCtx, cwd, "diff", "--name-only", "--diff-filter=ACMRT", "HEAD", "--")
-	files = append(files, runGitList(cmdCtx, cwd, "ls-files", "--others", "--exclude-standard")...)
-	return files
+
+	var errs []error
+	files, err := runGitList(cmdCtx, safeCwd, "diff", "--name-only", "--diff-filter=ACMRT", "HEAD", "--")
+	if err != nil {
+		errs = append(errs, err)
+	}
+	extra, err := runGitList(cmdCtx, safeCwd, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		errs = append(errs, err)
+	}
+	files = append(files, extra...)
+
+	if len(errs) > 0 && len(files) == 0 {
+		return nil, fmt.Errorf("git commands failed: %v", errs)
+	}
+	return files, nil
 }
 
-func runGitList(ctx context.Context, cwd string, args ...string) []string {
+// validateGitCwd resolves symlinks and ensures the cwd is a real directory.
+// Returns the canonicalized path or an error if validation fails.
+func validateGitCwd(cwd string) (string, error) {
+	if strings.TrimSpace(cwd) == "" {
+		return "", fmt.Errorf("empty cwd")
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve cwd %s: %w", cwd, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("cwd is not a directory: %s", resolved)
+	}
+	return resolved, nil
+}
+
+// safeGitEnv returns environment variables that prevent git from executing
+// attacker-controlled config hooks (core.fsmonitor, core.hooksPath, etc.)
+// by disabling system/global config and pointing HOME to a safe empty dir.
+func safeGitEnv() []string {
+	return append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"HOME="+os.TempDir(),
+	)
+}
+
+func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
+	cmd.Env = safeGitEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("git %v in %s: %w", args, cwd, err)
 	}
 	lines := strings.Split(string(out), "\n")
 	ret := make([]string, 0, len(lines))
@@ -449,7 +496,7 @@ func runGitList(ctx context.Context, cwd string, args ...string) []string {
 			ret = append(ret, line)
 		}
 	}
-	return ret
+	return ret, nil
 }
 
 func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookRequest) int {
@@ -538,10 +585,15 @@ func workspaceCodexRoots(cwd string) []string {
 }
 
 func gitRootForCWD(cwd string) string {
+	safeCwd, err := validateGitCwd(cwd)
+	if err != nil {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	cmd.Dir = cwd
+	cmd.Dir = safeCwd
+	cmd.Env = safeGitEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

@@ -4604,15 +4604,31 @@ func TestTokenAuth_DisabledWhenEmpty(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	// Loopback callers are allowed when no token is configured
 	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("POST with empty token config: status = %d, want %d", rr.Code, http.StatusOK)
+		t.Errorf("loopback POST with empty token config: status = %d, want %d", rr.Code, http.StatusOK)
 	}
 	if !*called {
-		t.Error("empty token config: next handler was not called")
+		t.Error("empty token config: loopback next handler was not called")
+	}
+
+	// Non-loopback callers are denied when no token is configured
+	*called = false
+	req2 := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
+	req2.RemoteAddr = "10.0.0.5:54321"
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusUnauthorized {
+		t.Errorf("non-loopback POST with empty token config: status = %d, want %d", rr2.Code, http.StatusUnauthorized)
+	}
+	if *called {
+		t.Error("empty token config: non-loopback next handler should not be called")
 	}
 }
 

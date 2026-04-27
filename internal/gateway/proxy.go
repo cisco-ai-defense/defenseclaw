@@ -258,9 +258,7 @@ func NewGuardrailProxy(
 	// Inject credentials into the connector so its Authenticate() method
 	// can validate tokens without the proxy duplicating the logic.
 	if conn != nil {
-		if cs, ok := conn.(connector.CredentialSetter); ok {
-			cs.SetCredentials(gatewayToken, masterKey)
-		}
+		conn.SetCredentials(gatewayToken, masterKey)
 	}
 
 	p := &GuardrailProxy{
@@ -426,17 +424,38 @@ func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
 // traffic. For example, Claude Code sets ANTHROPIC_BASE_URL to
 // http://proxy:4000/c/claudecode; the SDK then POSTs to
 // /c/claudecode/v1/messages. This middleware rewrites that to /v1/messages.
+//
+// The connector name is validated against a strict [a-z0-9-] charset with a
+// max length of 64 to prevent path traversal and log injection via crafted
+// prefixes.
 func connectorPrefixStripper(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if strings.HasPrefix(p, "/c/") {
 			if idx := strings.Index(p[3:], "/"); idx >= 0 {
+				name := p[3 : 3+idx]
+				if !isValidConnectorName(name) {
+					http.Error(w, "invalid connector name", http.StatusBadRequest)
+					return
+				}
 				r.URL.Path = p[3+idx:]
 				r.URL.RawPath = ""
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isValidConnectorName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // requestLogger wraps a handler and logs every incoming request so we can
@@ -1418,9 +1437,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	fmt.Fprintf(os.Stderr, "[guardrail] ── INCOMING REQUEST ──────────────────────────────────\n")
 	fmt.Fprintf(os.Stderr, "[guardrail] headers: Authorization=%s api-key=%s X-DC-Target-URL=%s\n",
-		truncateLog(r.Header.Get("Authorization"), 20),
-		truncateLog(r.Header.Get("api-key"), 20),
-		r.Header.Get("X-DC-Target-URL"))
+		redactAuthValue(r.Header.Get("Authorization")),
+		redactAuthValue(r.Header.Get("api-key")),
+		scrubURLSecrets(r.Header.Get("X-DC-Target-URL")))
 	// The raw LLM request body frequently contains user prompts
 	// (SSNs, emails, passwords, API keys). Stderr is operator-
 	// facing, so we honor DEFENSECLAW_REVEAL_PII via
@@ -2854,6 +2873,28 @@ func truncateLog(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + fmt.Sprintf("... (%d more chars)", len(s)-maxLen)
+}
+
+// redactAuthValue masks an Authorization or api-key header value for safe
+// logging. Shows only the prefix (e.g. "Bearer") and the last 4 chars of
+// the credential, or "[empty]" / "[set]" for short values.
+func redactAuthValue(val string) string {
+	if val == "" {
+		return "[empty]"
+	}
+	parts := strings.SplitN(val, " ", 2)
+	if len(parts) == 2 {
+		scheme := parts[0]
+		cred := parts[1]
+		if len(cred) > 8 {
+			return scheme + " ****" + cred[len(cred)-4:]
+		}
+		return scheme + " [set]"
+	}
+	if len(val) > 8 {
+		return "****" + val[len(val)-4:]
+	}
+	return "[set]"
 }
 
 // scrubURLSecrets removes sensitive query parameters (key, api-key, apikey,

@@ -110,11 +110,12 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 // same shape (single allow entry, single load path, enabled=true).
 func installOpenClawExtension(ocHome string) error {
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	parentDir := filepath.Join(ocHome, "extensions")
 
-	// Blow away any prior install so stale files never linger across
-	// gateway upgrades. The embedded tree is the authoritative source.
-	_ = os.RemoveAll(extDir)
-	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir); err != nil {
+	if err := safeRemoveAll(extDir, parentDir); err != nil {
+		return fmt.Errorf("remove prior extension: %w", err)
+	}
+	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
 		return fmt.Errorf("write plugin files: %w", err)
 	}
 
@@ -125,9 +126,44 @@ func installOpenClawExtension(ocHome string) error {
 	return nil
 }
 
+// safeRemoveAll removes target only if it resolves to a path under parent.
+// This prevents symlink attacks where target is a symlink to an unrelated
+// directory (e.g. /etc).
+func safeRemoveAll(target, parent string) error {
+	if _, err := os.Lstat(target); os.IsNotExist(err) {
+		return nil
+	}
+
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("resolve symlinks for %s: %w", target, err)
+	}
+
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return fmt.Errorf("resolve parent %s: %w", parent, err)
+	}
+
+	if !strings.HasPrefix(resolved, resolvedParent+string(filepath.Separator)) && resolved != resolvedParent {
+		return fmt.Errorf("path %s resolves to %s which is outside %s — refusing to remove", target, resolved, resolvedParent)
+	}
+
+	return os.RemoveAll(target)
+}
+
 // writeEmbeddedTree walks fsys under srcRoot and mirrors every file into
 // dstRoot with the same relative layout, creating directories as needed.
-func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string) error {
+// Each target path is checked for path traversal to prevent zip-slip style
+// attacks from crafted embed paths. fileMode and dirMode control the
+// permissions of written files and directories respectively.
+func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode os.FileMode) error {
+	absDstRoot, err := filepath.Abs(dstRoot)
+	if err != nil {
+		return fmt.Errorf("resolve dstRoot: %w", err)
+	}
 	return fs.WalkDir(fsys, srcRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -136,18 +172,21 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dstRoot, rel)
+		target := filepath.Join(absDstRoot, rel)
+		if !strings.HasPrefix(target, absDstRoot+string(filepath.Separator)) && target != absDstRoot {
+			return fmt.Errorf("path traversal detected: %s escapes %s", rel, absDstRoot)
+		}
 		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
+			return os.MkdirAll(target, dirMode)
 		}
 		data, err := fsys.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), dirMode); err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, 0o644)
+		return os.WriteFile(target, data, fileMode)
 	})
 }
 
@@ -155,46 +194,45 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string) error {
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
 // in plugins.load.paths. Other sections are left untouched.
 func patchOpenClawConfig(configPath, extDir string) error {
-	cfg := map[string]interface{}{}
-	if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("parse %s: %w", configPath, err)
+	return withFileLock(configPath, func() error {
+		cfg := map[string]interface{}{}
+		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				return fmt.Errorf("parse %s: %w", configPath, err)
+			}
+		} else if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read %s: %w", configPath, err)
 		}
-	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read %s: %w", configPath, err)
-	}
 
-	plugins, _ := cfg["plugins"].(map[string]interface{})
-	if plugins == nil {
-		plugins = map[string]interface{}{}
-	}
+		plugins, _ := cfg["plugins"].(map[string]interface{})
+		if plugins == nil {
+			plugins = map[string]interface{}{}
+		}
 
-	plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+		plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
 
-	entries, _ := plugins["entries"].(map[string]interface{})
-	if entries == nil {
-		entries = map[string]interface{}{}
-	}
-	entries["defenseclaw"] = map[string]interface{}{"enabled": true}
-	plugins["entries"] = entries
+		entries, _ := plugins["entries"].(map[string]interface{})
+		if entries == nil {
+			entries = map[string]interface{}{}
+		}
+		entries["defenseclaw"] = map[string]interface{}{"enabled": true}
+		plugins["entries"] = entries
 
-	load, _ := plugins["load"].(map[string]interface{})
-	if load == nil {
-		load = map[string]interface{}{}
-	}
-	load["paths"] = appendUniqueString(load["paths"], extDir)
-	plugins["load"] = load
+		load, _ := plugins["load"].(map[string]interface{})
+		if load == nil {
+			load = map[string]interface{}{}
+		}
+		load["paths"] = appendUniqueString(load["paths"], extDir)
+		plugins["load"] = load
 
-	cfg["plugins"] = plugins
+		cfg["plugins"] = plugins
 
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal %s: %w", configPath, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-	return os.WriteFile(configPath, append(out, '\n'), 0o644)
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", configPath, err)
+		}
+		return atomicWriteFile(configPath, append(out, '\n'), 0o644)
+	})
 }
 
 // uninstallOpenClawExtension removes the extension directory and deletes
@@ -202,7 +240,8 @@ func patchOpenClawConfig(configPath, extDir string) error {
 // untouched.
 func uninstallOpenClawExtension(ocHome string) {
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
-	_ = os.RemoveAll(extDir)
+	parentDir := filepath.Join(ocHome, "extensions")
+	_ = safeRemoveAll(extDir, parentDir)
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
 	data, err := os.ReadFile(configPath)
@@ -280,14 +319,10 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// Loopback fallback: allow when no gatewayToken is configured.
-	if isLoopback && c.gatewayToken == "" {
-		return true
-	}
-
-	// No auth configured at all — proxy is open (initial state).
+	// No token configured: allow only loopback callers. Non-loopback traffic
+	// is denied by default until the operator explicitly sets a gateway token.
 	if c.gatewayToken == "" && c.masterKey == "" {
-		return true
+		return isLoopback
 	}
 
 	return false

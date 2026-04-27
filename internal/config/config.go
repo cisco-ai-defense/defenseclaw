@@ -596,10 +596,19 @@ func (c *WebhookConfig) ResolvedSecret() string {
 type AgentHookConfig struct {
 	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
 	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
+	FailMode                     string   `mapstructure:"fail_mode"                       yaml:"fail_mode,omitempty"`
 	ScanOnSessionStart           bool     `mapstructure:"scan_on_session_start"           yaml:"scan_on_session_start,omitempty"`
 	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
 	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
 	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
+}
+
+// EffectiveFailMode returns the fail mode, defaulting to "closed".
+func (c AgentHookConfig) EffectiveFailMode() string {
+	if c.FailMode == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 type WatchConfig struct {

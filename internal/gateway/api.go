@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -154,9 +155,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	handler := maxBodyMiddleware(mux, 1<<20)
 	handler = a.apiCSRFProtect(handler)
-	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
-		handler = a.tokenAuth(handler)
-	}
+	handler = a.tokenAuth(handler)
 	handler = a.metricsMiddleware(handler)
 	var reg *AgentRegistry
 	if a.scannerCfg != nil {
@@ -1654,7 +1653,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			expected = a.scannerCfg.Gateway.Token
 		}
 		if expected == "" {
-			next.ServeHTTP(w, r)
+			// No token configured: allow loopback callers only.
+			if connector.IsLoopback(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_non_loopback")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		if token == "" {
@@ -1697,6 +1702,16 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			route = r.Pattern
 		}
 		ctx := r.Context()
+
+		// Sec-Fetch-Site is a browser-enforced header that cannot be spoofed
+		// by JavaScript. When present, reject cross-site requests outright.
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+			if sfs != "same-origin" && sfs != "none" {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
+				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				return
+			}
+		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
@@ -1746,6 +1761,13 @@ func csrfProtect(next http.Handler) http.Handler {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
+		}
+
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+			if sfs != "same-origin" && sfs != "none" {
+				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				return
+			}
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {

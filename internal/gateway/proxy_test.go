@@ -3182,3 +3182,28 @@ func TestConnectorPrefixStripper(t *testing.T) {
 		}
 	}
 }
+
+func TestIsValidConnectorName(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"claudecode", true},
+		{"codex", true},
+		{"a-b-c", true},
+		{"abc123", true},
+		{"", false},
+		{"UPPERCASE", false},
+		{"foo/bar", false},
+		{"foo..bar", false},
+		{"foo%2fbar", false},
+		{strings.Repeat("a", 65), false},
+		{strings.Repeat("a", 64), true},
+	}
+	for _, tt := range tests {
+		got := isValidConnectorName(tt.name)
+		if got != tt.valid {
+			t.Errorf("isValidConnectorName(%q) = %v, want %v", tt.name, got, tt.valid)
+		}
+	}
+}

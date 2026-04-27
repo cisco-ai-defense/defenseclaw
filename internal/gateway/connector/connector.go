@@ -80,11 +80,11 @@ type Connector interface {
 
 	Authenticate(r *http.Request) bool
 	Route(r *http.Request, body []byte) (*ConnectorSignals, error)
-}
 
-// CredentialSetter — optional, connectors implement to receive
-// gateway token and master key at sidecar boot.
-type CredentialSetter interface {
+	// SetCredentials injects the gateway token and master key at sidecar
+	// boot. Every connector must implement this so that a missing
+	// implementation causes a compile-time error rather than a silent
+	// runtime auth bypass via the old type-assertion path.
 	SetCredentials(gatewayToken, masterKey string)
 }
 

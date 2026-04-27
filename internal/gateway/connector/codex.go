@@ -29,7 +29,7 @@ import (
 // CodexConnector handles all security surfaces for OpenAI Codex.
 // LLM traffic: sets OPENAI_BASE_URL to route through proxy.
 // Tool inspection: hook script calls /api/v1/codex/hook.
-// Implements HookEventHandler, ComponentScanner, StopScanner.
+// Implements ComponentScanner, StopScanner.
 type CodexConnector struct {
 	gatewayToken string
 	masterKey    string
@@ -90,12 +90,10 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if isLoopback && c.gatewayToken == "" {
-		return true
-	}
-
+	// No token configured: allow only loopback callers. Non-loopback traffic
+	// is denied by default until the operator explicitly sets a gateway token.
 	if c.gatewayToken == "" && c.masterKey == "" {
-		return true
+		return isLoopback
 	}
 
 	return false
@@ -121,26 +119,6 @@ func (c *CodexConnector) Route(r *http.Request, body []byte) (*ConnectorSignals,
 	}
 
 	return cs, nil
-}
-
-// --- HookEventHandler interface ---
-
-func (c *CodexConnector) HookEndpointPath() string {
-	return "/api/v1/codex/hook"
-}
-
-func (c *CodexConnector) HandleHookEvent(ctx context.Context, payload []byte) ([]byte, error) {
-	var req struct {
-		HookEventName string `json:"hook_event_name"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		return nil, fmt.Errorf("parse hook event: %w", err)
-	}
-
-	resp := map[string]interface{}{
-		"action": "allow",
-	}
-	return json.Marshal(resp)
 }
 
 // --- ComponentScanner interface ---
@@ -175,7 +153,7 @@ func (c *CodexConnector) saveBackup(dataDir string, backup codexBackup) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dataDir, "codex_backup.json"), data, 0o644)
+	return atomicWriteFile(filepath.Join(dataDir, "codex_backup.json"), data, 0o644)
 }
 
 const codexEnvFileName = "codex_env.sh"

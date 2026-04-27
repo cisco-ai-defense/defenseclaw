@@ -24,6 +24,8 @@ import (
 	"runtime"
 	"strings"
 	"text/template"
+
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed shims/*.sh
@@ -63,7 +65,7 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 		}
 
 		shimPath := filepath.Join(shimDir, name)
-		if err := os.WriteFile(shimPath, []byte(rendered), 0o755); err != nil {
+		if err := os.WriteFile(shimPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write shim %s: %w", name, err)
 		}
 	}
@@ -109,11 +111,22 @@ func WriteHookScript(hookDir, apiAddr string) error {
 //   - claude-code-hook.sh      (Claude Code lifecycle events)
 //   - codex-hook.sh            (Codex lifecycle events)
 func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
-	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, APIToken: token}
+	// Write the token to a separate file with restrictive permissions
+	// instead of baking it into the script body. The scripts source
+	// this file at runtime.
+	tokenPath := filepath.Join(hookDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write hook token file: %w", err)
+	}
+
+	// Never bake the real token into template output — scripts read
+	// the .token file or the env var at runtime.
+	data := templateData{APIAddr: apiAddr, APIToken: ""}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -127,7 +140,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 
 		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o755); err != nil {
+		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -150,6 +163,29 @@ func HookScripts() []string {
 	return out
 }
 
+type sandboxPolicy struct {
+	Sandbox struct {
+		Mode       string          `yaml:"mode"`
+		Exec       sandboxExec     `yaml:"exec"`
+		Network    sandboxNetwork  `yaml:"network"`
+		Filesystem sandboxFilesys  `yaml:"filesystem"`
+	} `yaml:"sandbox"`
+}
+
+type sandboxExec struct {
+	Allow []string `yaml:"allow"`
+	Deny  []string `yaml:"deny"`
+}
+
+type sandboxNetwork struct {
+	AllowEgress []string `yaml:"allow_egress"`
+	DenyEgress  string   `yaml:"deny_egress"`
+}
+
+type sandboxFilesys struct {
+	DenyWrite []string `yaml:"deny_write"`
+}
+
 // WriteSandboxPolicy generates a sandbox policy YAML for OpenShell enforcement.
 // The policy restricts exec, network egress, and filesystem writes.
 func WriteSandboxPolicy(dataDir, proxyAddr, apiAddr string) error {
@@ -158,34 +194,25 @@ func WriteSandboxPolicy(dataDir, proxyAddr, apiAddr string) error {
 		return fmt.Errorf("create policy dir: %w", err)
 	}
 
-	policy := fmt.Sprintf(`sandbox:
-  mode: enforce
-  exec:
-    allow:
-      - /usr/bin/git
-      - /usr/bin/node
-      - /usr/bin/python3
-      - /usr/bin/npm
-    deny:
-      - /usr/bin/curl
-      - /usr/bin/wget
-      - "**/nc"
-      - "**/ncat"
-      - "**/ssh"
-  network:
-    allow_egress:
-      - %s
-      - %s
-    deny_egress: "*"
-  filesystem:
-    deny_write:
-      - /etc/
-      - ~/.ssh/
-      - ~/.aws/credentials
-`, proxyAddr, apiAddr)
+	var pol sandboxPolicy
+	pol.Sandbox.Mode = "enforce"
+	pol.Sandbox.Exec.Allow = []string{
+		"/usr/bin/git", "/usr/bin/node", "/usr/bin/python3", "/usr/bin/npm",
+	}
+	pol.Sandbox.Exec.Deny = []string{
+		"/usr/bin/curl", "/usr/bin/wget", "**/nc", "**/ncat", "**/ssh",
+	}
+	pol.Sandbox.Network.AllowEgress = []string{proxyAddr, apiAddr}
+	pol.Sandbox.Network.DenyEgress = "*"
+	pol.Sandbox.Filesystem.DenyWrite = []string{"/etc/", "~/.ssh/", "~/.aws/credentials"}
+
+	out, err := yaml.Marshal(&pol)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox policy: %w", err)
+	}
 
 	policyPath := filepath.Join(policyDir, "defenseclaw-policy.yaml")
-	return os.WriteFile(policyPath, []byte(policy), 0o644)
+	return os.WriteFile(policyPath, out, 0o644)
 }
 
 // ResolveSubprocessPolicy determines the effective subprocess policy for

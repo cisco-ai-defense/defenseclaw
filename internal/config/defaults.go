@@ -83,7 +83,7 @@ func DefaultConfig() *Config {
 		DataDir:       dataDir,
 		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
 		QuarantineDir: filepath.Join(dataDir, "quarantine"),
-		PluginDir:     filepath.Join(dataDir, "plugins"),
+		PluginDir:     "",
 		PolicyDir:     filepath.Join(dataDir, "policies"),
 		Environment:   string(DetectEnvironment()),
 		Claw: ClawConfig{

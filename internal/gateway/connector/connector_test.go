@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -223,20 +224,21 @@ func TestAllConnectors_ImplementInterface(t *testing.T) {
 }
 
 // --- HookEventHandler interface tests ---
+// M8: ClaudeCode and Codex no longer implement HookEventHandler — the stub
+// returned hardcoded "allow" which was a silent fail-open risk. Policy
+// enforcement lives in the gateway's handleClaudeCodeHook/handleCodexHook.
 
-func TestClaudeCode_ImplementsHookEventHandler(t *testing.T) {
+func TestClaudeCode_DoesNotImplementHookEventHandler(t *testing.T) {
 	c := NewClaudeCodeConnector()
-	var _ HookEventHandler = c
-	if c.HookEndpointPath() != "/api/v1/claude-code/hook" {
-		t.Errorf("HookEndpointPath = %q", c.HookEndpointPath())
+	if _, ok := interface{}(c).(HookEventHandler); ok {
+		t.Error("ClaudeCode should not implement HookEventHandler (stub removed)")
 	}
 }
 
-func TestCodex_ImplementsHookEventHandler(t *testing.T) {
+func TestCodex_DoesNotImplementHookEventHandler(t *testing.T) {
 	c := NewCodexConnector()
-	var _ HookEventHandler = c
-	if c.HookEndpointPath() != "/api/v1/codex/hook" {
-		t.Errorf("HookEndpointPath = %q", c.HookEndpointPath())
+	if _, ok := interface{}(c).(HookEventHandler); ok {
+		t.Error("Codex should not implement HookEventHandler (stub removed)")
 	}
 }
 
@@ -301,22 +303,6 @@ func TestCodex_ImplementsStopScanner(t *testing.T) {
 	var _ StopScanner = c
 	if !c.SupportsStopScan() {
 		t.Error("expected SupportsStopScan to be true")
-	}
-}
-
-// --- HandleHookEvent tests ---
-
-func TestClaudeCode_HandleHookEvent_Allow(t *testing.T) {
-	c := NewClaudeCodeConnector()
-	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`)
-	resp, err := c.HandleHookEvent(nil, payload)
-	if err != nil {
-		t.Fatalf("HandleHookEvent failed: %v", err)
-	}
-	var result map[string]interface{}
-	json.Unmarshal(resp, &result)
-	if result["action"] != "allow" {
-		t.Errorf("action = %v, want allow", result["action"])
 	}
 }
 
@@ -625,11 +611,11 @@ func TestClaudeCode_Authenticate_Loopback(t *testing.T) {
 		t.Error("expected loopback auth to pass")
 	}
 
-	// No credentials configured — open state allows all (matches OpenClaw)
+	// No credentials configured — non-loopback is denied by default
 	r2 := httptest.NewRequest("POST", "/v1/messages", nil)
 	r2.RemoteAddr = "10.0.0.5:54321"
-	if !c.Authenticate(r2) {
-		t.Error("expected auth to pass when no credentials configured")
+	if c.Authenticate(r2) {
+		t.Error("expected non-loopback auth to fail when no credentials configured")
 	}
 
 	// With credentials configured — non-loopback without token fails
@@ -861,11 +847,11 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 		t.Error("expected loopback auth to pass with no credentials")
 	}
 
-	// No credentials — open state allows all
+	// No credentials — non-loopback is denied by default
 	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r2.RemoteAddr = "10.0.0.5:54321"
-	if !c.Authenticate(r2) {
-		t.Error("expected auth to pass when no credentials configured")
+	if c.Authenticate(r2) {
+		t.Error("expected non-loopback auth to fail when no credentials configured")
 	}
 
 	// With token — non-loopback without token fails
@@ -886,10 +872,17 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 
 func TestCodex_Authenticate_NoCredentials(t *testing.T) {
 	c := NewCodexConnector()
+	// No credentials + non-loopback → deny
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "192.168.1.100:54321"
-	if !c.Authenticate(r) {
-		t.Error("expected auth to pass when no credentials configured (open state)")
+	if c.Authenticate(r) {
+		t.Error("expected non-loopback auth to fail when no credentials configured")
+	}
+	// No credentials + loopback → allow
+	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r2.RemoteAddr = "127.0.0.1:54321"
+	if !c.Authenticate(r2) {
+		t.Error("expected loopback auth to pass when no credentials configured")
 	}
 }
 
@@ -1028,16 +1021,16 @@ func TestCodex_Teardown(t *testing.T) {
 	}
 }
 
-func TestCodex_CredentialSetter(t *testing.T) {
+func TestCodex_SetCredentials_OnConnectorInterface(t *testing.T) {
 	c := NewCodexConnector()
-	var cs CredentialSetter = c // compile-time check
-	cs.SetCredentials("tok", "mk")
+	var conn Connector = c // SetCredentials is now on the core interface
+	conn.SetCredentials("tok", "mk")
 
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
 	r.Header.Set("X-DC-Auth", "tok")
 	if !c.Authenticate(r) {
-		t.Error("CredentialSetter interface should wire token auth")
+		t.Error("SetCredentials on Connector interface should wire token auth")
 	}
 }
 
@@ -1056,18 +1049,14 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 	c := NewZeptoClawConnector()
 	c.SetCredentials("my-token", "my-master")
 
-	// Loopback is trusted even when the gateway token is set, because
-	// ZeptoClaw is a native binary with no fetch interceptor to inject
-	// X-DC-Auth. Zeptoclaw forwards the real upstream provider key in
-	// Authorization (e.g. "Bearer sk-or-..."), which the connector
-	// deliberately ignores for auth purposes — it's an upstream key,
-	// not DefenseClaw's. The proxy binds loopback-only, which is the
-	// operative security boundary here.
+	// When a token is configured, loopback callers without X-DC-Auth or
+	// master key are denied. The upstream provider key in Authorization
+	// is not DefenseClaw's token and should not grant access.
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
 	r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
-	if !c.Authenticate(r) {
-		t.Error("expected loopback auth to pass even when token configured (ZeptoClaw has no way to carry X-DC-Auth)")
+	if c.Authenticate(r) {
+		t.Error("expected loopback auth to fail when token configured but not presented")
 	}
 
 	// A valid X-DC-Auth still works on loopback.
@@ -1468,7 +1457,7 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	stubDir := t.TempDir()
 	argFile := filepath.Join(stubDir, "curl-args.txt")
 	stub := filepath.Join(stubDir, "curl")
-	stubSrc := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argFile + "; done\nexit 0\n"
+	stubSrc := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argFile + "; done\nprintf '{\"action\":\"allow\"}\\n200'\nexit 0\n"
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1693,21 +1682,12 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 			t.Errorf("%s: master key should authenticate", c.Name())
 		}
 
-		// No creds should fail — except for native-binary connectors
-		// that have no way to carry DefenseClaw credentials and must
-		// trust loopback. Gate the assertion off .Name() rather than
-		// silently weakening the invariant across the board.
+		// No creds on loopback should fail for all connectors when
+		// token is configured — closes the local-process bypass vector.
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
-		switch c.Name() {
-		case "zeptoclaw":
-			if !c.Authenticate(r3) {
-				t.Errorf("%s: loopback must be trusted (no fetch interceptor to inject X-DC-Auth)", c.Name())
-			}
-		default:
-			if c.Authenticate(r3) {
-				t.Errorf("%s: should fail without credentials when token configured", c.Name())
-			}
+		if c.Authenticate(r3) {
+			t.Errorf("%s: should fail without credentials when token configured", c.Name())
 		}
 	}
 }
@@ -2118,7 +2098,7 @@ func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
 	// ZeptoClaw's own defaults remain valid.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
-	os.WriteFile(configPath, []byte(`{}`), 0o644)
+	os.WriteFile(configPath, []byte(`{"providers":{"anthropic":{"api_key":"sk-test-123"}}}`), 0o644)
 	ZeptoClawConfigPathOverride = configPath
 	defer func() { ZeptoClawConfigPathOverride = "" }()
 
@@ -2149,5 +2129,230 @@ func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
 				t.Errorf("hooks[%q] = string %v — ZeptoClaw expects a sequence", k, v)
 			}
 		}
+	}
+}
+
+// ========================================================================
+// M9 — Security path test coverage
+// ========================================================================
+
+func TestAuth_NoCredentials_AllConnectors_DenyNonLoopback(t *testing.T) {
+	connectors := []Connector{
+		NewClaudeCodeConnector(),
+		NewCodexConnector(),
+		NewOpenClawConnector(),
+		NewZeptoClawConnector(),
+	}
+	for _, conn := range connectors {
+		conn.SetCredentials("", "")
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "10.0.0.5:54321"
+		if conn.Authenticate(r) {
+			t.Errorf("%s: non-loopback request should be denied when no credentials configured", conn.Name())
+		}
+	}
+}
+
+func TestAuth_NoCredentials_AllConnectors_AllowLoopback(t *testing.T) {
+	connectors := []Connector{
+		NewClaudeCodeConnector(),
+		NewCodexConnector(),
+		NewOpenClawConnector(),
+		NewZeptoClawConnector(),
+	}
+	for _, conn := range connectors {
+		conn.SetCredentials("", "")
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.RemoteAddr = "127.0.0.1:54321"
+		if !conn.Authenticate(r) {
+			t.Errorf("%s: loopback request should be allowed when no credentials configured", conn.Name())
+		}
+	}
+}
+
+func TestIsLoopback_IPv6Variants(t *testing.T) {
+	tests := []struct {
+		addr     string
+		expected bool
+	}{
+		{"[::1]:54321", true},
+		{"::1", true},
+		{"127.0.0.1:54321", true},
+		{"[::ffff:127.0.0.1]:80", true},
+		{"[::ffff:10.0.0.1]:80", false},
+		{"10.0.0.1:80", false},
+		{"192.168.1.1:80", false},
+	}
+	for _, tt := range tests {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = tt.addr
+		got := IsLoopback(r)
+		if got != tt.expected {
+			t.Errorf("IsLoopback(%q) = %v, want %v", tt.addr, got, tt.expected)
+		}
+	}
+}
+
+func TestHookScript_FailClosed_Default(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:99999", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	// Run hook against an unreachable port — should exit 2 (fail-closed)
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"))
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("hook should fail-closed (exit 2) when gateway is unreachable, but got exit 0")
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (fail-closed)", exitErr.ExitCode())
+		}
+	}
+}
+
+func TestHookScript_FailOpen_Override(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:99999", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"), "DEFENSECLAW_FAIL_MODE=open")
+	err := cmd.Run()
+	if err != nil {
+		t.Errorf("hook should fail-open (exit 0) when DEFENSECLAW_FAIL_MODE=open, got: %v", err)
+	}
+}
+
+func TestInstallOpenClaw_SymlinkedExtDir(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "attacker-owned")
+	os.MkdirAll(target, 0o755)
+	os.WriteFile(filepath.Join(target, "precious.txt"), []byte("don't delete me"), 0o644)
+
+	extParent := filepath.Join(dir, "extensions")
+	os.MkdirAll(extParent, 0o755)
+	symlink := filepath.Join(extParent, "defenseclaw")
+	os.Symlink(target, symlink)
+
+	err := safeRemoveAll(symlink, extParent)
+	if err == nil {
+		// If symlink was resolved and is outside parent, it should error
+		if _, statErr := os.Stat(filepath.Join(target, "precious.txt")); statErr != nil {
+			t.Error("safeRemoveAll should not delete files outside the parent directory")
+		}
+	}
+	// The important assertion: the attack target's content is preserved
+	data, err2 := os.ReadFile(filepath.Join(target, "precious.txt"))
+	if err2 != nil || string(data) != "don't delete me" {
+		t.Error("symlink attack: files in target directory were deleted")
+	}
+}
+
+func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{}`), 0o644)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 10)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: patchOpenClawConfig failed: %v", i, err)
+		}
+	}
+
+	// Verify the file is valid JSON and not corrupted
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("config file corrupted by concurrent writes: %v\ncontent: %s", err, string(data))
+	}
+}
+
+func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	os.WriteFile(configPath, []byte(`{}`), 0o644)
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+
+	c := NewZeptoClawConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+	}
+	err := c.Setup(nil, opts)
+	if err == nil {
+		t.Fatal("Setup should fail with no usable providers")
+	}
+	if !strings.Contains(err.Error(), "no usable providers") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestIsOwnedHook_StrictMatch(t *testing.T) {
+	dir := t.TempDir()
+	hookPath := filepath.Join(dir, "hooks", "claude-code-hook.sh")
+	os.MkdirAll(filepath.Join(dir, "hooks"), 0o755)
+	os.WriteFile(hookPath, []byte("#!/bin/bash\n"+hookMarker+"\necho test\n"), 0o755)
+
+	// Hook with matching path should be owned
+	entry := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": hookPath},
+		},
+	}
+	if !isOwnedHook(entry, filepath.Join(dir, "hooks")) {
+		t.Error("hook with matching path should be owned")
+	}
+
+	// Hook with unrelated path containing "defenseclaw" should NOT be owned
+	unrelatedPath := filepath.Join(dir, "defenseclaw-clone", "bin", "my-tool")
+	os.MkdirAll(filepath.Dir(unrelatedPath), 0o755)
+	os.WriteFile(unrelatedPath, []byte("#!/bin/bash\necho not ours\n"), 0o755)
+	unrelatedEntry := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": unrelatedPath},
+		},
+	}
+	if isOwnedHook(unrelatedEntry, filepath.Join(dir, "hooks")) {
+		t.Error("hook with unrelated path containing 'defenseclaw' should NOT be owned")
+	}
+}
+
+func TestAllConnectors_ImplementSetCredentials(t *testing.T) {
+	connectors := []Connector{
+		NewClaudeCodeConnector(),
+		NewCodexConnector(),
+		NewOpenClawConnector(),
+		NewZeptoClawConnector(),
+	}
+	for _, conn := range connectors {
+		conn.SetCredentials("test-token", "test-master")
 	}
 }
