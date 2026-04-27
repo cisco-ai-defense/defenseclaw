@@ -3,6 +3,7 @@ import DefenseClawKit
 import AppKit
 
 private enum SettingsTab: String {
+    case overview
     case config
     case gateway
     case guardrails
@@ -21,7 +22,7 @@ private enum SettingsTab: String {
            let tab = SettingsTab(rawValue: String(argument.dropFirst("--qa-settings-tab=".count))) {
             return tab
         }
-        return .config
+        return .overview
     }
 }
 
@@ -30,6 +31,23 @@ struct SettingsView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            SettingsOverviewView(
+                openSetup: { (NSApp.delegate as? AppDelegate)?.showSetup() },
+                openConfig: { selectedTab = .config },
+                openGateway: { selectedTab = .gateway },
+                openGuardrails: { selectedTab = .guardrails },
+                openEnforcement: { selectedTab = .enforcement },
+                openScanners: { selectedTab = .scanners },
+                openDiagnostics: { selectedTab = .diagnostics },
+                openPolicy: { (NSApp.delegate as? AppDelegate)?.showPolicy() },
+                openAlerts: { (NSApp.delegate as? AppDelegate)?.showAlerts() },
+                openLogs: { (NSApp.delegate as? AppDelegate)?.showLogs() }
+            )
+            .tabItem {
+                Label("Overview", systemImage: "square.grid.2x2")
+            }
+            .tag(SettingsTab.overview)
+
             ConfigFilesView()
                 .tabItem {
                     Label("Config Files", systemImage: "doc.text.magnifyingglass")
