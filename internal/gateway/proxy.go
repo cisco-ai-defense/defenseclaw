@@ -1583,7 +1583,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
 		agentCtx, agentSpan = p.otel.StartAgentSpan(
 			context.Background(),
-			conversationID, agentName, "",
+			conversationID, agentName, p.agentIDForRequest(), "",
 		)
 	}
 	if agentCtx == nil {
@@ -3748,6 +3748,7 @@ func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw j
 				DestinationApp: "builtin",
 				PolicyID:       p.defaultPolicyID,
 				AgentName:      agentName,
+				AgentID:        p.agentIDForRequest(),
 			},
 		)
 

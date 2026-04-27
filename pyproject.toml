@@ -91,10 +91,19 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
     "cryptography>=46.0.7",   # CVE-2026-39892 fixed in 46.0.7
-    "litellm==1.83.7",        # GHSA-xqmj-j6mv-4862 fixed in 1.83.7
-    "click>=8.1.8",           # litellm 1.83.7 pins 8.1.8, scanner pins 8.3.1
-    "openai>=2.15.0",         # litellm 1.83.7 pins 2.30.0, scanner pins 2.15.0
-    "python-dotenv>=1.0.1",   # litellm pins 1.0.1, scanner pins 1.2.1
+    "litellm==1.83.7",        # CVE-2026-35029, CVE-2026-35030, GHSA-xqmj-j6mv-4862
+    # litellm 1.83.7 ships exact pins for several transitive deps that
+    # conflict with what cisco-ai-skill-scanner 2.0.8 (and our own pins)
+    # expect. We override to a single compatible version per package —
+    # the newer of the two — and rely on litellm's runtime API surface
+    # being compatible with the bumped versions (verified via Python
+    # tests in CI). CVE-2026-28684 (python-dotenv 1.2.1) is tracked via
+    # pip-audit's ignore list in ci.yml.
+    "python-dotenv==1.2.1",
+    "openai==2.30.0",
+    "click>=8.3.1",
+    "importlib-metadata>=8.7.1",
+    "jsonschema>=4.26.0",
     "python-multipart>=0.0.26", # CVE-2026-40347 fixed in 0.0.26
 ]
 

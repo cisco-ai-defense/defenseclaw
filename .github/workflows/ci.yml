@@ -106,6 +106,11 @@ jobs:
       # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip version is
       # released. No fix version available as of 2026-04-24. pip is only used
       # by pip-audit itself, not by DefenseClaw at runtime.
+      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip is released.
+      # CVE-2026-3219: pip's interpretation conflict with concatenated tar/ZIP
+      # archives. Medium severity; impacts only attacker-supplied package
+      # archives. We install exclusively from PyPI via uv with locked hashes
+      # (uv.lock), so this attack surface is not exposed in CI or runtime.
       - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
 
   ts-build-test:
