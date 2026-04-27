@@ -251,7 +251,7 @@ struct DashboardView: View {
                     SubsystemRow(name: "API", health: h.api)
                     SubsystemRow(name: "Guardrail", health: h.guardrail)
                     SubsystemRow(name: "Telemetry", health: h.telemetry)
-                    SubsystemRow(name: "Splunk", health: h.splunk)
+                    SubsystemRow(name: "Sinks", health: h.splunk)
                     if let sandbox = h.sandbox {
                         SubsystemRow(name: "Sandbox", health: sandbox)
                     }

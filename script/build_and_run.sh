@@ -62,6 +62,10 @@ open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
+open_app_qa() {
+  /usr/bin/open -n "$APP_BUNDLE" --args --qa-open-all-windows
+}
+
 case "$MODE" in
   run)
     open_app
@@ -82,8 +86,13 @@ case "$MODE" in
     sleep 2
     pgrep -x "$APP_NAME" >/dev/null
     ;;
+  --qa|qa)
+    open_app_qa
+    sleep 2
+    pgrep -x "$APP_NAME" >/dev/null
+    ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--qa]" >&2
     exit 2
     ;;
 esac

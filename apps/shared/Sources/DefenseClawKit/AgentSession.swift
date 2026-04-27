@@ -4,6 +4,9 @@ import Observation
 /// WebSocket v3 client for the OpenClaw gateway.
 @Observable
 public final class AgentSession: @unchecked Sendable {
+    static let gatewayClientID = "gateway-client"
+    static let gatewayClientMode = "backend"
+
     public private(set) var isConnected = false
     public private(set) var messages: [ChatMessage] = []
     public private(set) var toolEvents: [ToolEvent] = []
@@ -22,6 +25,12 @@ public final class AgentSession: @unchecked Sendable {
     private var reconnectTask: Task<Void, Never>?
     private var shouldReconnect = true
     private var reconnectAttempt = 0
+
+    private func withPendingRPCLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
 
     public init(host: String = "127.0.0.1", port: Int = 18789, token: String = "") {
         self.host = host; self.port = port
@@ -79,10 +88,11 @@ public final class AgentSession: @unchecked Sendable {
         log.info("gateway", "WebSocket opened, waiting for challenge")
 
         // Fail any pending RPCs from previous connection
-        lock.lock()
-        let stale = pendingRPC
-        pendingRPC.removeAll()
-        lock.unlock()
+        let stale = withPendingRPCLock {
+            let stale = pendingRPC
+            pendingRPC.removeAll()
+            return stale
+        }
         for (_, cont) in stale {
             cont.resume(throwing: AgentSessionError.notConnected)
         }
@@ -262,8 +272,8 @@ public final class AgentSession: @unchecked Sendable {
             do {
                 // Keep this aligned with API-PROTOCOL.md. Current gateway v3
                 // auth expects the canonical client id during challenge-response.
-                let clientID = "gateway-client"
-                let clientMode = "operator-ui"
+                let clientID = Self.gatewayClientID
+                let clientMode = Self.gatewayClientMode
                 let role = "operator"
                 let scopes = ["operator.read", "operator.write", "operator.admin", "operator.approvals"]
 
@@ -591,9 +601,9 @@ public final class AgentSession: @unchecked Sendable {
     @MainActor
     private func handleResponse(_ json: [String: Any]) {
         guard let id = json["id"] as? String else { return }
-        lock.lock()
-        let continuation = pendingRPC.removeValue(forKey: id)
-        lock.unlock()
+        let continuation = withPendingRPCLock {
+            pendingRPC.removeValue(forKey: id)
+        }
 
         if let continuation {
             let ok = json["ok"] as? Bool ?? false
@@ -639,17 +649,17 @@ public final class AgentSession: @unchecked Sendable {
         guard let text = String(data: data, encoding: .utf8) else { throw AgentSessionError.encodingFailed }
 
         return try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            pendingRPC[id] = continuation
-            lock.unlock()
+            withPendingRPCLock {
+                pendingRPC[id] = continuation
+            }
 
             Task {
                 do {
                     try await webSocket?.send(.string(text))
                 } catch {
-                    lock.lock()
-                    let cont = pendingRPC.removeValue(forKey: id)
-                    lock.unlock()
+                    let cont = withPendingRPCLock {
+                        pendingRPC.removeValue(forKey: id)
+                    }
                     cont?.resume(throwing: error)
                 }
             }
@@ -657,9 +667,9 @@ public final class AgentSession: @unchecked Sendable {
             // Timeout after 30 seconds
             Task {
                 try? await Task.sleep(for: .seconds(30))
-                lock.lock()
-                let cont = pendingRPC.removeValue(forKey: id)
-                lock.unlock()
+                let cont = withPendingRPCLock {
+                    pendingRPC.removeValue(forKey: id)
+                }
                 cont?.resume(throwing: AgentSessionError.rpcFailed("timeout"))
             }
         }

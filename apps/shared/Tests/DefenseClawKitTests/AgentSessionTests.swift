@@ -29,4 +29,9 @@ final class AgentSessionTests: XCTestCase {
         XCTAssertTrue(session.messages.isEmpty)
         XCTAssertTrue(session.toolEvents.isEmpty)
     }
+
+    func testGatewayHandshakeUsesProtocolClientIdentity() {
+        XCTAssertEqual(AgentSession.gatewayClientID, "gateway-client")
+        XCTAssertEqual(AgentSession.gatewayClientMode, "backend")
+    }
 }
