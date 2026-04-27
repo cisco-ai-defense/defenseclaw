@@ -1802,6 +1802,128 @@ func TestHookScripts_ReturnsList(t *testing.T) {
 	}
 }
 
+// TestHookScripts_FailOpen_OnDisabledSentinel exercises the v2 fail-open
+// guard in every generated hook. When `~/.defenseclaw/.disabled` exists
+// the hook must exit 0 immediately without dialling the gateway —
+// otherwise running `defenseclaw setup guardrail --disable` (or simply
+// removing ~/.defenseclaw) would brick whichever agent already had the
+// hook wired into its config.
+func TestHookScripts_FailOpen_OnDisabledSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook scripts are POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	dcHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dcHome, ".disabled"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range HookScripts() {
+		t.Run(name, func(t *testing.T) {
+			out := runHookAndReturnCurlArgsWithHome(t, filepath.Join(dir, name), dcHome, nil)
+			if out != "" {
+				t.Errorf("%s: hook called curl while .disabled sentinel is present; got curl args:\n%s", name, out)
+			}
+		})
+	}
+}
+
+// TestHookScripts_FailOpen_OnMissingDefenseClawHome covers the
+// `rm -rf ~/.defenseclaw` (full uninstall, hooks left dangling) case.
+// The hook must short-circuit instead of failing with curl errors that
+// the agent then surfaces as a refusal to run the tool/request.
+func TestHookScripts_FailOpen_OnMissingDefenseClawHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook scripts are POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	for _, name := range HookScripts() {
+		t.Run(name, func(t *testing.T) {
+			out := runHookAndReturnCurlArgsWithHome(t, filepath.Join(dir, name), missingDir, nil)
+			if out != "" {
+				t.Errorf("%s: hook called curl with DEFENSECLAW_HOME missing; got curl args:\n%s", name, out)
+			}
+		})
+	}
+}
+
+// TestHookScripts_TokenedHooks_FailOpen_OnMissingToken covers the
+// codex / claude-code hook fast-path: if the .token sidecar file was
+// never written (or was removed) AND DEFENSECLAW_GATEWAY_TOKEN is
+// unset, the gateway will reject every request with 401 and the
+// agent gets bricked. v2 hooks short-circuit before that happens.
+func TestHookScripts_TokenedHooks_FailOpen_OnMissingToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook scripts are POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(dir, ".token")); err != nil {
+		t.Fatal(err)
+	}
+
+	dcHome := t.TempDir()
+
+	for _, name := range []string{"claude-code-hook.sh", "codex-hook.sh"} {
+		t.Run(name, func(t *testing.T) {
+			out := runHookAndReturnCurlArgsWithHome(t, filepath.Join(dir, name), dcHome, nil)
+			if out != "" {
+				t.Errorf("%s: hook called curl with no .token and no env override; got curl args:\n%s", name, out)
+			}
+		})
+	}
+}
+
+// runHookAndReturnCurlArgsWithHome is the sentinel-aware variant of
+// runHookAndReturnCurlArgs. It takes an explicit DEFENSECLAW_HOME so
+// tests can drive the .disabled / missing-home branches deterministically
+// without touching the real $HOME of the developer running the tests.
+// curl args end up in a file the stub appends to; the function returns
+// the file contents (empty string when the hook short-circuited and never
+// reached curl). It does NOT t.Fatal on a non-zero hook exit — fail-open
+// hooks legitimately exit 0, but a hook that errors out also yields an
+// empty curl-args file, and the assertion in the caller covers both.
+func runHookAndReturnCurlArgsWithHome(t *testing.T, scriptPath, dcHome string, extraEnv map[string]string) string {
+	t.Helper()
+	stubDir := t.TempDir()
+	argFile := filepath.Join(stubDir, "curl-args.txt")
+	stub := filepath.Join(stubDir, "curl")
+	stubSrc := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argFile + "; done\nprintf '{\"action\":\"allow\"}\\n200'\nexit 0\n"
+	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(),
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+	_ = cmd.Run() // exit 0 = fail-open path; non-zero would still record args if curl ran first
+	data, err := os.ReadFile(argFile)
+	if err != nil {
+		// argFile only exists if the stub ran — its absence is exactly
+		// what we want to assert against in the fail-open tests.
+		return ""
+	}
+	return string(data)
+}
+
 func TestWriteSandboxPolicy(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteSandboxPolicy(dir, "127.0.0.1:4000", "127.0.0.1:18970"); err != nil {

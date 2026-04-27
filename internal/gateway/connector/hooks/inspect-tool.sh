@@ -1,9 +1,15 @@
 #!/bin/bash
-# defenseclaw-managed-hook v1
+# defenseclaw-managed-hook v2
 # DefenseClaw PreToolUse hook — calls DefenseClaw inspect API before tool execution.
 # Used by Claude Code (PreToolUse) and OpenCode (hook command).
 # The agent sets CLAUDE_TOOL_NAME (Claude Code) or TOOL_NAME and pipes input to stdin.
 set -euo pipefail
+
+# Fail-open guard. See inspect-request.sh for rationale.
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  exit 0
+fi
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_INPUT=$(cat)

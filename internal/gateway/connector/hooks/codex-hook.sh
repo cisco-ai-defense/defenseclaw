@@ -1,16 +1,29 @@
 #!/bin/bash
-# defenseclaw-managed-hook v1
+# defenseclaw-managed-hook v2
 # DefenseClaw Codex hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/codex/hook endpoint. Codex pipes the
 # structured JSON event to stdin and reads the response from stdout.
 set -euo pipefail
+
+# Fail-open guard. See inspect-request.sh for rationale. We also bail
+# early when the companion .token file is missing, because that means
+# `defenseclaw setup` was never run for this connector or the token
+# was wiped — either way the gateway will reject every request and
+# we'd brick the agent.
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  exit 0
+fi
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  exit 0
+fi
 
 PAYLOAD=$(cat)
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). The env var takes precedence if already set.
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/.token"

@@ -1,8 +1,14 @@
 #!/bin/bash
-# defenseclaw-managed-hook v1
+# defenseclaw-managed-hook v2
 # DefenseClaw PostResponse hook — inspects LLM response content after it is returned.
 # Reads the LLM response from stdin (JSON with "content" field).
 set -euo pipefail
+
+# Fail-open guard. See inspect-request.sh for rationale.
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  exit 0
+fi
 
 CONTENT=$(cat)
 
