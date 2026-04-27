@@ -439,6 +439,51 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 	return cs, nil
 }
 
+// --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
+
+// AgentPaths reports the on-disk footprint OpenClaw's connector
+// touches. The connector patches ~/.openclaw/openclaw.json (allow
+// list + plugin entry) and writes the embedded extension into
+// ~/.openclaw/extensions/defenseclaw/. Hook scripts under
+// <DataDir>/hooks/ are written for proxy-side tool inspection.
+func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
+	ocHome := openClawHome()
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	hooks := make([]string, 0, len(HookScripts()))
+	for _, name := range HookScripts() {
+		hooks = append(hooks, filepath.Join(hookDir, name))
+	}
+	return AgentPaths{
+		PatchedFiles: []string{filepath.Join(ocHome, "openclaw.json")},
+		BackupFiles:  nil, // openclaw.json edits are reversible without a backup file
+		HookScripts:  hooks,
+		CreatedDirs: []string{
+			filepath.Join(ocHome, "extensions", "defenseclaw"),
+			filepath.Join(opts.DataDir, "shims"),
+		},
+	}
+}
+
+func (c *OpenClawConnector) HookScripts(opts SetupOpts) []string {
+	return c.AgentPaths(opts).HookScripts
+}
+
+// RequiredEnv reports the env vars OpenClaw needs for proxy
+// routing. OpenClaw uses a fetch interceptor plugin loaded from
+// extensions/defenseclaw/ — there is no env var the operator must
+// set; the plugin patches globalThis.fetch at runtime. Return a
+// single EnvScopeNone entry as positive documentation.
+func (c *OpenClawConnector) RequiredEnv() []EnvRequirement {
+	return []EnvRequirement{
+		{
+			Name:        "",
+			Scope:       EnvScopeNone,
+			Required:    false,
+			Description: "OpenClaw routes through DefenseClaw via the embedded fetch interceptor plugin loaded from ~/.openclaw/extensions/defenseclaw/; no env vars are needed.",
+		},
+	}
+}
+
 // --- ComponentScanner interface ---
 
 func (c *OpenClawConnector) SupportsComponentScanning() bool { return true }

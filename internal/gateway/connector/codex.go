@@ -237,6 +237,56 @@ func (c *CodexConnector) Route(r *http.Request, body []byte) (*ConnectorSignals,
 	return cs, nil
 }
 
+// --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
+
+// AgentPaths reports the on-disk footprint Codex's connector
+// touches. The canonical scoped routing primitive is the patch
+// applied to ~/.codex/config.toml's [model_providers.*].base_url,
+// backed up via codex_config_backup.json. Older releases also
+// wrote codex_env.sh / codex.env into <DataDir>; those are still
+// surfaced here so tools that audit DefenseClaw's footprint find
+// them and Teardown can remove them.
+func (c *CodexConnector) AgentPaths(opts SetupOpts) AgentPaths {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	hooks := make([]string, 0, len(HookScripts()))
+	for _, name := range HookScripts() {
+		hooks = append(hooks, filepath.Join(hookDir, name))
+	}
+	return AgentPaths{
+		PatchedFiles: []string{codexConfigPath()},
+		BackupFiles: []string{
+			filepath.Join(opts.DataDir, "codex_config_backup.json"),
+			filepath.Join(opts.DataDir, "codex_backup.json"),
+		},
+		HookScripts: hooks,
+		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
+	}
+}
+
+func (c *CodexConnector) HookScripts(opts SetupOpts) []string {
+	return c.AgentPaths(opts).HookScripts
+}
+
+// RequiredEnv reports Codex's env requirements. Codex picks its
+// model provider via [model_providers.*].base_url in config.toml,
+// which Setup patches directly — so the connector does not require
+// the operator to set OPENAI_BASE_URL in their shell. Older
+// releases wrote a codex_env.sh that exported it globally; that
+// path is being retired (see PR-H / S8.1) because it bleeds into
+// non-Codex OpenAI SDK clients. Documenting both the canonical
+// scoped path and the legacy var here gives `defenseclaw doctor`
+// enough context to flag mis-configurations.
+func (c *CodexConnector) RequiredEnv() []EnvRequirement {
+	return []EnvRequirement{
+		{
+			Name:        "OPENAI_BASE_URL",
+			Scope:       EnvScopeProcess,
+			Required:    false,
+			Description: "Optional. Codex's primary routing surface is the [model_providers.openai].base_url patch in ~/.codex/config.toml. Setting OPENAI_BASE_URL globally is discouraged because it also redirects unrelated OpenAI SDK clients.",
+		},
+	}
+}
+
 // --- ComponentScanner interface ---
 
 func (c *CodexConnector) SupportsComponentScanning() bool { return true }

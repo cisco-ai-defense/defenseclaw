@@ -120,3 +120,121 @@ type ComponentScanner interface {
 type StopScanner interface {
 	SupportsStopScan() bool
 }
+
+// AgentPaths describes the on-disk filesystem footprint that a
+// connector touches at Setup/Teardown time. It is informational
+// metadata used by the CLI / `defenseclaw doctor` / install.sh to:
+//
+//   - preview what files Setup will modify before the operator runs it
+//   - audit what Teardown is responsible for removing
+//   - surface a friendlier "you need write access to <list>" error
+//     than letting Setup fail mid-write
+//
+// All paths are absolute. Empty slices are valid (a connector may have
+// no patched files, e.g. a pure proxy connector with no on-disk
+// integration).
+type AgentPaths struct {
+	// PatchedFiles are agent-owned files DefenseClaw modifies in
+	// place during Setup and restores during Teardown (e.g.
+	// ~/.codex/config.toml, ~/.zeptoclaw/config.json,
+	// ~/.claude/settings.json, ~/.openclaw/openclaw.json).
+	PatchedFiles []string
+
+	// BackupFiles are DefenseClaw-owned files written under
+	// opts.DataDir at Setup so Teardown can restore PatchedFiles.
+	// Clobbering these strands the user — they should be excluded
+	// from any cleanup that isn't a full Teardown.
+	BackupFiles []string
+
+	// HookScripts are executable scripts written under
+	// <opts.DataDir>/hooks/ at Setup that the agent invokes at
+	// runtime (PreToolUse, PostToolUse, etc.). Path semantics match
+	// PatchedFiles.
+	HookScripts []string
+
+	// CreatedDirs are directories the connector creates and owns
+	// (e.g. ~/.openclaw/extensions/defenseclaw/). Distinct from
+	// PatchedFiles because the entire directory is owned by
+	// DefenseClaw, not just edited.
+	CreatedDirs []string
+}
+
+// AgentPathProvider — optional, connectors that touch on-disk agent
+// configuration expose the paths they will patch / back up / write
+// here. This is metadata only: implementing it does not change
+// Setup/Teardown behavior, it just makes the connector inspectable
+// before / after those phases run. Unimplemented = "unknown
+// footprint" (the CLI falls back to a generic warning).
+type AgentPathProvider interface {
+	AgentPaths(opts SetupOpts) AgentPaths
+}
+
+// EnvScope describes where an environment variable needs to be set
+// for the connector's routing to take effect. DefenseClaw never
+// writes to user shell rc files; this enum is documentation for the
+// operator surfaced by `defenseclaw doctor`.
+type EnvScope string
+
+const (
+	// EnvScopeProcess — variable must be set in the agent's process
+	// env at launch time. The connector typically achieves this by
+	// patching an agent-specific config file that the agent reads at
+	// startup (e.g. config.toml for codex), so the operator usually
+	// does not need to do anything.
+	EnvScopeProcess EnvScope = "process"
+	// EnvScopeShell — variable must be set in the user's shell rc.
+	// DefenseClaw will not write the rc file; the operator must do
+	// it manually. Surfaced as a doctor warning when unset.
+	EnvScopeShell EnvScope = "shell"
+	// EnvScopeNone — no env var required (native binary configured
+	// entirely via on-disk config files).
+	EnvScopeNone EnvScope = "none"
+)
+
+// EnvRequirement describes a single env var the connector relies on
+// for the agent → proxy hop to work. It is informational metadata
+// surfaced by the CLI; a connector that needs no env vars implements
+// EnvRequirementsProvider returning an empty slice.
+type EnvRequirement struct {
+	// Name of the env var, e.g. "ANTHROPIC_BASE_URL".
+	Name string
+	// Scope describes where the var needs to be set.
+	Scope EnvScope
+	// Required is true when the connector cannot route the agent
+	// through the proxy without this var. False = ergonomic
+	// (e.g. helps debugging) but not required for routing.
+	Required bool
+	// Description explains why the var matters and how the
+	// connector uses it. Surfaced verbatim by `defenseclaw doctor`.
+	Description string
+}
+
+// EnvRequirementsProvider — optional, connectors that depend on env
+// vars (or document the absence of any) implement this so the CLI
+// can surface clear preflight diagnostics.
+type EnvRequirementsProvider interface {
+	RequiredEnv() []EnvRequirement
+}
+
+// HookScriptProvider — optional, connectors that own one or more
+// hook scripts at runtime expose their absolute on-disk paths here.
+// This is a thin convenience wrapper over AgentPaths.HookScripts so a
+// connector can advertise hook scripts without committing to the
+// rest of the AgentPaths shape.
+type HookScriptProvider interface {
+	HookScripts(opts SetupOpts) []string
+}
+
+// AgentRestarter — optional, connectors that know how to gracefully
+// bounce the agent process after a config change implement this.
+// Behavior contract:
+//   - Best-effort: a connector that finds the agent isn't running
+//     should return nil, not an error.
+//   - The CLI only calls this when the operator opts in via
+//     `--restart-agent` (or the equivalent flag). It is never
+//     called from Setup/Teardown.
+//   - Implementations must not block forever; they should respect
+//     ctx.Done().
+type AgentRestarter interface {
+	RestartAgent(ctx context.Context, opts SetupOpts) error
+}

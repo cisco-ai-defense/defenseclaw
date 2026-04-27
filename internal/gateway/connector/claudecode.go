@@ -192,6 +192,51 @@ func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSig
 	return cs, nil
 }
 
+// --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
+
+// AgentPaths reports the on-disk footprint Claude Code's connector
+// touches. The connector patches ~/.claude/settings.json (hooks
+// table), backs it up via claudecode_backup.json, and writes the
+// inspect-* + claude-code-hook.sh scripts under <DataDir>/hooks/.
+// Legacy env files (claudecode_env.sh / claudecode.env) are
+// surfaced for audit completeness even though they are scoped to
+// <DataDir> and never sourced into the user's shell.
+func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	hooks := make([]string, 0, len(HookScripts()))
+	for _, name := range HookScripts() {
+		hooks = append(hooks, filepath.Join(hookDir, name))
+	}
+	return AgentPaths{
+		PatchedFiles: []string{claudeCodeSettingsPath()},
+		BackupFiles:  []string{filepath.Join(opts.DataDir, "claudecode_backup.json")},
+		HookScripts:  hooks,
+		CreatedDirs:  []string{filepath.Join(opts.DataDir, "shims")},
+	}
+}
+
+func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
+	return c.AgentPaths(opts).HookScripts
+}
+
+// RequiredEnv reports Claude Code's env requirements. The CLI honors
+// ANTHROPIC_BASE_URL at startup; setting it points the agent at the
+// DefenseClaw proxy. The connector currently writes a scoped env
+// file the operator can `source` before launching Claude Code, but
+// it is not strictly required because the connector also patches
+// settings.json. Mark Required=false so `defenseclaw doctor` shows
+// it as recommended-but-not-blocking.
+func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
+	return []EnvRequirement{
+		{
+			Name:        "ANTHROPIC_BASE_URL",
+			Scope:       EnvScopeProcess,
+			Required:    false,
+			Description: "Recommended. When set in Claude Code's process env it pins LLM traffic to the DefenseClaw proxy. The connector also patches ~/.claude/settings.json hooks so guardrail enforcement runs even when this var is unset.",
+		},
+	}
+}
+
 // --- ComponentScanner interface ---
 
 func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
