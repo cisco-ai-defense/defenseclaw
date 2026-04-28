@@ -156,7 +156,11 @@ class TestMCPScan(MCPCommandTestBase):
 
         result = self.invoke(["scan", "http://localhost:3000"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("CLEAN", result.output)
+        # S6.4 — the shared scan UX renders "[ok] <target>" instead of
+        # the old "Status: CLEAN" line. The summary line carries the
+        # canonical clean count.
+        self.assertIn("[ok] http://localhost:3000", result.output)
+        self.assertIn("clean=1", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_with_findings(self, mock_scan):
@@ -225,7 +229,9 @@ class TestMCPScan(MCPCommandTestBase):
 
         result = self.invoke(["scan", "http://safe.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("CLEAN", result.output)
+        # S6.4 — clean verdict shown via shared `[ok]` glyph + summary.
+        self.assertIn("[ok] http://safe.com", result.output)
+        self.assertIn("clean=1", result.output)
         self.assertNotIn("ALLOWED", result.output)
         mock_scan.assert_called_once()
 
