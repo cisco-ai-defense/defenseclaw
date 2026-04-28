@@ -42,7 +42,7 @@ func NewClaudeCodeConnector() *ClaudeCodeConnector {
 }
 
 func (c *ClaudeCodeConnector) Name() string        { return "claudecode" }
-func (c *ClaudeCodeConnector) HookAPIPath() string  { return "/api/v1/claude-code/hook" }
+func (c *ClaudeCodeConnector) HookAPIPath() string { return "/api/v1/claude-code/hook" }
 func (c *ClaudeCodeConnector) Description() string {
 	return "env var + settings.json hooks (20+ events, component scanning)"
 }
