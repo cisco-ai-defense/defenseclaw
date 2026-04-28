@@ -13,7 +13,7 @@ DIST_DIR    := dist
 
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        plugin plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
@@ -194,37 +194,63 @@ gateway: sync-openclaw-extension
 # The copy preserves the directory layout under dist/ (policy/,
 # scanners/plugin_scanner/, etc.) because dist/index.js imports siblings
 # by relative path. Flattening the tree silently breaks plugin load.
+#
+# Best-effort: a fresh clone has no extensions/defenseclaw/dist/ until
+# `make plugin` runs. Forcing every gateway build to first run npm
+# would block non-OpenClaw operators (zeptoclaw, codex, claude code)
+# who don't need the plugin at all. Instead we drop a placeholder file
+# so //go:embed has at least one entry, and the OpenClaw connector
+# detects the placeholder at runtime and returns a clear error when
+# `Setup` is called for OpenClaw without a built plugin. Operators who
+# actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension:
-	@rm -rf internal/gateway/connector/openclaw_extension
-	@mkdir -p internal/gateway/connector/openclaw_extension/node_modules
-	@cp $(PLUGIN_DIR)/package.json internal/gateway/connector/openclaw_extension/
-	@cp $(PLUGIN_DIR)/openclaw.plugin.json internal/gateway/connector/openclaw_extension/
-	@# rsync preserves tree structure AND skips dev artifacts (tests, .d.ts,
-	@# source maps) in a single pass. Fall back to find-based copy when
-	@# rsync is unavailable (shouldn't happen on macOS / linux dev).
-	@# When dist/ does not exist (CI without `make plugin`), create an empty
-	@# directory so go:embed still compiles.
-	@if [ ! -d "$(PLUGIN_DIR)/dist" ]; then \
-	  echo "  ⚠ $(PLUGIN_DIR)/dist not found — run 'make plugin' to build the OpenClaw extension"; \
-	  mkdir -p internal/gateway/connector/openclaw_extension/dist; \
-	elif command -v rsync >/dev/null 2>&1; then \
+	@set -e; \
+	embed_dir=internal/gateway/connector/openclaw_extension; \
+	plugin_dist=$(PLUGIN_DIR)/dist; \
+	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
+	  if [ -f "$$embed_dir/.placeholder" ] || [ ! -d "$$embed_dir" ] \
+	      || [ -z "$$(ls -A "$$embed_dir" 2>/dev/null | grep -v '^\.placeholder$$' || true)" ]; then \
+	    mkdir -p "$$embed_dir"; \
+	    printf '%s\n' "OpenClaw extension not built." \
+	      "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+	      > "$$embed_dir/.placeholder"; \
+	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
+	  else \
+	    echo "  • OpenClaw extension dist/ missing — keeping the previously synced tree under $$embed_dir/"; \
+	  fi; \
+	  exit 0; \
+	fi; \
+	rm -rf "$$embed_dir"; \
+	mkdir -p "$$embed_dir/node_modules"; \
+	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
+	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
+	if command -v rsync >/dev/null 2>&1; then \
 	  rsync -a \
 	    --exclude='__tests__' --exclude='*.d.ts' --exclude='*.d.ts.map' --exclude='*.js.map' \
-	    $(PLUGIN_DIR)/dist/ internal/gateway/connector/openclaw_extension/dist/; \
+	    $(PLUGIN_DIR)/dist/ "$$embed_dir/dist/"; \
 	else \
-	  mkdir -p internal/gateway/connector/openclaw_extension/dist; \
+	  mkdir -p "$$embed_dir/dist"; \
 	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print0 \
 	    | while IFS= read -r -d '' f; do \
-	        mkdir -p "../../../internal/gateway/connector/openclaw_extension/dist/$$(dirname "$$f")"; \
-	        cp "$$f" "../../../internal/gateway/connector/openclaw_extension/dist/$$f"; \
+	        mkdir -p "../../../$$embed_dir/dist/$$(dirname "$$f")"; \
+	        cp "$$f" "../../../$$embed_dir/dist/$$f"; \
 	      done); \
-	fi
-	@for dep in js-yaml argparse; do \
+	fi; \
+	for dep in js-yaml argparse; do \
 	  if [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ]; then \
-	    cp -R "$(PLUGIN_DIR)/node_modules/$$dep" internal/gateway/connector/openclaw_extension/node_modules/; \
+	    cp -R "$(PLUGIN_DIR)/node_modules/$$dep" "$$embed_dir/node_modules/"; \
 	  fi; \
-	done
-	@echo "  • Synced OpenClaw extension → internal/gateway/connector/openclaw_extension/"
+	done; \
+	echo "  • Synced OpenClaw extension → $$embed_dir/"
+
+# extensions — explicit, opt-in build of the OpenClaw TypeScript plugin
+# followed by an embed sync. Only OpenClaw operators need this; the
+# gateway itself builds without it (sync-openclaw-extension drops a
+# placeholder that the OpenClaw connector detects at runtime). Use this
+# target whenever you change anything under extensions/defenseclaw/ and
+# want the change baked into the next gateway binary.
+extensions: plugin sync-openclaw-extension
+	@echo "  • OpenClaw extension is built and embedded — rebuild the gateway with 'make gateway'"
 
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }

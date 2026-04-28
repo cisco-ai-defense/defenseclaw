@@ -42,6 +42,29 @@ var openClawExtensionFS embed.FS
 // openClawPluginRoot names the root directory inside openClawExtensionFS.
 const openClawPluginRoot = "openclaw_extension"
 
+// openClawPlaceholderName is the marker file the Makefile drops into
+// openclaw_extension/ when extensions/defenseclaw/dist is missing at
+// build time. Its presence means this gateway binary was built without
+// the OpenClaw plugin (e.g. because the operator never ran
+// `make extensions`/`make plugin`), and so OpenClaw setup must fail
+// with a clear error rather than installing a non-functional shell.
+// Other connectors (zeptoclaw, codex, claudecode) don't touch this
+// embed at all and remain fully usable.
+const openClawPlaceholderName = ".placeholder"
+
+// openClawExtensionAvailable returns true when the embedded OpenClaw
+// extension contains the runtime files (package.json, dist/, etc.) and
+// false when it only contains the build-time placeholder marker. This
+// lets the gateway boot cleanly for non-OpenClaw operators while still
+// failing loudly when someone tries to switch to OpenClaw without
+// having built the plugin.
+func openClawExtensionAvailable() bool {
+	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, "package.json")); err == nil {
+		return true
+	}
+	return false
+}
+
 // OpenClawHomeOverride lets tests redirect the OpenClaw home directory so
 // Setup/Teardown write into a scratch path instead of ~/.openclaw.
 var OpenClawHomeOverride string
@@ -76,6 +99,14 @@ func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
 }
 
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	// The Makefile keeps the gateway buildable on machines without the
+	// TS plugin built (typical for non-OpenClaw operators) by embedding
+	// a placeholder. If the operator now actually wants OpenClaw, refuse
+	// to plant a corrupt extension and tell them how to fix it.
+	if !openClawExtensionAvailable() {
+		return fmt.Errorf("openclaw extension is not bundled in this gateway build — run 'make extensions' (or 'make plugin') and rebuild the gateway, or pick a different connector with 'defenseclaw setup connector'")
+	}
+
 	// Surface 1: Install the embedded plugin into OpenClaw and register it
 	// in openclaw.json. Enabling the connector is the *only* step an
 	// operator needs — no separate `defenseclaw setup guardrail` phase.
