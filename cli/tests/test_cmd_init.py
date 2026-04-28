@@ -372,7 +372,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Gateway", result.output)
-        self.assertIn("OpenClaw:", result.output)
+        self.assertIn("connector: openclaw", result.output)
         self.assertIn("127.0.0.1:18789", result.output)
         self.assertIn("API port:", result.output)
         self.assertIn("18970", result.output)
@@ -435,7 +435,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("none (local)", result.output)
+        self.assertIn("none (loopback auth)", result.output)
 
 
 class TestResolveOpenclawGateway(unittest.TestCase):

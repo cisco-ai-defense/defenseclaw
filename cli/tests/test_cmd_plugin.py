@@ -1103,7 +1103,7 @@ class TestResolvePluginDir(unittest.TestCase):
         source = os.path.join(root, "index.ts")
         open(source, "w").close()
 
-        def info_side_effect(name):
+        def info_side_effect(name, connector=""):
             return self._mock_info(source) if name == "whatsapp" else None
 
         mock_info.side_effect = info_side_effect
