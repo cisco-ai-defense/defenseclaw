@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -235,6 +236,85 @@ func TestSidecarHealthSinceUpdates(t *testing.T) {
 
 	if !snap2.Gateway.Since.After(t1) {
 		t.Error("Since should advance after SetGateway")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Connector dispatch helpers
+// ---------------------------------------------------------------------------
+
+// stubConnector is a minimal connector.Connector test double — only
+// Name() is exercised by proxyShouldBindForConnector, so the other
+// methods can return zero values.
+type stubConnector struct{ name string }
+
+func (s *stubConnector) Name() string                                                 { return s.name }
+func (s *stubConnector) Description() string                                          { return "" }
+func (s *stubConnector) ToolInspectionMode() connector.ToolInspectionMode             { return "" }
+func (s *stubConnector) SubprocessPolicy() connector.SubprocessPolicy                 { return "" }
+func (s *stubConnector) Setup(context.Context, connector.SetupOpts) error             { return nil }
+func (s *stubConnector) Teardown(context.Context, connector.SetupOpts) error          { return nil }
+func (s *stubConnector) Authenticate(*http.Request) bool                              { return false }
+func (s *stubConnector) Route(*http.Request, []byte) (*connector.ConnectorSignals, error) {
+	return nil, nil
+}
+func (s *stubConnector) SetCredentials(string, string)                       {}
+func (s *stubConnector) VerifyClean(connector.SetupOpts) error               { return nil }
+
+// TestProxyShouldBindForConnector pins the routing decision behind
+// the codex/claudecode observability defaults. proxyShouldBindForConnector
+// gates whether runGuardrail calls proxy.Run() (binding the proxy
+// listener) or short-circuits to ctx.Done() (observability-only,
+// agent talks directly to its native upstream). A regression that
+// flipped this matrix would either:
+//   - bind the proxy port for codex in observability mode
+//     (defeating the point of the mode entirely), or
+//   - skip the bind for openclaw (breaking every existing OpenClaw
+//     install on upgrade, since openclaw's data path goes through
+//     /v1/chat/completions on the proxy port).
+//
+// Each table row exercises one cell of (connector, enforcement
+// flags) → expected bind decision.
+func TestProxyShouldBindForConnector(t *testing.T) {
+	cases := []struct {
+		name           string
+		conn           connector.Connector
+		codexEnf       bool
+		claudeCodeEnf  bool
+		expectBind     bool
+	}{
+		{"codex_default_observability", &stubConnector{name: "codex"}, false, false, false},
+		{"codex_enforcement_on", &stubConnector{name: "codex"}, true, false, true},
+		{"claudecode_default_observability", &stubConnector{name: "claudecode"}, false, false, false},
+		{"claudecode_enforcement_on", &stubConnector{name: "claudecode"}, false, true, true},
+		// Sibling enforcement flag must NOT cross over: codex
+		// enforcement flipping on shouldn't change claudecode bind
+		// behavior.
+		{"claudecode_observability_with_codex_enf_on", &stubConnector{name: "claudecode"}, true, false, false},
+		// Always-bind connectors stay bound regardless of either flag.
+		{"openclaw_default", &stubConnector{name: "openclaw"}, false, false, true},
+		{"openclaw_with_codex_enf_off", &stubConnector{name: "openclaw"}, false, false, true},
+		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, false, false, true},
+		// Unknown connectors default to bind=true (conservative
+		// fail-closed for the proxy data path).
+		{"unknown_connector", &stubConnector{name: "frobozz"}, false, false, true},
+		// Nil connector defends against a sidecar startup race where
+		// resolveActiveConnector returns nil before fallback kicks in.
+		{"nil_connector", nil, false, false, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gc := &config.GuardrailConfig{
+				CodexEnforcementEnabled:      tc.codexEnf,
+				ClaudeCodeEnforcementEnabled: tc.claudeCodeEnf,
+			}
+			got := proxyShouldBindForConnector(tc.conn, gc)
+			if got != tc.expectBind {
+				t.Errorf("proxyShouldBindForConnector(%v) = %v, want %v",
+					tc.name, got, tc.expectBind)
+			}
+		})
 	}
 }
 

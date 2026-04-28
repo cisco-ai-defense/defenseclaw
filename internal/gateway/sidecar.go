@@ -1227,7 +1227,71 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return err
 	}
+
+	// Observability-only short-circuit. When the active connector is
+	// codex or claudecode AND its enforcement flag is false (the
+	// production default), we never bind the proxy listener: the
+	// connector's Setup() has already installed hooks + OTel + notify
+	// for end-to-end telemetry, and the agent talks DIRECTLY to its
+	// native upstream (api.openai.com / chatgpt.com or
+	// api.anthropic.com).
+	//
+	// We still construct the GuardrailProxy above and call Setup
+	// before this gate so:
+	//   - connector lifecycle (provider snapshot, credential wiring)
+	//     stays consistent across modes,
+	//   - the operator can flip enforcement on at runtime by editing
+	//     config.yaml and restarting (no rebuild needed),
+	//   - subsystem health surfaces a single source of truth in the
+	//     CLI status and /api/v1/status JSON.
+	//
+	// The API server (runAPI) runs in a separate goroutine and is
+	// unaffected by this gate — hook ingest and the OTLP-HTTP
+	// receiver added in a follow-up commit continue to accept
+	// telemetry on the API port. Block on ctx.Done() to keep the
+	// goroutine alive until shutdown, mirroring the existing
+	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
+	if !proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
+		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+			"summary":             "observability-only (no proxy binding)",
+			"connector":           conn.Name(),
+			"enforcement_enabled": false,
+			"proxy_port":          "closed",
+			"hint":                fmt.Sprintf("flip on with guardrail.%s_enforcement_enabled: true in config.yaml", conn.Name()),
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] observability mode: %s talks directly to its native upstream — proxy port intentionally not bound\n", conn.Name())
+		<-ctx.Done()
+		return nil
+	}
 	return proxy.Run(ctx)
+}
+
+// proxyShouldBindForConnector returns true when the active connector
+// requires the proxy listener to be bound — i.e. the agent's data
+// path goes through DefenseClaw. For the observability-default
+// connectors (codex, claudecode) this returns false when their
+// enforcement flag is disabled, so the proxy port stays unbound and
+// the agent talks directly to its native upstream. OpenClaw and
+// ZeptoClaw always return true: those connectors were designed
+// around the fetch-interceptor / api_base redirect from day one and
+// have no observability-only path.
+//
+// Adding a new connector? Default-on (return true) is the
+// conservative choice for guardrail-style adapters; only return
+// false when the connector ships native telemetry comparable to
+// the codex [hooks] table + native OTel exporter.
+func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailConfig) bool {
+	if conn == nil {
+		return true
+	}
+	switch conn.Name() {
+	case "codex":
+		return gc.CodexEnforcementEnabled
+	case "claudecode":
+		return gc.ClaudeCodeEnforcementEnabled
+	default:
+		return true
+	}
 }
 
 // teardownPreviousConnector checks if a different connector was previously
