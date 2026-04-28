@@ -296,10 +296,58 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
-			fmt.Printf("             %s: %v\n", k, h.Details[k])
+			line, ok := formatDetailValue(h.Details[k])
+			if !ok {
+				// Non-scalar value (slice/map/nil). These are kept
+				// in the /health JSON for API consumers (e.g. the
+				// structured ``sinks: [...]`` array under
+				// ``sinks.details``) but render unreadably through
+				// ``%v`` on a terminal, so we skip them here. The
+				// per-sink scalar keys emitted alongside (e.g.
+				// ``sink_01``) carry the human-readable view.
+				continue
+			}
+			fmt.Printf("             %s: %s\n", k, line)
 		}
 	}
 	fmt.Println()
+}
+
+// formatDetailValue renders a single Details map value as a one-line
+// string for the CLI status panel. JSON unmarshalling reduces every
+// numeric value to ``float64``; we render whole numbers as integers
+// so a port like ``18789`` prints cleanly rather than as ``18789``-
+// with-a-trailing-``.0``. Returns ``ok=false`` for slice/map/nil
+// values so callers can skip them rather than dumping a Go-style
+// ``[map[...]]`` representation onto the terminal.
+func formatDetailValue(v interface{}) (string, bool) {
+	switch val := v.(type) {
+	case string:
+		return val, true
+	case bool:
+		return fmt.Sprintf("%t", val), true
+	case float64:
+		// Whole numbers — render as int. ``math.Trunc`` keeps
+		// fractional values intact for the rare non-integer case
+		// (e.g. uptime fractions) without forcing a dependency on
+		// the math package; an equality check against the integer
+		// truncation of ``val`` is sufficient and avoids importing
+		// math just for this one site.
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val)), true
+		}
+		return fmt.Sprintf("%g", val), true
+	case int, int32, int64:
+		// Direct (non-JSON-decoded) callers — e.g. a future in-
+		// process renderer that does not round-trip through JSON.
+		return fmt.Sprintf("%d", val), true
+	case fmt.Stringer:
+		return val.String(), true
+	case nil:
+		return "", false
+	default:
+		return "", false
+	}
 }
 
 func formatDuration(d time.Duration) string {

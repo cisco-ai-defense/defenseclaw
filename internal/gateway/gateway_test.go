@@ -3049,6 +3049,129 @@ func TestHealthEndpointNoSecrets(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// reportSinksHealth tests
+//
+// These exercise the contract that the CLI status renderer relies on:
+// every code path must emit a ``summary`` scalar so operators can tell
+// from one ``defenseclaw-gateway status`` row why the Sinks subsystem
+// is in its current state, even when ``DISABLED``.
+// ---------------------------------------------------------------------------
+
+func TestReportSinksHealth_NoSinksConfigured(t *testing.T) {
+	s := &Sidecar{
+		cfg:    &config.Config{AuditSinks: nil},
+		health: NewSidecarHealth(),
+	}
+	s.reportSinksHealth()
+	snap := s.health.Snapshot()
+	if snap.Sinks.State != StateDisabled {
+		t.Fatalf("State = %q, want %q", snap.Sinks.State, StateDisabled)
+	}
+	summary, _ := snap.Sinks.Details["summary"].(string)
+	if !strings.Contains(summary, "no audit sinks configured") {
+		t.Errorf("summary = %q, want it to mention 'no audit sinks configured'", summary)
+	}
+	hint, _ := snap.Sinks.Details["hint"].(string)
+	if !strings.Contains(hint, "defenseclaw setup") {
+		t.Errorf("hint = %q, want it to point operators at the setup command", hint)
+	}
+}
+
+func TestReportSinksHealth_AllDisabledStillSurfacesEntries(t *testing.T) {
+	s := &Sidecar{
+		cfg: &config.Config{
+			AuditSinks: []config.AuditSink{
+				{
+					Name: "splunk-prod", Kind: config.SinkKindSplunkHEC, Enabled: false,
+					SplunkHEC: &config.SplunkHECSinkConfig{
+						Endpoint: "https://splunk.example.com:8088/services/collector/event",
+						Index:    "defenseclaw",
+					},
+				},
+				{
+					Name: "local-otlp-logs", Kind: config.SinkKindOTLPLogs, Enabled: false,
+					OTLPLogs: &config.OTLPLogsSinkConfig{
+						Endpoint: "127.0.0.1:4317", Protocol: "grpc",
+					},
+				},
+			},
+		},
+		health: NewSidecarHealth(),
+	}
+	s.reportSinksHealth()
+	snap := s.health.Snapshot()
+	if snap.Sinks.State != StateDisabled {
+		t.Fatalf("State = %q, want %q (all sinks disabled)",
+			snap.Sinks.State, StateDisabled)
+	}
+	summary, _ := snap.Sinks.Details["summary"].(string)
+	if !strings.Contains(summary, "0 of 2") {
+		t.Errorf("summary = %q, want it to report 0 of 2 enabled", summary)
+	}
+	// Per-sink scalar lines must be present so the CLI status row can
+	// render each configured (but disabled) sink.
+	sink1, _ := snap.Sinks.Details["sink_01"].(string)
+	if !strings.Contains(sink1, "splunk-prod") || !strings.Contains(sink1, "[disabled]") {
+		t.Errorf("sink_01 = %q, want 'splunk-prod ... [disabled]'", sink1)
+	}
+	sink2, _ := snap.Sinks.Details["sink_02"].(string)
+	if !strings.Contains(sink2, "local-otlp-logs") || !strings.Contains(sink2, "127.0.0.1:4317") {
+		t.Errorf("sink_02 = %q, want 'local-otlp-logs ... 127.0.0.1:4317'", sink2)
+	}
+}
+
+func TestReportSinksHealth_MixedEnabledDisabled(t *testing.T) {
+	s := &Sidecar{
+		cfg: &config.Config{
+			AuditSinks: []config.AuditSink{
+				{
+					Name: "splunk-prod", Kind: config.SinkKindSplunkHEC, Enabled: false,
+					SplunkHEC: &config.SplunkHECSinkConfig{
+						Endpoint: "https://splunk.example.com:8088/services/collector/event",
+					},
+				},
+				{
+					Name: "local-otlp-logs", Kind: config.SinkKindOTLPLogs, Enabled: true,
+					OTLPLogs: &config.OTLPLogsSinkConfig{
+						Endpoint: "127.0.0.1:4317", Protocol: "grpc",
+					},
+				},
+			},
+		},
+		health: NewSidecarHealth(),
+	}
+	s.reportSinksHealth()
+	snap := s.health.Snapshot()
+	if snap.Sinks.State != StateRunning {
+		t.Fatalf("State = %q, want %q (one sink enabled)",
+			snap.Sinks.State, StateRunning)
+	}
+	summary, _ := snap.Sinks.Details["summary"].(string)
+	if summary != "1 of 2 enabled" {
+		t.Errorf("summary = %q, want '1 of 2 enabled'", summary)
+	}
+	// Backward-compat structured fields still present for the
+	// /health JSON consumers (TUI / dashboards / external monitors).
+	if got, _ := snap.Sinks.Details["count"].(int); got != 1 {
+		t.Errorf("count = %v, want 1 (enabled count)", snap.Sinks.Details["count"])
+	}
+	rows, ok := snap.Sinks.Details["sinks"].([]map[string]interface{})
+	if !ok || len(rows) != 2 {
+		t.Fatalf("sinks = %#v, want a 2-entry structured row slice",
+			snap.Sinks.Details["sinks"])
+	}
+	// Disabled sink row must still have ``enabled: false`` so JSON
+	// consumers can distinguish "not configured" from "configured
+	// but disabled" without losing context.
+	if rows[0]["enabled"] != false {
+		t.Errorf("rows[0].enabled = %v, want false", rows[0]["enabled"])
+	}
+	if rows[1]["enabled"] != true {
+		t.Errorf("rows[1].enabled = %v, want true", rows[1]["enabled"])
+	}
+}
+
+// ---------------------------------------------------------------------------
 // baseCommand and truncate tests (router helpers)
 // ---------------------------------------------------------------------------
 

@@ -1432,49 +1432,104 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 // audit_sinks model is provider-agnostic and operators bring their own
 // collector/SIEM credentials.
 func (s *Sidecar) reportSinksHealth() {
+	total := len(s.cfg.AuditSinks)
+	if total == 0 {
+		// Nothing configured — surface the explicit reason + a hint
+		// pointing operators at the right CLI command. Without this
+		// the CLI status row showed a bare "Sinks: DISABLED" with no
+		// context, leaving operators unsure whether their setup
+		// command had taken effect.
+		s.health.SetSinks(StateDisabled, "", map[string]interface{}{
+			"summary": "no audit sinks configured",
+			"hint":    "run 'defenseclaw setup local-observability' or 'defenseclaw setup observability add <preset>' to enable audit forwarding",
+		})
+		return
+	}
+
 	enabled := 0
-	kinds := make([]string, 0, len(s.cfg.AuditSinks))
-	rows := make([]map[string]interface{}, 0, len(s.cfg.AuditSinks))
-	for _, sink := range s.cfg.AuditSinks {
-		if !sink.Enabled {
-			continue
-		}
-		enabled++
-		kinds = append(kinds, string(sink.Kind))
+	enabledKinds := make([]string, 0, total)
+	rows := make([]map[string]interface{}, 0, total)
+	details := make(map[string]interface{}, total+4)
+
+	for i, sink := range s.cfg.AuditSinks {
 		row := map[string]interface{}{
 			"name":    sink.Name,
 			"kind":    string(sink.Kind),
-			"enabled": true,
+			"enabled": sink.Enabled,
 		}
+		var endpoint string
 		switch sink.Kind {
 		case config.SinkKindSplunkHEC:
 			if sink.SplunkHEC != nil {
-				row["endpoint"] = sink.SplunkHEC.Endpoint
+				endpoint = sink.SplunkHEC.Endpoint
+				row["endpoint"] = endpoint
 				row["index"] = sink.SplunkHEC.Index
 			}
 		case config.SinkKindOTLPLogs:
 			if sink.OTLPLogs != nil {
-				row["endpoint"] = sink.OTLPLogs.Endpoint
+				endpoint = sink.OTLPLogs.Endpoint
+				row["endpoint"] = endpoint
 				row["protocol"] = sink.OTLPLogs.Protocol
 			}
 		case config.SinkKindHTTPJSONL:
 			if sink.HTTPJSONL != nil {
-				row["url"] = sink.HTTPJSONL.URL
+				endpoint = sink.HTTPJSONL.URL
+				row["url"] = endpoint
 			}
 		}
 		rows = append(rows, row)
+
+		state := "disabled"
+		if sink.Enabled {
+			enabled++
+			enabledKinds = append(enabledKinds, string(sink.Kind))
+			state = "enabled"
+		}
+
+		// Per-sink scalar key so the CLI status renderer can show
+		// one human-readable line per sink. Two-digit zero-padded
+		// index keeps the alphabetical key sort matching the config
+		// order (sink_01 before sink_10), so the rendered list
+		// follows config.yaml ordering rather than map iteration.
+		key := fmt.Sprintf("sink_%02d", i+1)
+		if endpoint != "" {
+			details[key] = fmt.Sprintf(
+				"%s (%s) -> %s [%s]", sink.Name, sink.Kind, endpoint, state,
+			)
+		} else {
+			// Sink missing its kind block (validation should reject
+			// this at config-load, but be defensive — health is
+			// strictly read-only and must never panic).
+			details[key] = fmt.Sprintf(
+				"%s (%s) [%s, missing %s block]",
+				sink.Name, sink.Kind, state, sink.Kind,
+			)
+		}
 	}
 
+	// Backward-compatible structured fields preserved for /health
+	// JSON consumers (TUI, dashboards, the regression test in
+	// gateway_test.go::TestHealthEndpointNoSecrets). The CLI
+	// printer's scalar-only filter hides these on the terminal —
+	// the per-sink string keys above carry the human-readable view.
+	details["count"] = enabled
+	details["kinds"] = enabledKinds
+	details["sinks"] = rows
+
 	if enabled == 0 {
-		s.health.SetSinks(StateDisabled, "", nil)
+		// At least one sink is configured but all are disabled —
+		// distinct from "no audit sinks configured" so operators
+		// know they have stale entries to flip on or remove rather
+		// than nothing at all.
+		details["summary"] = fmt.Sprintf(
+			"0 of %d sink(s) enabled — flip one on with 'defenseclaw setup observability enable <name>'",
+			total,
+		)
+		s.health.SetSinks(StateDisabled, "", details)
 		return
 	}
 
-	details := map[string]interface{}{
-		"count": enabled,
-		"kinds": kinds,
-		"sinks": rows,
-	}
+	details["summary"] = fmt.Sprintf("%d of %d enabled", enabled, total)
 	s.health.SetSinks(StateRunning, "", details)
 }
 
