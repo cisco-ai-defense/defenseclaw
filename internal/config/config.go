@@ -913,13 +913,21 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
-	Enabled       bool    `mapstructure:"enabled"         yaml:"enabled"`
-	Injection     bool    `mapstructure:"injection"       yaml:"injection"`
-	PII           bool    `mapstructure:"pii"             yaml:"pii"`
-	PIIPrompt     bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
-	PIICompletion bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
-	ToolInjection bool    `mapstructure:"tool_injection"  yaml:"tool_injection"`
-	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
+	Enabled       bool `mapstructure:"enabled"         yaml:"enabled"`
+	Injection     bool `mapstructure:"injection"       yaml:"injection"`
+	PII           bool `mapstructure:"pii"             yaml:"pii"`
+	PIIPrompt     bool `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
+	PIICompletion bool `mapstructure:"pii_completion"  yaml:"pii_completion"`
+	ToolInjection bool `mapstructure:"tool_injection"  yaml:"tool_injection"`
+	// Exfil enables the data-exfiltration judge that explicitly asks the
+	// LLM whether the prompt is trying to read or exfiltrate sensitive
+	// files, credentials, secrets, or system data. Distinct from the
+	// injection judge (which asks "is this prompt overriding my
+	// instructions?") and the PII judge (which only fires on substring
+	// PII). The exfil judge catches polite-tone /etc/passwd-shaped
+	// prompts where neither category alone would block.
+	Exfil   bool    `mapstructure:"exfil"           yaml:"exfil"`
+	Timeout float64 `mapstructure:"timeout"         yaml:"timeout"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy

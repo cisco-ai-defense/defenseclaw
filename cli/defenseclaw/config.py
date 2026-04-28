@@ -713,6 +713,14 @@ class JudgeConfig:
     pii_prompt: bool = True
     pii_completion: bool = True
     tool_injection: bool = True
+    # ``exfil`` runs a dedicated data-exfiltration judge that asks the
+    # LLM whether a prompt is trying to read or exfiltrate sensitive
+    # files / credentials / secrets. Distinct from the injection judge
+    # (which asks "are you overriding my instructions?") and the PII
+    # judge (which only fires on substring PII). Mirrors the Go-side
+    # ``JudgeConfig.Exfil`` field — round-tripped through ``config.yaml``
+    # so the operator's choice survives a process restart.
+    exfil: bool = True
     timeout: float = 30.0
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
     # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
@@ -1260,6 +1268,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         pii_prompt=raw.get("pii_prompt", True),
         pii_completion=raw.get("pii_completion", True),
         tool_injection=raw.get("tool_injection", True),
+        exfil=raw.get("exfil", True),
         timeout=raw.get("timeout", 30.0),
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),

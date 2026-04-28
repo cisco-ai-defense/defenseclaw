@@ -1778,7 +1778,10 @@ def _interactive_guardrail_setup(
     click.echo("    • Prompt injection and jailbreak attempts")
     click.echo("    • Secrets, API keys, and credentials")
     click.echo("    • PII leakage (names, emails, SSNs, credit cards)")
-    click.echo("    • Data exfiltration patterns")
+    click.echo(
+        "    • Data exfiltration: credential-file reads (/etc/passwd, "
+        "~/.ssh, ~/.aws), out-of-band channels"
+    )
     click.echo()
 
     # --- Step 0: Connector selection ---
@@ -1860,6 +1863,15 @@ def _interactive_guardrail_setup(
     click.echo("  ────────────────────────────────────")
     click.echo("  Uses an LLM to verify detections and catch novel attacks.")
     click.echo("  Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
+    click.echo()
+    click.echo("  Three judge kinds run on every prompt when enabled:")
+    click.echo("    • injection — overrides / jailbreaks (kind=injection)")
+    click.echo("    • pii       — names, emails, SSNs, secrets (kind=pii)")
+    click.echo(
+        "    • exfil     — credential-file reads & out-of-band channels "
+        "(kind=exfil)"
+    )
+    click.echo("  Tool calls additionally run the tool_injection judge.")
     click.echo()
 
     enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
@@ -1983,6 +1995,13 @@ def _interactive_guardrail_setup(
         gc.judge.pii = True
         gc.judge.pii_prompt = True
         gc.judge.pii_completion = True
+        # Data-exfiltration judge runs alongside injection + PII on
+        # every prompt. It exists because polite-tone /etc/passwd-shaped
+        # prompts slip through the injection judge ("not adversarial
+        # phrasing") and the PII judge ("no literal PII emitted yet").
+        # Audit rows for this judge appear with kind=exfil and follow
+        # the same retention / redaction rules as the other kinds.
+        gc.judge.exfil = True
 
         # Completion-side strategy defaults to regex_only (no judge latency)
         if not getattr(gc, "detection_strategy_completion", None):

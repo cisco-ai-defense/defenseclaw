@@ -146,7 +146,7 @@ func LoadRulePack(dir string) *RulePack {
 	rp.Suppressions = loadYAML[SuppressionsConfig](dir, "suppressions.yaml")
 	rp.SensitiveTools = loadYAML[SensitiveToolsConfig](dir, "sensitive-tools.yaml")
 
-	for _, name := range []string{"pii", "injection", "tool-injection"} {
+	for _, name := range []string{"pii", "injection", "tool-injection", "exfil"} {
 		jc := loadYAML[JudgeYAML](dir, filepath.Join("judge", name+".yaml"))
 		if jc != nil {
 			rp.JudgeConfigs[name] = jc
@@ -260,6 +260,20 @@ func (rp *RulePack) ToolInjectionJudge() *JudgeYAML {
 		return nil
 	}
 	return rp.JudgeConfigs["tool-injection"]
+}
+
+// ExfilJudge returns the data-exfiltration judge config, or nil. The
+// exfil judge asks the LLM directly whether a prompt is trying to
+// read or exfiltrate sensitive files / credentials / secrets — the
+// question that the injection judge ("are you overriding my
+// instructions?") and the PII judge ("did the text emit literal
+// PII?") both fail to answer for polite-tone /etc/passwd-shaped
+// prompts.
+func (rp *RulePack) ExfilJudge() *JudgeYAML {
+	if rp == nil {
+		return nil
+	}
+	return rp.JudgeConfigs["exfil"]
 }
 
 // EffectiveSeverity returns the severity for a PII category based on
