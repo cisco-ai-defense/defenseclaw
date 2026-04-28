@@ -43,6 +43,13 @@ type CodexConnector struct {
 	gatewayToken string
 	masterKey    string
 
+	// PR #141 audit H1: emit a single `[SECURITY]` warning per
+	// process when loopback bypass is exercised while a gateway
+	// token is configured. The native-binary loopback carve-out
+	// is intentional (see Authenticate), but operators must see
+	// it surfaced at least once.
+	loopbackWarn sync.Once
+
 	// snapshotMu protects providers.
 	snapshotMu sync.RWMutex
 	providers  map[string]CodexProviderEntry
@@ -188,6 +195,28 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // those paths, not to break the local-only native binary path.
 func (c *CodexConnector) Authenticate(r *http.Request) bool {
 	if IsLoopback(r) {
+		// PR #141 audit H1: ZeptoClaw closed its loopback-trust gap in
+		// plan B1 because its inspect-*.sh hooks can inject X-DC-Auth.
+		// codex-cli is a native Rust binary that opens connections to
+		// /c/codex/responses directly with `Authorization: Bearer
+		// <provider-key>` and has no shell-script seam to inject the
+		// gateway token. Strict-rejecting loopback when a gateway
+		// token is configured would 401 every codex request and no
+		// guardrail would ever execute — see
+		// TestCodex_Authenticate_NativeBinaryLoopback for the
+		// production rationale. Until codex grows a token-injection
+		// path, the most we can do is surface the architectural gap
+		// once at boot so operators in shared-host deployments are
+		// aware that other local processes can impersonate codex.
+		if c.gatewayToken != "" {
+			c.loopbackWarn.Do(func() {
+				fmt.Fprintf(os.Stderr,
+					"[SECURITY] codex: loopback request accepted without X-DC-Auth — "+
+						"DEFENSECLAW_GATEWAY_TOKEN is set but the codex native binary "+
+						"has no seam to inject it. Any process on this host can route "+
+						"through /c/codex/* with no further authentication.\n")
+			})
+		}
 		return true
 	}
 

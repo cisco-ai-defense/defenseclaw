@@ -3817,12 +3817,14 @@ func TestHandleGuardrailEvaluate_BothScanners(t *testing.T) {
 
 func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
+	const tok = "patch-config-tok-abc"
 	api := &APIServer{
 		health: NewSidecarHealth(),
 		logger: logger,
 		store:  store,
 		scannerCfg: &config.Config{
 			DataDir: "/nonexistent/path/that/will/fail",
+			Gateway: config.GatewayConfig{Token: tok},
 			Guardrail: config.GuardrailConfig{
 				Mode:        "observe",
 				ScannerMode: "local",
@@ -3836,6 +3838,11 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	// PR #141 audit C1: handler now requires a valid gateway token
+	// even on loopback. The harness configures one above and presents
+	// it here; without it we'd see a 403 instead of the 500 we're
+	// asserting on for the rollback-on-write-failure path.
+	req.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	api.handleGuardrailConfig(w, req)
 
@@ -3855,12 +3862,14 @@ func TestHandleGuardrailConfig_PatchRollbackOnWriteFailure(t *testing.T) {
 func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
+	const tok = "patch-config-tok-success"
 	api := &APIServer{
 		health: NewSidecarHealth(),
 		logger: logger,
 		store:  store,
 		scannerCfg: &config.Config{
 			DataDir: tmpDir,
+			Gateway: config.GatewayConfig{Token: tok},
 			Guardrail: config.GuardrailConfig{
 				Mode:        "observe",
 				ScannerMode: "local",
@@ -3874,6 +3883,9 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	// PR #141 audit C1: PATCH now requires a gateway token in
+	// addition to the tokenAuth middleware (defense-in-depth).
+	req.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	api.handleGuardrailConfig(w, req)
 
@@ -3893,12 +3905,14 @@ func TestHandleGuardrailConfig_PatchSuccess(t *testing.T) {
 func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	tmpDir := t.TempDir()
+	const tok = "patch-config-tok-concurrent"
 	api := &APIServer{
 		health: NewSidecarHealth(),
 		logger: logger,
 		store:  store,
 		scannerCfg: &config.Config{
 			DataDir: tmpDir,
+			Gateway: config.GatewayConfig{Token: tok},
 			Guardrail: config.GuardrailConfig{
 				Mode:        "observe",
 				ScannerMode: "local",
@@ -3920,6 +3934,11 @@ func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 			body, _ := json.Marshal(map[string]string{"mode": mode})
 			req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
+			// PR #141 audit C1: PATCH requires a valid token now;
+			// the loop continues to exercise the cfgMu locking
+			// path because authentication succeeds on every
+			// request.
+			req.Header.Set("Authorization", "Bearer "+tok)
 			w := httptest.NewRecorder()
 			api.handleGuardrailConfig(w, req)
 		}()
@@ -3936,6 +3955,73 @@ func TestHandleGuardrailConfig_ConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestHandleGuardrailConfig_PatchRequiresToken pins PR #141 audit C1.
+// The PATCH handler must reject mode/scanner_mode changes when no token
+// is presented or when the presented token doesn't match the configured
+// gateway token, regardless of source IP. tokenAuth provides the same
+// gate at the middleware layer, but we deliberately have a redundant
+// check here so a future refactor that exposes this handler outside
+// the tokenAuth chain doesn't silently re-open the bypass.
+func TestHandleGuardrailConfig_PatchRequiresToken(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	tmpDir := t.TempDir()
+	api := &APIServer{
+		health: NewSidecarHealth(),
+		logger: logger,
+		store:  store,
+		scannerCfg: &config.Config{
+			DataDir:   tmpDir,
+			Gateway:   config.GatewayConfig{Token: "real-tok-cafe"},
+			Guardrail: config.GuardrailConfig{Mode: "action", ScannerMode: "both"},
+		},
+	}
+
+	cases := []struct {
+		name    string
+		setHdr  func(*http.Request)
+		wantErr string
+	}{
+		{
+			name:    "no auth header",
+			setHdr:  func(_ *http.Request) {},
+			wantErr: "valid gateway token",
+		},
+		{
+			name:    "wrong bearer",
+			setHdr:  func(r *http.Request) { r.Header.Set("Authorization", "Bearer wrong-tok") },
+			wantErr: "valid gateway token",
+		},
+		{
+			name:    "wrong x-defenseclaw-token",
+			setHdr:  func(r *http.Request) { r.Header.Set("X-DefenseClaw-Token", "wrong-tok") },
+			wantErr: "valid gateway token",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]string{"mode": "observe"})
+			req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			tc.setHdr(req)
+			w := httptest.NewRecorder()
+			api.handleGuardrailConfig(w, req)
+
+			if w.Result().StatusCode != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body: %s", w.Result().StatusCode, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.wantErr) {
+				t.Fatalf("body = %q, want substring %q", w.Body.String(), tc.wantErr)
+			}
+			// Mode must NOT have changed — the rejection must
+			// happen BEFORE any cfgMu mutation.
+			if api.scannerCfg.Guardrail.Mode != "action" {
+				t.Fatalf("mode mutated to %q despite 403", api.scannerCfg.Guardrail.Mode)
+			}
+		})
+	}
 }
 
 func TestParseJudgeJSON(t *testing.T) {

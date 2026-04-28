@@ -19,7 +19,6 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -36,6 +35,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -2762,20 +2762,38 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 }
 
 // deriveMasterKey produces a deterministic master key from the device key
-// file, matching the legacy Python _derive_master_key().
+// file using PBKDF2-SHA256 with 100k iterations.
+//
+// PR #141 audit H9: the previous implementation was a single HMAC-SHA256
+// round. With ~16 bytes of effective entropy in `device.key` and zero
+// stretching, a leak of `device.key` (a 0600 file in dataDir, but anyone
+// with that fd has full master-key control) was instantly equivalent to
+// a master-key compromise — and a leak of the master key gave the
+// attacker an `Authorization: Bearer sk-dc-…` that bypasses the entire
+// connector auth chain (see Codex/ZeptoClaw Authenticate). PBKDF2 with
+// 100k iterations puts a CPU cost on each crack attempt, so an attacker
+// needs the live file plus seconds-per-guess of compute even when both
+// the device.key contents and the salt are known.
+//
+// BREAKING for any persisted `sk-dc-…` value derived under the old
+// algorithm: those will no longer match the master key the proxy
+// recomputes at boot. Operators who cached the literal string need to
+// re-read it from the running proxy (the value is logged once at boot
+// to gateway.log) or, more commonly, simply continue using whichever
+// connector-issued bearer their tooling has — `sk-dc-` master keys are
+// an internal fallback, not the supported credential.
 func deriveMasterKey(dataDir string) string {
 	keyFile := filepath.Join(dataDir, "device.key")
 	data, err := os.ReadFile(keyFile)
 	if err != nil {
 		return ""
 	}
-	mac := hmac.New(sha256.New, []byte("defenseclaw-proxy-master-key"))
-	mac.Write(data)
-	digest := fmt.Sprintf("%x", mac.Sum(nil))
-	if len(digest) > 32 {
-		digest = digest[:32]
-	}
-	return "sk-dc-" + digest
+	// 32-byte output (= 64 hex chars) — wider than the previous
+	// truncated-to-16-byte digest so a brute-force attacker now also
+	// needs to cover a meaningfully larger search space if they ever
+	// recover only the published `sk-dc-…` string.
+	dk := pbkdf2.Key(data, []byte("defenseclaw-proxy-master-key"), 100_000, 32, sha256.New)
+	return "sk-dc-" + fmt.Sprintf("%x", dk)
 }
 
 // ---------------------------------------------------------------------------
@@ -3187,11 +3205,25 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// envelope as the logger row above — otherwise dashboards
 		// pivoting on agent_id would see two conflicting rows for
 		// the same verdict.
+		//
+		// PR #141 audit M5: route the persisted Details string
+		// through redaction.ForSinkReason. The proxy composes
+		// `details` from the verdict's reason/findings, which are
+		// the literal matched substrings (e.g. a credit card or
+		// API key fragment that triggered the rule). The TUI is
+		// fine to render these — operators have local intent —
+		// but third-party sinks (Splunk forwarder, Loki, Cisco
+		// AID telemetry) inheriting from this row must not.
+		// LogActionCtx above already honors the same redaction
+		// contract via the logger's sink chain; this brings the
+		// store-direct path to parity instead of leaking the
+		// unredacted form to whichever forwarder reads from
+		// audit.Store.
 		evt := audit.Event{
 			Action:    "guardrail-inspection",
 			Target:    model,
 			Severity:  verdict.Severity,
-			Details:   details,
+			Details:   redaction.ForSinkReason(details),
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
 		}

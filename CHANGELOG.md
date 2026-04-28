@@ -56,6 +56,68 @@ docs).
   `EventPluginLoadRejected` event. ed25519 signing tracked as a
   follow-up.
 
+#### PR #141 audit follow-ups (additive security hardening)
+
+These items land the seven security-floor fixes introduced in
+PR #141 commit `45cf241d3cea4d90606de835a6746ae6a2b3270e` against this
+branch's baseline. Each is additive — there is no removed protection.
+
+- **C1** PATCH `/v1/guardrail/config` re-validates the gateway token
+  inside the handler in addition to the existing `tokenAuth`
+  middleware. A future refactor that exposes the handler outside the
+  middleware chain will not silently re-open the bypass — mode
+  changes (`action` ↔ `observe`) require an authenticated caller
+  unconditionally. Returns `403` with a clear operator-facing message
+  when the token is missing or wrong.
+- **H1** Codex `Authenticate()` emits a one-time `[SECURITY]` line on
+  stderr the first time loopback is trusted while
+  `DEFENSECLAW_GATEWAY_TOKEN` is configured. Codex remains permissive
+  on loopback because the codex-cli native Rust binary has no
+  fetch-interceptor seam to inject `X-DC-Auth` (see the existing
+  `TestCodex_Authenticate_NativeBinaryLoopback`). The warn surfaces
+  the architectural gap without breaking codex routing. ZeptoClaw was
+  already strict-reject post-B1 on this branch and needs no change.
+- **H2** `Registry.RegisterPlugin` now returns an error when a plugin
+  declares a name that collides with a built-in connector
+  (openclaw / zeptoclaw / claudecode / codex). `DiscoverPlugins`
+  surfaces the rejection on stderr and continues processing the
+  remaining plugins instead of failing the boot. A malicious `.so`
+  dropped into the plugin directory can no longer shadow-override
+  the auth seam routed via `Get(name)`.
+- **H4** OPA evaluator hardening:
+  `rego.UnsafeBuiltins(http.send, opa.runtime, net.lookup_ip_addr)` +
+  `rego.StrictBuiltinErrors(true)`. User-supplied Rego in policy
+  bundles can no longer reach an outbound network primitive or leak
+  build / host info, and silent builtin failures become hard
+  evaluation errors so a banned builtin cannot noop into a `pass`
+  verdict.
+- **H9** `deriveMasterKey()` now uses PBKDF2-SHA256 with 100k
+  iterations and a 32-byte (64-hex-char) output, replacing the
+  previous single-round HMAC-SHA256 truncated to 32 hex chars.
+  **BREAKING for any persisted `sk-dc-` value derived under the old
+  algorithm:** those will no longer match the master key the proxy
+  recomputes at boot. `sk-dc-` is an internal fallback credential and
+  not the supported caller-side bearer; operators relying on it must
+  re-read it from `gateway.log` after upgrade. Adds direct
+  `golang.org/x/crypto` dep (was indirect).
+- **M1** `isPrivateHost()` resolves hostnames through `net.LookupHost`
+  and inspects every returned address before deciding whether to
+  flag the host. The previous "skip hostnames" branch was a DNS-
+  rebinding hole — an attacker-controlled DNS record could resolve
+  to `127.0.0.1` / `169.254.169.254` and bypass the IP-literal guard.
+  Lookup failures continue to fail-open (return `false`) to prevent
+  legitimate-LLM-endpoint over-block; callers needing a hard
+  guarantee must layer a network-level egress allowlist on top.
+- **M5/M6** `redaction.ForSinkReason` is now applied to the
+  `Details` field of `guardrail-inspection` rows the proxy writes
+  directly to the audit store. The TUI still renders the unredacted
+  reason via the logger path (operator local intent), but third-party
+  sinks (Splunk forwarder, Loki, Cisco AID telemetry) inheriting from
+  `audit.Store` no longer leak the matched literal. In `api.go` the
+  `redactedReason` declaration moves above the `details` composer so
+  the persisted row, the `gateway.log` line, and the sink-forwarded
+  copy all carry the same redacted form.
+
 ### Connectors
 
 - **C1 (S2.4)** Hard-coded per-connector `case` switches replaced by a

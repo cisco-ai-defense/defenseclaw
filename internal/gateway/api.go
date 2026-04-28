@@ -1373,10 +1373,18 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// PR #141 audit M6: compute the redacted reason BEFORE the details
+	// string is composed so the audit-store row, the gateway.log line,
+	// and any sink-forwarded copy all carry the redacted form. The
+	// upstream rule-id literal is still preserved on stderr (see
+	// switch-block below) for operator-facing visibility, but every
+	// persisted surface now matches the rest of the v7 redaction
+	// contract.
+	redactedReason := redaction.Reason(req.Reason)
 	details := fmt.Sprintf("direction=%s action=%s severity=%s findings=%d elapsed_ms=%.1f",
 		req.Direction, req.Action, req.Severity, len(req.Findings), req.ElapsedMs)
 	if req.Reason != "" {
-		details += fmt.Sprintf(" reason=%s", truncate(req.Reason, 120))
+		details += fmt.Sprintf(" reason=%s", truncate(redactedReason, 120))
 	}
 
 	if nfs := NormalizeScanVerdict(&ScanVerdict{
@@ -1400,10 +1408,10 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 
 	// Both Reason and Findings are composed upstream by the
 	// guardrail proxy and routinely embed the matched literal
-	// in RULE-ID:description form. Redact both for the
-	// operator-facing stderr lines (Reveal flag can unmask
-	// locally if needed); rule IDs survive intact.
-	redactedReason := redaction.Reason(req.Reason)
+	// in RULE-ID:description form. redactedReason is computed
+	// above (see audit M6); the same Reveal-aware redaction is
+	// applied to each finding for parity with the persisted
+	// `details` string. Rule IDs survive intact in either form.
 	redactedFindings := make([]string, len(req.Findings))
 	for i, f := range req.Findings {
 		redactedFindings[i] = redaction.Reason(f)
@@ -1602,6 +1610,31 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	case http.MethodPatch:
+		// PR #141 audit C1: defense-in-depth gate. tokenAuth already
+		// fail-closes when no gateway token is configured, but mode
+		// changes are too security-sensitive to depend on a single
+		// middleware layer. A future refactor that exposes this
+		// handler outside the tokenAuth chain (or a misconfigured
+		// custom mux) must not silently downgrade `action` → `observe`
+		// without an authenticated caller. Re-validate here with the
+		// same constant-time compare tokenAuth uses.
+		if a.scannerCfg != nil {
+			token := ""
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				token = strings.TrimPrefix(auth, "Bearer ")
+			}
+			if token == "" {
+				token = r.Header.Get("X-DefenseClaw-Token")
+			}
+			expected := a.scannerCfg.Gateway.Token
+			if expected == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+				a.writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN",
+				})
+				return
+			}
+		}
+
 		var req map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})

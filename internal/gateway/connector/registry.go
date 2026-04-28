@@ -18,6 +18,7 @@ package connector
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 )
@@ -54,11 +55,20 @@ func (r *Registry) RegisterBuiltin(c Connector) {
 	r.mu.Unlock()
 }
 
-// RegisterPlugin adds an externally-loaded connector.
-func (r *Registry) RegisterPlugin(c Connector) {
+// RegisterPlugin adds an externally-loaded connector. Returns an error
+// when the plugin's Name() collides with a built-in connector to prevent
+// shadow-override attacks (PR #141 audit H2): a malicious .so dropped
+// into the plugin directory must not be able to register itself as
+// "openclaw"/"codex"/"claudecode"/"zeptoclaw" and intercept the auth
+// path that routes through Get(name).
+func (r *Registry) RegisterPlugin(c Connector) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.builtins[c.Name()]; exists {
+		return fmt.Errorf("plugin %q collides with built-in connector name — refusing registration", c.Name())
+	}
 	r.plugins[c.Name()] = c
-	r.mu.Unlock()
+	return nil
 }
 
 // Get returns a connector by name, searching builtins first then plugins.
@@ -169,7 +179,16 @@ func (r *Registry) DiscoverPlugins(dir string) error {
 		return fmt.Errorf("discover plugins in %s: %w", dir, err)
 	}
 	for _, c := range connectors {
-		r.RegisterPlugin(c)
+		if err := r.RegisterPlugin(c); err != nil {
+			// Builtin-collision is logged-and-skipped, not fatal:
+			// a single malicious .so must not gate the whole boot
+			// path — the other plugins in the directory can still
+			// load. The error is surfaced via stderr (and would
+			// also be picked up by an audit-log forwarder) so
+			// operators see exactly which name was rejected.
+			fmt.Fprintf(os.Stderr, "[SECURITY] %v\n", err)
+			continue
+		}
 	}
 	return nil
 }

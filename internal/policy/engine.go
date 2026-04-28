@@ -294,6 +294,23 @@ func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map
 		rego.Query(query),
 		rego.Store(store),
 		rego.Input(inputMap),
+		// PR #141 audit H4: harden the OPA evaluator against
+		// user-supplied Rego that ships in policy bundles. The
+		// default builtins surface includes:
+		//   - http.send         — outbound network from the eval path
+		//   - opa.runtime       — leaks build/host info
+		//   - net.lookup_ip_addr — DNS probing primitive
+		// These are network/info-disclosure vectors that policy
+		// authors should never need from inside a guardrail rule.
+		// StrictBuiltinErrors flips silent builtin failures into hard
+		// evaluation errors so a banned builtin can never be reached
+		// behind a `with` shim and silently noop into a `pass` verdict.
+		rego.UnsafeBuiltins(map[string]struct{}{
+			"http.send":          {},
+			"opa.runtime":        {},
+			"net.lookup_ip_addr": {},
+		}),
+		rego.StrictBuiltinErrors(true),
 	}
 	for name, src := range modules {
 		opts = append(opts, rego.Module(name, src))

@@ -19,6 +19,8 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -242,6 +244,77 @@ func TestRegistry_GetAll_Unknown(t *testing.T) {
 	_, err := r.GetAll([]string{"claudecode", "nonexistent"})
 	if err == nil {
 		t.Error("expected error for unknown connector")
+	}
+}
+
+// stubConnector is a minimal Connector for collision tests. It only
+// needs Name(); the other methods can return zero values because the
+// registry never invokes them in this path.
+type stubConnector struct{ name string }
+
+func (s *stubConnector) Name() string                                  { return s.name }
+func (s *stubConnector) Description() string                           { return "stub for tests" }
+func (s *stubConnector) ToolInspectionMode() ToolInspectionMode        { return ToolModeBoth }
+func (s *stubConnector) SubprocessPolicy() SubprocessPolicy            { return SubprocessNone }
+func (s *stubConnector) Authenticate(_ *http.Request) bool             { return false }
+func (s *stubConnector) Setup(_ context.Context, _ SetupOpts) error    { return nil }
+func (s *stubConnector) Teardown(_ context.Context, _ SetupOpts) error { return nil }
+func (s *stubConnector) VerifyClean(_ SetupOpts) error                 { return nil }
+func (s *stubConnector) Route(_ *http.Request, _ []byte) (*ConnectorSignals, error) {
+	return &ConnectorSignals{}, nil
+}
+func (s *stubConnector) SetCredentials(_, _ string) {}
+
+// TestRegistry_RegisterPlugin_RejectsBuiltinCollision pins PR #141 audit H2.
+// A malicious .so dropped into the plugin discovery directory must not be
+// able to register itself under a built-in connector name and intercept
+// Get(name) — that path is the auth seam the proxy resolves to before
+// calling Authenticate(). The registry must surface the collision as a
+// concrete error and leave the original built-in in place.
+func TestRegistry_RegisterPlugin_RejectsBuiltinCollision(t *testing.T) {
+	for _, builtin := range []string{"openclaw", "zeptoclaw", "claudecode", "codex"} {
+		t.Run(builtin, func(t *testing.T) {
+			r := NewDefaultRegistry()
+			before, ok := r.Get(builtin)
+			if !ok {
+				t.Fatalf("default registry missing builtin %q", builtin)
+			}
+
+			plugin := &stubConnector{name: builtin}
+			err := r.RegisterPlugin(plugin)
+			if err == nil {
+				t.Fatalf("RegisterPlugin(%q) returned nil error — collision not rejected", builtin)
+			}
+			if !strings.Contains(err.Error(), "built-in connector name") {
+				t.Errorf("err = %v, want substring 'built-in connector name'", err)
+			}
+
+			// Get must still resolve to the original builtin —
+			// the rejected plugin must not have replaced it via
+			// any side-effect path.
+			after, _ := r.Get(builtin)
+			if fmt.Sprintf("%T", after) != fmt.Sprintf("%T", before) {
+				t.Errorf("Get(%q) returned %T, want %T (plugin shadowed builtin)", builtin, after, before)
+			}
+		})
+	}
+}
+
+// TestRegistry_RegisterPlugin_AcceptsUniqueName confirms the collision
+// guard does not over-block: a plugin with a name that doesn't match
+// any built-in must register and be resolvable via Get().
+func TestRegistry_RegisterPlugin_AcceptsUniqueName(t *testing.T) {
+	r := NewDefaultRegistry()
+	plugin := &stubConnector{name: "enterprise-foo"}
+	if err := r.RegisterPlugin(plugin); err != nil {
+		t.Fatalf("RegisterPlugin returned %v, want nil for unique name", err)
+	}
+	resolved, ok := r.Get("enterprise-foo")
+	if !ok {
+		t.Fatal("plugin not retrievable via Get()")
+	}
+	if resolved.Name() != "enterprise-foo" {
+		t.Errorf("Get() returned %q, want enterprise-foo", resolved.Name())
 	}
 }
 
@@ -1004,6 +1077,50 @@ func TestCodex_Authenticate_NoCredentials(t *testing.T) {
 	r2.RemoteAddr = "127.0.0.1:54321"
 	if !c.Authenticate(r2) {
 		t.Error("expected loopback auth to pass when no credentials configured")
+	}
+}
+
+// TestCodex_Authenticate_LoopbackWarnOnce pins PR #141 audit H1.
+// Codex cannot inject X-DC-Auth from its native binary, so loopback
+// remains trusted even when a gateway token is configured (otherwise
+// every codex request 401s and no guardrail runs — see
+// TestCodex_Authenticate_NativeBinaryLoopback for the production
+// rationale). H1 surfaces this architectural limitation by emitting a
+// one-time `[SECURITY]` line to stderr the first time the bypass is
+// exercised. We capture stderr, exercise the bypass twice, and assert
+// the warning fires exactly once and that auth still succeeds.
+func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
+	c := NewCodexConnector()
+	c.SetCredentials("gw-tok-h1", "")
+
+	origStderr := os.Stderr
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = pipeW
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	for i := 0; i < 3; i++ {
+		r := httptest.NewRequest("POST", "/c/codex/responses", nil)
+		r.RemoteAddr = "127.0.0.1:54321"
+		r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
+		if !c.Authenticate(r) {
+			t.Fatalf("iter %d: codex loopback auth must still succeed (warn-only contract)", i)
+		}
+	}
+
+	if err := pipeW.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	captured, _ := io.ReadAll(pipeR)
+	got := string(captured)
+	if !strings.Contains(got, "[SECURITY] codex: loopback request accepted") {
+		t.Errorf("stderr missing warn-once line; got:\n%s", got)
+	}
+	// Three calls but only one warning line. Count occurrences.
+	if n := strings.Count(got, "[SECURITY] codex: loopback request accepted"); n != 1 {
+		t.Errorf("expected exactly 1 warn-once line, got %d:\n%s", n, got)
 	}
 }
 
