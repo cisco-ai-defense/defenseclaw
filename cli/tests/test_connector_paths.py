@@ -186,6 +186,11 @@ class TestMCPServers:
 
     def test_codex_reads_dotmcp(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        # Isolate $HOME so the test doesn't accidentally pick up a
+        # real ~/.codex/config.toml on the developer's machine.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
         self._write_mcp_json(tmp_path, {
             "github": {"command": "gh", "args": ["mcp"]},
         })
@@ -196,7 +201,83 @@ class TestMCPServers:
 
     def test_codex_no_dotmcp_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
         assert connector_paths.mcp_servers("codex") == []
+
+    def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
+        """Bug fix regression: pre-S5.x ``defenseclaw mcp list`` only
+        consulted ``./.mcp.json`` for Codex, dropping every server
+        registered globally in ``~/.codex/config.toml``. We now read
+        both."""
+        fake_home = tmp_path / "home"
+        codex_dir = fake_home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.global-fs]\n"
+            'command = "node"\n'
+            'args = ["/opt/fs.js"]\n'
+            "\n"
+            "[mcp_servers.global-fs.env]\n"
+            'TOKEN = "redacted"\n'
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["global-fs"]
+        assert entries[0].command == "node"
+        assert entries[0].args == ["/opt/fs.js"]
+        assert entries[0].env == {"TOKEN": "redacted"}
+
+    def test_codex_merges_global_toml_and_local_dotmcp(
+        self, tmp_path, monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        codex_dir = fake_home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "config.toml").write_text(
+            "[mcp_servers.global-fs]\n"
+            'command = "node"\n'
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        self._write_mcp_json(cwd, {
+            "local-search": {"command": "search-mcp"},
+        })
+        monkeypatch.chdir(cwd)
+
+        entries = connector_paths.mcp_servers("codex")
+        names = sorted(e.name for e in entries)
+        assert names == ["global-fs", "local-search"]
+
+    def test_codex_malformed_config_toml_falls_back_to_dotmcp(
+        self, tmp_path, monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        codex_dir = fake_home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "config.toml").write_text("[mcp_servers.fs\nbroken")
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        self._write_mcp_json(cwd, {
+            "local-search": {"command": "search-mcp"},
+        })
+        monkeypatch.chdir(cwd)
+
+        # Malformed TOML must NOT raise — we soft-fall-back to the
+        # project-local file. This keeps `defenseclaw mcp list`
+        # usable when an operator hand-edits config.toml and breaks
+        # it; the next save will fix it without us crashing.
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["local-search"]
 
     def test_claudecode_merges_settings_and_dotmcp(
         self, tmp_path, monkeypatch,

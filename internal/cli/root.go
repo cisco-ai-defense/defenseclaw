@@ -95,7 +95,15 @@ Run without arguments to start the sidecar daemon.`,
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if otelProvider != nil {
-			if err := otelProvider.Shutdown(context.Background()); err != nil {
+			if err := otelProvider.Shutdown(context.Background()); err != nil && !isTransientOTelShutdownError(err) {
+				// We swallow the common "no collector reachable"
+				// flavours here (see isTransientOTelShutdownError):
+				// the same condition is already surfaced inside the
+				// TUI by cmd_doctor's "OTel (OTLP)" check, and
+				// printing it again to stderr trashes the prompt
+				// the user just got back when they pressed `q` in
+				// the TUI. Genuine SDK failures still print so
+				// real bugs aren't hidden.
 				fmt.Fprintf(os.Stderr, "warning: otel shutdown: %v\n", err)
 			}
 		}

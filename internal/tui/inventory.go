@@ -57,6 +57,11 @@ type aibomInventory struct {
 	OpenclawCfg string            `json:"openclaw_config"`
 	ClawHome    string            `json:"claw_home"`
 	ClawMode    string            `json:"claw_mode"`
+	// Connector is the active connector name written by
+	// claw_inventory.py (line ~103). Older CLIs may not populate
+	// it — the renderer falls back to ClawMode and to the panel's
+	// SetConnector value.
+	Connector   string            `json:"connector,omitempty"`
 	Live        bool              `json:"live"`
 	Skills      []aibomSkill      `json:"skills"`
 	Plugins     []aibomPlugin     `json:"plugins"`
@@ -181,6 +186,12 @@ type InventoryPanel struct {
 	detailCacheSub int
 	filter         string // "eligible", "warning", "blocked", "loaded", "disabled", "" = all
 
+	// connector is the active agent framework name. Used by the
+	// Summary tab so operators see "Source: Claude Code (claudecode)"
+	// instead of just the raw mode value, even when the AIBOM JSON's
+	// own `connector` field is empty (older CLI versions).
+	connector string
+
 	// P3-#19: category scope mirrors the CLI --only flag. nil means
 	// "scan everything" (the CLI default); a non-nil slice narrows
 	// the scan to the listed categories and is forwarded to
@@ -209,6 +220,9 @@ var fastScanCategories = []string{"skills", "plugins", "mcp"}
 func NewInventoryPanel(theme *Theme, exec *CommandExecutor, store *audit.Store) InventoryPanel {
 	return InventoryPanel{theme: theme, executor: exec, store: store}
 }
+
+// SetConnector updates the active connector for source labelling.
+func (p *InventoryPanel) SetConnector(name string) { p.connector = name }
 
 func (p *InventoryPanel) LoadCmd() tea.Cmd {
 	p.loading = true
@@ -759,7 +773,10 @@ func (p *InventoryPanel) View(width, height int) string {
 	b.WriteString("\n")
 
 	if p.loading {
-		b.WriteString(p.theme.Spinner.Render("  Scanning inventory from OpenClaw... (this may take 15-30s)"))
+		b.WriteString(p.theme.Spinner.Render(fmt.Sprintf(
+			"  Scanning inventory from %s... (this may take 15-30s)",
+			FriendlyConnectorName(p.connector),
+		)))
 		return b.String()
 	}
 
@@ -885,14 +902,26 @@ func (p *InventoryPanel) renderSummary(width int) string {
 	s := p.inv.Summary
 	inv := p.inv
 
-	// Header
+	// Header. Prefer the AIBOM JSON's `connector` field (claw_inventory.py
+	// writes it from cfg.active_connector()); fall back to claw_mode
+	// (older CLI), then the panel's pushed connector value.
+	connectorName := inv.Connector
+	if connectorName == "" {
+		connectorName = inv.ClawMode
+	}
+	if connectorName == "" {
+		connectorName = p.connector
+	}
+
+	dimLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	fmt.Fprintf(&b, "\n  AIBOM v%s  generated %s\n", inv.Version.String(), inv.GeneratedAt)
-	fmt.Fprintf(&b, "  %s  %s\n",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("Mode:"),
-		inv.ClawMode)
-	fmt.Fprintf(&b, "  %s  %s\n\n",
-		lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("Home:"),
-		inv.ClawHome)
+
+	sourceVal := FriendlyConnectorName(connectorName)
+	if connectorName != "" && !strings.EqualFold(connectorName, sourceVal) {
+		sourceVal = fmt.Sprintf("%s (%s)", sourceVal, connectorName)
+	}
+	fmt.Fprintf(&b, "  %s  %s\n", dimLabel.Render("Source:"), sourceVal)
+	fmt.Fprintf(&b, "  %s  %s\n\n", dimLabel.Render("Home:"), inv.ClawHome)
 
 	halfW := width/2 - 2
 	if halfW < 35 {

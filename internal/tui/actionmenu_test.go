@@ -16,7 +16,10 @@
 
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func testTheme() *Theme {
 	return DefaultTheme()
@@ -218,7 +221,7 @@ func TestSkillActions(t *testing.T) {
 
 func TestMCPActions(t *testing.T) {
 	t.Run("blocked_mcp", func(t *testing.T) {
-		actions := MCPActions("blocked")
+		actions := MCPActions("blocked", "openclaw")
 		keys := actionKeys(actions)
 		assertContains(t, keys, "s", "blocked should have scan")
 		assertContains(t, keys, "u", "blocked should have unblock")
@@ -227,7 +230,7 @@ func TestMCPActions(t *testing.T) {
 	})
 
 	t.Run("allowed_mcp", func(t *testing.T) {
-		actions := MCPActions("allowed")
+		actions := MCPActions("allowed", "openclaw")
 		keys := actionKeys(actions)
 		assertContains(t, keys, "b", "allowed should have block")
 		assertContains(t, keys, "x", "allowed should have unset")
@@ -235,7 +238,7 @@ func TestMCPActions(t *testing.T) {
 	})
 
 	t.Run("default_mcp", func(t *testing.T) {
-		actions := MCPActions("clean")
+		actions := MCPActions("clean", "openclaw")
 		keys := actionKeys(actions)
 		assertContains(t, keys, "s", "default should have scan")
 		assertContains(t, keys, "b", "default should have block")
@@ -245,10 +248,49 @@ func TestMCPActions(t *testing.T) {
 
 	t.Run("always_has_scan_and_info", func(t *testing.T) {
 		for _, status := range []string{"blocked", "allowed", "clean", ""} {
-			actions := MCPActions(status)
+			actions := MCPActions(status, "openclaw")
 			keys := actionKeys(actions)
 			assertContains(t, keys, "s", status+" should have scan")
 			assertContains(t, keys, "i", status+" should have info")
+		}
+	})
+
+	t.Run("zeptoclaw_unset_marked_read_only", func(t *testing.T) {
+		actions := MCPActions("blocked", "zeptoclaw")
+		var unset *ActionItem
+		for i := range actions {
+			if actions[i].Key == "x" {
+				unset = &actions[i]
+				break
+			}
+		}
+		if unset == nil {
+			t.Fatal("zeptoclaw should still surface the Unset action key (just with a read-only hint)")
+		}
+		if !strings.Contains(strings.ToLower(unset.Description), "read-only") {
+			t.Errorf("zeptoclaw unset description should mention read-only; got %q", unset.Description)
+		}
+	})
+
+	t.Run("connector_specific_unset_target", func(t *testing.T) {
+		cases := map[string]string{
+			"openclaw":   "OpenClaw config",
+			"claudecode": "~/.claude/settings.json",
+			"codex":      "./.mcp.json",
+			"zeptoclaw":  "~/.zeptoclaw/config.json",
+		}
+		for connector, want := range cases {
+			actions := MCPActions("blocked", connector)
+			var got string
+			for _, a := range actions {
+				if a.Key == "x" {
+					got = a.Description
+					break
+				}
+			}
+			if !strings.Contains(got, want) {
+				t.Errorf("connector=%q: unset description %q should mention %q", connector, got, want)
+			}
 		}
 	})
 }

@@ -65,7 +65,14 @@ type PluginsPanel struct {
 	height         int
 	detailCache    *PluginDetailInfo
 	detailCacheIdx int
+
+	// connector is the active agent framework name. Drives the
+	// "Source: …" banner and mode-aware empty-state copy.
+	connector string
 }
+
+// SetConnector updates the active connector for source labelling.
+func (p *PluginsPanel) SetConnector(name string) { p.connector = name }
 
 // PluginsLoadedMsg is sent when plugin list completes.
 type PluginsLoadedMsg struct {
@@ -187,6 +194,18 @@ func (p *PluginsPanel) listHeight() int {
 	return h
 }
 
+// sourceBanner is the one-line "Source: <connector> — <dirs>" header
+// rendered above the plugin list. Empty paths render as a plain
+// connector label rather than an awkward trailing dash.
+func (p *PluginsPanel) sourceBanner() string {
+	name := FriendlyConnectorName(p.connector)
+	paths := ConnectorSourceLabel(p.connector, "plugins")
+	if paths == "" {
+		return p.theme.Dimmed.Render("  Source: ") + p.theme.Bold.Render(name)
+	}
+	return p.theme.Dimmed.Render("  Source: ") + p.theme.Bold.Render(name) + p.theme.Dimmed.Render(" — "+paths)
+}
+
 func (p *PluginsPanel) GetDetailInfo() *PluginDetailInfo {
 	sel := p.Selected()
 	if sel == nil {
@@ -228,10 +247,15 @@ func (p *PluginsPanel) View(width, height int) string {
 	}
 
 	if len(p.items) == 0 {
-		return p.theme.Dimmed.Render("  No plugins detected. Plugins extend OpenClaw with tools and hooks.\n  Use : then \"plugin install <name>\" to add one.")
+		return p.theme.Dimmed.Render(fmt.Sprintf(
+			"  No plugins detected. Plugins extend %s with tools and hooks.\n  Source: %s\n  Use : then \"plugin install <name>\" to add one.",
+			FriendlyConnectorName(p.connector),
+			ConnectorSourceLabel(p.connector, "plugins"),
+		))
 	}
 
 	var b strings.Builder
+	b.WriteString(p.sourceBanner() + "\n")
 	header := fmt.Sprintf("  %-20s %-12s %-10s %-10s %-10s %-10s %-8s",
 		"NAME", "VERSION", "ORIGIN", "STATUS", "VERDICT", "SEVERITY", "FINDINGS")
 	b.WriteString(HeaderStyle.Render(header))

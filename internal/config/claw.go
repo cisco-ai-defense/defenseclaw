@@ -24,7 +24,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	toml "github.com/pelletier/go-toml/v2"
 )
+
+// tomlUnmarshal is a thin alias kept private to this package — it
+// lets us swap the TOML implementation later without touching every
+// call site, and keeps the import surface minimal at the top of the
+// file.
+func tomlUnmarshal(data []byte, v any) error { return toml.Unmarshal(data, v) }
 
 // openclawConfig represents the structure of openclaw.json.
 type openclawConfig struct {
@@ -290,9 +298,17 @@ func dedup(paths []string) []string {
 	return out
 }
 
-// SkillDirsForMode returns skill directories for a given mode.
-// Used when config is not yet available.
-func SkillDirsForMode(mode ClawMode, homeDir string) []string {
+// SkillDirsForOpenClaw returns the skill directories for an OpenClaw
+// installation rooted at homeDir. Used when no Config is available
+// (early init paths, tests, fixed-mode fallbacks).
+//
+// This was previously named SkillDirsForMode(mode, home) but the
+// `mode` argument was never honored — every code path used the
+// OpenClaw layout regardless of the value passed. The rename makes
+// the OpenClaw-only contract explicit; callers that need polymorphic
+// dispatch should use Config.SkillDirsForConnector instead, which
+// reads cfg.activeConnector() and dispatches correctly.
+func SkillDirsForOpenClaw(homeDir string) []string {
 	if homeDir == "" {
 		homeDir = "~/.openclaw"
 	}
@@ -395,10 +411,72 @@ func readMCPServersClaudeCode() ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex() ([]MCPServerEntry, error) {
+	// Codex registers MCP servers in two places — the global
+	// `~/.codex/config.toml` `[mcp_servers]` table and the
+	// project-local `./.mcp.json` (a Codex SDK / Claude Code
+	// convention). Pre-S5.x we only read `./.mcp.json`, which
+	// silently dropped every globally-registered server. We now
+	// read both, with the project-local file taking precedence so
+	// per-project overrides win — matching how Codex itself layers
+	// them at runtime.
+	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
 
+	var entries []MCPServerEntry
+	if home != "" {
+		tomlPath := filepath.Join(home, ".codex", "config.toml")
+		if e, err := readMCPFromCodexConfigTOML(tomlPath); err == nil {
+			entries = append(entries, e...)
+		}
+	}
 	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-	return readMCPFromDotMCPJSON(mcpJsonPath)
+	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+		entries = append(entries, e...)
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+// readMCPFromCodexConfigTOML parses the [mcp_servers] table out of
+// ~/.codex/config.toml. Codex's documented schema is:
+//
+//	[mcp_servers.<name>]
+//	command = "..."
+//	args = ["..."]
+//	env = { KEY = "value" }
+//
+// Returns an empty slice (not an error) for missing files / malformed
+// TOML / missing block so callers can soft-fall back to the
+// project-local .mcp.json. Uses pelletier/go-toml/v2 which is already
+// a project dependency — no new module is added.
+func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		MCPServers map[string]struct {
+			Command   string            `toml:"command"`
+			Args      []string          `toml:"args"`
+			Env       map[string]string `toml:"env"`
+			URL       string            `toml:"url"`
+			Transport string            `toml:"transport"`
+		} `toml:"mcp_servers"`
+	}
+	if err := tomlUnmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	out := make([]MCPServerEntry, 0, len(doc.MCPServers))
+	for name, cfg := range doc.MCPServers {
+		out = append(out, MCPServerEntry{
+			Name:      name,
+			Command:   cfg.Command,
+			Args:      cfg.Args,
+			Env:       cfg.Env,
+			URL:       cfg.URL,
+			Transport: cfg.Transport,
+		})
+	}
+	return out, nil
 }
 
 func readMCPServersZeptoClaw() ([]MCPServerEntry, error) {

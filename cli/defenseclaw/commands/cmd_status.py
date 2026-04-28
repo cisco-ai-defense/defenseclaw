@@ -102,13 +102,93 @@ def status(app: AppContext) -> None:
     from defenseclaw.commands import hint
     if client.is_running():
         click.secho("  Sidecar:      running", fg="green")
+        _print_connected_agent(bind, cfg.gateway.api_port)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
         )
     else:
         click.echo("  Sidecar:      not running")
+        # Even when the sidecar is down, show the *configured* agent
+        # so operators know what `start` will spin up.
+        configured = cfg.active_connector() if hasattr(cfg, "active_connector") else (cfg.claw.mode or "openclaw")
+        click.echo(f"  Agent:        {_friendly_connector_name(configured)} ({configured}) — configured, not connected")
         hint("Start sidecar:  defenseclaw-gateway start")
+
+
+_FRIENDLY_CONNECTOR_NAMES = {
+    "openclaw": "OpenClaw",
+    "zeptoclaw": "ZeptoClaw",
+    "claudecode": "Claude Code",
+    "codex": "Codex",
+}
+
+
+def _friendly_connector_name(name: str | None) -> str:
+    """Mirror internal/tui/connector_label.go::FriendlyConnectorName.
+
+    Kept duplicated to avoid coupling the Python CLI to the Go TUI
+    binary — the friendly-name table is small and rarely changes.
+    """
+    if not name:
+        return "OpenClaw"
+    name = name.strip()
+    if name in _FRIENDLY_CONNECTOR_NAMES:
+        return _FRIENDLY_CONNECTOR_NAMES[name]
+    return name[:1].upper() + name[1:]
+
+
+def _print_connected_agent(host: str, port: int) -> None:
+    """Read /health and surface the active-connector block.
+
+    Failure modes are intentionally swallowed — the sidecar may have
+    just come up, or the operator may be on an old gateway build that
+    pre-dates the connector field. We never want `defenseclaw status`
+    to error because of an optional UX line.
+    """
+    try:
+        import json as _json
+        import urllib.request as _urlreq
+
+        url = f"http://{host}:{port}/health"
+        req = _urlreq.Request(url)
+        with _urlreq.urlopen(req, timeout=3) as resp:  # noqa: S310 — loopback only
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return
+
+    conn = data.get("connector") if isinstance(data, dict) else None
+    if not isinstance(conn, dict):
+        click.echo("  Agent:        (no active connector)")
+        return
+
+    name = str(conn.get("name") or "").strip()
+    state = str(conn.get("state") or "").strip().upper()
+    friendly = _friendly_connector_name(name)
+
+    line = f"  Agent:        {friendly} ({name})"
+    if state:
+        line += f" — {state}"
+    click.echo(line)
+
+    tool_mode = str(conn.get("tool_inspection_mode") or "").strip()
+    sub_policy = str(conn.get("subprocess_policy") or "").strip()
+    if tool_mode or sub_policy:
+        click.echo(
+            f"                tool inspection: {tool_mode or 'n/a'}    "
+            f"subprocess: {sub_policy or 'n/a'}"
+        )
+
+    requests = int(conn.get("requests") or 0)
+    errors = int(conn.get("errors") or 0)
+    inspections = int(conn.get("tool_inspections") or 0)
+    tool_blocks = int(conn.get("tool_blocks") or 0)
+    sub_blocks = int(conn.get("subprocess_blocks") or 0)
+    click.echo(
+        f"                requests: {requests}  errors: {errors}  "
+        f"tool inspections: {inspections}  tool blocks: {tool_blocks}  "
+        f"subprocess blocks: {sub_blocks}"
+    )
 
 
 def _print_observability_status(cfg) -> None:

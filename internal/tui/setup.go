@@ -347,25 +347,27 @@ func (p *SetupPanel) loadSections() {
 			Help: "Controls where skills/MCPs are discovered. " +
 				"Changing this without also migrating content will orphan scans.",
 			Fields: []configField{
-				{Label: "Mode", Key: "claw.mode", Kind: "string", Value: string(c.Claw.Mode),
-					Hint: "openclaw (default). Controls skill/MCP dir resolution — see internal/config/claw.go."},
+				{Label: "Mode", Key: "claw.mode", Kind: "choice",
+					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex"},
+					Value:   string(c.Claw.Mode),
+					Hint:    "Active agent framework: openclaw, zeptoclaw, claudecode (Claude Code), codex. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
 				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
-					Hint: "Override for ~/.openclaw/. Leave empty to use the OS default."},
+					Hint: "Override for the connector's home directory (~/.openclaw, ~/.claude, ~/.codex, ~/.zeptoclaw). Leave empty to use the OS default."},
 				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
-					Hint: "Path to openclaw.json (for per-user skill_dir overrides)."},
+					Hint: "Path to the connector's primary config file (openclaw.json for OpenClaw; ignored for connectors that locate their own config)."},
 			},
 		},
 		{
 			Name:    "Gateway",
-			Summary: "Sidecar WebSocket gateway: where OpenClaw connects, TLS/auth, API bind, reconnect tuning.",
-			Help: "gateway.port is the WebSocket OpenClaw connects to; api_port is the local REST sidecar. " +
+			Summary: "Sidecar WebSocket gateway: where the active agent connects, TLS/auth, API bind, reconnect tuning.",
+			Help: "gateway.port is the WebSocket the agent (OpenClaw / ZeptoClaw / Claude Code / Codex) dials; api_port is the local REST sidecar. " +
 				"Leave host=localhost for embedded runs — change only when running the gateway on a different box. " +
 				"Token *env* keeps secrets out of YAML; device_key_file is the persistent machine identity.",
 			Fields: []configField{
 				{Label: "Host", Key: "gateway.host", Kind: "string", Value: c.Gateway.Host,
 					Hint: "Where clients reach the gateway. 127.0.0.1/localhost disables TLS enforcement."},
 				{Label: "Port", Key: "gateway.port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Port),
-					Hint: "WebSocket port (default 9090). Must match the value OpenClaw/agent hosts dial."},
+					Hint: "WebSocket port (default 9090). Must match the value the active agent dials."},
 				{Label: "API Port", Key: "gateway.api_port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.APIPort),
 					Hint: "REST sidecar port (default 9099). Used by the CLI/TUI to issue commands."},
 				{Label: "API Bind", Key: "gateway.api_bind", Kind: "string", Value: c.Gateway.APIBind,
@@ -522,7 +524,7 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Scan server-provided instructions for malicious directives."},
 				{Label: "── Plugin / CodeGuard ──", Kind: "header"},
 				{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner,
-					Hint: "Command to scan OpenClaw TS plugins (defaults to built-in)."},
+					Hint: "Command to scan plugins for the active connector (defaults to built-in plugin scanner — handles OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins)."},
 				{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard,
 					Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
 			},
@@ -542,7 +544,7 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Master switch for all watchers."},
 				{Label: "── Skill ──", Kind: "header"},
 				{Label: "Enabled", Key: "gateway.watcher.skill.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.Enabled),
-					Hint: "Watch skill directories (~/.openclaw/skills, workspace/skills)."},
+					Hint: "Watch skill directories for the active connector (e.g. ~/.openclaw/skills, ~/.claude/skills, ~/.codex/skills, ~/.zeptoclaw/skills, plus workspace/<connector>/skills)."},
 				{Label: "Take Action", Key: "gateway.watcher.skill.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.TakeAction),
 					Hint: "Re-apply enforcement (block/quarantine) on changes. Off = scan-and-log only."},
 				{Label: "Dirs", Key: "gateway.watcher.skill.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Skill.Dirs, ","),
@@ -556,7 +558,7 @@ func (p *SetupPanel) loadSections() {
 					Hint: "CSV of extra plugin directories."},
 				{Label: "── MCP ──", Kind: "header"},
 				{Label: "Take Action", Key: "gateway.watcher.mcp.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.MCP.TakeAction),
-					Hint: "Re-apply enforcement when an MCP server config changes (~/.openclaw/mcp.json)."},
+					Hint: "Re-apply enforcement when an MCP server config changes — file watched depends on connector (openclaw.json, ~/.claude/settings.json, .mcp.json, ~/.zeptoclaw/config.json)."},
 			},
 		},
 		{
@@ -627,7 +629,7 @@ func (p *SetupPanel) loadSections() {
 		},
 		{
 			Name:    "Plugin Actions",
-			Summary: "Per-severity response matrix for OpenClaw TS plugins.",
+			Summary: "Per-severity response matrix for plugins from the active connector (OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins).",
 			Help:    "Same shape as Skill Actions. Governs the plugin_dir admission gate.",
 			Fields:  actionMatrixFields("plugin_actions", c.PluginActions),
 		},

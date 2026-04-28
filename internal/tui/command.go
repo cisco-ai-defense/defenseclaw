@@ -558,8 +558,8 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "block mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "block"}, Description: "Block an MCP server", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
 		{TUIName: "allow mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "allow"}, Description: "Allow-list an MCP server", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
 		{TUIName: "unblock mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "unblock"}, Description: "Unblock an MCP server", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
-		{TUIName: "set mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "set"}, Description: "Scan + set MCP server in OpenClaw", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
-		{TUIName: "unset mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "unset"}, Description: "Unset MCP server from OpenClaw", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
+		{TUIName: "set mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "set"}, Description: "Scan + set MCP server in the active connector's config", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
+		{TUIName: "unset mcp", CLIBinary: dc, CLIArgs: []string{"mcp", "unset"}, Description: "Unset MCP server from the active connector's config", Category: "enforce", NeedsArg: true, ArgHint: "<url>"},
 
 		// Enforce (plugin)
 		{TUIName: "block plugin", CLIBinary: dc, CLIArgs: []string{"plugin", "block"}, Description: "Block a plugin", Category: "enforce", NeedsArg: true, ArgHint: "<plugin-name>"},

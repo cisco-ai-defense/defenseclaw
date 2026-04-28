@@ -63,11 +63,11 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex". Constants for those modes
-	// are intentionally not introduced here yet — Config.Claw.Mode
-	// is currently only used by SkillDirsForMode (OpenClaw-specific)
-	// and by the OTel resource attribute. Promoting them to typed
-	// constants is part of S1.2 and tracked in the claw-agnostic
-	// refactor plan.
+	// are intentionally not introduced here yet — they're used as
+	// raw strings by Config.activeConnector() (see internal/config/
+	// claw.go) which dispatches to per-connector readers. Promoting
+	// them to typed constants is part of S1.2 and tracked in the
+	// claw-agnostic refactor plan.
 )
 
 type ClawConfig struct {
@@ -1544,7 +1544,14 @@ func migrateConfig(cfg *Config) {
 	}
 
 	cfg.ConfigVersion = CurrentConfigVersion
-	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
+	// Intentionally silent: migrateConfig() runs on every Load() because
+	// we don't rewrite the YAML file (that would be a surprising
+	// write-on-read side effect). Logging on every load was just noise
+	// — every CLI invocation, every TUI launch, every sidecar restart.
+	// The migration is idempotent; suppressing the line keeps the TUI's
+	// initial render clean and stops `defenseclaw-gateway status` from
+	// printing a banner above the actual status output.
+	_ = oldVersion
 }
 
 // migrateLLMConfigFields performs the v4→v5 migration: legacy fields

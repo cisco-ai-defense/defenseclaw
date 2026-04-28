@@ -478,8 +478,8 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 	}
 }
 
-func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
-	dirs := SkillDirsForMode(ClawOpenClaw, "/tmp/nonexistent-home")
+func TestSkillDirsForOpenClaw_NoOpenclawJSON(t *testing.T) {
+	dirs := SkillDirsForOpenClaw("/tmp/nonexistent-home")
 	if len(dirs) < 2 {
 		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
 	}
@@ -491,7 +491,7 @@ func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 	}
 }
 
-func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
+func TestSkillDirsForOpenClaw_WithOpenclawJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	workspaceDir := filepath.Join(tmpDir, "project-workspace")
 
@@ -514,7 +514,7 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 		t.Fatalf("write openclaw.json: %v", err)
 	}
 
-	dirs := SkillDirsForMode(ClawOpenClaw, tmpDir)
+	dirs := SkillDirsForOpenClaw(tmpDir)
 
 	found := false
 	for _, d := range dirs {

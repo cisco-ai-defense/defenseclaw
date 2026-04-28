@@ -86,7 +86,21 @@ type MCPsPanel struct {
 	detailOpen     bool
 	detailCache    *MCPDetailInfo
 	detailCacheIdx int
+
+	// connector is the active agent framework name (openclaw,
+	// zeptoclaw, claudecode, codex). Used by View() to render the
+	// "Source: …" banner so operators know which agent's MCP
+	// config their list reflects.
+	connector string
 }
+
+// SetConnector updates the active connector for source labelling.
+func (p *MCPsPanel) SetConnector(name string) { p.connector = name }
+
+// ActiveConnector returns the currently labelled connector name —
+// used by app.go to gate connector-specific UX (e.g. ZeptoClaw MCP
+// write is unsupported, so the action menu disables Set/Unset).
+func (p *MCPsPanel) ActiveConnector() string { return p.connector }
 
 // MCPsLoadedMsg carries the result of an async `defenseclaw mcp list
 // --json` invocation. Shape mirrors PluginsLoadedMsg / SkillsLoadedMsg.
@@ -401,6 +415,7 @@ func (p *MCPsPanel) View() string {
 		Render(fmt.Sprintf("%d total", len(p.items)))
 
 	b.WriteString("  " + blockedBadge + "  " + allowedBadge + "   " + totalLabel + "\n")
+	b.WriteString(p.sourceBanner() + "\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", p.width)) + "\n")
 
 	if p.filter != "" {
@@ -420,7 +435,11 @@ func (p *MCPsPanel) View() string {
 				"  Press \"r\" to load MCP servers. Runs \"defenseclaw mcp list --json\".")
 		}
 		return b.String() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
-			"  No MCP servers configured in openclaw.json (mcp.servers).")
+			fmt.Sprintf(
+				"  No MCP servers configured in %s (active connector: %s).",
+				ConnectorSourceLabel(p.connector, "mcps"),
+				FriendlyConnectorName(p.connector),
+			))
 	}
 
 	header := fmt.Sprintf("  %-14s %-22s %-10s %-10s %-18s", "STATUS", "NAME", "TRANSPORT", "SEVERITY", "ACTIONS")
@@ -495,6 +514,29 @@ func (p *MCPsPanel) View() string {
 	}
 
 	return b.String()
+}
+
+// sourceBanner is the one-line "Source: <connector> — <files>" header
+// rendered just under the count summary. ZeptoClaw appends a write-
+// disabled hint because connector_paths.set_mcp_server raises
+// MCPWriteUnsupportedError for it — the operator must edit
+// ~/.zeptoclaw/config.json by hand.
+func (p *MCPsPanel) sourceBanner() string {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	bold := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+
+	name := FriendlyConnectorName(p.connector)
+	paths := ConnectorSourceLabel(p.connector, "mcps")
+
+	line := dim.Render("  Source: ") + bold.Render(name)
+	if paths != "" {
+		line += dim.Render(" — " + paths)
+	}
+	if strings.TrimSpace(p.connector) == "zeptoclaw" {
+		line += "  " + warn.Render("(read-only — edit config.json manually)")
+	}
+	return line
 }
 
 func (p *MCPsPanel) renderDetail() string {

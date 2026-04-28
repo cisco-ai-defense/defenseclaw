@@ -334,7 +334,77 @@ def _claudecode_mcp_servers() -> list[MCPServerEntry]:
 
 
 def _codex_mcp_servers() -> list[MCPServerEntry]:
-    return _read_dotmcp_json(os.path.join(os.getcwd(), ".mcp.json"))
+    """Return the merged Codex MCP server list.
+
+    Codex stores its global MCP server registry in
+    ``~/.codex/config.toml`` under the ``[mcp_servers]`` table, and
+    *additionally* honors a project-local ``./.mcp.json`` (a
+    convention shared with Claude Code SDK). Pre-S5.x we only read
+    ``./.mcp.json``, which silently dropped every globally-registered
+    server from ``defenseclaw mcp list`` for Codex users — the
+    gateway's connector watch path read config.toml fine, but the
+    CLI/TUI saw an empty registry.
+
+    We read the global registry first (config.toml) and let the
+    project-local file override matching names, mirroring how Codex
+    itself layers them at runtime.
+    """
+    home = str(Path.home())
+    cwd = os.getcwd()
+    entries: list[MCPServerEntry] = []
+    entries.extend(_read_codex_config_toml(os.path.join(home, ".codex", "config.toml")))
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    return _dedup_mcp_entries(entries)
+
+
+def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
+    """Parse the ``[mcp_servers]`` table out of Codex's config.toml.
+
+    Codex's documented schema (developers.openai.com/codex/config) is::
+
+        [mcp_servers.<name>]
+        command = "..."
+        args = ["..."]
+        env = { KEY = "value" }
+
+    Values may also use a flat ``[mcp_servers]`` mapping where each
+    entry is itself a table — both shapes are accepted. Failures
+    (missing file, malformed TOML, missing block) return ``[]`` so
+    callers can soft-fall back to ``./.mcp.json``.
+
+    Implementation note: we use the stdlib :mod:`tomllib` (Python
+    3.11+) which is already a project requirement; no third-party
+    parser is added.
+    """
+    try:
+        import tomllib  # Python 3.11+ stdlib — safe parser, no exec.
+    except ImportError:
+        # Defensive: cli/defenseclaw targets 3.12 in pyproject.toml,
+        # so this branch is unreachable in supported deployments.
+        # We still soft-fail rather than raising because the caller
+        # treats this as best-effort discovery.
+        return []
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    out: list[MCPServerEntry] = []
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            continue
+        out.append(MCPServerEntry(
+            name=name,
+            command=str(cfg.get("command", "") or ""),
+            args=list(cfg.get("args", []) or []),
+            env={str(k): str(v) for k, v in (cfg.get("env", {}) or {}).items()},
+            url=str(cfg.get("url", "") or ""),
+            transport=str(cfg.get("transport", "") or ""),
+        ))
+    return out
 
 
 def _zeptoclaw_mcp_servers() -> list[MCPServerEntry]:
@@ -582,6 +652,15 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "codex":
+        # Codex has two registries: the global ``~/.codex/config.toml``
+        # ``[mcp_servers]`` table and the project-local ``./.mcp.json``.
+        # We only write to the project-local file from `defenseclaw mcp
+        # set` because (a) editing TOML safely requires a write path
+        # that preserves comments and ordering and (b) project-local
+        # writes are scoped to the current workspace which matches
+        # operator intent. Operators who want to register a global
+        # server should edit ``~/.codex/config.toml`` directly — the
+        # read path now picks it up automatically.
         path = os.path.join(os.getcwd(), ".mcp.json")
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return

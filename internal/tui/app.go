@@ -82,6 +82,12 @@ type HealthSnapshot struct {
 	Telemetry SubsystemHealth  `json:"telemetry"`
 	Sinks     SubsystemHealth  `json:"sinks"`
 	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
+	// Connector mirrors gateway.ConnectorHealth: which agent
+	// framework (openclaw / zeptoclaw / claudecode / codex) is
+	// currently active in the sidecar, plus the live counters.
+	// Nil when no connector has been initialised yet — the TUI
+	// falls back to cfg.Claw.Mode in that case.
+	Connector *ConnectorHealth `json:"connector,omitempty"`
 }
 
 // SubsystemHealth mirrors a single subsystem from /health.
@@ -90,6 +96,22 @@ type SubsystemHealth struct {
 	Since     string                 `json:"since,omitempty"`
 	LastError string                 `json:"last_error,omitempty"`
 	Details   map[string]interface{} `json:"details,omitempty"`
+}
+
+// ConnectorHealth mirrors gateway.ConnectorHealth. Field names and
+// JSON tags must stay in sync with internal/gateway/health.go::ConnectorHealth
+// or the TUI will silently drop the block on parse.
+type ConnectorHealth struct {
+	Name               string `json:"name"`
+	State              string `json:"state"`
+	Since              string `json:"since,omitempty"`
+	ToolInspectionMode string `json:"tool_inspection_mode,omitempty"`
+	SubprocessPolicy   string `json:"subprocess_policy,omitempty"`
+	Requests           int64  `json:"requests"`
+	Errors             int64  `json:"errors"`
+	ToolInspections    int64  `json:"tool_inspections"`
+	ToolBlocks         int64  `json:"tool_blocks"`
+	SubprocessBlocks   int64  `json:"subprocess_blocks"`
 }
 
 type healthUpdateMsg struct {
@@ -126,6 +148,7 @@ type Model struct {
 	palette    PaletteModel
 	actionMenu ActionMenu
 	mcpSetForm MCPSetForm
+	modePicker ModePickerModal
 	helpOpen   bool
 
 	// Persistent command input
@@ -210,6 +233,7 @@ func New(deps Deps) Model {
 		palette:    NewPaletteModel(theme, registry, executor),
 		actionMenu: NewActionMenu(theme),
 		mcpSetForm: NewMCPSetForm(),
+		modePicker: NewModePickerModal(theme),
 
 		cmdInput: ti,
 
@@ -225,6 +249,10 @@ func New(deps Deps) Model {
 		isDark:  true,
 		focused: true,
 	}
+	// Push the configured connector immediately so the first paint
+	// of any data panel shows the right "Source: …" banner before
+	// /health has had time to round-trip.
+	m.propagateConnector()
 	return m
 }
 
@@ -241,6 +269,22 @@ func (m Model) Init() tea.Cmd {
 		// without waiting for the user to manually re-run doctor.
 		m.loadDoctorCacheCmd(),
 	)
+}
+
+// propagateConnector pushes the active connector name (preferring the
+// live /health connector block, falling back to cfg.Claw.Mode) to
+// every data-listing panel so their "Source: …" banners stay in sync
+// with what the gateway is actually routing for.
+func (m *Model) propagateConnector() {
+	mode := ""
+	if m.cfg != nil {
+		mode = string(m.cfg.Claw.Mode)
+	}
+	name := ActiveConnectorName(m.health, mode)
+	m.skills.SetConnector(name)
+	m.mcps.SetConnector(name)
+	m.plugins.SetConnector(name)
+	m.inventory.SetConnector(name)
 }
 
 // isDoctorCommand reports whether the display-name passed to
@@ -345,6 +389,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.health = msg.Health
 		}
 		m.overview.SetHealth(m.health)
+		m.propagateConnector()
 		return m, nil
 
 	case CommandStartMsg:
@@ -700,6 +745,11 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
 					m.activePanel = PanelActivity
 					return m, cmd
+				case "m":
+					// Mirror the keyboard handler: open the picker
+					// pre-focused on the active connector.
+					m.modePicker.Show(m.activeConnectorForPicker())
+					return m, nil
 				case "p":
 					m.activePanel = PanelPolicy
 				case "l":
@@ -1718,6 +1768,16 @@ func (m Model) handleAuditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The mode-picker overlay consumes its own keys when visible. We
+	// route here BEFORE any other Overview shortcut so e.g. typing 'o'
+	// inside the modal selects OpenClaw instead of being interpreted as
+	// a panel-level shortcut. Esc/enter close-or-confirm semantics
+	// live with the picker; everything else is forwarded as cursor
+	// motion or hotkey jump.
+	if m.modePicker.IsVisible() {
+		return m.handleModePickerKey(msg)
+	}
+
 	switch msg.String() {
 	case "s":
 		cmd := m.executor.Execute("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all")
@@ -1735,6 +1795,13 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
 		m.activePanel = PanelActivity
 		return m, cmd
+	case "m":
+		// Open the connector switcher pre-focused on the currently
+		// active mode. ActiveConnectorName is the same resolver used
+		// for the SERVICES "Agent" row, so the picker and the
+		// dashboard agree on which entry is "active".
+		m.modePicker.Show(m.activeConnectorForPicker())
+		return m, nil
 	case "p":
 		m.activePanel = PanelPolicy
 	case "l":
@@ -1745,6 +1812,74 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// handleModePickerKey runs while the connector picker overlay is
+// open. The contract:
+//
+//   - esc / q: close without changing anything
+//   - enter:   dispatch `defenseclaw setup mode <wire> --yes` and
+//              switch to the Activity panel so the user can watch the
+//              restart progress (mirrors how [s] / [d] / [u] behave)
+//   - up / k:  cursor up
+//   - down / j cursor down
+//   - o/z/c/k: hotkey jump to the matching row, then confirm — one
+//              keystroke is enough because muscle memory is the
+//              whole point of the picker
+func (m Model) handleModePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.modePicker.Hide()
+		return m, nil
+	case "up", "k":
+		m.modePicker.CursorUp()
+		return m, nil
+	case "down", "j":
+		m.modePicker.CursorDown()
+		return m, nil
+	case "enter":
+		return m.confirmModePicker()
+	}
+	// Hotkey jump + auto-confirm. We deliberately accept *only* the
+	// four documented hotkeys here; other letters fall through to a
+	// no-op so a stray keystroke can't surprise-switch the connector.
+	if r := []rune(msg.String()); len(r) == 1 {
+		if m.modePicker.SelectByHotkey(r[0]) {
+			return m.confirmModePicker()
+		}
+	}
+	return m, nil
+}
+
+// confirmModePicker dispatches the chosen mode through the Python
+// CLI and switches to the Activity panel so the user sees the
+// restart output. We always pass --yes because the modal IS the
+// confirmation step — there's no point asking again.
+func (m Model) confirmModePicker() (tea.Model, tea.Cmd) {
+	wire := m.modePicker.Selected()
+	m.modePicker.Hide()
+	if wire == "" {
+		return m, nil
+	}
+	cmd := m.executor.Execute(
+		"defenseclaw",
+		[]string{"setup", "mode", wire, "--yes"},
+		"setup mode "+wire,
+	)
+	m.activePanel = PanelActivity
+	return m, cmd
+}
+
+// activeConnectorForPicker resolves the connector name we want to
+// pre-highlight in the picker. Mirrors ActiveConnectorName's
+// resolution order so the SERVICES "Agent" row and the picker's
+// "(active)" badge always agree on which connector is live.
+func (m Model) activeConnectorForPicker() string {
+	mode := ""
+	if m.cfg != nil {
+		mode = string(m.cfg.Claw.Mode)
+	}
+	return ActiveConnectorName(m.health, mode)
 }
 
 func (m Model) handleAlertsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1944,7 +2079,7 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				{"Reason", sel.Reason},
 			}
 			m.actionMenu.SetSize(m.width, m.height)
-			m.actionMenu.Show(sel.URL, sel.Status, info, MCPActions(sel.Status))
+			m.actionMenu.Show(sel.URL, sel.Status, info, MCPActions(sel.Status, m.mcps.ActiveConnector()))
 		}
 	case "b":
 		// Pre-P0-#5 this called ToggleBlock() which mutated the
@@ -2472,6 +2607,15 @@ func (m Model) View() tea.View {
 	// Action menu overlay
 	if m.actionMenu.IsVisible() {
 		return m.tuiShellView(m.actionMenu.View())
+	}
+
+	// Mode picker overlay (Overview [m]). Drawn here so it occupies
+	// the same screen real estate as the help / action overlays
+	// instead of competing with the underlying Overview panel for
+	// clicks and re-paints.
+	if m.modePicker.IsVisible() {
+		m.modePicker.SetSize(m.width, m.height)
+		return m.tuiShellView(m.modePicker.View())
 	}
 
 	// Detail modal

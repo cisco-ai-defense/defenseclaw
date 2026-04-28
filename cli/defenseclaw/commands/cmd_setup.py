@@ -2164,6 +2164,229 @@ def setup_claude_code(
     )
 
 
+# Connectors that go through the DefenseClaw proxy (port 4000) and
+# therefore support the full guardrail enforcement surface (block,
+# observe, scanner_mode, judge, etc.). The complement set
+# {codex, claudecode} is observability-only — they talk directly to
+# their native upstream and DefenseClaw collects telemetry via
+# hook scripts and OTel without sitting in the data path.
+_GUARDRAIL_SUPPORTING_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+_OBSERVABILITY_ONLY_CONNECTORS = frozenset({"codex", "claudecode"})
+
+
+def _apply_connector_mode_switch(
+    app: AppContext,
+    *,
+    new_connector: str,
+    restart: bool,
+) -> bool:
+    """Switch the active claw connector with smart guardrail inheritance.
+
+    Inheritance rules (intentionally asymmetric — the user wants
+    "switch fast, don't surprise me"):
+
+      • openclaw ↔ zeptoclaw
+            Inherit the current ``guardrail.*`` config verbatim. Both
+            connectors run the same proxy-mode pipeline so whatever
+            ``mode`` / ``scanner_mode`` / ``judge`` / etc. was set
+            stays set. Only ``claw.mode`` and ``guardrail.connector``
+            change.
+
+      • {openclaw|zeptoclaw} → {codex|claudecode}
+            Switch to observability-only template via
+            ``_apply_connector_observability_only``: the proxy stops
+            binding, the Go gateway wires hook scripts + OTel
+            exporter, and the matching ``*_enforcement_enabled`` flag
+            is forced to false. Existing ``mode`` / scanner /  judge
+            settings stay on disk so flipping back later restores the
+            previous posture.
+
+      • {codex|claudecode} → {openclaw|zeptoclaw}
+            Treat as a "guardrail-supporting but don't auto-block"
+            switch: enable guardrail in observe mode so the proxy
+            binds and we collect telemetry, but never turn enforcement
+            on without an explicit ``defenseclaw setup guardrail`` run.
+            This matches the user's stated intent ("only observability
+            and no guardrails when switching between
+            zeptoclaw/openclaw and codex/claude code") while keeping
+            the proxy listener live, since openclaw/zeptoclaw require
+            it to function.
+
+      • {codex|claudecode} ↔ {codex|claudecode}
+            Both observability-only — apply the destination's
+            template so the right enforcement flag is cleared and the
+            ``connector`` field is realigned.
+
+    Returns True on success, False on persistence error.
+    """
+    cfg = app.cfg
+    gc = cfg.guardrail
+    prev = (cfg.claw.mode or "openclaw").strip().lower()
+    if prev not in _CONNECTOR_NAMES:
+        prev = "openclaw"
+
+    if new_connector not in _CONNECTOR_NAMES:
+        click.echo(
+            f"  ✗ unknown connector {new_connector!r} — "
+            f"expected one of {sorted(_CONNECTOR_NAMES)}",
+            err=True,
+        )
+        return False
+
+    if prev == new_connector:
+        click.echo(
+            f"  • Already on {_CONNECTOR_META[new_connector]['label']} "
+            f"({new_connector}) — nothing to change."
+        )
+        # Persisting the picked-connector hint is still cheap and
+        # idempotent; do it so a reinstall sees the right default.
+        _write_picked_connector_hint(getattr(cfg, "data_dir", None), new_connector)
+        return True
+
+    # Branch on the destination kind. Source kind only matters for
+    # the third bullet above (recover guardrail state when leaving
+    # observability-only).
+    if new_connector in _OBSERVABILITY_ONLY_CONNECTORS:
+        click.echo(
+            f"  Switching {_CONNECTOR_META[prev]['label']} → "
+            f"{_CONNECTOR_META[new_connector]['label']} "
+            f"(observability-only — proxy disabled)"
+        )
+        return _apply_connector_observability_only(
+            app, connector=new_connector, restart=restart,
+        )
+
+    # Destination is openclaw or zeptoclaw.
+    cfg.claw.mode = new_connector
+    gc.connector = new_connector
+
+    if prev in _GUARDRAIL_SUPPORTING_CONNECTORS:
+        # openclaw ↔ zeptoclaw: pure inheritance. We only re-pin
+        # claw.mode + guardrail.connector. ``gc.enabled``, ``gc.mode``,
+        # ``gc.scanner_mode``, judge config, ports, block message —
+        # all left exactly as the operator configured them.
+        click.echo(
+            f"  Switching {_CONNECTOR_META[prev]['label']} → "
+            f"{_CONNECTOR_META[new_connector]['label']} "
+            f"(inheriting current guardrail config)"
+        )
+    else:
+        # codex/claudecode → openclaw/zeptoclaw: the proxy needs to
+        # bind so guardrail traffic flows, but we deliberately leave
+        # enforcement off (mode=observe). Operators who want enforce
+        # mode run ``defenseclaw setup guardrail`` next.
+        click.echo(
+            f"  Switching {_CONNECTOR_META[prev]['label']} → "
+            f"{_CONNECTOR_META[new_connector]['label']} "
+            f"(observe-only — run `defenseclaw setup guardrail` "
+            f"to enable enforcement)"
+        )
+        gc.enabled = True
+        gc.mode = "observe"
+        if not gc.port:
+            gc.port = 4000
+        if not gc.scanner_mode:
+            gc.scanner_mode = "local"
+        if not gc.detection_strategy:
+            gc.detection_strategy = "regex_only"
+        if not gc.detection_strategy_completion:
+            gc.detection_strategy_completion = "regex_only"
+        # Don't auto-enable judge — that's an opt-in toggle that
+        # implies an LLM API call per inspection. Leave whatever was
+        # there.
+
+    try:
+        cfg.save()
+        click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    except OSError as exc:
+        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        return False
+
+    _write_picked_connector_hint(getattr(cfg, "data_dir", None), new_connector)
+    click.echo(
+        f"  ✓ Active connector set to {new_connector!r} "
+        f"(claw.mode={new_connector})"
+    )
+
+    # Refresh the runtime guardrail snapshot so the gateway picks up
+    # connector + mode without restarting when the operator chooses
+    # --no-restart. Restart still required for a different connector
+    # because OpenClawConnector.Setup / ZeptoClawConnector.Setup runs
+    # at boot only, but the runtime snapshot keeps the proxy honest
+    # in the meantime.
+    if hasattr(cfg, "data_dir"):
+        _write_guardrail_runtime(cfg.data_dir, gc)
+
+    if restart:
+        click.echo()
+        click.echo("  Restarting gateway to wire connector hooks + OTel...")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=new_connector,
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-connector-mode",
+            "config",
+            f"from={prev} to={new_connector}",
+        )
+    return True
+
+
+@setup.command("mode")
+@click.argument(
+    "connector",
+    type=click.Choice(
+        sorted(("openclaw", "zeptoclaw", "codex", "claudecode")),
+        case_sensitive=False,
+    ),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after switching. The gateway "
+        "selects its connector at boot only, so a switch without "
+        "restart leaves the previous connector handling traffic "
+        "until the next bounce."
+    ),
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Reserved for symmetry with other setup commands; this command "
+         "is non-interactive by default and never prompts.",
+)
+@pass_ctx
+def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> None:
+    """Switch the active claw connector with smart guardrail inheritance.
+
+    \b
+    Inheritance rules:
+      openclaw ↔ zeptoclaw         inherit current guardrail config
+      → codex / claudecode         observability-only (proxy off)
+      from codex / claudecode      observe-only (proxy on, no enforce)
+
+    The TUI Overview's [m] action calls this command directly.
+
+    Examples:
+
+    \b
+        defenseclaw setup mode openclaw
+        defenseclaw setup mode codex --no-restart
+    """
+    _ = yes  # reserved
+    connector = connector.strip().lower()
+    ok = _apply_connector_mode_switch(
+        app, new_connector=connector, restart=restart,
+    )
+    if not ok:
+        raise click.ClickException(
+            f"failed to switch to {connector!r} — see errors above"
+        )
+
+
 def execute_guardrail_setup(
     app: AppContext,
     *,

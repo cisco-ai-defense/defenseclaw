@@ -280,7 +280,65 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
 
+	printConnector(snap.Connector)
+
 	return nil
+}
+
+// printConnector renders the active-connector block (which agent
+// framework — OpenClaw / ZeptoClaw / Claude Code / Codex — the sidecar
+// is currently routing for, plus the live tool/subprocess counters).
+// Skipped when the sidecar has not yet initialised a connector
+// (e.g. guardrail disabled or proxy not yet booted).
+func printConnector(c *gateway.ConnectorHealth) {
+	if c == nil {
+		fmt.Println("  Connected: (no active connector)")
+		fmt.Println()
+		return
+	}
+
+	stateStr := strings.ToUpper(string(c.State))
+	fmt.Printf("  Connected: %s (%s) — %s\n", friendlyConnectorName(c.Name), c.Name, stateStr)
+	if !c.Since.IsZero() {
+		fmt.Printf("             since %s\n", c.Since.Format(time.RFC3339))
+	}
+	if c.ToolInspectionMode != "" || c.SubprocessPolicy != "" {
+		fmt.Printf("             tool inspection: %s    subprocess: %s\n",
+			defaultStr(string(c.ToolInspectionMode), "n/a"),
+			defaultStr(string(c.SubprocessPolicy), "n/a"))
+	}
+	fmt.Printf("             requests: %d  errors: %d  tool inspections: %d  tool blocks: %d  subprocess blocks: %d\n",
+		c.Requests, c.Errors, c.ToolInspections, c.ToolBlocks, c.SubprocessBlocks)
+	fmt.Println()
+}
+
+// friendlyConnectorName mirrors internal/tui/connector_label.go::FriendlyConnectorName
+// for the CLI text output. Kept duplicated to avoid pulling the TUI
+// package (and Bubble Tea) into the CLI binary import graph.
+func friendlyConnectorName(name string) string {
+	switch strings.TrimSpace(name) {
+	case "", "openclaw":
+		return "OpenClaw"
+	case "zeptoclaw":
+		return "ZeptoClaw"
+	case "claudecode":
+		return "Claude Code"
+	case "codex":
+		return "Codex"
+	default:
+		s := strings.TrimSpace(name)
+		if s == "" {
+			return name
+		}
+		return strings.ToUpper(s[:1]) + s[1:]
+	}
+}
+
+func defaultStr(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }
 
 // connectorModeSummary mirrors the JSON shape emitted by
