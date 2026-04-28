@@ -296,6 +296,34 @@ Pin a specific version:
 VERSION=0.2.0 curl -LsSf .../install.sh | bash
 ```
 
+#### Picking an agent connector at install time
+
+By default the installer integrates with **OpenClaw** (installs the
+OpenClaw runtime and the DefenseClaw plugin). You can pick a different
+connector — or skip connector setup entirely — with `--connector`:
+
+```bash
+# Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
+curl -LsSf .../install.sh | bash -s -- --connector codex
+
+# Claude Code (no OpenClaw; patches ~/.claude/settings.json hooks)
+curl -LsSf .../install.sh | bash -s -- --connector claudecode
+
+# ZeptoClaw (no OpenClaw; patches ~/.zeptoclaw/config.json)
+curl -LsSf .../install.sh | bash -s -- --connector zeptoclaw
+
+# Lay binaries only — pick a connector later
+curl -LsSf .../install.sh | bash -s -- --connector none
+
+# Shortcut for "skip OpenClaw" without naming another connector
+curl -LsSf .../install.sh | bash -s -- --no-openclaw
+```
+
+Run interactively (without `--yes` and without `--connector`) and the
+installer prompts which connector to use. The picked connector is
+recorded at `~/.defenseclaw/picked_connector` so the CLI's `defenseclaw
+setup` defaults to it on the next invocation.
+
 ---
 
 ## Setup Commands Reference
