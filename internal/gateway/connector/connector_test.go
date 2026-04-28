@@ -2987,3 +2987,317 @@ func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
 		t.Errorf("active after switch = %q, want claudecode", got)
 	}
 }
+
+// --- PR-G (S1.1): AgentPathProvider / EnvRequirementsProvider /
+//                  HookScriptProvider / AgentRestarter contract ---
+//
+// These tests pin the additive interface contract introduced for the
+// claw-agnostic refactor. They are pure metadata assertions: every
+// built-in connector must (a) declare the on-disk paths it touches,
+// (b) declare any env vars it needs, (c) expose its hook scripts.
+// AgentRestarter is optional — none of the built-ins implement it
+// today; we only assert that the type assertion compiles.
+
+func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
+	dataDir := t.TempDir()
+	opts := SetupOpts{
+		DataDir:   dataDir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+	}
+
+	type tc struct {
+		name string
+		ctor func() Connector
+	}
+	cases := []tc{
+		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }},
+		{"openclaw", func() Connector { return NewOpenClawConnector() }},
+		{"codex", func() Connector { return NewCodexConnector() }},
+		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			conn := c.ctor()
+			ap, ok := conn.(AgentPathProvider)
+			if !ok {
+				t.Fatalf("%s does not implement AgentPathProvider", c.name)
+			}
+			paths := ap.AgentPaths(opts)
+
+			// Every built-in connector touches at least one file
+			// the operator should know about (PatchedFiles or
+			// CreatedDirs). Pure-metadata-only connectors are
+			// not allowed at this layer.
+			if len(paths.PatchedFiles) == 0 && len(paths.CreatedDirs) == 0 {
+				t.Errorf("%s: neither PatchedFiles nor CreatedDirs declared — connector appears to be a no-op", c.name)
+			}
+
+			// Hook scripts must be absolute paths under DataDir
+			// when present.
+			for _, hs := range paths.HookScripts {
+				if !filepath.IsAbs(hs) {
+					t.Errorf("%s: hook script %q is not absolute", c.name, hs)
+				}
+				if !strings.HasPrefix(hs, dataDir) {
+					t.Errorf("%s: hook script %q is not under DataDir %q", c.name, hs, dataDir)
+				}
+			}
+
+			// Backup files must live under DataDir.
+			for _, bf := range paths.BackupFiles {
+				if !strings.HasPrefix(bf, dataDir) {
+					t.Errorf("%s: backup file %q is not under DataDir %q", c.name, bf, dataDir)
+				}
+			}
+		})
+	}
+}
+
+func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
+	dataDir := t.TempDir()
+	opts := SetupOpts{DataDir: dataDir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	expected := HookScripts() // canonical list from subprocess.go
+
+	connectors := []Connector{
+		NewZeptoClawConnector(),
+		NewOpenClawConnector(),
+		NewCodexConnector(),
+		NewClaudeCodeConnector(),
+	}
+	for _, conn := range connectors {
+		ap, ok := conn.(AgentPathProvider)
+		if !ok {
+			t.Fatalf("%s missing AgentPathProvider", conn.Name())
+		}
+		paths := ap.AgentPaths(opts)
+		// Each declared script name from the canonical list should
+		// appear at <DataDir>/hooks/<name> in the connector's
+		// reported HookScripts.
+		got := map[string]bool{}
+		for _, p := range paths.HookScripts {
+			got[filepath.Base(p)] = true
+		}
+		for _, want := range expected {
+			if !got[want] {
+				t.Errorf("%s: AgentPaths.HookScripts missing %q (got %v)", conn.Name(), want, paths.HookScripts)
+			}
+		}
+	}
+}
+
+func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
+	opts := SetupOpts{DataDir: t.TempDir(), ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+
+	connectors := []Connector{
+		NewZeptoClawConnector(),
+		NewOpenClawConnector(),
+		NewCodexConnector(),
+		NewClaudeCodeConnector(),
+	}
+	for _, conn := range connectors {
+		hsp, ok := conn.(HookScriptProvider)
+		if !ok {
+			t.Fatalf("%s missing HookScriptProvider", conn.Name())
+		}
+		ap, _ := conn.(AgentPathProvider)
+		want := ap.AgentPaths(opts).HookScripts
+		got := hsp.HookScripts(opts)
+		if len(got) != len(want) {
+			t.Errorf("%s: HookScripts() returned %d entries, AgentPaths reported %d", conn.Name(), len(got), len(want))
+			continue
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("%s: HookScripts()[%d] = %q, AgentPaths reported %q", conn.Name(), i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
+	type tc struct {
+		name           string
+		ctor           func() Connector
+		mustHaveScopes []EnvScope
+	}
+	cases := []tc{
+		// Native binaries route via on-disk config; document the
+		// absence of env requirements with EnvScopeNone.
+		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, []EnvScope{EnvScopeNone}},
+		// OpenClaw uses the fetch interceptor plugin; no env vars.
+		{"openclaw", func() Connector { return NewOpenClawConnector() }, []EnvScope{EnvScopeNone}},
+		// Codex routes via config.toml; OPENAI_BASE_URL is
+		// optional/discouraged. Scope is process-only.
+		{"codex", func() Connector { return NewCodexConnector() }, []EnvScope{EnvScopeProcess}},
+		// Claude Code honors ANTHROPIC_BASE_URL at startup but
+		// settings.json hooks are sufficient for guardrail
+		// enforcement, so the var is recommended-not-required.
+		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			conn := c.ctor()
+			ep, ok := conn.(EnvRequirementsProvider)
+			if !ok {
+				t.Fatalf("%s does not implement EnvRequirementsProvider", c.name)
+			}
+			reqs := ep.RequiredEnv()
+			if len(reqs) == 0 {
+				t.Fatalf("%s: RequiredEnv() returned empty slice; expected at least one documentation entry", c.name)
+			}
+
+			seen := map[EnvScope]bool{}
+			for _, r := range reqs {
+				seen[r.Scope] = true
+				if r.Description == "" {
+					t.Errorf("%s: env requirement %q has empty Description", c.name, r.Name)
+				}
+				if r.Scope != EnvScopeNone && r.Name == "" {
+					t.Errorf("%s: env requirement with non-None scope %q is missing Name", c.name, r.Scope)
+				}
+				// Require the scope to be one of the
+				// documented enum values; reject typo'd
+				// strings.
+				switch r.Scope {
+				case EnvScopeProcess, EnvScopeShell, EnvScopeNone:
+				default:
+					t.Errorf("%s: env requirement %q has unknown Scope %q", c.name, r.Name, r.Scope)
+				}
+			}
+			for _, want := range c.mustHaveScopes {
+				if !seen[want] {
+					t.Errorf("%s: RequiredEnv() did not declare expected scope %q", c.name, want)
+				}
+			}
+		})
+	}
+}
+
+func TestConnector_AgentRestarter_OptionalAtThisLayer(t *testing.T) {
+	// None of the built-in connectors implement AgentRestarter
+	// today; this test pins the contract that the type assertion
+	// compiles cleanly and returns ok=false. When a future
+	// connector adds restart support, the fix is to update this
+	// test, not to make the assertion compile-time mandatory.
+	connectors := []Connector{
+		NewZeptoClawConnector(),
+		NewOpenClawConnector(),
+		NewCodexConnector(),
+		NewClaudeCodeConnector(),
+	}
+	for _, conn := range connectors {
+		if _, ok := conn.(AgentRestarter); ok {
+			t.Logf("%s implements AgentRestarter — update this test to exercise it", conn.Name())
+		}
+	}
+}
+
+// TestZeptoClaw_AgentPaths_Specifics pins the exact paths the
+// ZeptoClaw connector reports so a future refactor that drops
+// zeptoclaw_backup.json or moves the config file is caught here
+// instead of at runtime in `defenseclaw doctor`.
+func TestZeptoClaw_AgentPaths_Specifics(t *testing.T) {
+	dataDir := t.TempDir()
+	tmpHome := t.TempDir()
+	cfg := filepath.Join(tmpHome, ".zeptoclaw", "config.json")
+	ZeptoClawConfigPathOverride = cfg
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+
+	conn := NewZeptoClawConnector()
+	paths := conn.AgentPaths(SetupOpts{DataDir: dataDir})
+
+	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != cfg {
+		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
+	}
+	wantBackup := filepath.Join(dataDir, "zeptoclaw_backup.json")
+	if len(paths.BackupFiles) != 1 || paths.BackupFiles[0] != wantBackup {
+		t.Errorf("BackupFiles = %v, want [%q]", paths.BackupFiles, wantBackup)
+	}
+}
+
+// TestCodex_AgentPaths_Specifics pins Codex's footprint. The
+// connector exposes both codex_config_backup.json (config.toml
+// patch) and codex_backup.json (legacy env backup).
+func TestCodex_AgentPaths_Specifics(t *testing.T) {
+	dataDir := t.TempDir()
+	tmpHome := t.TempDir()
+	cfg := filepath.Join(tmpHome, ".codex", "config.toml")
+	CodexConfigPathOverride = cfg
+	defer func() { CodexConfigPathOverride = "" }()
+
+	conn := NewCodexConnector()
+	paths := conn.AgentPaths(SetupOpts{DataDir: dataDir})
+
+	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != cfg {
+		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
+	}
+	wantBackups := []string{
+		filepath.Join(dataDir, "codex_config_backup.json"),
+		filepath.Join(dataDir, "codex_backup.json"),
+	}
+	if len(paths.BackupFiles) != len(wantBackups) {
+		t.Errorf("BackupFiles = %v, want %v", paths.BackupFiles, wantBackups)
+	} else {
+		for i, want := range wantBackups {
+			if paths.BackupFiles[i] != want {
+				t.Errorf("BackupFiles[%d] = %q, want %q", i, paths.BackupFiles[i], want)
+			}
+		}
+	}
+}
+
+// TestClaudeCode_AgentPaths_Specifics pins the Claude Code
+// footprint: settings.json + claudecode_backup.json + hook scripts.
+func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
+	dataDir := t.TempDir()
+	tmpHome := t.TempDir()
+	cfg := filepath.Join(tmpHome, ".claude", "settings.json")
+	ClaudeCodeSettingsPathOverride = cfg
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	conn := NewClaudeCodeConnector()
+	paths := conn.AgentPaths(SetupOpts{DataDir: dataDir})
+
+	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != cfg {
+		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
+	}
+	wantBackup := filepath.Join(dataDir, "claudecode_backup.json")
+	if len(paths.BackupFiles) != 1 || paths.BackupFiles[0] != wantBackup {
+		t.Errorf("BackupFiles = %v, want [%q]", paths.BackupFiles, wantBackup)
+	}
+}
+
+// TestOpenClaw_AgentPaths_Specifics pins OpenClaw's footprint:
+// openclaw.json patched, no backup file (edits are reversible),
+// extension dir created.
+func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
+	dataDir := t.TempDir()
+	tmpHome := t.TempDir()
+	OpenClawHomeOverride = filepath.Join(tmpHome, ".openclaw")
+	defer func() { OpenClawHomeOverride = "" }()
+
+	conn := NewOpenClawConnector()
+	paths := conn.AgentPaths(SetupOpts{DataDir: dataDir})
+
+	wantPatched := filepath.Join(OpenClawHomeOverride, "openclaw.json")
+	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != wantPatched {
+		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, wantPatched)
+	}
+	if len(paths.BackupFiles) != 0 {
+		t.Errorf("BackupFiles = %v, want empty (openclaw.json edits are reversible without a backup)", paths.BackupFiles)
+	}
+	wantDir := filepath.Join(OpenClawHomeOverride, "extensions", "defenseclaw")
+	found := false
+	for _, d := range paths.CreatedDirs {
+		if d == wantDir {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("CreatedDirs = %v, missing %q", paths.CreatedDirs, wantDir)
+	}
+}

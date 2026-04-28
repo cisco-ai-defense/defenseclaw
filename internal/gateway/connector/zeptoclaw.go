@@ -306,6 +306,51 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 	return cs, nil
 }
 
+// --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
+
+// AgentPaths reports the on-disk footprint ZeptoClaw's connector
+// touches. ZeptoClaw is a native Rust binary configured entirely
+// through ~/.zeptoclaw/config.json, so only that file is patched.
+// The connector also writes the inspect-* hook scripts into
+// <DataDir>/hooks/ for proxy-side tool inspection.
+func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	hooks := make([]string, 0, len(HookScripts()))
+	for _, name := range HookScripts() {
+		hooks = append(hooks, filepath.Join(hookDir, name))
+	}
+	return AgentPaths{
+		PatchedFiles: []string{zeptoClawConfigPath()},
+		BackupFiles:  []string{filepath.Join(opts.DataDir, "zeptoclaw_backup.json")},
+		HookScripts:  hooks,
+		CreatedDirs:  []string{filepath.Join(opts.DataDir, "shims")},
+	}
+}
+
+// HookScripts is a convenience wrapper over AgentPaths.HookScripts
+// so callers that only need the hook list don't have to construct a
+// full AgentPaths.
+func (c *ZeptoClawConnector) HookScripts(opts SetupOpts) []string {
+	return c.AgentPaths(opts).HookScripts
+}
+
+// RequiredEnv reports the env vars ZeptoClaw needs for proxy
+// routing. ZeptoClaw is a native binary that reads its api_base
+// from config.json, so no env vars are required — Setup patches
+// the JSON file directly. We still return a single EnvScopeNone
+// entry as documentation so `defenseclaw doctor` can show a
+// "no env vars required" line instead of staying silent.
+func (c *ZeptoClawConnector) RequiredEnv() []EnvRequirement {
+	return []EnvRequirement{
+		{
+			Name:        "",
+			Scope:       EnvScopeNone,
+			Required:    false,
+			Description: "ZeptoClaw is configured via ~/.zeptoclaw/config.json (api_base patched at setup); no env vars are needed for routing.",
+		},
+	}
+}
+
 // --- ComponentScanner interface ---
 
 func (c *ZeptoClawConnector) SupportsComponentScanning() bool { return true }
