@@ -1132,6 +1132,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// below, so the baked value and the value accepted by the API
 		// middleware stay in lockstep.
 		APIToken: apiToken,
+		// Per-connector enforcement gates: when false (the default),
+		// the connector's Setup() installs hooks + native OTel
+		// exporters but skips the proxy-redirect path. See
+		// GuardrailConfig.CodexEnforcementEnabled /
+		// ClaudeCodeEnforcementEnabled in internal/config/config.go
+		// for the rationale. Plumbed through SetupOpts so the codex
+		// and claudecode connectors can branch on a single source of
+		// truth without re-reading config from disk.
+		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
+		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the

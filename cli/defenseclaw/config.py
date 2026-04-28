@@ -814,6 +814,30 @@ class GuardrailConfig:
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
     connector: str = "openclaw"  # openclaw | zeptoclaw | claudecode | codex
+    # ``codex_enforcement_enabled`` gates the proxy-redirect /
+    # blocking path for the Codex connector. Default ``False`` means
+    # codex talks DIRECTLY to its native upstream — observability
+    # runs via three independent channels (hooks → /api/v1/codex/hook,
+    # ``[otel]`` exporter → /v1/logs+/v1/metrics, notify bridge →
+    # /api/v1/codex/notify) but the proxy is NOT in the data path
+    # and no ``openai_base_url``/reserved-id rewrite is performed.
+    # Flipping to ``True`` re-engages the existing guardrail path
+    # (proxy bind + reserved-id strip + subprocess sandbox); the
+    # enforcement code stays intact behind this flag for that
+    # workflow. Mirrors ``GuardrailConfig.CodexEnforcementEnabled``
+    # in internal/config/config.go.
+    codex_enforcement_enabled: bool = False
+    # ``claudecode_enforcement_enabled`` is the parallel flag for
+    # the Claude Code connector. Default ``False`` means claude code
+    # talks DIRECTLY to api.anthropic.com; observability runs via
+    # hooks (settings.json hook entries) and the native OTel stack —
+    # including ``OTEL_LOG_RAW_API_BODIES=file:`` which writes the
+    # full Messages API request/response JSON to disk alongside a
+    # ``body_ref`` pointer in each event. Flipping to ``True`` re-
+    # engages ``ANTHROPIC_BASE_URL`` env override and the subprocess
+    # sandbox. Mirrors
+    # ``GuardrailConfig.ClaudeCodeEnforcementEnabled``.
+    claudecode_enforcement_enabled: bool = False
 
 
 @dataclass
@@ -1303,6 +1327,8 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
         connector=raw.get("connector", "openclaw"),
+        codex_enforcement_enabled=raw.get("codex_enforcement_enabled", False),
+        claudecode_enforcement_enabled=raw.get("claudecode_enforcement_enabled", False),
     )
 
 

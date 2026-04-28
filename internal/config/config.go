@@ -887,6 +887,45 @@ type GuardrailConfig struct {
 	// proxy never fails open. The request is still inspected, audited,
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
+
+	// CodexEnforcementEnabled gates the proxy-redirect / blocking
+	// path for the Codex connector. When false (the default),
+	// codex talks DIRECTLY to its native upstream
+	// (api.openai.com/v1/responses for OPENAI_API_KEY mode,
+	// chatgpt.com/backend-api/codex/responses for chatgpt mode);
+	// the DefenseClaw proxy is NOT in the data path and no
+	// reserved-id strip / openai_base_url rewrite is performed.
+	// Observability still runs end-to-end via three independent
+	// channels: hooks (UserPromptSubmit / PreToolUse / PostToolUse /
+	// Stop) post to /api/v1/codex/hook, the [otel] block in
+	// config.toml exports OTLP-HTTP to /v1/logs and /v1/metrics,
+	// and the notify bridge POSTs agent-turn-complete to
+	// /api/v1/codex/notify.
+	//
+	// When true, the existing guardrail enforcement code in
+	// patchCodexConfig() runs (openai_base_url rewrite, reserved-id
+	// strip, model_providers rewrite, subprocess sandbox) and the
+	// proxy port binds. Designed to be flipped on later by an
+	// operator who wants the proxy in path; the enforcement code
+	// stays intact behind this flag rather than being removed, so
+	// re-enabling is a single-line config change with no rebuild.
+	CodexEnforcementEnabled bool `mapstructure:"codex_enforcement_enabled" yaml:"codex_enforcement_enabled,omitempty"`
+
+	// ClaudeCodeEnforcementEnabled is the parallel flag for the
+	// Claude Code connector. When false (the default), claude code
+	// talks DIRECTLY to api.anthropic.com; no
+	// ANTHROPIC_BASE_URL/claudecode_env.sh override is written and
+	// the proxy port does NOT bind. Observability runs via hooks
+	// (settings.json hook entries) and Claude Code's native OTel
+	// stack — including OTEL_LOG_RAW_API_BODIES=file: which writes
+	// the full Anthropic Messages API request/response JSON to disk
+	// alongside a body_ref pointer in each event, the closest thing
+	// to proxy-level body capture without sitting in the data path.
+	//
+	// When true, writeEnvOverride and SetupSubprocessEnforcement
+	// run as before. Designed for the same flip-on-later workflow
+	// as CodexEnforcementEnabled.
+	ClaudeCodeEnforcementEnabled bool `mapstructure:"claudecode_enforcement_enabled" yaml:"claudecode_enforcement_enabled,omitempty"`
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,

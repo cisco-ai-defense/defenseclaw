@@ -66,6 +66,27 @@ type SetupOpts struct {
 	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken    string // gateway bearer token; baked into hook curl -H
 	Interactive bool
+
+	// CodexEnforcement and ClaudeCodeEnforcement gate the
+	// proxy-redirect / blocking path for the Codex and Claude Code
+	// connectors respectively. The Sidecar populates these from
+	// cfg.Guardrail.CodexEnforcementEnabled and
+	// cfg.Guardrail.ClaudeCodeEnforcementEnabled. When false (the
+	// default), the connector's Setup() installs hooks + native
+	// OTel exporters but skips the proxy-redirect path
+	// (openai_base_url rewrite, ANTHROPIC_BASE_URL env override,
+	// reserved-id strip, subprocess sandbox). Observability still
+	// runs end-to-end via three independent channels per connector;
+	// see GuardrailConfig.CodexEnforcementEnabled in
+	// internal/config/config.go for the rationale.
+	//
+	// Per-connector flags (rather than a single InstallMode enum)
+	// because OpenClaw and ZeptoClaw run in full guardrail mode
+	// regardless and have no observability-only path; mixing the
+	// gates into one tri-state was producing an unused enforcement
+	// branch for those connectors.
+	CodexEnforcement      bool
+	ClaudeCodeEnforcement bool
 }
 
 // Connector is the contract every agent framework adapter implements.

@@ -1254,7 +1254,11 @@ env_key = "OPENAI_API_KEY"
 	}
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode: this test asserts proxy-redirect behavior
+	// (/c/codex prefix in model_providers base_url), which only
+	// runs in the gated enforcement path. Default observability
+	// mode skips the redirect — see GuardrailConfig.CodexEnforcementEnabled.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
@@ -1324,7 +1328,11 @@ env_key = "OPENROUTER_API_KEY"
 	t.Setenv("OPENROUTER_API_KEY", "sk-or-live-test-value")
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: SetProviderSnapshot only runs in
+	// the gated enforcement block (it's only consumed by Route()
+	// during proxy passthrough, which doesn't happen in the
+	// observability default).
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -1371,7 +1379,10 @@ env_key = "OPENAI_API_KEY"
 	defer func() { CodexConfigPathOverride = "" }()
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: this test asserts the proxy
+	// rewrite of [model_providers.*].base_url which only runs in
+	// the gated enforcement path.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -1495,6 +1506,125 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	}
 }
 
+// TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
+// regression test for the codex/claude-code observability-only
+// architecture. With CodexEnforcement=false (the default), Setup must
+// install the [hooks] table and features.codex_hooks=true (so the
+// codex-hook.sh script fires for tool-call telemetry) but must NOT:
+//   - rewrite cfg["openai_base_url"] to the proxy URL (codex talks
+//     directly to its native upstream — api.openai.com or
+//     chatgpt.com/backend-api/codex — instead)
+//   - strip reserved built-in provider IDs (those entries stay
+//     untouched on the operator's disk)
+//   - rewrite [model_providers.*].base_url for custom providers
+//     (openrouter / azure / groq stay pointed at their real URLs)
+//
+// Without this test, a refactor that quietly re-engaged the proxy
+// path for the default install flow would silently break the
+// "no traffic interception for codex" contract — the whole reason
+// observability mode exists.
+func TestCodex_Setup_DefaultObservability_NoProxyRewrite(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	enterpriseURL := "https://gateway.corp.example/openai"
+	original := `model = "gpt-5"
+openai_base_url = "` + enterpriseURL + `"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+
+[model_providers.openrouter]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+	// Pin auth.json to a non-existent path so detectCodexChatGPTMode
+	// returns false (otherwise a developer's local `codex login`
+	// state would alter Setup's behavior).
+	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
+	defer func() { CodexAuthPathOverride = "" }()
+
+	c := NewCodexConnector()
+	// CodexEnforcement omitted == false (the production default).
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+
+	// Operator's openai_base_url must survive untouched.
+	gotOpenAIBaseURL, _ := parsed["openai_base_url"].(string)
+	if gotOpenAIBaseURL != enterpriseURL {
+		t.Errorf("openai_base_url = %q, want operator's pristine value %q (no proxy rewrite in observability mode)",
+			gotOpenAIBaseURL, enterpriseURL)
+	}
+	if strings.Contains(string(raw), "/c/codex") {
+		t.Errorf("config.toml unexpectedly contains /c/codex proxy prefix in observability mode:\n%s", raw)
+	}
+
+	// Reserved-ID block must NOT be stripped — the [model_providers
+	// .openai] entry the operator wrote stays in place.
+	providers, _ := parsed["model_providers"].(map[string]interface{})
+	if providers == nil {
+		t.Fatal("[model_providers] table missing — observability mode should leave provider blocks untouched")
+	}
+	if openaiBlock, ok := providers["openai"].(map[string]interface{}); !ok {
+		t.Errorf("[model_providers.openai] was stripped in observability mode (got=%v)", providers["openai"])
+	} else if bu, _ := openaiBlock["base_url"].(string); bu != "https://api.openai.com/v1" {
+		t.Errorf("openai base_url = %q, want pristine api.openai.com/v1 (no rewrite in observability mode)", bu)
+	}
+	if openrouterBlock, ok := providers["openrouter"].(map[string]interface{}); !ok {
+		t.Errorf("[model_providers.openrouter] missing")
+	} else if bu, _ := openrouterBlock["base_url"].(string); bu != "https://openrouter.ai/api/v1" {
+		t.Errorf("openrouter base_url = %q, want pristine openrouter.ai/api/v1 (no rewrite in observability mode)", bu)
+	}
+
+	// Hooks MUST still be installed — they're the entry point for
+	// tool-call telemetry into /api/v1/codex/hook.
+	hooks, ok := parsed["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("[hooks] table missing in observability mode — telemetry wouldn't fire (got=%T)", parsed["hooks"])
+	}
+	if _, ok := hooks["UserPromptSubmit"]; !ok {
+		t.Error("hooks.UserPromptSubmit missing — full prompt text capture lost")
+	}
+	if _, ok := hooks["PreToolUse"]; !ok {
+		t.Error("hooks.PreToolUse missing — tool-call telemetry lost")
+	}
+	if _, ok := hooks["PostToolUse"]; !ok {
+		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
+	}
+	features, _ := parsed["features"].(map[string]interface{})
+	if v, _ := features["codex_hooks"].(bool); !v {
+		t.Errorf("features.codex_hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	}
+
+	// Subprocess sandbox JSON must NOT be created — that's
+	// enforcement-only.
+	sandboxPath := filepath.Join(dir, "subprocess.json")
+	if _, err := os.Stat(sandboxPath); err == nil {
+		t.Errorf("subprocess.json was created in observability mode — sandbox is enforcement-only (path=%s)", sandboxPath)
+	}
+}
+
 // TestCodex_Setup_EnablesHooksFeature confirms the connector writes
 // features.codex_hooks = true into config.toml. Without this, Codex
 // ignores any registered hooks because the feature gate defaults to
@@ -1591,7 +1721,9 @@ env_key = "OPENAI_API_KEY"
 	defer func() { CodexConfigPathOverride = "" }()
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: openai_base_url rewrite + reserved-
+	// id strip live behind the enforcement flag.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -1666,7 +1798,9 @@ env_key = "OPENROUTER_API_KEY"
 	defer func() { CodexConfigPathOverride = "" }()
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: this test asserts the reserved-id
+	// strip + per-provider rewrite which only run in enforcement.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -1777,7 +1911,11 @@ func TestCodex_Setup_SynthesizesOpenAISnapshot(t *testing.T) {
 	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: SetProviderSnapshot only runs in
+	// the enforcement path. Observability-mode default skips the
+	// snapshot entirely (no proxy passthrough means Route() is
+	// never consulted).
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -1827,7 +1965,9 @@ func TestCodex_Setup_SynthesizesChatGPTBackendWhenAuthModeChatGPT(t *testing.T) 
 	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: SetProviderSnapshot only runs in
+	// the gated enforcement block.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -1877,7 +2017,9 @@ openai_base_url = "` + enterpriseURL + `"
 	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: SetProviderSnapshot only runs in
+	// the gated enforcement block.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -2922,10 +3064,16 @@ func TestCodex_Setup_Surface1_DoesNotExportGlobalEnv(t *testing.T) {
 	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
 	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
+	// Enforcement mode required: this test asserts the /c/codex
+	// rewrite hits config.toml, which only happens in the gated
+	// enforcement path. Default observability mode does not write
+	// the proxy URL into config.toml at all (codex talks directly
+	// to its native upstream).
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
+		DataDir:          dir,
+		ProxyAddr:        "127.0.0.1:4000",
+		APIAddr:          "127.0.0.1:18970",
+		CodexEnforcement: true,
 	}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
