@@ -1334,10 +1334,11 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	redactedReason := redaction.Reason(req.Reason)
 	details := fmt.Sprintf("direction=%s action=%s severity=%s findings=%d elapsed_ms=%.1f",
 		req.Direction, req.Action, req.Severity, len(req.Findings), req.ElapsedMs)
 	if req.Reason != "" {
-		details += fmt.Sprintf(" reason=%s", truncate(req.Reason, 120))
+		details += fmt.Sprintf(" reason=%s", truncate(redactedReason, 120))
 	}
 
 	if nfs := NormalizeScanVerdict(&ScanVerdict{
@@ -1359,12 +1360,6 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
 
-	// Both Reason and Findings are composed upstream by the
-	// guardrail proxy and routinely embed the matched literal
-	// in RULE-ID:description form. Redact both for the
-	// operator-facing stderr lines (Reveal flag can unmask
-	// locally if needed); rule IDs survive intact.
-	redactedReason := redaction.Reason(req.Reason)
 	redactedFindings := make([]string, len(req.Findings))
 	for i, f := range req.Findings {
 		redactedFindings[i] = redaction.Reason(f)
@@ -1563,6 +1558,26 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	case http.MethodPatch:
+		// C1 fix: guardrail mode changes require authentication even on
+		// loopback. A compromised local agent must not be able to
+		// silently switch from action mode to observe mode.
+		if a.scannerCfg != nil {
+			token := ""
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				token = strings.TrimPrefix(auth, "Bearer ")
+			}
+			if token == "" {
+				token = r.Header.Get("X-DefenseClaw-Token")
+			}
+			expected := a.scannerCfg.Gateway.Token
+			if expected == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+				a.writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN",
+				})
+				return
+			}
+		}
+
 		var req map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})

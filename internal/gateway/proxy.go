@@ -19,7 +19,6 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -36,6 +35,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -2742,20 +2742,15 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 }
 
 // deriveMasterKey produces a deterministic master key from the device key
-// file, matching the legacy Python _derive_master_key().
+// file using PBKDF2-SHA256 with 100k iterations for brute-force resistance.
 func deriveMasterKey(dataDir string) string {
 	keyFile := filepath.Join(dataDir, "device.key")
 	data, err := os.ReadFile(keyFile)
 	if err != nil {
 		return ""
 	}
-	mac := hmac.New(sha256.New, []byte("defenseclaw-proxy-master-key"))
-	mac.Write(data)
-	digest := fmt.Sprintf("%x", mac.Sum(nil))
-	if len(digest) > 32 {
-		digest = digest[:32]
-	}
-	return "sk-dc-" + digest
+	dk := pbkdf2.Key(data, []byte("defenseclaw-proxy-master-key"), 100_000, 32, sha256.New)
+	return "sk-dc-" + fmt.Sprintf("%x", dk)
 }
 
 // ---------------------------------------------------------------------------
@@ -3171,7 +3166,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Action:    "guardrail-inspection",
 			Target:    model,
 			Severity:  verdict.Severity,
-			Details:   details,
+			Details:   redaction.ForSinkReason(details),
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
 		}

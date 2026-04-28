@@ -42,6 +42,8 @@ type CodexConnector struct {
 	gatewayToken string
 	masterKey    string
 
+	loopbackWarn sync.Once
+
 	// snapshotMu protects providers.
 	snapshotMu sync.RWMutex
 	providers  map[string]CodexProviderEntry
@@ -139,6 +141,11 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // those paths, not to break the local-only native binary path.
 func (c *CodexConnector) Authenticate(r *http.Request) bool {
 	if IsLoopback(r) {
+		if c.gatewayToken != "" {
+			c.loopbackWarn.Do(func() {
+				fmt.Fprintf(os.Stderr, "[SECURITY] codex: loopback request accepted without token — DEFENSECLAW_GATEWAY_TOKEN is set but codex connector cannot enforce it on native binary traffic\n")
+			})
+		}
 		return true
 	}
 

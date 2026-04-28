@@ -294,6 +294,12 @@ func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map
 		rego.Query(query),
 		rego.Store(store),
 		rego.Input(inputMap),
+		rego.UnsafeBuiltins(map[string]struct{}{
+			"http.send":           {},
+			"opa.runtime":         {},
+			"net.lookup_ip_addr":  {},
+		}),
+		rego.StrictBuiltinErrors(true),
 	}
 	for name, src := range modules {
 		opts = append(opts, rego.Module(name, src))

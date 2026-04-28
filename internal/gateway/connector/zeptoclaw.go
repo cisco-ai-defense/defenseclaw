@@ -37,6 +37,8 @@ type ZeptoClawConnector struct {
 	gatewayToken string
 	masterKey    string
 
+	loopbackWarn sync.Once
+
 	// snapshotMu protects providers.
 	snapshotMu sync.RWMutex
 	providers  map[string]ZeptoClawProviderEntry
@@ -171,6 +173,11 @@ func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {
 // those paths, not to break the local-only native binary path.
 func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 	if IsLoopback(r) {
+		if c.gatewayToken != "" {
+			c.loopbackWarn.Do(func() {
+				fmt.Fprintf(os.Stderr, "[SECURITY] zeptoclaw: loopback request accepted without token — DEFENSECLAW_GATEWAY_TOKEN is set but zeptoclaw connector cannot enforce it on native binary traffic\n")
+			})
+		}
 		return true
 	}
 

@@ -201,11 +201,6 @@ func isKnownSafeDomain(rawURL string) bool {
 //   - host:port form:   "10.0.0.1:8080"
 //   - bracketed v6:     "[::1]:8080"
 //
-// Returns false for hostnames so we don't over-block legitimate LLM
-// endpoints with non-registered TLDs. DNS resolution happens at a
-// separate egress layer (future enhancement); callers must not rely
-// on this function alone as their SSRF defense.
-//
 // NOTE: a separate isPrivateIP(net.IP) exists in webhook.go for the
 // webhook SSRF allowlist. This function is the URL-string flavour.
 func isPrivateHost(host string) bool {
@@ -222,13 +217,18 @@ func isPrivateHost(host string) bool {
 		h = h2
 	}
 	ip := net.ParseIP(h)
-	if ip == nil {
+	if ip != nil {
+		return isPrivateIP(ip)
+	}
+	// Hostname — resolve and check all returned IPs to prevent DNS rebinding.
+	addrs, err := net.LookupHost(h)
+	if err != nil {
 		return false
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return true
+	for _, addr := range addrs {
+		if resolved := net.ParseIP(addr); resolved != nil && isPrivateIP(resolved) {
+			return true
+		}
 	}
-	// Cloud metadata & link-local v4 (169.254.0.0/16) are covered by IsLinkLocalUnicast.
 	return false
 }
