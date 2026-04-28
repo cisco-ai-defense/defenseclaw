@@ -303,6 +303,50 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         names = {d.name for d in list_destinations(tmp)}
         self.assertNotIn("generic-webhook", names)
 
+    def test_otlp_preset_target_override_audit_sinks(self) -> None:
+        """The generic ``otlp`` preset declares target=otel and
+        sink_kind=None. ``target_override="audit_sinks"`` must mint a
+        valid ``otlp_logs`` audit sink — the writer is responsible for
+        coercing the missing sink_kind. Drives the same path that
+        ``defenseclaw setup local-observability`` uses to add a
+        loopback ``otlp_logs`` sink alongside the OTel exporter.
+        """
+        _, tmp = _make_tmp_ctx()
+        result = apply_preset(
+            "otlp",
+            {"endpoint": "127.0.0.1:4317", "protocol": "grpc"},
+            tmp,
+            name="local-otlp-logs",
+            target_override="audit_sinks",
+        )
+        self.assertEqual(result.target, "audit_sinks")
+
+        doc = _read_yaml(tmp)
+        sinks = doc.get("audit_sinks") or []
+        self.assertEqual(len(sinks), 1)
+        sink = sinks[0]
+        self.assertEqual(sink.get("name"), "local-otlp-logs")
+        self.assertEqual(sink.get("kind"), "otlp_logs")
+        self.assertTrue(sink.get("enabled"))
+        block = sink.get("otlp_logs") or {}
+        # ``_strip_scheme`` keeps host:port intact (no leading ``http://``).
+        self.assertEqual(block.get("endpoint"), "127.0.0.1:4317")
+        self.assertEqual(block.get("protocol"), "grpc")
+
+        # And re-applying with the same name must update in place
+        # rather than appending a duplicate — the writer's shallow
+        # merge contract is what makes ``setup local-observability up``
+        # idempotent across re-invocations.
+        apply_preset(
+            "otlp",
+            {"endpoint": "127.0.0.1:4317", "protocol": "grpc"},
+            tmp,
+            name="local-otlp-logs",
+            target_override="audit_sinks",
+        )
+        doc = _read_yaml(tmp)
+        self.assertEqual(len(doc.get("audit_sinks") or []), 1)
+
 
 # ---------------------------------------------------------------------------
 # CLI flag matrix — exercise the three probe paths end-to-end

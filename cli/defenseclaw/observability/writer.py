@@ -519,6 +519,16 @@ def _build_sink_entry(
     enabled: bool,
 ) -> dict[str, Any]:
     kind = preset.sink_kind or ""
+    # The generic ``otlp`` preset declares target=otel and sink_kind=None
+    # because its primary mode is the gateway exporter. When a caller
+    # supplies ``target_override="audit_sinks"``, ``_resolve_target``
+    # routes us here without setting sink_kind on the (frozen) preset.
+    # Coerce to ``otlp_logs`` — the only valid sink shape for this
+    # preset — so the rest of the builder picks the right block. See
+    # ``_resolve_target``'s "coerce to otlp_logs" comment for the
+    # contract this completes.
+    if not kind and preset.id == "otlp":
+        kind = _SINK_KIND_OTLP_LOGS
     base: dict[str, Any] = {
         "name": name,
         "kind": kind,
