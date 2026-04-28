@@ -115,6 +115,25 @@ type HookEndpoint interface {
 	HookAPIPath() string
 }
 
+// AllowedHostsProvider — optional. Connectors that depend on
+// connector-specific upstream hostnames (e.g. ZeptoClaw → openrouter.ai
+// when the user has BYOK'd against OpenRouter; Codex → its update
+// channel) implement this so the firewall default-deny config can
+// fold them into the allow-list at boot. Without it,
+// firewall.DefaultFirewallConfig only knows the OpenClaw / OpenAI /
+// Anthropic baseline and a ZeptoClaw user gets every chat blocked
+// at L4. The list returned here is treated as additive over the
+// firewall's static defaults — connectors should not return their
+// only required host (api.openai.com, api.anthropic.com) since
+// those are already in the static list. See S3.3 / F26.
+//
+// Hostnames must be plain DNS names (no scheme, no path, no
+// wildcards). The firewall layer does its own validation; returning
+// an invalid host is logged and that host is dropped.
+type AllowedHostsProvider interface {
+	AllowedHosts() []string
+}
+
 // ComponentScanner — optional, connectors that support scanning
 // agent-specific skills, plugins, MCP servers implement this.
 type ComponentScanner interface {

@@ -72,6 +72,21 @@ func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
 }
 
+// AllowedHosts returns the Codex update / docs / GitHub release
+// channels. api.openai.com is already in the firewall's static
+// defaults so we don't repeat it. See S3.3 / F26.
+func (c *CodexConnector) AllowedHosts() []string {
+	return []string{
+		// Update / release channel — Codex pulls binaries from GitHub.
+		"github.com",
+		"api.github.com",
+		"objects.githubusercontent.com",
+		// Docs CDN.
+		"openai.com",
+		"platform.openai.com",
+	}
+}
+
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// We intentionally do NOT export a global OPENAI_BASE_URL.
 	//

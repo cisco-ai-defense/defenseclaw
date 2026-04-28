@@ -98,6 +98,20 @@ func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
 }
 
+// AllowedHosts returns the OpenClaw upstream baseline. The OpenClaw
+// fetch interceptor talks to whatever provider the user configured;
+// the safe default-deny shipping config covers OpenAI/Anthropic
+// (already in firewall.DefaultFirewallConfig) plus the Cisco AI
+// Defense inspect endpoint when the OpenClaw plugin is uploading
+// findings. This list is *additive* over the static firewall
+// defaults — repeating api.openai.com here would be harmless but is
+// elided to keep the per-connector contribution honest. See S3.3.
+func (c *OpenClawConnector) AllowedHosts() []string {
+	return []string{
+		"us.api.inspect.aidefense.security.cisco.com",
+	}
+}
+
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// The Makefile keeps the gateway buildable on machines without the
 	// TS plugin built (typical for non-OpenClaw operators) by embedding
