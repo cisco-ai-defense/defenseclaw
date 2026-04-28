@@ -1835,6 +1835,14 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.judge.pii_prompt", true)
 	viper.SetDefault("guardrail.judge.pii_completion", true)
 	viper.SetDefault("guardrail.judge.tool_injection", true)
+	// guardrail.judge.exfil registers the data-exfiltration judge default
+	// here so existing config.yaml files without an `exfil:` key still get
+	// the judge wired on next reload. Mirrors the Go-side JudgeConfig.Exfil
+	// default in defaults.go and the Python JudgeConfig.exfil default in
+	// cli/defenseclaw/config.py — three sources of truth must agree, so
+	// any of them being missed surfaces as kind=exfil rows never appearing
+	// in the audit JSONL during live tests.
+	viper.SetDefault("guardrail.judge.exfil", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")

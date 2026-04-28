@@ -237,6 +237,21 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	a.registerConnectorHookRoutes(mux)
+	// OTLP-HTTP receiver for the three signal types codex
+	// (via [otel.exporter.otlp-http]) and Claude Code (via
+	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
+	// OTLP-JSON; tokenAuth + apiCSRFProtect protect the endpoints
+	// the same way they protect /api/v1/codex/hook. See
+	// internal/gateway/otel_ingest.go.
+	mux.HandleFunc("/v1/logs", a.handleOTLPLogs)
+	mux.HandleFunc("/v1/metrics", a.handleOTLPMetrics)
+	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
+	// Codex agent-turn-complete notifier. The notify-bridge.sh shim
+	// installed by the codex connector POSTs codex's JSON arg here
+	// after every turn (see https://developers.openai.com/codex/
+	// config-advanced). Audited as a structured event so the SIEM
+	// can roll up turn counts + completion reasons per session.
+	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
 
 	handler := maxBodyMiddleware(mux, 1<<20)
@@ -350,6 +365,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"health":     snap,
 		"provenance": version.Current(),
+		// connector_mode reports which guardrail surface the active
+		// connector is running. The TUI uses this to render the
+		// "Observability mode" banner with the right copy and to
+		// hide proxy-related panels (proxy_addr, openai_base_url
+		// override) when enforcement is off. This is the single
+		// source of truth: the proxy's "running / observability-only"
+		// summary in health.proxy mirrors this but the structured
+		// field below is what programmatic consumers (CLI status,
+		// dashboards) should read.
+		"connector_mode": a.connectorModeSummary(),
 	}
 
 	if a.client != nil && a.client.Hello() != nil {
@@ -358,6 +383,68 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, status)
+}
+
+// connectorModeSummary returns the per-connector enforcement /
+// observability mode for the active connector. The shape is:
+//
+//	{
+//	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
+//	  "mode":       "guardrail" | "observability",
+//	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
+//	  "proxy_intercept": true | false,
+//	}
+//
+// "guardrail" means the proxy listener is bound and inline blocking
+// is active; "observability" means traffic is NOT intercepted and
+// the gateway only ingests telemetry. Telemetry channels reflect
+// what Setup() actually wired (hooks always on; otel + notify are
+// codex/claude-only; openclaw/zeptoclaw enumerate "hooks" alone).
+func (a *APIServer) connectorModeSummary() map[string]interface{} {
+	name := a.connectorName()
+	mode := "guardrail"
+	intercept := true
+	telemetry := []string{"hooks"}
+
+	a.cfgMu.RLock()
+	gc := config.GuardrailConfig{}
+	if a.scannerCfg != nil {
+		gc = a.scannerCfg.Guardrail
+	}
+	a.cfgMu.RUnlock()
+
+	switch name {
+	case "codex":
+		if !gc.CodexEnforcementEnabled {
+			mode = "observability"
+			intercept = false
+		}
+		// codex telemetry always wires all three channels (hooks,
+		// the [otel.exporter.otlp-http] block, the notify bridge).
+		// Setup() runs these unconditionally; we only gate proxy
+		// interception on enforcement.
+		telemetry = []string{"hooks", "otel", "notify"}
+	case "claudecode":
+		if !gc.ClaudeCodeEnforcementEnabled {
+			mode = "observability"
+			intercept = false
+		}
+		// Claude Code uses hooks + the OTel env-block; no notify
+		// equivalent (Anthropic doesn't ship a turn-complete shim).
+		telemetry = []string{"hooks", "otel"}
+	default:
+		// openclaw / zeptoclaw / unknown: enforcement is the only
+		// supported mode today. Hooks are wired by the connector;
+		// no native OTel surface from those agents.
+		telemetry = []string{"hooks"}
+	}
+
+	return map[string]interface{}{
+		"connector":       name,
+		"mode":            mode,
+		"telemetry":       telemetry,
+		"proxy_intercept": intercept,
+	}
 }
 
 type skillActionRequest struct {

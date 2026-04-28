@@ -1625,6 +1625,161 @@ env_key = "OPENROUTER_API_KEY"
 	}
 }
 
+// TestCodex_Setup_WritesOtelBlock pins the [otel] block contract: in
+// observability mode the codex connector must register codex's
+// native OTel exporter pointing at the gateway's OTLP-HTTP receiver.
+// Without this, codex's structured logs (raw API request/response,
+// model + token counts, timing) never reach the gateway and the
+// observability story has a hole the hook script alone can't cover.
+//
+// We assert log_user_prompt = false (privacy default; UserPromptSubmit
+// hook captures the prompt text with redaction control) and that the
+// otlp-http endpoint matches the gateway API address. The token
+// header is asserted present and equal to opts.APIToken so the
+// receiver can authenticate the codex CLI process.
+func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
+	defer func() { CodexAuthPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-codex-otel",
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+
+	otelBlock, ok := parsed["otel"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("[otel] block missing — codex's native OTel exporter won't fire (got=%T:\n%s", parsed["otel"], raw)
+	}
+	if v, _ := otelBlock["log_user_prompt"].(bool); v {
+		t.Errorf("log_user_prompt = true in default; should be false (UserPromptSubmit hook captures prompts with redaction)")
+	}
+	exporter, _ := otelBlock["exporter"].(map[string]interface{})
+	if exporter == nil {
+		t.Fatal("[otel.exporter] missing")
+	}
+	otlphttp, _ := exporter["otlp-http"].(map[string]interface{})
+	if otlphttp == nil {
+		t.Fatal("[otel.exporter.otlp-http] missing")
+	}
+	endpoint, _ := otlphttp["endpoint"].(string)
+	if !strings.Contains(endpoint, "127.0.0.1:18970") {
+		t.Errorf("otlp-http endpoint = %q, want gateway API address (127.0.0.1:18970)", endpoint)
+	}
+	if !strings.Contains(endpoint, "/v1/logs") {
+		t.Errorf("otlp-http endpoint = %q, want /v1/logs path (the OTLP-HTTP logs sub-path)", endpoint)
+	}
+	headers, _ := otlphttp["headers"].(map[string]interface{})
+	if headers == nil {
+		t.Fatal("[otel.exporter.otlp-http.headers] missing — receiver auth would fail")
+	}
+	if headers["x-defenseclaw-token"] != "test-token-codex-otel" {
+		t.Errorf("x-defenseclaw-token header = %v, want %q",
+			headers["x-defenseclaw-token"], "test-token-codex-otel")
+	}
+}
+
+// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete
+// telemetry path. Codex shells out to ``notify`` with a JSON arg
+// describing each completed turn (per https://developers.openai.com
+// /codex/config-advanced). Our Setup writes a per-instance bash
+// bridge that POSTs the JSON to /api/v1/codex/notify. Without
+// this wiring, the third independent observability channel (after
+// hooks + OTel) would be dark.
+//
+// Asserts:
+//   - notify-bridge.sh exists at DataDir, mode 0o700 (operator-only)
+//   - bridge body baked the operator-supplied APIToken AND the
+//     gateway notify endpoint (no env-var indirection — codex's
+//     subshell can scrub env)
+//   - config.toml emits notify = ["bash", "<DataDir>/notify-bridge.sh"]
+//     in the canonical TOML array form (codex parses this; a
+//     non-array would silently disable the bridge with no log).
+func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
+	defer func() { CodexAuthPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-codex-notify",
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	bridgePath := filepath.Join(dir, "notify-bridge.sh")
+	info, err := os.Stat(bridgePath)
+	if err != nil {
+		t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
+	}
+	bridge, err := os.ReadFile(bridgePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bridge), "test-token-codex-notify") {
+		t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
+	}
+	if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
+		t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+	}
+
+	// config.toml notify entry must be the array shape codex parses.
+	raw, _ := os.ReadFile(configPath)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+	notify, ok := parsed["notify"].([]interface{})
+	if !ok {
+		t.Fatalf("notify entry not an array (got %T) — codex would silently disable the bridge", parsed["notify"])
+	}
+	if len(notify) != 2 {
+		t.Errorf("notify array has %d entries, want 2 ([bash, bridge.sh]); got %v", len(notify), notify)
+	}
+	if first, _ := notify[0].(string); first != "bash" {
+		t.Errorf("notify[0] = %q, want \"bash\"", first)
+	}
+	if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
+		t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+	}
+}
+
 // TestCodex_Setup_EnablesHooksFeature confirms the connector writes
 // features.codex_hooks = true into config.toml. Without this, Codex
 // ignores any registered hooks because the feature gate defaults to
@@ -3346,6 +3501,130 @@ func TestClaudeCode_Setup_DefaultObservability_NoEnvOverride(t *testing.T) {
 		if _, ok := hooks[evt]; !ok {
 			t.Errorf("hooks.%s missing — telemetry event would be lost", evt)
 		}
+	}
+}
+
+// TestClaudeCode_Setup_WritesOtelEnv pins the OTel env-block contract.
+// Claude Code reads its OTel exporter config from process env vars
+// (https://code.claude.com/docs/en/monitoring-usage). We persist the
+// vars in ~/.claude/settings.json's `env` block so the operator
+// doesn't need to source any shell file. Without this, Claude's
+// structured logs/metrics are never sent and the second
+// observability channel (after hooks) is dark.
+func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-claude-otel",
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+	env, ok := settings["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("settings.env missing — claude won't export OTel vars (got=%T:\n%s", settings["env"], data)
+	}
+
+	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %v, want \"1\"", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
+	}
+	if env["OTEL_LOGS_EXPORTER"] != "otlp" {
+		t.Errorf("OTEL_LOGS_EXPORTER = %v, want \"otlp\"", env["OTEL_LOGS_EXPORTER"])
+	}
+	if env["OTEL_METRICS_EXPORTER"] != "otlp" {
+		t.Errorf("OTEL_METRICS_EXPORTER = %v, want \"otlp\"", env["OTEL_METRICS_EXPORTER"])
+	}
+	endpoint, _ := env["OTEL_EXPORTER_OTLP_ENDPOINT"].(string)
+	if !strings.Contains(endpoint, "127.0.0.1:18970") {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q, want gateway API address", endpoint)
+	}
+	headers, _ := env["OTEL_EXPORTER_OTLP_HEADERS"].(string)
+	if !strings.Contains(headers, "x-defenseclaw-token=test-token-claude-otel") {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing token; got %q", headers)
+	}
+	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
+	}
+	if env["OTEL_SERVICE_NAME"] != "claudecode" {
+		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
+	}
+}
+
+// TestClaudeCode_Setup_PreservesNonOtelEnvKeys guards the partial-
+// merge contract: when the operator has set non-OTel keys in
+// settings.json's env block (e.g. PATH, NODE_OPTIONS), Setup must
+// preserve them verbatim while overlaying our OTel keys. Without
+// this, an OTel patch would silently destroy unrelated overrides.
+func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	pristine := `{
+		"env": {
+			"NODE_OPTIONS": "--max-old-space-size=8192",
+			"PATH": "/custom/bin:/usr/bin"
+		}
+	}`
+	if err := os.WriteFile(settingsPath, []byte(pristine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-tok",
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	if env["NODE_OPTIONS"] != "--max-old-space-size=8192" {
+		t.Errorf("NODE_OPTIONS clobbered: got %v, want pristine value", env["NODE_OPTIONS"])
+	}
+	if env["PATH"] != "/custom/bin:/usr/bin" {
+		t.Errorf("PATH clobbered: got %v, want pristine value", env["PATH"])
+	}
+	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+		t.Errorf("OTel keys not merged in alongside operator keys (got CLAUDE_CODE_ENABLE_TELEMETRY=%v)", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
 }
 

@@ -262,6 +262,14 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	fmt.Printf("  Uptime:   %s\n", formatDuration(uptime))
 	fmt.Println()
 
+	// Best-effort fetch of /status for the connector_mode block.
+	// Failure is non-fatal — the health view above is the primary
+	// status surface and we don't want a missing /status (e.g.
+	// older sidecars without the field) to fail the whole command.
+	if mode := fetchConnectorMode(client, bind, cfg.Gateway.APIPort); mode != nil {
+		printConnectorMode(mode)
+	}
+
 	printSubsystem("Gateway", snap.Gateway)
 	printSubsystem("Watcher", snap.Watcher)
 	printSubsystem("API", snap.API)
@@ -273,6 +281,65 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// connectorModeSummary mirrors the JSON shape emitted by
+// APIServer.connectorModeSummary. We keep the type local to the CLI
+// because it's a UI projection — adding an exported type would
+// pollute the gateway package's API surface for a single consumer.
+type connectorModeSummary struct {
+	Connector      string   `json:"connector"`
+	Mode           string   `json:"mode"`
+	Telemetry      []string `json:"telemetry"`
+	ProxyIntercept bool     `json:"proxy_intercept"`
+}
+
+// fetchConnectorMode does a GET /status and pulls out the
+// connector_mode subobject. Returns nil on any error so callers
+// can degrade gracefully (older gateway versions or transient
+// network failures shouldn't fail the whole status command).
+func fetchConnectorMode(client *http.Client, bind string, port int) *connectorModeSummary {
+	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
+	resp, err := client.Get(addr)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var envelope struct {
+		ConnectorMode *connectorModeSummary `json:"connector_mode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil
+	}
+	return envelope.ConnectorMode
+}
+
+// printConnectorMode renders the per-connector mode banner. Uses the
+// same column alignment as printSubsystem for visual consistency.
+// Mode label color hint:
+//
+//	guardrail     → enforcement (proxy in data path)
+//	observability → telemetry-only (no proxy intercept)
+//
+// We don't ANSI-color the output here because the CLI honors the
+// surrounding terminal preferences (NO_COLOR, dumb terminals); the
+// state words alone are descriptive enough.
+func printConnectorMode(m *connectorModeSummary) {
+	fmt.Println("  Connector Mode")
+	fmt.Printf("    Connector:       %s\n", m.Connector)
+	fmt.Printf("    Mode:            %s\n", m.Mode)
+	if len(m.Telemetry) > 0 {
+		fmt.Printf("    Telemetry:       %s\n", strings.Join(m.Telemetry, ", "))
+	}
+	intercept := "no (traffic flows directly to upstream)"
+	if m.ProxyIntercept {
+		intercept = "yes (proxy in data path)"
+	}
+	fmt.Printf("    Proxy intercept: %s\n", intercept)
+	fmt.Println()
 }
 
 func printSubsystem(name string, h gateway.SubsystemHealth) {

@@ -1855,6 +1855,117 @@ func TestAPIStatusRejectsPost(t *testing.T) {
 	}
 }
 
+// TestAPIStatusEmitsConnectorMode is the headline regression test
+// for the per-connector telemetry surface added with the
+// observability mode work. /api/v1/status MUST include a
+// connector_mode subobject describing:
+//   - which connector is active
+//   - whether enforcement (proxy intercept) is on
+//   - which telemetry channels are wired
+//
+// The TUI / CLI use this to render the right banner; programmatic
+// consumers (dashboards) use it for "is observability on for codex
+// today?" checks. Without this test, a config refactor that drops
+// the Guardrail field plumbing could silently regress the contract
+// and the TUI would render a misleading panel.
+func TestAPIStatusEmitsConnectorMode(t *testing.T) {
+	cases := []struct {
+		name              string
+		connector         string
+		codexEnforce      bool
+		claudeEnforce     bool
+		wantMode          string
+		wantIntercept     bool
+		wantTelemetryAll  []string
+	}{
+		{
+			name:             "codex_observability_default",
+			connector:        "codex",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks", "otel", "notify"},
+		},
+		{
+			name:             "codex_enforcement_explicit",
+			connector:        "codex",
+			codexEnforce:     true,
+			wantMode:         "guardrail",
+			wantIntercept:    true,
+			wantTelemetryAll: []string{"hooks", "otel", "notify"},
+		},
+		{
+			name:             "claudecode_observability_default",
+			connector:        "claudecode",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "claudecode_enforcement_explicit",
+			connector:        "claudecode",
+			claudeEnforce:    true,
+			wantMode:         "guardrail",
+			wantIntercept:    true,
+			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "openclaw_always_guardrail",
+			connector:        "openclaw",
+			wantMode:         "guardrail",
+			wantIntercept:    true,
+			wantTelemetryAll: []string{"hooks"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Connector = c.connector
+			cfg.Guardrail.CodexEnforcementEnabled = c.codexEnforce
+			cfg.Guardrail.ClaudeCodeEnforcementEnabled = c.claudeEnforce
+
+			api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+			req := httptest.NewRequest(http.MethodGet, "/status", nil)
+			w := httptest.NewRecorder()
+			api.handleStatus(w, req)
+
+			if w.Result().StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+			}
+
+			var result map[string]interface{}
+			if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			cm, ok := result["connector_mode"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("connector_mode missing or wrong type: %T", result["connector_mode"])
+			}
+			if cm["connector"] != c.connector {
+				t.Errorf("connector = %v, want %s", cm["connector"], c.connector)
+			}
+			if cm["mode"] != c.wantMode {
+				t.Errorf("mode = %v, want %s", cm["mode"], c.wantMode)
+			}
+			if cm["proxy_intercept"] != c.wantIntercept {
+				t.Errorf("proxy_intercept = %v, want %v", cm["proxy_intercept"], c.wantIntercept)
+			}
+			tel, _ := cm["telemetry"].([]interface{})
+			if len(tel) != len(c.wantTelemetryAll) {
+				t.Errorf("telemetry len = %d, want %d (got %v, want %v)",
+					len(tel), len(c.wantTelemetryAll), tel, c.wantTelemetryAll)
+			}
+			for i, want := range c.wantTelemetryAll {
+				if i >= len(tel) {
+					break
+				}
+				if tel[i] != want {
+					t.Errorf("telemetry[%d] = %v, want %s", i, tel[i], want)
+				}
+			}
+		})
+	}
+}
+
 func TestAPISkillDisableMissingBody(t *testing.T) {
 	_, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), logger: logger}

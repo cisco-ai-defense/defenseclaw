@@ -109,6 +109,19 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
 
+	// patchClaudeCodeOtelEnv writes Claude Code's native OpenTelemetry
+	// env vars into ~/.claude/settings.json's env block (Claude reads
+	// these at process startup, exporting structured logs + metrics
+	// directly to the gateway's OTLP-HTTP receiver). This is the
+	// second independent observability channel after hooks: hooks
+	// give us per-tool-call structured events, OTel gives us raw
+	// model/token/timing telemetry that doesn't fit the hook bus.
+	// Runs unconditionally — telemetry is on by default in both
+	// observability and enforcement modes.
+	if err := c.patchClaudeCodeOtelEnv(opts); err != nil {
+		return fmt.Errorf("claudecode otel env: %w", err)
+	}
+
 	// Subprocess sandbox is part of enforcement: it's consulted by
 	// claude-code-hook.sh's PreToolUse handler to decide whether to
 	// BLOCK a tool call. Skipped in observability mode — the hook
@@ -339,6 +352,18 @@ type claudeCodeBackup struct {
 	HadBaseURL    bool            `json:"had_base_url"`
 	OldBaseURL    string          `json:"old_base_url"`
 	HadHooksKey   bool            `json:"had_hooks_key"`
+
+	// OTel env block backup (set on the very first patch only — see
+	// patchClaudeCodeHooks). HadEnvKey distinguishes "operator had no
+	// env block at all" from "operator had an empty env block": on
+	// Teardown we delete the key entirely in the first case so the
+	// settings.json shape exactly matches the pristine state.
+	// OriginalEnv stores the raw JSON of the operator's env block
+	// (excluding any OTel-prefixed keys we added) so partial overrides
+	// the operator had set on non-OTel keys (e.g. PATH, NODE_OPTIONS)
+	// are preserved verbatim.
+	HadEnvKey   bool            `json:"had_env_key"`
+	OriginalEnv json.RawMessage `json:"original_env,omitempty"`
 }
 
 func (c *ClaudeCodeConnector) saveBackup(dataDir string, backup claudeCodeBackup) error {
@@ -500,6 +525,163 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	})
 }
 
+// claudeCodeOtelEnvKeys is the canonical set of OpenTelemetry-related
+// environment variable names Claude Code consumes (see
+// https://code.claude.com/docs/en/monitoring-usage). We track them by
+// name so Teardown can strip our additions without nuking unrelated
+// operator-set keys, and so backup-on-first-patch preserves the
+// operator's pristine values for any keys we overwrite. Keep this
+// list in sync with the CLAUDE_CODE_* / OTEL_* vars Claude reads.
+var claudeCodeOtelEnvKeys = []string{
+	"CLAUDE_CODE_ENABLE_TELEMETRY",
+	"OTEL_METRICS_EXPORTER",
+	"OTEL_LOGS_EXPORTER",
+	"OTEL_EXPORTER_OTLP_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_HEADERS",
+	"OTEL_RESOURCE_ATTRIBUTES",
+	"OTEL_SERVICE_NAME",
+}
+
+// buildClaudeCodeOtelEnv returns the OTel env vars Claude Code's
+// settings.json should inject into the CLI process env. Endpoint is
+// the gateway's OTLP-HTTP receiver; headers carry the gateway token
+// so the receiver can authenticate the Claude CLI process the same
+// way the hook script does. Service name + resource attributes mark
+// telemetry as originating from a Claude Code process so the gateway
+// can fan out to per-connector dashboards.
+//
+// Privacy note: we set OTEL_LOG_USER_PROMPTS = false equivalent by
+// NOT enabling Claude's prompt-content telemetry — Claude Code's OTel
+// emitter follows its own redaction defaults documented at the
+// monitoring-usage URL above. Operators who want richer prompt logs
+// in OTel must opt in via Claude's own settings flag (separate from
+// our wiring, intentionally).
+func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
+	endpoint := "http://" + opts.APIAddr
+	headers := []string{
+		"x-defenseclaw-source=claudecode",
+		// X-DefenseClaw-Client is required by the gateway's CSRF
+		// gate (apiCSRFProtect rejects POSTs without it). OTel
+		// exporters propagate OTEL_EXPORTER_OTLP_HEADERS verbatim
+		// into every outbound request, so adding it here ensures
+		// claude code's OTel POSTs satisfy the same auth contract
+		// as the python CLI and the inspect hooks.
+		"x-defenseclaw-client=claudecode-otel/1.0",
+	}
+	if opts.APIToken != "" {
+		// OTEL_EXPORTER_OTLP_HEADERS is a comma-separated key=value
+		// list per the spec. URL-encoding is not required for the
+		// token (we generate it from a controlled charset) but we
+		// keep the format strict to match third-party OTel consumers.
+		headers = append(headers, "x-defenseclaw-token="+opts.APIToken)
+	}
+	// Switch to OTLP-JSON over HTTP so the gateway's permissive
+	// JSON receiver (internal/gateway/otel_ingest.go) can decode
+	// the payload without a protobuf dependency. Claude Code
+	// supports both protocols; "http/json" is documented at
+	// https://code.claude.com/docs/en/monitoring-usage and is
+	// the safe default for a forwarder that doesn't have an OTel
+	// SDK on the receive path.
+	return map[string]string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"OTEL_METRICS_EXPORTER":        "otlp",
+		"OTEL_LOGS_EXPORTER":           "otlp",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":  "http/json",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":  endpoint,
+		"OTEL_EXPORTER_OTLP_HEADERS":   strings.Join(headers, ","),
+		"OTEL_SERVICE_NAME":            "claudecode",
+		"OTEL_RESOURCE_ATTRIBUTES":     "service.name=claudecode,defenseclaw.connector=claudecode",
+	}
+}
+
+// patchClaudeCodeOtelEnv merges OpenTelemetry env vars into
+// ~/.claude/settings.json's `env` block. Claude Code reads this
+// block at startup and exports it into the CLI process environment
+// (https://code.claude.com/docs/en/monitoring-usage), so persisting
+// the OTel wiring here means the operator does not need to source
+// any shell file before launching `claude`.
+//
+// Read-modify-write is protected by the same advisory file lock as
+// patchClaudeCodeHooks; concurrent gateway starts will serialize.
+// On first patch (i.e. claudecode_backup.json doesn't yet have an
+// HadEnvKey marker), we capture the operator's pristine env block
+// minus any pre-existing OTel-prefixed keys so Teardown can restore
+// it verbatim. Subsequent patches reuse the captured backup — we
+// never re-snapshot a partially-modified env.
+func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
+	settingsPath := claudeCodeSettingsPath()
+
+	return withFileLock(settingsPath, func() error {
+		settings := map[string]interface{}{}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read claude settings: %w", err)
+		}
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return fmt.Errorf("parse claude settings: %w", err)
+			}
+		}
+
+		existing, _ := settings["env"].(map[string]interface{})
+		if existing == nil {
+			existing = map[string]interface{}{}
+		}
+
+		// Backup: only on first patch. patchClaudeCodeHooks runs
+		// before this method in Setup() and creates the backup file
+		// with HadHooksKey populated; here we augment the SAME
+		// backup with HadEnvKey/OriginalEnv. This keeps the file
+		// single-source-of-truth for Teardown.
+		backup, _ := c.loadBackup(opts.DataDir)
+		if !backup.HadEnvKey && len(backup.OriginalEnv) == 0 {
+			if envRaw, present := settings["env"]; present {
+				envMap, _ := envRaw.(map[string]interface{})
+				pristine := map[string]interface{}{}
+				for k, v := range envMap {
+					if !isClaudeCodeOtelKey(k) {
+						pristine[k] = v
+					}
+				}
+				if raw, err := json.Marshal(pristine); err == nil {
+					backup.OriginalEnv = raw
+				}
+				backup.HadEnvKey = true
+			}
+			if err := c.saveBackup(opts.DataDir, backup); err != nil {
+				return fmt.Errorf("save claudecode backup (otel env): %w", err)
+			}
+		}
+
+		// Overwrite our OTel keys with current values. Operator-set
+		// keys outside our list (PATH, NODE_OPTIONS, etc.) are
+		// preserved verbatim — we never touch them.
+		for k, v := range buildClaudeCodeOtelEnv(opts) {
+			existing[k] = v
+		}
+		settings["env"] = existing
+
+		out, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal claude settings (otel env): %w", err)
+		}
+		return atomicWriteFile(settingsPath, out, 0o644)
+	})
+}
+
+// isClaudeCodeOtelKey reports whether an env-var name belongs to the
+// OTel-related set this connector manages. Used both for backup-time
+// filtering and for Teardown stripping.
+func isClaudeCodeOtelKey(name string) bool {
+	for _, k := range claudeCodeOtelEnvKeys {
+		if name == k {
+			return true
+		}
+	}
+	return false
+}
+
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
 // Uses file locking to match patchClaudeCodeHooks and prevent corruption.
 func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
@@ -529,6 +711,34 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			settings["hooks"] = orig
 		} else {
 			delete(settings, "hooks")
+		}
+
+		// Restore env: strip our OTel keys (always), then either
+		// merge back the operator's pristine env block or drop the
+		// key entirely. Non-OTel keys the operator added AFTER our
+		// patch are preserved — restoring blindly would erase them,
+		// which is more destructive than leaving them in place.
+		if envMap, ok := settings["env"].(map[string]interface{}); ok {
+			for _, k := range claudeCodeOtelEnvKeys {
+				delete(envMap, k)
+			}
+			if backup.HadEnvKey && len(backup.OriginalEnv) > 0 {
+				var orig map[string]interface{}
+				if err := json.Unmarshal(backup.OriginalEnv, &orig); err == nil {
+					for k, v := range orig {
+						if _, present := envMap[k]; !present {
+							envMap[k] = v
+						}
+					}
+				}
+				settings["env"] = envMap
+			} else if len(envMap) == 0 {
+				// Pristine state had no env block AND there are no
+				// operator-added non-OTel keys: drop entirely.
+				delete(settings, "env")
+			} else {
+				settings["env"] = envMap
+			}
 		}
 
 		out, err := json.MarshalIndent(settings, "", "  ")

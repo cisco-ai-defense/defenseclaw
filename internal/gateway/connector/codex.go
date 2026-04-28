@@ -593,6 +593,24 @@ type codexConfigBackup struct {
 	// during Setup. Teardown only clears the flag if we were the ones
 	// who set it.
 	AddedCodexHooksFlag bool `json:"added_codex_hooks_flag"`
+
+	// HadOtelBlock / OriginalOtel back up the operator's pristine
+	// [otel] block. Setup overwrites this with our own
+	// {log_user_prompt = false, exporter = otlp-http to gateway},
+	// regardless of enforcement mode (OTel telemetry runs end-to-end
+	// in observability mode too — that's the whole point of the
+	// observability default). Teardown restores the original or
+	// deletes the key if there was none.
+	HadOtelBlock bool            `json:"had_otel_block"`
+	OriginalOtel json.RawMessage `json:"original_otel,omitempty"`
+
+	// HadNotify / OriginalNotify back up the operator's pristine
+	// notify = [...] entry. Setup overwrites with
+	// notify = ["bash", "<DataDir>/notify-bridge.sh"] so codex
+	// agent-turn-complete events flow to /api/v1/codex/notify.
+	// Teardown restores or deletes.
+	HadNotify      bool            `json:"had_notify"`
+	OriginalNotify json.RawMessage `json:"original_notify,omitempty"`
 }
 
 func (c *CodexConnector) saveConfigBackup(dataDir string, backup codexConfigBackup) error {
@@ -665,6 +683,22 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if existing, ok := cfg["openai_base_url"].(string); ok {
 			backup.HadOpenAIBaseURL = true
 			backup.OriginalOpenAIBaseURL = existing
+		}
+		// Capture pristine [otel] and notify so Teardown can restore
+		// either verbatim or delete-if-we-added. Both run on every
+		// install (observability + enforcement) — see the comments on
+		// HadOtelBlock / HadNotify in codexConfigBackup.
+		if existing, ok := cfg["otel"]; ok {
+			backup.HadOtelBlock = true
+			if raw, err := json.Marshal(existing); err == nil {
+				backup.OriginalOtel = raw
+			}
+		}
+		if existing, ok := cfg["notify"]; ok {
+			backup.HadNotify = true
+			if raw, err := json.Marshal(existing); err == nil {
+				backup.OriginalNotify = raw
+			}
 		}
 		if providers, ok := cfg["model_providers"].(map[string]interface{}); ok {
 			for name, p := range providers {
@@ -874,6 +908,26 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	features["codex_hooks"] = true
 	cfg["features"] = features
 
+	// Native OTel exporter — runs on every install regardless of
+	// enforcement mode. Codex's [otel] block produces structured
+	// logs (raw API request/response, model + token counts) and
+	// metrics that complement the hook-based event stream. The
+	// /v1/logs and /v1/metrics endpoints on the gateway's API port
+	// receive the OTLP-HTTP payload and normalize into
+	// gateway.jsonl with source="codex_otel".
+	cfg["otel"] = buildCodexOtelBlock(opts)
+
+	// agent-turn-complete bridge: codex shells out to ``notify`` with
+	// a JSON payload describing each completed turn. We point it at a
+	// per-instance bash bridge that POSTs to /api/v1/codex/notify.
+	// Runs on every install — the bridge is harmless when the
+	// endpoint isn't yet wired (curl --fail-with-body silently drops
+	// the event rather than crashing codex).
+	if err := writeCodexNotifyBridge(opts); err != nil {
+		return fmt.Errorf("write codex notify bridge: %w", err)
+	}
+	cfg["notify"] = []string{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
+
 	if !backupExists {
 		if err := c.saveConfigBackup(opts.DataDir, backup); err != nil {
 			return fmt.Errorf("save codex config backup: %w", err)
@@ -980,6 +1034,104 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 	return out
 }
 
+// buildCodexOtelBlock returns the [otel] table that points codex's
+// native OTel exporter at the gateway's OTLP-HTTP receiver. The shape
+// matches codex's documented config (see
+// https://developers.openai.com/codex/config-advanced):
+//
+//	[otel]
+//	log_user_prompt = false
+//	[otel.exporter.otlp-http]
+//	endpoint = "http://127.0.0.1:18970/v1/logs"
+//	headers = { x-defenseclaw-token = "<token>" }
+//
+// log_user_prompt = false is the privacy-preserving default: codex's
+// native OTel emits prompt text only when this is true. We capture
+// the prompt text via the UserPromptSubmit hook instead, which gives
+// us per-prompt audit + redaction control. Operators who want raw
+// prompts in OTel too can flip the value in config.toml after
+// Setup runs — Teardown's restore preserves that override.
+//
+// Headers carry the gateway token so the OTLP-HTTP receiver can
+// authenticate the codex CLI process the same way the hook script
+// does. The header name is intentionally NOT "Authorization" so the
+// receiver can distinguish OTel traffic from hook/REST traffic in
+// audit logs.
+func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
+	endpoint := "http://" + opts.APIAddr + "/v1/logs"
+	headers := map[string]interface{}{}
+	if opts.APIToken != "" {
+		headers["x-defenseclaw-token"] = opts.APIToken
+	}
+	headers["x-defenseclaw-source"] = "codex"
+	// X-DefenseClaw-Client satisfies the gateway's CSRF gate
+	// (apiCSRFProtect) which rejects POSTs without it. The
+	// header is the same one the CLI and inspect hooks set —
+	// codex's OTel exporter merges it into every outbound POST.
+	headers["x-defenseclaw-client"] = "codex-otel/1.0"
+	return map[string]interface{}{
+		"log_user_prompt": false,
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": endpoint,
+				"headers":  headers,
+			},
+		},
+	}
+}
+
+// writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the
+// shell shim codex invokes on agent-turn-complete. The script POSTs
+// codex's JSON arg to /api/v1/codex/notify with the gateway token
+// baked in. We use ``--max-time 5`` and ``--silent --show-error``
+// so a transient gateway outage doesn't make codex's notify chain
+// hang or print noise to the operator's terminal — telemetry is
+// best-effort, the agent's UX is not.
+//
+// Per-instance script (lives under DataDir, owned 0o700) so a
+// multi-tenant install can have one notify-bridge per gateway
+// process. The token is baked in rather than read from the
+// environment because codex spawns the bridge as a subshell and
+// the host's environment may scrub DEFENSECLAW_GATEWAY_TOKEN.
+func writeCodexNotifyBridge(opts SetupOpts) error {
+	scriptPath := filepath.Join(opts.DataDir, "notify-bridge.sh")
+	endpoint := "http://" + opts.APIAddr + "/api/v1/codex/notify"
+	body := "#!/usr/bin/env bash\n" +
+		"# Auto-generated by defenseclaw setup guardrail. DO NOT EDIT.\n" +
+		"# Codex invokes this bridge on agent-turn-complete with a single\n" +
+		"# JSON arg. We forward to the gateway notify endpoint with the\n" +
+		"# baked-in token; outages are silent (telemetry is best-effort).\n" +
+		"set -u\n" +
+		"JSON=\"${1:-}\"\n" +
+		"if [ -z \"${JSON}\" ]; then\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"curl --silent --show-error --max-time 5 \\\n" +
+		"  --header 'Content-Type: application/json' \\\n" +
+		// Authorization: Bearer is the canonical credential the
+		// gateway's tokenAuth middleware checks first (with
+		// X-DefenseClaw-Token as a fallback). Using the standard
+		// header keeps the bridge interoperable with curl/proxy
+		// debugging and matches the python CLI / inspect-hook
+		// auth contract.
+		"  --header 'Authorization: Bearer " + opts.APIToken + "' \\\n" +
+		// X-DefenseClaw-Client is required by the gateway's CSRF gate;
+		// without it apiCSRFProtect 403s the POST. inspect-tool-response
+		// and the python CLI set the same header; the value is purely
+		// observational (logged in audit).
+		"  --header 'X-DefenseClaw-Client: codex-notify/1.0' \\\n" +
+		"  --header 'x-defenseclaw-source: codex-notify' \\\n" +
+		"  --data \"${JSON}\" \\\n" +
+		"  '" + endpoint + "' >/dev/null 2>&1 || true\n"
+	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
+		return fmt.Errorf("ensure data dir: %w", err)
+	}
+	if err := atomicWriteFile(scriptPath, []byte(body), 0o700); err != nil {
+		return fmt.Errorf("write notify bridge: %w", err)
+	}
+	return nil
+}
+
 // isCodexReservedProviderID reports whether name is one of the
 // built-in provider IDs Codex 5.x rejects under [model_providers.*].
 // See codexReservedProviderIDs for the full list and rationale.
@@ -1080,6 +1232,31 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		}
 	}
 
+	// Restore the operator's pristine [otel] block. Either replace
+	// our gateway-pointed entry with the original or delete the key
+	// entirely. The same applies to notify.
+	if backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
+		var orig interface{}
+		if err := json.Unmarshal(backup.OriginalOtel, &orig); err == nil {
+			cfg["otel"] = orig
+		} else {
+			delete(cfg, "otel")
+		}
+	} else {
+		delete(cfg, "otel")
+	}
+
+	if backup.HadNotify && len(backup.OriginalNotify) > 0 {
+		var orig interface{}
+		if err := json.Unmarshal(backup.OriginalNotify, &orig); err == nil {
+			cfg["notify"] = orig
+		} else {
+			delete(cfg, "notify")
+		}
+	} else {
+		delete(cfg, "notify")
+	}
+
 	if out, err := toml.Marshal(cfg); err == nil {
 		// Best-effort restore path: if rewrite fails we leave the
 		// existing (already-patched) config in place rather than the
@@ -1089,8 +1266,10 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	}
 
 	// Remove any stale hooks.json from an earlier version that
-	// mistakenly used the file-path approach.
+	// mistakenly used the file-path approach, plus the notify bridge
+	// shim we wrote in Setup.
 	hooksPath := filepath.Join(filepath.Dir(configPath), "hooks.json")
 	_ = os.Remove(hooksPath)
+	_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
 	_ = os.Remove(filepath.Join(opts.DataDir, "codex_config_backup.json"))
 }
