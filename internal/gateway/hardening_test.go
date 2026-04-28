@@ -617,6 +617,7 @@ func TestProxyNotificationInjectSuccess(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	proxy.handleChatCompletion(rec, req)

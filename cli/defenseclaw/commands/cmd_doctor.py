@@ -1312,4 +1312,4 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     backup_path = os.path.join(cfg.data_dir, backup_name)
     if os.path.isfile(backup_path):
         return ("skip", f"backup exists at {backup_path}")
-    return ("skip", f"no backup found — run `defenseclaw setup guardrail` to create one")
+    return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
