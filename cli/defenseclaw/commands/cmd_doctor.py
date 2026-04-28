@@ -1028,15 +1028,28 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
+
+    # S6.5 — surface the active connector + its configured paths
+    # before any scanner runs. Operators routinely point doctor at a
+    # config that *thinks* it's running on (say) Codex but actually
+    # has stale openclaw.json paths under .openclaw/extensions; a
+    # per-connector inventory pass catches that drift.
+    if not json_out:
+        click.echo()
+        click.echo("  ── Connector ──")
+    active_connector = _active_connector(cfg)
+    _check_connector_inventory(cfg, active_connector, r)
+
     if not json_out:
         click.echo()
         click.echo("  ── Scanners ──")
     _check_scanners(cfg, r)
+    _check_scan_coverage(cfg, r)
+
     if not json_out:
         click.echo()
         click.echo("  ── Services ──")
     _check_sidecar(cfg, r)
-    active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
     if active_connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
     elif active_connector == "claudecode":
@@ -1172,6 +1185,126 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
             _emit(tag, f"fix: {title}", detail=detail, r=r)
 
 
+def _active_connector(cfg) -> str:
+    """Return the active connector name in lowercase.
+
+    Prefer the unified ``Config.active_connector()`` from S4.1 — it
+    handles the legacy ``guardrail.connector`` field plus the
+    ``claw.mode`` fallback the same way the rest of the CLI does.
+    Falls back to ``"openclaw"`` for older configs that predate the
+    method.
+    """
+    if hasattr(cfg, "active_connector"):
+        try:
+            return (cfg.active_connector() or "openclaw").lower()
+        except Exception:
+            pass
+    return (getattr(getattr(cfg, "guardrail", None), "connector", "")
+            or "openclaw").lower()
+
+
+_CONNECTOR_LABELS = {
+    "openclaw": "OpenClaw",
+    "claudecode": "Claude Code",
+    "codex": "Codex",
+    "zeptoclaw": "ZeptoClaw",
+}
+
+
+def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
+    """Surface the active connector and the directories it points at.
+
+    Each connector has its own conventions for where skills, plugins,
+    and MCP server registrations live. ``Config.skill_dirs()`` /
+    ``plugin_dirs()`` / ``mcp_servers()`` are now polymorphic per
+    connector (S4.1), so this check makes that mapping visible to the
+    operator: if Codex is active but skill_dirs() still points at
+    ``~/.openclaw/skills``, that's a config bug doctor should flag.
+    """
+    label = _CONNECTOR_LABELS.get(connector, connector)
+    if connector not in _CONNECTOR_LABELS:
+        _emit(
+            "warn", "Active connector",
+            f"unknown connector {connector!r} — known: "
+            + ", ".join(sorted(_CONNECTOR_LABELS)),
+            r=r,
+        )
+    else:
+        _emit("pass", "Active connector", label, r=r)
+
+    # Skill dirs.
+    try:
+        sdirs = cfg.skill_dirs() if hasattr(cfg, "skill_dirs") else []
+    except Exception as exc:
+        _emit("warn", "Skill paths", f"could not enumerate: {exc}", r=r)
+        sdirs = []
+    if sdirs:
+        existing = sum(1 for d in sdirs if os.path.isdir(d))
+        detail = f"{existing}/{len(sdirs)} present — " + ", ".join(sdirs)
+        if existing == 0:
+            _emit("warn", "Skill paths", detail, r=r)
+        else:
+            _emit("pass", "Skill paths", detail, r=r)
+    else:
+        _emit("skip", "Skill paths", f"no skill dirs configured for {label}", r=r)
+
+    # Plugin dirs.
+    try:
+        pdirs = cfg.plugin_dirs() if hasattr(cfg, "plugin_dirs") else []
+    except Exception as exc:
+        _emit("warn", "Plugin paths", f"could not enumerate: {exc}", r=r)
+        pdirs = []
+    if pdirs:
+        existing = sum(1 for d in pdirs if os.path.isdir(d))
+        detail = f"{existing}/{len(pdirs)} present — " + ", ".join(pdirs)
+        if existing == 0:
+            _emit("warn", "Plugin paths", detail, r=r)
+        else:
+            _emit("pass", "Plugin paths", detail, r=r)
+    else:
+        _emit("skip", "Plugin paths", f"no plugin dirs configured for {label}", r=r)
+
+    # MCP servers.
+    try:
+        servers = cfg.mcp_servers() if hasattr(cfg, "mcp_servers") else []
+    except Exception as exc:
+        _emit("warn", "MCP servers", f"could not enumerate: {exc}", r=r)
+        servers = []
+    count = len(servers)
+    if count:
+        names = ", ".join(s.name for s in servers[:5])
+        more = f" (+{count - 5} more)" if count > 5 else ""
+        _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
+    else:
+        _emit("skip", "MCP servers", "no MCP servers registered", r=r)
+
+
+def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
+    """Advertise what each scanner will check.
+
+    Mirrors the bullet list rendered by ``_scan_ui.render_preamble``
+    so operators see the *same* category contract from doctor as
+    they see when they actually run the scanner. Anything we can't
+    look up via :func:`_scan_ui.categories_for` falls through as
+    SKIP — the helper is the source of truth.
+    """
+    del cfg  # unused: categories are static per component
+    from defenseclaw.commands import _scan_ui
+
+    for component in _scan_ui.supported_components():
+        cats = _scan_ui.categories_for(component)
+        label = _scan_ui._COMPONENT_LABELS.get(  # type: ignore[attr-defined]
+            component, (component, component + "s"),
+        )[0]
+        if cats:
+            _emit(
+                "pass", f"Scanner coverage ({label})",
+                "; ".join(cats), r=r,
+            )
+        else:
+            _emit("skip", f"Scanner coverage ({label})", "no categories registered", r=r)
+
+
 def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
     """Remove a ``gateway.pid`` file whose recorded PID is no longer alive."""
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
@@ -1214,7 +1347,7 @@ def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
 
 def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
     """Re-sync gateway token from the active connector's config."""
-    active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
+    active_connector = _active_connector(cfg)
 
     if active_connector == "openclaw":
         from defenseclaw.commands.cmd_setup import (
@@ -1281,7 +1414,7 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     the data directory.
     """
     del assume_yes  # unused: capturing a snapshot is always safe
-    active_connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
+    active_connector = _active_connector(cfg)
 
     if active_connector == "openclaw":
         from defenseclaw.guardrail import (
