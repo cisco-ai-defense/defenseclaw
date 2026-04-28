@@ -26,13 +26,6 @@ jobs:
 
       - uses: anchore/sbom-action/download-syft@v0
 
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.13"
@@ -41,12 +34,52 @@ jobs:
         with:
           node-version: "20"
 
+      # GoReleaser builds, signs, generates SBOMs, and publishes the Homebrew
+      # cask, but does NOT create the GitHub release (release.disable: true in
+      # .goreleaser.yaml). This is required because the repository has
+      # "Immutable releases" enabled, which rejects post-create asset uploads.
+      - name: Build artifacts with GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build CLI wheel and plugin tarball
         run: |
           make dist-cli
           make dist-plugin
 
-      - name: Upload CLI and plugin to release
+      # Create the GitHub release atomically with every asset attached at
+      # creation time. Immutable releases freeze immediately on create, so all
+      # assets must be supplied in this single API call.
+      - name: Publish GitHub release with all assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF#refs/tags/}" dist/*.whl dist/defenseclaw-plugin-*.tar.gz
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          shopt -s nullglob
+          assets=(
+            dist/*.tar.gz
+            dist/*.sbom.json
+            dist/checksums.txt
+            dist/checksums.txt.sig
+            dist/checksums.txt.pem
+            dist/*.whl
+          )
+
+          notes_args=()
+          if [ -f dist/CHANGELOG.md ]; then
+            notes_args=(--notes-file dist/CHANGELOG.md)
+          else
+            notes_args=(--generate-notes)
+          fi
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            "${notes_args[@]}" \
+            "${assets[@]}"
