@@ -213,8 +213,8 @@ runtime_action := "allow" if {
 		},
 		"scanner_overrides": map[string]interface{}{},
 		"first_party_allow_list": []map[string]interface{}{
-			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": []string{".defenseclaw", ".openclaw/extensions"}},
-			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": []string{".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills"}},
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": []string{".defenseclaw", ".openclaw/extensions", ".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin"}},
+			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": []string{".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills", ".codex/skills"}},
 		},
 	}
 
@@ -447,6 +447,72 @@ func TestEngine_Compile(t *testing.T) {
 	}
 	if err := eng.Compile(); err != nil {
 		t.Errorf("compile failed: %v", err)
+	}
+}
+
+// TestEngine_FirstPartyAllowList_AllConnectorPaths is the regression
+// test for S3.2 / F10. Before that change the first-party
+// allow-list only knew about the OpenClaw skill paths
+// (.openclaw/workspace/skills, .openclaw/skills), so the codeguard
+// skill scanned from a Codex / Claude Code / ZeptoClaw home would
+// fall through to the standard severity-action rules and get
+// quarantined under strict policy. The fix extends
+// source_path_contains to cover all four built-in connectors plus
+// the bare ~/.defenseclaw/ install location.
+//
+// The test drives the Rego engine end-to-end so a future refactor
+// that splits the allow-list out of policies/strict.yaml without
+// keeping data.json in sync still trips this assertion.
+func TestEngine_FirstPartyAllowList_AllConnectorPaths(t *testing.T) {
+	dir := setupRegoDir(t)
+	eng, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One representative path per connector home. We include both the
+	// "extensions" (plugin) and "skills" (skill) flavors so a future
+	// path drift on either axis is caught here, not deeper in the
+	// scanner where the failure mode is "everything blocks under
+	// strict".
+	cases := []struct {
+		name       string
+		targetType string
+		targetName string
+		path       string
+	}{
+		{"openclaw_skill", "skill", "codeguard", "/tmp/.openclaw/skills/codeguard"},
+		{"openclaw_workspace_skill", "skill", "codeguard", "/tmp/.openclaw/workspace/skills/codeguard"},
+		{"zeptoclaw_skill", "skill", "codeguard", "/tmp/.zeptoclaw/skills/codeguard"},
+		{"claudecode_skill", "skill", "codeguard", "/tmp/.claude/skills/codeguard"},
+		{"codex_skill", "skill", "codeguard", "/tmp/.codex/skills/codeguard"},
+		{"openclaw_plugin", "plugin", "defenseclaw", "/tmp/.openclaw/extensions/defenseclaw"},
+		{"zeptoclaw_plugin", "plugin", "defenseclaw", "/tmp/.zeptoclaw/extensions/defenseclaw"},
+		{"claudecode_plugin", "plugin", "defenseclaw", "/tmp/.claude/extensions/defenseclaw"},
+		{"codex_plugin", "plugin", "defenseclaw", "/tmp/.codex/extensions/defenseclaw"},
+		{"defenseclaw_root", "skill", "codeguard", "/tmp/.defenseclaw/skills/codeguard"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := eng.Evaluate(context.Background(), AdmissionInput{
+				TargetType: tc.targetType,
+				TargetName: tc.targetName,
+				Path:       tc.path,
+				ScanResult: &ScanResultInput{MaxSeverity: "MEDIUM", TotalFindings: 1},
+			})
+			if err != nil {
+				t.Fatalf("Evaluate(%s): %v", tc.path, err)
+			}
+			// allow_list_bypass_scan=true in setupRegoDir, so the
+			// allow-list match should produce verdict=allowed
+			// instead of warning/blocked.
+			if out.Verdict != "allowed" {
+				t.Errorf("verdict for %s=%q at %s: got %q, want allowed (path not in first_party_allow_list?)",
+					tc.targetType, tc.targetName, tc.path, out.Verdict)
+			}
+		})
 	}
 }
 
