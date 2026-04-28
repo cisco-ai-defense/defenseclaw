@@ -1714,6 +1714,456 @@ def setup_guardrail(
         )
 
 
+# ---------------------------------------------------------------------------
+# setup codex / setup claude-code  —  observability-only aliases
+# ---------------------------------------------------------------------------
+#
+# These are thin wrappers around the existing observability-only branch
+# of ``setup guardrail``. They exist because operators who only want
+# telemetry (no traffic interception, no enforcement) currently have to
+# walk through the full ``setup guardrail`` wizard, answer "yes" to a
+# single confirm, and trust that the wizard does the right thing under
+# the hood. The aliases shortcut that:
+#
+#   defenseclaw setup codex          → observability-only for Codex
+#   defenseclaw setup claude-code    → observability-only for Claude Code
+#
+# Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
+# (skill scanner, MCP scanner, plugin scanner, overview panels) reads
+# from the matching connector's source-of-truth files (``~/.codex`` or
+# ``~/.claude``) instead of OpenClaw's default ``~/.openclaw`` layout.
+# Without this flip, ``defenseclaw scan skills`` after ``setup codex``
+# would scan ``~/.openclaw/skills`` and miss every Codex skill — a
+# foot-gun we explicitly want to close.
+#
+# Enforcement (proxy data path, blocking) stays disabled. Operators who
+# later want to engage enforcement edit
+# ``guardrail.codex_enforcement_enabled`` /
+# ``guardrail.claudecode_enforcement_enabled`` in ~/.defenseclaw/config.yaml
+# and restart the gateway — see docs/OBSERVABILITY.md §9.
+
+# Stable hint filename used by ``defenseclaw setup guardrail`` and
+# ``defenseclaw quickstart`` to default the connector picker after a
+# fresh install. Mirrors the ``picked_connector`` constant baked into
+# scripts/install.sh — keeping these in sync means re-running the
+# alias commands here updates the hint just like the installer would.
+_PICKED_CONNECTOR_FILENAME = "picked_connector"
+
+
+def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
+    """Persist *connector* as the install-time picked-connector hint.
+
+    Writes ``<data_dir>/picked_connector`` atomically (tmp file +
+    ``os.replace``). Failures are non-fatal and surface as a warning —
+    a stale hint never blocks setup, it only affects the *default*
+    selected by future ``defenseclaw setup guardrail`` invocations.
+
+    The bound on contents is intentional: the file is one short word
+    (``codex`` / ``claudecode`` / ``openclaw`` / ``zeptoclaw``) and
+    ``_read_picked_connector`` rejects anything outside ``_CONNECTOR_NAMES``,
+    so even a corrupted write can never escalate to remote code paths.
+    """
+    if not data_dir:
+        return
+    if connector not in _CONNECTOR_NAMES:
+        return
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        path = os.path.join(data_dir, _PICKED_CONNECTOR_FILENAME)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(connector + "\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        click.echo(
+            f"  ⚠ Failed to update picked_connector hint: {exc}",
+            err=True,
+        )
+
+
+def _apply_connector_observability_only(
+    app: AppContext,
+    *,
+    connector: str,
+    restart: bool,
+) -> bool:
+    """Pin DefenseClaw to *connector* in observability-only mode.
+
+    Idempotent: running twice yields the same on-disk state. The
+    function:
+
+      1. Sets ``guardrail.connector`` and ``claw.mode`` to *connector*
+         so the active-connector resolver
+         (``Config.active_connector``) returns *connector* even if a
+         future ``guardrail.enabled = false`` toggle is applied.
+      2. Disables the matching enforcement flag
+         (``gc.codex_enforcement_enabled`` / ``gc.claudecode_enforcement_enabled``)
+         so the Go gateway's ``Connector.Setup()`` skips proxy
+         binding, openai_base_url / ANTHROPIC_BASE_URL rewriting, and
+         the subprocess-policy enforcement that come bundled with
+         "guardrail" mode for these connectors.
+      3. Sets ``gc.enabled=True``, ``gc.mode='observe'``,
+         ``gc.scanner_mode='local'``, ``gc.detection_strategy='regex_only'``
+         — sensible defaults so the YAML stays loadable if the
+         operator later flips enforcement on. The Go gateway never
+         reads these in observability mode.
+      4. Persists config.yaml and writes the
+         ``<data_dir>/picked_connector`` hint.
+      5. When ``restart`` is true, bounces the gateway so its
+         ``Connector.Setup()`` wires hooks + native OTel exporter +
+         (codex only) the notify bridge against the running sidecar.
+
+    Returns True on success, False on any persistence error.
+    """
+    if connector not in ("codex", "claudecode"):
+        click.echo(
+            f"  ✗ observability-only mode is only supported for "
+            f"codex/claudecode (got {connector!r})",
+            err=True,
+        )
+        return False
+
+    cfg = app.cfg
+    gc = cfg.guardrail
+
+    cfg.claw.mode = connector
+    gc.connector = connector
+    gc.enabled = True
+    gc.mode = "observe"
+    gc.scanner_mode = "local"
+    gc.port = gc.port or 4000
+    gc.detection_strategy = "regex_only"
+    gc.detection_strategy_completion = "regex_only"
+    gc.judge.enabled = False
+
+    if connector == "codex":
+        gc.codex_enforcement_enabled = False
+    else:
+        gc.claudecode_enforcement_enabled = False
+
+    try:
+        cfg.save()
+        click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    except OSError as exc:
+        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        return False
+
+    _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
+    click.echo(f"  ✓ Active connector set to {connector!r} (claw.mode={connector})")
+
+    _write_guardrail_runtime(cfg.data_dir, gc)
+
+    if restart:
+        click.echo()
+        click.echo("  Restarting gateway to wire connector telemetry...")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=connector,
+        )
+        click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-connector-observability",
+            "config",
+            f"connector={connector} mode=observability_only enforcement=disabled",
+        )
+
+    return True
+
+
+def _print_connector_observability_banner(connector: str) -> None:
+    label = _CONNECTOR_META[connector]["label"]
+    enforcement_flag = (
+        "codex_enforcement_enabled"
+        if connector == "codex"
+        else "claudecode_enforcement_enabled"
+    )
+    click.echo()
+    click.echo(f"  DefenseClaw — {label} observability setup")
+    click.echo("  ─────────────────────────────────────────────────────────")
+    click.echo()
+    click.echo(f"  This wires {label} telemetry into DefenseClaw WITHOUT")
+    click.echo("  inserting a proxy in the data path. No traffic is")
+    click.echo("  intercepted, no requests are blocked.")
+    click.echo()
+    click.echo("  Telemetry channels:")
+    click.echo(
+        "    • Hooks      — tool calls, prompt-submit, agent stop "
+        f"→ /api/v1/{connector}/hook"
+    )
+    click.echo(
+        "    • Native OTel — model + token counts, raw API bodies "
+        "→ /v1/logs and /v1/metrics"
+    )
+    if connector == "codex":
+        click.echo(
+            "    • Notify     — agent-turn-complete events "
+            "→ /api/v1/codex/notify"
+        )
+    click.echo()
+    click.echo(f"  To later turn enforcement on, set guardrail.{enforcement_flag}=true")
+    click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+    click.echo()
+
+
+def _print_observability_summary(connector: str) -> None:
+    """One-screen summary surfaced after a successful alias run."""
+    label = _CONNECTOR_META[connector]["label"]
+    click.echo()
+    click.echo("  Summary")
+    click.echo("  ───────")
+    rows = [
+        ("connector", f"{label} ({connector})"),
+        ("claw.mode", connector),
+        ("guardrail.enabled", "true (observability-only)"),
+        ("guardrail.mode", "observe"),
+        ("enforcement", "disabled"),
+    ]
+    for k, v in rows:
+        click.echo(f"    {k + ':':<22s} {v}")
+    click.echo()
+    click.echo("  Next steps:")
+    click.echo(
+        "    • Verify gateway picked up the new connector: "
+        "defenseclaw-gateway status"
+    )
+    click.echo(
+        "    • Optionally launch the bundled local stack: "
+        "defenseclaw setup local-observability up"
+    )
+    click.echo(
+        f"    • Tail audit events for the new connector: "
+        f"defenseclaw audit tail --connector {connector}"
+    )
+    click.echo()
+    click.echo("  To revert and restore direct LLM access:")
+    click.echo("    defenseclaw setup guardrail --disable")
+    click.echo()
+
+
+def _local_observability_already_up(data_dir: str) -> bool:
+    """Best-effort check: are the bundled stack containers already running?
+
+    We probe the Grafana port — the cheapest signal that ``setup
+    local-observability up`` has run successfully. False positives are
+    benign (we'll just call ``up`` again, which is idempotent), but we
+    err on "skip the auto-up" when uncertain so we don't shadow a
+    pre-existing operator-managed stack.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.25)
+            return s.connect_ex(("127.0.0.1", 3000)) == 0
+    except OSError:
+        return False
+
+
+def _maybe_bring_up_local_stack(app: AppContext, *, auto: bool) -> None:
+    """Optionally bootstrap the bundled local OTel stack.
+
+    Honours ``--with-local-stack`` (auto=True) by invoking the existing
+    ``local_observability up`` Click command in-process. We never run
+    it in non-interactive mode without an explicit flag — Docker
+    starts are heavyweight, can fail noisily, and we don't want a
+    quick ``setup codex --non-interactive`` to hang for 30s in CI.
+    """
+    if not auto:
+        return
+
+    if _local_observability_already_up(app.cfg.data_dir):
+        click.echo(
+            "  ✓ Local observability stack already reachable on :3000 "
+            "(skipping `up`)"
+        )
+        return
+
+    try:
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            up_cmd,
+        )
+    except ImportError as exc:
+        click.echo(
+            f"  ⚠ Could not load local-observability bridge: {exc}",
+            err=True,
+        )
+        return
+
+    click.echo()
+    click.echo("  Bringing up bundled local observability stack...")
+    ctx = click.get_current_context()
+    try:
+        ctx.invoke(
+            up_cmd,
+            timeout=180,
+            no_wait=False,
+            no_config=False,
+            endpoint=None,
+            signals="traces,metrics,logs",
+            service_name="defenseclaw",
+            with_audit_sink=True,
+        )
+    except SystemExit:
+        # ``up_cmd`` raises SystemExit(1) on Docker preflight failure.
+        # Don't propagate — observability mode is still useful without
+        # the local stack (operators can target a remote SIEM via
+        # ``defenseclaw setup observability add ...``). Just warn.
+        click.echo(
+            "  ⚠ Local stack failed to start; continuing without it. "
+            "Re-run `defenseclaw setup local-observability up` after "
+            "fixing Docker.",
+            err=True,
+        )
+
+
+def _setup_observability_alias(
+    app: AppContext,
+    *,
+    connector: str,
+    yes: bool,
+    restart: bool,
+    with_local_stack: bool,
+) -> None:
+    """Shared body for ``setup codex`` and ``setup claude-code``.
+
+    Splitting this out (rather than calling each Click command from
+    the other) keeps the wiring linear: each Click command parses its
+    own flags, then defers to this helper for the actual work.
+    """
+    if connector not in ("codex", "claudecode"):
+        raise click.ClickException(
+            f"unsupported connector for observability alias: {connector!r}"
+        )
+
+    _print_connector_observability_banner(connector)
+
+    if not yes:
+        if not click.confirm(
+            f"  Configure DefenseClaw for {_CONNECTOR_META[connector]['label']} "
+            "observability now?",
+            default=True,
+        ):
+            click.echo("  Aborted — no changes made.")
+            return
+
+    ok = _apply_connector_observability_only(
+        app, connector=connector, restart=restart,
+    )
+    if not ok:
+        raise click.ClickException(
+            f"failed to configure {connector} observability — see errors above"
+        )
+
+    _maybe_bring_up_local_stack(app, auto=with_local_stack)
+    _print_observability_summary(connector)
+
+
+@setup.command("codex")
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Skip the confirmation prompt (non-interactive).",
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after applying changes "
+        "(needed so the connector's hook scripts + OTel block are wired)."
+    ),
+)
+@click.option(
+    "--with-local-stack/--no-local-stack", default=False, show_default=True,
+    help=(
+        "Also bring up the bundled Prom/Loki/Tempo/Grafana stack via "
+        "`defenseclaw setup local-observability up` once config is saved."
+    ),
+)
+@pass_ctx
+def setup_codex(app: AppContext, yes: bool, restart: bool, with_local_stack: bool) -> None:
+    """Configure DefenseClaw for Codex observability (no enforcement).
+
+    Alias for the observability-only path of ``setup guardrail`` with
+    ``--connector codex``. Pins ``claw.mode=codex`` so the TUI, skill
+    scanner, MCP scanner, and plugin scanner read from ``~/.codex/``
+    instead of the OpenClaw default layout.
+
+    Wires three telemetry channels at gateway boot:
+
+    \b
+      • Hooks   — SessionStart / UserPromptSubmit / PreToolUse /
+                  PostToolUse / PermissionRequest / Stop events
+      • OTel    — native Codex log + metric exporter pointing at the
+                  gateway's /v1/logs and /v1/metrics
+      • Notify  — agent-turn-complete webhooks via the bundled
+                  notify-bridge.sh shim
+
+    No proxy listener binds; Codex talks directly to its native
+    upstream. Enforcement code stays in place behind
+    ``guardrail.codex_enforcement_enabled`` — flip to ``true`` and
+    restart the gateway to re-engage the proxy.
+    """
+    _setup_observability_alias(
+        app,
+        connector="codex",
+        yes=yes,
+        restart=restart,
+        with_local_stack=with_local_stack,
+    )
+
+
+@setup.command("claude-code")
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Skip the confirmation prompt (non-interactive).",
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after applying changes "
+        "(needed so the connector's hook scripts + OTel env vars are wired)."
+    ),
+)
+@click.option(
+    "--with-local-stack/--no-local-stack", default=False, show_default=True,
+    help=(
+        "Also bring up the bundled Prom/Loki/Tempo/Grafana stack via "
+        "`defenseclaw setup local-observability up` once config is saved."
+    ),
+)
+@pass_ctx
+def setup_claude_code(
+    app: AppContext, yes: bool, restart: bool, with_local_stack: bool,
+) -> None:
+    """Configure DefenseClaw for Claude Code observability (no enforcement).
+
+    Alias for the observability-only path of ``setup guardrail`` with
+    ``--connector claudecode``. Pins ``claw.mode=claudecode`` so the
+    TUI, skill scanner, MCP scanner, and plugin scanner read from
+    ``~/.claude/`` instead of the OpenClaw default layout.
+
+    Wires two telemetry channels at gateway boot:
+
+    \b
+      • Hooks — PreToolUse / PostToolUse / UserPromptSubmit / Stop /
+                PermissionRequest events via Claude Code's hook system
+      • OTel  — native Claude Code OTel exporter (env-driven) pointing
+                at the gateway's /v1/logs and /v1/metrics
+
+    No proxy listener binds; Claude Code talks directly to its native
+    upstream. Enforcement code stays in place behind
+    ``guardrail.claudecode_enforcement_enabled`` — flip to ``true`` and
+    restart the gateway to re-engage the proxy.
+    """
+    _setup_observability_alias(
+        app,
+        connector="claudecode",
+        yes=yes,
+        restart=restart,
+        with_local_stack=with_local_stack,
+    )
+
+
 def execute_guardrail_setup(
     app: AppContext,
     *,

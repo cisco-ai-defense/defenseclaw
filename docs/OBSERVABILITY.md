@@ -759,3 +759,41 @@ through the proxy and persists snapshots in
 mode flip cleanly reverts both the guardrail wiring AND the OTel /
 notify glue. See `internal/gateway/connector/{codex,claudecode}.go`
 for the full backup/restore contract.
+
+### 9.5 One-shot setup aliases
+
+For operators who only want telemetry (no enforcement, no proxy
+listener), DefenseClaw exposes two dedicated CLI aliases that wrap the
+observability-only branch of `setup guardrail` and additionally pin
+`claw.mode` so the rest of the CLI/TUI surfaces the matching
+connector's source-of-truth files (`~/.codex/` or `~/.claude/`):
+
+```bash
+# Codex: hooks + native OTel + notify-bridge.sh
+defenseclaw setup codex --yes
+
+# Claude Code: hooks + native OTel exporter
+defenseclaw setup claude-code --yes
+
+# Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
+# the same step:
+defenseclaw setup codex --yes --with-local-stack
+```
+
+Both aliases persist:
+
+| Field                                         | Value             | Why                                                                    |
+|-----------------------------------------------|-------------------|------------------------------------------------------------------------|
+| `claw.mode`                                   | `codex` / `claudecode` | TUI / scanners read from `~/.codex/` or `~/.claude/` instead of the OpenClaw layout. |
+| `guardrail.connector`                         | `codex` / `claudecode` | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
+| `guardrail.codex_enforcement_enabled`         | `false`           | Keeps the proxy out of the data path even though `guardrail.enabled=true`. |
+| `guardrail.claudecode_enforcement_enabled`    | `false`           | Same as above for Claude Code.                                         |
+| `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
+| `guardrail.mode`                              | `observe`         | Sensible if-flipped-on-later default.                                  |
+| `<data_dir>/picked_connector`                 | `codex` / `claudecode` | So `defenseclaw setup guardrail` and `defenseclaw quickstart` default to the same connector on subsequent runs. |
+
+After both aliases run, the gateway is restarted (unless `--no-restart`
+is passed) so its connector setup hook scripts, OTel block, and
+(codex only) notify bridge are reconciled with the running sidecar.
+To revert and restore direct LLM access, run
+`defenseclaw setup guardrail --disable`.
