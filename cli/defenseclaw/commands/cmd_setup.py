@@ -1796,6 +1796,68 @@ def _interactive_guardrail_setup(
     _print_connector_info(gc.connector)
     click.echo()
 
+    # Codex and Claude Code default to observability-only mode: hooks +
+    # native OTel telemetry, NO traffic interception. The Go-side
+    # connector Setup gates every enforcement code path on the matching
+    # ``*_enforcement_enabled`` flag (see ``CodexEnforcementEnabled`` /
+    # ``ClaudeCodeEnforcementEnabled`` in internal/config/config.go),
+    # and the Python wizard mirrors that here: skip every prompt that
+    # only matters when the proxy is in the data path (enforcement
+    # mode, scanner engine, LLM judge config, block message). The
+    # operator can flip enforcement on later by editing config.yaml
+    # directly — re-running ``defenseclaw setup guardrail`` will then
+    # run the full prompt set.
+    #
+    # OpenClaw and ZeptoClaw fall through to the full-prompts path
+    # because they were designed around traffic interception from day
+    # one and have no observability-only equivalent.
+    observability_only = gc.connector in ("codex", "claudecode")
+    if observability_only:
+        proxy_port = gc.port or 4000
+        click.echo("  ┌──────────────────────────────────────────────────────────────┐")
+        click.echo("  │  Observability mode (enforcement disabled by default)        │")
+        click.echo("  └──────────────────────────────────────────────────────────────┘")
+        click.echo()
+        click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
+        click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
+        click.echo()
+        click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
+        click.echo("      UserPromptSubmit, Stop, PermissionRequest) → /api/v1/<connector>/hook")
+        click.echo("    • OTel: native exporter writes structured logs + metrics")
+        click.echo("      (raw API bodies, model + token counts) to /v1/logs and /v1/metrics")
+        click.echo("    • Notify: agent-turn-complete events (codex only) → /api/v1/codex/notify")
+        click.echo()
+        click.echo("  No proxy listener binds; no openai_base_url / ANTHROPIC_BASE_URL")
+        click.echo("  override is written. Existing enforcement code stays in place behind")
+        click.echo("  the guardrail." + ("codex_enforcement_enabled" if gc.connector == "codex" else "claudecode_enforcement_enabled") + " flag — flip to true in")
+        click.echo("  ~/.defenseclaw/config.yaml + restart the gateway to re-engage the proxy.")
+        click.echo()
+
+        if not click.confirm("  Enable observability for " + gc.connector + "?", default=True):
+            gc.enabled = False
+            return
+
+        # Sensible "if-you-ever-flip-enforcement-on" defaults so the
+        # config.yaml stays loadable. The Go gateway never reads these
+        # fields when enforcement is off — they live as forward-looking
+        # state for the operator who later wants to switch modes.
+        gc.enabled = True
+        gc.mode = "observe"
+        gc.scanner_mode = "local"
+        gc.port = proxy_port
+        gc.judge.enabled = False
+        gc.detection_strategy = "regex_only"
+        gc.detection_strategy_completion = "regex_only"
+        if gc.connector == "codex":
+            gc.codex_enforcement_enabled = False
+        else:
+            gc.claudecode_enforcement_enabled = False
+        click.echo()
+        click.echo("  ✓ Observability mode enabled (no traffic interception)")
+        click.echo("  ✓ Hooks + OTel + notify telemetry will be wired automatically at gateway boot")
+        click.echo()
+        return
+
     model_name = gc.model_name or gc.model or ""
     if model_name:
         click.echo(f"  Detected LLM:  {model_name}")
