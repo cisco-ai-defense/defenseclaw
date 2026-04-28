@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -64,6 +65,15 @@ func NewCodexConnector() *CodexConnector {
 
 func (c *CodexConnector) Name() string        { return "codex" }
 func (c *CodexConnector) HookAPIPath() string { return "/api/v1/codex/hook" }
+
+// HookScriptNames implements HookScriptOwner (plan C2 / S2.5). Codex
+// owns codex-hook.sh; the generic inspect-* scripts come from the
+// shared list maintained by WriteHookScriptsForConnector. Including
+// a non-existent template name here produces an explicit write
+// error rather than a silent skip — the embed FS is authoritative.
+func (c *CodexConnector) HookScriptNames(SetupOpts) []string {
+	return []string{"codex-hook.sh"}
+}
 func (c *CodexConnector) Description() string {
 	return "config.toml model_providers patch + hook script (6 events, component scanning)"
 }
@@ -111,7 +121,10 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsForConnector(hookDir, opts.APIAddr, opts.APIToken, c.Name()); err != nil {
+	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
+	// connector method; generic inspect-* scripts come from the
+	// shared list inside writeHookScriptsCommon.
+	if err := WriteHookScriptsForConnectorObject(hookDir, opts.APIAddr, opts.APIToken, c); err != nil {
 		return fmt.Errorf("codex hook script: %w", err)
 	}
 
@@ -218,6 +231,29 @@ func (c *CodexConnector) ProviderSnapshot() map[string]CodexProviderEntry {
 		out[k] = v
 	}
 	return out
+}
+
+// HasUsableProviders implements ProviderProbe (plan A4). Mirrors
+// resolveUpstream's "first usable entry" rule: any provider with at
+// least one populated field (key or base URL) counts. We additionally
+// accept a non-empty OPENAI_API_KEY env var as a fallback so installs
+// that haven't yet finished a Setup-time snapshot capture still boot.
+func (c *CodexConnector) HasUsableProviders() (int, error) {
+	c.snapshotMu.RLock()
+	count := 0
+	for _, e := range c.providers {
+		if strings.TrimSpace(e.APIKey) != "" || strings.TrimSpace(e.BaseURL) != "" {
+			count++
+		}
+	}
+	c.snapshotMu.RUnlock()
+	if count > 0 {
+		return count, nil
+	}
+	if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+		return 1, nil
+	}
+	return 0, errors.New("codex: no upstream provider configured (~/.codex/config.toml has no [providers] entry with key or base_url, and OPENAI_API_KEY is unset)")
 }
 
 // resolveUpstream picks the upstream base_url + api_key for the given
@@ -646,6 +682,30 @@ func buildCodexProviderSnapshot(providers map[string]interface{}) map[string]Cod
 // records (type-tagged; we use the `command` variant).
 //
 // Timeouts are in seconds (not milliseconds) per codex's TOML schema.
+//
+// === BY-DESIGN: Codex hook invocation is WONTFIX (architectural) ===
+// Plan C3 / matrix §"Out of scope". Today's `codex` binary does NOT
+// honor a settings-based hook invocation pipeline — there is no
+// codex code path that reads a `[hooks]` table out of config.toml
+// and shells out to `command` on the matching event. We write the
+// table anyway as a forward-compatibility placeholder: the moment
+// codex grows external-script hook support (the schema is already
+// in their TOML grammar), this Setup is wired and only the
+// agent-side dispatch needs to land upstream.
+//
+// Pre-execution gating for Codex flows from a different surface:
+//  1. Path-based interception — proxy admits Codex via the
+//     `/c/codex/...` route prefix (codex.HookAPIPath()), which forces
+//     every tool call through GuardrailProxy.Route + response-scan.
+//  2. ToolModeBoth on the connector — pre-call telemetry is captured
+//     from the LLM response side, where the proxy still has the
+//     unstreamed `tool_calls` array to inspect.
+//
+// In short: the on-disk `[hooks]` block is a future-proofing artifact;
+// the security guarantee comes from the proxy, not the agent. Do not
+// "fix" this by emitting fake handlers or shelling out from here —
+// codex won't read it. See plan C3 + docs/CONNECTOR-MATRIX.md
+// "By-design connector limitations" for the canonical statement.
 func buildCodexHooksTable(hookScript string) map[string]interface{} {
 	out := map[string]interface{}{}
 	for _, group := range codexHookGroups {

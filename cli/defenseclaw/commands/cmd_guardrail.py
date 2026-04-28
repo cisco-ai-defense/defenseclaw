@@ -42,7 +42,6 @@ import click
 
 from defenseclaw.context import AppContext, pass_ctx
 
-
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
     "claudecode": "Claude Code",

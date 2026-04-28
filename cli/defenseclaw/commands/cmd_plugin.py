@@ -504,7 +504,10 @@ def _print_install_result(name: str, result) -> None:
 def list_plugins(app: AppContext, as_json: bool) -> None:
     """List installed plugins with scan severity."""
     connector = app.cfg.guardrail.connector.lower() or "openclaw"
-    plugins = _merge_all_plugins(app.cfg.plugin_dir, connector)
+    # Plan C6: pass the full cfg so _merge_all_plugins can consult
+    # cfg.plugin_dirs() for host-side plugin enumeration. Falls back
+    # to None for callers that have not migrated.
+    plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
     scan_map = _build_plugin_scan_map(app.store)
     actions_map = _build_plugin_actions_map(app.store)
 
@@ -536,11 +539,23 @@ def list_plugins(app: AppContext, as_json: bool) -> None:
     hint("Scan a plugin:  defenseclaw plugin scan <name>")
 
 
-def _merge_all_plugins(plugin_dir: str, connector: str = "") -> list[dict[str, Any]]:
+def _merge_all_plugins(
+    plugin_dir: str,
+    connector: str = "",
+    *,
+    cfg: Any = None,
+) -> list[dict[str, Any]]:
     """Build a unified plugin list from DefenseClaw + connector sources.
 
     Each entry carries both ``id`` (directory basename, matches scan DB
     targets) and ``name`` (human-readable display name).
+
+    Plan C6: when *cfg* is provided AND the active connector is not
+    OpenClaw, host-agent plugins are enumerated via cfg.plugin_dirs()
+    and tagged ``source: "host:<connector>"`` so the merged list
+    distinguishes managed-by-DefenseClaw plugins from host-owned
+    ones. cfg=None is supported for back-compat with existing tests
+    that mock _list_openclaw_plugins directly.
     """
     plugins: list[dict[str, Any]] = []
 
@@ -565,6 +580,17 @@ def _merge_all_plugins(plugin_dir: str, connector: str = "") -> list[dict[str, A
             "enabled": p.get("enabled", False),
             "source": "openclaw",
         })
+
+    # Plan C6: matrix §5 — surface host-owned plugins for non-OpenClaw
+    # connectors. We de-dup by id against DefenseClaw-managed plugins:
+    # a DefenseClaw plugin with the same id wins (it's our copy).
+    if cfg is not None:
+        seen_ids = {p["id"] for p in plugins}
+        for hp in _list_host_plugins(connector, cfg):
+            if hp["id"] in seen_ids:
+                continue
+            seen_ids.add(hp["id"])
+            plugins.append(hp)
 
     return plugins
 
@@ -829,6 +855,125 @@ def _list_defenseclaw_plugins(plugin_dir: str) -> list[str]:
         e for e in os.listdir(plugin_dir)
         if os.path.isdir(os.path.join(plugin_dir, e))
     )
+
+
+# _HOST_PLUGIN_MANIFEST_FILES — plan C6 / matrix #3. Each host agent
+# declares a plugin via one of these manifest filenames inside the
+# plugin directory. We try each in order; the first hit wins. Keep
+# this list narrow — adding a globbed extension here invites both
+# false positives (treating a config file as a plugin) and DoS
+# (large directory walks during ``plugin list``).
+_HOST_PLUGIN_MANIFEST_FILES = (
+    "plugin.json",
+    "plugin.yaml",
+    "plugin.yml",
+    "package.json",
+    "manifest.json",
+)
+
+
+def _read_host_plugin_manifest(plugin_path: str) -> dict[str, Any] | None:
+    """Try each known manifest filename inside *plugin_path*.
+
+    Returns a dict with at least ``id`` populated, or None if no
+    manifest exists. We never raise on a malformed manifest — a
+    broken plugin should not break ``defenseclaw plugin list`` for
+    the rest of the host's plugins.
+    """
+    for fname in _HOST_PLUGIN_MANIFEST_FILES:
+        manifest_path = os.path.join(plugin_path, fname)
+        if not os.path.isfile(manifest_path):
+            continue
+        try:
+            with open(manifest_path) as fh:
+                if fname.endswith((".yaml", ".yml")):
+                    import yaml as _yaml
+
+                    raw = _yaml.safe_load(fh) or {}
+                else:
+                    raw = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        return raw
+    return None
+
+
+def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
+    """Walk one level under *host_dir* and emit one dict per plugin.
+
+    Only one level — host-agent plugin directories are conventionally
+    flat (``~/.claude/plugins/<name>/plugin.json``). Recursing risks
+    picking up unrelated nested package.json files (e.g. a plugin's
+    own node_modules tree).
+    """
+    if not os.path.isdir(host_dir):
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        entries = sorted(os.listdir(host_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        plugin_path = os.path.join(host_dir, entry)
+        if not os.path.isdir(plugin_path):
+            continue
+        manifest = _read_host_plugin_manifest(plugin_path) or {}
+        plugin_id = manifest.get("id") or entry
+        plugin_name = manifest.get("name") or plugin_id
+        out.append({
+            "id": str(plugin_id),
+            "name": str(plugin_name),
+            "description": str(manifest.get("description", "")),
+            "version": str(manifest.get("version", "")),
+            "origin": str(manifest.get("origin", "host")),
+            "enabled": bool(manifest.get("enabled", True)),
+            # Provenance label per plan C6 — the merged list MUST
+            # disambiguate "managed by DefenseClaw" from "owned by the
+            # host agent" so policy hooks (block/quarantine) only
+            # touch the right side.
+            "source": f"host:{connector}",
+            "host_path": plugin_path,
+        })
+    return out
+
+
+def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
+    """Enumerate host-agent-owned plugins for the active connector.
+
+    Plan C6: matrix §5 marks zeptoclaw / claudecode / codex as ⚠️ for
+    ``plugin list`` because the host's own plugin directory was
+    silently skipped. This pulls each entry through cfg.plugin_dirs(),
+    which is already connector-aware (see config.plugin_dirs() →
+    connector_paths.plugin_dirs()), and tags each result with
+    ``source: "host:<connector>"`` so the merged list keeps
+    provenance even when the host directory contains plugins with
+    the same id as a DefenseClaw-managed one.
+    """
+    name = (connector or "").lower()
+    if name in ("", "openclaw"):
+        # OpenClaw has its own enumeration path via the openclaw
+        # binary (see _list_openclaw_plugins). Don't double-count.
+        return []
+    try:
+        dirs = cfg.plugin_dirs()
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for d in dirs:
+        for entry in _scan_plugin_dir(d, name):
+            pid = entry["id"]
+            if pid in seen_ids:
+                # First occurrence wins. Two plugin dirs (e.g.
+                # ``~/.claude/plugins`` + ``./.claude/plugins``) may
+                # legitimately ship the same plugin id; we prefer the
+                # earlier (typically user-scoped) source.
+                continue
+            seen_ids.add(pid)
+            out.append(entry)
+    return out
 
 
 def _list_openclaw_plugins(connector: str = "") -> list[dict]:

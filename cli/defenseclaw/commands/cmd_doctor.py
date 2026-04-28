@@ -1350,7 +1350,7 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     if not found:
         _emit(
             "pass", "Connector residue",
-            f"no leftover artifacts from inactive connectors", r=r,
+            "no leftover artifacts from inactive connectors", r=r,
         )
         return
 
@@ -1539,7 +1539,7 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     backup_path = os.path.join(cfg.data_dir, backup_name)
     if os.path.isfile(backup_path):
         return ("skip", f"backup exists at {backup_path}")
-    return ("skip", f"no backup found — run `defenseclaw setup guardrail` to create one")
+    return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
 
 
 def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:

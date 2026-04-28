@@ -107,20 +107,50 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 }
 
 // hookHandlers maps connector names to their gateway-side HTTP handlers.
-// The handler bodies remain in the gateway package (they need the full
-// policy engine); only the route registration is data-driven so adding
-// a new connector no longer requires editing this file.
-var hookHandlers = map[string]string{
-	"claudecode": "handleClaudeCodeHook",
-	"codex":      "handleCodexHook",
+// connectorHookHandlerByName is the registry that lets api.go map a
+// connector name to the http.HandlerFunc that owns its hook endpoint.
+// Plan C1 / S2.4: registration is data-driven so adding a new
+// connector no longer requires editing the switch in
+// registerConnectorHookRoutes; the gateway package populates this
+// map in api.go's init() (see the bottom of this file).
+//
+// The handler bodies still live in the gateway package because they
+// reach into APIServer state (logger, otel, config, redactor). The
+// HookEndpoint interface in the connector package supplies the path;
+// the map below supplies the handler. Together they encode the
+// "what" (route) on the connector side and the "how" (gateway-level
+// state plumbing) on this side, with no name-cased switch in either.
+var connectorHookHandlerByName = map[string]func(*APIServer) http.HandlerFunc{}
+
+// registerHookHandler is the registration entry point used by
+// gateway-package init() blocks. Idempotent — duplicate registration
+// for the same name overwrites; the last-writer-wins semantics keeps
+// test fixtures hermetic when they swap a stub handler in.
+func registerHookHandler(name string, factory func(*APIServer) http.HandlerFunc) {
+	connectorHookHandlerByName[name] = factory
 }
 
 // registerConnectorHookRoutes dynamically registers hook endpoints for
-// connectors that implement the HookEndpoint interface.
+// connectors that implement the HookEndpoint interface and have a
+// matching gateway-side handler factory in connectorHookHandlerByName.
+//
+// Plan C1: when a connector is in the registry but has no factory,
+// we log and skip rather than fall back to a hardcoded path — that
+// way an out-of-tree connector can ship without forcing a gateway
+// rebuild, and a misnamed factory fails loud (logged) rather than
+// silent (a 404 at request time).
 func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
 	if a.connectorRegistry == nil {
-		mux.HandleFunc("/api/v1/claude-code/hook", a.handleClaudeCodeHook)
-		mux.HandleFunc("/api/v1/codex/hook", a.handleCodexHook)
+		// No registry plumbed (legacy boot path, tests). Fall back
+		// to the previous hardcoded routes so existing flows keep
+		// working — we never unconditionally register a route the
+		// connector didn't ask for.
+		if f, ok := connectorHookHandlerByName["claudecode"]; ok {
+			mux.HandleFunc("/api/v1/claude-code/hook", f(a))
+		}
+		if f, ok := connectorHookHandlerByName["codex"]; ok {
+			mux.HandleFunc("/api/v1/codex/hook", f(a))
+		}
 		return
 	}
 
@@ -133,13 +163,15 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
 		if !ok {
 			continue
 		}
-		path := he.HookAPIPath()
-		switch name {
-		case "claudecode":
-			mux.HandleFunc(path, a.handleClaudeCodeHook)
-		case "codex":
-			mux.HandleFunc(path, a.handleCodexHook)
+		factory, ok := connectorHookHandlerByName[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr,
+				"[api] connector %q implements HookEndpoint but no gateway handler is registered; skipping route %s\n",
+				name, he.HookAPIPath())
+			continue
 		}
+		path := he.HookAPIPath()
+		mux.HandleFunc(path, factory(a))
 		fmt.Fprintf(os.Stderr, "[api] registered hook endpoint: %s → %s\n", name, path)
 	}
 }
@@ -191,10 +223,17 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
-	mux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
-	mux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
-	mux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
+	// /api/v1/inspect/* is in the agent's critical path: every hook
+	// callback (claude-code-hook, codex-hook, inspect-tool) hits one of
+	// these. Wrap them in a per-IP token bucket so a misbehaving or
+	// compromised local agent can never blast the path. Loopback callers
+	// (the gateway's own hooks) are exempt inside perIPRateLimiter.
+	inspectMux := http.NewServeMux()
+	inspectMux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
+	inspectMux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
+	inspectMux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
+	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
+	mux.Handle("/api/v1/inspect/", perIPRateLimiter(20, 40)(inspectMux))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	a.registerConnectorHookRoutes(mux)
@@ -1738,13 +1777,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			expected = a.scannerCfg.Gateway.Token
 		}
 		if expected == "" {
-			// No token configured: allow loopback callers only.
-			if connector.IsLoopback(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_non_loopback")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			// Plan B2 / S0.2: fail-closed when no token is configured.
+			// EnsureGatewayToken synthesizes one at boot, so this branch
+			// is unreachable in production. Treat it as a misconfiguration
+			// (503) rather than silently allowing loopback — the previous
+			// "no token, trust loopback" path was a local-IDOR risk.
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
+			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
 		if token == "" {
@@ -1776,9 +1815,17 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, ro
 }
 
 // apiCSRFProtect is the CSRF gate for the REST API with structured auth telemetry.
+//
+// Plan A3 (S0.13): GET/HEAD remain exempt because the inspect handlers (and
+// every state-changing endpoint) reject non-POST. OPTIONS is no longer a
+// blanket exemption — CORS preflight is rejected via the same Sec-Fetch-Site
+// gate that protects POST. There is no legitimate cross-origin caller of
+// the sidecar API today; if one is added, it must explicitly bypass this
+// gate by setting Sec-Fetch-Site to same-origin or none in a non-browser
+// caller (where the header is absent).
 func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1790,12 +1837,27 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 
 		// Sec-Fetch-Site is a browser-enforced header that cannot be spoofed
 		// by JavaScript. When present, reject cross-site requests outright.
+		// For OPTIONS (CORS preflight), this is the primary signal.
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
 				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
+		}
+
+		// CORS preflights legitimately have no body / Content-Type but
+		// browsers always set Origin and Sec-Fetch-Site=cross-site for them.
+		// If an OPTIONS reaches here with same-origin / no Sec-Fetch-Site
+		// (curl, internal callers) it must still present the CSRF tag.
+		if r.Method == http.MethodOptions {
+			if r.Header.Get("X-DefenseClaw-Client") == "" {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch_options")
+				http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {

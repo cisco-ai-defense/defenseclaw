@@ -470,6 +470,141 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	}
 }
 
+// TestRescan_FromZeptoClawConfig — plan E1 / item 5. Mirrors the
+// existing TestEnumerateTargets_IncludesConfiguredMCPServers shape but
+// drives ReadMCPServers through the connector dispatcher: with
+// guardrail.connector="zeptoclaw" the watcher's enumerator MUST pick
+// up MCP servers declared in $HOME/.zeptoclaw/config.json — not from
+// openclaw.json.
+//
+// We isolate $HOME via t.Setenv so the connector-specific reader
+// (which uses os.UserHomeDir directly, no override) lands in our tmpdir
+// and not on the developer's real home.
+func TestRescan_FromZeptoClawConfig(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("PATH", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	zcDir := filepath.Join(tmpHome, ".zeptoclaw")
+	if err := os.MkdirAll(zcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	zcConfig := `{
+		"providers": {"openai": {"api_base": "https://api.openai.com"}},
+		"mcp": {
+			"servers": {
+				"zc-remote": {"url": "https://example.com/mcp", "transport": "http"},
+				"zc-stdio":  {"command": "npx", "args": ["-y", "mcp-zc"]}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(zcDir, "config.json"), []byte(zcConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Connector = "zeptoclaw"
+
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	targets := w.enumerateTargets()
+
+	mcpByName := make(map[string]InstallEvent)
+	for _, t := range targets {
+		if t.Type == InstallMCP {
+			mcpByName[t.Name] = t
+		}
+	}
+	for _, name := range []string{"zc-remote", "zc-stdio"} {
+		if _, ok := mcpByName[name]; !ok {
+			t.Errorf("expected zeptoclaw MCP %q in targets, got %+v", name, mcpByName)
+		}
+	}
+}
+
+// TestRescan_FromClaudeSettingsJSON — plan E1 / item 5. Drives
+// enumerateTargets through the claudecode arm: ReadMCPServers reads
+// from $HOME/.claude/settings.json's `mcpServers` section.
+func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("PATH", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	ccDir := filepath.Join(tmpHome, ".claude")
+	if err := os.MkdirAll(ccDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ccSettings := `{
+		"mcpServers": {
+			"cc-stdio":  {"command": "node", "args": ["mcp.js"]},
+			"cc-remote": {"command": "uvx", "args": ["mcp-remote"]}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(ccDir, "settings.json"), []byte(ccSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Connector = "claudecode"
+
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	targets := w.enumerateTargets()
+
+	mcpByName := make(map[string]InstallEvent)
+	for _, t := range targets {
+		if t.Type == InstallMCP {
+			mcpByName[t.Name] = t
+		}
+	}
+	for _, name := range []string{"cc-stdio", "cc-remote"} {
+		if _, ok := mcpByName[name]; !ok {
+			t.Errorf("expected claudecode MCP %q in targets, got %+v", name, mcpByName)
+		}
+	}
+}
+
+// TestRescan_FromCodexConfigToml — plan E1 / item 5. Codex uses
+// `<cwd>/.mcp.json` (not config.toml — TOML doesn't carry MCP today).
+// The test stages the .mcp.json under a tmp cwd and asserts the
+// enumerator picks it up via the codex connector arm. Note: codex's
+// MCP reader uses os.Getwd, so we t.Chdir into the tmpdir to drive it.
+func TestRescan_FromCodexConfigToml(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	t.Setenv("PATH", "")
+
+	origCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+
+	tmpCwd := t.TempDir()
+	if err := os.Chdir(tmpCwd); err != nil {
+		t.Fatal(err)
+	}
+
+	mcpJSON := `{
+		"mcpServers": {
+			"codex-stdio": {"command": "node", "args": ["mcp.js"]}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(tmpCwd, ".mcp.json"), []byte(mcpJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Connector = "codex"
+
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil, nil)
+	targets := w.enumerateTargets()
+
+	var saw bool
+	for _, t := range targets {
+		if t.Type == InstallMCP && t.Name == "codex-stdio" {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Errorf("expected codex-stdio MCP in targets, got %+v", targets)
+	}
+}
+
 func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")

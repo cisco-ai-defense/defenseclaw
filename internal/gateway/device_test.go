@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // readOpenClawGatewayToken and isAuthError are in client.go — tests go here
@@ -138,6 +141,116 @@ func TestReadOpenClawGatewayToken(t *testing.T) {
 		_, ok := readOpenClawGatewayToken(home)
 		if ok {
 			t.Error("expected false for empty token")
+		}
+	})
+}
+
+// TestReadZeptoClawProviderKeys_FromConfigJSON — plan E1 / item 6.
+//
+// Documents the per-connector mechanism: ZeptoClaw stores upstream
+// API keys *per provider* in `~/.zeptoclaw/config.json` (NOT in a
+// single auth.token field like OpenClaw's openclaw.json). The Setup
+// flow parses that file, captures pristine providers in a backup,
+// and exposes the captured keys via ProviderSnapshot() — which is
+// what audit/scan/AIBOM consumers read.
+//
+// We exercise the public path: Setup → ProviderSnapshot. The proxy
+// URL is a stub (Setup just substitutes api_base in the on-disk
+// config; no network calls happen).
+func TestReadZeptoClawProviderKeys_FromConfigJSON(t *testing.T) {
+	tmpHome := t.TempDir()
+	zcDir := filepath.Join(tmpHome, ".zeptoclaw")
+	if err := os.MkdirAll(zcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(zcDir, "config.json")
+	cfg := `{
+		"providers": {
+			"openai":   {"api_base": "https://api.openai.com",      "api_key": "sk-zc-openai-test"},
+			"anthropic":{"api_base": "https://api.anthropic.com",   "api_key": "ant-zc-test"}
+		}
+	}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := connector.ZeptoClawConfigPathOverride
+	connector.ZeptoClawConfigPathOverride = cfgPath
+	t.Cleanup(func() { connector.ZeptoClawConfigPathOverride = prev })
+
+	dataDir := t.TempDir()
+
+	// SubprocessSandbox enforcement requires writing to dataDir/shims —
+	// fully self-contained inside the tmpdir. No network or external
+	// binaries are touched in Setup.
+	c := connector.NewZeptoClawConnector()
+	opts := connector.SetupOpts{
+		DataDir:   dataDir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "tok",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("zeptoclaw Setup: %v", err)
+	}
+
+	snap := c.ProviderSnapshot()
+	if got, want := len(snap), 2; got != want {
+		t.Fatalf("ProviderSnapshot len = %d, want %d (snap=%+v)", got, want, snap)
+	}
+	if oa, ok := snap["openai"]; !ok || oa.APIKey != "sk-zc-openai-test" {
+		t.Errorf("openai key not captured: got %+v", snap["openai"])
+	}
+	if an, ok := snap["anthropic"]; !ok || an.APIKey != "ant-zc-test" {
+		t.Errorf("anthropic key not captured: got %+v", snap["anthropic"])
+	}
+}
+
+// TestReadClaudeCodeAPIKey_FromAnthropicEnv — plan E1 / item 6.
+//
+// Documents the per-connector mechanism: Claude Code reads its
+// upstream API key from the ANTHROPIC_API_KEY environment variable
+// (NOT from a config file). The gateway honors the same convention
+// via ResolveAPIKey, which means Anthropic's CLI and DefenseClaw's
+// proxy share the same env-var contract.
+func TestReadClaudeCodeAPIKey_FromAnthropicEnv(t *testing.T) {
+	t.Run("reads from environment", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-claude-key")
+		got := ResolveAPIKey("ANTHROPIC_API_KEY", "")
+		if got != "sk-ant-test-claude-key" {
+			t.Errorf("ResolveAPIKey(ANTHROPIC_API_KEY) = %q, want sk-ant-test-claude-key", got)
+		}
+	})
+	t.Run("returns empty when not set", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		got := ResolveAPIKey("ANTHROPIC_API_KEY", "")
+		if got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+}
+
+// TestReadCodexAPIKey_FromOpenAIEnv — plan E1 / item 6.
+//
+// Documents the per-connector mechanism: Codex reads its upstream
+// API key from the OPENAI_API_KEY environment variable. This is
+// distinct from OpenClaw (config-file-based) and ZeptoClaw
+// (per-provider config-file). When `~/.codex/config.toml` is in play
+// it patches the *base URL* (S8.1), but the auth credential itself
+// remains env-var sourced.
+func TestReadCodexAPIKey_FromOpenAIEnv(t *testing.T) {
+	t.Run("reads from environment", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "sk-test-codex-key")
+		got := ResolveAPIKey("OPENAI_API_KEY", "")
+		if got != "sk-test-codex-key" {
+			t.Errorf("ResolveAPIKey(OPENAI_API_KEY) = %q, want sk-test-codex-key", got)
+		}
+	})
+	t.Run("returns empty when not set", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "")
+		got := ResolveAPIKey("OPENAI_API_KEY", "")
+		if got != "" {
+			t.Errorf("expected empty, got %q", got)
 		}
 	})
 }

@@ -296,6 +296,139 @@ func TestConnectorVerify_CleanOpenClaw(t *testing.T) {
 	}
 }
 
+// TestConnectorVerify_CleanPerConnector — plan E1 / item 4. Cover
+// the verify path for the three non-OpenClaw connectors. Each one
+// uses a different config-path override (ZeptoClawConfigPathOverride,
+// ClaudeCodeSettingsPathOverride, CodexConfigPathOverride) so a single
+// shared helper can't take their place — we walk them as t.Run subtests
+// and document which override redirects which on-disk artifact.
+//
+// The CLI's verify command is connector-agnostic; this test proves the
+// plumbing works end-to-end for each connector in the registry, not
+// just OpenClaw.
+func TestConnectorVerify_CleanPerConnector(t *testing.T) {
+	cases := []struct {
+		connector string
+		// applyOverride redirects the connector's host config path to
+		// a fresh tmp file that does NOT exist. VerifyClean tolerates
+		// a missing config (os.ReadFile errors are swallowed) so the
+		// "clean" assertion holds without needing to seed a pristine
+		// host config on every CI box.
+		applyOverride func(t *testing.T, tmpHome string)
+	}{
+		{
+			connector: "zeptoclaw",
+			applyOverride: func(t *testing.T, tmpHome string) {
+				prev := connector.ZeptoClawConfigPathOverride
+				connector.ZeptoClawConfigPathOverride = filepath.Join(tmpHome, ".zeptoclaw", "config.json")
+				t.Cleanup(func() { connector.ZeptoClawConfigPathOverride = prev })
+			},
+		},
+		{
+			connector: "claudecode",
+			applyOverride: func(t *testing.T, tmpHome string) {
+				prev := connector.ClaudeCodeSettingsPathOverride
+				connector.ClaudeCodeSettingsPathOverride = filepath.Join(tmpHome, ".claude", "settings.json")
+				t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = prev })
+			},
+		},
+		{
+			connector: "codex",
+			applyOverride: func(t *testing.T, tmpHome string) {
+				prev := connector.CodexConfigPathOverride
+				connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
+				t.Cleanup(func() { connector.CodexConfigPathOverride = prev })
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.connector, func(t *testing.T) {
+			dir := t.TempDir()
+			defer withConnectorState(t, dir, tc.connector)()
+
+			tmpHome := t.TempDir()
+			tc.applyOverride(t, tmpHome)
+
+			stdout, stderr, exitCode := runConnectorCmd(t,
+				"verify", "--connector", tc.connector)
+			if exitCode != 0 {
+				t.Fatalf("connector=%s: expected exit 0 (clean), got %d (stdout=%q stderr=%q)",
+					tc.connector, exitCode, stdout, stderr)
+			}
+			if !strings.Contains(stdout, "[clean]") {
+				t.Fatalf("connector=%s: expected [clean] glyph in stdout; got %q",
+					tc.connector, stdout)
+			}
+		})
+	}
+}
+
+// TestConnectorVerify_JSONCleanPerConnector — plan E1 / item 4.
+// JSON-output parity for the verify path across the non-OpenClaw
+// connectors. Each subtest asserts the exact JSON shape so downstream
+// scripts (the install lifecycle smoke matrix in C5, the e2e shell
+// suite in E4) can pivot on `connector` and `clean` without per-name
+// branching.
+func TestConnectorVerify_JSONCleanPerConnector(t *testing.T) {
+	cases := []struct {
+		connector     string
+		applyOverride func(t *testing.T, tmpHome string)
+	}{
+		{
+			connector: "zeptoclaw",
+			applyOverride: func(t *testing.T, tmpHome string) {
+				prev := connector.ZeptoClawConfigPathOverride
+				connector.ZeptoClawConfigPathOverride = filepath.Join(tmpHome, ".zeptoclaw", "config.json")
+				t.Cleanup(func() { connector.ZeptoClawConfigPathOverride = prev })
+			},
+		},
+		{
+			connector: "claudecode",
+			applyOverride: func(t *testing.T, tmpHome string) {
+				prev := connector.ClaudeCodeSettingsPathOverride
+				connector.ClaudeCodeSettingsPathOverride = filepath.Join(tmpHome, ".claude", "settings.json")
+				t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = prev })
+			},
+		},
+		{
+			connector: "codex",
+			applyOverride: func(t *testing.T, tmpHome string) {
+				prev := connector.CodexConfigPathOverride
+				connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
+				t.Cleanup(func() { connector.CodexConfigPathOverride = prev })
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.connector, func(t *testing.T) {
+			dir := t.TempDir()
+			defer withConnectorState(t, dir, tc.connector)()
+
+			tmpHome := t.TempDir()
+			tc.applyOverride(t, tmpHome)
+
+			stdout, _, exitCode := runConnectorCmd(t,
+				"verify", "--connector", tc.connector, "--json")
+			if exitCode != 0 {
+				t.Fatalf("connector=%s: expected exit 0, got %d", tc.connector, exitCode)
+			}
+			var payload struct {
+				Connector string `json:"connector"`
+				Action    string `json:"action"`
+				Clean     bool   `json:"clean"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("connector=%s: invalid JSON: %v\n%s", tc.connector, err, stdout)
+			}
+			if payload.Connector != tc.connector || payload.Action != "verify" || !payload.Clean {
+				t.Fatalf("connector=%s: unexpected payload: %+v", tc.connector, payload)
+			}
+		})
+	}
+}
+
 func TestConnectorVerify_JSONClean(t *testing.T) {
 	dir := t.TempDir()
 	defer withConnectorState(t, dir, "openclaw")()

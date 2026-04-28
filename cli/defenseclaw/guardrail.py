@@ -43,27 +43,20 @@ from __future__ import annotations
 # Public connector-agnostic surface.
 from defenseclaw.llm_keys import (
     derive_master_key as _derive_master_key,
+)
+from defenseclaw.llm_keys import (
     detect_api_key_env,
     model_to_proxy_name,
 )
 
 # Public OpenClaw-specific surface.
-from defenseclaw.openclaw_guardrail import (
-    BACKUP_INDEX_FILENAME,
-    BACKUP_SUBDIR,
-    detect_current_model,
-    patch_openclaw_config,
-    pristine_backup_path,
-    record_pristine_backup,
-    restore_openclaw_config,
-    uninstall_openclaw_plugin,
-)
-
 # Underscore-prefixed helpers — kept exported for the legacy test
 # surface (tests/test_guardrail.py imports several of these directly).
 # NEW code should not import these from here; reach into
 # :mod:`defenseclaw.openclaw_guardrail` instead.
 from defenseclaw.openclaw_guardrail import (  # noqa: F401
+    BACKUP_INDEX_FILENAME,
+    BACKUP_SUBDIR,
     _backup,
     _backup_index_path,
     _expand,
@@ -74,8 +67,13 @@ from defenseclaw.openclaw_guardrail import (  # noqa: F401
     _remove_from_plugins_allow,
     _unregister_plugin_from_config,
     _write_backup_index,
+    detect_current_model,
+    patch_openclaw_config,
+    pristine_backup_path,
+    record_pristine_backup,
+    restore_openclaw_config,
+    uninstall_openclaw_plugin,
 )
-
 
 __all__ = [
     # Connector-agnostic

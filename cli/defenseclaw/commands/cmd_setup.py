@@ -965,6 +965,142 @@ def _print_mcp_summary(mc, llm, aid) -> None:
 
 
 # ---------------------------------------------------------------------------
+# setup rotate-token  (plan B5 / S0.5)
+# ---------------------------------------------------------------------------
+
+
+def _rotate_token_dotenv_path(app: AppContext) -> str:
+    """Resolve ~/.defenseclaw/.env relative to the configured DataDir."""
+    data_dir = app.cfg.data_dir or os.path.expanduser("~/.defenseclaw")
+    return os.path.join(data_dir, ".env")
+
+
+def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
+    """Rewrite the dotenv file with the new token, preserving every
+    other line. Atomic via os.replace; mode 0o600.
+
+    Mirrors internal/gateway/firstboot.go appendEnvLine semantics so a
+    Python-side rotation produces the same byte-shape on disk as the
+    Go-side first-boot synthesis.
+    """
+    parent = os.path.dirname(dotenv_path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+
+    lines: list[str] = []
+    if os.path.exists(dotenv_path):
+        with open(dotenv_path, encoding="utf-8") as fh:
+            for raw in fh.read().splitlines():
+                stripped = raw.strip()
+                if stripped.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                    continue
+                lines.append(raw)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.append(f"DEFENSECLAW_GATEWAY_TOKEN={new_token}")
+    body = "\n".join(lines) + "\n"
+
+    tmp = dotenv_path + ".tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        os.write(fd, body.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # Belt-and-suspenders: chmod in case the umask widened the perms.
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, dotenv_path)
+
+
+def _rotate_token_run_gateway(args: list[str]) -> tuple[int, str, str]:
+    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr)."""
+    binary = shutil.which("defenseclaw-gateway")
+    if not binary:
+        raise click.ClickException(
+            "defenseclaw-gateway binary not found on PATH. Install it before running rotate-token "
+            "(the connector teardown/setup hooks need it to refresh hook scripts)."
+        )
+    proc = subprocess.run(
+        [binary, *args],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout.decode("utf-8", errors="replace"), proc.stderr.decode("utf-8", errors="replace")
+
+
+@setup.command("rotate-token")
+@click.option(
+    "--connector",
+    default=None,
+    help="Override the active connector (default: read from config).",
+)
+@click.option(
+    "--no-restart",
+    is_flag=True,
+    help="Skip the connector teardown/setup that refreshes hook .token files.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the confirmation prompt and rotate immediately.",
+)
+@pass_ctx
+def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
+    """Rotate the DEFENSECLAW_GATEWAY_TOKEN.
+
+    Generates a new 32-byte CSPRNG hex token, rewrites
+    ~/.defenseclaw/.env atomically (mode 0o600), and refreshes the
+    per-connector hook scripts so they pick up the new token. The
+    operator must restart their agent (claude / codex / openclaw /
+    zeptoclaw) for the new credential to take effect.
+
+    Plan B5 / S0.5.
+    """
+    import secrets
+
+    dotenv_path = _rotate_token_dotenv_path(app)
+    if not yes:
+        click.confirm(
+            f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path}\n"
+            "and refresh hook scripts for the active connector. Continue?",
+            abort=True,
+        )
+
+    new_token = secrets.token_hex(32)
+    _rotate_token_atomic_write(dotenv_path, new_token)
+    click.echo(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
+
+    active = connector or (app.cfg.guardrail.connector if app.cfg.guardrail.connector else None)
+    if not active:
+        click.echo("  (no active connector configured; skipping hook refresh)")
+        return
+
+    if no_restart:
+        click.echo("  --no-restart specified; hook .token files were NOT refreshed.")
+        click.echo("  Run `defenseclaw-gateway connector setup` manually to apply the new token.")
+        return
+
+    # Bounce the connector so the hook scripts pick up the new token.
+    click.echo(f"  Refreshing hook scripts for connector={active!r}…")
+    rc1, _so, se = _rotate_token_run_gateway(["connector", "teardown"])
+    if rc1 != 0:
+        click.echo(
+            "  WARNING: connector teardown returned non-zero; old hook scripts may persist.\n"
+            f"  stderr: {se.strip()}"
+        )
+    rc2, _so, se = _rotate_token_run_gateway(["connector", "setup"])
+    if rc2 != 0:
+        raise click.ClickException(
+            "connector setup failed after token rotation; the gateway may be in an inconsistent state.\n"
+            f"stderr: {se.strip()}"
+        )
+
+    click.echo("  Hook scripts refreshed.")
+    click.echo()
+    click.echo("Next step: restart the agent (claude / codex / openclaw / zeptoclaw) so")
+    click.echo("the new token is picked up by its inspect / hook subprocess invocations.")
+
+
+# ---------------------------------------------------------------------------
 # setup gateway
 # ---------------------------------------------------------------------------
 

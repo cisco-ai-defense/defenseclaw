@@ -167,5 +167,12 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@v4
       - run: make plugin
-      - run: make pycli
+      # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
+      # which `make test → cli-test` indirectly needs at import time:
+      # several cli/tests/*.py files use pytest fixtures/parametrize
+      # and `python -m unittest discover` aborts on the first failed
+      # import. The non-dev `make pycli` target only installs runtime
+      # deps and broke this job after the S4.1/S4.2 connector_paths
+      # tests landed.
+      - run: make dev-pycli
       - run: make test

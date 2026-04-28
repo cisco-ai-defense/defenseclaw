@@ -17,7 +17,9 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -270,38 +272,13 @@ func TestAllConnectors_ImplementInterface(t *testing.T) {
 	}
 }
 
-// --- HookEventHandler interface tests ---
-// M8: ClaudeCode and Codex no longer implement HookEventHandler — the stub
-// returned hardcoded "allow" which was a silent fail-open risk. Policy
-// enforcement lives in the gateway's handleClaudeCodeHook/handleCodexHook.
-
-func TestClaudeCode_DoesNotImplementHookEventHandler(t *testing.T) {
-	c := NewClaudeCodeConnector()
-	if _, ok := interface{}(c).(HookEventHandler); ok {
-		t.Error("ClaudeCode should not implement HookEventHandler (stub removed)")
-	}
-}
-
-func TestCodex_DoesNotImplementHookEventHandler(t *testing.T) {
-	c := NewCodexConnector()
-	if _, ok := interface{}(c).(HookEventHandler); ok {
-		t.Error("Codex should not implement HookEventHandler (stub removed)")
-	}
-}
-
-func TestOpenClaw_DoesNotImplementHookEventHandler(t *testing.T) {
-	c := NewOpenClawConnector()
-	if _, ok := interface{}(c).(HookEventHandler); ok {
-		t.Error("OpenClaw should not implement HookEventHandler")
-	}
-}
-
-func TestZeptoClaw_DoesNotImplementHookEventHandler(t *testing.T) {
-	c := NewZeptoClawConnector()
-	if _, ok := interface{}(c).(HookEventHandler); ok {
-		t.Error("ZeptoClaw should not implement HookEventHandler")
-	}
-}
+// --- HookEventHandler interface deletion (Phase A5) ---
+// HookEventHandler was a reserved-for-future-use stub interface that no
+// built-in connector implemented. It was removed in plan A5 along with
+// AgentRestarter (also unimplemented) so the connector contract surface
+// only describes interfaces with at least one real consumer. The active
+// hook-routing interface is HookEndpoint (added in d3b94fb), exercised
+// by api.go:registerConnectorHookRoutes.
 
 // --- OpenClaw extension placeholder tests ---
 
@@ -1500,12 +1477,37 @@ func TestCodex_SetCredentials_OnConnectorInterface(t *testing.T) {
 
 // --- ZeptoClaw connector tests ---
 
+// TestZeptoClaw_Authenticate_Loopback pins the new B1 contract: with no
+// gateway token AND no master key configured (the brief first-boot
+// window before ensureGatewayToken runs), loopback callers are still
+// allowed so the install can complete its first request without 401.
+// Once a token is configured, this loopback-allow is no longer
+// reachable — TestZeptoClaw_Authenticate_LoopbackRequiresTokenWhenConfigured
+// pins that flip.
 func TestZeptoClaw_Authenticate_Loopback(t *testing.T) {
 	c := NewZeptoClawConnector()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
 	if !c.Authenticate(r) {
-		t.Error("expected loopback auth to pass")
+		t.Error("expected loopback auth to pass when no token configured (first-boot window)")
+	}
+}
+
+// TestZeptoClaw_Authenticate_LoopbackRequiresTokenWhenConfigured pins
+// the new B1 / S0.3 invariant: once a gateway token is configured, even
+// loopback callers must present a valid X-DC-Auth header. The previous
+// behavior allowed any local process to hit /c/zeptoclaw/* and have its
+// upstream key recorded by Route() — that path is now closed.
+func TestZeptoClaw_Authenticate_LoopbackRequiresTokenWhenConfigured(t *testing.T) {
+	c := NewZeptoClawConnector()
+	c.SetCredentials("gw-tok-configured", "")
+
+	r := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
+
+	if c.Authenticate(r) {
+		t.Fatal("loopback without X-DC-Auth must be rejected when gateway token is configured (plan B1)")
 	}
 }
 
@@ -1513,17 +1515,23 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 	c := NewZeptoClawConnector()
 	c.SetCredentials("my-token", "my-master")
 
-	// ZeptoClaw is a native binary with no fetch interceptor (same
-	// shape as codex) — its Authorization header carries the upstream
-	// provider key, never DefenseClaw's gateway token. Loopback is
-	// therefore trusted unconditionally; denying it would make
-	// zeptoclaw fundamentally unroutable. Non-loopback callers still
-	// require X-DC-Auth or the master key.
+	// Loopback without X-DC-Auth is now rejected when a token is
+	// configured (plan B1 / S0.3): the previous "trust loopback
+	// unconditionally" contract was a local-IDOR risk.
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
 	r.Header.Set("Authorization", "Bearer sk-or-upstream-key")
-	if !c.Authenticate(r) {
-		t.Error("loopback must be trusted for zeptoclaw — native binary has no way to inject X-DC-Auth")
+	if c.Authenticate(r) {
+		t.Error("loopback with only an upstream-bearer (no X-DC-Auth) must be rejected when token configured")
+	}
+
+	// Loopback with X-DC-Auth is accepted (the hooks/inspect-*.sh
+	// scripts inject this header bearing the synthesized gateway token).
+	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	r2.RemoteAddr = "127.0.0.1:54321"
+	r2.Header.Set("X-DC-Auth", "my-token")
+	if !c.Authenticate(r2) {
+		t.Error("loopback with valid X-DC-Auth must pass")
 	}
 
 	// Non-loopback: upstream bearer is NOT a valid DefenseClaw
@@ -1552,22 +1560,21 @@ func TestZeptoClaw_Authenticate_Token(t *testing.T) {
 	}
 }
 
-// TestZeptoClaw_Authenticate_NativeBinaryLoopback mirrors the codex
-// test: the critical end-to-end path is zeptoclaw → proxy on loopback
-// with an Authorization: Bearer <provider-api-key> header. Denying
-// this 401s every request before guardrail inspection even runs, so
-// loopback trust is structural not optional.
+// TestZeptoClaw_Authenticate_NativeBinaryLoopback (post-B1): the
+// hook-script flow injects X-DC-Auth bearing the synthesized gateway
+// token, so loopback callers are authenticated via the same path as
+// remote callers. The previous "loopback always allowed" path is gone.
 func TestZeptoClaw_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	c := NewZeptoClawConnector()
 	c.SetCredentials("gw-tok-5c80", "")
 
 	r := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
 	r.RemoteAddr = "127.0.0.1:54321"
+	r.Header.Set("X-DC-Auth", "gw-tok-5c80")
 	r.Header.Set("Authorization", "Bearer sk-or-v1-real-openrouter-key")
 
 	if !c.Authenticate(r) {
-		t.Fatal("zeptoclaw loopback with provider Authorization must be accepted; " +
-			"otherwise zeptoclaw → proxy traffic gets 401'd and guardrail never runs")
+		t.Fatal("zeptoclaw loopback with X-DC-Auth must be accepted post-B1")
 	}
 }
 
@@ -1947,8 +1954,24 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Plan S7.1 sentinel guard: every built-in hook exits 0 immediately
+	// if DEFENSECLAW_HOME is missing or has a `.disabled` marker. CI
+	// runners have no real ~/.defenseclaw, so without an explicit
+	// DEFENSECLAW_HOME the hook fail-opens before curl is ever invoked
+	// and `curl-args.txt` is never written. Seed a tmp dir that exists
+	// and contains no .disabled sentinel so the hook proceeds to the
+	// curl path the caller cares about.
+	dcHome := t.TempDir()
 	cmd := exec.Command("bash", scriptPath)
-	cmd.Env = append(os.Environ(), "PATH="+stubDir+":"+os.Getenv("PATH"))
+	// Plan B4 / S0.4: hooks lock PATH down by default. The test
+	// stubs `curl` inside an ephemeral tmpdir; tell the hardening
+	// helpers to keep our path rather than reset it to system bins.
+	hookPath := stubDir + ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	cmd.Env = append(os.Environ(),
+		"PATH="+stubDir+":"+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+		"DEFENSECLAW_HOOK_PATH="+hookPath,
+	)
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -2293,19 +2316,23 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 		// No creds on loopback should fail for connectors with a fetch
 		// interceptor — closes the local-process bypass vector.
 		//
-		// Exception: native-binary connectors (codex, zeptoclaw) have
-		// no fetch interceptor and cannot inject X-DC-Auth. Their
-		// primary authentication path IS loopback trust; denying it
-		// would make them fundamentally unroutable through the proxy.
-		// Bridge / remote deployments still require X-DC-Auth or the
-		// master key — the token protects those paths.
+		// Plan B1 / S0.3: ZeptoClaw used to trust loopback as a
+		// "native binary has no way to inject X-DC-Auth" carve-out;
+		// that was the local-IDOR vector. The hooks/inspect-*.sh
+		// shell scripts (which run on the same host) now inject
+		// X-DC-Auth bearing the synthesized gateway token, so
+		// ZeptoClaw no longer needs the loopback trust.
+		//
+		// Codex still trusts loopback because the OpenAI Python SDK
+		// inside the agent process has no equivalent shell wrapper
+		// to inject the header — that wiring is a Phase E follow-up.
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
 		accepted := c.Authenticate(r3)
-		nativeBinary := c.Name() == "codex" || c.Name() == "zeptoclaw"
-		if nativeBinary {
+		loopbackTrust := c.Name() == "codex"
+		if loopbackTrust {
 			if !accepted {
-				t.Errorf("%s: loopback must be trusted so native-binary traffic can reach the proxy", c.Name())
+				t.Errorf("%s: loopback must be trusted so codex traffic can reach the proxy", c.Name())
 			}
 		} else if accepted {
 			t.Errorf("%s: should fail without credentials when token configured", c.Name())
@@ -2845,10 +2872,21 @@ func TestHookScript_FailClosed_Default(t *testing.T) {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
+	// Plan S7.1 sentinel guard: hooks exit 0 fast when DEFENSECLAW_HOME
+	// is missing (operator-uninstall safety). To exercise the
+	// fail-closed branch we must point DEFENSECLAW_HOME at a real
+	// directory with no .disabled marker — otherwise the hook
+	// short-circuits before ever attempting the unreachable gateway
+	// dial and the test sees exit 0 instead of exit 2.
+	dcHome := t.TempDir()
+
 	// Run hook against an unreachable port — should exit 2 (fail-closed)
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
-	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
 	err := cmd.Run()
 	if err == nil {
 		t.Fatal("hook should fail-closed (exit 2) when gateway is unreachable, but got exit 0")
@@ -3074,14 +3112,15 @@ func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
 }
 
 // --- PR-G (S1.1): AgentPathProvider / EnvRequirementsProvider /
-//                  HookScriptProvider / AgentRestarter contract ---
+//                  HookScriptProvider contract ---
 //
 // These tests pin the additive interface contract introduced for the
 // claw-agnostic refactor. They are pure metadata assertions: every
 // built-in connector must (a) declare the on-disk paths it touches,
 // (b) declare any env vars it needs, (c) expose its hook scripts.
-// AgentRestarter is optional — none of the built-ins implement it
-// today; we only assert that the type assertion compiles.
+// (AgentRestarter was deleted in plan A5 because no built-in implemented
+// it; if a future connector needs restart, reintroduce it as an explicit
+// S2.6 with at least one consumer.)
 
 func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 	dataDir := t.TempDir()
@@ -3261,12 +3300,14 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 	}
 }
 
-func TestConnector_AgentRestarter_OptionalAtThisLayer(t *testing.T) {
-	// None of the built-in connectors implement AgentRestarter
-	// today; this test pins the contract that the type assertion
-	// compiles cleanly and returns ok=false. When a future
-	// connector adds restart support, the fix is to update this
-	// test, not to make the assertion compile-time mandatory.
+// TestConnector_ProviderProbe_AllBuiltinsImplement pins the plan A4
+// contract: every built-in connector exposes a HasUsableProviders()
+// hook so the sidecar boot path can refuse to start when no LLM
+// upstream is configured. This is intentionally compile-time mandatory
+// — a connector that drops the implementation should fail this test
+// before it ever ships, since a silent zero-provider boot would let
+// the gateway accept traffic that has no upstream to forward to.
+func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
 	connectors := []Connector{
 		NewZeptoClawConnector(),
 		NewOpenClawConnector(),
@@ -3274,8 +3315,8 @@ func TestConnector_AgentRestarter_OptionalAtThisLayer(t *testing.T) {
 		NewClaudeCodeConnector(),
 	}
 	for _, conn := range connectors {
-		if _, ok := conn.(AgentRestarter); ok {
-			t.Logf("%s implements AgentRestarter — update this test to exercise it", conn.Name())
+		if _, ok := conn.(ProviderProbe); !ok {
+			t.Errorf("%s does not implement ProviderProbe — startup probe will skip it (plan A4)", conn.Name())
 		}
 	}
 }
@@ -3384,5 +3425,150 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("CreatedDirs = %v, missing %q", paths.CreatedDirs, wantDir)
+	}
+}
+
+// TestHookScriptOwner_BuiltinSurface enumerates the canonical mapping
+// of HookScriptOwner across built-in connectors (plan C2 / S2.5).
+// This is the contract that drives WriteHookScriptsForConnectorObject.
+//
+//   - claudecode owns claude-code-hook.sh
+//   - codex      owns codex-hook.sh
+//   - openclaw   owns no vendor template (fetch-interceptor plugin)
+//   - zeptoclaw  owns no vendor template (config-only)
+func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	cases := []struct {
+		name string
+		ctor func() Connector
+		want []string
+	}{
+		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
+		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
+		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
+		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.ctor()
+			owner, ok := c.(HookScriptOwner)
+			if tc.want == nil {
+				if ok {
+					t.Fatalf("%s should NOT implement HookScriptOwner (no vendor template); plan C2 says non-owners stay opt-out", tc.name)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("%s must implement HookScriptOwner; plan C2 wires WriteHookScriptsForConnectorObject through this interface", tc.name)
+			}
+			got := owner.HookScriptNames(SetupOpts{})
+			if len(got) != len(tc.want) {
+				t.Fatalf("%s HookScriptNames() = %v, want %v", tc.name, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("%s HookScriptNames()[%d] = %q, want %q", tc.name, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// fakeHookScriptOwner exercises the plan C2 contract: arbitrary
+// connector hands back a script name, WriteHookScriptsForConnectorObject
+// must materialize it on disk alongside the generic inspect-* set.
+type fakeHookScriptOwner struct {
+	name  string
+	hooks []string
+}
+
+func (f *fakeHookScriptOwner) Name() string        { return f.name }
+func (f *fakeHookScriptOwner) Description() string { return "fake hook owner for tests" }
+func (f *fakeHookScriptOwner) HookAPIPath() string { return "" }
+func (f *fakeHookScriptOwner) ToolInspectionMode() ToolInspectionMode {
+	return ToolModeResponseScan
+}
+func (f *fakeHookScriptOwner) SubprocessPolicy() SubprocessPolicy        { return SubprocessNone }
+func (f *fakeHookScriptOwner) AllowedHosts() []string                    { return nil }
+func (f *fakeHookScriptOwner) Setup(context.Context, SetupOpts) error    { return nil }
+func (f *fakeHookScriptOwner) Teardown(context.Context, SetupOpts) error { return nil }
+func (f *fakeHookScriptOwner) VerifyClean(SetupOpts) error               { return nil }
+func (f *fakeHookScriptOwner) Authenticate(*http.Request) bool           { return true }
+func (f *fakeHookScriptOwner) Route(*http.Request, []byte) (*ConnectorSignals, error) {
+	return &ConnectorSignals{}, nil
+}
+func (f *fakeHookScriptOwner) SetCredentials(string, string) {}
+func (f *fakeHookScriptOwner) HookScriptNames(SetupOpts) []string {
+	out := make([]string, len(f.hooks))
+	copy(out, f.hooks)
+	return out
+}
+
+// TestWriteHookScriptsForConnectorObject_HonoursInterface validates
+// the interface-driven path (plan C2): a connector that opts in via
+// HookScriptOwner gets its scripts materialized; a connector that
+// does not opt in gets only the generic inspect-* scripts.
+func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
+	t.Run("owner_with_codex_template", func(t *testing.T) {
+		dir := t.TempDir()
+		owner := &fakeHookScriptOwner{name: "fakecodex", hooks: []string{"codex-hook.sh"}}
+		if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "tok-test", owner); err != nil {
+			t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+		}
+		mustExist(t, filepath.Join(dir, "codex-hook.sh"))
+		mustExist(t, filepath.Join(dir, "inspect-tool.sh"))
+	})
+
+	t.Run("non_owner_writes_generic_only", func(t *testing.T) {
+		dir := t.TempDir()
+		// Use the real ZeptoClaw connector — does not implement
+		// HookScriptOwner per the plan C2 contract above.
+		conn := NewZeptoClawConnector()
+		if _, isOwner := any(conn).(HookScriptOwner); isOwner {
+			t.Fatalf("zeptoclaw must not implement HookScriptOwner")
+		}
+		if err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "tok-test", conn); err != nil {
+			t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
+		}
+		mustExist(t, filepath.Join(dir, "inspect-tool.sh"))
+		mustNotExist(t, filepath.Join(dir, "codex-hook.sh"))
+		mustNotExist(t, filepath.Join(dir, "claude-code-hook.sh"))
+	})
+
+	t.Run("missing_template_fails_loud", func(t *testing.T) {
+		dir := t.TempDir()
+		owner := &fakeHookScriptOwner{name: "typo", hooks: []string{"does-not-exist.sh"}}
+		err := WriteHookScriptsForConnectorObject(dir, "127.0.0.1:18970", "tok-test", owner)
+		if err == nil {
+			t.Fatalf("expected error for non-existent template, got nil")
+		}
+		if !strings.Contains(err.Error(), "does-not-exist.sh") {
+			t.Errorf("error %q should name the missing template", err.Error())
+		}
+	})
+
+	t.Run("string_shim_routes_through_registry", func(t *testing.T) {
+		dir := t.TempDir()
+		// Drives the back-compat string-keyed function — ensures
+		// it reaches HookScriptOwner via the default registry,
+		// not the legacy package map.
+		if err := WriteHookScriptsForConnector(dir, "127.0.0.1:18970", "tok-test", "claudecode"); err != nil {
+			t.Fatalf("WriteHookScriptsForConnector: %v", err)
+		}
+		mustExist(t, filepath.Join(dir, "claude-code-hook.sh"))
+		mustNotExist(t, filepath.Join(dir, "codex-hook.sh"))
+	})
+}
+
+func mustExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+}
+
+func mustNotExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to NOT exist, got err=%v", path, err)
 	}
 }

@@ -15,6 +15,12 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   exit 0
 fi
 
+# Plan B4 / S0.4: shell-side hook hardening (sourced before reading
+# stdin so the bounded fd limit is in place when curl spawns).
+. "$(dirname "${BASH_SOURCE[0]}")/_hardening.sh"
+defenseclaw_harden_resources
+defenseclaw_harden_env
+
 CONTENT=$(cat)
 
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"

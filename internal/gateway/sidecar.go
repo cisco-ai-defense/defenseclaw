@@ -137,6 +137,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] device identity loaded (id=%s)\n", client.device.DeviceID)
 
+	// Plan B6 / S0.10: install the per-boot HMAC seed for telemetry
+	// payload integrity. We feed the ed25519 device-key seed to HKDF
+	// inside SetTelemetryHMACSeed so the HMAC key is derived (not
+	// reused) — the device key never ends up on the wire even
+	// indirectly. Done as early as possible so every event emitted
+	// after this point is HMAC-stamped at the writer choke point.
+	gatewaylog.SetTelemetryHMACSeed(client.device.PrivateKey.Seed())
+
 	notify := NewNotificationQueue()
 
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
@@ -577,6 +585,84 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	}
 }
 
+// watcherDirSource tags where each dir came from for telemetry / logs.
+// Used by resolveWatcherDirs so callers (and tests) can assert that
+// the priority chain (explicit > connector > config-default) was
+// honoured for the active connector. Plan C4 / S1.3.
+type watcherDirSource string
+
+const (
+	watcherDirsFromConfig    watcherDirSource = "config-explicit"
+	watcherDirsFromConnector watcherDirSource = "connector-discovered"
+	watcherDirsFromDefault   watcherDirSource = "config-default"
+	watcherDirsDisabled      watcherDirSource = "disabled"
+)
+
+// watcherDirSources reports the source of each resolved dir bucket.
+type watcherDirSources struct {
+	Skill  watcherDirSource
+	Plugin watcherDirSource
+}
+
+// resolveWatcherDirs is the pure dir-resolution helper extracted from
+// runWatcher (plan C4 / S1.3). It applies the priority chain:
+//
+//	explicit gateway.watcher.{skill,plugin}.dirs
+//	  > active connector ComponentTargets("")
+//	  > cfg.SkillDirs() / cfg.PluginDirs() (OpenClaw default)
+//
+// Pure: no globals, no I/O, no logging — every input arrives via
+// arguments. The third return value tags the source bucket so the
+// matrix test can prove that, say, claudecode connector's
+// ComponentTargets actually flowed through to the watcher rather
+// than silently falling back to config defaults.
+//
+// `conn` may be nil; that mirrors the runWatcher path where the
+// resolveActiveConnector failure is logged and we fall through to
+// cfg defaults. A nil `conn` skips the connector branch entirely.
+func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs []string, pluginDirs []string, src watcherDirSources) {
+	var compTargets map[string][]string
+	if conn != nil {
+		if scanner, ok := conn.(connector.ComponentScanner); ok && scanner.SupportsComponentScanning() {
+			compTargets = scanner.ComponentTargets("")
+		}
+	}
+
+	if wcfg.Skill.Enabled {
+		switch {
+		case len(wcfg.Skill.Dirs) > 0:
+			skillDirs = append([]string(nil), wcfg.Skill.Dirs...)
+			src.Skill = watcherDirsFromConfig
+		case len(compTargets["skill"]) > 0:
+			skillDirs = append([]string(nil), compTargets["skill"]...)
+			src.Skill = watcherDirsFromConnector
+		default:
+			skillDirs = cfg.SkillDirs()
+			src.Skill = watcherDirsFromDefault
+		}
+	} else {
+		src.Skill = watcherDirsDisabled
+	}
+
+	if wcfg.Plugin.Enabled {
+		switch {
+		case len(wcfg.Plugin.Dirs) > 0:
+			pluginDirs = append([]string(nil), wcfg.Plugin.Dirs...)
+			src.Plugin = watcherDirsFromConfig
+		case len(compTargets["plugin"]) > 0:
+			pluginDirs = append([]string(nil), compTargets["plugin"]...)
+			src.Plugin = watcherDirsFromConnector
+		default:
+			pluginDirs = cfg.PluginDirs()
+			src.Plugin = watcherDirsFromDefault
+		}
+	} else {
+		src.Plugin = watcherDirsDisabled
+	}
+
+	return skillDirs, pluginDirs, src
+}
+
 // runWatcher starts the skill/MCP install watcher if enabled in config.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
 	wcfg := s.cfg.Gateway.Watcher
@@ -597,50 +683,23 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	// and fall back rather than aborting the watcher loop. That keeps
 	// the watcher useful for the OpenClaw default flow even while a
 	// freshly-broken connector name is being debugged.
-	var compTargets map[string][]string
 	reg := connector.NewDefaultRegistry()
 	conn, err := resolveActiveConnector(reg, s.cfg.Guardrail.Connector, "watcher")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
-	} else if conn != nil {
-		if scanner, ok := conn.(connector.ComponentScanner); ok && scanner.SupportsComponentScanning() {
-			compTargets = scanner.ComponentTargets("")
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using %s connector ComponentTargets\n", conn.Name())
-		}
 	}
 
-	// Resolve skill dirs: explicit config overrides connector autodiscovery
-	var skillDirs []string
-	if wcfg.Skill.Enabled {
-		if len(wcfg.Skill.Dirs) > 0 {
-			skillDirs = wcfg.Skill.Dirs
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using configured skill dirs: %v\n", skillDirs)
-		} else if paths := compTargets["skill"]; len(paths) > 0 {
-			skillDirs = paths
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector-discovered skill dirs: %v\n", skillDirs)
-		} else {
-			skillDirs = s.cfg.SkillDirs()
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: autodiscovered skill dirs: %v\n", skillDirs)
-		}
-	} else {
+	skillDirs, pluginDirs, _ := resolveWatcherDirs(s.cfg, conn, wcfg)
+
+	if !wcfg.Skill.Enabled {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")
+	} else if len(skillDirs) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill dirs: %v\n", skillDirs)
 	}
-
-	// Plugin dirs: explicit config overrides connector autodiscovery
-	var pluginDirs []string
-	if wcfg.Plugin.Enabled {
-		if len(wcfg.Plugin.Dirs) > 0 {
-			pluginDirs = wcfg.Plugin.Dirs
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using configured plugin dirs: %v\n", pluginDirs)
-		} else if paths := compTargets["plugin"]; len(paths) > 0 {
-			pluginDirs = paths
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector-discovered plugin dirs: %v\n", pluginDirs)
-		} else {
-			pluginDirs = s.cfg.PluginDirs()
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: autodiscovered plugin dirs: %v\n", pluginDirs)
-		}
-	} else {
+	if !wcfg.Plugin.Enabled {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin watching disabled\n")
+	} else if len(pluginDirs) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin dirs: %v\n", pluginDirs)
 	}
 
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
@@ -1002,6 +1061,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// would let a typo in `guardrail.connector` route Codex / Claude
 	// Code traffic through the OpenClaw connector and patch the wrong
 	// agent's config files. See S1.4 / F7.
+	// Plan B3: route plugin-loader rejections into the audit pipeline
+	// (gatewaylog.EventError + SubsystemPlugin) BEFORE DiscoverPlugins
+	// runs, so a hostile plugin rejected pre-load still surfaces a
+	// structured event to the same sinks as auth failures.
+	wirePluginAuditEmitter()
+
 	registry := connector.NewDefaultRegistry()
 	if s.cfg.PluginDir != "" {
 		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
@@ -1023,6 +1088,26 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	}
 	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
 
+	// Plan B2 / S0.2: synthesize a first-boot gateway token if none is
+	// configured, BEFORE Setup writes hook scripts (which bake the
+	// token into curl headers) and BEFORE the API server starts (which
+	// uses the same token to authenticate inbound hook calls). After
+	// this point, s.cfg.Gateway.Token always has a non-empty value.
+	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
+	apiToken := s.cfg.Gateway.ResolvedToken()
+	if apiToken == "" {
+		tok, err := EnsureGatewayToken(dotenvPath)
+		if err != nil {
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return fmt.Errorf("first-boot gateway token: %w", err)
+		}
+		s.cfg.Gateway.Token = tok
+		apiToken = tok
+		// Also push into the process env so subsequent ResolveAPIKey
+		// calls (e.g. judge LLM init) see the synthesized value.
+		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
+	}
+
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.cfg.DataDir,
 		ProxyAddr: proxyAddr,
@@ -1033,7 +1118,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// config — same source the proxy uses for credential wiring
 		// below, so the baked value and the value accepted by the API
 		// middleware stay in lockstep.
-		APIToken: s.cfg.Gateway.ResolvedToken(),
+		APIToken: apiToken,
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the
@@ -1061,6 +1146,26 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 			}
+		}
+
+		// Plan A4 / S0.12: refuse to start when the connector advertises
+		// no usable upstream provider. Without this, the gateway would
+		// accept agent traffic and fail every request once it tries to
+		// dial a non-existent upstream — far better to crash at boot
+		// where the operator sees the misconfiguration immediately.
+		// The cfg.Guardrail.AllowEmptyProviders flag opts test harnesses
+		// out of the gate (CI fixtures with stub upstreams, etc.).
+		if probe, ok := conn.(connector.ProviderProbe); ok && !s.cfg.Guardrail.AllowEmptyProviders {
+			count, err := probe.HasUsableProviders()
+			if err != nil {
+				s.health.SetGuardrail(StateError, err.Error(), nil)
+				return fmt.Errorf("connector %s reports no usable providers: %w (set guardrail.allow_empty_providers=true to override)", conn.Name(), err)
+			}
+			if count == 0 {
+				s.health.SetGuardrail(StateError, "no usable providers", nil)
+				return fmt.Errorf("connector %s reports zero usable providers; refusing to start (set guardrail.allow_empty_providers=true to override)", conn.Name())
+			}
+			fmt.Fprintf(os.Stderr, "[guardrail] provider probe ok: %s reports %d usable upstream(s)\n", conn.Name(), count)
 		}
 	}
 

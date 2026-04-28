@@ -96,18 +96,6 @@ type Connector interface {
 	VerifyClean(opts SetupOpts) error
 }
 
-// HookEventHandler — reserved for future use. No built-in connector
-// implements this; hook handling lives in the gateway's per-connector
-// handlers (handleClaudeCodeHook, handleCodexHook) which have access
-// to the full policy engine. A stub implementation was removed in M8
-// because it returned hardcoded "allow", creating a silent fail-open
-// risk. If a plugin connector needs custom hook handling, it can
-// implement this interface and the gateway will route to it.
-type HookEventHandler interface {
-	HookEndpointPath() string
-	HandleHookEvent(ctx context.Context, payload []byte) ([]byte, error)
-}
-
 // HookEndpoint — optional, connectors that receive lifecycle events
 // from agents declare which API path they need. The gateway registers
 // the route dynamically at boot instead of hardcoding paths in api.go.
@@ -251,16 +239,38 @@ type HookScriptProvider interface {
 	HookScripts(opts SetupOpts) []string
 }
 
-// AgentRestarter — optional, connectors that know how to gracefully
-// bounce the agent process after a config change implement this.
-// Behavior contract:
-//   - Best-effort: a connector that finds the agent isn't running
-//     should return nil, not an error.
-//   - The CLI only calls this when the operator opts in via
-//     `--restart-agent` (or the equivalent flag). It is never
-//     called from Setup/Teardown.
-//   - Implementations must not block forever; they should respect
-//     ctx.Done().
-type AgentRestarter interface {
-	RestartAgent(ctx context.Context, opts SetupOpts) error
+// HookScriptOwner — plan C2 / S2.5: optional, connectors that own a
+// per-vendor hook template implement this to advertise the BASENAMES
+// (not absolute paths) of the scripts they need written into hookDir.
+// Used by WriteHookScriptsForConnector to collect the union of
+// generic + per-connector scripts without consulting a package-level
+// map. A connector that does not own any vendor hook (openclaw,
+// zeptoclaw) should NOT implement this interface — the empty case
+// flows through the no-extra-scripts branch.
+//
+// The returned slice MUST contain only base filenames, no path
+// separators; the embed FS at hooks/<name> is the single source of
+// truth for the file body. Returning a name that doesn't exist in
+// the embed FS produces an explicit error at write time so a typo
+// never silently no-ops.
+type HookScriptOwner interface {
+	HookScriptNames(opts SetupOpts) []string
+}
+
+// ProviderProbe — optional, connectors that can self-diagnose whether
+// at least one usable upstream provider is configured implement this.
+// The sidecar boot path calls HasUsableProviders() right after Setup
+// and refuses to start (returns an error from Run) when count == 0,
+// preventing the gateway from accepting traffic with no LLM upstream
+// to forward to (S0.12 / plan A4).
+//
+// Implementations must be cheap (no network I/O, no blocking).
+// Returning a non-nil error short-circuits the count check and is
+// logged as the boot-time refusal reason.
+//
+// The cfg.Guardrail.AllowEmptyProviders flag bypasses the refusal —
+// CI test harnesses that intentionally run with stub upstreams opt
+// in via that flag.
+type ProviderProbe interface {
+	HasUsableProviders() (count int, err error)
 }

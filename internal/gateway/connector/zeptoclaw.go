@@ -30,9 +30,34 @@ import (
 // ZeptoClawConnector handles LLM traffic routing and tool inspection for ZeptoClaw.
 // LLM traffic: patches api_base in ~/.zeptoclaw/config.json to route through proxy.
 // Tool inspection: proxy-side response-scan — the proxy inspects tool_calls in the
-// LLM response stream. ZeptoClaw's hooks schema (before_tool/after_tool) expects
-// structured HookRule objects, not script paths, so config-based hook wiring is not
-// used. Hook scripts are still written to disk for subprocess enforcement.
+// LLM response stream.
+//
+// === BY-DESIGN: ZeptoClaw before_tool hook wiring is WONTFIX (architectural) ===
+// Plan C3 / matrix §"Out of scope". ZeptoClaw's HooksConfig.before_tool is a
+// notification list — an in-process callback signal — NOT an external-script
+// trigger. The shape is `[]HookRule{Match, Action}`, structured objects, not
+// shell paths. There is no schema slot for "run /path/to/inspect-tool.sh
+// before this tool fires" and adding one is out of our control: we do not own
+// the ZeptoClaw binary.
+//
+// What this means for the security guarantee:
+//  1. Pre-tool gating cannot run from the agent process directly.
+//  2. We achieve the same result via proxy-side response-scan: the gateway
+//     inspects the model's `tool_calls` array on the LLM response stream
+//     before it reaches the agent, and rejects/rewrites disallowed calls.
+//  3. The ToolModeBoth setting on this connector is what wires that flow —
+//     the proxy is the policy enforcement point, not the agent.
+//
+// The hook scripts are still written under DataDir/hooks for two reasons:
+//   - Subprocess enforcement (shim PATH) reuses inspect-tool.sh.
+//   - Forward-compat: if ZeptoClaw ever grows external-script hook
+//     support, the artifacts are already on disk and only the agent-side
+//     wiring needs to land.
+//
+// Do NOT add a "patch before_tool to point at our script" branch in Setup —
+// it will silently no-op or, worse, write a malformed HookRule and break
+// the user's config. See plan C3 + docs/CONNECTOR-MATRIX.md "By-design
+// connector limitations" for the canonical statement.
 type ZeptoClawConnector struct {
 	gatewayToken string
 	masterKey    string
@@ -100,8 +125,12 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	// Surface 2: Tool inspection hook script
+	// Plan C2: ZeptoClaw does not own a vendor hook template
+	// (only generic inspect-* scripts apply). It deliberately does
+	// NOT implement HookScriptOwner — the empty-extras path below
+	// flows through writeHookScriptsCommon's generic-only branch.
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsForConnector(hookDir, opts.APIAddr, opts.APIToken, c.Name()); err != nil {
+	if err := WriteHookScriptsForConnectorObject(hookDir, opts.APIAddr, opts.APIToken, c); err != nil {
 		return fmt.Errorf("zeptoclaw hook script: %w", err)
 	}
 
@@ -172,22 +201,21 @@ func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {
 	return nil
 }
 
-// Authenticate trusts loopback callers unconditionally. ZeptoClaw is
-// a native Rust binary with no fetch interceptor: its Authorization
-// header carries the upstream provider API key, never DefenseClaw's
-// gateway token, and it has no way to inject X-DC-Auth. Denying
-// loopback when a gateway token is configured would make zeptoclaw
-// fundamentally unroutable — every request would 401 before guardrail
-// inspection ran.
+// Authenticate enforces credentials on every ZeptoClaw request — no more
+// unconditional loopback bypass (plan B1 / S0.3). The previous behavior
+// allowed any local process to hit /c/zeptoclaw/* and have its
+// upstream key recorded in the provider-snapshot path. With first-boot
+// token synthesis (plan B2), the gateway always has a token to enforce,
+// so the only legitimate "no token configured" path is the brief window
+// before ensureGatewayToken() runs. We retain a narrow loopback-allow
+// for that case so a fully-fresh install can complete its first request
+// without 401, but reject loopback the moment a token is configured.
 //
-// Non-loopback callers (bridge / remote deployments) are still gated
-// on X-DC-Auth or the master key. The gateway token exists to protect
-// those paths, not to break the local-only native binary path.
+// ZeptoClaw is a native Rust binary with no fetch interceptor, so the
+// hooks/inspect-*.sh scripts (which run on the same host) inject the
+// X-DC-Auth header bearing the synthesized gateway token. That token
+// flow is what keeps loopback callers authenticated post-boot.
 func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
-	if IsLoopback(r) {
-		return true
-	}
-
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
@@ -200,6 +228,15 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
+	}
+
+	// Narrow loopback-allow ONLY for the unconfigured-gateway window.
+	// Once first-boot token synthesis lands (plan B2), this branch is
+	// effectively unreachable in production — but defensive belt-and-
+	// suspenders for the brief boot interval before ensureGatewayToken
+	// finishes writing ~/.defenseclaw/.env.
+	if c.gatewayToken == "" && c.masterKey == "" && IsLoopback(r) {
+		return true
 	}
 
 	return false
@@ -291,15 +328,31 @@ func zeptoClawBaseOrDefault(provider, configured string) string {
 	return zeptoClawDefaultAPIBase[provider]
 }
 
+// Route classifies inbound /c/zeptoclaw/* traffic. Plan B1: the
+// provider-snapshot lookup and inbound-key extraction are now gated
+// behind isChatPath. Non-chat paths get an empty RawAPIKey and a
+// PassthroughMode=true signal — they were never going to reach a
+// chat completion API anyway, and recording the inbound key on a
+// non-chat path was a needless secret-residency risk.
 func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
 	cs := &ConnectorSignals{
 		ConnectorName: "zeptoclaw",
-		RawAPIKey:     ExtractAPIKey(r),
 		RawBody:       body,
 		RawModel:      ParseModelFromBody(body),
 		Stream:        ParseStreamFromBody(body),
 		ExtraHeaders:  map[string]string{},
 	}
+
+	if !isChatPath(r.URL.Path) {
+		// Non-chat path: leave RawAPIKey empty and skip the upstream
+		// resolver. The proxy's passthrough path forwards the inbound
+		// Authorization header verbatim — no DefenseClaw machinery
+		// touches the request body or the secret.
+		cs.PassthroughMode = true
+		return cs, nil
+	}
+
+	cs.RawAPIKey = ExtractAPIKey(r)
 
 	// ZeptoClaw is a native binary with no fetch interceptor to set
 	// X-DC-Target-URL / X-AI-Auth. Resolve the real upstream from the
@@ -311,10 +364,6 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 		if key != "" {
 			cs.RawAPIKey = key
 		}
-	}
-
-	if !isChatPath(r.URL.Path) {
-		cs.PassthroughMode = true
 	}
 
 	return cs, nil
@@ -363,6 +412,25 @@ func (c *ZeptoClawConnector) RequiredEnv() []EnvRequirement {
 			Description: "ZeptoClaw is configured via ~/.zeptoclaw/config.json (api_base patched at setup); no env vars are needed for routing.",
 		},
 	}
+}
+
+// HasUsableProviders implements ProviderProbe. Counts the entries in
+// the provider snapshot that have a non-empty API key — these are the
+// upstreams that resolveUpstream() can route a chat request to. Setup
+// already errors when the snapshot is empty, but plan A4 tightens the
+// guarantee at boot: even if Setup somehow returned a snapshot full of
+// blank-key entries (e.g. a config edit between setup and run), the
+// gateway refuses to start traffic.
+func (c *ZeptoClawConnector) HasUsableProviders() (int, error) {
+	c.snapshotMu.RLock()
+	defer c.snapshotMu.RUnlock()
+	count := 0
+	for _, e := range c.providers {
+		if strings.TrimSpace(e.APIKey) != "" {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // --- ComponentScanner interface ---

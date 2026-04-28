@@ -4645,35 +4645,43 @@ func TestTokenAuth_BearerPrecedence(t *testing.T) {
 	}
 }
 
-func TestTokenAuth_DisabledWhenEmpty(t *testing.T) {
+// TestTokenAuth_FailsClosedWhenEmpty pins the plan B2 / S0.2 invariant:
+// when no gateway token is configured, the sidecar API fails closed
+// with 503 (Service Unavailable) rather than silently allowing
+// loopback callers. EnsureGatewayToken makes this case unreachable in
+// production — it synthesizes a token at boot — so reaching this
+// branch indicates a misconfigured deployment.
+func TestTokenAuth_FailsClosedWhenEmpty(t *testing.T) {
 	api, called := tokenAuthTestServer(t, "")
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	// Loopback callers are allowed when no token is configured
+	// Loopback callers are now denied (not allowed) when no token is
+	// configured — the previous fail-open behavior was a local-IDOR
+	// risk.
 	req := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("loopback POST with empty token config: status = %d, want %d", rr.Code, http.StatusOK)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("loopback POST with empty token config: status = %d, want %d (fail-closed)", rr.Code, http.StatusServiceUnavailable)
 	}
-	if !*called {
-		t.Error("empty token config: loopback next handler was not called")
+	if *called {
+		t.Error("empty token config: loopback next handler must NOT be called (fail-closed)")
 	}
 
-	// Non-loopback callers are denied when no token is configured
+	// Non-loopback callers also get 503 (same fail-closed branch).
 	*called = false
 	req2 := httptest.NewRequest(http.MethodPost, "/skill/disable", nil)
 	req2.RemoteAddr = "10.0.0.5:54321"
 	rr2 := httptest.NewRecorder()
 	handler.ServeHTTP(rr2, req2)
 
-	if rr2.Code != http.StatusUnauthorized {
-		t.Errorf("non-loopback POST with empty token config: status = %d, want %d", rr2.Code, http.StatusUnauthorized)
+	if rr2.Code != http.StatusServiceUnavailable {
+		t.Errorf("non-loopback POST with empty token config: status = %d, want %d", rr2.Code, http.StatusServiceUnavailable)
 	}
 	if *called {
 		t.Error("empty token config: non-loopback next handler should not be called")

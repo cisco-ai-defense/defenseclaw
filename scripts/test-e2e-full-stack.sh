@@ -1517,6 +1517,91 @@ phase_connector() {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 2C — Per-Connector Artifact Matrix (plan E4)
+# ---------------------------------------------------------------------------
+# Walks every built-in connector returned by /v1/connectors and asserts
+# the on-disk hook artifacts match the connector's HookScriptOwner
+# contract from plan C2. Read-only — does NOT install/uninstall any
+# connector during the live e2e run. The full lifecycle round-trip is
+# already covered by the Go matrix in test/e2e/connector_lifecycle_matrix_test.go.
+phase_connector_artifact_matrix() {
+    echo ""
+    echo "=== Phase 2C: Per-Connector Artifact Matrix [Read-only] ==="
+    phase_timer_start
+
+    local connectors_resp connector_names
+    connectors_resp=$(curl_with_gateway_headers GET "$SIDECAR_URL/v1/connectors" 2>/dev/null || echo '{"error":"unreachable"}')
+    if echo "$connectors_resp" | jq -e '.error' >/dev/null 2>&1; then
+        skip "phase 2C: API unavailable" "$(echo "$connectors_resp" | jq -r '.error')"
+        phase_timer_end "Phase 2C"
+        return
+    fi
+
+    connector_names=$(echo "$connectors_resp" | jq -r '[.connectors[].name] | sort | join(" ")' 2>/dev/null || echo "")
+
+    local hook_dir="$HOME/.defenseclaw/hooks"
+    if [ ! -d "$hook_dir" ]; then
+        skip "phase 2C: hook dir absent" "no $hook_dir (guardrail not yet set up)"
+        phase_timer_end "Phase 2C"
+        return
+    fi
+
+    # Generic inspect-* hooks are written for every connector by
+    # writeHookScriptsCommon. The list MUST match the in-binary list
+    # in internal/gateway/connector/subprocess.go::genericHookScripts —
+    # if you add a new generic script, update this list too.
+    local generic_scripts=("inspect-tool.sh" "inspect-request.sh" "inspect-response.sh" "inspect-tool-response.sh")
+    for s in "${generic_scripts[@]}"; do
+        if [ -f "$hook_dir/$s" ]; then
+            pass "phase 2C: generic hook $s present"
+        else
+            fail "phase 2C: generic hook $s present" "missing under $hook_dir"
+        fi
+    done
+
+    # Per-connector vendor scripts. Driven by HookScriptOwner; this
+    # mapping mirrors the connector's HookScriptNames() returns.
+    declare -A connector_owned_scripts
+    connector_owned_scripts[claudecode]="claude-code-hook.sh"
+    connector_owned_scripts[codex]="codex-hook.sh"
+    connector_owned_scripts[openclaw]=""   # fetch interceptor — no vendor hook
+    connector_owned_scripts[zeptoclaw]=""  # config-only — no vendor hook
+
+    for name in $connector_names; do
+        local owned="${connector_owned_scripts[$name]:-__unknown__}"
+        if [ "$owned" = "__unknown__" ]; then
+            # Future-proof: a fifth connector ships and we haven't
+            # taught the matrix about it yet. Skip rather than fail
+            # so the e2e doesn't false-alarm on a registry-side win.
+            skip "phase 2C: $name owned-hook expectations" "no entry in connector_owned_scripts"
+            continue
+        fi
+        if [ -z "$owned" ]; then
+            pass "phase 2C: $name has no vendor-owned hook (by design)"
+            continue
+        fi
+        # The vendor script is only on disk when the active connector
+        # at Setup time was *this* one. Multiple connectors don't share
+        # a hooks/ dir today (it's per-data-dir, not per-connector), so
+        # we only assert presence for the active connector and skip the
+        # rest with a clear reason.
+        local active_name
+        active_name=$(echo "$connectors_resp" | jq -r '.active // empty')
+        if [ "$active_name" != "$name" ]; then
+            skip "phase 2C: $name vendor hook present" "active connector is $active_name, not $name"
+            continue
+        fi
+        if [ -f "$hook_dir/$owned" ]; then
+            pass "phase 2C: $name vendor hook $owned present"
+        else
+            fail "phase 2C: $name vendor hook $owned present" "missing under $hook_dir"
+        fi
+    done
+
+    phase_timer_end "Phase 2C"
+}
+
+# ---------------------------------------------------------------------------
 # Phase 3 — Skill Scanner (CLI)
 # ---------------------------------------------------------------------------
 phase_skill_scanner() {
@@ -3529,6 +3614,7 @@ main() {
     phase_start || exit 1
     phase_health
     phase_connector
+    phase_connector_artifact_matrix
     phase_skill_scanner
     phase_mcp_scanner
     phase_block_allow

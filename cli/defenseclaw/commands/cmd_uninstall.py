@@ -49,7 +49,6 @@ import click
 
 from defenseclaw import config as config_module
 
-
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
 # is the conservative fallback path used when the gateway binary is too

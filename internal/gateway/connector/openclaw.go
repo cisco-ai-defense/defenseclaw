@@ -20,6 +20,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -452,6 +453,21 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 func (c *OpenClawConnector) SetCredentials(gatewayToken, masterKey string) {
 	c.gatewayToken = gatewayToken
 	c.masterKey = masterKey
+}
+
+// HasUsableProviders implements ProviderProbe (plan A4). OpenClaw does
+// not maintain a provider snapshot: the fetch interceptor plugin
+// supplies the upstream URL + key on every call via X-DC-Target-URL /
+// X-AI-Auth. As long as openclaw.json has been patched (the plugin is
+// installed) and either a gateway token or master key is configured,
+// the gateway has at least one usable upstream. We treat the absence
+// of credentials as "no upstream" so the boot probe fails fast on
+// half-installed deployments.
+func (c *OpenClawConnector) HasUsableProviders() (int, error) {
+	if c.gatewayToken == "" && c.masterKey == "" {
+		return 0, errors.New("openclaw: no gateway token or master key configured; fetch interceptor cannot authenticate to proxy")
+	}
+	return 1, nil
 }
 
 func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {

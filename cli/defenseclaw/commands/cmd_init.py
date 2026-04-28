@@ -495,7 +495,14 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     _ensure_device_key(cfg.gateway.device_key_file)
 
     click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
-    token_status = "configured" if token_configured else "none (loopback auth)"
+    # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first
+    # boot and persists it to ~/.defenseclaw/.env (mode 0600). The
+    # "none" branch is now an instruction, not a security mode.
+    token_status = (
+        "configured"
+        if token_configured
+        else "auto-generated on first boot (~/.defenseclaw/.env)"
+    )
     click.echo(f"  Token:         {token_status}")
     click.echo(f"  API port:      {cfg.gateway.api_port}")
     click.echo(f"  Watcher:       enabled={cfg.gateway.watcher.enabled}")

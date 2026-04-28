@@ -95,6 +95,8 @@ func TestHandleReloadProviders_RequiresAuth(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 	proxy.gatewayToken = "test-token"
+	// Specifically exercising the auth path — flip off the test bypass.
+	proxy.skipAuthForTest = false
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/config/providers/reload", nil)
 	rec := httptest.NewRecorder()

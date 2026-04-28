@@ -126,6 +126,18 @@ type GuardrailProxy struct {
 	// Splunk Local Bridge / AgentWatch summary work correctly.
 	defaultAgentName string
 	defaultPolicyID  string
+
+	// skipAuthForTest is a test-only escape hatch: when true,
+	// authenticateRequest returns true without consulting the
+	// connector / token / master-key. Plan B2 fails authentication
+	// closed when no token is configured; the bulk of proxy_test.go
+	// constructs a proxy directly without going through
+	// NewGuardrailProxy (no token plumbing) and asserts behavior
+	// downstream of auth. Tests that DO exercise the auth path
+	// (TestTokenAuth_*, etc.) leave this false and present a real
+	// X-DC-Auth header. Production callers MUST never set this —
+	// it bypasses the security floor entirely.
+	skipAuthForTest bool
 }
 
 // SetDefaultAgentName sets the agent name fallback for OTel spans when
@@ -248,16 +260,16 @@ func NewGuardrailProxy(
 	}
 
 	masterKey := deriveMasterKey(dataDir)
-	gatewayToken := ResolveAPIKey("DEFENSECLAW_GATEWAY_TOKEN", dotenvPath)
-	if gatewayToken == "" {
-		gatewayToken = ResolveAPIKey("OPENCLAW_GATEWAY_TOKEN", dotenvPath)
-	}
 
-	if gatewayToken == "" {
-		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: no gateway token is set — "+
-			"loopback connections are trusted without authentication. Any local process "+
-			"can relay requests through this proxy using forwarded API keys. "+
-			"Set DEFENSECLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env to require auth on all connections.\n")
+	// Plan B2 / S0.2: synthesize a first-boot gateway token if none is
+	// set. The previous "warn and trust loopback" path was a local-IDOR
+	// risk — any process on the host could relay through the proxy.
+	// EnsureGatewayToken is idempotent: the second call returns the
+	// same value, so subsequent boots and the API server's parallel
+	// init see identical tokens.
+	gatewayToken, err := EnsureGatewayToken(dotenvPath)
+	if err != nil {
+		return nil, fmt.Errorf("gateway token: %w", err)
 	}
 
 	// Inject credentials into the connector so its Authenticate() method
@@ -2676,6 +2688,13 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 //     required via X-DC-Auth or the master key.
 
 func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Request) bool {
+	// Test-only fast path: legacy proxy_test.go fixtures construct
+	// a GuardrailProxy directly without the NewGuardrailProxy boot
+	// path that synthesizes the gateway token. The bypass is set
+	// only by newTestProxy in this package.
+	if p.skipAuthForTest {
+		return true
+	}
 	// Delegate to the connector when available — each connector knows its
 	// own auth scheme (tokens, loopback trust, etc.).
 	if p.connector != nil {
@@ -2691,8 +2710,6 @@ func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Fallback: built-in auth for when no connector is wired (tests, legacy).
-	isLoopback := strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") || strings.HasPrefix(r.RemoteAddr, "[::1]:")
-
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if p.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.gatewayToken)) == 1 {
@@ -2707,12 +2724,15 @@ func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	// Plan B2 / S0.2: no longer fall through to loopback-trust when the
+	// gateway token is empty. EnsureGatewayToken synthesizes one at boot
+	// if the operator hasn't supplied one, so this case is unreachable
+	// in production. If we somehow got here with an empty token, the
+	// safe behavior is fail-closed: a misconfigured proxy should refuse
+	// traffic, not silently accept it.
 	if p.gatewayToken == "" {
-		return isLoopback
+		p.emitProxyAuthFailure(r, "no_token_configured")
+		return false
 	}
 
 	reason := "invalid_token"

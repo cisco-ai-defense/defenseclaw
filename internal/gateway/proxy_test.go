@@ -158,6 +158,14 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 		dataDir:   t.TempDir(),
 		inspector: insp,
 		mode:      mode,
+		// Plan B2 / S0.2: production paths fail closed when the
+		// gateway token is empty. The legacy fixtures in this file
+		// construct a proxy directly without going through
+		// NewGuardrailProxy (no token synthesis), so flip the
+		// test-only bypass; the auth behavior itself is covered by
+		// dedicated TestTokenAuth_* / TestProxyAuth_* tests that
+		// leave skipAuthForTest false.
+		skipAuthForTest: true,
 	}
 	// Inject the mock provider — bypasses header-based resolution.
 	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return prov }
@@ -985,6 +993,9 @@ func TestProxyEdgeCases(t *testing.T) {
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
 		proxy.masterKey = "secret-key-123"
+		// This sub-test specifically exercises the auth path, so
+		// undo the test-only bypass that newTestProxy installs.
+		proxy.skipAuthForTest = false
 
 		reqBody := mustJSON(t, map[string]interface{}{
 			"model":    "gpt-4",
@@ -3151,6 +3162,100 @@ func TestHydrateConnectorSignals_NoSnapshotIsNoOp(t *testing.T) {
 	upstream, key := hydrateConnectorSignals(conn, r, []byte(`{"model":"gpt-4"}`))
 	if upstream != "" || key != "" {
 		t.Errorf("fetch-interceptor connector should emit no upstream, got upstream=%q key=%q", upstream, key)
+	}
+}
+
+// TestHydrateConnectorSignals_PerConnector — plan E1 / item 2.
+//
+// Closes the four-cell hydration matrix the plan called for:
+//
+//   - openclaw   — fetch-interceptor; Route() does not emit RawUpstream.
+//   - claudecode — fetch-interceptor; Route() does not emit RawUpstream.
+//   - zeptoclaw  — native binary; Route() resolves upstream from the
+//     provider snapshot captured at Setup.
+//   - codex      — native binary; Route() resolves upstream from the
+//     provider snapshot captured at Setup.
+//
+// The snapshot-vs-fetch-interceptor split is a per-connector contract,
+// not a runtime negotiation, so this test pins the four cells in one
+// place to keep regressions loud (e.g. someone removing
+// resolveUpstream() from a connector that used to need it would
+// silently fall through to "let the OpenAI-compat default fire" and
+// hit the wrong upstream).
+func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
+	cases := []struct {
+		name     string
+		build    func() connector.Connector
+		wantURL  string
+		wantKey  string
+		wantHas  bool // true → expect non-empty upstream + key
+		bodyJSON string
+	}{
+		{
+			name:     "openclaw_fetch_interceptor_no_snapshot",
+			build:    func() connector.Connector { return connector.NewOpenClawConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"gpt-4"}`,
+		},
+		{
+			name:     "claudecode_fetch_interceptor_no_snapshot",
+			build:    func() connector.Connector { return connector.NewClaudeCodeConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"claude-3-5-sonnet-20241022"}`,
+		},
+		{
+			name: "zeptoclaw_snapshot_drives_upstream",
+			build: func() connector.Connector {
+				c := connector.NewZeptoClawConnector()
+				c.SetProviderSnapshot(map[string]connector.ZeptoClawProviderEntry{
+					"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-zc"},
+				})
+				return c
+			},
+			wantURL:  "https://openrouter.ai/api/v1",
+			wantKey:  "sk-or-zc",
+			wantHas:  true,
+			bodyJSON: `{"model":"anthropic/claude-sonnet-4.5"}`,
+		},
+		{
+			name: "codex_snapshot_drives_upstream",
+			build: func() connector.Connector {
+				c := connector.NewCodexConnector()
+				c.SetProviderSnapshot(map[string]connector.CodexProviderEntry{
+					"openai": {
+						BaseURL: "https://api.openai.com/v1",
+						APIKey:  "sk-codex-snap",
+					},
+				})
+				return c
+			},
+			wantURL:  "https://api.openai.com/v1",
+			wantKey:  "sk-codex-snap",
+			wantHas:  true,
+			bodyJSON: `{"model":"gpt-5"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.build()
+			r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(tc.bodyJSON)))
+			upstream, key := hydrateConnectorSignals(conn, r, []byte(tc.bodyJSON))
+			if tc.wantHas {
+				if upstream != tc.wantURL {
+					t.Errorf("upstream = %q, want %q", upstream, tc.wantURL)
+				}
+				if key != tc.wantKey {
+					t.Errorf("key = %q, want %q", key, tc.wantKey)
+				}
+			} else {
+				if upstream != "" || key != "" {
+					t.Errorf("fetch-interceptor connector %q should emit no upstream, got upstream=%q key=%q",
+						conn.Name(), upstream, key)
+				}
+			}
+		})
 	}
 }
 

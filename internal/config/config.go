@@ -826,6 +826,14 @@ type GuardrailConfig struct {
 	// defaults to "openclaw" for backward compatibility.
 	Connector string `mapstructure:"connector"            yaml:"connector,omitempty"`
 
+	// AllowEmptyProviders bypasses the boot-time ProviderProbe refusal
+	// (plan A4 / S0.12). The default behavior is to fail-closed when the
+	// active connector reports zero usable upstream providers — this
+	// catches half-installed deployments where the gateway would accept
+	// traffic with no LLM to forward to. Test harnesses that intentionally
+	// run with stub upstreams opt in by setting this to true.
+	AllowEmptyProviders bool `mapstructure:"allow_empty_providers" yaml:"allow_empty_providers,omitempty"`
+
 	// LLM overrides the top-level llm: block for the guardrail upstream
 	// (the model that DefenseClaw proxies client traffic to). Prefer
 	// Config.ResolveLLM("guardrail") over reading LLM / legacy Model

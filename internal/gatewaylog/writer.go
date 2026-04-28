@@ -176,6 +176,16 @@ func (w *Writer) Emit(e Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = SidecarInstanceID()
 	}
+	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
+	// payload using the per-boot device-key-derived HMAC key. No-op
+	// when SetTelemetryHMACSeed has not been called (boot ordering
+	// race / unit tests) — the field stays empty and downstream
+	// auditors skip verification. Computed AFTER provenance stamping
+	// so the canonicalized bytes are stable across reboots that
+	// would otherwise advance Generation.
+	if e.PayloadHMAC == "" {
+		e.StampPayloadHMAC()
+	}
 
 	// Strict schema gate. Runs AFTER provenance/sidecar stamping so
 	// a missing provenance or sidecar_instance_id becomes a normal

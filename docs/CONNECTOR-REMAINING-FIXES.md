@@ -1,10 +1,26 @@
 # Connector Package — Remaining Fixes
 
-**Date**: 2026-04-23
+**Date**: 2026-04-28 (updated by PR #194 single rollup)
 **Package**: `internal/gateway/connector/`
 **Review base**: Full code review against techspec, 18 findings total, 12 fixed.
 
-This document tracks the 6 remaining findings from the connector code review that require design decisions, architectural alignment, or non-trivial implementation work.
+This document tracks the remaining findings from the connector code review that require design decisions, architectural alignment, or non-trivial implementation work.
+
+## PR #194 single-rollup status (2026-04-28)
+
+Items resolved in this rollup are marked DONE inline below. Items
+that remain open continue to track what's deferred to follow-up
+PRs. See `CHANGELOG.md` for the full set of changes; this file
+focuses on the connector-package review thread.
+
+| # | Severity | Status as of PR #194 |
+|---|----------|----------------------|
+| 6  | HIGH    | OPEN — needs event-list decision |
+| 7  | HIGH    | DONE (Option A) — `HookEventHandler` interface deleted via Phase A5; gateway-level dispatcher is the canonical owner |
+| 8  | MEDIUM  | OPEN — chose pragmatic Option C (test added) |
+| 9  | MEDIUM  | DONE — `withFileLock` + atomic-rename helpers in `helpers.go` |
+| 12 | MEDIUM  | OPEN — needs config-schema decision |
+| 14 | MEDIUM  | OPEN — `*PathOverride` globals retained for now; SetupOpts plumbing tracked as a follow-up |
 
 ---
 

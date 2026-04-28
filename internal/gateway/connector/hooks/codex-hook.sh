@@ -19,6 +19,11 @@ if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; the
   exit 0
 fi
 
+# Plan B4 / S0.4: shell-side hook hardening.
+. "${HOOK_DIR}/_hardening.sh"
+defenseclaw_harden_resources
+defenseclaw_harden_env
+
 PAYLOAD=$(cat)
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 

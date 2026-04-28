@@ -17,8 +17,10 @@
 package connector
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,9 +29,50 @@ import (
 	"plugin"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
+
+// PluginAuditEmitter is the callback contract the gateway wires up so
+// the plugin loader can emit audit-pipeline events on rejection without
+// the connector package importing gatewaylog (which would create a
+// dependency cycle once handlers move into this package per Phase C1).
+//
+// Implementations forward to gatewaylog.Event{EventType: EventError,
+// Subsystem: SubsystemPlugin, Code: ...} via the same writer choke
+// point as emitGatewayError. When unset, the loader falls back to
+// log.Printf so a built-in run with no audit pipeline still surfaces
+// the rejection. Plan B3 / S0.1 invariant: every refusal MUST land in
+// the audit log when the pipeline is wired.
+type PluginAuditEmitter func(ctx context.Context, code, msg, soPath string, cause error)
+
+var pluginAuditEmitter PluginAuditEmitter
+
+// SetPluginAuditEmitter wires the audit-pipeline emitter callback. The
+// gateway calls this exactly once at boot, before any plugin discovery
+// runs. Calling with nil restores the log-only fallback (used by
+// tests that want to inspect rejections without setting up the full
+// audit machinery).
+func SetPluginAuditEmitter(e PluginAuditEmitter) {
+	pluginAuditEmitter = e
+}
+
+// pluginGetUID is overridable for tests. Returns the effective UID of
+// the running process. The default delegates to os.Getuid().
+var pluginGetUID = os.Getuid
+
+func emitPluginRejection(code, msg, soPath string, cause error) {
+	if pluginAuditEmitter != nil {
+		pluginAuditEmitter(context.Background(), code, msg, soPath, cause)
+		return
+	}
+	if cause != nil {
+		log.Printf("[SECURITY] %s: %s (so=%s): %v", code, msg, soPath, cause)
+	} else {
+		log.Printf("[SECURITY] %s: %s (so=%s)", code, msg, soPath)
+	}
+}
 
 // pluginManifest is the structure of plugin.yaml in each connector plugin dir.
 type pluginManifest struct {
@@ -90,30 +133,42 @@ func LoadPlugins(dir string) ([]Connector, error) {
 		}
 
 		if strings.TrimSpace(manifest.SHA256) == "" {
-			log.Printf("[SECURITY] refusing plugin %s: plugin.yaml missing required sha256 field", entry.Name())
+			emitPluginRejection("PLUGIN_MANIFEST_INVALID",
+				fmt.Sprintf("plugin %s: plugin.yaml missing required sha256 field", entry.Name()),
+				manifestPath, nil)
 			continue
 		}
 
 		soPath := filepath.Join(pluginDir, manifest.Entry)
 
 		if err := validatePluginPath(soPath, realDir); err != nil {
-			log.Printf("[SECURITY] refusing plugin %s: path validation failed: %v", manifest.Name, err)
+			emitPluginRejection("PLUGIN_PATH_REJECTED",
+				fmt.Sprintf("plugin %s: path validation failed", manifest.Name), soPath, err)
 			continue
 		}
 
 		if err := validatePluginPermissions(soPath); err != nil {
-			log.Printf("[SECURITY] refusing plugin %s: permission check failed: %v", manifest.Name, err)
+			emitPluginRejection("PLUGIN_PERMISSION_DENIED",
+				fmt.Sprintf("plugin %s: permission check failed", manifest.Name), soPath, err)
+			continue
+		}
+
+		if err := validatePluginOwner(soPath); err != nil {
+			emitPluginRejection("PLUGIN_OWNER_MISMATCH",
+				fmt.Sprintf("plugin %s: owner check failed", manifest.Name), soPath, err)
 			continue
 		}
 
 		if err := validatePluginHash(soPath, manifest.SHA256); err != nil {
-			log.Printf("[SECURITY] refusing plugin %s: hash verification failed: %v", manifest.Name, err)
+			emitPluginRejection("PLUGIN_HASH_MISMATCH",
+				fmt.Sprintf("plugin %s: hash verification failed", manifest.Name), soPath, err)
 			continue
 		}
 
 		c, err := loadPluginSO(soPath)
 		if err != nil {
-			log.Printf("[connector] skipping %s: load failed: %v", manifest.Name, err)
+			emitPluginRejection("PLUGIN_LOAD_FAILED",
+				fmt.Sprintf("plugin %s: load failed", manifest.Name), soPath, err)
 			continue
 		}
 
@@ -155,6 +210,34 @@ func validatePluginPermissions(soPath string) error {
 	mode := info.Mode().Perm()
 	if mode&0o022 != 0 {
 		return fmt.Errorf("%s is group-writable or world-writable (mode %04o)", soPath, mode)
+	}
+	return nil
+}
+
+// validatePluginOwner refuses .so files that are not owned by the
+// running process's UID. The previous permission gate covered
+// "world-writable" but not "world-readable + owned-by-attacker": a
+// hostile user on a shared host could drop a plugin in a directory
+// the gateway daemon reads, set mode 0o755, and have it loaded with
+// the daemon's privileges. This gate closes that path.
+//
+// Plan B3 / S0.1: skipped on Windows (file ownership semantics differ
+// and the code path uses syscall.Stat_t which is unix-only).
+func validatePluginOwner(soPath string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Lstat(soPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", soPath, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("could not extract owner UID from FileInfo (non-unix FS?)")
+	}
+	want := uint32(pluginGetUID())
+	if stat.Uid != want {
+		return fmt.Errorf("%s owner uid=%d does not match running process uid=%d", soPath, stat.Uid, want)
 	}
 	return nil
 }

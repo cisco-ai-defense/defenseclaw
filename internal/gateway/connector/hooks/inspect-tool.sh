@@ -11,6 +11,13 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   exit 0
 fi
 
+# Plan B4 / S0.4: shell-side hook hardening. Source the helpers BEFORE
+# touching any agent-supplied data so resource caps + env sanitization
+# apply to every subprocess this hook spawns.
+. "$(dirname "${BASH_SOURCE[0]}")/_hardening.sh"
+defenseclaw_harden_resources
+defenseclaw_harden_env
+
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_INPUT=$(cat)
 

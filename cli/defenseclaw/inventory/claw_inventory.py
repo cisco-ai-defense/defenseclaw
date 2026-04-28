@@ -31,7 +31,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
@@ -1252,6 +1251,336 @@ _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Plan C7 / matrix #4 — per-connector AIBOM adapters
+#
+# For non-OpenClaw connectors, agents / tools / model_providers / memory
+# come from on-disk filesystem fixtures rather than a CLI shellout. Each
+# adapter returns a list of plain dicts that share the schema produced
+# by the OpenClaw _parse_* helpers above (id / name / description /
+# source). The dispatchers below select the right adapter based on
+# the active connector.
+#
+# OpenClaw is intentionally absent from these dispatch tables — it
+# stays on the live ``openclaw <cat> --json`` path. Adding it here
+# would create two competing data sources for the same inventory.
+# ---------------------------------------------------------------------------
+
+
+def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
+    """Per-connector agent enumeration.
+
+    * claudecode — ``~/.claude/agents/*.md`` (sub-agent prompt files)
+    * codex      — ``~/.codex/agents/*`` (when present)
+    * zeptoclaw  — ``~/.zeptoclaw/agents.json`` array
+    """
+    home = os.path.expanduser("~")
+    name = (connector or "").lower()
+    if name == "claudecode":
+        return _agents_from_md_dir(os.path.join(home, ".claude", "agents"))
+    if name == "codex":
+        return _agents_from_md_dir(os.path.join(home, ".codex", "agents"))
+    if name == "zeptoclaw":
+        return _agents_from_zeptoclaw_json(
+            os.path.join(home, ".zeptoclaw", "agents.json"),
+        )
+    return []
+
+
+def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
+    """Per-connector tool enumeration.
+
+    * claudecode — ``~/.claude/settings.json`` ``tools`` field
+    * codex      — ``~/.codex/config.toml`` ``[tools]`` table
+    * zeptoclaw  — ``~/.zeptoclaw/agents.json`` (tools are inline)
+    """
+    home = os.path.expanduser("~")
+    name = (connector or "").lower()
+    if name == "claudecode":
+        return _tools_from_claude_settings(
+            os.path.join(home, ".claude", "settings.json"),
+        )
+    if name == "codex":
+        return _tools_from_codex_config(
+            os.path.join(home, ".codex", "config.toml"),
+        )
+    if name == "zeptoclaw":
+        return _tools_from_zeptoclaw_json(
+            os.path.join(home, ".zeptoclaw", "agents.json"),
+        )
+    return []
+
+
+def _model_providers_for_connector(
+    connector: str,
+    cfg: Config,
+) -> list[dict[str, Any]]:
+    """Per-connector model-provider enumeration.
+
+    * claudecode — ``ANTHROPIC_BASE_URL`` env + the resolved key store
+    * codex      — ``OPENAI_BASE_URL`` env + key store
+    * zeptoclaw  — re-parse ``~/.zeptoclaw/config.json`` providers map
+                   (the Setup-time snapshot is held in-process by
+                   the Go connector; offline AIBOM doesn't have it,
+                   so we re-derive from disk).
+    """
+    home = os.path.expanduser("~")
+    name = (connector or "").lower()
+    if name == "claudecode":
+        return _providers_from_env(
+            "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", default_provider="anthropic",
+            default_base_url="https://api.anthropic.com",
+        )
+    if name == "codex":
+        return _providers_from_env(
+            "OPENAI_BASE_URL", "OPENAI_API_KEY", default_provider="openai",
+            default_base_url="https://api.openai.com/v1",
+        )
+    if name == "zeptoclaw":
+        return _providers_from_zeptoclaw_config(
+            os.path.join(home, ".zeptoclaw", "config.json"),
+        )
+    return []
+
+
+def _memory_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
+    """Per-connector memory backend enumeration.
+
+    Memory backends are rarely declarative across these frameworks;
+    the conservative shape is "report the directory if present".
+    """
+    home = os.path.expanduser("~")
+    name = (connector or "").lower()
+    candidates: list[str] = []
+    if name == "claudecode":
+        candidates = [os.path.join(home, ".claude", "memory")]
+    elif name == "codex":
+        candidates = [
+            os.path.join(home, ".codex", "memory"),
+            os.path.join(home, ".codex", "history"),
+        ]
+    elif name == "zeptoclaw":
+        candidates = [os.path.join(home, ".zeptoclaw", "memory")]
+    else:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for path in candidates:
+        if not os.path.isdir(path):
+            continue
+        try:
+            entry_count = sum(1 for _ in os.scandir(path))
+        except OSError:
+            entry_count = 0
+        rows.append({
+            "id": os.path.basename(path) or path,
+            "name": path,
+            "source": path,
+            "kind": "filesystem",
+            "entry_count": entry_count,
+        })
+    return rows
+
+
+# --- adapter helpers -------------------------------------------------------
+
+
+def _agents_from_md_dir(agents_dir: str) -> list[dict[str, Any]]:
+    """Each *.md (or *.txt) file under *agents_dir* is one agent."""
+    if not os.path.isdir(agents_dir):
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        entries = sorted(os.listdir(agents_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        full = os.path.join(agents_dir, entry)
+        if not os.path.isfile(full):
+            continue
+        if not entry.endswith((".md", ".txt", ".json", ".yaml", ".yml")):
+            continue
+        agent_id = os.path.splitext(entry)[0]
+        rows.append({
+            "id": agent_id,
+            "name": agent_id,
+            "source": full,
+            "kind": "subagent",
+        })
+    return rows
+
+
+def _agents_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
+    """``~/.zeptoclaw/agents.json`` is a list of agent records."""
+    raw = _safe_load_json(path)
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        agent_id = item.get("id") or item.get("name")
+        if not agent_id:
+            continue
+        rows.append({
+            "id": str(agent_id),
+            "name": str(item.get("name") or agent_id),
+            "description": str(item.get("description", "")),
+            "source": path,
+            "kind": "agent",
+        })
+    return rows
+
+
+def _tools_from_claude_settings(path: str) -> list[dict[str, Any]]:
+    raw = _safe_load_json(path)
+    if not isinstance(raw, dict):
+        return []
+    tools = raw.get("tools")
+    rows: list[dict[str, Any]] = []
+    if isinstance(tools, list):
+        for item in tools:
+            if isinstance(item, str):
+                rows.append({"id": item, "name": item, "source": path})
+            elif isinstance(item, dict) and (item.get("name") or item.get("id")):
+                tool_id = item.get("id") or item.get("name")
+                rows.append({
+                    "id": str(tool_id),
+                    "name": str(item.get("name") or tool_id),
+                    "description": str(item.get("description", "")),
+                    "source": path,
+                })
+    elif isinstance(tools, dict):
+        for tool_id, item in tools.items():
+            if isinstance(item, dict):
+                rows.append({
+                    "id": str(tool_id),
+                    "name": str(item.get("name") or tool_id),
+                    "description": str(item.get("description", "")),
+                    "source": path,
+                })
+    return rows
+
+
+def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``[tools]`` table — TOML."""
+    if not os.path.isfile(path):
+        return []
+    try:
+        # Python 3.11+: tomllib in stdlib. Earlier we'd need tomli;
+        # the project pins 3.12 so this is safe.
+        import tomllib
+
+        with open(path, "rb") as fh:
+            raw = tomllib.load(fh)
+    except (OSError, ValueError, ModuleNotFoundError):
+        return []
+    tools = raw.get("tools") if isinstance(raw, dict) else None
+    if not isinstance(tools, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for tool_id, body in tools.items():
+        if not isinstance(body, dict):
+            rows.append({"id": str(tool_id), "name": str(tool_id), "source": path})
+            continue
+        rows.append({
+            "id": str(tool_id),
+            "name": str(body.get("name") or tool_id),
+            "description": str(body.get("description", "")),
+            "source": path,
+        })
+    return rows
+
+
+def _tools_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
+    """ZeptoClaw stores agent + tool defs in a single agents.json."""
+    raw = _safe_load_json(path)
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        for tool in item.get("tools", []) or []:
+            if not isinstance(tool, dict):
+                continue
+            tid = tool.get("id") or tool.get("name")
+            if not tid or tid in seen:
+                continue
+            seen.add(tid)
+            rows.append({
+                "id": str(tid),
+                "name": str(tool.get("name") or tid),
+                "description": str(tool.get("description", "")),
+                "source": path,
+            })
+    return rows
+
+
+def _providers_from_env(
+    base_url_var: str,
+    api_key_var: str,
+    *,
+    default_provider: str,
+    default_base_url: str,
+) -> list[dict[str, Any]]:
+    """Synthesize a provider entry from env vars without leaking the key value.
+
+    Only emits a row when at least ONE of the relevant env vars is
+    actually set. This preserves the historical "no env -> empty BOM"
+    contract that pre-C7 tests rely on, while still surfacing a
+    provider record the moment an operator wires up either side
+    (custom base URL or API key) of the connector env.
+    """
+    base_url_env = os.environ.get(base_url_var, "").strip()
+    has_key = bool(os.environ.get(api_key_var, "").strip())
+    if not base_url_env and not has_key:
+        return []
+    base_url = base_url_env or default_base_url
+    return [{
+        "id": default_provider,
+        "name": default_provider,
+        "base_url": base_url,
+        "api_key_present": has_key,
+        "source": f"env:{base_url_var}",
+    }]
+
+
+def _providers_from_zeptoclaw_config(path: str) -> list[dict[str, Any]]:
+    raw = _safe_load_json(path)
+    if not isinstance(raw, dict):
+        return []
+    providers = raw.get("providers")
+    if not isinstance(providers, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for pid, body in providers.items():
+        if not isinstance(body, dict):
+            continue
+        rows.append({
+            "id": str(pid),
+            "name": str(body.get("name") or pid),
+            "base_url": str(body.get("api_base") or ""),
+            # Don't echo the key. Reporting "present/absent" is the
+            # only safe inventory signal.
+            "api_key_present": bool(body.get("api_key")),
+            "source": path,
+        })
+    return rows
+
+
+def _safe_load_json(path: str) -> Any:
+    """Read JSON from *path*; return None on any I/O or parse error."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def _build_aibom_from_filesystem(
     cfg: Config,
     connector: str,
@@ -1279,16 +1608,41 @@ def _build_aibom_from_filesystem(
     if "mcp" in cats:
         mcps = _enumerate_mcp_filesystem(cfg)
 
+    # Plan C7: dispatch into per-connector adapters for the four
+    # categories that the CLI shellout used to own. When an adapter
+    # returns an empty list we still emit the informational note so
+    # operators see *why* a category is empty (no agent dir, no env
+    # var set, etc.).
+    agents = _agents_for_connector(connector, cfg) if "agents" in cats else []
+    tools = _tools_for_connector(connector, cfg) if "tools" in cats else []
+    model_providers = (
+        _model_providers_for_connector(connector, cfg) if "models" in cats else []
+    )
+    memory = _memory_for_connector(connector, cfg) if "memory" in cats else []
+
     # Populate "errors" with informational notes for categories that
     # don't translate to non-OpenClaw connectors. This keeps the
     # output schema stable while telling operators why those buckets
     # are empty.
+    _fs_only_results = {
+        "agents": agents,
+        "tools": tools,
+        "models": model_providers,
+        "memory": memory,
+    }
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
-        if cat_key in cats:
-            errors.append({
-                "command": f"{connector}:{cat_key}",
-                "error": note,
-            })
+        if cat_key not in cats:
+            continue
+        # Only attach the "informational" note when the adapter
+        # actually returned no rows; if the adapter found rows we
+        # don't want to confuse operators with "agents are not a
+        # first-class concept" alongside a populated agents list.
+        if _fs_only_results.get(cat_key):
+            continue
+        errors.append({
+            "command": f"{connector}:{cat_key}",
+            "error": note,
+        })
 
     out: dict[str, Any] = {
         "version": INVENTORY_VERSION,
@@ -1301,10 +1655,10 @@ def _build_aibom_from_filesystem(
         "skills": skills,
         "plugins": plugins,
         "mcp": mcps,
-        "agents": [],
-        "tools": [],
-        "model_providers": [],
-        "memory": [],
+        "agents": agents,
+        "tools": tools,
+        "model_providers": model_providers,
+        "memory": memory,
         "errors": errors,
     }
     out["summary"] = _build_summary(out)

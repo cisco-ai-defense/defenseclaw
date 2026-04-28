@@ -140,7 +140,7 @@ func (c *FirewallConfig) Validate() error {
 //   - us.api.inspect.aidefense.security.cisco.com (OpenClaw plugin)
 //   - proxy.golang.org / sum.golang.org / registry.npmjs.org / pypi.org
 //     (build-time package downloads when the agent shells out to
-//      go/npm/pip during a tool call)
+//     go/npm/pip during a tool call)
 //
 // The list is intentionally generous: a Codex / Claude Code /
 // ZeptoClaw user with a deny-by-default firewall would otherwise see

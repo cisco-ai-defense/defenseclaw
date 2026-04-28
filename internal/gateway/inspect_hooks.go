@@ -51,7 +51,14 @@ func inspectMode(cfg *config.Config) string {
 
 const (
 	maxInspectContentLen = 256 * 1024 // 256 KiB per field
-	inspectScanTimeout   = 5 * time.Second
+	// inspectScanTimeout caps every synchronous rule scan executed under
+	// /api/v1/inspect/*. The hook callers (claude-code, codex, inspect-tool)
+	// are in the agent's critical path: a timeout here directly stalls the
+	// user-visible LLM call. Plan F19 sets this to 200ms — fast enough that
+	// a stuck regex / pathological scanner can never wedge the agent, while
+	// still covering >P99 of well-behaved scans (median is well under 5ms
+	// for the rule set shipped in internal/gateway/scan_rules*.go).
+	inspectScanTimeout = 200 * time.Millisecond
 )
 
 // scanWithTimeout runs ScanAllRules under a context deadline. Returns partial

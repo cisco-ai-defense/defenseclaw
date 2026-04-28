@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -43,6 +44,13 @@ func NewClaudeCodeConnector() *ClaudeCodeConnector {
 
 func (c *ClaudeCodeConnector) Name() string        { return "claudecode" }
 func (c *ClaudeCodeConnector) HookAPIPath() string { return "/api/v1/claude-code/hook" }
+
+// HookScriptNames implements HookScriptOwner (plan C2 / S2.5).
+// claudecode-only template; the generic inspect-* scripts are
+// added by WriteHookScriptsForConnector unconditionally.
+func (c *ClaudeCodeConnector) HookScriptNames(SetupOpts) []string {
+	return []string{"claude-code-hook.sh"}
+}
 func (c *ClaudeCodeConnector) Description() string {
 	return "env var + settings.json hooks (20+ events, component scanning)"
 }
@@ -72,7 +80,9 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsForConnector(hookDir, opts.APIAddr, opts.APIToken, c.Name()); err != nil {
+	// Plan C2: hand the connector itself so HookScriptOwner is the
+	// single source of truth for which vendor templates land here.
+	if err := WriteHookScriptsForConnectorObject(hookDir, opts.APIAddr, opts.APIToken, c); err != nil {
 		return fmt.Errorf("claudecode hook script: %w", err)
 	}
 
@@ -251,6 +261,22 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 			Description: "Recommended. When set in Claude Code's process env it pins LLM traffic to the DefenseClaw proxy. The connector also patches ~/.claude/settings.json hooks so guardrail enforcement runs even when this var is unset.",
 		},
 	}
+}
+
+// HasUsableProviders implements ProviderProbe (plan A4). Claude Code is
+// fully configured by patched settings.json + env-resolved
+// ANTHROPIC_API_KEY; the connector itself does not maintain a snapshot.
+// We return (1, nil) when the conventional Anthropic key var is set
+// (or when the operator has provided a master key), and (0, error)
+// otherwise so the gateway refuses to start with no usable upstream.
+func (c *ClaudeCodeConnector) HasUsableProviders() (int, error) {
+	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
+		return 1, nil
+	}
+	if strings.TrimSpace(c.masterKey) != "" {
+		return 1, nil
+	}
+	return 0, errors.New("claudecode: no upstream API key (ANTHROPIC_API_KEY) configured")
 }
 
 // --- ComponentScanner interface ---

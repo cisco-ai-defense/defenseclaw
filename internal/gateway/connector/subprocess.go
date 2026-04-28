@@ -31,7 +31,11 @@ import (
 //go:embed shims/*.sh
 var shimFS embed.FS
 
-//go:embed hooks/*.sh
+// Embed every .sh under hooks/, including helpers prefixed with `_`
+// (Go's default embed skips `_*` and `.*` files; the `all:` prefix
+// opts in). Plan B4 needs hooks/_hardening.sh in the embed.
+//
+//go:embed all:hooks
 var hookFS embed.FS
 
 // shimBinaries lists the high-risk commands that get PATH shims.
@@ -116,6 +120,32 @@ func WriteHookScript(hookDir, apiAddr string) error {
 	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
 }
 
+// hookHelperScripts lists support files that hooks `source` at runtime.
+// They are written into the hook dir alongside the executable hooks but
+// NEVER appear in HookScripts() / connector enumerations — agents do
+// not invoke them directly. Plan B4: _hardening.sh centralizes the
+// shell-side rlimit + env sanitization helpers.
+var hookHelperScripts = []string{
+	"_hardening.sh",
+}
+
+// writeHookHelpers writes the helper scripts (_hardening.sh, etc.) into
+// hookDir at mode 0o600. Helpers are sourced — never executed
+// directly — so they don't need the executable bit.
+func writeHookHelpers(hookDir string) error {
+	for _, name := range hookHelperScripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return fmt.Errorf("read hook helper %s: %w", name, err)
+		}
+		helperPath := filepath.Join(hookDir, name)
+		if err := os.WriteFile(helperPath, content, 0o600); err != nil {
+			return fmt.Errorf("write hook helper %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // WriteHookScriptsWithToken generates every hook script into hookDir,
 // baking the gateway bearer token into the curl Authorization header so
 // the API server's auth middleware accepts the hook's POST. When token
@@ -129,6 +159,10 @@ func WriteHookScript(hookDir, apiAddr string) error {
 //   - inspect-tool-response.sh (post-tool)
 //   - claude-code-hook.sh      (Claude Code lifecycle events)
 //   - codex-hook.sh            (Codex lifecycle events)
+//
+// Plan B4: the shared _hardening.sh helper is also written so each
+// hook can `source` it at runtime to pick up the rlimit + env
+// sanitization policy.
 func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
@@ -141,6 +175,10 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
 	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
 		return fmt.Errorf("write hook token file: %w", err)
+	}
+
+	if err := writeHookHelpers(hookDir); err != nil {
+		return err
 	}
 
 	// Never bake the real token into template output — scripts read
@@ -175,11 +213,13 @@ func WriteAllHookScripts(hookDir, apiAddr string) error {
 	return WriteHookScriptsWithToken(hookDir, apiAddr, "")
 }
 
-// WriteHookScriptsForConnector generates the generic inspection scripts
-// plus only the connector-specific lifecycle script for the named
-// connector. Avoids writing vendor-specific scripts (e.g. codex-hook.sh)
-// into hook directories of unrelated connectors.
-func WriteHookScriptsForConnector(hookDir, apiAddr, token, connectorName string) error {
+// writeHookScriptsCommon shares the on-disk dance (mkdir, .token,
+// helpers) between every variant. `extras` is the per-connector list
+// of basenames stacked on top of the generic ones. Returning an error
+// if a name is not in the embed FS is intentional (plan C2): a
+// connector that mis-spells a hook name fails loud at setup, never
+// silently ships a hook dir missing its template.
+func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -190,12 +230,28 @@ func WriteHookScriptsForConnector(hookDir, apiAddr, token, connectorName string)
 		return fmt.Errorf("write hook token file: %w", err)
 	}
 
+	if err := writeHookHelpers(hookDir); err != nil {
+		return err
+	}
+
 	data := templateData{APIAddr: apiAddr, APIToken: ""}
 
-	scripts := make([]string, len(genericHookScripts))
-	copy(scripts, genericHookScripts)
-	if extra, ok := connectorHookScripts[connectorName]; ok {
-		scripts = append(scripts, extra...)
+	scripts := make([]string, 0, len(genericHookScripts)+len(extras))
+	scripts = append(scripts, genericHookScripts...)
+	// De-dup: generic scripts must never collide with connector-owned
+	// names, but a hostile/buggy connector returning "inspect-tool.sh"
+	// shouldn't be silently overwritten by the second iteration. Skip
+	// duplicates and keep the first occurrence.
+	seen := make(map[string]struct{}, len(scripts))
+	for _, n := range scripts {
+		seen[n] = struct{}{}
+	}
+	for _, n := range extras {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		scripts = append(scripts, n)
 	}
 
 	for _, name := range scripts {
@@ -213,6 +269,41 @@ func WriteHookScriptsForConnector(hookDir, apiAddr, token, connectorName string)
 		}
 	}
 	return nil
+}
+
+// WriteHookScriptsForConnectorObject is the canonical, interface-driven
+// entry (plan C2 / S2.5). The connector itself is the source of truth
+// for which vendor-specific hook templates land in hookDir: if it
+// implements HookScriptOwner, those names are unioned with the
+// generic inspect-* set; if not, only the generic scripts are written.
+//
+// Prefer this over the string-keyed WriteHookScriptsForConnector for
+// new callsites. The string variant is preserved as a thin wrapper for
+// CLI paths that resolve connectors by name.
+func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connector) error {
+	var extras []string
+	if owner, ok := c.(HookScriptOwner); ok {
+		extras = owner.HookScriptNames(SetupOpts{APIAddr: apiAddr, APIToken: token})
+	}
+	return writeHookScriptsCommon(hookDir, apiAddr, token, extras)
+}
+
+// WriteHookScriptsForConnector generates the generic inspection scripts
+// plus only the connector-specific lifecycle script for the named
+// connector. Avoids writing vendor-specific scripts (e.g. codex-hook.sh)
+// into hook directories of unrelated connectors.
+//
+// Plan C2 / S2.5: this is now a back-compat shim over the
+// interface-driven WriteHookScriptsForConnectorObject. It first tries
+// the default registry (so a real connector's HookScriptOwner is
+// authoritative) and falls back to the legacy package-level map for
+// names that aren't registered (older tests / CLI fixtures).
+func WriteHookScriptsForConnector(hookDir, apiAddr, token, connectorName string) error {
+	if c, ok := NewDefaultRegistry().Get(connectorName); ok {
+		return WriteHookScriptsForConnectorObject(hookDir, apiAddr, token, c)
+	}
+	extras := connectorHookScripts[connectorName]
+	return writeHookScriptsCommon(hookDir, apiAddr, token, extras)
 }
 
 // HookScripts returns the list of hook script names that are generated.

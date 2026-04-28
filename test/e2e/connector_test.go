@@ -147,11 +147,32 @@ func TestConnectorVerifyCleanOnFreshDataDir(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 	}
 
-	// Only test connectors whose VerifyClean depends solely on DataDir,
-	// not the real user home. OpenClaw's VerifyClean checks
-	// ~/.openclaw/ which may have a live installation.
-	homeIndependent := []string{"claudecode", "codex", "zeptoclaw"}
-	for _, name := range homeIndependent {
+	// Plan E3: walk every built-in connector — not just the
+	// home-independent ones. We isolate every connector's host
+	// config path to a tmpdir via the *PathOverride seams so the
+	// test is hermetic on developer machines that have a live
+	// installation in their real $HOME.
+	tmpHome := t.TempDir()
+	prevOC := connector.OpenClawHomeOverride
+	connector.OpenClawHomeOverride = filepath.Join(tmpHome, ".openclaw")
+	if err := os.MkdirAll(connector.OpenClawHomeOverride, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { connector.OpenClawHomeOverride = prevOC })
+
+	prevZC := connector.ZeptoClawConfigPathOverride
+	connector.ZeptoClawConfigPathOverride = filepath.Join(tmpHome, ".zeptoclaw", "config.json")
+	t.Cleanup(func() { connector.ZeptoClawConfigPathOverride = prevZC })
+
+	prevCC := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = filepath.Join(tmpHome, ".claude", "settings.json")
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = prevCC })
+
+	prevCodex := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
+	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+
+	for _, name := range []string{"openclaw", "claudecode", "codex", "zeptoclaw"} {
 		c, ok := reg.Get(name)
 		if !ok {
 			t.Errorf("connector %q not found", name)

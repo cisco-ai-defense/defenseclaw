@@ -22,7 +22,6 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import platform
@@ -34,17 +33,14 @@ from typing import Any
 import yaml
 
 from defenseclaw import connector_paths
-from defenseclaw.connector_paths import MCPServerEntry  # re-export for back-compat
+
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
 # still import them from defenseclaw.config; keeping the aliases avoids
 # touching unrelated test files in this PR.
 from defenseclaw.connector_paths import (
-    _dedup,
-    _parse_mcp_servers_dict,
-    _read_mcp_servers_from_openclaw_json as _read_mcp_servers_from_file,
-    _read_openclaw_json as _read_openclaw_config,
-)
+    MCPServerEntry,  # re-export for back-compat
+    )
 
 _log = logging.getLogger(__name__)
 

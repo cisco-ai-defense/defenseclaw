@@ -1246,26 +1246,90 @@ jobs:
           # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
           bash scripts/runner-cleanup.sh
 
+  # Plan E4 / item 2: connector matrix axis. Runs the four connector
+  # artifact + lifecycle test packages in parallel on the public
+  # ubuntu runners so a regression in zeptoclaw / claudecode / codex
+  # is loud at PR time even when the live `core` self-hosted job is
+  # pinned to OpenClaw. fail-fast: false → one connector's failure
+  # does not mask the others.
+  connector-matrix:
+    name: Connector Matrix (${{ matrix.connector }})
+    if: ${{ github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: [openclaw, zeptoclaw, claudecode, codex]
+    env:
+      DEFENSECLAW_E2E_CONNECTOR: ${{ matrix.connector }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      # The Go connector lifecycle matrix runs the same test for every
+      # connector; we use -run to filter to just one connector per
+      # matrix cell so failures point at exactly which connector
+      # regressed instead of a mass red.
+      - name: Connector lifecycle matrix
+        run: |
+          go test -count=1 -v ./test/e2e/ \
+            -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}"
+      # Watcher rescan + gateway proxy + OTel parity tests are
+      # connector-parameterized too; run only the active matrix cell's
+      # subtests for fast iteration on PRs.
+      - name: Per-connector parity tests
+        run: |
+          go test -count=1 -v ./internal/gateway/ \
+            -run "TestProxy_PerConnectorPrefixStrip/${{ matrix.connector }}|TestSwitchConnector_PerConnectorPersistsState/${{ matrix.connector }}|TestApplyRuntime_PerConnectorSwitch/${{ matrix.connector }}|TestHandleGuardrailEvent_OTelAgentName_PerConnector/${{ matrix.connector }}"
+      - name: Per-connector watcher rescan tests
+        if: matrix.connector != 'openclaw'
+        run: |
+          set -e
+          case "${{ matrix.connector }}" in
+            zeptoclaw)
+              go test -count=1 -v ./internal/watcher/ -run TestRescan_FromZeptoClawConfig
+              ;;
+            claudecode)
+              go test -count=1 -v ./internal/watcher/ -run TestRescan_FromClaudeSettingsJSON
+              ;;
+            codex)
+              go test -count=1 -v ./internal/watcher/ -run TestRescan_FromCodexConfigToml
+              ;;
+          esac
+
   e2e-required:
     name: E2E Required
     if: ${{ always() && github.event_name != 'schedule' }}
-    needs: [core, full-live]
+    needs: [core, full-live, connector-matrix]
     runs-on: ubuntu-latest
     steps:
       - name: Enforce required E2E checks
         env:
           CORE_RESULT: ${{ needs.core.result }}
           FULL_LIVE_RESULT: ${{ needs.full-live.result }}
+          # Plan E4: connector-matrix is a strategy job so its result
+          # rolls up across all four matrix cells (success only when
+          # every connector passed).
+          CONNECTOR_MATRIX_RESULT: ${{ needs.connector-matrix.result }}
           EVENT_NAME: ${{ github.event_name }}
           SAME_REPO_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           echo "core=$CORE_RESULT"
           echo "full_live=$FULL_LIVE_RESULT"
+          echo "connector_matrix=$CONNECTOR_MATRIX_RESULT"
           echo "event=$EVENT_NAME"
           echo "same_repo_pr=$SAME_REPO_PR"
 
           if [ "$CORE_RESULT" != "success" ]; then
             echo "Core E2E must succeed."
+            exit 1
+          fi
+
+          if [ "$CONNECTOR_MATRIX_RESULT" != "success" ]; then
+            echo "Connector Matrix must succeed (all 4 connectors)."
             exit 1
           fi
 

@@ -435,7 +435,14 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("none (loopback auth)", result.output)
+        # Plan B2 / S0.2: the empty-token path no longer reports
+        # "loopback auth" as the fallback because B2 removed the
+        # empty-token allow path. Init now tells the operator that
+        # the first-boot CSPRNG token will be auto-generated under
+        # ~/.defenseclaw/.env. The test pins the new copy so a
+        # future regression to "loopback auth" is caught loudly.
+        self.assertIn("auto-generated on first boot", result.output)
+        self.assertIn(".defenseclaw/.env", result.output)
 
 
 class TestResolveOpenclawGateway(unittest.TestCase):

@@ -271,6 +271,24 @@ type Event struct {
 	DeploymentMode  string `json:"deployment_mode,omitempty"`
 	DiscoverySource string `json:"discovery_source,omitempty"`
 
+	// PayloadHMAC [v7.1 / plan B6] is the hex-encoded HMAC-SHA256 of
+	// the canonical JSON of whichever type-specific payload is set on
+	// this event, computed under the per-boot HMAC key derived via
+	// HKDF-SHA256 from the device.key seed (info=
+	// "defenseclaw-telemetry-v1"). Downstream auditors verify
+	// integrity by recomputing the HMAC over the canonicalized
+	// payload; tampering or in-flight rewriting yields a mismatch
+	// without exposing the device key.
+	//
+	// Stamped at the writer choke point alongside StampProvenance.
+	// Empty when:
+	//   - SetTelemetryHMACSeed has not been called (boot ordering /
+	//     unit tests). Production sidecars always invoke it; tests
+	//     that don't care about HMAC keep the field empty.
+	//   - No payload pointer is set on the event (envelope-only
+	//     events have nothing to authenticate).
+	PayloadHMAC string `json:"payload_hmac,omitempty"`
+
 	// Type-specific payloads — exactly one is populated.
 	Verdict     *VerdictPayload     `json:"verdict,omitempty"`
 	Judge       *JudgePayload       `json:"judge,omitempty"`
@@ -281,6 +299,37 @@ type Event struct {
 	ScanFinding *ScanFindingPayload `json:"scan_finding,omitempty"`
 	Activity    *ActivityPayload    `json:"activity,omitempty"`
 	Egress      *EgressPayload      `json:"egress,omitempty"`
+}
+
+// StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
+// whichever type-specific payload is non-nil. Safe to call when no
+// payload is set (no-op) or when the HMAC key is not yet installed
+// (no-op). Idempotent — calling twice produces the same digest because
+// the canonicalization is deterministic.
+//
+// Plan B6 / S0.10: stamped at the writer choke point so every event
+// on the wire is HMAC-stamped under a single boot-stable key.
+func (e *Event) StampPayloadHMAC() {
+	switch {
+	case e.Verdict != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Verdict)
+	case e.Judge != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Judge)
+	case e.Lifecycle != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Lifecycle)
+	case e.Error != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Error)
+	case e.Diagnostic != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Diagnostic)
+	case e.Scan != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Scan)
+	case e.ScanFinding != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.ScanFinding)
+	case e.Activity != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Activity)
+	case e.Egress != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Egress)
+	}
 }
 
 // StampProvenance fills the four v7 provenance fields from the
