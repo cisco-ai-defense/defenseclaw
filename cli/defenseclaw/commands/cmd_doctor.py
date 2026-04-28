@@ -1039,6 +1039,12 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         click.echo("  ── Connector ──")
     active_connector = _active_connector(cfg)
     _check_connector_inventory(cfg, active_connector, r)
+    # S7.5 — surface inactive-connector residue (backup files / hook
+    # scripts left over from a previous connector). Without this check
+    # operators who switch connectors via 'defenseclaw setup guardrail
+    # --agent <new>' get a silent half-state where the old adapter's
+    # config patches are still on disk.
+    _check_connector_residue(cfg, active_connector, r)
 
     if not json_out:
         click.echo()
@@ -1170,6 +1176,7 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
         ("gateway token",            _fix_gateway_token),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup",   _fix_pristine_backup),
+        ("connector residue",        _fix_connector_residue),
     ]
 
     for title, fn in fixers:
@@ -1277,6 +1284,93 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
     else:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
+
+
+# Maps connector name → list of *expected* artifact filenames (relative
+# to data_dir) that Connector.Setup writes. When the active connector
+# is X but data_dir contains Y's artifacts, that's residue from a prior
+# install and Connector.Teardown was never invoked for Y.
+#
+# The OpenClaw pristine backup lives at ``<openclaw.json>.pristine``,
+# which is not under data_dir, so it is handled separately by
+# :func:`_check_connector_residue`.
+_CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "claudecode": ("claudecode_backup.json",),
+    "codex": ("codex_backup.json",),
+    "zeptoclaw": ("zeptoclaw_backup.json",),
+}
+
+
+def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
+    """Detect leftover artifacts from connectors that aren't active.
+
+    Each connector's ``Setup`` writes a pristine backup of the agent
+    framework's config plus (for some connectors) hook scripts and env
+    files. ``Teardown`` removes them. When an operator switches
+    connectors without first running ``defenseclaw guardrail disable``
+    (or the gateway crashes mid-handoff), we end up with the *prior*
+    connector's residue on disk.
+
+    This check walks every known connector that isn't the active one
+    and emits a WARN listing any artifact still present. The matching
+    fixer (``fix: connector residue``) calls
+    ``defenseclaw-gateway connector teardown --connector <name>`` for
+    each residual connector to clean it up via the canonical sentinel.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        _emit("skip", "Connector residue", "no data dir configured", r=r)
+        return
+
+    # Build the inactive set explicitly so unknown active connectors
+    # (plugins) don't accidentally suppress residue detection.
+    inactive = [
+        name for name in _CONNECTOR_RESIDUE_ARTIFACTS
+        if name != active.lower()
+    ]
+
+    found: list[tuple[str, str]] = []  # (connector_name, full_path)
+    for name in inactive:
+        for filename in _CONNECTOR_RESIDUE_ARTIFACTS[name]:
+            full = os.path.join(data_dir, filename)
+            if os.path.isfile(full):
+                found.append((name, full))
+
+    # OpenClaw's pristine backup is its only residue marker and lives
+    # next to openclaw.json, not under data_dir. Only flag it when
+    # OpenClaw is *not* the active connector.
+    if active.lower() != "openclaw":
+        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
+        oc_path = os.path.expanduser(oc_path)
+        if oc_path:
+            pristine = oc_path + ".pristine"
+            if os.path.isfile(pristine):
+                found.append(("openclaw", pristine))
+
+    if not found:
+        _emit(
+            "pass", "Connector residue",
+            f"no leftover artifacts from inactive connectors", r=r,
+        )
+        return
+
+    # Group residue by connector for a readable message — operators
+    # need to see "Codex left X behind" not just a flat path list.
+    by_conn: dict[str, list[str]] = {}
+    for name, path in found:
+        by_conn.setdefault(name, []).append(path)
+    parts = []
+    for name in sorted(by_conn):
+        paths = ", ".join(by_conn[name])
+        parts.append(f"{name}: {paths}")
+    detail = (
+        "found residue from inactive connectors — "
+        + "; ".join(parts)
+        + ". Run 'defenseclaw doctor --fix' to invoke "
+        "'defenseclaw-gateway connector teardown' for each, or "
+        "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
+    )
+    _emit("warn", "Connector residue", detail, r=r)
 
 
 def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
@@ -1446,3 +1540,78 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if os.path.isfile(backup_path):
         return ("skip", f"backup exists at {backup_path}")
     return ("skip", f"no backup found — run `defenseclaw setup guardrail` to create one")
+
+
+def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Run ``defenseclaw-gateway connector teardown`` for every inactive
+    connector that still has artifacts on disk.
+
+    Inactive-connector residue is detected with the same logic as
+    :func:`_check_connector_residue`, then this fixer shells out to the
+    S7.2 sentinel for each residual connector. The sentinel is the
+    canonical place to do this — ``Connector.Teardown`` knows about
+    hook scripts, env files, and config patches that the residue check
+    can't reasonably enumerate. We never call the OpenClaw Python
+    helpers here because the gateway sentinel handles every connector
+    uniformly.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return ("skip", "no data dir configured")
+
+    active = _active_connector(cfg)
+    inactive_residue: list[str] = []
+    for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
+        if name == active:
+            continue
+        if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
+            inactive_residue.append(name)
+
+    if active != "openclaw":
+        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
+        oc_path = os.path.expanduser(oc_path)
+        if oc_path and os.path.isfile(oc_path + ".pristine"):
+            inactive_residue.append("openclaw")
+
+    if not inactive_residue:
+        return ("skip", "no inactive-connector residue detected")
+
+    inactive_residue = sorted(set(inactive_residue))
+
+    if not assume_yes and not click.confirm(
+        f"    Run 'defenseclaw-gateway connector teardown' for "
+        f"{', '.join(inactive_residue)}?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    gw = shutil.which("defenseclaw-gateway")
+    if not gw:
+        return ("warn",
+                "defenseclaw-gateway not on PATH — install the binary and re-run")
+
+    cleaned: list[str] = []
+    failed: list[str] = []
+    import subprocess as _sub
+    for name in inactive_residue:
+        try:
+            proc = _sub.run(
+                [gw, "connector", "teardown", "--connector", name],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, _sub.TimeoutExpired) as exc:
+            failed.append(f"{name}: {exc}")
+            continue
+        if proc.returncode == 0:
+            cleaned.append(name)
+        else:
+            err = (proc.stderr or proc.stdout or "").strip().splitlines()
+            tail = err[-1] if err else f"rc={proc.returncode}"
+            failed.append(f"{name}: {tail}")
+
+    if cleaned and not failed:
+        return ("pass", f"teardown ran for: {', '.join(cleaned)}")
+    if cleaned and failed:
+        return ("warn",
+                f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
+    return ("warn", f"teardown failed: {'; '.join(failed)}")
