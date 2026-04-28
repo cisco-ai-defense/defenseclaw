@@ -630,8 +630,19 @@ def scan(
         click.echo(f"ALLOWED (skip scan): {name}")
         return
 
-    if not as_json:
-        click.echo(f"[scan] skill-scanner -> {scan_dir}")
+    from defenseclaw.commands import _scan_ui
+
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    ctx = _scan_ui.ScanContext.for_skill(
+        connector=connector,
+        paths=[scan_dir],
+        as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=1)
 
     try:
         result = scanner.scan(scan_dir)
@@ -645,7 +656,31 @@ def scan(
     if as_json:
         click.echo(result.to_json())
     else:
+        # Per-target glyph line (S6.3 — shared scan UX) sits above the
+        # existing detailed Skill / Target / Duration / Findings block
+        # so the new summary numbers tie back to a clear verdict.
+        if result.is_clean():
+            _scan_ui.render_per_target_status(
+                ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+            )
+        else:
+            _scan_ui.render_per_target_status(
+                ctx,
+                target=name,
+                verdict=_scan_ui.VERDICT_BLOCKED,
+                detail=f"max severity: {result.max_severity()}",
+                findings=len(result.findings),
+            )
+        click.echo()
         _print_result(name, result)
+        _scan_ui.render_summary(
+            ctx,
+            clean=1 if result.is_clean() else 0,
+            blocked=0 if result.is_clean() else 1,
+            errored=0,
+            total=1,
+            duration_ms=int(result.duration.total_seconds() * 1000),
+        )
         from defenseclaw.commands import hint
         if result.is_clean():
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
@@ -745,6 +780,7 @@ def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:
 
 
 def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False) -> None:
+    from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
 
     oc_list = _list_openclaw_skills_full(app)
@@ -755,35 +791,31 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
 
     pe = PolicyEngine(app.store)
     verdicts = []
+    errors = 0
+
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+
+    # Build the target list up front so we can render an accurate
+    # preamble (count + sources) before the first scanner run.
+    targets: list[tuple[str, str]] = []  # (name, base_dir)
+    sources: list[str] = []
 
     if skill_names:
-        if not as_json:
-            click.echo(f"[scan] found {len(skill_names)} skills to scan\n")
         for name in skill_names:
             info = _get_openclaw_skill_info(name, app)
             if not info or not info.get("baseDir"):
                 click.echo(f"[scan] warning: no baseDir for {name}", err=True)
                 continue
-            base_dir = info["baseDir"]
-            if not as_json:
-                click.echo(f"[scan] skill-scanner -> {base_dir}")
-            try:
-                result = scanner.scan(base_dir)
-                if app.logger:
-                    app.logger.log_scan(result)
-                verdicts.append({"name": name, "result": result})
-                if as_json:
-                    click.echo(result.to_json())
-                else:
-                    _print_result(name, result)
-                    click.echo()
-                if not result.is_clean() and enforce:
-                    _apply_scan_enforcement(app, pe, name, base_dir, result)
-            except Exception as exc:
-                click.echo(f"[scan] error scanning {name}: {exc}", err=True)
+            targets.append((name, info["baseDir"]))
+        sources = sorted({os.path.dirname(p) for _, p in targets if p})
     else:
         # Fall back to directory scan
         dirs = app.cfg.skill_dirs()
+        sources = list(dirs)
         for skill_dir in dirs:
             if not os.path.isdir(skill_dir):
                 continue
@@ -791,41 +823,71 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
                 path = os.path.join(skill_dir, entry)
                 if not os.path.isdir(path):
                     continue
-                if not as_json:
-                    click.echo(f"[scan] skill-scanner -> {path}")
-                try:
-                    result = scanner.scan(path)
-                    if app.logger:
-                        app.logger.log_scan(result)
-                    verdicts.append({"name": entry, "result": result})
-                    if as_json:
-                        click.echo(result.to_json())
-                    else:
-                        _print_result(entry, result)
-                        click.echo()
-                    if not result.is_clean() and enforce:
-                        _apply_scan_enforcement(app, pe, entry, path, result)
-                except Exception as exc:
-                    click.echo(f"  Error: {exc}")
+                targets.append((entry, path))
 
-        if not verdicts:
+        if not targets:
             click.echo("No skills found in configured directories:")
             for d in (dirs if dirs else []):
                 click.echo(f"  {d}")
             return
 
+    ctx = _scan_ui.ScanContext.for_skill(
+        connector=connector, paths=sources, as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=len(targets))
+
+    import time
+    started = time.monotonic()
+
+    for name, base_dir in targets:
+        try:
+            result = scanner.scan(base_dir)
+            if app.logger:
+                app.logger.log_scan(result)
+            verdicts.append({"name": name, "result": result})
+            if as_json:
+                click.echo(result.to_json())
+            else:
+                if result.is_clean():
+                    _scan_ui.render_per_target_status(
+                        ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                    )
+                else:
+                    _scan_ui.render_per_target_status(
+                        ctx,
+                        target=name,
+                        verdict=_scan_ui.VERDICT_BLOCKED,
+                        detail=f"max severity: {result.max_severity()}",
+                        findings=len(result.findings),
+                    )
+            if not result.is_clean() and enforce:
+                _apply_scan_enforcement(app, pe, name, base_dir, result)
+        except Exception as exc:
+            errors += 1
+            if not as_json:
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=name,
+                    verdict=_scan_ui.VERDICT_ERROR,
+                    detail=str(exc),
+                )
+            else:
+                click.echo(f"[scan] error scanning {name}: {exc}", err=True)
+
     if not as_json and verdicts:
         clean = sum(1 for v in verdicts if v["result"].is_clean())
-        rejected = sum(
-            1 for v in verdicts
-            if not v["result"].is_clean()
-            and (app.cfg.skill_actions.should_disable(v["result"].max_severity())
-                 or app.cfg.skill_actions.should_quarantine(v["result"].max_severity()))
+        blocked = len(verdicts) - clean
+        duration_ms = int((time.monotonic() - started) * 1000)
+        _scan_ui.render_summary(
+            ctx,
+            clean=clean,
+            blocked=blocked,
+            errored=errors,
+            total=len(verdicts) + errors,
+            duration_ms=duration_ms,
         )
-        warnings = len(verdicts) - clean - rejected
-        click.echo(f"Summary: {clean} clean, {warnings} warnings, {rejected} rejected")
         from defenseclaw.commands import hint
-        if rejected:
+        if blocked:
             hint("View alerts:       defenseclaw alerts")
         else:
             hint("Scan MCP servers:  defenseclaw mcp scan --all")

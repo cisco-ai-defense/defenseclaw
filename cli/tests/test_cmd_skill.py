@@ -865,12 +865,18 @@ class TestVerdictBreakdown(SkillCommandTestBase):
         result = self.invoke(["scan", "mixed-skill", "--path", skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("CRITICAL", result.output)
+        # The detailed verdict line still includes the per-severity
+        # breakdown — that's the contract this test was originally
+        # protecting. The new S6.3 top-line "(5 findings)" sits *above*
+        # the breakdown so users still see both.
         self.assertIn("1 critical", result.output)
         self.assertIn("1 high", result.output)
         self.assertIn("2 medium", result.output)
         self.assertIn("1 info", result.output)
-        # Must NOT show raw total "5 findings"
-        self.assertNotIn("5 findings", result.output)
+        # The breakdown line itself must not be the bare-count form —
+        # check that "Verdict: CRITICAL (5 findings)" is NOT how we
+        # surface the verdict (we want the per-severity counts there).
+        self.assertNotIn("Verdict:  CRITICAL (5 findings)", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
