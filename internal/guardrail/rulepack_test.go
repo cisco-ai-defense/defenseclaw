@@ -30,7 +30,7 @@ func TestLoadRulePack_Embedded(t *testing.T) {
 
 func TestLoadRulePack_JudgeConfigs(t *testing.T) {
 	rp := LoadRulePack("")
-	for _, name := range []string{"pii", "injection", "tool-injection"} {
+	for _, name := range []string{"pii", "injection", "tool-injection", "exfil"} {
 		jc, ok := rp.JudgeConfigs[name]
 		if !ok {
 			t.Errorf("expected judge config for %q", name)
@@ -119,12 +119,55 @@ func TestRulePack_Nil(t *testing.T) {
 	if rp.InjectionJudge() != nil {
 		t.Error("nil rulepack should return nil InjectionJudge")
 	}
+	if rp.ToolInjectionJudge() != nil {
+		t.Error("nil rulepack should return nil ToolInjectionJudge")
+	}
+	if rp.ExfilJudge() != nil {
+		t.Error("nil rulepack should return nil ExfilJudge")
+	}
 	if rp.LookupSensitiveTool("x") != nil {
 		t.Error("nil rulepack should return nil from LookupSensitiveTool")
 	}
 	rp.Validate()
 	if s := rp.String(); s != "RulePack{nil}" {
 		t.Errorf("nil rulepack String() = %q", s)
+	}
+}
+
+// TestRulePack_LoadEmbeddedExfilJudge ensures the new exfil judge
+// default ships in the embedded fs and round-trips through
+// LoadRulePack with an empty operator dir. Without this, removing the
+// file from internal/guardrail/defaults/judge/ would silently leave
+// every fresh install with no exfil-judge prompt and the runtime
+// would fall back to the in-code constant — but operators editing
+// the policy pack would have no source to override.
+func TestRulePack_LoadEmbeddedExfilJudge(t *testing.T) {
+	rp := LoadRulePack("")
+	if rp == nil {
+		t.Fatal("LoadRulePack(\"\") returned nil")
+	}
+	jc := rp.ExfilJudge()
+	if jc == nil {
+		t.Fatal("embedded exfil judge config is missing")
+	}
+	if !jc.Enabled {
+		t.Error("embedded exfil judge should be enabled by default")
+	}
+	if jc.SystemPrompt == "" {
+		t.Error("embedded exfil judge has no system_prompt")
+	}
+	for _, want := range []string{"Sensitive File Access", "Exfiltration Channel"} {
+		if _, ok := jc.Categories[want]; !ok {
+			t.Errorf("embedded exfil judge missing category %q", want)
+		}
+	}
+	// Single-category exfil findings must stay HIGH — the whole point
+	// of the new judge is to block polite "/etc/passwd" prompts that
+	// only ever flip ONE category. A future edit that drops this to
+	// MEDIUM re-introduces the gap.
+	if jc.SingleCategoryMaxSev != "HIGH" {
+		t.Errorf("embedded exfil single_category_max_severity = %q, want HIGH",
+			jc.SingleCategoryMaxSev)
 	}
 }
 

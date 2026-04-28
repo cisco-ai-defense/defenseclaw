@@ -394,15 +394,42 @@ the store.
 
 ## 6. Health
 
-`defenseclaw-gateway status` reports a `Sinks` subsystem that aggregates
-every configured audit sink:
+`defenseclaw-gateway status` reports a `Sinks` subsystem with one
+human-readable line per configured sink so operators can tell at a
+glance which destinations are wired and which are toggled off.
+
+When at least one sink is enabled:
 
 ```
-Sinks:   running — 2 sinks (splunk_hec, otlp_logs)
+  Sinks:     RUNNING (since 2026-04-28T13:39:10-04:00)
+             count: 1
+             sink_01: local-otlp-logs (otlp_logs) -> 127.0.0.1:4317 [enabled]
+             summary: 1 of 1 enabled
 ```
 
-Per-sink health and failure counters are exposed on the gateway
-`/health` endpoint under `sinks.details.sinks[]`.
+When entries are configured but all toggled off:
+
+```
+  Sinks:     DISABLED (since 2026-04-28T13:39:10-04:00)
+             count: 0
+             sink_01: splunk-prod (splunk_hec) -> https://splunk.example.com:8088/services/collector/event [disabled]
+             sink_02: local-otlp-logs (otlp_logs) -> 127.0.0.1:4317 [disabled]
+             summary: 0 of 2 sink(s) enabled — flip one on with 'defenseclaw setup observability enable <name>'
+```
+
+When nothing is configured at all:
+
+```
+  Sinks:     DISABLED (since 2026-04-28T13:39:10-04:00)
+             hint: run 'defenseclaw setup local-observability' or 'defenseclaw setup observability add <preset>' to enable audit forwarding
+             summary: no audit sinks configured
+```
+
+The structured per-sink array is still exposed on the gateway
+`/health` endpoint under `sinks.details.sinks[]` for dashboards and
+the TUI; the terminal renderer skips it because the
+`sink_<NN>` scalar lines above already carry the same information in
+a one-line-per-sink shape.
 
 ---
 

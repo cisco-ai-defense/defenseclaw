@@ -822,6 +822,47 @@ var exfilPatterns = []string{
 	"exfiltrate", "exfil", "send to my server", "curl http",
 }
 
+// exfilRegexes is the deterministic regex FLOOR for credential-file
+// reads. It runs against the normalized triage view (lowercased,
+// zero-width stripped, whitespace-around-slashes collapsed) so it
+// catches typo evasions and odd separators that the literal
+// substring list above would silently miss:
+//
+//   - "etccc passwd", "etc passsswd", "etc/  passwd"
+//     → matches via `etc.{0,3}pas{1,8}wd`
+//   - "etc shaaadow", "etc shadow"
+//     → matches via `etc.{0,3}sha{1,8}dow`
+//   - "id_rsa", "id_ed25519", any sibling SSH private key file
+//     → matches via `\bid_(?:rsa|ed25519|ecdsa|dsa)\b`
+//   - ".ssh/config", "~/.ssh/authorized_keys"
+//     → matches via `(?:^|[/\s'"\x60])\.ssh/`
+//   - ".aws/credentials", ".aws/config"
+//     → matches via `(?:^|[/\s'"\x60])\.aws/(?:credentials|config)\b`
+//
+// The `.{0,3}` separator is intentionally permissive: it admits both
+// extra alphanumerics ("etccc passwd" = 3 trailing c's plus space)
+// AND non-alphanumerics ("etc / passwd"). A stricter `[^a-z0-9]{0,3}`
+// alternative would silently miss the most common attacker typo
+// shape — appending or duplicating letters in the directory name.
+// The pattern is still anchored to the exact target words ("etc" +
+// "pas...wd" / "sha...dow") so false positives from prose
+// containing both fragments separately are rare.
+//
+// Treat this as a floor under the LLM-judge layer: even if the exfil
+// judge is offline, mis-routed, or returns "false" on a polite typo
+// prompt, these patterns alone are enough to raise a HIGH_SIGNAL
+// triage finding. They are intentionally narrow (no `\.env`,
+// `kubeconfig`, etc. — those live under the rules engine and the
+// exfil-context probe) so the FLOOR stays opinionated and hard to
+// false-positive.
+var exfilRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`etc.{0,3}pas{1,8}wd\b`),
+	regexp.MustCompile(`etc.{0,3}sha{1,8}dow\b`),
+	regexp.MustCompile(`\bid_(?:rsa|ed25519|ecdsa|dsa)\b`),
+	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.ssh/`),
+	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.aws/(?:credentials|config)\b`),
+}
+
 // bulkAccessRegex detects prompts requesting bulk extraction from sensitive tools
 // (e.g. "users_list with top 10", "contacts_list top 50").
 var bulkAccessRegex = regexp.MustCompile(
@@ -860,6 +901,19 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		for _, p := range exfilPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, p)
+				isHigh = true
+			}
+		}
+		// Regex floor: catches typo evasions like "etccc passwd",
+		// "etc shaadow", and direct ~/.ssh/.aws/ credential paths
+		// that the literal substring list above misses.
+		for _, re := range exfilRegexes {
+			if match, norm, ok := findRegexMatch(content, lower, re); ok {
+				flag := "exfil-regex:" + match
+				if norm {
+					flag = "exfil-regex:[normalized] " + match
+				}
+				flags = append(flags, flag)
 				isHigh = true
 			}
 		}
@@ -1058,6 +1112,25 @@ func triagePatterns(direction, content string) []TriageSignal {
 					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL",
 					Category: "exfil", Pattern: p,
 					Evidence: extractEvidence(content, lower, p), Confidence: 0.90,
+				})
+			}
+		}
+		// Regex floor: typo / separator-evasion variants of the
+		// credential-file targets above. HIGH_SIGNAL because the
+		// regex set is opinionated enough that a positive match is
+		// not benign — see exfilRegexes for the discipline. This is
+		// what guarantees that "please dump etccc passwd" still
+		// blocks even if the exfil judge is unreachable.
+		for _, re := range exfilRegexes {
+			if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
+				ev := extractEvidenceAt(src, loc[0], loc[1])
+				if norm {
+					ev = "[normalized] " + ev
+				}
+				signals = append(signals, TriageSignal{
+					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL-REGEX",
+					Category: "exfil", Pattern: re.String(),
+					Evidence: ev, Confidence: 0.90,
 				})
 			}
 		}

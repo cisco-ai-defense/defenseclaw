@@ -110,6 +110,46 @@ class TestCLIFlagParsing(unittest.TestCase):
         gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
         self.assertTrue(gc.judge.tool_injection)
 
+    def test_judge_exfil_default_true(self):
+        # The exfil judge is the dedicated "are you trying to read or
+        # exfiltrate sensitive files / credentials / secrets?" classifier.
+        # Default-on so polite-tone /etc/passwd-shaped prompts cannot
+        # silently slip past a fresh install.
+        from defenseclaw.config import JudgeConfig
+
+        cfg = JudgeConfig()
+        self.assertTrue(cfg.exfil)
+
+    def test_judge_exfil_from_dict(self):
+        from defenseclaw.config import _merge_guardrail
+
+        raw = {
+            "enabled": True,
+            "judge": {"enabled": True, "exfil": False},
+        }
+        gc = _merge_guardrail(raw, "/tmp/test")
+        self.assertFalse(gc.judge.exfil)
+
+    def test_judge_exfil_absent_defaults_true(self):
+        from defenseclaw.config import _merge_guardrail
+
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
+        self.assertTrue(gc.judge.exfil)
+
+    def test_judge_exfil_yaml_roundtrip(self):
+        """exfil flag survives load → asdict → reload."""
+        from dataclasses import asdict
+        from defenseclaw.config import _merge_guardrail
+
+        raw = {
+            "enabled": True,
+            "judge": {"enabled": True, "exfil": False},
+        }
+        gc = _merge_guardrail(raw, "/tmp/test")
+        d = asdict(gc)
+        gc2 = _merge_guardrail(d, "/tmp/test")
+        self.assertFalse(gc2.judge.exfil)
+
     def test_judge_fallbacks_roundtrip(self):
         from defenseclaw.config import _merge_guardrail
 
