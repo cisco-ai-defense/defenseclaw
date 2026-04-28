@@ -232,7 +232,8 @@ class TestMCPCommands(unittest.TestCase):
 
         result = _invoke(scan, ["http://localhost:3000"], app=_make_app())
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("CLEAN", result.output)
+        self.assertIn("[ok] http://localhost:3000", result.output)
+        self.assertIn("clean=1", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper")
     def test_mcp_scan_with_findings(self, MockScanner):
