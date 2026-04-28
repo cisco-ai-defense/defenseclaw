@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -164,6 +165,27 @@ type metricsSet struct {
 	guardrailJudgeLatency metric.Float64Histogram
 	guardrailCacheHits    metric.Int64Counter
 	guardrailCacheMisses  metric.Int64Counter
+
+	// Connector OTLP ingest receivers (codex / claudecode native
+	// telemetry posted to /v1/logs, /v1/metrics, /v1/traces). Kept
+	// low-cardinality on purpose — labels are signal (logs|metrics|
+	// traces) and source (codex|claudecode|unknown). Records counts
+	// the per-batch leaf records (logRecords / dataPoints / spans)
+	// the summarizer extracted; used by the connector dashboard to
+	// show "telemetry volume per connector".
+	otelIngestRequests  metric.Int64Counter
+	otelIngestRecords   metric.Int64Counter
+	otelIngestBytes     metric.Int64Counter
+	otelIngestMalformed metric.Int64Counter
+	otelIngestLastSeen  metric.Float64Gauge
+
+	// Codex notify webhook (agent-turn-complete et al.). type is
+	// the sanitized notify type ("agent-turn-complete", "unknown",
+	// "malformed"); status is the codex-supplied status string when
+	// present (empty otherwise). Both labels run through the same
+	// allow-list as the audit action key so cardinality stays bounded.
+	codexNotifyTotal     metric.Int64Counter
+	codexNotifyMalformed metric.Int64Counter
 
 	// Track 6 (LLM bridge, OpenShell, Cisco, webhook circuit / cooldown)
 	llmBridgeLatency          metric.Float64Histogram
@@ -762,6 +784,63 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.guardrailCacheMisses, err = m.Int64Counter("defenseclaw.guardrail.cache.misses",
 		metric.WithUnit("{miss}"),
 		metric.WithDescription("Verdict cache misses by scanner/verdict/TTL bucket"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Connector OTLP ingest receivers.
+	ms.otelIngestRequests, err = m.Int64Counter("defenseclaw.otel.ingest.requests",
+		metric.WithUnit("{request}"),
+		metric.WithDescription("OTLP-HTTP requests accepted by the connector ingest receiver, by signal/source/result"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.otelIngestRecords, err = m.Int64Counter("defenseclaw.otel.ingest.records",
+		metric.WithUnit("{record}"),
+		metric.WithDescription("Leaf records (logRecords|dataPoints|spans) extracted from inbound OTLP-JSON batches by signal/source"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.otelIngestBytes, err = m.Int64Counter("defenseclaw.otel.ingest.bytes",
+		metric.WithUnit("By"),
+		metric.WithDescription("Total OTLP body bytes received by the connector ingest receiver, by signal/source"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.otelIngestMalformed, err = m.Int64Counter("defenseclaw.otel.ingest.malformed",
+		metric.WithUnit("{request}"),
+		metric.WithDescription("OTLP-JSON bodies that failed to parse, by signal/source"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.otelIngestLastSeen, err = m.Float64Gauge("defenseclaw.otel.ingest.last_seen_ts",
+		metric.WithUnit("s"),
+		metric.WithDescription("Unix-seconds timestamp of the most recent OTLP-HTTP batch accepted from a given source/signal. Used by the ConnectorTelemetrySilent alert."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Codex notify (agent-turn-complete et al.). Avoid `.total` in
+	// the meter name because the OTel→Prom exporter appends `_total`
+	// to counter metric names automatically; "defenseclaw.codex.notify"
+	// becomes the canonical "defenseclaw_codex_notify_total" in the
+	// scraped exposition format.
+	ms.codexNotifyTotal, err = m.Int64Counter("defenseclaw.codex.notify",
+		metric.WithUnit("{event}"),
+		metric.WithDescription("Codex notify events received via the notify-bridge shim, labelled by type/status"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.codexNotifyMalformed, err = m.Int64Counter("defenseclaw.codex.notify.malformed",
+		metric.WithUnit("{event}"),
+		metric.WithDescription("Codex notify payloads that failed to parse"),
 	)
 	if err != nil {
 		return nil, err
@@ -1759,4 +1838,171 @@ func (p *Provider) RecordGuardrailCacheMiss(ctx context.Context, scanner, verdic
 		attribute.String("ttl_bucket", ttlBucket),
 		attribute.String("cache", "verdict"),
 	))
+}
+
+// RecordOTelIngest records a single OTLP-HTTP batch the gateway
+// accepted from a connector (codex / claudecode). Emits four
+// time series per call:
+//
+//   - defenseclaw.otel.ingest.requests{signal,source,result} += 1
+//   - defenseclaw.otel.ingest.records{signal,source}         += records
+//   - defenseclaw.otel.ingest.bytes{signal,source}           += bodyBytes
+//   - defenseclaw.otel.ingest.last_seen_ts{signal,source}    = now()
+//
+// `result` is "ok" on the happy path, "malformed" when the body
+// failed to parse (records/bytes are still recorded so volume
+// dashboards stay accurate even during schema drift). Cardinality
+// is bounded: signal ∈ {logs,metrics,traces}, source is the
+// sanitized x-defenseclaw-source header (codex|claudecode|unknown),
+// result ∈ {ok,malformed}.
+func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result string, records, bodyBytes int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	if signal == "" {
+		signal = "unknown"
+	}
+	if source == "" {
+		source = "unknown"
+	}
+	if result == "" {
+		result = "ok"
+	}
+
+	requestAttrs := metric.WithAttributes(
+		attribute.String("signal", signal),
+		attribute.String("source", source),
+		attribute.String("result", result),
+	)
+	p.metrics.otelIngestRequests.Add(ctx, 1, requestAttrs)
+	if result == "malformed" {
+		p.metrics.otelIngestMalformed.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("signal", signal),
+			attribute.String("source", source),
+		))
+	}
+
+	volumeAttrs := metric.WithAttributes(
+		attribute.String("signal", signal),
+		attribute.String("source", source),
+	)
+	if records > 0 {
+		p.metrics.otelIngestRecords.Add(ctx, records, volumeAttrs)
+	}
+	if bodyBytes > 0 {
+		p.metrics.otelIngestBytes.Add(ctx, bodyBytes, volumeAttrs)
+	}
+
+	// last_seen is a Float64Gauge (Unix seconds). Recording a fresh
+	// timestamp on every batch lets the ConnectorTelemetrySilent
+	// alert page when a connector goes silent for >10m.
+	p.metrics.otelIngestLastSeen.Record(ctx, float64(time.Now().Unix()), volumeAttrs)
+}
+
+// RecordCodexNotify records a single codex notify webhook event.
+// `kind` is the sanitized notify type the action key uses
+// ("agent-turn-complete", "unknown", "malformed"); `status` is
+// the codex-supplied status string when present, "" otherwise.
+// `result` is "ok" on parse success, "malformed" otherwise — we
+// still increment the counter on malformed so dashboards see the
+// volume even when the schema drifts.
+func (p *Provider) RecordCodexNotify(ctx context.Context, kind, status, result string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	if result == "" {
+		result = "ok"
+	}
+	p.metrics.codexNotifyTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("type", kind),
+		attribute.String("status", status),
+		attribute.String("result", result),
+	))
+	if result == "malformed" {
+		p.metrics.codexNotifyMalformed.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("type", kind),
+		))
+	}
+}
+
+// EmitConnectorTelemetryLog emits an OTel log record summarizing an
+// inbound OTLP-HTTP batch from a connector. The record routes
+// through the gateway's own log pipeline (see
+// internal/telemetry/provider.go::loggerProvider) and therefore
+// lands in whatever OTel collector the operator has configured —
+// in the local-observability-stack that's the bundled collector
+// → Loki, giving operators direct visibility into codex/claudecode
+// telemetry without configuring an additional audit OTLP sink.
+//
+// The log body is short ("connector ingest …") because the
+// structured fields carry the searchable signal; Loki indexes
+// body and labels separately and we don't want to balloon the
+// chunk store with verbose summaries.
+//
+// signal: logs|metrics|traces. source: codex|claudecode|unknown.
+// result: ok|malformed. records is the leaf-record count the
+// summarizer produced; bodyBytes is the request size; summary
+// is the human-readable summary line the audit row also stores.
+func (p *Provider) EmitConnectorTelemetryLog(ctx context.Context, signal, source, result string, records, bodyBytes int64, summary string) {
+	if !p.LogsEnabled() {
+		return
+	}
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if result == "malformed" {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	} else {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	}
+	rec.SetBody(otellog.StringValue("connector telemetry ingest"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.otel.ingest"),
+		otellog.String("event.domain", "defenseclaw.connector"),
+		otellog.String("defenseclaw.otel.ingest.signal", signal),
+		otellog.String("defenseclaw.otel.ingest.source", source),
+		otellog.String("defenseclaw.otel.ingest.result", result),
+		otellog.Int64("defenseclaw.otel.ingest.records", records),
+		otellog.Int64("defenseclaw.otel.ingest.bytes", bodyBytes),
+		otellog.String("defenseclaw.otel.ingest.summary", summary),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitCodexNotifyLog emits an OTel log record for one codex notify
+// event. Routed through the same logger as connector telemetry so
+// the local-stack's Loki sees turn-complete events alongside log
+// records — no extra sink configuration required.
+func (p *Provider) EmitCodexNotifyLog(ctx context.Context, kind, status, result, turnID, model string) {
+	if !p.LogsEnabled() {
+		return
+	}
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if result == "malformed" {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	} else {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	}
+	rec.SetBody(otellog.StringValue("codex notify"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.codex.notify"),
+		otellog.String("event.domain", "defenseclaw.connector"),
+		otellog.String("defenseclaw.codex.notify.type", kind),
+		otellog.String("defenseclaw.codex.notify.status", status),
+		otellog.String("defenseclaw.codex.notify.result", result),
+		otellog.String("defenseclaw.codex.notify.turn_id", turnID),
+		otellog.String("defenseclaw.codex.notify.model", model),
+	)
+	p.logger.Emit(ctx, rec)
 }

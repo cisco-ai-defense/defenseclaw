@@ -13,8 +13,12 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 // TestOTLPIngest_Logs_AcceptsValidPayload pins the success path: a
@@ -216,7 +220,7 @@ func TestOTLPIngest_SummarizeLogs_CountsResourcesAndRecords(t *testing.T) {
 			}
 		]
 	}`)
-	got, err := summarizeOTLPPayload(body, otelSignalLogs)
+	got, stats, err := summarizeOTLPPayload(body, otelSignalLogs)
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}
@@ -228,6 +232,12 @@ func TestOTLPIngest_SummarizeLogs_CountsResourcesAndRecords(t *testing.T) {
 	}
 	if !strings.Contains(got, "codex=2") {
 		t.Errorf("summary missing service grouping codex=2; got %q", got)
+	}
+	if stats.Records != 4 {
+		t.Errorf("stats.Records = %d, want 4 (one per leaf logRecord) — used by the otel.ingest.records counter", stats.Records)
+	}
+	if stats.Resources != 2 {
+		t.Errorf("stats.Resources = %d, want 2", stats.Resources)
 	}
 }
 
@@ -292,5 +302,179 @@ func TestCodexNotify_SanitizesNotifyType(t *testing.T) {
 		if got != c.want {
 			t.Errorf("sanitizeNotifyType(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// newOTLPIngestTestStore wires a temp SQLite store + Logger so the
+// ingest handler tests can read back audit rows. The audit logger
+// is the only path through which persistAuditEvent observes whether
+// the typed action constants survived sanitizeEvent / store.LogEvent.
+func newOTLPIngestTestStore(t *testing.T) (*audit.Store, *audit.Logger) {
+	t.Helper()
+	store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	logger := audit.NewLogger(store)
+	t.Cleanup(func() { logger.Close() })
+	return store, logger
+}
+
+// TestOTLPIngest_PersistsTypedAuditAction pins the registry contract:
+// the OTLP handler must NOT smuggle freeform action keys through the
+// audit DB. Every row emitted from the happy path on /v1/logs must
+// match audit.ActionOTelIngestLogs verbatim so dashboards filtering
+// on action="otel.ingest.logs" stay green and the strict JSON-schema
+// gate doesn't drop the row.
+func TestOTLPIngest_PersistsTypedAuditAction(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+
+	body := `{
+		"resourceLogs": [{
+			"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "codex"}}]},
+			"scopeLogs": [{"logRecords": [{}]}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "codex")
+	w := httptest.NewRecorder()
+	a.handleOTLPLogs(w, req)
+	logger.Close() // flush
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+
+	// Allow background goroutines to complete (sinks, structured emitter).
+	time.Sleep(50 * time.Millisecond)
+
+	rows, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1; rows=%+v", len(rows), rows)
+	}
+	if got, want := rows[0].Action, string(audit.ActionOTelIngestLogs); got != want {
+		t.Errorf("audit Action = %q, want %q (typed constant from internal/audit/actions.go)", got, want)
+	}
+	if !audit.IsKnownAction(rows[0].Action) {
+		t.Errorf("audit Action %q is not in AllActions(); the action enum must reject unknown values", rows[0].Action)
+	}
+}
+
+// TestOTLPIngest_MalformedPersistsTypedAuditAction guards the failure
+// branch: a body that fails to parse must still hit the audit DB
+// under audit.ActionOTelIngestMalformed (not "malformed" or any
+// other freeform key). Operators rely on filtering by this exact
+// constant to spot connector schema drift.
+func TestOTLPIngest_MalformedPersistsTypedAuditAction(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", strings.NewReader(`{not-json`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "claudecode")
+	w := httptest.NewRecorder()
+	a.handleOTLPMetrics(w, req)
+	logger.Close()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d (malformed must still 200 to prevent retry storms)", w.Code)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	rows, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if got, want := rows[0].Action, string(audit.ActionOTelIngestMalformed); got != want {
+		t.Errorf("malformed Action = %q, want %q", got, want)
+	}
+	if rows[0].Severity != "WARN" {
+		t.Errorf("malformed Severity = %q, want WARN", rows[0].Severity)
+	}
+}
+
+// TestCodexNotify_PersistsDynamicSuffixAction pins the dynamic
+// codex.notify.<sanitized-type> family. The static enum lists
+// codex.notify.agent-turn-complete explicitly; everything else
+// must still pass IsKnownActionPrefix so future codex notify types
+// don't get rejected by audit-event validators.
+func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+
+	body := `{"type": "agent-turn-complete", "turn_id": "turn-abc", "model": "gpt-5", "status": "success"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleCodexNotify(w, req)
+	logger.Close()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	rows, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if got, want := rows[0].Action, "codex.notify.agent-turn-complete"; got != want {
+		t.Errorf("Action = %q, want %q", got, want)
+	}
+	// Must satisfy *either* the static enum OR the prefix matcher.
+	// audit-event.json validators in downstream SIEMs use the same
+	// disjunction.
+	if !audit.IsKnownAction(rows[0].Action) && !audit.IsKnownActionPrefix(rows[0].Action) {
+		t.Errorf("audit Action %q matches neither IsKnownAction nor IsKnownActionPrefix", rows[0].Action)
+	}
+	if rows[0].SessionID != "turn-abc" {
+		t.Errorf("SessionID = %q, want %q (codex notify rows must carry turn_id for SIEM rollups)", rows[0].SessionID, "turn-abc")
+	}
+}
+
+// TestCodexNotify_NoTypePersistsBareAction ensures a notify payload
+// without a `type` field produces audit.ActionCodexNotify (the bare
+// "codex.notify" key) rather than "codex.notify." with an empty
+// suffix that would slip past the prefix matcher.
+func TestCodexNotify_NoTypePersistsBareAction(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+
+	body := `{"turn_id": "turn-xyz"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleCodexNotify(w, req)
+	logger.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	rows, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if got, want := rows[0].Action, string(audit.ActionCodexNotify); got != want {
+		t.Errorf("Action = %q, want %q (no type → bare codex.notify)", got, want)
 	}
 }

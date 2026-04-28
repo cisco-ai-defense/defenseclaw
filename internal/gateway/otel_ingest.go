@@ -51,6 +51,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
+// otelIngestStats is what summarizeOTLPPayload returns alongside
+// the human-readable summary. We keep it tiny on purpose — the
+// counters we expose are low-cardinality (signal × source) so a
+// noisy connector cannot explode the TSDB.
+type otelIngestStats struct {
+	// Records is the number of leaf records (logRecords / metrics
+	// data points / spans) the summarizer extracted. 0 when the
+	// envelope is well-formed but empty (which is rare but legal
+	// per the OTLP spec — exporters flush empty batches).
+	Records int64
+	// Resources is the number of top-level resourceLogs / resourceMetrics
+	// / resourceSpans entries. Useful for spotting batches that
+	// span many services.
+	Resources int64
+}
+
 // otelIngestSignal classifies which OTLP-HTTP path the request hit.
 type otelIngestSignal string
 
@@ -141,15 +157,18 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		source = "unknown"
 	}
 
-	summary, parseErr := summarizeOTLPPayload(body, signal)
+	ctx := r.Context()
+	bodyBytes := int64(len(body))
+	summary, stats, parseErr := summarizeOTLPPayload(body, signal)
 	if parseErr != nil {
 		// We log the parse failure but still 200 — the exporter
 		// already paid the network round-trip and retrying won't
-		// help (the body is malformed). Audit the failure so the
-		// operator can investigate.
+		// help (the body is malformed). Audit + meter + emit a
+		// WARN log so dashboards / alerts surface the drift
+		// without the exporter retrying.
 		ev := audit.Event{
 			Timestamp: time.Now().UTC(),
-			Action:    "otel.ingest.malformed",
+			Action:    string(audit.ActionOTelIngestMalformed),
 			Target:    fmt.Sprintf("otlp:%s", signal),
 			Actor:     source,
 			Details:   fmt.Sprintf("malformed OTLP-JSON payload: %v (size=%d bytes)", parseErr, len(body)),
@@ -157,13 +176,19 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 			AgentName: source,
 		}
 		_ = persistAuditEvent(a.logger, a.store, ev)
+		// Record metrics + emit OTel log for the malformed branch.
+		// We pass records=0 (we couldn't extract any) but keep
+		// bodyBytes so volume dashboards still see the request.
+		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
+		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "malformed", 0, bodyBytes,
+			fmt.Sprintf("malformed OTLP-JSON payload: %v", parseErr))
 		writeOTLPSuccess(w)
 		return
 	}
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
-		Action:    fmt.Sprintf("otel.ingest.%s", signal),
+		Action:    otelIngestActionForSignal(signal),
 		Target:    fmt.Sprintf("otlp:%s", signal),
 		Actor:     source,
 		Details:   summary,
@@ -178,7 +203,36 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		fmt.Fprintf(otelIngestLogSink(), "[otel-ingest] persist failed (signal=%s source=%s): %v\n", signal, source, err)
 	}
 
+	// Record metrics + emit OTel log on the happy path. The OTel
+	// log routes through the gateway's own logger provider so the
+	// local-observability-stack's Loki receives codex/claudecode
+	// telemetry directly — no extra audit OTLP sink needed.
+	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
+	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
+
 	writeOTLPSuccess(w)
+}
+
+// otelIngestActionForSignal maps the inbound signal to the typed
+// audit action constant. Keeping the mapping tight here (rather
+// than fmt.Sprintf into the action column) makes the static check
+// in scripts/check_audit_actions.py fail loud when a new signal
+// gets added without a matching constant.
+func otelIngestActionForSignal(signal otelIngestSignal) string {
+	switch signal {
+	case otelSignalLogs:
+		return string(audit.ActionOTelIngestLogs)
+	case otelSignalMetrics:
+		return string(audit.ActionOTelIngestMetrics)
+	case otelSignalTraces:
+		return string(audit.ActionOTelIngestTraces)
+	default:
+		// Should be unreachable — handleOTLPSignal only ever calls
+		// us with one of the three constants above. Fall back to
+		// the malformed marker so an out-of-band caller can't
+		// smuggle a new action key into the audit DB.
+		return string(audit.ActionOTelIngestMalformed)
+	}
 }
 
 // isOTLPJSONContentType returns true if the request Content-Type
@@ -218,14 +272,14 @@ func writeOTLPSuccess(w http.ResponseWriter) {
 // number of distinct service.name resource attributes. That's enough
 // for the audit row to answer "how much telemetry from which service
 // in which batch" without forcing SQLite to grow per-record.
-func summarizeOTLPPayload(body []byte, signal otelIngestSignal) (string, error) {
+func summarizeOTLPPayload(body []byte, signal otelIngestSignal) (string, otelIngestStats, error) {
 	if len(body) == 0 {
-		return "", errors.New("empty body")
+		return "", otelIngestStats{}, errors.New("empty body")
 	}
 
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return "", fmt.Errorf("unmarshal envelope: %w", err)
+		return "", otelIngestStats{}, fmt.Errorf("unmarshal envelope: %w", err)
 	}
 
 	var resourceKey, scopeKey, leafKey string
@@ -237,17 +291,17 @@ func summarizeOTLPPayload(body []byte, signal otelIngestSignal) (string, error) 
 	case otelSignalTraces:
 		resourceKey, scopeKey, leafKey = "resourceSpans", "scopeSpans", "spans"
 	default:
-		return "", fmt.Errorf("unknown signal: %s", signal)
+		return "", otelIngestStats{}, fmt.Errorf("unknown signal: %s", signal)
 	}
 
 	resourceRaw, ok := envelope[resourceKey]
 	if !ok {
-		return fmt.Sprintf("size=%d bytes, no %s entries", len(body), resourceKey), nil
+		return fmt.Sprintf("size=%d bytes, no %s entries", len(body), resourceKey), otelIngestStats{}, nil
 	}
 
 	var resources []map[string]json.RawMessage
 	if err := json.Unmarshal(resourceRaw, &resources); err != nil {
-		return "", fmt.Errorf("unmarshal %s: %w", resourceKey, err)
+		return "", otelIngestStats{}, fmt.Errorf("unmarshal %s: %w", resourceKey, err)
 	}
 
 	var totalLeaf int
@@ -303,7 +357,11 @@ func summarizeOTLPPayload(body []byte, signal otelIngestSignal) (string, error) 
 		}
 		parts = append(parts, fmt.Sprintf("services=[%s]", strings.Join(svcParts, ",")))
 	}
-	return strings.Join(parts, " "), nil
+	stats := otelIngestStats{
+		Records:   int64(totalLeaf),
+		Resources: int64(len(resources)),
+	}
+	return strings.Join(parts, " "), stats, nil
 }
 
 // extractServiceName pulls service.name out of an OTLP resource block.
@@ -384,15 +442,22 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	var p codexNotifyPayload
 	parseErr := json.Unmarshal(body, &p)
 
-	action := "codex.notify"
+	action := string(audit.ActionCodexNotify)
 	severity := "INFO"
+	result := "ok"
+	kind := "unknown"
 	if parseErr != nil {
 		// Persist a malformed marker so operators can investigate
 		// codex schema drift without losing the event.
-		action = "codex.notify.malformed"
+		action = string(audit.ActionCodexNotifyMalformed)
 		severity = "WARN"
+		result = "malformed"
+		kind = "malformed"
 	} else if p.Type != "" {
-		action = "codex.notify." + sanitizeNotifyType(p.Type)
+		kind = sanitizeNotifyType(p.Type)
+		action = "codex.notify." + kind
+	} else {
+		kind = "" // body parsed but no `type` field — keep audit Action == "codex.notify"
 	}
 
 	details := string(body)
@@ -416,6 +481,15 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)
 	}
+
+	// Surface the same event as a Prometheus counter and an OTel log
+	// record so the local-stack dashboards see codex turn-completes
+	// without configuring an audit OTLP sink. Cardinality is bounded
+	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
+	ctx := r.Context()
+	a.otel.RecordCodexNotify(ctx, kind, p.Status, result)
+	a.otel.EmitCodexNotifyLog(ctx, kind, p.Status, result, p.TurnID, p.Model)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))

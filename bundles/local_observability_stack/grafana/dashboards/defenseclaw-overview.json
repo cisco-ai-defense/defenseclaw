@@ -19,6 +19,7 @@
   "links": [
     {"title": "Security",    "type": "link", "url": "/d/defenseclaw-security",    "icon": "external link", "targetBlank": false},
     {"title": "Scanners",    "type": "link", "url": "/d/defenseclaw-scanners",    "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",  "type": "link", "url": "/d/defenseclaw-connectors",  "icon": "external link", "targetBlank": false},
     {"title": "Reliability", "type": "link", "url": "/d/defenseclaw-reliability", "icon": "external link", "targetBlank": false},
     {"title": "Runtime",     "type": "link", "url": "/d/defenseclaw-runtime",     "icon": "external link", "targetBlank": false},
     {"title": "Traffic",     "type": "link", "url": "/d/defenseclaw-traffic",     "icon": "external link", "targetBlank": false}

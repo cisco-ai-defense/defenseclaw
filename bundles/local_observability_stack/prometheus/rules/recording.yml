@@ -126,3 +126,49 @@ groups:
     rules:
       - record: exporter:defenseclaw_otlp_freshness:seconds
         expr: time() - max by (exporter) (defenseclaw_telemetry_exporter_last_export_ts_seconds)
+
+  # Connector ingest (codex / claudecode native telemetry posted to
+  # /v1/logs, /v1/metrics, /v1/traces, /api/v1/codex/notify).
+  # Pre-aggregated so the connector dashboard stays snappy even when
+  # an operator zooms out to 30 days of data. Group-by labels are
+  # signal (logs|metrics|traces) and source (codex|claudecode|unknown);
+  # cardinality is bounded by RecordOTelIngest's allow-list.
+  - name: defenseclaw.connectors
+    interval: 30s
+    rules:
+      - record: connector:defenseclaw_otel_ingest_requests:rate5m
+        expr: sum by (signal, source, result) (rate(defenseclaw_otel_ingest_requests_total[5m]))
+      - record: connector:defenseclaw_otel_ingest_records:rate5m
+        expr: sum by (signal, source) (rate(defenseclaw_otel_ingest_records_total[5m]))
+      - record: connector:defenseclaw_otel_ingest_bytes:rate5m
+        expr: sum by (signal, source) (rate(defenseclaw_otel_ingest_bytes_total[5m]))
+      - record: connector:defenseclaw_otel_ingest_malformed:ratio_5m
+        expr: |
+          (
+            sum by (signal, source) (rate(defenseclaw_otel_ingest_malformed_total[5m]))
+            /
+            clamp_min(sum by (signal, source) (rate(defenseclaw_otel_ingest_requests_total[5m])), 0.0001)
+          )
+      # silence_seconds is "wall-clock seconds since the last accepted
+      # batch". The ConnectorTelemetrySilent alert pages on this
+      # exceeding 600 (10 minutes) for any connector that has emitted
+      # at least one batch since the gateway started — so a never-used
+      # connector doesn't fire spuriously (last_seen is absent → no
+      # series, alert returns empty, no page).
+      - record: connector:defenseclaw_otel_ingest_silence:seconds
+        expr: time() - max by (signal, source) (defenseclaw_otel_ingest_last_seen_ts_seconds)
+      - record: connector:defenseclaw_codex_notify:rate5m
+        expr: sum by (type, status, result) (rate(defenseclaw_codex_notify_total[5m]))
+      # Hook-vs-OTel rates exposed separately so the Connector
+      # Telemetry dashboard can render both side-by-side and operators
+      # can spot drift visually. We deliberately don't precompute a
+      # ratio here: hook calls (tool-call / codex.notify.*) and OTel
+      # log records use different cardinality models, so a baked-in
+      # ratio would mislead during partial outages.
+      - record: connector:defenseclaw_hooks:rate5m
+        expr: |
+          sum by (action) (
+            rate(defenseclaw_audit_events_total{action=~"tool-call|tool-result|codex\\.notify.*"}[5m])
+          )
+      - record: connector:defenseclaw_otel_logs:rate5m
+        expr: sum by (source) (rate(defenseclaw_otel_ingest_records_total{signal="logs"}[5m]))
