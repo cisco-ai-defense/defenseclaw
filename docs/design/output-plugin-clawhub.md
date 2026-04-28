@@ -176,7 +176,13 @@ OpenClaw Agent (with output-plugin installed)
   "types": "dist/index.d.ts",
   "openclaw": {
     "extensions": ["./dist/index.js"],
-    "pluginManifest": "./openclaw.plugin.json"
+    "pluginManifest": "./openclaw.plugin.json",
+    "compat": {
+      "pluginApi": ">=1.0.0"
+    },
+    "build": {
+      "openclawVersion": ">=1.0.0"
+    }
   },
   "scripts": {
     "build": "tsc",
@@ -208,6 +214,8 @@ OpenClaw Agent (with output-plugin installed)
 ```
 
 **Key differences from embedded `package.json`:**
+- `openclaw.compat.pluginApi`: `">=1.0.0"` — required by ClawHub for compatibility validation
+- `openclaw.build.openclawVersion`: `">=1.0.0"` — required by ClawHub for build metadata
 - `name`: scoped `@defenseclaw/openclaw-plugin`
 - `permissions`: `"net:connect"` (not just `localhost` — needs remote sidecar)
 - `prepublish` script for ClawHub build
