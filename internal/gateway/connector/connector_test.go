@@ -1691,6 +1691,19 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	if !strings.Contains(endpoint, "/v1/logs") {
 		t.Errorf("otlp-http endpoint = %q, want /v1/logs path (the OTLP-HTTP logs sub-path)", endpoint)
 	}
+	// protocol = "json" is REQUIRED by codex's deserializer
+	// (codex-rs/config/src/types.rs::OtelExporterKind::OtlpHttp). Omitting
+	// it produces "invalid configuration: missing field `protocol` in
+	// `otel.exporter`" at codex startup — a regression that would block
+	// the entire CLI from launching, not just OTel export. The value
+	// must match the kebab-case serde tag for OtelHttpProtocol::Json,
+	// and "json" specifically is required because the gateway's OTLP-HTTP
+	// receiver only accepts application/json bodies (415s protobuf).
+	protocol, _ := otlphttp["protocol"].(string)
+	if protocol != "json" {
+		t.Errorf("otlp-http protocol = %q, want %q (codex requires this field; gateway only accepts application/json)",
+			protocol, "json")
+	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})
 	if headers == nil {
 		t.Fatal("[otel.exporter.otlp-http.headers] missing — receiver auth would fail")

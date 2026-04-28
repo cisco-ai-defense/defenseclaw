@@ -1037,13 +1037,25 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 // buildCodexOtelBlock returns the [otel] table that points codex's
 // native OTel exporter at the gateway's OTLP-HTTP receiver. The shape
 // matches codex's documented config (see
-// https://developers.openai.com/codex/config-advanced):
+// https://developers.openai.com/codex/config-advanced) and the
+// authoritative Rust schema in
+// codex-rs/config/src/types.rs::OtelExporterKind::OtlpHttp:
 //
 //	[otel]
 //	log_user_prompt = false
 //	[otel.exporter.otlp-http]
 //	endpoint = "http://127.0.0.1:18970/v1/logs"
+//	protocol = "json"
 //	headers = { x-defenseclaw-token = "<token>" }
+//
+// The ``protocol`` field is REQUIRED by codex's serde-deserialized
+// schema — omitting it produces ``invalid configuration: missing
+// field `protocol` in `otel.exporter``` at codex startup, which
+// blocks the entire CLI from launching (not just OTel export). We
+// hard-code ``"json"`` because the gateway's OTLP-HTTP receiver
+// (internal/gateway/otel_ingest.go) accepts ``application/json`` only
+// and 415s any ``application/x-protobuf`` body — a mismatched
+// protocol would silently drop every batch instead of erroring out.
 //
 // log_user_prompt = false is the privacy-preserving default: codex's
 // native OTel emits prompt text only when this is true. We capture
@@ -1074,6 +1086,12 @@ func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 		"exporter": map[string]interface{}{
 			"otlp-http": map[string]interface{}{
 				"endpoint": endpoint,
+				// "json" matches the kebab-case serde tag for
+				// OtelHttpProtocol::Json. Codex's deserializer is
+				// case-sensitive (rename_all = "kebab-case") — "JSON"
+				// or "Json" would fail with the same missing-field
+				// flavour error.
+				"protocol": "json",
 				"headers":  headers,
 			},
 		},
