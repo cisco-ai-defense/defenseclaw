@@ -141,3 +141,123 @@ func TestReadOpenClawGatewayToken(t *testing.T) {
 		}
 	})
 }
+
+// TestPersistRefreshedToken covers the on-disk side of the auth
+// auto-repair path. When the sidecar refreshes Gateway.Token from
+// openclaw.json in-memory, consumers of the old token (hook scripts
+// reading hooks/.token, operator scripts sourcing .env) must see the
+// new value or they'll 401 on every call until the next full sidecar
+// restart.
+func TestPersistRefreshedToken(t *testing.T) {
+	t.Run("rewrites existing token lines in .env", func(t *testing.T) {
+		dir := t.TempDir()
+		envPath := filepath.Join(dir, ".env")
+		original := "DEFENSECLAW_LLM_KEY=sk-or-v1-keep-me\n" +
+			"OPENCLAW_GATEWAY_TOKEN=old-stale-token\n" +
+			"DEFENSECLAW_GATEWAY_TOKEN=\"old-stale-token\"\n"
+		os.WriteFile(envPath, []byte(original), 0o600)
+
+		if err := persistRefreshedToken(dir, "new-fresh-token"); err != nil {
+			t.Fatalf("persistRefreshedToken: %v", err)
+		}
+
+		got, _ := os.ReadFile(envPath)
+		content := string(got)
+		for _, want := range []string{
+			"DEFENSECLAW_LLM_KEY=sk-or-v1-keep-me\n",
+			"OPENCLAW_GATEWAY_TOKEN=new-fresh-token\n",
+			"DEFENSECLAW_GATEWAY_TOKEN=new-fresh-token\n",
+		} {
+			if !containsLine(content, want) {
+				t.Errorf(".env missing line %q\nfile:\n%s", want, content)
+			}
+		}
+		if containsLine(content, "old-stale-token") {
+			t.Errorf(".env still contains old token\nfile:\n%s", content)
+		}
+	})
+
+	t.Run("appends token lines when .env missing the keys", func(t *testing.T) {
+		dir := t.TempDir()
+		envPath := filepath.Join(dir, ".env")
+		os.WriteFile(envPath, []byte("DEFENSECLAW_LLM_KEY=sk-existing\n"), 0o600)
+
+		if err := persistRefreshedToken(dir, "appended-token"); err != nil {
+			t.Fatalf("persistRefreshedToken: %v", err)
+		}
+
+		content, _ := os.ReadFile(envPath)
+		s := string(content)
+		if !containsLine(s, "OPENCLAW_GATEWAY_TOKEN=appended-token\n") {
+			t.Errorf("missing OPENCLAW_GATEWAY_TOKEN line\nfile:\n%s", s)
+		}
+		if !containsLine(s, "DEFENSECLAW_GATEWAY_TOKEN=appended-token\n") {
+			t.Errorf("missing DEFENSECLAW_GATEWAY_TOKEN line\nfile:\n%s", s)
+		}
+	})
+
+	t.Run("creates .env when it doesn't exist", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := persistRefreshedToken(dir, "brand-new-token"); err != nil {
+			t.Fatalf("persistRefreshedToken: %v", err)
+		}
+		content, err := os.ReadFile(filepath.Join(dir, ".env"))
+		if err != nil {
+			t.Fatalf(".env not created: %v", err)
+		}
+		if !containsLine(string(content), "OPENCLAW_GATEWAY_TOKEN=brand-new-token\n") {
+			t.Errorf(".env content: %s", content)
+		}
+	})
+
+	t.Run("rewrites hooks/.token with new value", func(t *testing.T) {
+		dir := t.TempDir()
+		hookDir := filepath.Join(dir, "hooks")
+		os.MkdirAll(hookDir, 0o755)
+		tokenPath := filepath.Join(hookDir, ".token")
+		os.WriteFile(tokenPath, []byte(`DEFENSECLAW_GATEWAY_TOKEN="old-stale"`+"\n"), 0o600)
+
+		if err := persistRefreshedToken(dir, "hook-refreshed"); err != nil {
+			t.Fatalf("persistRefreshedToken: %v", err)
+		}
+
+		content, _ := os.ReadFile(tokenPath)
+		s := string(content)
+		if !containsLine(s, `DEFENSECLAW_GATEWAY_TOKEN="hook-refreshed"`+"\n") {
+			t.Errorf("hooks/.token content:\n%s", s)
+		}
+
+		info, err := os.Stat(tokenPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("hooks/.token perm = %v, want 0600", info.Mode().Perm())
+		}
+	})
+
+	t.Run("silently skips hooks/.token when hooks dir missing", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := persistRefreshedToken(dir, "tok"); err != nil {
+			t.Errorf("should not error when hooks dir missing: %v", err)
+		}
+	})
+}
+
+// containsLine reports whether haystack contains needle as a full line
+// (handles leading lines, embedded lines, trailing lines without
+// requiring exact-file-content equality).
+func containsLine(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && (haystack == needle ||
+		// prefix or embedded match
+		(func() bool {
+			for i := 0; i+len(needle) <= len(haystack); i++ {
+				if haystack[i:i+len(needle)] == needle {
+					if i == 0 || haystack[i-1] == '\n' {
+						return true
+					}
+				}
+			}
+			return false
+		})())
+}

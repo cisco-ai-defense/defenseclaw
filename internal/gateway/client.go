@@ -576,7 +576,105 @@ func (c *Client) tryAuthRepair(connectErr error) {
 	if newToken, ok := readOpenClawGatewayToken(home); ok && newToken != c.cfg.Token {
 		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
 		c.cfg.Token = newToken
+
+		// Persist the refreshed token to disk so hook scripts and
+		// operator shells see the same value. Without this, the in-
+		// memory refresh only helps the sidecar itself — downstream
+		// consumers (hooks/.token, .env) stay stale and every
+		// hook-driven request 401s until the next full sidecar
+		// restart re-reads openclaw.json on boot.
+		//
+		// DeviceKeyFile lives at <dataDir>/device.key; derive dataDir
+		// from it so we don't need a new config field. Errors are
+		// logged but not returned — persistence is best-effort, the
+		// primary in-memory refresh already succeeded.
+		if c.cfg.DeviceKeyFile != "" {
+			dataDir := filepath.Dir(c.cfg.DeviceKeyFile)
+			if err := persistRefreshedToken(dataDir, newToken); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] WARNING: failed to persist refreshed token to disk: %v — hook scripts may 401 until next restart\n", err)
+			}
+		}
 	}
+}
+
+// persistRefreshedToken writes newToken into the on-disk token sources
+// that downstream consumers read:
+//
+//   - <dataDir>/.env              — sourced by operator shells and
+//     loaded into the sidecar process env at boot
+//   - <dataDir>/hooks/.token      — sourced by claude-code-hook.sh and
+//     codex-hook.sh before every call to the API server
+//
+// The .env file is modified in place, preserving unrelated entries.
+// Both OPENCLAW_GATEWAY_TOKEN (legacy env var) and
+// DEFENSECLAW_GATEWAY_TOKEN (current canonical name) are updated so
+// either naming convention works.
+//
+// hooks/.token is skipped when the hooks directory is missing (e.g.
+// connector not yet set up); that's not an error.
+func persistRefreshedToken(dataDir, newToken string) error {
+	if err := updateEnvFileToken(filepath.Join(dataDir, ".env"), newToken); err != nil {
+		return fmt.Errorf("update .env: %w", err)
+	}
+
+	hookTokenPath := filepath.Join(dataDir, "hooks", ".token")
+	if _, err := os.Stat(filepath.Dir(hookTokenPath)); err == nil {
+		content := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", newToken)
+		if err := os.WriteFile(hookTokenPath, []byte(content), 0o600); err != nil {
+			return fmt.Errorf("write hooks/.token: %w", err)
+		}
+	}
+	return nil
+}
+
+// updateEnvFileToken rewrites OPENCLAW_GATEWAY_TOKEN and
+// DEFENSECLAW_GATEWAY_TOKEN lines in a .env-style file. Missing keys
+// are appended. The file is created if it doesn't exist. Other lines
+// (LLM keys, comments, etc.) are preserved verbatim.
+func updateEnvFileToken(path, newToken string) error {
+	var lines []string
+	if data, err := os.ReadFile(path); err == nil {
+		lines = strings.Split(string(data), "\n")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	keys := map[string]bool{
+		"OPENCLAW_GATEWAY_TOKEN":    false,
+		"DEFENSECLAW_GATEWAY_TOKEN": false,
+	}
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for k := range keys {
+			if strings.HasPrefix(trimmed, k+"=") {
+				lines[i] = k + "=" + newToken
+				keys[k] = true
+				break
+			}
+		}
+	}
+
+	for k, seen := range keys {
+		if !seen {
+			lines = append(lines, k+"="+newToken)
+		}
+	}
+
+	// Trim trailing blank lines from the original split artifact and
+	// add a single terminating newline.
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	out := strings.Join(lines, "\n") + "\n"
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(out), 0o600)
 }
 
 // shouldAutoRepair returns true when auth auto-repair should be attempted.
