@@ -202,7 +202,12 @@ sync-openclaw-extension:
 	@# rsync preserves tree structure AND skips dev artifacts (tests, .d.ts,
 	@# source maps) in a single pass. Fall back to find-based copy when
 	@# rsync is unavailable (shouldn't happen on macOS / linux dev).
-	@if command -v rsync >/dev/null 2>&1; then \
+	@# When dist/ does not exist (CI without `make plugin`), create an empty
+	@# directory so go:embed still compiles.
+	@if [ ! -d "$(PLUGIN_DIR)/dist" ]; then \
+	  echo "  ⚠ $(PLUGIN_DIR)/dist not found — run 'make plugin' to build the OpenClaw extension"; \
+	  mkdir -p internal/gateway/connector/openclaw_extension/dist; \
+	elif command -v rsync >/dev/null 2>&1; then \
 	  rsync -a \
 	    --exclude='__tests__' --exclude='*.d.ts' --exclude='*.d.ts.map' --exclude='*.js.map' \
 	    $(PLUGIN_DIR)/dist/ internal/gateway/connector/openclaw_extension/dist/; \
