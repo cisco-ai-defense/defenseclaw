@@ -386,6 +386,18 @@ jobs:
             echo "gateway.jsonl not yet populated — skipping schema check"
           fi
 
+      # `make install` only installs the runtime venv (cli-install →
+      # pycli, no dev group). `make test` then runs `python -m unittest
+      # discover` which eagerly imports every cli/tests/test_*.py — and
+      # cli/tests/test_connector_paths.py + test_connector_mcp_writers.py
+      # `import pytest` at module top. Without pytest available the
+      # discovery aborts on ModuleNotFoundError before any tests run.
+      # Install the dev group inline so the existing venv picks up
+      # pytest without re-running `make install`. Same fix as the CI
+      # workflow's make-test job.
+      - name: Install dev test deps
+        run: uv pip install --group dev --python "${{ github.workspace }}/.venv/bin/python"
+
       - name: Unit tests
         run: make test
 
@@ -1125,6 +1137,18 @@ jobs:
           else
             echo "gateway.jsonl not yet populated — skipping schema check"
           fi
+
+      # `make install` only installs the runtime venv (cli-install →
+      # pycli, no dev group). `make test` then runs `python -m unittest
+      # discover` which eagerly imports every cli/tests/test_*.py — and
+      # cli/tests/test_connector_paths.py + test_connector_mcp_writers.py
+      # `import pytest` at module top. Without pytest available the
+      # discovery aborts on ModuleNotFoundError before any tests run.
+      # Install the dev group inline so the existing venv picks up
+      # pytest without re-running `make install`. Same fix as the CI
+      # workflow's make-test job.
+      - name: Install dev test deps
+        run: uv pip install --group dev --python "${{ github.workspace }}/.venv/bin/python"
 
       - name: Unit tests
         run: make test

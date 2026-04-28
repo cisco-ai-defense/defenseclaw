@@ -186,6 +186,17 @@ func isExternalDependencyError(err error) bool {
 		"no such file or directory",
 		"command not found",
 		"permission denied",
+		// OpenClaw connector Setup refuses when the gateway binary
+		// was built without the bundled extension (i.e. without a
+		// prior `make extensions`/`make plugin`). The connector-matrix
+		// CI job runs `make sync-openclaw-extension` which writes a
+		// .placeholder — enough to satisfy the //go:embed pattern at
+		// compile time, but Setup still rejects the placeholder at
+		// runtime. That's an environment-not-built issue, not a
+		// contract violation, so skip rather than fail. Other
+		// connectors (zeptoclaw / claudecode / codex) don't need the
+		// extension and this branch never matches their errors.
+		"openclaw extension is not bundled",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
