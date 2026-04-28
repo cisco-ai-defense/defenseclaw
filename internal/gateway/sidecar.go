@@ -591,16 +591,21 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	// Resolve the active connector to get connector-specific component
 	// directories. Falls back to cfg.SkillDirs()/PluginDirs() (OpenClaw
 	// paths) when the connector does not implement ComponentScanner.
+	// Unlike runGuardrail, the watcher is best-effort discovery: a
+	// misspelled guardrail.connector here should still be caught at
+	// runGuardrail's fail-fast check (see S1.4), so we log the error
+	// and fall back rather than aborting the watcher loop. That keeps
+	// the watcher useful for the OpenClaw default flow even while a
+	// freshly-broken connector name is being debugged.
 	var compTargets map[string][]string
-	connectorName := s.cfg.Guardrail.Connector
-	if connectorName == "" {
-		connectorName = "unknown"
-	}
 	reg := connector.NewDefaultRegistry()
-	if conn, ok := reg.Get(connectorName); ok {
+	conn, err := resolveActiveConnector(reg, s.cfg.Guardrail.Connector, "watcher")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
+	} else if conn != nil {
 		if scanner, ok := conn.(connector.ComponentScanner); ok && scanner.SupportsComponentScanning() {
 			compTargets = scanner.ComponentTargets("")
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using %s connector ComponentTargets\n", connectorName)
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using %s connector ComponentTargets\n", conn.Name())
 		}
 	}
 
@@ -674,9 +679,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	err := w.Run(ctx)
+	runErr := w.Run(ctx)
 	s.health.SetWatcher(StateStopped, "", nil)
-	return err
+	return runErr
 }
 
 // handleAdmissionResult processes watcher verdicts. It only forwards runtime
@@ -937,6 +942,45 @@ func (s *Sidecar) activeSessionKeys() []string {
 	return s.router.ActiveSessionKeys()
 }
 
+// resolveActiveConnector looks up the active connector in the registry
+// with a strict-but-friendly contract:
+//
+//   - Empty name: log INFO and return the openclaw default. This
+//     preserves backward compatibility with installs that predate the
+//     guardrail.connector field while still announcing the choice in
+//     the log so operators can see what was actually picked.
+//   - Non-empty name that the registry knows: return it.
+//   - Non-empty name that the registry does NOT know: return an error.
+//     This is the operator-typo case the silent "fall back to openclaw"
+//     branch used to mask. Returning an error lets callers decide
+//     whether the failure mode is "abort" (runGuardrail) or "log and
+//     continue with reduced functionality" (the watcher) without
+//     losing the typo signal in either case.
+//
+// surface is a short label included in log messages so operators can
+// tell which subsystem (runGuardrail / watcher / etc.) emitted the
+// resolution event.
+func resolveActiveConnector(reg *connector.Registry, name, surface string) (connector.Connector, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		conn, ok := reg.Get("openclaw")
+		if !ok {
+			// The default connector is registered by NewDefaultRegistry,
+			// so the only way to get here is if a custom registry was
+			// passed in without it. Surface as an error rather than
+			// returning nil to avoid silent behavior downstream.
+			return nil, fmt.Errorf("[%s] no openclaw default in registry; pass an explicit guardrail.connector", surface)
+		}
+		fmt.Fprintf(os.Stderr, "[%s] guardrail.connector unset; defaulting to openclaw\n", surface)
+		return conn, nil
+	}
+	conn, ok := reg.Get(trimmed)
+	if !ok {
+		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw) or remove the field to default to openclaw", surface, trimmed)
+	}
+	return conn, nil
+}
+
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// Reuse the rule pack already loaded by NewSidecar and stored on the
@@ -949,21 +993,28 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	}
 
 	// Load the active connector from the registry. The connector name is
-	// written by `defenseclaw setup` into guardrail.connector (defaults
-	// written by `defenseclaw setup`).
+	// written by `defenseclaw setup` into guardrail.connector. When the
+	// field is empty we treat that as "operator did not pick anything"
+	// and fall back to openclaw for backward compatibility (and log it
+	// at INFO so the operator can see what happened). When the field is
+	// set to a value the registry does not know about, we fail fast
+	// rather than silently substituting openclaw — silent substitution
+	// would let a typo in `guardrail.connector` route Codex / Claude
+	// Code traffic through the OpenClaw connector and patch the wrong
+	// agent's config files. See S1.4 / F7.
 	registry := connector.NewDefaultRegistry()
 	if s.cfg.PluginDir != "" {
 		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
 		}
 	}
-	connectorName := s.cfg.Guardrail.Connector
-	if connectorName == "" {
-		return fmt.Errorf("guardrail.connector is not set; run `defenseclaw setup guardrail` first")
-	}
-	conn, ok := registry.Get(connectorName)
-	if !ok {
-		return fmt.Errorf("connector %q not found in registry (available: %v)", connectorName, registry.Names())
+	conn, err := resolveActiveConnector(registry, s.cfg.Guardrail.Connector, "guardrail")
+	if err != nil {
+		// Fail fast: the operator explicitly set a connector that does
+		// not exist. Returning here aborts sidecar boot so the operator
+		// notices the typo immediately instead of seeing a "running but
+		// somehow not blocking anything" sidecar.
+		return err
 	}
 	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
 	apiBind := "127.0.0.1"
@@ -985,33 +1036,35 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		APIToken: s.cfg.Gateway.ResolvedToken(),
 	}
 
-	if conn != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
+	// resolveActiveConnector guarantees a non-nil connector — either the
+	// operator-selected one or the openclaw default. We can therefore
+	// drop the historical nil-guard and treat this as the canonical
+	// path; any "no active connector" condition is now a hard error.
+	fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
 
-		if !s.cfg.Guardrail.Enabled {
-			fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
-			if err := conn.Teardown(ctx, setupOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
-			}
-			if err := conn.VerifyClean(setupOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
-			}
-			connector.ClearActiveConnector(s.cfg.DataDir)
+	if !s.cfg.Guardrail.Enabled {
+		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
+		if err := conn.Teardown(ctx, setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
+		}
+		if err := conn.VerifyClean(setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
+		}
+		connector.ClearActiveConnector(s.cfg.DataDir)
+	} else {
+		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
+		}
+		if err := conn.Setup(ctx, setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
 		} else {
-			if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
-			}
-			if err := conn.Setup(ctx, setupOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
-			} else {
-				if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
-					fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
-				}
+			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 			}
 		}
-
-		s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 	}
+
+	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
 	proxy, err := NewGuardrailProxy(
 		&s.cfg.Guardrail,
