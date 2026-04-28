@@ -105,6 +105,52 @@ func TestManagedFileBackup_SkipsWhenUserEditedAfterSetup(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFile_PreservesSymlinkedDotfile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	linkDir := filepath.Join(dir, "home", ".codex")
+	if err := os.MkdirAll(linkDir, 0o755); err != nil {
+		t.Fatalf("mkdir link dir: %v", err)
+	}
+	link := filepath.Join(linkDir, "config.toml")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable on windows: %v", err)
+		}
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := atomicWriteFile(link, []byte("new"), 0o600); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("atomicWriteFile replaced symlink with mode %v", info.Mode())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("target contents = %q, want new", got)
+	}
+	if info, err := os.Stat(target); err != nil {
+		t.Fatalf("stat target: %v", err)
+	} else if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("target mode = %#o, want 0600", mode)
+	}
+}
+
 func TestExtractBearerKey(t *testing.T) {
 	tests := []struct {
 		input string
@@ -597,7 +643,7 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -680,10 +726,10 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("first Setup: %v", err)
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("second Setup: %v", err)
 	}
 
@@ -728,10 +774,10 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 
 	c := NewOpenClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -903,7 +949,7 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -949,7 +995,7 @@ func TestClaudeCode_Setup_RegistersFullEventCoverage(t *testing.T) {
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1032,8 +1078,12 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	c.Setup(nil, opts)
-	c.Teardown(nil, opts)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
 
 	data, _ := os.ReadFile(settingsPath)
 	var settings map[string]interface{}
@@ -1061,7 +1111,7 @@ func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1090,7 +1140,7 @@ func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 		t.Fatalf("write user-edited settings: %v", err)
 	}
 
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -1337,7 +1387,7 @@ func TestCodex_Setup(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -1390,7 +1440,7 @@ env_key = "OPENAI_API_KEY"
 	// runs in the gated enforcement path. Default observability
 	// mode skips the redirect — see GuardrailConfig.CodexEnforcementEnabled.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -1464,7 +1514,7 @@ env_key = "OPENROUTER_API_KEY"
 	// during proxy passthrough, which doesn't happen in the
 	// observability default).
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1514,7 +1564,7 @@ env_key = "OPENAI_API_KEY"
 	// rewrite of [model_providers.*].base_url which only runs in
 	// the gated enforcement path.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1565,7 +1615,7 @@ env_key = "OPENAI_API_KEY"
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1598,7 +1648,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1690,7 +1740,7 @@ env_key = "OPENROUTER_API_KEY"
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1789,7 +1839,7 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "test-token-codex-otel",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1908,7 +1958,7 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "test-token-codex-notify",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1966,7 +2016,7 @@ func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -1995,10 +2045,10 @@ env_key = "OPENAI_API_KEY"
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -2029,7 +2079,7 @@ func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2042,7 +2092,7 @@ func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 		t.Fatalf("setup hook does not forward to Codex hook API\nfile:\n%s", setupHook)
 	}
 
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -2082,7 +2132,7 @@ func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2115,7 +2165,7 @@ func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 		t.Fatalf("write user-edited config: %v", err)
 	}
 
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -2129,6 +2179,94 @@ func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 	}
 	if !strings.Contains(restored, "/tmp/user-codex-hook") {
 		t.Fatalf("user hook was not preserved:\n%s", restored)
+	}
+}
+
+func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "codex_config_backup.json")); err != nil {
+		t.Fatalf("remove backup: %v", err)
+	}
+	discardManagedFileBackup(dir, c.Name(), "config.toml")
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown without backup: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	restored := string(data)
+	for _, forbidden := range []string{
+		"codex-hook.sh",
+		"notify-bridge.sh",
+		"codex_hooks",
+		"x-defenseclaw-token",
+		"x-defenseclaw-client",
+		"[otel]",
+	} {
+		if strings.Contains(restored, forbidden) {
+			t.Fatalf("teardown without backup left %q in config:\n%s", forbidden, restored)
+		}
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after backupless teardown: %v", err)
+	}
+}
+
+func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/bash\n# defenseclaw-managed-hook v2\n"), 0o700); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	cfg := map[string]interface{}{
+		"hooks": buildCodexHooksTable(hookPath),
+		"otel":  buildCodexOtelBlock(SetupOpts{APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}),
+		"notify": []interface{}{
+			"bash",
+			filepath.Join(dir, "notify-bridge.sh"),
+		},
+	}
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	err = NewCodexConnector().VerifyClean(SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+	})
+	if err == nil {
+		t.Fatal("VerifyClean returned nil despite managed Codex config residue")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "config.toml hooks") || !strings.Contains(got, "[otel]") || !strings.Contains(got, "notify") {
+		t.Fatalf("VerifyClean error missing expected residue details: %v", err)
 	}
 }
 
@@ -2199,7 +2337,7 @@ env_key = "OPENAI_API_KEY"
 	// Enforcement mode required: openai_base_url rewrite + reserved-
 	// id strip live behind the enforcement flag.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2276,7 +2414,7 @@ env_key = "OPENROUTER_API_KEY"
 	// Enforcement mode required: this test asserts the reserved-id
 	// strip + per-provider rewrite which only run in enforcement.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2325,10 +2463,10 @@ env_key = "OPENAI_API_KEY"
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -2391,7 +2529,7 @@ func TestCodex_Setup_SynthesizesOpenAISnapshot(t *testing.T) {
 	// snapshot entirely (no proxy passthrough means Route() is
 	// never consulted).
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2443,7 +2581,7 @@ func TestCodex_Setup_SynthesizesChatGPTBackendWhenAuthModeChatGPT(t *testing.T) 
 	// Enforcement mode required: SetProviderSnapshot only runs in
 	// the gated enforcement block.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2495,7 +2633,7 @@ openai_base_url = "` + enterpriseURL + `"
 	// Enforcement mode required: SetProviderSnapshot only runs in
 	// the gated enforcement block.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -2604,10 +2742,10 @@ func TestCodex_Teardown(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 	}
 	// Setup first to create artifacts
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown failed: %v", err)
 	}
 }
@@ -2843,7 +2981,7 @@ func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
 
 	// First Setup (simulates first boot).
 	c1 := NewZeptoClawConnector()
-	if err := c1.Setup(nil, opts); err != nil {
+	if err := c1.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("first Setup: %v", err)
 	}
 
@@ -2852,7 +2990,7 @@ func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
 	// would read the patched config and record the proxy URL in the
 	// backup, but the snapshot must still reflect the pristine upstream.
 	c2 := NewZeptoClawConnector()
-	if err := c2.Setup(nil, opts); err != nil {
+	if err := c2.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("second Setup: %v", err)
 	}
 
@@ -2885,7 +3023,7 @@ func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
 
 	c := NewZeptoClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -3550,7 +3688,7 @@ func TestCodex_Setup_Surface1_DoesNotExportGlobalEnv(t *testing.T) {
 		APIAddr:          "127.0.0.1:18970",
 		CodexEnforcement: true,
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -3603,7 +3741,7 @@ func TestCodex_Teardown_RemovesLegacyEnvFiles(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -3616,7 +3754,7 @@ func TestCodex_Teardown_RemovesLegacyEnvFiles(t *testing.T) {
 		}
 	}
 
-	if err := c.Teardown(nil, opts); err != nil {
+	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -3639,7 +3777,7 @@ func TestCodex_Setup_Surface1_BackupsExistingEnv(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	c.Setup(nil, opts)
+	c.Setup(context.Background(), opts)
 
 	backupData, _ := os.ReadFile(filepath.Join(dir, "codex_backup.json"))
 	var backup codexBackup
@@ -3673,7 +3811,7 @@ func TestClaudeCode_Setup_Surface1_WritesEnvFiles(t *testing.T) {
 		APIAddr:               "127.0.0.1:18970",
 		ClaudeCodeEnforcement: true,
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -3711,7 +3849,7 @@ func TestClaudeCode_Setup_WritesConnectorPrefix(t *testing.T) {
 	// Enforcement mode required: writeEnvOverride is gated on
 	// opts.ClaudeCodeEnforcement.
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", ClaudeCodeEnforcement: true}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -3737,8 +3875,8 @@ func TestClaudeCode_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	c.Setup(nil, opts)
-	c.Teardown(nil, opts)
+	c.Setup(context.Background(), opts)
+	c.Teardown(context.Background(), opts)
 
 	if _, err := os.Stat(filepath.Join(dir, "claudecode_env.sh")); !os.IsNotExist(err) {
 		t.Error("claudecode_env.sh should be removed after teardown")
@@ -3783,7 +3921,7 @@ func TestClaudeCode_Setup_DefaultObservability_NoEnvOverride(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -3851,7 +3989,7 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "test-token-claude-otel",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -3894,6 +4032,68 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
 	}
+	if info, err := os.Stat(settingsPath); err != nil {
+		t.Fatalf("stat settings.json: %v", err)
+	} else if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("settings.json mode = %#o, want 0600 because OTel headers include the gateway token", mode)
+	}
+}
+
+func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"env":{"PATH":"/usr/bin"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
+		t.Fatalf("remove backup: %v", err)
+	}
+	discardManagedFileBackup(dir, c.Name(), "settings.json")
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown without backup: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after backupless teardown: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	if hooks, ok := settings["hooks"].(map[string]interface{}); ok && len(hooks) > 0 {
+		t.Fatalf("DefenseClaw hooks survived teardown without backup: %v", hooks)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	if env["PATH"] != "/usr/bin" {
+		t.Fatalf("non-OTel env key was not preserved: %v", env)
+	}
+	for _, key := range claudeCodeOtelEnvKeys {
+		if _, present := env[key]; present {
+			t.Fatalf("DefenseClaw OTel env %s survived teardown without backup: %v", key, env)
+		}
+	}
 }
 
 // TestClaudeCode_Setup_PreservesNonOtelEnvKeys guards the partial-
@@ -3927,7 +4127,7 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "test-tok",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -3978,7 +4178,7 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
 
@@ -4048,7 +4248,7 @@ func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
 
 	c := NewZeptoClawConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -4094,8 +4294,8 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	c.Setup(nil, opts)
-	c.Teardown(nil, opts)
+	c.Setup(context.Background(), opts)
+	c.Teardown(context.Background(), opts)
 
 	data, _ := os.ReadFile(configPath)
 	var config map[string]interface{}
@@ -4147,7 +4347,7 @@ func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	if err := c.Setup(nil, opts); err != nil {
+	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -4285,6 +4485,42 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 	}
 }
 
+func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	opts := SetupOpts{
+		APIAddr:          "127.0.0.1:99999",
+		APIToken:         "tok-test",
+		CodexEnforcement: false,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+
+	dcHome := t.TempDir()
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("observability Codex hook should fail-open by default, got: %v", err)
+	}
+	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
+	if err != nil {
+		t.Fatalf("hook failure log missing: %v", err)
+	}
+	logText := string(failureLog)
+	for _, want := range []string{`"connector":"codex"`, `"hook":"codex-hook"`, `"reason":"gateway unreachable"`, `"fail_mode":"open"`} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("hook failure log missing %s:\n%s", want, logText)
+		}
+	}
+}
+
 func TestInstallOpenClaw_SymlinkedExtDir(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "attacker-owned")
@@ -4356,7 +4592,7 @@ func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
 	}
-	err := c.Setup(nil, opts)
+	err := c.Setup(context.Background(), opts)
 	if err == nil {
 		t.Fatal("Setup should fail with no usable providers")
 	}
@@ -4461,7 +4697,7 @@ func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
 	}
 
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := oldConn.Teardown(nil, opts); err != nil {
+	if err := oldConn.Teardown(context.Background(), opts); err != nil {
 		t.Errorf("Teardown of previous connector: %v", err)
 	}
 
@@ -4469,7 +4705,7 @@ func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
 	ClaudeCodeSettingsPathOverride = filepath.Join(dir, "settings.json")
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
 
-	if err := newConn.Setup(nil, opts); err != nil {
+	if err := newConn.Setup(context.Background(), opts); err != nil {
 		t.Errorf("Setup of new connector: %v", err)
 	}
 	if err := SaveActiveConnector(dir, "claudecode"); err != nil {

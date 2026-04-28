@@ -52,26 +52,26 @@ var invSubNames = [invSubCount]string{
 // ---------- AIBOM JSON structures (matching actual output) ----------
 
 type aibomInventory struct {
-	Version     json.Number       `json:"version"`
-	GeneratedAt string            `json:"generated_at"`
-	OpenclawCfg string            `json:"openclaw_config"`
-	ClawHome    string            `json:"claw_home"`
-	ClawMode    string            `json:"claw_mode"`
+	Version     json.Number `json:"version"`
+	GeneratedAt string      `json:"generated_at"`
+	OpenclawCfg string      `json:"openclaw_config"`
+	ClawHome    string      `json:"claw_home"`
+	ClawMode    string      `json:"claw_mode"`
 	// Connector is the active connector name written by
 	// claw_inventory.py (line ~103). Older CLIs may not populate
 	// it — the renderer falls back to ClawMode and to the panel's
 	// SetConnector value.
-	Connector   string            `json:"connector,omitempty"`
-	Live        bool              `json:"live"`
-	Skills      []aibomSkill      `json:"skills"`
-	Plugins     []aibomPlugin     `json:"plugins"`
-	MCPs        []aibomMCP        `json:"mcp"`
-	Agents      []aibomAgent      `json:"agents"`
-	Tools       []aibomTool       `json:"tools"`
-	Models      []aibomModel      `json:"model_providers"`
-	Memory      []aibomMemory     `json:"memory"`
-	Errors      []json.RawMessage `json:"errors"`
-	Summary     aibomSummary      `json:"summary"`
+	Connector string            `json:"connector,omitempty"`
+	Live      bool              `json:"live"`
+	Skills    []aibomSkill      `json:"skills"`
+	Plugins   []aibomPlugin     `json:"plugins"`
+	MCPs      []aibomMCP        `json:"mcp"`
+	Agents    []aibomAgent      `json:"agents"`
+	Tools     []aibomTool       `json:"tools"`
+	Models    []aibomModel      `json:"model_providers"`
+	Memory    []aibomMemory     `json:"memory"`
+	Errors    []json.RawMessage `json:"errors"`
+	Summary   aibomSummary      `json:"summary"`
 }
 
 type aibomSkill struct {

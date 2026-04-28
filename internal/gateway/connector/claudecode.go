@@ -98,7 +98,7 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
 	// single source of truth for which vendor templates land here.
-	if err := WriteHookScriptsForConnectorObject(hookDir, opts.APIAddr, opts.APIToken, c); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("claudecode hook script: %w", err)
 	}
 
@@ -127,7 +127,9 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	if opts.InstallCodeGuard {
-		warnNativeCodeGuardInstall(c.Name(), ensureClaudeCodeCodeGuardPlugin(ctx))
+		if err := ensureClaudeCodeCodeGuardPlugin(ctx); err != nil {
+			return fmt.Errorf("claude CodeGuard plugin install: %w", err)
+		}
 	}
 
 	// Subprocess sandbox is part of enforcement: it's consulted by
@@ -186,6 +188,13 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 						if isOwnedHook(entry, hooksDir) {
 							residual = append(residual, fmt.Sprintf("settings.json hooks[%s] still contains defenseclaw hook", eventType))
 							break
+						}
+					}
+				}
+				if envMap, ok := settings["env"].(map[string]interface{}); ok {
+					for _, key := range claudeCodeOtelEnvKeys {
+						if _, present := envMap[key]; present {
+							residual = append(residual, fmt.Sprintf("settings.json env[%s] still contains defenseclaw OTel env", key))
 						}
 					}
 				}
@@ -533,7 +542,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			return fmt.Errorf("marshal claude settings: %w", err)
 		}
 
-		if err := atomicWriteFile(settingsPath, out, 0o644); err != nil {
+		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
 			return err
 		}
 		return nil
@@ -687,7 +696,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		if err != nil {
 			return fmt.Errorf("marshal claude settings (otel env): %w", err)
 		}
-		if err := atomicWriteFile(settingsPath, out, 0o644); err != nil {
+		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
 			return err
 		}
 		return updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "settings.json", settingsPath)
@@ -711,7 +720,10 @@ func isClaudeCodeOtelKey(name string) bool {
 func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	backup, err := c.loadBackup(opts.DataDir)
 	if err != nil {
-		return fmt.Errorf("load claudecode backup: %w", err)
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "[claudecode] backup unavailable; falling back to surgical cleanup: %v\n", err)
+		}
+		backup = claudeCodeBackup{}
 	}
 
 	settingsPath := claudeCodeSettingsPath()
@@ -726,6 +738,11 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
+			if os.IsNotExist(err) {
+				os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
+				discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
+				return nil
+			}
 			return fmt.Errorf("read claude settings for restore: %w", err)
 		}
 
@@ -786,7 +803,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			return fmt.Errorf("marshal restored settings: %w", err)
 		}
 
-		if err := atomicWriteFile(settingsPath, out, 0o644); err != nil {
+		if err := atomicWriteFile(settingsPath, out, 0o600); err != nil {
 			return fmt.Errorf("write restored settings: %w", err)
 		}
 

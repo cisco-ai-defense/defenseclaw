@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -34,6 +35,8 @@ import (
 // ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
 // Nil in binaries/tests that do not install the hook.
 var ReportConfigLoadError func(ctx context.Context, reason string)
+
+var privacyDisableRedactionWarnOnce sync.Once
 
 // DefenseClawLLMKeyEnv is the canonical environment variable holding the
 // unified LLM API key that powers every LLM-using component in DefenseClaw
@@ -206,9 +209,9 @@ type PrivacyConfig struct {
 	// documented in OBSERVABILITY.md. Only enable on single-tenant
 	// installs where every downstream sink already lives inside
 	// the same trust boundary (e.g. lab / prompt-engineering use).
-	// The CLI emits a loud warning on flip-on, and the loader logs
-	// a warning at every Load() so the runtime state stays
-	// auditable.
+	// The CLI emits a loud warning on flip-on, and config loaders emit
+	// a once-per-process warning when they observe the setting so the
+	// runtime state stays auditable without spamming reload loops.
 	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
@@ -1281,6 +1284,7 @@ func Load() (*Config, error) {
 	}
 
 	migrateConfig(&cfg)
+	warnDisableRedactionConfig(&cfg)
 
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
@@ -1332,6 +1336,20 @@ func Load() (*Config, error) {
 	seedProvenanceOnLoad(configFile, &cfg)
 
 	return &cfg, nil
+}
+
+func warnDisableRedactionConfig(cfg *Config) {
+	if cfg == nil || !cfg.Privacy.DisableRedaction {
+		return
+	}
+	privacyDisableRedactionWarnOnce.Do(func() {
+		fmt.Fprintln(os.Stderr,
+			"warning: privacy.disable_redaction=true — ALL sinks (audit DB, "+
+				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
+				"prompts, judge bodies, and verdict reasons. Disable in "+
+				"shared/multi-tenant deployments via "+
+				"`defenseclaw config set privacy.disable_redaction false`.")
+	})
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the
@@ -1555,9 +1573,7 @@ func migrateConfig(cfg *Config) {
 	// is detected in Load() before unmarshal and produces a hard error,
 	// so reaching this branch with v<4 simply means the file was created
 	// without a splunk block at all — safe to bump the version stamp.
-	if cfg.ConfigVersion < 4 {
-		// no-op: hard migration is enforced at file-load time.
-	}
+	// No in-process field changes are required here.
 
 	// v4 → v5: copy legacy LLM fields into the unified LLMConfig blocks
 	// so ResolveLLM(...) returns the same answers as the pre-v5

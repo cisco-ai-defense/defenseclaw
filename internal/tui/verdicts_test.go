@@ -290,6 +290,7 @@ func TestSelectedVerdict_ReturnsLastWhenCursorAtBottom(t *testing.T) {
 	got := p.SelectedVerdict()
 	if got == nil {
 		t.Fatal("unexpected nil")
+		return
 	}
 	// Default selection is the most recent event (last in slice).
 	if got.action != "block" {
@@ -321,6 +322,7 @@ func TestSelectedVerdict_RespectsSearchFilter(t *testing.T) {
 	got := p.SelectedVerdict()
 	if got == nil {
 		t.Fatal("SelectedVerdict returned nil with a matching row")
+		return
 	}
 	if got.action != "alert" {
 		t.Fatalf("search filter selected action=%q want alert (the "+
@@ -354,6 +356,7 @@ func TestSelectedVerdict_RespectsPresetFilter(t *testing.T) {
 	got := p.SelectedVerdict()
 	if got == nil {
 		t.Fatal("SelectedVerdict returned nil under errors filter")
+		return
 	}
 	if got.action != "block" {
 		t.Fatalf("errors filter selected action=%q want block", got.action)

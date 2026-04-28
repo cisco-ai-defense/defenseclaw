@@ -46,13 +46,6 @@ var (
 	nativeCodeGuardRepoDirOverride string
 )
 
-func warnNativeCodeGuardInstall(connectorName string, err error) {
-	if err == nil {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[%s] CodeGuard native integration install skipped: %v\n", connectorName, err)
-}
-
 func ensureClaudeCodeCodeGuardPlugin(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -185,7 +178,7 @@ func validateCodeGuardSkillSource(sourceDir string) error {
 	text := string(data)
 	if !strings.Contains(text, "Project CodeGuard") ||
 		!strings.Contains(text, "name: "+nativeCodeGuardCodexSkillName) {
-		return fmt.Errorf("Project CodeGuard skill source %s does not look like %s", sourceDir, nativeCodeGuardCodexSkillName)
+		return fmt.Errorf("project CodeGuard skill source %s does not look like %s", sourceDir, nativeCodeGuardCodexSkillName)
 	}
 	return nil
 }

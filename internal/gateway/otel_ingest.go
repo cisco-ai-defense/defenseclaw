@@ -39,6 +39,8 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // otelIngestStats is what summarizeOTLPPayload returns alongside
@@ -212,6 +215,9 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	for _, usage := range extractOTLPTokenUsage(body, signal, source) {
 		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), usage.tokenType, usage.tokens)
 	}
+	for _, duration := range extractOTLPOperationDurations(body, signal, source) {
+		a.otel.RecordLLMDuration(ctx, duration.operationName, duration.providerName, duration.model, duration.agentName, SharedAgentRegistry().AgentID(), duration.durationSeconds)
+	}
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
 	writeOTLPSuccess(w)
@@ -224,6 +230,14 @@ type otelTokenUsage struct {
 	agentName     string
 	tokenType     string
 	tokens        int64
+}
+
+type otelLLMDuration struct {
+	operationName   string
+	providerName    string
+	model           string
+	agentName       string
+	durationSeconds float64
 }
 
 // extractOTLPTokenUsage promotes connector-native OTLP log fields into
@@ -282,13 +296,39 @@ func extractOTLPLogTokenUsage(body []byte, source string) []otelTokenUsage {
 
 				inputTokens := otlpInt(attrs,
 					"input_token_count",
+					"input_tokens",
+					"prompt_token_count",
+					"prompt_tokens",
 					"gen_ai.usage.input_tokens",
+					"gen_ai.usage.prompt_tokens",
+					"gen_ai.usage.input",
+					"gen_ai.usage.prompt",
 					"codex.turn.token_usage.input_tokens",
+					"codex.turn.token_usage.prompt_tokens",
+					"usage.input_tokens",
+					"usage.prompt_tokens",
+					"llm.usage.input_tokens",
+					"llm.usage.prompt_tokens",
 				)
 				outputTokens := otlpInt(attrs,
 					"output_token_count",
+					"output_tokens",
+					"completion_token_count",
+					"completion_tokens",
+					"generated_token_count",
+					"generated_tokens",
 					"gen_ai.usage.output_tokens",
+					"gen_ai.usage.completion_tokens",
+					"gen_ai.usage.output",
+					"gen_ai.usage.completion",
 					"codex.turn.token_usage.output_tokens",
+					"codex.turn.token_usage.completion_tokens",
+					"usage.output_tokens",
+					"usage.completion_tokens",
+					"llm.usage.output_tokens",
+					"llm.usage.completion_tokens",
+					"response.output_tokens",
+					"response.completion_tokens",
 				)
 				if inputTokens <= 0 && outputTokens <= 0 {
 					continue
@@ -350,10 +390,11 @@ func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
 			} `json:"resource"`
 			ScopeMetrics []struct {
 				Metrics []struct {
-					Name  string           `json:"name"`
-					Unit  string           `json:"unit"`
-					Sum   otlpMetricPoints `json:"sum"`
-					Gauge otlpMetricPoints `json:"gauge"`
+					Name      string              `json:"name"`
+					Unit      string              `json:"unit"`
+					Sum       otlpMetricPoints    `json:"sum"`
+					Gauge     otlpMetricPoints    `json:"gauge"`
+					Histogram otlpHistogramPoints `json:"histogram"`
 				} `json:"metrics"`
 			} `json:"scopeMetrics"`
 		} `json:"resourceMetrics"`
@@ -401,12 +442,170 @@ func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
 	return out
 }
 
+func extractOTLPOperationDurations(body []byte, signal otelIngestSignal, source string) []otelLLMDuration {
+	if len(body) == 0 {
+		return nil
+	}
+	switch signal {
+	case otelSignalLogs:
+		return extractOTLPLogDurations(body, source)
+	case otelSignalMetrics:
+		return extractOTLPMetricDurations(body, source)
+	case otelSignalTraces:
+		return extractOTLPTraceDurations(body, source)
+	default:
+		return nil
+	}
+}
+
+func extractOTLPLogDurations(body []byte, source string) []otelLLMDuration {
+	var envelope struct {
+		ResourceLogs []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeLogs []struct {
+				LogRecords []struct {
+					Attributes []otlpAttribute `json:"attributes"`
+				} `json:"logRecords"`
+			} `json:"scopeLogs"`
+		} `json:"resourceLogs"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	var out []otelLLMDuration
+	for _, resource := range envelope.ResourceLogs {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		for _, scope := range resource.ScopeLogs {
+			for _, rec := range scope.LogRecords {
+				attrs := otlpAttributesToMap(rec.Attributes)
+				seconds := otlpDurationSeconds(attrs)
+				if seconds <= 0 {
+					continue
+				}
+				out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
+			}
+		}
+	}
+	return out
+}
+
+func extractOTLPMetricDurations(body []byte, source string) []otelLLMDuration {
+	var envelope struct {
+		ResourceMetrics []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeMetrics []struct {
+				Metrics []struct {
+					Name      string              `json:"name"`
+					Unit      string              `json:"unit"`
+					Sum       otlpMetricPoints    `json:"sum"`
+					Gauge     otlpMetricPoints    `json:"gauge"`
+					Histogram otlpHistogramPoints `json:"histogram"`
+				} `json:"metrics"`
+			} `json:"scopeMetrics"`
+		} `json:"resourceMetrics"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	var out []otelLLMDuration
+	for _, resource := range envelope.ResourceMetrics {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		for _, scope := range resource.ScopeMetrics {
+			for _, metric := range scope.Metrics {
+				if !isLLMDurationMetric(metric.Name) {
+					continue
+				}
+				for _, point := range metric.Histogram.DataPoints {
+					count := parseOTLPNumber(point.Count)
+					sum := parseOTLPNumberFloat(point.Sum)
+					if count <= 0 || sum <= 0 {
+						continue
+					}
+					attrs := otlpAttributesToMap(point.Attributes)
+					out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, normalizeDurationByUnit(sum/float64(count), metric.Unit), "chat"))
+				}
+				for _, point := range metric.Gauge.DataPoints {
+					attrs := otlpAttributesToMap(point.Attributes)
+					seconds := otlpMetricPointDurationSeconds(point, metric.Unit)
+					if seconds > 0 {
+						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
+					}
+				}
+				for _, point := range metric.Sum.DataPoints {
+					attrs := otlpAttributesToMap(point.Attributes)
+					seconds := otlpMetricPointDurationSeconds(point, metric.Unit)
+					if seconds > 0 {
+						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func extractOTLPTraceDurations(body []byte, source string) []otelLLMDuration {
+	var envelope struct {
+		ResourceSpans []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeSpans []struct {
+				Spans []struct {
+					Name              string          `json:"name"`
+					Attributes        []otlpAttribute `json:"attributes"`
+					StartTimeUnixNano json.RawMessage `json:"startTimeUnixNano"`
+					EndTimeUnixNano   json.RawMessage `json:"endTimeUnixNano"`
+				} `json:"spans"`
+			} `json:"scopeSpans"`
+		} `json:"resourceSpans"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	var out []otelLLMDuration
+	for _, resource := range envelope.ResourceSpans {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		for _, scope := range resource.ScopeSpans {
+			for _, span := range scope.Spans {
+				attrs := otlpAttributesToMap(span.Attributes)
+				if !spanLooksLikeLLMOperation(span.Name, attrs) {
+					continue
+				}
+				start := parseOTLPNumber(span.StartTimeUnixNano)
+				end := parseOTLPNumber(span.EndTimeUnixNano)
+				if start <= 0 || end <= start {
+					continue
+				}
+				out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, float64(end-start)/1e9, span.Name))
+			}
+		}
+	}
+	return out
+}
+
 type otlpMetricPoints struct {
-	DataPoints []struct {
-		Attributes []otlpAttribute `json:"attributes"`
-		AsInt      json.RawMessage `json:"asInt"`
-		AsDouble   json.RawMessage `json:"asDouble"`
-	} `json:"dataPoints"`
+	DataPoints []otlpMetricDataPoint `json:"dataPoints"`
+}
+
+type otlpMetricDataPoint struct {
+	Attributes []otlpAttribute `json:"attributes"`
+	AsInt      json.RawMessage `json:"asInt"`
+	AsDouble   json.RawMessage `json:"asDouble"`
+}
+
+type otlpHistogramPoints struct {
+	DataPoints []otlpHistogramDataPoint `json:"dataPoints"`
+}
+
+type otlpHistogramDataPoint struct {
+	Attributes []otlpAttribute `json:"attributes"`
+	Sum        json.RawMessage `json:"sum"`
+	Count      json.RawMessage `json:"count"`
 }
 
 type otlpAttribute struct {
@@ -431,6 +630,12 @@ func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
 		IntValue    *json.Number `json:"intValue"`
 		DoubleValue *float64     `json:"doubleValue"`
 		BoolValue   *bool        `json:"boolValue"`
+		KvListValue *struct {
+			Values []otlpAttribute `json:"values"`
+		} `json:"kvlistValue"`
+		ArrayValue *struct {
+			Values []json.RawMessage `json:"values"`
+		} `json:"arrayValue"`
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
@@ -449,13 +654,21 @@ func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
 		return *v.DoubleValue
 	case v.BoolValue != nil:
 		return *v.BoolValue
+	case v.KvListValue != nil:
+		return otlpAttributesToMap(v.KvListValue.Values)
+	case v.ArrayValue != nil:
+		out := make([]interface{}, 0, len(v.ArrayValue.Values))
+		for _, item := range v.ArrayValue.Values {
+			out = append(out, decodeOTLPAnyValue(item))
+		}
+		return out
 	default:
 		return nil
 	}
 }
 
 func otlpString(attrs map[string]interface{}, key string) string {
-	v, ok := attrs[key]
+	v, ok := otlpLookup(attrs, key)
 	if !ok || v == nil {
 		return ""
 	}
@@ -475,7 +688,7 @@ func otlpString(attrs map[string]interface{}, key string) string {
 
 func otlpInt(attrs map[string]interface{}, keys ...string) int64 {
 	for _, key := range keys {
-		v, ok := attrs[key]
+		v, ok := otlpLookup(attrs, key)
 		if !ok || v == nil {
 			continue
 		}
@@ -494,6 +707,66 @@ func otlpInt(attrs map[string]interface{}, keys ...string) int64 {
 		}
 	}
 	return 0
+}
+
+func otlpFloat(attrs map[string]interface{}, keys ...string) float64 {
+	for _, key := range keys {
+		v, ok := otlpLookup(attrs, key)
+		if !ok || v == nil {
+			continue
+		}
+		switch x := v.(type) {
+		case int64:
+			return float64(x)
+		case float64:
+			return x
+		case json.Number:
+			if f, err := strconv.ParseFloat(x.String(), 64); err == nil {
+				return f
+			}
+		case string:
+			if f, err := strconv.ParseFloat(strings.TrimSpace(x), 64); err == nil {
+				return f
+			}
+		}
+	}
+	return 0
+}
+
+func otlpLookup(attrs map[string]interface{}, key string) (interface{}, bool) {
+	if attrs == nil || key == "" {
+		return nil, false
+	}
+	if v, ok := attrs[key]; ok {
+		return v, true
+	}
+	parts := strings.Split(key, ".")
+	for prefixLen := len(parts) - 1; prefixLen >= 1; prefixLen-- {
+		prefix := strings.Join(parts[:prefixLen], ".")
+		v, ok := attrs[prefix]
+		if !ok {
+			continue
+		}
+		if found, ok := otlpTraverse(v, parts[prefixLen:]); ok {
+			return found, true
+		}
+	}
+	return nil, false
+}
+
+func otlpTraverse(v interface{}, parts []string) (interface{}, bool) {
+	cur := v
+	for _, part := range parts {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		cur, ok = m[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
 }
 
 func otlpDataPointInt(rawInt, rawDouble json.RawMessage) int64 {
@@ -531,6 +804,145 @@ func parseOTLPNumber(raw json.RawMessage) int64 {
 		}
 	}
 	return 0
+}
+
+func parseOTLPNumberFloat(raw json.RawMessage) float64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0
+	}
+	var asNumber json.Number
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&asNumber); err == nil {
+		if f, err := strconv.ParseFloat(asNumber.String(), 64); err == nil {
+			return f
+		}
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(asString), 64); err == nil {
+			return f
+		}
+	}
+	return 0
+}
+
+func otlpDurationSeconds(attrs map[string]interface{}) float64 {
+	if seconds := otlpFloat(attrs,
+		"gen_ai.client.operation.duration",
+		"gen_ai.operation.duration",
+		"duration_seconds",
+		"duration_s",
+		"duration",
+		"elapsed_seconds",
+		"elapsed_s",
+		"elapsed",
+		"latency_seconds",
+		"latency_s",
+		"latency",
+		"response.duration",
+		"codex.turn.duration_seconds",
+	); seconds > 0 {
+		return seconds
+	}
+	if millis := otlpFloat(attrs,
+		"duration_ms",
+		"duration_milliseconds",
+		"elapsed_ms",
+		"latency_ms",
+		"response.duration_ms",
+		"codex.turn.duration_ms",
+		"gen_ai.client.operation.duration_ms",
+		"gen_ai.operation.duration_ms",
+	); millis > 0 {
+		return millis / 1000
+	}
+	if nanos := otlpFloat(attrs,
+		"duration_ns",
+		"duration_nanos",
+		"elapsed_ns",
+		"latency_ns",
+		"gen_ai.client.operation.duration_ns",
+		"gen_ai.operation.duration_ns",
+	); nanos > 0 {
+		return nanos / 1e9
+	}
+	return 0
+}
+
+func otlpMetricPointDurationSeconds(point otlpMetricDataPoint, unit string) float64 {
+	if len(point.AsDouble) > 0 && string(point.AsDouble) != "null" {
+		return normalizeDurationByUnit(parseOTLPNumberFloat(point.AsDouble), unit)
+	}
+	if len(point.AsInt) > 0 && string(point.AsInt) != "null" {
+		return normalizeDurationByUnit(parseOTLPNumberFloat(point.AsInt), unit)
+	}
+	return 0
+}
+
+func normalizeDurationByUnit(value float64, unit string) float64 {
+	if value <= 0 {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "ms", "millisecond", "milliseconds":
+		return value / 1000
+	case "us", "microsecond", "microseconds":
+		return value / 1e6
+	case "ns", "nanosecond", "nanoseconds":
+		return value / 1e9
+	default:
+		return value
+	}
+}
+
+func isLLMDurationMetric(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "gen_ai.client.operation.duration", "gen_ai.operation.duration", "llm.operation.duration", "claude_code.operation.duration", "codex.operation.duration":
+		return true
+	default:
+		return strings.Contains(name, "operation.duration") && (strings.Contains(name, "gen_ai") || strings.Contains(name, "llm") || strings.Contains(name, "codex") || strings.Contains(name, "claude"))
+	}
+}
+
+func spanLooksLikeLLMOperation(name string, attrs map[string]interface{}) bool {
+	if otlpString(attrs, "gen_ai.operation.name") != "" ||
+		otlpString(attrs, "gen_ai.request.model") != "" ||
+		otlpString(attrs, "gen_ai.response.model") != "" ||
+		otlpString(attrs, "model") != "" {
+		return true
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(name, "gen_ai") ||
+		strings.Contains(name, "llm") ||
+		strings.Contains(name, "chat") ||
+		strings.Contains(name, "response") ||
+		strings.Contains(name, "codex.run")
+}
+
+func otelDurationFromAttrs(attrs, resourceAttrs map[string]interface{}, source string, seconds float64, fallbackOperation string) otelLLMDuration {
+	serviceName := otlpString(resourceAttrs, "service.name")
+	agentName := source
+	if agentName == "" || agentName == "unknown" {
+		agentName = firstNonEmpty(otlpString(attrs, "gen_ai.agent.name"), serviceName, "unknown")
+	}
+	return otelLLMDuration{
+		operationName: firstNonEmpty(
+			otlpString(attrs, "gen_ai.operation.name"),
+			fallbackOperation,
+			"chat",
+		),
+		providerName: firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
+		model: firstNonEmpty(
+			otlpString(attrs, "gen_ai.response.model"),
+			otlpString(attrs, "gen_ai.request.model"),
+			otlpString(attrs, "model"),
+			"unknown",
+		),
+		agentName:       agentName,
+		durationSeconds: seconds,
+	}
 }
 
 func normalizeClaudeCodeTokenType(tokenType string) string {
@@ -732,10 +1144,10 @@ func extractServiceName(resourceRaw json.RawMessage) string {
 // codexNotifyPayload mirrors the documented codex notify JSON shape
 // (https://developers.openai.com/codex/config-advanced). We capture
 // the fields the SIEM rollup needs (type, turn-id, model, status)
-// and treat any extra keys as opaque (passed through into the
-// audit Details string verbatim). The schema is deliberately
-// permissive: codex bumps the notify shape across releases and we
-// never want a schema drift to make the gateway 400 a real event.
+// and intentionally do not persist unknown fields verbatim. The schema
+// is deliberately permissive: codex bumps the notify shape across
+// releases and we never want schema drift to make the gateway 400 a
+// real event.
 type codexNotifyPayload struct {
 	Type   string `json:"type"`
 	TurnID string `json:"turn_id"`
@@ -751,7 +1163,7 @@ type codexNotifyPayload struct {
 //  1. Validate Content-Type (application/json) — the bridge sets
 //     this explicitly so a non-JSON body is a real error.
 //  2. Parse a permissive subset (codexNotifyPayload). Unknown fields
-//     are kept in the raw body for the audit Details column.
+//     are summarized by length + hash rather than stored raw.
 //  3. Persist as an INFO audit event with action="codex.notify.<type>"
 //     and Actor="codex" so the SIEM rollup can group by turn.
 //
@@ -783,7 +1195,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	action := string(audit.ActionCodexNotify)
 	severity := "INFO"
 	result := "ok"
-	kind := "unknown"
+	var kind string
 	if parseErr != nil {
 		// Persist a malformed marker so operators can investigate
 		// codex schema drift without losing the event.
@@ -798,13 +1210,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		kind = "" // body parsed but no `type` field — keep audit Action == "codex.notify"
 	}
 
-	details := string(body)
-	if len(details) > 4096 {
-		// SQLite Details is a TEXT column without a hard cap, but
-		// trimming keeps the audit row queryable in tools that
-		// truncate long text columns.
-		details = details[:4096] + "...[truncated]"
-	}
+	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -831,6 +1237,30 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
+}
+
+func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result string, parseErr error) string {
+	sum := sha256.Sum256(body)
+	sumHex := hex.EncodeToString(sum[:])
+	parts := []string{
+		"type=" + kind,
+		"result=" + result,
+		fmt.Sprintf("body_len=%d", len(body)),
+		"body_sha256_prefix=" + sumHex[:16],
+	}
+	if p.TurnID != "" {
+		parts = append(parts, "turn_id="+redaction.ForSinkEntity(p.TurnID))
+	}
+	if p.Model != "" {
+		parts = append(parts, "model="+redaction.ForSinkEntity(p.Model))
+	}
+	if p.Status != "" {
+		parts = append(parts, "status="+redaction.ForSinkEntity(p.Status))
+	}
+	if parseErr != nil {
+		parts = append(parts, "parse_error="+redaction.ForSinkReason(parseErr.Error()))
+	}
+	return strings.Join(parts, " ")
 }
 
 // sanitizeNotifyType strips characters unsafe for an audit Action

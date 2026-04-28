@@ -404,7 +404,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 	name := a.connectorName()
 	mode := "guardrail"
 	intercept := true
-	telemetry := []string{"hooks"}
+	var telemetry []string
 
 	a.cfgMu.RLock()
 	gc := config.GuardrailConfig{}

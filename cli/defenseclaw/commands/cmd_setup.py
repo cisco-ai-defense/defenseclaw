@@ -336,33 +336,6 @@ def setup_llm(app: AppContext, show: bool) -> None:
     click.echo("  Next: defenseclaw doctor       # verify the unified LLM is reachable")
 
 
-# Register `defenseclaw setup observability` (unified OTel + audit sinks).
-# Imported here rather than at module top so the subcommand surface can
-# grow without cluttering cmd_setup.py.
-from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
-
-setup.add_command(observability)
-
-# Register `defenseclaw setup local-observability` (bundled
-# Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
-# --logs` pattern: preflights Docker, drives a docker-compose bridge,
-# and wires config.yaml to point the gateway at the local collector.
-from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
-    local_observability,
-)
-
-setup.add_command(local_observability)
-
-# Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
-# notifiers). Distinct from `setup observability add webhook` (generic
-# HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
-# disambiguation.
-from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
-
-setup.add_command(webhook)
-
-
-
 @setup.command("skill-scanner")
 @click.option("--use-llm", is_flag=True, default=None, help="Enable LLM analyzer")
 @click.option("--use-behavioral", is_flag=True, default=None, help="Enable behavioral analyzer")
@@ -1394,7 +1367,10 @@ def _print_connector_mutation_notice(connector: str, *, switching_from: str | No
     click.echo(prefix + ":")
     for surface in _CONNECTOR_CHANGE_SURFACES.get(connector, ()):
         click.echo(f"    - {surface}")
-    click.echo("  A hash-checked backup is stored before edits; teardown restores or surgically removes only DefenseClaw-owned entries.")
+    click.echo(
+        "  A hash-checked backup is stored before edits; teardown restores or surgically removes only "
+        "DefenseClaw-owned entries."
+    )
 
 
 def _read_picked_connector(data_dir: str | None) -> str | None:
@@ -2678,7 +2654,10 @@ def _interactive_guardrail_setup(
         click.echo()
         click.echo("  No proxy listener binds; no openai_base_url / ANTHROPIC_BASE_URL")
         click.echo("  override is written. Existing enforcement code stays in place behind")
-        click.echo("  the guardrail." + ("codex_enforcement_enabled" if gc.connector == "codex" else "claudecode_enforcement_enabled") + " flag — flip to true in")
+        enforcement_flag = (
+            "codex_enforcement_enabled" if gc.connector == "codex" else "claudecode_enforcement_enabled"
+        )
+        click.echo(f"  the guardrail.{enforcement_flag} flag — flip to true in")
         click.echo("  ~/.defenseclaw/config.yaml + restart the gateway to re-engage the proxy.")
         click.echo()
 

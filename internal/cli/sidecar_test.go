@@ -16,9 +16,9 @@ import (
 
 // TestFormatDetailValue_Scalars locks in the rendering contract used
 // by the gateway status panel. JSON unmarshalling reduces every numeric
-// value to ``float64``; whole numbers must round-trip back to ints so
-// fields like ``protocol: 3`` and ``port: 4000`` don't render as
-// ``3.0`` / ``4000.0`` to operators reading the terminal.
+// value to “float64“; whole numbers must round-trip back to ints so
+// fields like “protocol: 3“ and “port: 4000“ don't render as
+// “3.0“ / “4000.0“ to operators reading the terminal.
 func TestFormatDetailValue_Scalars(t *testing.T) {
 	cases := []struct {
 		name string
@@ -50,10 +50,10 @@ func TestFormatDetailValue_Scalars(t *testing.T) {
 
 // TestFormatDetailValue_NonScalarsAreSkipped confirms that structured
 // fields kept on the /health JSON surface (e.g. the per-sink
-// ``sinks: [...]`` array) are signalled as "not renderable" so the CLI
-// printer skips them rather than dumping a ``[map[...]]`` blob to the
-// terminal. Equivalent JSON-decoded shapes (``[]interface{}`` /
-// ``map[string]interface{}``) and Go-native shapes are both covered.
+// “sinks: [...]“ array) are signalled as "not renderable" so the CLI
+// printer skips them rather than dumping a “[map[...]]“ blob to the
+// terminal. Equivalent JSON-decoded shapes (“[]interface{}“ /
+// “map[string]interface{}“) and Go-native shapes are both covered.
 func TestFormatDetailValue_NonScalarsAreSkipped(t *testing.T) {
 	cases := []struct {
 		name string

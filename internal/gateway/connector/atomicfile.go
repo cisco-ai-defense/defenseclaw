@@ -27,10 +27,20 @@ import (
 // atomicWriteFile writes data to path atomically by writing to a temp file in
 // the same directory and renaming. This prevents partial writes from corrupting
 // the target file if the process crashes mid-write.
+//
+// If path is a symlink, write through to the linked target instead of renaming
+// over the symlink itself. Many operators keep agent dotfiles in a managed
+// repo and symlink ~/.codex/config.toml or ~/.claude/settings.json; preserving
+// that filesystem shape is part of the teardown contract.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
+	writePath, err := resolveAtomicWritePath(path)
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(writePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create dir for %s: %w", path, err)
+		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -54,11 +64,36 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := os.Rename(tmpPath, writePath); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("rename %s → %s: %w", tmpPath, path, err)
+		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
 	}
 	return nil
+}
+
+func resolveAtomicWritePath(path string) (string, error) {
+	cur := path
+	for i := 0; i < 16; i++ {
+		info, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return cur, nil
+			}
+			return "", fmt.Errorf("lstat %s: %w", cur, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return cur, nil
+		}
+		target, err := os.Readlink(cur)
+		if err != nil {
+			return "", fmt.Errorf("readlink %s: %w", cur, err)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cur), target)
+		}
+		cur = filepath.Clean(target)
+	}
+	return "", fmt.Errorf("resolve symlink %s: too many symlinks", path)
 }
 
 // withFileLock acquires an exclusive advisory lock on path+".lock" before

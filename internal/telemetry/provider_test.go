@@ -828,6 +828,7 @@ func TestRecordGuardrailEvaluation_EmitsMetric(t *testing.T) {
 	found := findCounter(rm, "defenseclaw.guardrail.evaluations")
 	if found == nil {
 		t.Fatal("metric defenseclaw.guardrail.evaluations not found")
+		return
 	}
 
 	sum, ok := found.Data.(metricdata.Sum[int64])
@@ -866,6 +867,7 @@ func TestRecordGuardrailLatency_EmitsMetric(t *testing.T) {
 	found := findHistogram(rm, "defenseclaw.guardrail.latency")
 	if found == nil {
 		t.Fatal("metric defenseclaw.guardrail.latency not found")
+		return
 	}
 
 	hist, ok := found.Data.(metricdata.Histogram[float64])
@@ -911,6 +913,7 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	found := findHistogram(rm, "gen_ai.client.token.usage")
 	if found == nil {
 		t.Fatal("metric gen_ai.client.token.usage not found")
+		return
 	}
 
 	hist, ok := found.Data.(metricdata.Histogram[float64])
@@ -1026,6 +1029,7 @@ func TestRecordPolicyEvaluation_EmitsMetric(t *testing.T) {
 	found := findCounter(rm, "defenseclaw.policy.evaluations")
 	if found == nil {
 		t.Fatal("metric defenseclaw.policy.evaluations not found")
+		return
 	}
 
 	sum, ok := found.Data.(metricdata.Sum[int64])
@@ -1069,6 +1073,7 @@ func TestRecordPolicyLatency_EmitsMetric(t *testing.T) {
 	found := findHistogram(rm, "defenseclaw.policy.latency")
 	if found == nil {
 		t.Fatal("metric defenseclaw.policy.latency not found")
+		return
 	}
 
 	hist, ok := found.Data.(metricdata.Histogram[float64])
@@ -1110,6 +1115,7 @@ func TestRecordPolicyReload_EmitsMetric(t *testing.T) {
 	found := findCounter(rm, "defenseclaw.policy.reloads")
 	if found == nil {
 		t.Fatal("metric defenseclaw.policy.reloads not found")
+		return
 	}
 
 	sum, ok := found.Data.(metricdata.Sum[int64])
@@ -1185,6 +1191,7 @@ func TestStartEndPolicySpan_RecordsAttributes(t *testing.T) {
 	evalMetric := findCounter(rm, "defenseclaw.policy.evaluations")
 	if evalMetric == nil {
 		t.Fatal("EndPolicySpan should also record policy.evaluations metric")
+		return
 	}
 }
 
@@ -1252,6 +1259,7 @@ func TestEndPolicySpan_NilSpan_StillRecordsMetrics(t *testing.T) {
 	evalMetric := findCounter(rm, "defenseclaw.policy.evaluations")
 	if evalMetric == nil {
 		t.Fatal("EndPolicySpan(nil) should still record policy.evaluations metric")
+		return
 	}
 }
 

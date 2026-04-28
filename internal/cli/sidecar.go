@@ -440,11 +440,11 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 
 // formatDetailValue renders a single Details map value as a one-line
 // string for the CLI status panel. JSON unmarshalling reduces every
-// numeric value to ``float64``; we render whole numbers as integers
-// so a port like ``18789`` prints cleanly rather than as ``18789``-
-// with-a-trailing-``.0``. Returns ``ok=false`` for slice/map/nil
+// numeric value to “float64“; we render whole numbers as integers
+// so a port like “18789“ prints cleanly rather than as “18789“-
+// with-a-trailing-“.0“. Returns “ok=false“ for slice/map/nil
 // values so callers can skip them rather than dumping a Go-style
-// ``[map[...]]`` representation onto the terminal.
+// “[map[...]]“ representation onto the terminal.
 func formatDetailValue(v interface{}) (string, bool) {
 	switch val := v.(type) {
 	case string:

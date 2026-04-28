@@ -1160,7 +1160,9 @@ jobs:
         run: make rego-test
 
       - name: E2E tests
-        run: bash scripts/test-e2e-full-stack.sh
+        run: |
+          bash scripts/test-e2e-full-stack.sh
+          touch /tmp/defenseclaw-full-live-e2e-success
 
       # Phase 6 observability invariants: timestamp sanity, UUID
       # request_id format, and audit.db correlation after E2E
@@ -1190,10 +1192,10 @@ jobs:
           if [ -s "${SPLUNK_MOCK_LOG:-}" ]; then
             echo "[assertions] splunk-mock log captured $(wc -l <"${SPLUNK_MOCK_LOG}" | tr -d ' ') envelope(s)"
           fi
-          if [ "$GUARDRAIL_ENABLED" = "true" ] && [ -f "${SPLUNK_MOCK_LOG:-}" ]; then
+          if [ "$GUARDRAIL_ENABLED" = "true" ] && [ -f "${SPLUNK_MOCK_LOG:-}" ] && [ -f /tmp/defenseclaw-full-live-e2e-success ]; then
               MOCK_ARGS+=(--splunk-mock-log "${SPLUNK_MOCK_LOG}")
           else
-              echo "[assertions] guardrail_enabled=${GUARDRAIL_ENABLED} — skipping splunk-mock sourcetype assertion"
+              echo "[assertions] guardrail_enabled=${GUARDRAIL_ENABLED}; full-live-success-marker=$(test -f /tmp/defenseclaw-full-live-e2e-success && echo true || echo false) — skipping splunk-mock sourcetype assertion"
           fi
           bash test/e2e/observability_assertions.sh \
               --jsonl ~/.defenseclaw/gateway.jsonl \

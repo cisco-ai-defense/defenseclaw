@@ -175,7 +175,7 @@ func skillListToItem(s skillListJSON) skillItem {
 		}
 	}
 
-	status := "active"
+	var status string
 	actionsSummary := "-"
 	switch {
 	case s.Disabled:
@@ -573,10 +573,6 @@ func (p *SkillsPanel) View() string {
 		if len(source) > 14 {
 			source = source[:11] + "…"
 		}
-		severity := item.Severity
-		if severity == "" {
-			severity = "-"
-		}
 		actions := item.Actions
 		if len(actions) > 18 {
 			actions = actions[:15] + "…"
@@ -587,11 +583,9 @@ func (p *SkillsPanel) View() string {
 			pointer = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true).Render("▸ ")
 		}
 
-		sev := severity
+		sev := fmt.Sprintf("%-10s", "-")
 		if item.Severity != "" {
 			sev = SeverityStyle(item.Severity).Render(fmt.Sprintf("%-10s", item.Severity))
-		} else {
-			sev = fmt.Sprintf("%-10s", "-")
 		}
 
 		line := fmt.Sprintf("%s%s %-28s %-14s %s %-18s", pointer, badge, name, source, sev, actions)

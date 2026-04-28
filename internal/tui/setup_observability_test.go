@@ -103,6 +103,7 @@ func TestObservabilityWizardFields_TokenIsPasswordKind(t *testing.T) {
 			}
 			if found == nil {
 				t.Fatalf("preset %s has no --token field", id)
+				return
 			}
 			if found.Kind != "password" {
 				t.Errorf("preset %s: --token Kind=%q want password", id, found.Kind)

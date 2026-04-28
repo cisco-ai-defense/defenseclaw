@@ -8,6 +8,7 @@ INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
 DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
 OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
+RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
 
@@ -441,16 +442,16 @@ lint: py-lint go-lint
 	$(VENV)/bin/python -m py_compile cli/defenseclaw/main.py
 
 py-lint:
-	$(VENV)/bin/ruff check cli/defenseclaw/
+	$(RUFF) check cli/defenseclaw/
 
 go-lint: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast
 	@# on it before running the heavier analyzers.
-	@unformatted=$$(gofmt -l . 2>/dev/null); \
+	@unformatted=$$(gofmt -l $$(git ls-files '*.go') 2>/dev/null); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt: the following files are not formatted:"; \
 		echo "$$unformatted" | sed 's/^/  /'; \
-		echo "Run 'gofmt -w .' to fix."; \
+		echo "Run 'gofmt -w \$$(git ls-files '*.go')' to fix."; \
 		exit 1; \
 	fi
 	@tmp=$$(mktemp); \

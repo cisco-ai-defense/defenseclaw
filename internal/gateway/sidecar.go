@@ -1166,6 +1166,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		if err := conn.Setup(ctx, setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
+			recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
 		} else {
 			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
@@ -1322,6 +1323,24 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
 	return nil
+}
+
+func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
+	if conn == nil {
+		return
+	}
+	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save partial connector state for %s: %v\n", conn.Name(), err)
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] rolling back partial %s setup\n", conn.Name())
+	if err := conn.Teardown(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: partial %s setup left stale state and will be retried on next connector switch: %v\n", conn.Name(), err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] partial %s setup rolled back cleanly\n", conn.Name())
 }
 
 // runAPI starts the REST API server.

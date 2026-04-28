@@ -50,7 +50,7 @@ func NewRedactionToggleModal(theme *Theme) RedactionToggleModal {
 
 // Show opens the modal with the current redaction state captured
 // so the caller can decide which CLI subcommand to dispatch on
-// confirm. ``currentlyDisabled`` mirrors ``redaction.DisableAll()``
+// confirm. “currentlyDisabled“ mirrors “redaction.DisableAll()“
 // at the moment of the keypress; the modal does NOT re-poll the
 // flag because that could race with a setup-redaction subprocess
 // that hasn't finished yet — the operator should see consistent
@@ -77,9 +77,9 @@ func (r *RedactionToggleModal) SetSize(w, h int) {
 // Owning Model uses this to pick the "on" or "off" subcommand.
 func (r *RedactionToggleModal) CurrentlyDisabled() bool { return r.currentlyDisabled }
 
-// DesiredAction returns the CLI subcommand (``on`` or ``off``)
+// DesiredAction returns the CLI subcommand (“on“ or “off“)
 // that flipping the current state would produce. Caller passes
-// this directly to ``defenseclaw setup redaction <action> --yes``.
+// this directly to “defenseclaw setup redaction <action> --yes“.
 func (r *RedactionToggleModal) DesiredAction() string {
 	if r.currentlyDisabled {
 		return "on"

@@ -10,9 +10,11 @@ func TestLoadRulePack_Embedded(t *testing.T) {
 	rp := LoadRulePack("")
 	if rp == nil {
 		t.Fatal("LoadRulePack(\"\") returned nil")
+		return
 	}
 	if rp.Suppressions == nil {
 		t.Fatal("Suppressions should be loaded from embedded defaults")
+		return
 	}
 	if len(rp.Suppressions.FindingSupps) == 0 {
 		t.Error("expected at least one finding suppression in defaults")
@@ -95,6 +97,7 @@ func TestLookupSensitiveTool(t *testing.T) {
 	st := rp.LookupSensitiveTool("users_list")
 	if st == nil {
 		t.Fatal("expected to find users_list in sensitive tools")
+		return
 	}
 	if !st.ResultInspection {
 		t.Error("users_list should have result_inspection=true")
@@ -145,10 +148,12 @@ func TestRulePack_LoadEmbeddedExfilJudge(t *testing.T) {
 	rp := LoadRulePack("")
 	if rp == nil {
 		t.Fatal("LoadRulePack(\"\") returned nil")
+		return
 	}
 	jc := rp.ExfilJudge()
 	if jc == nil {
 		t.Fatal("embedded exfil judge config is missing")
+		return
 	}
 	if !jc.Enabled {
 		t.Error("embedded exfil judge should be enabled by default")
@@ -254,6 +259,7 @@ rules:
 	rp := LoadRulePack(dir)
 	if rp == nil {
 		t.Fatal("LoadRulePack returned nil")
+		return
 	}
 	if len(rp.RuleFiles) == 0 {
 		t.Fatal("expected RuleFiles to contain the custom rule file")

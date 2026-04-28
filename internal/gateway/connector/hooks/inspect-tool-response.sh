@@ -19,7 +19,7 @@ TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_OUTPUT=$(cat)
 
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"
+FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 fail_action() {
   echo "defenseclaw: inspect-tool-response hook error: $1" >&2

@@ -62,10 +62,12 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
+				return
 			}
 			ij := rp.InjectionJudge()
 			if ij == nil {
 				t.Fatalf("profile=%s has no InjectionJudge config", tc.profile)
+				return
 			}
 			if ij.MinCategoriesForHigh != tc.wantMinCats {
 				t.Errorf("profile=%s: min_categories_for_high = %d, want %d",

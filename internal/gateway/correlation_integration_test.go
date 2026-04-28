@@ -203,6 +203,7 @@ func TestCorrelation_RequestIDSharedAcrossJSONLSQLiteAndSplunk(t *testing.T) {
 		}
 		if match == nil {
 			t.Fatal("no llm-judge-response row in audit_events")
+			return
 		}
 		if match.RequestID != wantRequestID {
 			t.Fatalf("sqlite request_id=%q want %q", match.RequestID, wantRequestID)
@@ -560,6 +561,7 @@ func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
 	}
 	if match == nil {
 		t.Fatal("no guardrail-inspection row in audit_events")
+		return
 	}
 	// The middleware pulls RunID from DEFENSECLAW_RUN_ID, SessionID
 	// from the header, TraceID from traceparent, and agent identity

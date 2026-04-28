@@ -37,9 +37,24 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
 # Fail mode: "closed" (default) blocks the tool on any error;
 # "open" allows through with a stderr warning.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"
+FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+
+log_hook_failure() {
+  local reason="$1"
+  local log_dir="${DEFENSECLAW_HOME}/logs"
+  mkdir -p "$log_dir" 2>/dev/null || return 0
+  chmod 700 "$log_dir" 2>/dev/null || true
+  local log_file="${log_dir}/hook-failures.jsonl"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
+  local safe_reason
+  safe_reason="$(printf '%s' "$reason" | tr '\n\r' '  ' | sed 's/\\/\\\\/g; s/"/\\"/g' 2>/dev/null || printf unavailable)"
+  printf '{"ts":"%s","connector":"codex","hook":"codex-hook","reason":"%s","fail_mode":"%s"}\n' "$ts" "$safe_reason" "$FAIL_MODE" >> "$log_file" 2>/dev/null || true
+  chmod 600 "$log_file" 2>/dev/null || true
+}
 
 fail_action() {
+  log_hook_failure "$1"
   echo "defenseclaw: codex hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

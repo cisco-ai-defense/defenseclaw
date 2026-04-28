@@ -119,10 +119,6 @@ type healthUpdateMsg struct {
 	Err    error
 }
 
-// refreshTickMsg is an alias for the periodic refresh tick used by tests
-// and SLO instrumentation (same handler as refreshMsg).
-type refreshTickMsg = refreshMsg
-
 // Model is the root Bubbletea model for the unified TUI.
 type Model struct {
 	activePanel int
@@ -147,10 +143,12 @@ type Model struct {
 	detail     DetailModal
 	palette    PaletteModel
 	actionMenu ActionMenu
+
 	mcpSetForm     MCPSetForm
 	modePicker     ModePickerModal
 	redactionModal RedactionToggleModal
-	helpOpen       bool
+
+	helpOpen bool
 
 	// Persistent command input
 	cmdInput      textinput.Model
@@ -218,21 +216,21 @@ func New(deps Deps) Model {
 	ti.SetStyles(s)
 
 	m := Model{
-		overview:   NewOverviewPanel(theme, deps.Config, deps.Version),
-		alerts:     NewAlertsPanel(deps.Store, dataDir),
-		skills:     NewSkillsPanel(deps.Store),
-		mcps:       NewMCPsPanel(deps.Store),
-		plugins:    NewPluginsPanel(theme, deps.Store),
-		inventory:  NewInventoryPanel(theme, executor, deps.Store),
-		policy:     NewPolicyPanel(theme, deps.Config),
-		logs:       NewLogsPanel(theme, deps.Config),
-		auditHist:  NewAuditPanel(theme, deps.Store),
-		activity:   NewActivityPanel(theme, dataDir),
-		tools:      NewToolsPanel(deps.Store),
-		setup:      NewSetupPanel(theme, deps.Config, executor),
-		detail:     NewDetailModal(),
-		palette:    NewPaletteModel(theme, registry, executor),
-		actionMenu: NewActionMenu(theme),
+		overview:       NewOverviewPanel(theme, deps.Config, deps.Version),
+		alerts:         NewAlertsPanel(deps.Store, dataDir),
+		skills:         NewSkillsPanel(deps.Store),
+		mcps:           NewMCPsPanel(deps.Store),
+		plugins:        NewPluginsPanel(theme, deps.Store),
+		inventory:      NewInventoryPanel(theme, executor, deps.Store),
+		policy:         NewPolicyPanel(theme, deps.Config),
+		logs:           NewLogsPanel(theme, deps.Config),
+		auditHist:      NewAuditPanel(theme, deps.Store),
+		activity:       NewActivityPanel(theme, dataDir),
+		tools:          NewToolsPanel(deps.Store),
+		setup:          NewSetupPanel(theme, deps.Config, executor),
+		detail:         NewDetailModal(),
+		palette:        NewPaletteModel(theme, registry, executor),
+		actionMenu:     NewActionMenu(theme),
 		mcpSetForm:     NewMCPSetForm(),
 		modePicker:     NewModePickerModal(theme),
 		redactionModal: NewRedactionToggleModal(theme),
@@ -1821,13 +1819,13 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 //   - esc / q: close without changing anything
 //   - enter:   dispatch `defenseclaw setup mode <wire> --yes` and
-//              switch to the Activity panel so the user can watch the
-//              restart progress (mirrors how [s] / [d] / [u] behave)
+//     switch to the Activity panel so the user can watch the
+//     restart progress (mirrors how [s] / [d] / [u] behave)
 //   - up / k:  cursor up
 //   - down / j cursor down
 //   - o/z/c/k: hotkey jump to the matching row, then confirm — one
-//              keystroke is enough because muscle memory is the
-//              whole point of the picker
+//     keystroke is enough because muscle memory is the
+//     whole point of the picker
 func (m Model) handleModePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
@@ -1858,8 +1856,8 @@ func (m Model) handleModePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 //   - esc / q: close without changing anything
 //   - enter:   dispatch `defenseclaw setup redaction <on|off> --yes`
-//              and switch to the Activity panel so the operator
-//              watches the restart progress.
+//     and switch to the Activity panel so the operator
+//     watches the restart progress.
 //
 // Any other key is a no-op so a stray keystroke can't accidentally
 // flip privacy state. Hotkey shortcuts (e.g. "y" = yes) are

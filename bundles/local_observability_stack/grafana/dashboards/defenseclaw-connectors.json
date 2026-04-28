@@ -161,11 +161,11 @@
     },
     {
       "type": "timeseries",
-      "title": "LLM operation duration p95 by service",
-      "description": "OTel GenAI gen_ai.client.operation.duration. This stays at zero until native GenAI duration histograms arrive.",
+      "title": "LLM operation duration p95 by connector",
+      "description": "OTel GenAI gen_ai.client.operation.duration. Connector-native Codex/Claude Code OTLP logs, metrics, and traces are promoted into this histogram by the gateway.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
-      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval]))) or on() vector(0)", "legendFormat": "{{service_name}}", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, gen_ai_agent_name) (rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval]))) or on() vector(0)", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
 

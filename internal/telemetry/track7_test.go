@@ -78,6 +78,7 @@ func TestRecordSQLiteHealth_CheckpointHistogram(t *testing.T) {
 	h := findHistogram(rm, "defenseclaw.sqlite.checkpoint.duration")
 	if h == nil {
 		t.Fatal("checkpoint histogram missing")
+		return
 	}
 	hf, ok := h.Data.(metricdata.Histogram[float64])
 	if !ok {
@@ -106,6 +107,7 @@ func TestQueueDepthAndDrops(t *testing.T) {
 	g := findGauge(rm, "defenseclaw.queue.depth")
 	if g == nil {
 		t.Fatal("queue depth gauge missing")
+		return
 	}
 	gd, ok := g.Data.(metricdata.Gauge[int64])
 	if !ok {
@@ -117,6 +119,7 @@ func TestQueueDepthAndDrops(t *testing.T) {
 	c := findCounter(rm, "defenseclaw.queue.drops")
 	if c == nil {
 		t.Fatal("queue drops counter missing")
+		return
 	}
 }
 
@@ -138,6 +141,7 @@ func TestRecordPanic_CounterAndRecover(t *testing.T) {
 	c := findCounter(rm, "defenseclaw.panics.total")
 	if c == nil {
 		t.Fatal("panics counter missing")
+		return
 	}
 }
 
@@ -160,6 +164,7 @@ func TestSLOHistogram_DistributionQuantiles(t *testing.T) {
 	h := findHistogram(rm, "defenseclaw.slo.block.latency")
 	if h == nil {
 		t.Fatal("slo block histogram missing")
+		return
 	}
 	hf := h.Data.(metricdata.Histogram[float64])
 	if len(hf.DataPoints) == 0 {
@@ -254,6 +259,7 @@ func TestEmitGatewayEvent_IncrementsEmittedCounter(t *testing.T) {
 	c := findCounter(rm, "defenseclaw.gateway.events.emitted")
 	if c == nil {
 		t.Fatal("defenseclaw.gateway.events.emitted counter missing — fanout not wired")
+		return
 	}
 	sum, ok := c.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -284,6 +290,7 @@ func TestRecordConfigLoadError_EmitsMetric(t *testing.T) {
 	c := findCounter(rm, "defenseclaw.config.load.errors")
 	if c == nil {
 		t.Fatal("config load errors counter missing")
+		return
 	}
 }
 
@@ -303,6 +310,7 @@ func TestRecordExporterHealth_LastExport(t *testing.T) {
 	g := findGauge(rm, "defenseclaw.telemetry.exporter.last_export_ts")
 	if g == nil {
 		t.Fatal("last_export_ts gauge missing")
+		return
 	}
 }
 
@@ -325,6 +333,7 @@ func TestRecordSQLiteBusy_Counter(t *testing.T) {
 	c := findCounter(rm, "defenseclaw.sqlite.busy_retries")
 	if c == nil {
 		t.Fatal("sqlite busy counter missing")
+		return
 	}
 }
 
@@ -335,9 +344,10 @@ func assertGauge(t *testing.T, rm metricdata.ResourceMetrics, name string, want 
 	m := findGauge(rm, name)
 	if m == nil {
 		t.Fatalf("metric %s not found", name)
+		return
 	}
-	if m.Unit != unit && unit != "" {
-		// unit check optional
+	if unit != "" && m.Unit != unit {
+		t.Fatalf("%s: expected unit %q, got %q", name, unit, m.Unit)
 	}
 	gd, ok := m.Data.(metricdata.Gauge[int64])
 	if !ok {
@@ -356,6 +366,7 @@ func assertFloatGauge(t *testing.T, rm metricdata.ResourceMetrics, name string, 
 	m := findGauge(rm, name)
 	if m == nil {
 		t.Fatalf("metric %s not found", name)
+		return
 	}
 	gd, ok := m.Data.(metricdata.Gauge[float64])
 	if !ok {

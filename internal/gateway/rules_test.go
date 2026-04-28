@@ -722,6 +722,7 @@ func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
 	}
 	if secretCat == nil {
 		t.Fatal("secret category missing after override")
+		return
 	}
 	if len(secretCat.Rules) != 1 || secretCat.Rules[0].ID != "CUSTOM-SECRET" {
 		t.Errorf("secret rules = %+v, want exactly CUSTOM-SECRET", secretCat.Rules)

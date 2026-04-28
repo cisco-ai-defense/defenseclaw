@@ -596,15 +596,6 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 	})
 }
 
-func (l *Logger) forwardSinkEvent(mgr *sinks.Manager, se sinks.Event) {
-	if mgr == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	l.forwardSinkEventCtx(ctx, mgr, se)
-}
-
 func (l *Logger) forwardSinkEventCtx(ctx context.Context, mgr *sinks.Manager, se sinks.Event) {
 	_ = mgr.Forward(ctx, se)
 }

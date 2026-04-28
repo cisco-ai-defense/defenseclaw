@@ -44,9 +44,9 @@ var modePickerChoices = []modeChoice{
 	{wire: "zeptoclaw", label: "ZeptoClaw", hotkey: 'z', guardOK: true,
 		tagline: "api_base redirect + proxy response-scan (full guardrail)"},
 	{wire: "claudecode", label: "Claude Code", hotkey: 'k', guardOK: false,
-		tagline: "PreToolUse hooks + native OTel (observability only)"},
+		tagline: "PreToolUse hooks + native OTel + CodeGuard plugin"},
 	{wire: "codex", label: "Codex", hotkey: 'c', guardOK: false,
-		tagline: "hook scripts + native OTel + notify (observability only)"},
+		tagline: "hook scripts + native OTel + notify + CodeGuard skill"},
 }
 
 // ModePickerModal is the overlay launched by `[m]` on the Overview
@@ -161,7 +161,7 @@ func (p *ModePickerModal) previewForSwitch(dest string) string {
 	case prevGuard && destGuard:
 		return "Inherits current guardrail config; previous integration is restored first."
 	case !destGuard:
-		return "Switches to observability-only — restores previous integration, then wires hooks + OTel."
+		return "Switches to observability-only — restores previous integration, then wires hooks, OTel, and CodeGuard."
 	case prevGuard != destGuard && destGuard:
 		return "Enables guardrail in observe mode (no auto-enforcement) after restoring previous integration."
 	}

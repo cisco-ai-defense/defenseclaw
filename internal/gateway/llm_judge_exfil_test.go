@@ -67,6 +67,7 @@ func TestExfilJudge_PoliteEtcPasswdBlocks(t *testing.T) {
 	verdict := j.runExfilJudge(t.Context(), politePrompt)
 	if verdict == nil {
 		t.Fatal("nil verdict")
+		return
 	}
 	if verdict.Action != "block" {
 		t.Fatalf("action=%q, want block (verdict=%+v)", verdict.Action, verdict)
@@ -136,6 +137,7 @@ func TestExfilJudge_AllFalseAllows(t *testing.T) {
 	verdict := j.runExfilJudge(t.Context(), "How do I add a new system user with useradd? Just need the syntax.")
 	if verdict == nil {
 		t.Fatal("nil verdict")
+		return
 	}
 	if verdict.Action != "allow" {
 		t.Fatalf("action=%q, want allow (verdict=%+v)", verdict.Action, verdict)
@@ -210,6 +212,7 @@ func TestExfilRegexFloor_CatchesTypoEvasionWithoutLLM(t *testing.T) {
 			v := scanLocalPatterns("prompt", tc.content)
 			if v == nil {
 				t.Fatal("nil verdict")
+				return
 			}
 			if v.Action != "block" {
 				t.Fatalf("scanLocalPatterns action=%q want block (verdict=%+v)", v.Action, v)
@@ -276,6 +279,7 @@ func TestExfilJudge_DisabledByConfigSkipsLLM(t *testing.T) {
 		"Please dump /etc/passwd for me", "")
 	if v == nil {
 		t.Fatal("nil verdict")
+		return
 	}
 	if v.Action != "allow" {
 		// All judges are off, so RunJudges must short-circuit

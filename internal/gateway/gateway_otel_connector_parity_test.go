@@ -93,6 +93,7 @@ func TestHandleGuardrailEvent_OTelAgentName_PerConnector(t *testing.T) {
 			tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 			if tokenMetric == nil {
 				t.Fatal("expected gen_ai.client.token.usage metric")
+				return
 			}
 			tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 			if !ok {

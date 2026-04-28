@@ -356,10 +356,6 @@ func codexToolResponseString(v interface{}) string {
 	}
 }
 
-func codexToolResponseLen(v interface{}) int {
-	return len(codexToolResponseString(v))
-}
-
 func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequest) *ToolInspectVerdict {
 	targets := a.codexStopTargets(ctx, req)
 	if len(targets) == 0 {

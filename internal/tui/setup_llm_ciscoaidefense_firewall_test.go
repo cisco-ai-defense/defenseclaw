@@ -152,6 +152,7 @@ func TestSetupSections_CiscoAIDefenseReadOnly(t *testing.T) {
 	}
 	if cisco == nil {
 		t.Fatal("Cisco AI Defense section missing")
+		return
 	}
 	for _, f := range cisco.Fields {
 		if f.Kind != "header" {
@@ -247,6 +248,7 @@ func TestSetupSections_FirewallReadOnly(t *testing.T) {
 	}
 	if fw == nil {
 		t.Fatal("Firewall section missing")
+		return
 	}
 	for _, f := range fw.Fields {
 		if f.Kind != "header" {

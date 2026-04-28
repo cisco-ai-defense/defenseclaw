@@ -41,7 +41,7 @@ func TestEnsureGatewayToken_GeneratesAndPersists(t *testing.T) {
 		t.Errorf("expected 64-char hex token, got %d chars: %q", len(tok), tok)
 	}
 	for _, c := range tok {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("non-hex char %q in token", c)
 		}
 	}

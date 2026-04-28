@@ -141,6 +141,7 @@ func TestInspectToolCalls_ParseError(t *testing.T) {
 	verdict := proxy.inspectToolCalls(context.Background(), malformed)
 	if verdict == nil {
 		t.Fatal("expected non-nil verdict on parse error")
+		return
 	}
 	if verdict.Action != "block" {
 		t.Errorf("action = %q, want block (fail closed)", verdict.Action)
@@ -270,6 +271,7 @@ func TestInspectToolCallsMalformedJSONBlocks(t *testing.T) {
 	verdict := proxy.inspectToolCalls(context.Background(), json.RawMessage(`{not valid json`))
 	if verdict == nil {
 		t.Fatal("expected non-nil verdict for malformed JSON")
+		return
 	}
 	if verdict.Action != "block" {
 		t.Errorf("Action = %q, want block (fail closed on parse error)", verdict.Action)
@@ -323,6 +325,7 @@ func TestNotificationInjectBodyDivergence(t *testing.T) {
 		forwarded := prov.getLastReq()
 		if forwarded == nil {
 			t.Fatal("request should have been forwarded")
+			return
 		}
 
 		// When RawBody is present and inject succeeds, Messages and RawBody
@@ -367,6 +370,7 @@ func TestNotificationInjectBodyDivergence(t *testing.T) {
 		forwarded := prov.getLastReq()
 		if forwarded == nil {
 			t.Fatal("request should have been forwarded")
+			return
 		}
 
 		hasNotifyInMessages := false
@@ -629,6 +633,7 @@ func TestProxyNotificationInjectSuccess(t *testing.T) {
 	forwarded := prov.getLastReq()
 	if forwarded == nil {
 		t.Fatal("request should have been forwarded")
+		return
 	}
 
 	foundNotify := false

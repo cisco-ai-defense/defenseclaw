@@ -34,13 +34,13 @@ import (
 // restored even if the subtest fails.
 //
 // Belt-and-suspenders: we ALSO call t.Setenv("HOME", tmpHome). Every
-// connector's *Path() helper falls back to ``os.Getenv("HOME")``
+// connector's *Path() helper falls back to “os.Getenv("HOME")“
 // when its override is empty, so if a future refactor (or a fresh
 // test added here without the override goroutine) ever leaves a
 // global at "" mid-test, the fallback path lands inside tmpHome
 // instead of the developer's real home. Without this we have
 // already seen ~/.claude/settings.json get polluted with hook
-// commands pointing at long-deleted ``/var/folders/.../T/Test...``
+// commands pointing at long-deleted “/var/folders/.../T/Test...“
 // dirs — Claude Code then logs "hook script: No such file or
 // directory" on every session start.
 //

@@ -480,10 +480,6 @@ func claudeCodePayloadString(payload map[string]interface{}, key string) string 
 	return claudeCodeString(payload[key])
 }
 
-func claudeCodeOutputLen(req claudeCodeHookRequest) int {
-	return len(claudeCodeToolOutput(req))
-}
-
 func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeHookRequest) *ToolInspectVerdict {
 	target := strings.TrimSpace(req.FilePath)
 	if target == "" {

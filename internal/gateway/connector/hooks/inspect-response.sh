@@ -18,7 +18,7 @@ defenseclaw_harden_env
 CONTENT=$(cat)
 
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"
+FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 fail_action() {
   echo "defenseclaw: inspect-response hook error: $1" >&2

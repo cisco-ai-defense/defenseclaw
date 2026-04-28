@@ -266,6 +266,7 @@ func TestMCPActions(t *testing.T) {
 		}
 		if unset == nil {
 			t.Fatal("zeptoclaw should still surface the Unset action key (just with a read-only hint)")
+			return
 		}
 		if !strings.Contains(strings.ToLower(unset.Description), "read-only") {
 			t.Errorf("zeptoclaw unset description should mention read-only; got %q", unset.Description)

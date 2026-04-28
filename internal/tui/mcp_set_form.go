@@ -217,7 +217,7 @@ func (f *MCPSetForm) HandleKey(key string) (submit bool, binary string, args []s
 func (f *MCPSetForm) BuildCommand() ([]string, error) {
 	name := strings.TrimSpace(f.values[mcpFieldName])
 	if name == "" {
-		return nil, fmt.Errorf("Name is required")
+		return nil, fmt.Errorf("name is required")
 	}
 	cmd := strings.TrimSpace(f.values[mcpFieldCommand])
 	url := strings.TrimSpace(f.values[mcpFieldURL])

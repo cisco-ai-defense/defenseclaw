@@ -101,6 +101,7 @@ func TestSetupSections_OTelShape(t *testing.T) {
 	}
 	if otel == nil {
 		t.Fatal("OTel section missing")
+		return
 	}
 	want := []string{
 		"otel.enabled",

@@ -45,6 +45,14 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
+	FailMode string // "open" for observability-only hooks, "closed" for enforcement
+}
+
+func normalizeHookFailMode(mode string) string {
+	if strings.TrimSpace(mode) == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -55,7 +63,7 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr}
+	data := templateData{APIAddr: apiAddr, FailMode: "closed"}
 
 	for _, name := range shimBinaries {
 		content, err := shimFS.ReadFile("shims/" + name + ".sh")
@@ -183,7 +191,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 
 	// Never bake the real token into template output — scripts read
 	// the .token file or the env var at runtime.
-	data := templateData{APIAddr: apiAddr, APIToken: ""}
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: "closed"}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -220,6 +228,10 @@ func WriteAllHookScripts(hookDir, apiAddr string) error {
 // connector that mis-spells a hook name fails loud at setup, never
 // silently ships a hook dir missing its template.
 func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) error {
+	return writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, "closed", extras)
+}
+
+func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -234,7 +246,7 @@ func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) err
 		return err
 	}
 
-	data := templateData{APIAddr: apiAddr, APIToken: ""}
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode)}
 
 	scripts := make([]string, 0, len(genericHookScripts)+len(extras))
 	scripts = append(scripts, genericHookScripts...)
@@ -281,11 +293,35 @@ func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) err
 // new callsites. The string variant is preserved as a thin wrapper for
 // CLI paths that resolve connectors by name.
 func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connector) error {
+	opts := SetupOpts{APIAddr: apiAddr, APIToken: token}
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {
-		extras = owner.HookScriptNames(SetupOpts{APIAddr: apiAddr, APIToken: token})
+		extras = owner.HookScriptNames(opts)
 	}
 	return writeHookScriptsCommon(hookDir, apiAddr, token, extras)
+}
+
+// WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
+// has access to connector enforcement flags. Observability-only connectors
+// must fail open when their local hook cannot reach the gateway; enforcement
+// setups keep fail-closed semantics.
+func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
+	var extras []string
+	if owner, ok := c.(HookScriptOwner); ok {
+		extras = owner.HookScriptNames(opts)
+	}
+	failMode := "closed"
+	switch c.Name() {
+	case "codex":
+		if !opts.CodexEnforcement {
+			failMode = "open"
+		}
+	case "claudecode":
+		if !opts.ClaudeCodeEnforcement {
+			failMode = "open"
+		}
+	}
+	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts

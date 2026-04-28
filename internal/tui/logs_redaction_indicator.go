@@ -16,7 +16,7 @@ import (
 
 // redactionDisabledForLogsBadge reports whether the Logs panel
 // header should render the "RAW" badge. We delegate to
-// ``redaction.DisableAll`` so the badge reflects the SAME source
+// “redaction.DisableAll“ so the badge reflects the SAME source
 // of truth the writer side uses (config flag OR env override).
 //
 // Pulled into a tiny indirection so tests can override the lookup

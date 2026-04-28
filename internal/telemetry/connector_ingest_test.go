@@ -52,6 +52,7 @@ func TestRecordOTelIngest_HappyPath_FansOutAllInstruments(t *testing.T) {
 	c := findCounter(rm, "defenseclaw.otel.ingest.records")
 	if c == nil {
 		t.Fatal("records counter missing")
+		return
 	}
 	sum, ok := c.Data.(metricdata.Sum[int64])
 	if !ok {

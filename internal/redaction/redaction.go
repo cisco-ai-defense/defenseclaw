@@ -57,8 +57,9 @@
 // their raw inputs untouched. This is the strongest opt-out we
 // offer; the unconditional-redaction contract documented in
 // OBSERVABILITY.md is explicitly violated when this flag is on.
-// The CLI and config loader emit warnings on flip and at every
-// Load() so the runtime state stays auditable.
+// The CLI emits a warning on flip, and config loaders emit a
+// once-per-process warning when they observe the setting so the
+// runtime state stays auditable without spamming reload loops.
 //
 // # Output format
 //
@@ -104,9 +105,9 @@ const revealEnvVar = "DEFENSECLAW_REVEAL_PII"
 // The unconditional-redaction contract documented in OBSERVABILITY.md
 // is therefore explicitly violated when either disableEnvVar=1 or
 // the runtime override (SetDisableAll) is true. The CLI surfaces a
-// loud warning every time disable is flipped on, and the
-// configuration loader also logs at every Load() call so an
-// operator cannot quietly inherit a redaction-off install.
+// loud warning every time disable is flipped on, and configuration
+// loaders also log once per process so an operator cannot quietly
+// inherit a redaction-off install.
 const disableEnvVar = "DEFENSECLAW_DISABLE_REDACTION"
 
 // disableOverride mirrors the persisted Privacy.DisableRedaction
@@ -126,8 +127,8 @@ var disableOverride atomic.Bool
 // Reveal-respecting helper short-circuits to the raw value — the
 // strongest opt-out we offer.
 //
-// Always pair with a clearly-logged warning at the call site so the
-// runtime state is auditable.
+// Always pair config-driven activation with a clearly logged warning
+// in the load / flip path so the runtime state is auditable.
 func SetDisableAll(v bool) { disableOverride.Store(v) }
 
 // DisableAll reports the current state of the global override. Read
@@ -200,7 +201,7 @@ func String(s string) string {
 
 // ForSinkString is the Reveal-bypassing variant of String. Returns
 // the redacted placeholder regardless of the reveal flag, UNLESS
-// the global ``DisableAll`` override is on — in which case the raw
+// the global “DisableAll“ override is on — in which case the raw
 // value is returned. Use for anything destined for SQLite / Splunk
 // / OTel / webhooks / HTTP responses to remote callers.
 //

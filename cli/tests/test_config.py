@@ -16,6 +16,8 @@
 
 """Tests for defenseclaw.config — environment detection, load, save, claw-mode paths."""
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -26,6 +28,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import defenseclaw.config as config_mod
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
     Config,
@@ -828,6 +831,31 @@ class TestConfigTopLevelSections(unittest.TestCase):
             self.assertEqual(cfg.inspect_llm.provider, "")
             self.assertEqual(cfg.inspect_llm.timeout, 30)
             self.assertIn("aidefense.security.cisco.com", cfg.cisco_ai_defense.endpoint)
+
+    def test_load_warns_once_when_redaction_disabled(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_data = {
+                "data_dir": tmpdir,
+                "privacy": {"disable_redaction": True},
+            }
+            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+                yaml.dump(config_data, f)
+
+            stderr = io.StringIO()
+            with (
+                patch("defenseclaw.config.default_data_path") as mock_dp,
+                patch.object(config_mod, "_privacy_disable_redaction_warned", False),
+                contextlib.redirect_stderr(stderr),
+            ):
+                mock_dp.return_value = Path(tmpdir)
+                config_mod.load()
+                config_mod.load()
+
+            output = stderr.getvalue()
+            self.assertEqual(output.count("privacy.disable_redaction=true"), 1)
+            self.assertIn("UNREDACTED prompts", output)
 
     def test_guardrail_config_has_no_cisco_ai_defense(self):
         """GuardrailConfig no longer nests CiscoAIDefenseConfig."""

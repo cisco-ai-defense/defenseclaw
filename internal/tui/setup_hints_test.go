@@ -116,6 +116,7 @@ func TestSetupSections_GatewayExposesNewFields(t *testing.T) {
 	}
 	if gateway == nil {
 		t.Fatal("Gateway section missing")
+		return
 	}
 
 	want := map[string]bool{

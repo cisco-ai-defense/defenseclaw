@@ -149,24 +149,14 @@ func Execute() int {
 //     profiles) land here too, keeping the wiring local to one
 //     auditable touchpoint instead of growing PreRunE.
 //
-// We also emit a loud warning when the kill-switch is on so the
-// operator state is obvious in any startup transcript — the
-// unconditional-redaction contract documented in OBSERVABILITY.md
-// is being violated by design, and silent activation is exactly
-// the failure mode that contract exists to prevent.
+// The config loader emits the loud warning when the kill-switch is
+// present, so this startup hook only mirrors the loaded value into
+// the redaction package.
 func applyPrivacyConfig(c *config.Config) {
 	if c == nil {
 		return
 	}
 	redaction.SetDisableAll(c.Privacy.DisableRedaction)
-	if c.Privacy.DisableRedaction {
-		fmt.Fprintln(os.Stderr,
-			"warning: privacy.disable_redaction=true — ALL sinks (audit DB, "+
-				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
-				"prompts, judge bodies, and verdict reasons. Disable in "+
-				"shared/multi-tenant deployments via "+
-				"`defenseclaw config set privacy.disable_redaction false`.")
-	}
 }
 
 func initOTelProvider() {

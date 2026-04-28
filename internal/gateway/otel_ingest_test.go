@@ -173,8 +173,10 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 						{"key": "event.name", "value": {"stringValue": "codex.sse_event"}},
 						{"key": "event.kind", "value": {"stringValue": "response.completed"}},
 						{"key": "model", "value": {"stringValue": "gpt-5-codex"}},
-						{"key": "input_token_count", "value": {"stringValue": "123"}},
-						{"key": "output_token_count", "value": {"stringValue": "45"}},
+						{"key": "input_tokens", "value": {"stringValue": "123"}},
+						{"key": "gen_ai.usage", "value": {"kvlistValue": {"values": [
+							{"key": "output_tokens", "value": {"stringValue": "45"}}
+						]}}},
 						{"key": "cached_token_count", "value": {"stringValue": "7"}},
 						{"key": "reasoning_token_count", "value": {"stringValue": "11"}}
 					]
@@ -199,6 +201,7 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric == nil {
 		t.Fatal("expected gen_ai.client.token.usage metric")
+		return
 	}
 	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
@@ -288,6 +291,7 @@ func TestOTLPIngest_Metrics_PromotesClaudeCodeTokenUsage(t *testing.T) {
 	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric == nil {
 		t.Fatal("expected gen_ai.client.token.usage metric")
+		return
 	}
 	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
@@ -312,6 +316,145 @@ func TestOTLPIngest_Metrics_PromotesClaudeCodeTokenUsage(t *testing.T) {
 	}
 	if got["input"] != 321 || got["cacheRead"] != 17 {
 		t.Fatalf("token histogram sums = %#v, want input=321 cacheRead=17", got)
+	}
+}
+
+func TestOTLPIngest_Logs_PromotesCodexOperationDuration(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	otelProvider, err := telemetry.NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer otelProvider.Shutdown(context.Background())
+
+	a := &APIServer{}
+	a.SetOTelProvider(otelProvider)
+	body := `{
+		"resourceLogs": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "codex-cli"}}]
+			},
+			"scopeLogs": [{
+				"logRecords": [{
+					"attributes": [
+						{"key": "event.name", "value": {"stringValue": "codex.sse_event"}},
+						{"key": "event.kind", "value": {"stringValue": "response.completed"}},
+						{"key": "model", "value": {"stringValue": "gpt-5-codex"}},
+						{"key": "duration_ms", "value": {"intValue": "2500"}}
+					]
+				}]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "codex")
+	w := httptest.NewRecorder()
+
+	a.handleOTLPLogs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	durationMetric := findMetric(rm, "gen_ai.client.operation.duration")
+	if durationMetric == nil {
+		t.Fatal("expected gen_ai.client.operation.duration metric")
+		return
+	}
+	durationHist, ok := durationMetric.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("expected Histogram[float64], got %T", durationMetric.Data)
+	}
+	var got bool
+	for _, dp := range durationHist.DataPoints {
+		var agentName string
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "gen_ai.agent.name" {
+				agentName = attr.Value.AsString()
+			}
+		}
+		if agentName == "codex" && dp.Sum == 2.5 {
+			got = true
+		}
+	}
+	if !got {
+		t.Fatalf("duration histogram missing codex 2.5s sample: %#v", durationHist.DataPoints)
+	}
+}
+
+func TestOTLPIngest_Metrics_PromotesNativeOperationDuration(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	otelProvider, err := telemetry.NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer otelProvider.Shutdown(context.Background())
+
+	a := &APIServer{}
+	a.SetOTelProvider(otelProvider)
+	body := `{
+		"resourceMetrics": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "claude-code"}}]
+			},
+			"scopeMetrics": [{
+				"metrics": [{
+					"name": "gen_ai.client.operation.duration",
+					"unit": "ms",
+					"histogram": {
+						"dataPoints": [{
+							"attributes": [
+								{"key": "model", "value": {"stringValue": "claude-sonnet-4-5"}}
+							],
+							"sum": 5000,
+							"count": "2"
+						}]
+					}
+				}]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "claudecode")
+	w := httptest.NewRecorder()
+
+	a.handleOTLPMetrics(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	durationMetric := findMetric(rm, "gen_ai.client.operation.duration")
+	if durationMetric == nil {
+		t.Fatal("expected gen_ai.client.operation.duration metric")
+		return
+	}
+	durationHist, ok := durationMetric.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("expected Histogram[float64], got %T", durationMetric.Data)
+	}
+	var got bool
+	for _, dp := range durationHist.DataPoints {
+		var agentName string
+		for _, attr := range dp.Attributes.ToSlice() {
+			if string(attr.Key) == "gen_ai.agent.name" {
+				agentName = attr.Value.AsString()
+			}
+		}
+		if agentName == "claudecode" && dp.Sum == 2.5 {
+			got = true
+		}
+	}
+	if !got {
+		t.Fatalf("duration histogram missing claudecode 2.5s sample: %#v", durationHist.DataPoints)
 	}
 }
 
@@ -614,6 +757,33 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 	}
 	if rows[0].SessionID != "turn-abc" {
 		t.Errorf("SessionID = %q, want %q (codex notify rows must carry turn_id for SIEM rollups)", rows[0].SessionID, "turn-abc")
+	}
+	if strings.Contains(rows[0].Details, body) {
+		t.Fatalf("Details stored raw notify body: %q", rows[0].Details)
+	}
+	if !strings.Contains(rows[0].Details, "body_sha256") || !strings.Contains(rows[0].Details, "body_len") {
+		t.Fatalf("Details missing redacted notify summary fields: %q", rows[0].Details)
+	}
+}
+
+func TestCodexNotifyAuditDetails_RedactsRawPayload(t *testing.T) {
+	body := []byte(`{"type":"agent-turn-complete","turn_id":"turn-secret-123","model":"gpt-5","status":"ok","prompt":"please leak sk-secret-token"}`)
+	details := codexNotifyAuditDetails(codexNotifyPayload{
+		Type:   "agent-turn-complete",
+		TurnID: "turn-secret-123",
+		Model:  "gpt-5",
+		Status: "ok",
+	}, body, "agent-turn-complete", "ok", nil)
+
+	for _, forbidden := range []string{"please leak", "sk-secret-token", string(body)} {
+		if strings.Contains(details, forbidden) {
+			t.Fatalf("notify details leaked raw payload content %q: %s", forbidden, details)
+		}
+	}
+	for _, want := range []string{"body_len", "body_sha256", "agent-turn-complete"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("notify details missing %q: %s", want, details)
+		}
 	}
 }
 

@@ -142,7 +142,7 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
 	// connector method; generic inspect-* scripts come from the
 	// shared list inside writeHookScriptsCommon.
-	if err := WriteHookScriptsForConnectorObject(hookDir, opts.APIAddr, opts.APIToken, c); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("codex hook script: %w", err)
 	}
 
@@ -152,7 +152,9 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	if opts.InstallCodeGuard {
-		warnNativeCodeGuardInstall(c.Name(), ensureCodexCodeGuardSkill(ctx, opts))
+		if err := ensureCodexCodeGuardSkill(ctx, opts); err != nil {
+			return fmt.Errorf("codex CodeGuard skill install: %w", err)
+		}
 	}
 
 	// Subprocess sandbox is part of the enforcement path: the policy
@@ -205,6 +207,44 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 	shimDir := filepath.Join(opts.DataDir, "shims")
 	if entries, err := os.ReadDir(shimDir); err == nil && len(entries) > 0 {
 		residual = append(residual, fmt.Sprintf("shims/ still has %d entries", len(entries)))
+	}
+
+	configPath := codexConfigPath()
+	if data, err := os.ReadFile(configPath); err == nil {
+		cfg := map[string]interface{}{}
+		if err := toml.Unmarshal(data, &cfg); err == nil {
+			hooksDir := filepath.Join(opts.DataDir, "hooks")
+			if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+				for eventType, val := range hooks {
+					list, _ := val.([]interface{})
+					for _, entry := range list {
+						if isOwnedHook(entry, hooksDir) {
+							residual = append(residual, fmt.Sprintf("config.toml hooks[%s] still contains defenseclaw hook", eventType))
+							break
+						}
+					}
+				}
+			}
+			if codexOtelBlockLooksManaged(cfg["otel"], opts) {
+				residual = append(residual, "config.toml [otel] still points at defenseclaw")
+			}
+			managedNotify := []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
+			if codexValueMatches(cfg["notify"], managedNotify) {
+				residual = append(residual, "config.toml notify still points at defenseclaw bridge")
+			}
+			proxyURL := "http://" + opts.ProxyAddr + "/c/codex"
+			if cur, _ := cfg["openai_base_url"].(string); cur == proxyURL {
+				residual = append(residual, "config.toml openai_base_url still points at defenseclaw")
+			}
+			if providers, ok := cfg["model_providers"].(map[string]interface{}); ok {
+				for name, val := range providers {
+					pm, _ := val.(map[string]interface{})
+					if cur, _ := pm["base_url"].(string); cur == proxyURL {
+						residual = append(residual, fmt.Sprintf("config.toml model_providers.%s.base_url still points at defenseclaw", name))
+					}
+				}
+			}
+		}
 	}
 
 	if len(residual) > 0 {
@@ -998,35 +1038,15 @@ func buildCodexProviderSnapshot(providers map[string]interface{}) map[string]Cod
 }
 
 // buildCodexHooksTable produces the [hooks] HookEventsToml structure
-// that codex expects. Each event maps to a sequence of MatcherGroup
-// records; each MatcherGroup wraps a sequence of HookHandlerConfig
-// records (type-tagged; we use the `command` variant).
+// current Codex releases execute for lifecycle events. Each event maps
+// to a sequence of MatcherGroup records; each MatcherGroup wraps a
+// sequence of HookHandlerConfig records (type-tagged; we use the
+// `command` variant).
 //
-// Timeouts are in seconds (not milliseconds) per codex's TOML schema.
-//
-// === BY-DESIGN: Codex hook invocation is WONTFIX (architectural) ===
-// Plan C3 / matrix §"Out of scope". Today's `codex` binary does NOT
-// honor a settings-based hook invocation pipeline — there is no
-// codex code path that reads a `[hooks]` table out of config.toml
-// and shells out to `command` on the matching event. We write the
-// table anyway as a forward-compatibility placeholder: the moment
-// codex grows external-script hook support (the schema is already
-// in their TOML grammar), this Setup is wired and only the
-// agent-side dispatch needs to land upstream.
-//
-// Pre-execution gating for Codex flows from a different surface:
-//  1. Path-based interception — proxy admits Codex via the
-//     `/c/codex/...` route prefix (codex.HookAPIPath()), which forces
-//     every tool call through GuardrailProxy.Route + response-scan.
-//  2. ToolModeBoth on the connector — pre-call telemetry is captured
-//     from the LLM response side, where the proxy still has the
-//     unstreamed `tool_calls` array to inspect.
-//
-// In short: the on-disk `[hooks]` block is a future-proofing artifact;
-// the security guarantee comes from the proxy, not the agent. Do not
-// "fix" this by emitting fake handlers or shelling out from here —
-// codex won't read it. See plan C3 + docs/CONNECTOR-MATRIX.md
-// "By-design connector limitations" for the canonical statement.
+// Timeouts are in seconds (not milliseconds) per Codex's TOML schema.
+// The generated hook script decides fail-open vs fail-closed from
+// SetupOpts: observability-only installs allow the tool when the
+// gateway is unavailable, while enforcement installs can block.
 func buildCodexHooksTable(hookScript string) map[string]interface{} {
 	out := map[string]interface{}{}
 	for _, group := range codexHookGroups {
@@ -1208,7 +1228,10 @@ func isCodexReservedProviderID(name string) bool {
 func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	backup, err := c.loadConfigBackup(opts.DataDir)
 	if err != nil {
-		return
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "[codex] config backup unavailable; falling back to surgical cleanup: %v\n", err)
+		}
+		backup = codexConfigBackup{}
 	}
 
 	configPath := codexConfigPath()
@@ -1284,10 +1307,16 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		}
 	}
 
+	removedOwnedHooks := false
+	hooksRemain := false
 	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
 		hooksDir := filepath.Join(opts.DataDir, "hooks")
 		for eventType, val := range hooks {
+			before := codexHookEntryCount(val)
 			remaining := removeOwnedHooks(val, hooksDir)
+			if before != len(remaining) {
+				removedOwnedHooks = true
+			}
 			if len(remaining) == 0 {
 				delete(hooks, eventType)
 			} else {
@@ -1297,13 +1326,14 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		if len(hooks) == 0 {
 			delete(cfg, "hooks")
 		} else {
+			hooksRemain = true
 			cfg["hooks"] = hooks
 		}
 	} else if !backup.HadHooksKey {
 		delete(cfg, "hooks")
 	}
 
-	if backup.AddedCodexHooksFlag {
+	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hooksRemain) {
 		if features, ok := cfg["features"].(map[string]interface{}); ok {
 			delete(features, "codex_hooks")
 			if len(features) == 0 {
@@ -1367,6 +1397,14 @@ func (c *CodexConnector) cleanupCodexRestoreArtifacts(opts SetupOpts, configPath
 	_ = os.Remove(hooksPath)
 	_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
 	_ = os.Remove(filepath.Join(opts.DataDir, "codex_config_backup.json"))
+}
+
+func codexHookEntryCount(v interface{}) int {
+	list, ok := v.([]interface{})
+	if !ok {
+		return 0
+	}
+	return len(list)
 }
 
 func codexValueMatches(a, b interface{}) bool {

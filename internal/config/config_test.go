@@ -118,6 +118,7 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
 		t.Fatal("DefaultConfig() returned nil")
+		return
 	}
 
 	if cfg.DataDir == "" {
@@ -1369,6 +1370,7 @@ func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
 		t.Fatal("DefaultConfig() returned nil")
+		return
 	}
 	if cfg.Guardrail.Host != "" {
 		t.Fatalf("Guardrail.Host = %q, want empty string (not localhost); non-empty default breaks EffectiveHost IPv4 fallback", cfg.Guardrail.Host)

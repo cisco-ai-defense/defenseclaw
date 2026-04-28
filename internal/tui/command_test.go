@@ -204,6 +204,7 @@ func TestMatchCommand(t *testing.T) {
 
 			if entry == nil {
 				t.Fatalf("expected entry for %q, got nil", tt.input)
+				return
 			}
 			if entry.TUIName != tt.wantTUI {
 				t.Errorf("TUIName = %q, want %q", entry.TUIName, tt.wantTUI)
@@ -258,6 +259,7 @@ func TestMatchCommandCLIMapping(t *testing.T) {
 			entry, extra := MatchCommand(tt.input, registry)
 			if entry == nil {
 				t.Fatalf("no match for %q", tt.input)
+				return
 			}
 			if entry.CLIBinary != tt.wantBin {
 				t.Errorf("CLIBinary = %q, want %q", entry.CLIBinary, tt.wantBin)

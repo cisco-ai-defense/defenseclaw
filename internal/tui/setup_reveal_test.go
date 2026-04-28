@@ -17,9 +17,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// ctrlKey builds a synthetic ``Ctrl+<rune>`` press matching how
+// ctrlKey builds a synthetic “Ctrl+<rune>“ press matching how
 // Bubble Tea reports the keystroke (KeyPressMsg.String() returns
-// ``"ctrl+t"``). Re-implemented locally rather than imported from
+// “"ctrl+t"“). Re-implemented locally rather than imported from
 // app_test.go so this test file compiles on its own.
 func ctrlKey(r rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: r, Mod: tea.ModCtrl})
@@ -27,7 +27,7 @@ func ctrlKey(r rune) tea.KeyPressMsg {
 
 // TestSetupReveal_TogglesPasswordMask pins the operator-visible
 // contract that Ctrl+T flips a wizard's password-kind fields between
-// the default mask (``****abcd``) and the raw value.
+// the default mask (“****abcd“) and the raw value.
 //
 // The masking exists to keep secrets out of screen recordings; the
 // reveal toggle is the escape hatch when the operator needs to
@@ -161,7 +161,7 @@ func TestSetupReveal_ResetOnFormClose(t *testing.T) {
 
 // TestSetupReveal_ShortValueShowsBareMask confirms the renderer's
 // short-value branch still respects the toggle. Values shorter than
-// 5 characters render as a bare ``****`` (no suffix) when masked,
+// 5 characters render as a bare “****“ (no suffix) when masked,
 // but must still flip to plaintext when revealed.
 func TestSetupReveal_ShortValueShowsBareMask(t *testing.T) {
 	p := &SetupPanel{
@@ -190,8 +190,8 @@ func TestSetupReveal_ShortValueShowsBareMask(t *testing.T) {
 
 // TestSetupReveal_EmptyValueRendersEmptyMarker guards the empty-value
 // branch of the renderer: a password-kind field with an empty value
-// must always render ``(empty)`` regardless of reveal state — there
-// is nothing to reveal, and showing ``(revealed — …)`` next to an
+// must always render “(empty)“ regardless of reveal state — there
+// is nothing to reveal, and showing “(revealed — …)“ next to an
 // empty value would mislead the operator into thinking a secret is
 // present.
 func TestSetupReveal_EmptyValueRendersEmptyMarker(t *testing.T) {

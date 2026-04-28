@@ -112,3 +112,52 @@ func TestRedactionToggleModal_View_HiddenWhenNotVisible(t *testing.T) {
 		t.Fatalf("hidden modal must render empty, got %q", got)
 	}
 }
+
+// TestConfirmRedactionToggle_AppliesOverrideImmediately pins the
+// process-local RAW badge update that happens before the async CLI
+// subprocess restarts the gateway.
+func TestConfirmRedactionToggle_AppliesOverrideImmediately(t *testing.T) {
+	old := applyTUIRedactionOverride
+	var calls []bool
+	applyTUIRedactionOverride = func(disable bool) {
+		calls = append(calls, disable)
+	}
+	t.Cleanup(func() { applyTUIRedactionOverride = old })
+
+	cases := []struct {
+		name              string
+		currentlyDisabled bool
+		wantDisable       bool
+	}{
+		{name: "redacted_to_raw", currentlyDisabled: false, wantDisable: true},
+		{name: "raw_to_redacted", currentlyDisabled: true, wantDisable: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls = nil
+			m := Model{
+				executor:       NewCommandExecutor(),
+				redactionModal: NewRedactionToggleModal(DefaultTheme()),
+			}
+			m.redactionModal.Show(tc.currentlyDisabled)
+
+			next, cmd := m.confirmRedactionToggle()
+			if cmd == nil {
+				t.Fatal("confirmRedactionToggle must return a command")
+			}
+			if len(calls) != 1 || calls[0] != tc.wantDisable {
+				t.Fatalf("override calls=%v, want [%v]", calls, tc.wantDisable)
+			}
+			got, ok := next.(Model)
+			if !ok {
+				t.Fatalf("confirmRedactionToggle returned %T, want Model", next)
+			}
+			if got.activePanel != PanelActivity {
+				t.Fatalf("activePanel=%d, want PanelActivity", got.activePanel)
+			}
+			if got.redactionModal.IsVisible() {
+				t.Fatal("modal should be hidden after confirm")
+			}
+		})
+	}
+}

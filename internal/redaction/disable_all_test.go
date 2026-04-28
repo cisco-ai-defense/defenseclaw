@@ -85,7 +85,7 @@ func TestDisableAll_RuntimeOverride(t *testing.T) {
 // TestDisableAll_EnvVar guards the second opt-out path: the
 // DEFENSECLAW_DISABLE_REDACTION env var must produce the same
 // bypass behavior as the runtime override. Environments set both
-// (e.g. ``defenseclaw setup redaction off`` toggles config which
+// (e.g. “defenseclaw setup redaction off“ toggles config which
 // becomes SetDisableAll, and a paranoid operator additionally
 // exports the env var) and we want either to be sufficient.
 func TestDisableAll_EnvVar(t *testing.T) {
@@ -126,6 +126,13 @@ func TestDisableAll_PrecedenceOverReveal(t *testing.T) {
 	t.Setenv(revealEnvVar, "")
 	t.Setenv(disableEnvVar, "")
 
+	SetDisableAll(false)
+	t.Setenv(revealEnvVar, "1")
+	if got := MessageContent("user prompt"); got != "user prompt" {
+		t.Fatalf("DisableAll=false, Reveal=true must pass through raw: got %q", got)
+	}
+
+	t.Setenv(revealEnvVar, "")
 	SetDisableAll(true)
 	// Reveal off, DisableAll on: raw passthrough still wins.
 	if got := MessageContent("user prompt"); got != "user prompt" {

@@ -22,6 +22,7 @@ func TestDefaultThemeNotNil(t *testing.T) {
 	theme := DefaultTheme()
 	if theme == nil {
 		t.Fatal("DefaultTheme returned nil")
+		return
 	}
 
 	if theme.DotRunning == "" {

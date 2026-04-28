@@ -63,6 +63,9 @@ func openClawExtensionAvailable() bool {
 	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, "package.json")); err == nil {
 		return true
 	}
+	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
+		return false
+	}
 	return false
 }
 

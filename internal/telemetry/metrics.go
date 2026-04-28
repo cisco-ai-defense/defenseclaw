@@ -999,7 +999,7 @@ func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, provi
 // gen_ai.client.operation.duration histogram, unit=seconds. See
 // RecordLLMTokens for the agentName / agentID cardinality contract.
 func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, providerName, model, agentName, agentID string, durationSeconds float64) {
-	if !p.Enabled() || p.metrics == nil {
+	if !p.Enabled() || p.metrics == nil || durationSeconds <= 0 {
 		return
 	}
 	attrs := []attribute.KeyValue{

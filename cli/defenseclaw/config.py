@@ -26,6 +26,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
 )
 
 _log = logging.getLogger(__name__)
+_privacy_disable_redaction_warned = False
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
@@ -851,6 +853,8 @@ class PrivacyConfig:
     unconditional-redaction contract documented in OBSERVABILITY.md
     by design — only enable on single-tenant installs where every
     downstream sink lives inside the same trust boundary.
+    The CLI emits a warning on flip, and config loaders emit a
+    once-per-process warning when they observe it.
     """
 
     disable_redaction: bool = False
@@ -1547,6 +1551,21 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
+def _warn_disable_redaction_config(cfg: Config) -> None:
+    """Emit the persistent redaction kill-switch warning once per process."""
+    global _privacy_disable_redaction_warned
+    if not cfg.privacy.disable_redaction or _privacy_disable_redaction_warned:
+        return
+    _privacy_disable_redaction_warned = True
+    print(
+        "warning: privacy.disable_redaction=true — ALL sinks (audit DB, "
+        "OTel logs, webhooks, Splunk HEC) will receive UNREDACTED prompts, "
+        "judge bodies, and verdict reasons. Disable in shared/multi-tenant "
+        "deployments via `defenseclaw config set privacy.disable_redaction false`.",
+        file=sys.stderr,
+    )
+
+
 def load() -> Config:
     """Load config from ~/.defenseclaw/config.yaml, applying defaults."""
     data_dir = str(default_data_path())
@@ -1683,6 +1702,7 @@ def load() -> Config:
         privacy=_merge_privacy(raw.get("privacy")),
     )
     _migrate_llm_fields(cfg)
+    _warn_disable_redaction_config(cfg)
     _warn_plaintext_secrets(cfg)
     return cfg
 

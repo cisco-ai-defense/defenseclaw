@@ -177,14 +177,6 @@ func (p *GuardrailProxy) connectorName() string {
 	return "unknown"
 }
 
-// shouldScanResponseToolCalls returns true when the proxy should inspect
-// tool_calls in LLM response bodies. This is always true for connectors
-// using ToolModeResponseScan or ToolModeBoth, and still true for
-// ToolModePreExecution as defense-in-depth.
-func (p *GuardrailProxy) shouldScanResponseToolCalls() bool {
-	return true
-}
-
 // postCallContext returns a detached context for post-stream completion
 // inspection. The HTTP request context may already be cancelled by the time
 // the final POST-CALL inspection runs, which would kill in-flight LLM judge
@@ -493,7 +485,7 @@ func isValidConnectorName(name string) bool {
 		return false
 	}
 	for _, c := range name {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 			return false
 		}
 	}
@@ -598,7 +590,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		targetHost = u.Hostname()
 	}
 	branch := "passthrough"
-	var bodyShape BodyShape = BodyShapeNone
+	bodyShape := BodyShapeNone
 	if isKnownProviderDomain(targetForMatch) {
 		branch = "known"
 	} else {

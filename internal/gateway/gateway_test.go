@@ -248,18 +248,18 @@ func TestSidecarHealthSinceUpdates(t *testing.T) {
 // methods can return zero values.
 type stubConnector struct{ name string }
 
-func (s *stubConnector) Name() string                                                 { return s.name }
-func (s *stubConnector) Description() string                                          { return "" }
-func (s *stubConnector) ToolInspectionMode() connector.ToolInspectionMode             { return "" }
-func (s *stubConnector) SubprocessPolicy() connector.SubprocessPolicy                 { return "" }
-func (s *stubConnector) Setup(context.Context, connector.SetupOpts) error             { return nil }
-func (s *stubConnector) Teardown(context.Context, connector.SetupOpts) error          { return nil }
-func (s *stubConnector) Authenticate(*http.Request) bool                              { return false }
+func (s *stubConnector) Name() string                                        { return s.name }
+func (s *stubConnector) Description() string                                 { return "" }
+func (s *stubConnector) ToolInspectionMode() connector.ToolInspectionMode    { return "" }
+func (s *stubConnector) SubprocessPolicy() connector.SubprocessPolicy        { return "" }
+func (s *stubConnector) Setup(context.Context, connector.SetupOpts) error    { return nil }
+func (s *stubConnector) Teardown(context.Context, connector.SetupOpts) error { return nil }
+func (s *stubConnector) Authenticate(*http.Request) bool                     { return false }
 func (s *stubConnector) Route(*http.Request, []byte) (*connector.ConnectorSignals, error) {
 	return nil, nil
 }
-func (s *stubConnector) SetCredentials(string, string)                       {}
-func (s *stubConnector) VerifyClean(connector.SetupOpts) error               { return nil }
+func (s *stubConnector) SetCredentials(string, string)         {}
+func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 
 // TestProxyShouldBindForConnector pins the routing decision behind
 // the codex/claudecode observability defaults. proxyShouldBindForConnector
@@ -277,11 +277,11 @@ func (s *stubConnector) VerifyClean(connector.SetupOpts) error               { r
 // flags) → expected bind decision.
 func TestProxyShouldBindForConnector(t *testing.T) {
 	cases := []struct {
-		name           string
-		conn           connector.Connector
-		codexEnf       bool
-		claudeCodeEnf  bool
-		expectBind     bool
+		name          string
+		conn          connector.Connector
+		codexEnf      bool
+		claudeCodeEnf bool
+		expectBind    bool
 	}{
 		{"codex_default_observability", &stubConnector{name: "codex"}, false, false, false},
 		{"codex_enforcement_on", &stubConnector{name: "codex"}, true, false, true},
@@ -315,6 +315,39 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 					tc.name, got, tc.expectBind)
 			}
 		})
+	}
+}
+
+type rollbackConnector struct {
+	stubConnector
+	teardownCalled bool
+	verifyCalled   bool
+}
+
+func (r *rollbackConnector) Teardown(context.Context, connector.SetupOpts) error {
+	r.teardownCalled = true
+	return nil
+}
+
+func (r *rollbackConnector) VerifyClean(connector.SetupOpts) error {
+	r.verifyCalled = true
+	return nil
+}
+
+func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T) {
+	dir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+
+	recordAndRollbackFailedConnectorSetup(conn, connector.SetupOpts{DataDir: dir}, context.Background())
+
+	if !conn.teardownCalled {
+		t.Fatal("rollback did not call connector Teardown")
+	}
+	if !conn.verifyCalled {
+		t.Fatal("rollback did not call connector VerifyClean")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "codex" {
+		t.Fatalf("active connector = %q, want codex so future mode switches can retry teardown", got)
 	}
 }
 
@@ -1870,13 +1903,13 @@ func TestAPIStatusRejectsPost(t *testing.T) {
 // and the TUI would render a misleading panel.
 func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 	cases := []struct {
-		name              string
-		connector         string
-		codexEnforce      bool
-		claudeEnforce     bool
-		wantMode          string
-		wantIntercept     bool
-		wantTelemetryAll  []string
+		name             string
+		connector        string
+		codexEnforce     bool
+		claudeEnforce    bool
+		wantMode         string
+		wantIntercept    bool
+		wantTelemetryAll []string
 	}{
 		{
 			name:             "codex_observability_default",
@@ -2651,6 +2684,7 @@ func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {
 	evalMetric := findMetric(rm, "defenseclaw.policy.evaluations")
 	if evalMetric == nil {
 		t.Fatal("expected defenseclaw.policy.evaluations metric after blocked admission")
+		return
 	}
 	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -2668,6 +2702,7 @@ func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {
 	latencyMetric := findMetric(rm, "defenseclaw.policy.latency")
 	if latencyMetric == nil {
 		t.Fatal("expected defenseclaw.policy.latency metric after admission evaluation")
+		return
 	}
 	latHist, ok := latencyMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
@@ -2715,6 +2750,7 @@ func TestAPIPolicyEvaluate_OTelMetrics_RejectedVerdict(t *testing.T) {
 	evalMetric := findMetric(rm, "defenseclaw.policy.evaluations")
 	if evalMetric == nil {
 		t.Fatal("expected defenseclaw.policy.evaluations metric after rejected admission")
+		return
 	}
 	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -2759,6 +2795,7 @@ func TestAPIPolicyReload_OTelMetrics_Success(t *testing.T) {
 	reloadMetric := findMetric(rm, "defenseclaw.policy.reloads")
 	if reloadMetric == nil {
 		t.Fatal("expected defenseclaw.policy.reloads metric after successful reload")
+		return
 	}
 	reloadSum, ok := reloadMetric.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -2799,6 +2836,7 @@ func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 	reloadMetric := findMetric(rm, "defenseclaw.policy.reloads")
 	if reloadMetric == nil {
 		t.Fatal("expected defenseclaw.policy.reloads metric after failed reload")
+		return
 	}
 	reloadSum, ok := reloadMetric.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -3683,6 +3721,7 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 	evalMetric := findMetric(rm, "defenseclaw.guardrail.evaluations")
 	if evalMetric == nil {
 		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
+		return
 	}
 	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
 	if !ok {
@@ -3696,6 +3735,7 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 	latencyMetric := findMetric(rm, "defenseclaw.guardrail.latency")
 	if latencyMetric == nil {
 		t.Fatal("expected defenseclaw.guardrail.latency metric")
+		return
 	}
 	latHist, ok := latencyMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
@@ -3711,6 +3751,7 @@ func TestHandleGuardrailEvent_OTelMetricsRecorded(t *testing.T) {
 	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
 	if tokenMetric == nil {
 		t.Fatal("expected gen_ai.client.token.usage metric")
+		return
 	}
 	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
 	if !ok {
@@ -3807,6 +3848,7 @@ func TestHandleGuardrailEvent_OTelNoTokensSkipsLLMMetric(t *testing.T) {
 	evalMetric := findMetric(rm, "defenseclaw.guardrail.evaluations")
 	if evalMetric == nil {
 		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
+		return
 	}
 
 	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
@@ -3860,6 +3902,7 @@ func TestHandleGuardrailEvent_OTelMultipleEvents(t *testing.T) {
 	evalMetric := findMetric(rm, "defenseclaw.guardrail.evaluations")
 	if evalMetric == nil {
 		t.Fatal("expected defenseclaw.guardrail.evaluations metric")
+		return
 	}
 
 	evalSum, ok := evalMetric.Data.(metricdata.Sum[int64])
@@ -3879,6 +3922,7 @@ func TestHandleGuardrailEvent_OTelMultipleEvents(t *testing.T) {
 	latencyMetric := findMetric(rm, "defenseclaw.guardrail.latency")
 	if latencyMetric == nil {
 		t.Fatal("expected defenseclaw.guardrail.latency metric")
+		return
 	}
 	latHist, ok := latencyMetric.Data.(metricdata.Histogram[float64])
 	if !ok {

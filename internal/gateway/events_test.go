@@ -77,6 +77,7 @@ func TestInspect_EmitsVerdictOnNonNoneVerdict(t *testing.T) {
 
 	if v == nil {
 		t.Fatal("expected verdict, got nil")
+		return
 	}
 
 	// The injection regex layer should have produced at least one
