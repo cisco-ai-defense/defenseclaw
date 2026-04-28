@@ -1560,6 +1560,229 @@ env_key = "OPENAI_API_KEY"
 	}
 }
 
+// TestCodex_Setup_RedirectsBuiltinOpenAIViaTopLevelKey pins the post-PR
+// openai/codex#12024 contract: the built-in `openai` provider is
+// redirected via the top-level `openai_base_url` field, NOT via a
+// `[model_providers.openai]` table. Codex 5.x rejects the latter at
+// startup with "model_providers contains reserved built-in provider
+// IDs: `openai`. Built-in providers cannot be overridden." — which
+// took down both the codex agent and any agent harness (e.g. the
+// OpenClaw TUI) that spawns codex as a subprocess. This test parses
+// the patched config.toml back through the TOML decoder so the
+// assertion is structural (not just a substring match).
+func TestCodex_Setup_RedirectsBuiltinOpenAIViaTopLevelKey(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	// Seed an operator config that DOES have the now-rejected
+	// [model_providers.openai] block — this is the exact shape that
+	// every install before this fix produced and that Codex 5.x
+	// refuses to load.
+	original := `model = "gpt-5.5"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed config.toml: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("patched config did not round-trip as valid TOML: %v\nfile:\n%s", err, raw)
+	}
+
+	wantProxy := "http://127.0.0.1:4000/c/codex"
+
+	// 1) The top-level openai_base_url MUST be set to the proxy URL.
+	gotBaseURL, ok := parsed["openai_base_url"].(string)
+	if !ok {
+		t.Fatalf("openai_base_url missing or not a string in patched config; parsed=%v", parsed)
+	}
+	if gotBaseURL != wantProxy {
+		t.Errorf("openai_base_url = %q, want %q", gotBaseURL, wantProxy)
+	}
+
+	// 2) The reserved [model_providers.openai] table MUST NOT be
+	//    present — that is the exact shape Codex 5.x rejects.
+	if providers, ok := parsed["model_providers"].(map[string]interface{}); ok {
+		if _, found := providers["openai"]; found {
+			t.Errorf("[model_providers.openai] still present after Setup — Codex 5.x rejects this with 'reserved built-in provider IDs'\nfile:\n%s", raw)
+		}
+		if _, found := providers["ollama"]; found {
+			t.Errorf("[model_providers.ollama] still present after Setup — reserved built-in")
+		}
+		if _, found := providers["lmstudio"]; found {
+			t.Errorf("[model_providers.lmstudio] still present after Setup — reserved built-in")
+		}
+	}
+}
+
+// TestCodex_Setup_StripsAllReservedProviderIDs pins that every
+// reserved Codex built-in (openai, ollama, lmstudio) is removed from
+// [model_providers.*] on Setup. Operators with multi-provider configs
+// pre-fix could have any combination of these tables; if any one
+// survives Setup, Codex 5.x 's startup validator (PR #12024) trips
+// on it and refuses to start.
+func TestCodex_Setup_StripsAllReservedProviderIDs(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model = "gpt-5.5"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+
+[model_providers.ollama]
+name = "ollama"
+base_url = "http://localhost:11434/v1"
+
+[model_providers.lmstudio]
+name = "lmstudio"
+base_url = "http://localhost:1234/v1"
+
+[model_providers.openrouter]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, _ := os.ReadFile(configPath)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+	providers, _ := parsed["model_providers"].(map[string]interface{})
+	for _, id := range []string{"openai", "ollama", "lmstudio"} {
+		if _, found := providers[id]; found {
+			t.Errorf("reserved provider %q still present in [model_providers] — Codex 5.x will refuse to start", id)
+		}
+	}
+	// The non-reserved provider MUST still be present and rewritten.
+	openrouter, ok := providers["openrouter"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("custom provider 'openrouter' missing after Setup — should be retained and rewritten")
+	}
+	if bu, _ := openrouter["base_url"].(string); bu != "http://127.0.0.1:4000/c/codex" {
+		t.Errorf("openrouter base_url = %q, want proxy redirect", bu)
+	}
+}
+
+// TestCodex_Teardown_RestoresOriginalOpenAIProviderBlock verifies
+// that an operator who had a pristine [model_providers.openai] block
+// (e.g. from an older Codex release that accepted overrides) gets it
+// back on Teardown — even though we stripped it on Setup. The
+// reserved-block backup channel is what makes "uninstall returns the
+// host to its original shape" still hold for these operators.
+func TestCodex_Teardown_RestoresOriginalOpenAIProviderBlock(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model = "gpt-5.5"
+
+[model_providers.openai]
+name = "openai-classic"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	raw, _ := os.ReadFile(configPath)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Teardown: %v\nfile:\n%s", err, raw)
+	}
+	// Top-level openai_base_url must be removed (operator never had it).
+	if _, found := parsed["openai_base_url"]; found {
+		t.Errorf("Teardown left top-level openai_base_url behind — operator's pristine config did not have it\nfile:\n%s", raw)
+	}
+	// The original [model_providers.openai] block must be back, with
+	// its original `name` field intact (i.e. restored from backup,
+	// not re-synthesized).
+	providers, _ := parsed["model_providers"].(map[string]interface{})
+	openai, ok := providers["openai"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Teardown did not restore [model_providers.openai] from backup\nfile:\n%s", raw)
+	}
+	if name, _ := openai["name"].(string); name != "openai-classic" {
+		t.Errorf("[model_providers.openai].name = %q, want %q (restored verbatim from backup)", name, "openai-classic")
+	}
+	if bu, _ := openai["base_url"].(string); bu != "https://api.openai.com/v1" {
+		t.Errorf("[model_providers.openai].base_url = %q, want pristine OpenAI URL", bu)
+	}
+}
+
+// TestCodex_Setup_SynthesizesOpenAISnapshot pins that the in-memory
+// provider snapshot ALWAYS includes a usable `openai` entry, even
+// when the operator's config.toml has no [model_providers.openai]
+// block (the new default after the Codex 5.x reserved-ID change).
+// Without this, Route() would have no upstream URL for codex's
+// `/c/codex/responses` traffic and the proxy would 502 every request.
+func TestCodex_Setup_SynthesizesOpenAISnapshot(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	// Pristine config without any provider block — the realistic
+	// post-fix shape on a fresh Codex install.
+	original := `model = "gpt-5.5"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	snap := c.ProviderSnapshot()
+	openai, ok := snap["openai"]
+	if !ok {
+		t.Fatalf("snapshot missing synthetic 'openai' entry — Route() will 502 on /c/codex/responses\nsnapshot=%v", snap)
+	}
+	if openai.BaseURL != "https://api.openai.com/v1" {
+		t.Errorf("synthetic openai BaseURL = %q, want canonical OpenAI URL", openai.BaseURL)
+	}
+}
+
 func TestCodex_Teardown(t *testing.T) {
 	dir := t.TempDir()
 	CodexConfigPathOverride = filepath.Join(dir, "config.toml")

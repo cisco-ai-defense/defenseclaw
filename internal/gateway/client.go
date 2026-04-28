@@ -695,6 +695,23 @@ func (c *Client) authRepairHome() string {
 // isAuthError returns true if the error message indicates the OpenClaw
 // gateway rejected the connect handshake due to a missing/invalid token
 // or device pairing.
+//
+// The needles cover three OpenClaw error formats simultaneously:
+//
+//  1. The machine-readable code (NOT_PAIRED, AUTH_TOKEN_MISMATCH, etc.) —
+//     match these as substrings of the lowercased message.
+//  2. The lowercased pairing message prefix ("pairing required") — this
+//     is the wire form OpenClaw sends; it is NOT "pairing_required".
+//  3. Specific reason fragments ("device identity changed",
+//     "higher role than", "more scopes than") that come from the
+//     metadata-upgrade / role-upgrade / scope-upgrade subreasons —
+//     these signal the device record exists but disagrees with the
+//     handshake, so RepairPairing rewriting the record can fix it.
+//
+// Past bug: this list previously included "pairing_required" (underscore)
+// and "not paired" (lowercased phrase), neither of which match the wire
+// format. Auto-repair never ran and the sidecar stayed in RECONNECTING
+// forever when paired.json had stale metadata. Do not regress this.
 func isAuthError(err error) bool {
 	if err == nil {
 		return false
@@ -702,7 +719,15 @@ func isAuthError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	for _, needle := range []string{
 		"token_missing", "token_mismatch",
-		"unauthorized", "pairing_required", "not paired",
+		"auth_token_mismatch", "auth_unauthorized", "auth_required",
+		"unauthorized",
+		"not_paired",
+		"not paired", // legacy prose form ("device not paired with gateway")
+		"pairing required",
+		"pairing_required",
+		"device identity changed",
+		"higher role than",
+		"more scopes than",
 	} {
 		if strings.Contains(msg, needle) {
 			return true

@@ -1108,6 +1108,19 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
 	}
 
+	// S0.12 follow-up: inject credentials into the connector NOW, before
+	// Setup() and before the HasUsableProviders() probe below. Without
+	// this, OpenClaw's probe (which is keyed off the connector's
+	// gatewayToken/masterKey fields) returns a false-negative
+	// "no gateway token or master key configured" error and runGuardrail
+	// aborts even though the token is correctly resolved on disk. The
+	// historical wiring relied on NewGuardrailProxy() to call
+	// SetCredentials, but that runs *after* the probe — leaving the
+	// connector blind during the gate. NewGuardrailProxy() will call
+	// SetCredentials() again with the same values (idempotent restore).
+	masterKey := deriveMasterKey(s.cfg.DataDir)
+	conn.SetCredentials(apiToken, masterKey)
+
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.cfg.DataDir,
 		ProxyAddr: proxyAddr,

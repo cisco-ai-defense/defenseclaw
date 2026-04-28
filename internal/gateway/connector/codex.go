@@ -30,6 +30,17 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+// codexReservedProviderIDs are the built-in Codex provider IDs that
+// cannot appear under [model_providers.*]. Codex 5.x (PR
+// openai/codex#12024, March 2026) hard-fails at startup with
+// "model_providers contains reserved built-in provider IDs" if any
+// of these are present. To redirect the built-in `openai` provider
+// at a proxy, set the top-level `openai_base_url` field instead.
+// (`ollama` and `lmstudio` have no public top-level override; we
+// strip them on Setup so a stale entry from an older config doesn't
+// keep the user's Codex stuck in the rejection path.)
+var codexReservedProviderIDs = []string{"openai", "ollama", "lmstudio"}
+
 // CodexConnector handles all security surfaces for OpenAI Codex.
 // LLM traffic: rewrites [model_providers.*].base_url in
 // ~/.codex/config.toml to route through the DefenseClaw proxy, and
@@ -488,7 +499,23 @@ type codexConfigBackup struct {
 	// Per-provider base_url values keyed by provider name. Only
 	// providers that had an explicit base_url are recorded; providers
 	// without one are restored by deleting the proxy override we added.
+	// Reserved IDs (openai/ollama/lmstudio) are NOT tracked here —
+	// see ReservedProviderBlocks for the full-block backup of those.
 	OriginalBaseURLs map[string]string `json:"original_base_urls"`
+	// ReservedProviderBlocks holds the entire [model_providers.<id>]
+	// table for any reserved built-in IDs (openai, ollama, lmstudio)
+	// that were present in the operator's pristine config. We strip
+	// those tables on Setup because Codex 5.x rejects them at startup
+	// (PR openai/codex#12024); Teardown restores them verbatim so an
+	// operator who downgrades Codex still gets their original config
+	// back. JSON-encoded so the in-memory shape (nested
+	// map[string]interface{}) survives the on-disk round trip.
+	ReservedProviderBlocks map[string]json.RawMessage `json:"reserved_provider_blocks,omitempty"`
+	// HadOpenAIBaseURL records whether the operator's pristine config
+	// already had a top-level openai_base_url field, and what it was.
+	// On Teardown we restore the original value or delete our override.
+	HadOpenAIBaseURL      bool   `json:"had_openai_base_url"`
+	OriginalOpenAIBaseURL string `json:"original_openai_base_url,omitempty"`
 	// HadHooksKey tracks whether config.toml already had a top-level
 	// [hooks] table so Teardown can decide between restoring the
 	// original value vs. deleting the key we added. OriginalHooks
@@ -553,7 +580,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		backupExists = true
 	}
 
-	backup := codexConfigBackup{OriginalBaseURLs: map[string]string{}}
+	backup := codexConfigBackup{
+		OriginalBaseURLs:       map[string]string{},
+		ReservedProviderBlocks: map[string]json.RawMessage{},
+	}
 	if !backupExists {
 		if existing, ok := cfg["hooks"]; ok {
 			backup.HadHooksKey = true
@@ -561,8 +591,28 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				backup.OriginalHooks = raw
 			}
 		}
+		// Capture the operator's pre-DefenseClaw openai_base_url so
+		// Teardown can put it back. Empty string is a valid value
+		// (the field exists but was unset to "" by the operator), so
+		// we use a separate bool flag rather than treating "" as "absent".
+		if existing, ok := cfg["openai_base_url"].(string); ok {
+			backup.HadOpenAIBaseURL = true
+			backup.OriginalOpenAIBaseURL = existing
+		}
 		if providers, ok := cfg["model_providers"].(map[string]interface{}); ok {
 			for name, p := range providers {
+				if isCodexReservedProviderID(name) {
+					// Save the entire reserved-id block so Teardown
+					// can restore it verbatim. Don't record its
+					// base_url under OriginalBaseURLs — that map
+					// drives the per-provider restore loop, and the
+					// reserved block round-trips through a separate
+					// path (see restoreCodexConfig).
+					if raw, err := json.Marshal(p); err == nil {
+						backup.ReservedProviderBlocks[name] = raw
+					}
+					continue
+				}
 				if pm, ok := p.(map[string]interface{}); ok {
 					if bu, ok := pm["base_url"].(string); ok {
 						backup.OriginalBaseURLs[name] = bu
@@ -583,6 +633,13 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if b, err := c.loadConfigBackup(opts.DataDir); err == nil {
 			cur, _ := cfg["model_providers"].(map[string]interface{})
 			for name, provVal := range cur {
+				if isCodexReservedProviderID(name) {
+					// Reserved entries shouldn't be in cur after a
+					// post-fix Setup, but a pre-fix backup may have
+					// left one behind. Skip — we'll synthesize the
+					// canonical openai entry below.
+					continue
+				}
 				pm, ok := provVal.(map[string]interface{})
 				if !ok {
 					pm = map[string]interface{}{}
@@ -598,29 +655,71 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				}
 				pristineProviders[name] = clone
 			}
+			// Re-attach reserved blocks from the prior backup so the
+			// snapshot still has the original `openai` upstream for
+			// Route() to point at when codex sends `/c/codex/responses`.
+			for name, rawBlock := range b.ReservedProviderBlocks {
+				var block interface{}
+				if err := json.Unmarshal(rawBlock, &block); err == nil {
+					pristineProviders[name] = block
+				}
+			}
 		}
 	} else if cur, ok := cfg["model_providers"].(map[string]interface{}); ok {
 		for name, v := range cur {
 			pristineProviders[name] = v
 		}
 	}
+
+	// Always synthesize a canonical `openai` snapshot entry. Codex 5.x
+	// can't carry a [model_providers.openai] block in config.toml, so
+	// the operator's pristine config typically has no `openai` entry
+	// at all. Without this synthetic record, Route() would have no
+	// upstream URL to attach when codex sends `/c/codex/responses`,
+	// and the proxy would 502. Operator overrides (custom base_url
+	// via openai_base_url, or a backed-up reserved block) win.
+	if _, ok := pristineProviders["openai"]; !ok {
+		openaiBaseURL := "https://api.openai.com/v1"
+		if backup.HadOpenAIBaseURL && backup.OriginalOpenAIBaseURL != "" {
+			openaiBaseURL = backup.OriginalOpenAIBaseURL
+		} else if backupExists {
+			if b, err := c.loadConfigBackup(opts.DataDir); err == nil &&
+				b.HadOpenAIBaseURL && b.OriginalOpenAIBaseURL != "" {
+				openaiBaseURL = b.OriginalOpenAIBaseURL
+			}
+		}
+		pristineProviders["openai"] = map[string]interface{}{
+			"name":     "openai",
+			"base_url": openaiBaseURL,
+			"env_key":  "OPENAI_API_KEY",
+		}
+	}
 	c.SetProviderSnapshot(buildCodexProviderSnapshot(pristineProviders))
 
 	proxyURL := "http://" + opts.ProxyAddr + "/c/codex"
+
+	// Built-in `openai` redirect: must use the top-level openai_base_url
+	// field, NOT a [model_providers.openai] block. Codex 5.x (PR
+	// openai/codex#12024) treats `openai`, `ollama`, and `lmstudio` as
+	// reserved built-in provider IDs and refuses to start with the
+	// error: "model_providers contains reserved built-in provider IDs:
+	// `openai`. Built-in providers cannot be overridden."
+	cfg["openai_base_url"] = proxyURL
+
+	// Strip any reserved-ID entries already present in the config —
+	// either from a pristine pre-DefenseClaw config (rare, since older
+	// Codex accepted them) or from a previous DefenseClaw setup that
+	// pre-dated this fix. Their original blocks are preserved in
+	// backup.ReservedProviderBlocks for Teardown.
 	providers, _ := cfg["model_providers"].(map[string]interface{})
-	if providers == nil {
-		providers = map[string]interface{}{}
-	}
-	if len(providers) == 0 {
-		// No providers declared — create a default openai entry so the
-		// operator's Codex install routes even without a hand-written
-		// provider block.
-		providers["openai"] = map[string]interface{}{
-			"name":     "openai",
-			"base_url": proxyURL,
-			"env_key":  "OPENAI_API_KEY",
+	if providers != nil {
+		for _, id := range codexReservedProviderIDs {
+			delete(providers, id)
 		}
-	} else {
+		// Rewrite remaining (custom-named) providers to route through
+		// the proxy. Codex still honors per-provider base_url for
+		// non-built-in IDs (e.g. `openrouter`, `azure`, `groq`, etc.),
+		// so this is the correct path for those.
 		for name, p := range providers {
 			pm, ok := p.(map[string]interface{})
 			if !ok {
@@ -629,8 +728,15 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			pm["base_url"] = proxyURL
 			providers[name] = pm
 		}
+		if len(providers) > 0 {
+			cfg["model_providers"] = providers
+		} else {
+			// Avoid leaving an empty [model_providers] table behind —
+			// it's harmless but adds visual noise to the operator's
+			// config.toml. Codex tolerates the key being absent.
+			delete(cfg, "model_providers")
+		}
 	}
-	cfg["model_providers"] = providers
 
 	// Codex's [hooks] table is an inline struct (HookEventsToml) with
 	// per-event fields. It is NOT a path to a hooks.json file — passing
@@ -755,6 +861,18 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 	return out
 }
 
+// isCodexReservedProviderID reports whether name is one of the
+// built-in provider IDs Codex 5.x rejects under [model_providers.*].
+// See codexReservedProviderIDs for the full list and rationale.
+func isCodexReservedProviderID(name string) bool {
+	for _, id := range codexReservedProviderIDs {
+		if id == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	backup, err := c.loadConfigBackup(opts.DataDir)
 	if err != nil {
@@ -771,6 +889,19 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		return
 	}
 
+	// Restore the top-level openai_base_url to the operator's pristine
+	// value (or remove it entirely if they hadn't set one). This is
+	// the inverse of the Setup-time `cfg["openai_base_url"] = proxyURL`.
+	if backup.HadOpenAIBaseURL {
+		cfg["openai_base_url"] = backup.OriginalOpenAIBaseURL
+	} else {
+		delete(cfg, "openai_base_url")
+	}
+
+	// Restore non-reserved provider base_urls. Reserved blocks are
+	// re-attached below from a separate backup channel — restoring
+	// them here would skip operators whose original config had a
+	// [model_providers.openai] entry that we stripped on Setup.
 	if providers, ok := cfg["model_providers"].(map[string]interface{}); ok {
 		for name, p := range providers {
 			pm, ok := p.(map[string]interface{})
@@ -783,6 +914,28 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 				delete(pm, "base_url")
 			}
 			providers[name] = pm
+		}
+	}
+
+	// Re-attach the original reserved-ID blocks (openai/ollama/lmstudio)
+	// if the operator had any in their pristine config. We restore
+	// verbatim — even though current Codex rejects them, the operator
+	// had them for a reason (e.g. they downgraded back to a Codex
+	// release that accepted overrides) and Teardown's contract is
+	// "pre-DefenseClaw shape", not "current-Codex-validated shape".
+	if len(backup.ReservedProviderBlocks) > 0 {
+		providers, _ := cfg["model_providers"].(map[string]interface{})
+		if providers == nil {
+			providers = map[string]interface{}{}
+		}
+		for name, raw := range backup.ReservedProviderBlocks {
+			var block interface{}
+			if err := json.Unmarshal(raw, &block); err == nil {
+				providers[name] = block
+			}
+		}
+		if len(providers) > 0 {
+			cfg["model_providers"] = providers
 		}
 	}
 

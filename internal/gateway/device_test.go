@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -54,6 +55,41 @@ func TestRepairPairing(t *testing.T) {
 		}
 	})
 
+	t.Run("platform matches runtime.GOOS so OpenClaw doesn't flag metadata-upgrade", func(t *testing.T) {
+		// Regression: device.go used to hard-code platform="linux"
+		// in the paired.json entry, but the connect handshake
+		// (client.go) always reports runtime.GOOS — so on macOS the
+		// two disagreed and OpenClaw rejected every connect with
+		// `pairing required: device identity changed and must be
+		// re-approved (NOT_PAIRED)`, leaving the gateway link stuck
+		// in RECONNECTING forever even with auto-repair active.
+		// If you ever change the platform field, update the
+		// handshake too — the two MUST agree byte-for-byte.
+		home := t.TempDir()
+		if err := device.RepairPairing(home); err != nil {
+			t.Fatalf("repair pairing: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, ".openclaw", "devices", "paired.json"))
+		if err != nil {
+			t.Fatalf("read paired.json: %v", err)
+		}
+		var paired map[string]map[string]interface{}
+		if err := json.Unmarshal(data, &paired); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		entry, ok := paired[device.DeviceID]
+		if !ok {
+			t.Fatalf("device entry missing for id=%s", device.DeviceID)
+		}
+		got, _ := entry["platform"].(string)
+		if got != runtime.GOOS {
+			t.Errorf("platform = %q, want runtime.GOOS = %q\n\nThis is the metadata-upgrade regression: hardcoding the platform makes paired.json disagree with the connect handshake on every non-Linux host, causing an infinite NOT_PAIRED loop.", got, runtime.GOOS)
+		}
+		if got == "linux" && runtime.GOOS != "linux" {
+			t.Fatalf("platform was hardcoded to %q on a non-linux host (runtime.GOOS=%q) — this is the exact regression that caused the gateway RECONNECTING bug; do not revert", got, runtime.GOOS)
+		}
+	})
+
 	t.Run("preserves existing devices", func(t *testing.T) {
 		devicesDir := filepath.Join(sandboxHome, ".openclaw", "devices")
 		os.MkdirAll(devicesDir, 0o755)
@@ -84,6 +120,13 @@ func TestRepairPairing(t *testing.T) {
 }
 
 func TestIsAuthError(t *testing.T) {
+	// The first cases below are the EXACT wire formats OpenClaw emits
+	// (see node_modules/openclaw/dist/connect-error-details-*.js Ee
+	// and Se). Past regression: isAuthError used to look for
+	// "pairing_required" (underscore) and "not paired" (lowercased
+	// phrase), neither of which match these messages, so the
+	// auto-repair code path went dead. Keep these literals — they
+	// are copy-paste from production gateway.log.
 	tests := []struct {
 		err  error
 		want bool
@@ -95,6 +138,17 @@ func TestIsAuthError(t *testing.T) {
 		{fmt.Errorf("token_mismatch"), true},
 		{fmt.Errorf("Pairing_Required"), true},
 		{fmt.Errorf("device not paired with gateway"), true},
+
+		// Real OpenClaw NOT_PAIRED messages — the four sub-reasons
+		// (not-paired, metadata-upgrade, role-upgrade, scope-upgrade)
+		// — must all trigger auto-repair. Anything less leaves the
+		// gateway flapping in RECONNECTING.
+		{fmt.Errorf("gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)"), true},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device identity changed and must be re-approved (NOT_PAIRED)"), true},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)"), true},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)"), true},
+		{fmt.Errorf("websocket: close 1008 (policy violation): pairing required: device identity changed and must be re-approved (requestId: eabe39af-7a72-4331-8271-03e16e635db2)"), true},
+
 		{fmt.Errorf("connection refused"), false},
 		{fmt.Errorf("timeout"), false},
 	}
