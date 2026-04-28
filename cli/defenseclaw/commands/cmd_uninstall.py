@@ -19,8 +19,23 @@
 Removes DefenseClaw artifacts from the system in a predictable,
 scriptable way so operators aren't left with a mess after evaluating
 the tool. ``reset`` is the "lose my data" button — it wipes
-``~/.defenseclaw`` but keeps the binaries and the OpenClaw plugin
-in place so ``defenseclaw quickstart`` can reinstall cleanly.
+``~/.defenseclaw`` but keeps the binaries and the agent framework's
+plugin in place so ``defenseclaw quickstart`` can reinstall cleanly.
+
+Connector polymorphism (S7.3)
+-----------------------------
+Removal of the agent framework's defenseclaw artifacts is delegated to
+``defenseclaw-gateway connector teardown`` — the canonical sentinel that
+each connector adapter implements (S7.2). This keeps the Python flow
+honest: it never has to know how Codex / Claude Code / ZeptoClaw
+configure themselves, which previously meant the OpenClaw teardown was
+the only one that worked.
+
+The Python side still owns OpenClaw-specific revert paths as a fallback
+for very old gateway binaries (pre-S7.2) where the ``connector teardown``
+subcommand is not available. The fallback only ever runs against
+OpenClaw, never against the other adapters — calling
+``restore_openclaw_config`` against a Codex install would corrupt it.
 """
 
 from __future__ import annotations
@@ -35,6 +50,13 @@ import click
 from defenseclaw import config as config_module
 
 
+# Connectors whose teardown the Python CLI knows how to perform locally
+# without going through ``defenseclaw-gateway connector teardown``. This
+# is the conservative fallback path used when the gateway binary is too
+# old to expose the connector subcommand.
+_PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
+
+
 @dataclass
 class UninstallPlan:
     """Aggregated summary of what an uninstall/reset intends to do."""
@@ -47,6 +69,10 @@ class UninstallPlan:
     data_dir: str = ""
     openclaw_config_file: str = ""
     openclaw_home: str = ""
+    # connector is the active framework adapter to tear down. Resolved
+    # from cfg.active_connector() at plan-build time and surfaced in
+    # _render_plan so the operator sees what's about to be touched.
+    connector: str = "openclaw"
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +151,31 @@ def reset_cmd(yes: bool) -> None:
 # Planning + execution
 # ---------------------------------------------------------------------------
 
+def _resolve_active_connector(cfg) -> str:
+    """Return the active connector for ``cfg``, lowercased.
+
+    Mirrors :meth:`Config.active_connector` but tolerates older
+    in-process configs that haven't been migrated yet — the same
+    pattern used in :mod:`cmd_setup_sandbox`. We can't rely on
+    ``Config.active_connector`` existing because ``_build_plan`` is
+    called even when config loading raised.
+    """
+    if cfg is None:
+        return "openclaw"
+    if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
+        try:
+            name = (cfg.active_connector() or "").strip().lower()
+            if name:
+                return name
+        except Exception:
+            pass
+    if hasattr(cfg, "guardrail") and hasattr(cfg.guardrail, "connector"):
+        name = (cfg.guardrail.connector or "").strip().lower()
+        if name:
+            return name
+    return "openclaw"
+
+
 def _build_plan(
     *,
     wipe_data: bool,
@@ -139,6 +190,7 @@ def _build_plan(
     # rather than blocking the uninstall.
     openclaw_config_file = ""
     openclaw_home = ""
+    cfg = None
     try:
         cfg = config_module.load()
         openclaw_config_file = cfg.claw.config_file
@@ -146,6 +198,8 @@ def _build_plan(
     except Exception:
         openclaw_home = os.path.expanduser("~/.openclaw")
         openclaw_config_file = os.path.join(openclaw_home, "openclaw.json")
+
+    connector = _resolve_active_connector(cfg)
 
     return UninstallPlan(
         stop_gateway=True,
@@ -156,6 +210,7 @@ def _build_plan(
         data_dir=data_dir,
         openclaw_config_file=openclaw_config_file,
         openclaw_home=openclaw_home,
+        connector=connector,
     )
 
 
@@ -163,10 +218,19 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     click.echo()
     click.echo("  ── Uninstall plan ────────────────────────────────────")
     click.echo()
+    click.echo(f"  • active connector:    {plan.connector}")
     click.echo(f"  • stop sidecar:        {'yes' if plan.stop_gateway else 'no'}")
-    click.echo(f"  • revert openclaw.json: {'yes' if plan.revert_openclaw else 'no'} "
-               f"({plan.openclaw_config_file})")
-    click.echo(f"  • remove plugin:        {'yes' if plan.remove_plugin else 'no'}")
+    if plan.connector == "openclaw":
+        click.echo(
+            f"  • revert openclaw.json: {'yes' if plan.revert_openclaw else 'no'} "
+            f"({plan.openclaw_config_file})"
+        )
+        click.echo(f"  • remove plugin:        {'yes' if plan.remove_plugin else 'no'}")
+    else:
+        click.echo(
+            f"  • teardown {plan.connector}:    "
+            f"{'yes (via gateway connector teardown)' if plan.revert_openclaw else 'no'}"
+        )
     click.echo(f"  • wipe {plan.data_dir}: {'yes' if plan.remove_data_dir else 'no'}")
     click.echo(f"  • remove binaries:     {'yes' if plan.remove_binaries else 'no'}")
     click.echo()
@@ -176,8 +240,12 @@ def _execute_plan(plan: UninstallPlan) -> None:
     if plan.stop_gateway:
         _stop_gateway()
     if plan.revert_openclaw:
-        _revert_openclaw(plan)
-    if plan.remove_plugin:
+        _connector_teardown(plan)
+    if plan.remove_plugin and plan.connector == "openclaw":
+        # Plugin removal is OpenClaw-specific. For other connectors the
+        # gateway sentinel teardown above already removed the
+        # connector's hook scripts and config patches, so there is
+        # nothing additional to do here.
         _remove_plugin(plan)
     if plan.remove_data_dir:
         _remove_data_dir(plan.data_dir)
@@ -197,8 +265,99 @@ def _stop_gateway() -> None:
         click.echo(f"  ⚠ could not stop sidecar: {exc}")
 
 
-def _revert_openclaw(plan: UninstallPlan) -> None:
-    """Restore openclaw.json, preferring the pristine backup if we have it."""
+def _gateway_supports_connector_teardown() -> bool:
+    """Return True iff the local ``defenseclaw-gateway`` exposes the
+    ``connector teardown`` subcommand introduced in S7.2.
+
+    Older binaries print a usage error that includes ``unknown command``
+    on stderr; the subprocess returncode is also non-zero. We detect
+    by asking for ``--help`` on the ``connector`` subcommand — which is
+    a non-destructive probe — and checking exit code + output.
+    """
+    gw = shutil.which("defenseclaw-gateway")
+    if gw is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [gw, "connector", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    return "teardown" in combined and "list-backups" in combined
+
+
+def _connector_teardown(plan: UninstallPlan) -> None:
+    """Run connector teardown via the canonical sentinel, falling back
+    to the OpenClaw-specific Python helpers when the gateway binary
+    is too old (pre-S7.2) or the connector isn't OpenClaw.
+
+    For non-OpenClaw connectors the Python fallback path is **not**
+    safe — calling ``restore_openclaw_config`` against a Codex install
+    would corrupt it — so we hard-fail in that case with a clear
+    remediation pointing at the gateway upgrade path.
+    """
+    if _gateway_supports_connector_teardown():
+        if _run_gateway_connector_teardown(plan.connector):
+            return
+        click.echo(
+            f"  ⚠ gateway connector teardown for {plan.connector} reported errors — "
+            f"see output above"
+        )
+        if plan.connector != "openclaw":
+            return
+
+    if plan.connector in _PYTHON_FALLBACK_CONNECTORS:
+        _revert_openclaw_python(plan)
+        return
+
+    click.echo(
+        f"  ⚠ no Python fallback for connector '{plan.connector}'.\n"
+        f"     Upgrade defenseclaw-gateway to v0.7+ (introduces "
+        f"'connector teardown') and re-run 'defenseclaw uninstall'."
+    )
+
+
+def _run_gateway_connector_teardown(connector: str) -> bool:
+    """Invoke ``defenseclaw-gateway connector teardown --connector <name>``.
+
+    Returns True on success (rc == 0), False on any error. stdout/stderr
+    is forwarded to the operator so they can see exactly what each
+    adapter restored.
+    """
+    gw = shutil.which("defenseclaw-gateway")
+    if gw is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [gw, "connector", "teardown", "--connector", connector],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        click.echo(f"  ⚠ gateway connector teardown failed to launch: {exc}")
+        return False
+    if proc.stdout:
+        for line in proc.stdout.splitlines():
+            click.echo(f"  · {line}")
+    if proc.stderr and proc.returncode != 0:
+        for line in proc.stderr.splitlines():
+            click.echo(f"  ⚠ {line}")
+    if proc.returncode == 0:
+        click.echo(f"  ✓ {connector} teardown via gateway sentinel")
+        return True
+    return False
+
+
+def _revert_openclaw_python(plan: UninstallPlan) -> None:
+    """OpenClaw-specific revert path used as a fallback when the gateway
+    sentinel is unavailable. NOT safe for other connectors."""
     from defenseclaw.guardrail import (
         pristine_backup_path,
         restore_openclaw_config,

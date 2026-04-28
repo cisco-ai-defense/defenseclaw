@@ -25,11 +25,13 @@ Commands are dispatched in parallel via ``ThreadPoolExecutor`` and deduplicated
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
+from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
@@ -79,22 +81,26 @@ def build_claw_aibom(
     live: bool = True,
     categories: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Collect the agent inventory.
+    """Collect a connector-agnostic agent-framework inventory.
 
-    For the OpenClaw connector (default), runs ``openclaw … --json`` commands
-    in parallel and merges results. For other connectors, builds the inventory
-    from the filesystem using ``cfg.skill_dirs()``, ``cfg.plugin_dirs()``,
-    and ``cfg.mcp_servers()``.
+    Dispatches via :meth:`Config.active_connector`. For OpenClaw —
+    the historical default — *live=True* shells out to ``openclaw …
+    --json`` commands in parallel; for Codex / Claude Code / ZeptoClaw
+    we walk the filesystem under :func:`connector_paths.skill_dirs`,
+    :func:`connector_paths.plugin_dirs`, and
+    :func:`connector_paths.mcp_servers`.
 
-    Use *categories* to restrict which sections are collected (default: all).
+    *categories* restricts which sections are collected (default: all).
+    *live=False* always returns the disk-only shape (no subprocess
+    calls, no filesystem walk).
     """
-    connector = (cfg.guardrail.connector or "openclaw").lower()
     cats = _resolve_categories(categories)
+    connector = cfg.active_connector()
+    if connector != "openclaw" and live:
+        return _build_aibom_from_filesystem(cfg, connector, cats)
+
     claw_home = cfg.claw_home_dir()
     now = datetime.now(timezone.utc).isoformat()
-
-    if connector != "openclaw":
-        return _build_filesystem_aibom(cfg, cats, claw_home, now)
 
     if live:
         cache, errors = _fetch_all(_needed_commands(cats))
@@ -129,65 +135,6 @@ def build_claw_aibom(
         ),
         "memory": _parse_memory(cache.get("memory_status")) if "memory" in cats else [],
         "errors": errors,
-    }
-    out["summary"] = _build_summary(out)
-    return out
-
-
-def _build_filesystem_aibom(
-    cfg: Config,
-    cats: set[str],
-    claw_home: str,
-    now: str,
-) -> dict[str, Any]:
-    """Build inventory from the filesystem for non-OpenClaw connectors."""
-    import os
-
-    connector = (cfg.guardrail.connector or "unknown").lower()
-    skills: list[dict[str, Any]] = []
-    if "skills" in cats:
-        for skill_dir in cfg.skill_dirs():
-            if not os.path.isdir(skill_dir):
-                continue
-            for entry in sorted(os.listdir(skill_dir)):
-                path = os.path.join(skill_dir, entry)
-                if os.path.isdir(path):
-                    skills.append({"name": entry, "baseDir": path, "source": "directory"})
-
-    plugins: list[dict[str, Any]] = []
-    if "plugins" in cats or "tools" in cats:
-        for plugin_dir in cfg.plugin_dirs():
-            if not os.path.isdir(plugin_dir):
-                continue
-            for entry in sorted(os.listdir(plugin_dir)):
-                path = os.path.join(plugin_dir, entry)
-                if os.path.isdir(path):
-                    plugins.append({"id": entry, "name": entry, "source": "directory"})
-
-    mcp_entries: list[dict[str, Any]] = []
-    if "mcp" in cats:
-        for s in cfg.mcp_servers():
-            mcp_entries.append({
-                "name": s.name,
-                "transport": s.transport,
-                "command": s.command,
-                "url": s.url,
-            })
-
-    out: dict[str, Any] = {
-        "version": INVENTORY_VERSION,
-        "generated_at": now,
-        "connector": connector,
-        "claw_home": claw_home,
-        "live": False,
-        "skills": skills if "skills" in cats else [],
-        "plugins": plugins if "plugins" in cats else [],
-        "mcp": mcp_entries if "mcp" in cats else [],
-        "agents": [],
-        "tools": [],
-        "model_providers": [],
-        "memory": [],
-        "errors": [],
     }
     out["summary"] = _build_summary(out)
     return out
@@ -1281,5 +1228,243 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
         vector = s.get("vector", {})
         if isinstance(vector, dict):
             row["vector_enabled"] = vector.get("enabled", False)
+        rows.append(row)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Non-OpenClaw filesystem adapter (S4.3)
+# ---------------------------------------------------------------------------
+#
+# Codex, Claude Code, and ZeptoClaw don't expose a ``<framework> …
+# --json`` style introspection CLI, so we discover their installed
+# components by walking the directory layouts documented in
+# defenseclaw.connector_paths. Categories that are OpenClaw-only
+# concepts (agents, models, memory, tools-as-plugin-export) come back
+# as empty lists with a clear "errors" entry pointing the reader at
+# the connector-specific surface that owns that concept.
+
+_FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
+    "agents": "agents are not a first-class concept on this connector",
+    "tools": "tool registry is owned by each plugin's manifest",
+    "models": "model providers are configured inside the framework",
+    "memory": "memory backend is private to the framework",
+}
+
+
+def _build_aibom_from_filesystem(
+    cfg: Config,
+    connector: str,
+    cats: frozenset[str],
+) -> dict[str, Any]:
+    """Build an inventory by walking the on-disk skill / plugin / MCP
+    layout for non-OpenClaw connectors.
+
+    Mirrors the schema produced by the OpenClaw CLI path so callers
+    (``defenseclaw aibom``, OPA enrichment, JSON serialization) can
+    treat the result uniformly.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    errors: list[dict[str, str]] = []
+
+    skills: list[dict[str, Any]] = []
+    if "skills" in cats:
+        skills = _enumerate_skills_filesystem(cfg)
+
+    plugins: list[dict[str, Any]] = []
+    if "plugins" in cats:
+        plugins = _enumerate_plugins_filesystem(cfg)
+
+    mcps: list[dict[str, Any]] = []
+    if "mcp" in cats:
+        mcps = _enumerate_mcp_filesystem(cfg)
+
+    # Populate "errors" with informational notes for categories that
+    # don't translate to non-OpenClaw connectors. This keeps the
+    # output schema stable while telling operators why those buckets
+    # are empty.
+    for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
+        if cat_key in cats:
+            errors.append({
+                "command": f"{connector}:{cat_key}",
+                "error": note,
+            })
+
+    out: dict[str, Any] = {
+        "version": INVENTORY_VERSION,
+        "generated_at": now,
+        "connector": connector,
+        "openclaw_config": _expand(cfg.claw.config_file),
+        "claw_home": cfg.claw_home_dir(),
+        "claw_mode": cfg.claw.mode,
+        "live": True,
+        "skills": skills,
+        "plugins": plugins,
+        "mcp": mcps,
+        "agents": [],
+        "tools": [],
+        "model_providers": [],
+        "memory": [],
+        "errors": errors,
+    }
+    out["summary"] = _build_summary(out)
+    return out
+
+
+def _enumerate_skills_filesystem(cfg: Config) -> list[dict[str, Any]]:
+    """Walk every directory in ``cfg.skill_dirs()`` and emit one row
+    per immediate subdirectory.
+
+    A skill is treated as the directory itself; its ``id`` is the
+    basename. ``eligible`` is True if the directory contains at
+    least one of: SKILL.md, skill.json, README.md (matches the
+    discovery contract used by the connector-specific OTel
+    component scanner).
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for skill_dir in cfg.skill_dirs():
+        if not os.path.isdir(skill_dir):
+            continue
+        try:
+            entries = os.listdir(skill_dir)
+        except OSError:
+            continue
+        for entry in sorted(entries):
+            full = os.path.join(skill_dir, entry)
+            if not os.path.isdir(full):
+                continue
+            if entry in seen:
+                continue
+            seen.add(entry)
+            row: dict[str, Any] = {
+                "id": entry,
+                "source": skill_dir,
+                "eligible": _skill_dir_is_eligible(full),
+                "enabled": True,
+                "bundled": False,
+                "path": full,
+            }
+            description = _read_skill_description(full)
+            if description:
+                row["description"] = description
+            rows.append(row)
+    return rows
+
+
+def _skill_dir_is_eligible(path: str) -> bool:
+    for marker in ("SKILL.md", "skill.json", "README.md"):
+        if os.path.isfile(os.path.join(path, marker)):
+            return True
+    return False
+
+
+def _read_skill_description(path: str) -> str:
+    """Return the first non-empty line of SKILL.md / README.md, if any.
+
+    Bounded to 2 KiB so we don't accidentally slurp a multi-MB README
+    into the inventory dict.
+    """
+    for marker in ("SKILL.md", "README.md"):
+        marker_path = os.path.join(path, marker)
+        if not os.path.isfile(marker_path):
+            continue
+        try:
+            with open(marker_path, encoding="utf-8", errors="replace") as f:
+                text = f.read(2048)
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip().lstrip("#").strip()
+            if stripped:
+                return stripped[:200]
+    return ""
+
+
+def _enumerate_plugins_filesystem(cfg: Config) -> list[dict[str, Any]]:
+    """One row per plugin directory under ``cfg.plugin_dirs()``.
+
+    A plugin is treated as a directory containing one of the
+    documented manifest names (matches plugin_scanner._MANIFEST_CANDIDATES
+    after S2.3): package.json, manifest.json, plugin.json,
+    openclaw.plugin.json, .codex-plugin/plugin.json,
+    .claude-plugin/plugin.json.
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for plugin_dir in cfg.plugin_dirs():
+        if not os.path.isdir(plugin_dir):
+            continue
+        try:
+            entries = os.listdir(plugin_dir)
+        except OSError:
+            continue
+        for entry in sorted(entries):
+            if entry == "cache":
+                # Codex / ZeptoClaw use a "cache" sibling for transient
+                # downloads; not a plugin in its own right.
+                continue
+            full = os.path.join(plugin_dir, entry)
+            if not os.path.isdir(full):
+                continue
+            if entry in seen:
+                continue
+            seen.add(entry)
+            manifest = _detect_plugin_manifest(full)
+            row: dict[str, Any] = {
+                "id": entry,
+                "name": entry,
+                "version": "",
+                "origin": plugin_dir,
+                "enabled": True,
+                "status": "loaded" if manifest else "no-manifest",
+                "path": full,
+            }
+            if manifest:
+                row["manifest"] = manifest
+            rows.append(row)
+    return rows
+
+
+_PLUGIN_MANIFEST_FILES: tuple[str, ...] = (
+    "package.json",
+    "manifest.json",
+    "plugin.json",
+    "openclaw.plugin.json",
+    os.path.join(".codex-plugin", "plugin.json"),
+    os.path.join(".claude-plugin", "plugin.json"),
+)
+
+
+def _detect_plugin_manifest(plugin_root: str) -> str:
+    for rel in _PLUGIN_MANIFEST_FILES:
+        candidate = os.path.join(plugin_root, rel)
+        if os.path.isfile(candidate):
+            return rel
+    return ""
+
+
+def _enumerate_mcp_filesystem(cfg: Config) -> list[dict[str, Any]]:
+    """Read MCP servers via the connector-aware
+    :meth:`Config.mcp_servers` helper and convert
+    :class:`MCPServerEntry` rows into the inventory dict shape used by
+    the OpenClaw CLI parser.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry in cfg.mcp_servers():
+        row: dict[str, Any] = {
+            "id": entry.name,
+            "source": f"{cfg.active_connector()} mcp registry",
+        }
+        if entry.command:
+            row["command"] = entry.command
+        if entry.args:
+            row["args"] = list(entry.args)
+        if entry.url:
+            row["url"] = entry.url
+        if entry.transport:
+            row["transport"] = entry.transport
+        if entry.env:
+            row["env_keys"] = sorted(entry.env.keys())
         rows.append(row)
     return rows

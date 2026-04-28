@@ -208,7 +208,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             }, f)
         return oc_home
 
-    @patch("defenseclaw.guardrail.subprocess.run")
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run")
     @patch("defenseclaw.config.openclaw_bin", return_value="openclaw")
     def test_cli_uninstall_when_openclaw_available(self, _mock_bin, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
@@ -222,7 +222,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["openclaw", "plugins", "uninstall", "defenseclaw"])
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_manual_fallback_removes_directory(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)
@@ -233,7 +233,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             ext = os.path.join(tmpdir, "extensions", "defenseclaw")
             self.assertFalse(os.path.exists(ext))
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_manual_fallback_cleans_config(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)
@@ -252,7 +252,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
         os.name == "nt" and not os.environ.get("CI"),
         "os.symlink requires admin or Developer Mode on Windows",
     )
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_manual_fallback_removes_symlink(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             ext_parent = os.path.join(tmpdir, "extensions")
@@ -273,7 +273,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             result = uninstall_openclaw_plugin(tmpdir)
             self.assertEqual(result, "")
 
-    @patch("defenseclaw.guardrail.subprocess.run")
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run")
     def test_cli_failure_falls_back_to_manual(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stderr="error", stdout="")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -285,7 +285,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             ext = os.path.join(tmpdir, "extensions", "defenseclaw")
             self.assertFalse(os.path.exists(ext))
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_removes_from_plugins_allow(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)
@@ -297,7 +297,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             self.assertNotIn("defenseclaw", cfg["plugins"]["allow"])
             self.assertIn("other", cfg["plugins"]["allow"])
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_timeout_on_cli_falls_back_to_manual(self, _mock_run):
         _mock_run.side_effect = subprocess.TimeoutExpired(cmd="openclaw", timeout=30)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -640,7 +640,7 @@ class TestDeriveMasterKey(unittest.TestCase):
             key2 = _derive_master_key(key_file)
             self.assertEqual(key1, key2)
 
-    @patch("defenseclaw.guardrail.Path")
+    @patch("defenseclaw.llm_keys.Path")
     def test_raises_when_file_missing(self, mock_path):
         mock_path.home.return_value = Path("/nonexistent-home")
         with self.assertRaises(RuntimeError):

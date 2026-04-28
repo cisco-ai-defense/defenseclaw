@@ -28,6 +28,7 @@ import subprocess
 
 import click
 
+from defenseclaw import connector_paths
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
@@ -92,12 +93,18 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
         click.echo(json.dumps(out, indent=2))
         return
 
+    connector = app.cfg.active_connector()
     if not servers:
-        click.echo("No MCP servers configured in openclaw.json (mcp.servers).")
+        click.echo(
+            f"No MCP servers configured for connector={connector!r} "
+            "(checked the connector-specific source: openclaw.json / "
+            ".claude/settings.json / .mcp.json / "
+            ".zeptoclaw/config.json).",
+        )
         return
 
     console = Console()
-    table = Table(title="MCP Servers (from openclaw.json)")
+    table = Table(title=f"MCP Servers (connector={connector})")
     table.add_column("Name", style="bold")
     table.add_column("Transport")
     table.add_column("Command")
@@ -272,8 +279,11 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         app.cfg.cisco_ai_defense,
         llm=resolved_llm,
     )
-    if not quiet:
-        click.echo(f"Scanning MCP server: {target}")
+    # NOTE: pre-S6.4 this printed "Scanning MCP server: <target>"; the
+    # new shared scan UX renders that information once via
+    # ``_scan_ui.render_preamble`` + a per-target glyph line, so we
+    # no longer need a per-server announce-line here.
+    _ = quiet  # parameter kept for back-compat with existing callers
 
     try:
         result = scanner.scan(target, server_entry=server_entry)
@@ -289,29 +299,30 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
 
 
 def _print_scan_result(result: ScanResult, as_json: bool) -> None:
+    """Print the *details* of a scan result.
+
+    The shared ``_scan_ui`` preamble + per-target glyph + summary is
+    rendered by the caller (S6.4); this function now only emits the
+    JSON payload, or — in human mode — the per-finding breakdown that
+    appears underneath the per-target line. Keeping the breakdown
+    here so call sites don't have to replicate the per-finding loop.
+    """
     if as_json:
         click.echo(result.to_json())
-    elif result.is_clean():
-        click.secho("  Status: CLEAN", fg="green")
-    else:
-        sev = result.max_severity()
-        color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
-        click.secho(
-            f"  Status: {sev} ({len(result.findings)} findings)",
-            fg=color,
-        )
-        click.echo()
-        for f in result.findings:
-            sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
-            click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
-            click.echo(f" {f.title}")
-            if f.location:
-                click.echo(f"      Location: {f.location}")
-            if f.description:
-                desc = f.description[:120] + "..." if len(f.description) > 120 else f.description
-                click.echo(f"      {desc}")
-            if f.remediation:
-                click.echo(f"      Fix: {f.remediation}")
+        return
+    if result.is_clean():
+        return
+    for f in result.findings:
+        sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
+        click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+        click.echo(f" {f.title}")
+        if f.location:
+            click.echo(f"      Location: {f.location}")
+        if f.description:
+            desc = f.description[:120] + "..." if len(f.description) > 120 else f.description
+            click.echo(f"      {desc}")
+        if f.remediation:
+            click.echo(f"      Fix: {f.remediation}")
 
 
 @mcp.command()
@@ -338,28 +349,78 @@ def scan(
     TARGET can be a server name from openclaw.json or a direct URL.
     Use --all to scan every configured server.
     """
+    import time
+
+    from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
+
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
 
     if scan_all:
         servers = app.cfg.mcp_servers()
         if not servers:
-            click.echo("No MCP servers configured in openclaw.json.")
+            click.echo("No MCP servers configured.")
             return
-        has_findings = False
-        for s in servers:
-            scan_target = s.url or s.name
-            if not as_json:
-                click.echo(f"\n{'─' * 40}")
-            result = _run_scan(app, scan_target, analyzers,
-                               scan_prompts, scan_resources, scan_instructions,
-                               server_entry=s, quiet=as_json)
-            if result:
+
+        scan_targets = [(s, s.url or s.name) for s in servers]
+        ctx = _scan_ui.ScanContext.for_mcp(
+            connector=connector,
+            paths=sorted({t for _, t in scan_targets}),
+            as_json=as_json,
+        )
+        _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
+
+        clean = blocked = errored = 0
+        started = time.monotonic()
+
+        for s, scan_target in scan_targets:
+            result = _run_scan(
+                app, scan_target, analyzers,
+                scan_prompts, scan_resources, scan_instructions,
+                server_entry=s, quiet=as_json,
+            )
+            if result is None:
+                errored += 1
+                _scan_ui.render_per_target_status(
+                    ctx, target=s.name, verdict=_scan_ui.VERDICT_ERROR,
+                    detail="see error log above",
+                )
+                continue
+            if as_json:
                 _print_scan_result(result, as_json)
-                if not result.is_clean():
-                    has_findings = True
+            else:
+                if result.is_clean():
+                    clean += 1
+                    _scan_ui.render_per_target_status(
+                        ctx, target=s.name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                    )
+                else:
+                    blocked += 1
+                    _scan_ui.render_per_target_status(
+                        ctx,
+                        target=s.name,
+                        verdict=_scan_ui.VERDICT_BLOCKED,
+                        detail=f"max severity: {result.max_severity()}",
+                        findings=len(result.findings),
+                    )
+                _print_scan_result(result, as_json)
+
         if not as_json:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            _scan_ui.render_summary(
+                ctx,
+                clean=clean,
+                blocked=blocked,
+                errored=errored,
+                total=clean + blocked + errored,
+                duration_ms=duration_ms,
+            )
             from defenseclaw.commands import hint
-            if has_findings:
+            if blocked:
                 hint("View alerts:  defenseclaw alerts")
             else:
                 hint("Scan skills:  defenseclaw skill scan all")
@@ -375,11 +436,43 @@ def scan(
         click.echo(f"BLOCKED: {target} — remove from block list first", err=True)
         raise SystemExit(2)
 
+    ctx = _scan_ui.ScanContext.for_mcp(
+        connector=connector,
+        paths=[resolved],
+        as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=1)
+
+    started = time.monotonic()
     result = _run_scan(app, resolved, analyzers,
                        scan_prompts, scan_resources, scan_instructions,
                        server_entry=entry, quiet=as_json)
     if result:
-        _print_scan_result(result, as_json)
+        if as_json:
+            _print_scan_result(result, as_json)
+        else:
+            if result.is_clean():
+                _scan_ui.render_per_target_status(
+                    ctx, target=target, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                )
+            else:
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=target,
+                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    detail=f"max severity: {result.max_severity()}",
+                    findings=len(result.findings),
+                )
+            _print_scan_result(result, as_json)
+            duration_ms = int((time.monotonic() - started) * 1000)
+            _scan_ui.render_summary(
+                ctx,
+                clean=1 if result.is_clean() else 0,
+                blocked=0 if result.is_clean() else 1,
+                errored=0,
+                total=1,
+                duration_ms=duration_ms,
+            )
         if not as_json:
             from defenseclaw.commands import hint
             if result.is_clean():
@@ -473,8 +566,17 @@ def unblock(app: AppContext, target: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# set / unset  — delegate writes to ``openclaw config set/unset``
+# set / unset  — connector-aware: delegate writes to the active
+# connector's preferred surface.
 # ---------------------------------------------------------------------------
+#
+# OpenClaw uses ``openclaw config set/unset`` (schema-validated +
+# hot-reloaded). Claude Code and Codex have no equivalent CLI, so
+# we patch ``~/.claude/settings.json`` and ``./.mcp.json`` directly
+# via the atomic JSON helpers in :mod:`defenseclaw.connector_paths`.
+# ZeptoClaw owns its config.json from the TUI and does not expose a
+# safe write surface — we surface a clear error rather than racing
+# ZeptoClaw's autosave.
 
 def _openclaw_config_set(path: str, value: str) -> None:
     """Write a value via ``openclaw config set`` (schema-validated, hot-reloaded)."""
@@ -502,103 +604,36 @@ def _openclaw_config_unset(path: str) -> None:
         raise click.ClickException(f"openclaw config unset failed: {detail}")
 
 
-# -- Connector-aware config writers ----------------------------------------
+def _set_mcp_via_connector(cfg, name: str, entry: dict) -> None:
+    """Dispatch ``mcp set`` to the active connector's write surface.
 
-_CONNECTOR_CONFIG_PATHS: dict[str, str] = {
-    "claudecode": "~/.claude/settings.json",
-    "codex": ".mcp.json",
-    "zeptoclaw": "~/.zeptoclaw/config.json",
-}
-
-
-def _connector_config_set_mcp(connector: str, name: str, entry_json: str) -> None:
-    """Write an MCP server entry to the active connector's config file."""
-    if connector in ("", "openclaw"):
-        _openclaw_config_set(f"mcp.servers.{name}", entry_json)
-        return
-
-    import os
-    from pathlib import Path
-
-    entry = json.loads(entry_json)
-    path_template = _CONNECTOR_CONFIG_PATHS.get(connector)
-    if path_template is None:
-        raise click.ClickException(
-            f"MCP config write is not supported for connector {connector!r}. "
-            "Add it manually to your agent's config file."
-        )
-
-    if path_template.startswith("~"):
-        config_path = str(Path.home() / path_template[2:])
-    elif not os.path.isabs(path_template):
-        config_path = os.path.join(os.getcwd(), path_template)
-    else:
-        config_path = path_template
-
+    Translates :class:`connector_paths.MCPWriteUnsupportedError` into a
+    user-friendly :class:`click.ClickException` so the CLI exits 1
+    with a clean error instead of a stack trace.
+    """
     try:
-        with open(config_path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
-    except json.JSONDecodeError:
-        raise click.ClickException(f"Cannot parse {config_path} as JSON")
-
-    if connector == "claudecode":
-        data.setdefault("mcpServers", {})[name] = entry
-    elif connector == "codex":
-        data.setdefault("mcpServers", {})[name] = entry
-    elif connector == "zeptoclaw":
-        data.setdefault("mcp", {}).setdefault("servers", {})[name] = entry
-
-    os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
-    with open(config_path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-
-
-def _connector_config_unset_mcp(connector: str, name: str) -> None:
-    """Remove an MCP server entry from the active connector's config file."""
-    if connector in ("", "openclaw"):
-        _openclaw_config_unset(f"mcp.servers.{name}")
-        return
-
-    import os
-    from pathlib import Path
-
-    path_template = _CONNECTOR_CONFIG_PATHS.get(connector)
-    if path_template is None:
-        raise click.ClickException(
-            f"MCP config write is not supported for connector {connector!r}. "
-            "Remove it manually from your agent's config file."
+        connector_paths.set_mcp_server(
+            cfg.active_connector(),
+            name,
+            entry,
+            openclaw_config_setter=_openclaw_config_set,
         )
+    except connector_paths.MCPWriteUnsupportedError as e:
+        raise click.ClickException(str(e)) from e
 
-    if path_template.startswith("~"):
-        config_path = str(Path.home() / path_template[2:])
-    elif not os.path.isabs(path_template):
-        config_path = os.path.join(os.getcwd(), path_template)
-    else:
-        config_path = path_template
 
+def _unset_mcp_via_connector(cfg, name: str) -> None:
+    """Dispatch ``mcp unset`` to the active connector's write surface.
+    Symmetric with :func:`_set_mcp_via_connector`.
+    """
     try:
-        with open(config_path) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        raise click.ClickException(f"Cannot read {config_path}")
-
-    removed = False
-    if connector == "claudecode":
-        removed = data.get("mcpServers", {}).pop(name, None) is not None
-    elif connector == "codex":
-        removed = data.get("mcpServers", {}).pop(name, None) is not None
-    elif connector == "zeptoclaw":
-        removed = data.get("mcp", {}).get("servers", {}).pop(name, None) is not None
-
-    if not removed:
-        raise click.ClickException(f"MCP server {name!r} not found in {config_path}")
-
-    with open(config_path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+        connector_paths.unset_mcp_server(
+            cfg.active_connector(),
+            name,
+            openclaw_config_unsetter=_openclaw_config_unset,
+        )
+    except connector_paths.MCPWriteUnsupportedError as e:
+        raise click.ClickException(str(e)) from e
 
 
 @mcp.command("set")
@@ -620,7 +655,7 @@ def set_server(
     env_pairs: tuple[str, ...],
     skip_scan: bool,
 ) -> None:
-    """Add or update an MCP server in the active connector's config.
+    """Add or update an MCP server in OpenClaw config.
 
     Scans the server before adding unless --skip-scan is set.
     Rejects servers with HIGH/CRITICAL findings.
@@ -726,8 +761,7 @@ def set_server(
         else:
             click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
-    _connector_config_set_mcp(connector, name, json.dumps(entry))
+    _set_mcp_via_connector(app.cfg, name, entry)
 
     if scan_required:
         post_decision = evaluate_admission(
@@ -755,16 +789,15 @@ def set_server(
 @click.argument("name")
 @pass_ctx
 def unset_server(app: AppContext, name: str) -> None:
-    """Remove an MCP server from the active connector's config."""
+    """Remove an MCP server from OpenClaw config."""
     servers = app.cfg.mcp_servers()
     if not any(s.name == name for s in servers):
-        connector = app.cfg.guardrail.connector or "openclaw"
         raise click.ClickException(
-            f"MCP server {name!r} not found in {connector} config."
+            f"MCP server {name!r} not found for connector="
+            f"{app.cfg.active_connector()!r}."
         )
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
-    _connector_config_unset_mcp(connector, name)
+    _unset_mcp_via_connector(app.cfg, name)
     click.secho(f"Removed MCP server: {name}", fg="yellow")
 
     if app.logger:

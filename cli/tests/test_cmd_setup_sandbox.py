@@ -443,5 +443,137 @@ class TestPrePairDevice(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# S4.5 — connector-aware sandbox setup
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSandboxConnector(unittest.TestCase):
+    """``_validate_sandbox_connector`` must abort early on non-OpenClaw."""
+
+    def _make_cfg(self, connector_value: str | None) -> object:
+        """Build a stand-in for FullConfig that exposes the same surface
+        the validator reads from."""
+        class _Guardrail:
+            def __init__(self, connector: str | None):
+                self.connector = connector
+
+        class _Cfg:
+            def __init__(self, connector_value: str | None):
+                self.guardrail = _Guardrail(connector_value)
+
+            # If callers prefer the modern Config.active_connector
+            # entry point, this matches the post-S4.1 shape.
+            def active_connector(self) -> str:
+                return (self.guardrail.connector or "openclaw").strip().lower() or "openclaw"
+
+        return _Cfg(connector_value)
+
+    def test_openclaw_passes(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        # Should not raise.
+        _validate_sandbox_connector(self._make_cfg("openclaw"))
+
+    def test_empty_string_treated_as_openclaw(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        _validate_sandbox_connector(self._make_cfg(""))
+
+    def test_none_treated_as_openclaw(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        _validate_sandbox_connector(self._make_cfg(None))
+
+    def test_codex_aborts_with_clickexception(self):
+        import click as _click
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        with self.assertRaises(_click.ClickException) as ctx:
+            _validate_sandbox_connector(self._make_cfg("codex"))
+        msg = str(ctx.exception.message)
+        self.assertIn("guardrail.connector=openclaw", msg)
+        self.assertIn("codex", msg.lower())
+        # Remediation guidance must point at host mode.
+        self.assertIn("defenseclaw setup", msg)
+
+    def test_claudecode_aborts(self):
+        import click as _click
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        with self.assertRaises(_click.ClickException):
+            _validate_sandbox_connector(self._make_cfg("claudecode"))
+
+    def test_zeptoclaw_aborts(self):
+        import click as _click
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        with self.assertRaises(_click.ClickException):
+            _validate_sandbox_connector(self._make_cfg("zeptoclaw"))
+
+    def test_uppercase_connector_normalized(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        # Case-insensitive — "OpenClaw" must be accepted.
+        _validate_sandbox_connector(self._make_cfg("OpenClaw"))
+
+    def test_whitespace_only_treated_as_openclaw(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _validate_sandbox_connector,
+        )
+        _validate_sandbox_connector(self._make_cfg("   "))
+
+
+class TestSandboxFrameworkRoots(unittest.TestCase):
+    def _make_cfg(self, connector: str) -> object:
+        class _Guardrail:
+            def __init__(self, c):
+                self.connector = c
+
+        class _Cfg:
+            def __init__(self, c):
+                self.guardrail = _Guardrail(c)
+
+            def active_connector(self) -> str:
+                return (self.guardrail.connector or "openclaw").strip().lower()
+
+        return _Cfg(connector)
+
+    def test_openclaw_returns_dotopenclaw(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _sandbox_framework_roots,
+        )
+        roots = _sandbox_framework_roots(self._make_cfg("openclaw"), "/home/sandbox")
+        self.assertEqual(roots, ["/home/sandbox/.openclaw"])
+
+    def test_unknown_connector_returns_empty(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _sandbox_framework_roots,
+        )
+        # Defense-in-depth — even if a caller bypasses validation, the
+        # iteration over [] is safe.
+        self.assertEqual(
+            _sandbox_framework_roots(self._make_cfg("codex"), "/home/sandbox"),
+            [],
+        )
+
+
+class TestSupportedSandboxConnectors(unittest.TestCase):
+    """Lock the supported set so adding a connector requires explicit intent."""
+
+    def test_only_openclaw(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            SUPPORTED_SANDBOX_CONNECTORS,
+        )
+        self.assertEqual(SUPPORTED_SANDBOX_CONNECTORS, frozenset({"openclaw"}))
+
+
 if __name__ == "__main__":
     unittest.main()

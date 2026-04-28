@@ -99,6 +99,7 @@ def scan(
       defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml\n
       defenseclaw plugin scan /path/to/plugin --profile strict --lenient
     """
+    from defenseclaw.commands import _scan_ui
     from defenseclaw.scanner.plugin import PluginScannerWrapper
 
     connector = app.cfg.guardrail.connector.lower() or "openclaw"
@@ -118,6 +119,21 @@ def scan(
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+
+    # S6.2 — surface the connector and the concrete category list
+    # before kicking off the scan, so operators see what's being
+    # checked instead of an opaque "[plugin] scanning..." line.
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    ctx = _scan_ui.ScanContext.for_plugin(
+        connector=connector,
+        paths=[scan_dir],
+        as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=1)
     if not as_json:
         flags = []
         if policy_name:
@@ -127,8 +143,8 @@ def scan(
             flags.append(f"llm={model}")
         if profile:
             flags.append(f"profile={profile}")
-        flag_str = f" ({', '.join(flags)})" if flags else ""
-        click.echo(f"[plugin] scanning {scan_dir}{flag_str}...")
+        if flags:
+            click.echo(f"  Options: {', '.join(flags)}")
 
     try:
         result = scanner.scan(scan_dir, **scan_options)
@@ -142,25 +158,51 @@ def scan(
         app.logger.log_scan(result)
 
     if as_json:
+        # JSON contract is locked: ScanResult.to_json() — automation
+        # parses it. Don't reshape via render_json_payload here.
         click.echo(result.to_json())
-    elif result.is_clean():
-        click.secho(f"  Plugin: {os.path.basename(scan_dir)}", bold=True)
-        click.secho("  Verdict: CLEAN", fg="green")
-    else:
-        sev = result.max_severity()
-        color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
-        click.secho(f"  Plugin:   {os.path.basename(scan_dir)}", bold=True)
-        click.echo(f"  Duration: {result.duration.total_seconds():.2f}s")
-        click.secho(f"  Verdict:  {sev} ({len(result.findings)} findings)", fg=color)
-        click.echo()
-        for f in result.findings:
-            sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
-            click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
-            click.echo(f" {f.title}")
-            if f.location:
-                click.echo(f"      Location: {f.location}")
-            if f.remediation:
-                click.echo(f"      Fix: {f.remediation}")
+        return
+
+    target_name = os.path.basename(scan_dir)
+    if result.is_clean():
+        _scan_ui.render_per_target_status(
+            ctx,
+            target=target_name,
+            verdict=_scan_ui.VERDICT_CLEAN,
+            findings=0,
+        )
+        _scan_ui.render_summary(
+            ctx,
+            clean=1, blocked=0, errored=0, total=1,
+            duration_ms=int(result.duration.total_seconds() * 1000),
+        )
+        return
+
+    sev = result.max_severity()
+    _scan_ui.render_per_target_status(
+        ctx,
+        target=target_name,
+        verdict=_scan_ui.VERDICT_BLOCKED,
+        detail=f"max severity: {sev}",
+        findings=len(result.findings),
+    )
+    click.echo()
+    for f in result.findings:
+        sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
+        click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+        click.echo(f" {f.title}")
+        if f.location:
+            click.echo(f"      Location: {f.location}")
+        if f.remediation:
+            click.echo(f"      Fix: {f.remediation}")
+    _scan_ui.render_summary(
+        ctx,
+        clean=0,
+        blocked=1,
+        errored=0,
+        total=1,
+        duration_ms=int(result.duration.total_seconds() * 1000),
+    )
 
 
 def _build_scan_options(
