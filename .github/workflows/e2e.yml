@@ -1269,6 +1269,15 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      # internal/gateway/connector/openclaw.go has `//go:embed
+      # all:openclaw_extension`. Without sync-openclaw-extension first
+      # there is no openclaw_extension/.placeholder to satisfy the
+      # embed and `go test ./...` fails to compile (CI run 25037878418
+      # exhibited exactly this failure on the matrix axis). The full
+      # `make plugin` is overkill here — a placeholder is enough since
+      # the matrix tests don't exercise OpenClaw extension runtime.
+      - name: Sync openclaw_extension placeholder
+        run: make sync-openclaw-extension
       # The Go connector lifecycle matrix runs the same test for every
       # connector; we use -run to filter to just one connector per
       # matrix cell so failures point at exactly which connector

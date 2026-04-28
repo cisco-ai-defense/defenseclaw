@@ -36,11 +36,30 @@ from defenseclaw import connector_paths
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
-# still import them from defenseclaw.config; keeping the aliases avoids
-# touching unrelated test files in this PR.
+# and runtime call sites in cmd_init.py still import them from
+# defenseclaw.config; keeping the aliases avoids touching unrelated test
+# files (and avoids breaking the public surface that other plugins
+# already depend on).
+#
+# noqa: F401 alone is not enough — ruff's import-sort autofix (I001) will
+# silently drop aliased imports that aren't referenced inside the
+# module body (because UI-level "imported but unused" rules treat the
+# alias as the dead name). We expose every alias as a module-level
+# attribute below so the autofix can no longer prune them, and we list
+# them in __all__ for explicit re-export semantics.
+from defenseclaw.connector_paths import MCPServerEntry  # noqa: F401
 from defenseclaw.connector_paths import (
-    MCPServerEntry,  # re-export for back-compat
-    )
+    _dedup as _dedup,
+)
+from defenseclaw.connector_paths import (
+    _parse_mcp_servers_dict as _parse_mcp_servers_dict,
+)
+from defenseclaw.connector_paths import (  # noqa: F401
+    _read_mcp_servers_from_openclaw_json as _read_mcp_servers_from_file,
+)
+from defenseclaw.connector_paths import (  # noqa: F401
+    _read_openclaw_json as _read_openclaw_config,
+)
 
 _log = logging.getLogger(__name__)
 
