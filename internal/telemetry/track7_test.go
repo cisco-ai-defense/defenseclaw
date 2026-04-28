@@ -36,7 +36,7 @@ func TestRecordRuntimeMetrics_Gauges(t *testing.T) {
 	if err := reader.Collect(ctx, &rm); err != nil {
 		t.Fatal(err)
 	}
-	assertGauge(t, rm, "defenseclaw.runtime.goroutines", 42, "goroutine")
+	assertGauge(t, rm, "defenseclaw.runtime.goroutines", 42, "{goroutine}")
 	assertGauge(t, rm, "defenseclaw.runtime.heap.alloc", 1024, "By")
 	assertGauge(t, rm, "defenseclaw.runtime.heap.objects", 99, "{object}")
 	assertGauge(t, rm, "defenseclaw.runtime.fd.in_use", 7, "{fd}")
