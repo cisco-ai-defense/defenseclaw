@@ -1251,7 +1251,269 @@ phase_health() {
     else
         skip "health: splunk" "state=$splunk_state"
     fi
+
+    # Connector health — present when a connector is configured and the
+    # guardrail is enabled. Core profile may not have one.
+    local conn_name conn_state
+    conn_name=$(echo "$health" | jq -r '.connector.name // empty' 2>/dev/null)
+    conn_state=$(echo "$health" | jq -r '.connector.state // empty' 2>/dev/null)
+    if [ -n "$conn_name" ]; then
+        if [ "$conn_state" = "running" ]; then
+            pass "health: connector '$conn_name' is running"
+        else
+            fail "health: connector '$conn_name' is running" "state=$conn_state"
+        fi
+    else
+        if is_full_live; then
+            skip "health: connector" "no connector in health (guardrail may be disabled)"
+        else
+            skip "health: connector" "core profile (no connector expected)"
+        fi
+    fi
+
     phase_timer_end "Phase 2"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 2B — Connector Architecture
+# ---------------------------------------------------------------------------
+phase_connector() {
+    echo ""
+    echo "=== Phase 2B: Connector Architecture [API/CLI] ==="
+    phase_timer_start
+
+    # ── 2B-1. Connector Registry API ──
+    local connectors_resp active_name connector_count connector_names
+    connectors_resp=$(curl_with_gateway_headers GET "$SIDECAR_URL/v1/connectors" 2>/dev/null || echo '{"error":"unreachable"}')
+    echo "  /v1/connectors response:"
+    echo "$connectors_resp" | jq '.' 2>/dev/null || echo "$connectors_resp"
+
+    if echo "$connectors_resp" | jq -e '.error' >/dev/null 2>&1; then
+        fail "connector registry: API reachable" "$(echo "$connectors_resp" | jq -r '.error' 2>/dev/null)"
+        phase_timer_end "Phase 2B"
+        return
+    fi
+    pass "connector registry: API reachable"
+
+    active_name=$(echo "$connectors_resp" | jq -r '.active // empty' 2>/dev/null)
+    connector_count=$(echo "$connectors_resp" | jq '.connectors | length' 2>/dev/null || echo "0")
+    connector_names=$(echo "$connectors_resp" | jq -r '[.connectors[].name] | sort | join(",")' 2>/dev/null || echo "")
+
+    # Verify all 4 built-in connectors are registered.
+    if [ "${connector_count:-0}" -ge 4 ]; then
+        pass "connector registry: has ${connector_count} connectors"
+    else
+        fail "connector registry: has >= 4 connectors" "got $connector_count"
+    fi
+
+    local expected_builtins=("claudecode" "codex" "openclaw" "zeptoclaw")
+    local builtins_ok=true
+    for name in "${expected_builtins[@]}"; do
+        if echo "$connector_names" | grep -q "$name"; then
+            pass "connector registry: built-in '$name' present"
+        else
+            fail "connector registry: built-in '$name' present" "not found in: $connector_names"
+            builtins_ok=false
+        fi
+    done
+
+    # Verify each connector entry has expected fields.
+    local field_check
+    field_check=$(echo "$connectors_resp" | jq '[.connectors[] | select(.name != "" and .description != "" and .source != "" and .tool_inspection_mode != "" and .subprocess_policy != "")] | length' 2>/dev/null || echo "0")
+    if [ "${field_check:-0}" -ge 4 ]; then
+        pass "connector registry: all entries have required fields"
+    else
+        fail "connector registry: all entries have required fields" "only $field_check entries fully populated"
+    fi
+
+    # Verify all built-in connectors report source="built-in".
+    local builtin_source_count
+    builtin_source_count=$(echo "$connectors_resp" | jq '[.connectors[] | select(.source == "built-in")] | length' 2>/dev/null || echo "0")
+    if [ "${builtin_source_count:-0}" -ge 4 ]; then
+        pass "connector registry: all built-in connectors have source=built-in"
+    else
+        fail "connector registry: all built-in connectors have source=built-in" "only $builtin_source_count with source=built-in"
+    fi
+
+    # ── 2B-2. Active Connector State ──
+    local state_file="$HOME/.defenseclaw/active_connector.json"
+    if is_full_live; then
+        # Full-live should have an active connector configured.
+        if [ -n "$active_name" ] && [ "$active_name" != "null" ] && [ "$active_name" != "unknown" ]; then
+            pass "connector state: active connector is '$active_name'"
+        else
+            skip "connector state: active connector" "active='$active_name' (guardrail may be disabled)"
+        fi
+
+        if [ -f "$state_file" ]; then
+            local state_name
+            state_name=$(jq -r '.name // empty' "$state_file" 2>/dev/null)
+            if [ -n "$state_name" ]; then
+                pass "connector state: active_connector.json present (name=$state_name)"
+            else
+                fail "connector state: active_connector.json readable" "file exists but name is empty"
+            fi
+        else
+            skip "connector state: active_connector.json" "file not present (guardrail may be disabled)"
+        fi
+    else
+        skip "connector state: active connector" "core profile"
+    fi
+
+    # ── 2B-3. Connector Health in /health ──
+    local health_resp conn_tool_mode conn_subprocess
+    health_resp=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    conn_tool_mode=$(echo "$health_resp" | jq -r '.connector.tool_inspection_mode // empty' 2>/dev/null)
+    conn_subprocess=$(echo "$health_resp" | jq -r '.connector.subprocess_policy // empty' 2>/dev/null)
+
+    if [ -n "$conn_tool_mode" ]; then
+        case "$conn_tool_mode" in
+            pre-execution|response-scan|both)
+                pass "connector health: tool_inspection_mode='$conn_tool_mode'"
+                ;;
+            *)
+                fail "connector health: tool_inspection_mode valid" "got '$conn_tool_mode'"
+                ;;
+        esac
+    else
+        skip "connector health: tool_inspection_mode" "no connector in /health"
+    fi
+
+    if [ -n "$conn_subprocess" ]; then
+        case "$conn_subprocess" in
+            sandbox|shims|none)
+                pass "connector health: subprocess_policy='$conn_subprocess'"
+                ;;
+            *)
+                fail "connector health: subprocess_policy valid" "got '$conn_subprocess'"
+                ;;
+        esac
+    else
+        skip "connector health: subprocess_policy" "no connector in /health"
+    fi
+
+    # ── 2B-4. Hook Scripts & Shims ──
+    local hooks_dir="$HOME/.defenseclaw/hooks"
+    local shims_dir="$HOME/.defenseclaw/shims"
+
+    if [ -d "$hooks_dir" ]; then
+        pass "connector hooks: hooks directory exists"
+
+        # Check generic inspection hooks (written for all connectors).
+        local generic_hooks=("inspect-tool.sh" "inspect-request.sh" "inspect-response.sh" "inspect-tool-response.sh")
+        for hook in "${generic_hooks[@]}"; do
+            if [ -f "$hooks_dir/$hook" ]; then
+                if [ -x "$hooks_dir/$hook" ]; then
+                    pass "connector hooks: $hook present and executable"
+                else
+                    fail "connector hooks: $hook executable" "file exists but not executable"
+                fi
+            else
+                skip "connector hooks: $hook" "not present (connector may not need it)"
+            fi
+        done
+
+        # Token file for hook scripts.
+        if [ -f "$hooks_dir/.token" ]; then
+            local token_perms
+            token_perms=$(stat -c '%a' "$hooks_dir/.token" 2>/dev/null || stat -f '%Lp' "$hooks_dir/.token" 2>/dev/null || echo "unknown")
+            if [ "$token_perms" = "600" ]; then
+                pass "connector hooks: .token file has restrictive permissions (600)"
+            else
+                fail "connector hooks: .token file permissions" "got $token_perms, expected 600"
+            fi
+        else
+            skip "connector hooks: .token file" "not present (loopback-only mode)"
+        fi
+    else
+        skip "connector hooks: hooks directory" "not present"
+    fi
+
+    if [ -d "$shims_dir" ]; then
+        pass "connector shims: shims directory exists"
+
+        # Check expected shim binaries.
+        local expected_shims=("curl" "wget" "ssh" "nc" "pip" "npm")
+        for shim in "${expected_shims[@]}"; do
+            if [ -f "$shims_dir/$shim" ]; then
+                if [ -x "$shims_dir/$shim" ]; then
+                    pass "connector shims: $shim present and executable"
+                else
+                    fail "connector shims: $shim executable" "file exists but not executable"
+                fi
+            else
+                skip "connector shims: $shim" "not present"
+            fi
+        done
+
+        # ncat should be a symlink to nc.
+        if [ -L "$shims_dir/ncat" ]; then
+            local ncat_target
+            ncat_target=$(readlink "$shims_dir/ncat" 2>/dev/null || echo "unknown")
+            if echo "$ncat_target" | grep -q "nc"; then
+                pass "connector shims: ncat is symlink to nc"
+            else
+                fail "connector shims: ncat symlink target" "points to '$ncat_target', expected nc"
+            fi
+        elif [ -f "$shims_dir/ncat" ]; then
+            pass "connector shims: ncat present (not symlink)"
+        else
+            skip "connector shims: ncat" "not present"
+        fi
+    else
+        skip "connector shims: shims directory" "not present"
+    fi
+
+    # ── 2B-5. Connector-Specific Hook Endpoints ──
+    # Verify that connector hook paths are exposed via the API.
+    if is_full_live && [ -n "$active_name" ] && [ "$active_name" != "null" ]; then
+        local hook_path=""
+        case "$active_name" in
+            claudecode) hook_path="/api/v1/claude-code/hook" ;;
+            codex)      hook_path="/api/v1/codex/hook" ;;
+        esac
+
+        if [ -n "$hook_path" ]; then
+            local hook_code
+            hook_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer $(get_gateway_token)" \
+                -H "Content-Type: application/json" \
+                -d '{}' \
+                "$SIDECAR_URL$hook_path" 2>/dev/null || echo "000")
+            # 200 or 400 (bad payload) means the endpoint is registered.
+            # 404 means the route was never mounted.
+            if [ "$hook_code" != "404" ] && [ "$hook_code" != "000" ]; then
+                pass "connector hooks: $active_name hook endpoint registered (HTTP $hook_code)"
+            else
+                fail "connector hooks: $active_name hook endpoint registered" "got HTTP $hook_code"
+            fi
+        else
+            skip "connector hooks: connector-specific endpoint" "$active_name does not expose a lifecycle hook"
+        fi
+    else
+        skip "connector hooks: connector-specific endpoint" "no active connector"
+    fi
+
+    # ── 2B-6. Inspection Endpoints ──
+    # The generic inspection endpoints should be reachable on all profiles.
+    local inspect_endpoints=("/api/v1/inspect/tool" "/api/v1/inspect/request" "/api/v1/inspect/response" "/api/v1/inspect/tool-response")
+    for ep in "${inspect_endpoints[@]}"; do
+        local ep_code
+        ep_code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $(get_gateway_token)" \
+            -H "Content-Type: application/json" \
+            -d '{"tool":"e2e-test","args":{}}' \
+            "$SIDECAR_URL$ep" 2>/dev/null || echo "000")
+        # 200, 400, or 422 means the endpoint is registered.
+        # 404 means the route was never mounted.
+        if [ "$ep_code" != "404" ] && [ "$ep_code" != "000" ]; then
+            pass "inspection endpoint: $ep reachable (HTTP $ep_code)"
+        else
+            fail "inspection endpoint: $ep reachable" "got HTTP $ep_code"
+        fi
+    done
+
+    phase_timer_end "Phase 2B"
 }
 
 # ---------------------------------------------------------------------------
@@ -3192,8 +3454,21 @@ phase_teardown() {
     echo "  Final sidecar status:"
     defenseclaw-gateway status 2>/dev/null || true
 
+    # Verify connector state before stopping.
+    local state_file="$HOME/.defenseclaw/active_connector.json"
+    if [ -f "$state_file" ]; then
+        echo "  Active connector state at teardown: $(cat "$state_file" 2>/dev/null)"
+    fi
+
     defenseclaw-gateway stop 2>/dev/null || true
     openclaw gateway stop 2>/dev/null || true
+
+    # Verify connector teardown cleaned up stale artifacts.
+    local shims_dir="$HOME/.defenseclaw/shims"
+    local hooks_dir="$HOME/.defenseclaw/hooks"
+    if [ -d "$shims_dir" ] && [ -n "$(ls -A "$shims_dir" 2>/dev/null)" ]; then
+        echo "  [warn] shims directory still populated after stop — may need manual cleanup"
+    fi
 
     if is_full_live && [ -f "$OPENCLAW_MODEL_BACKUP_PATH" ]; then
         echo "  Restoring OpenClaw model configuration..."
@@ -3253,6 +3528,7 @@ main() {
 
     phase_start || exit 1
     phase_health
+    phase_connector
     phase_skill_scanner
     phase_mcp_scanner
     phase_block_allow

@@ -352,6 +352,7 @@ jobs:
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
           cfg['guardrail']['mode'] = 'observe'
+          cfg['guardrail']['connector'] = 'openclaw'
 
           with open(cfg_path, 'w') as f:
               yaml.dump(cfg, f, default_flow_style=False)
@@ -1061,6 +1062,7 @@ jobs:
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
           cfg['guardrail']['mode'] = 'observe'
+          cfg['guardrail']['connector'] = 'openclaw'
 
           if os.environ.get('GUARDRAIL_ENABLED', '').lower() == 'true':
               cfg['guardrail']['enabled'] = True
