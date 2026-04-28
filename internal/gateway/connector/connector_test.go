@@ -3188,10 +3188,15 @@ func TestClaudeCode_Setup_Surface1_WritesEnvFiles(t *testing.T) {
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
 
 	c := NewClaudeCodeConnector()
+	// Enforcement mode required: writeEnvOverride only runs in the
+	// gated enforcement path. Default observability mode does not
+	// produce claudecode_env.sh / claudecode.env at all (claude code
+	// talks directly to api.anthropic.com).
 	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
+		DataDir:               dir,
+		ProxyAddr:             "127.0.0.1:4000",
+		APIAddr:               "127.0.0.1:18970",
+		ClaudeCodeEnforcement: true,
 	}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
@@ -3228,7 +3233,9 @@ func TestClaudeCode_Setup_WritesConnectorPrefix(t *testing.T) {
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
 
 	c := NewClaudeCodeConnector()
-	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	// Enforcement mode required: writeEnvOverride is gated on
+	// opts.ClaudeCodeEnforcement.
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", ClaudeCodeEnforcement: true}
 	if err := c.Setup(nil, opts); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
@@ -3263,6 +3270,82 @@ func TestClaudeCode_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "claudecode.env")); !os.IsNotExist(err) {
 		t.Error("claudecode.env should be removed after teardown")
+	}
+}
+
+// TestClaudeCode_Setup_DefaultObservability_NoEnvOverride is the
+// headline regression test for the claude-code observability default.
+// With ClaudeCodeEnforcement=false (the default), Setup must register
+// hooks (the entry point for tool-call telemetry into
+// /api/v1/claudecode/hook) but must NOT:
+//   - write claudecode_env.sh / claudecode.env (the
+//     ANTHROPIC_BASE_URL files that route claude code's data path
+//     through the DefenseClaw proxy)
+//   - install the subprocess sandbox JSON
+//
+// Without this test, a refactor that quietly re-engaged the env
+// override on the default install flow would silently break the
+// "no traffic interception for claude code" contract.
+func TestClaudeCode_Setup_DefaultObservability_NoEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	// ClaudeCodeEnforcement omitted == false (the production
+	// default).
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+	}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// Env-override files MUST NOT exist — claude code talks
+	// directly to api.anthropic.com in observability mode.
+	if _, err := os.Stat(filepath.Join(dir, "claudecode_env.sh")); err == nil {
+		t.Error("claudecode_env.sh was written in observability mode — proxy redirect should be skipped")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "claudecode.env")); err == nil {
+		t.Error("claudecode.env was written in observability mode — proxy redirect should be skipped")
+	}
+
+	// Subprocess sandbox JSON must NOT exist — that's
+	// enforcement-only. Hook can still POST to the API and read
+	// "allow" by default.
+	if _, err := os.Stat(filepath.Join(dir, "subprocess.json")); err == nil {
+		t.Error("subprocess.json was written in observability mode — sandbox is enforcement-only")
+	}
+
+	// Hooks MUST be registered — they're the telemetry entry
+	// point. patchClaudeCodeHooks runs unconditionally.
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings.json: %v", err)
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("settings.json missing hooks block in observability mode (got=%T)", settings["hooks"])
+	}
+	for _, evt := range []string{"PreToolUse", "PostToolUse", "UserPromptSubmit"} {
+		if _, ok := hooks[evt]; !ok {
+			t.Errorf("hooks.%s missing — telemetry event would be lost", evt)
+		}
 	}
 }
 

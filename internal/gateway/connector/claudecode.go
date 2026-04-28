@@ -75,8 +75,20 @@ func (c *ClaudeCodeConnector) AllowedHosts() []string {
 }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	if err := c.writeEnvOverride(opts); err != nil {
-		return fmt.Errorf("claudecode env override: %w", err)
+	// writeEnvOverride installs the ANTHROPIC_BASE_URL redirect that
+	// puts the DefenseClaw proxy in Claude Code's data path. Gated
+	// on opts.ClaudeCodeEnforcement so the default install runs in
+	// observability-only mode: claude code talks DIRECTLY to
+	// api.anthropic.com, no env-override file is written, and no
+	// proxy interception happens. Hooks (next block) and OTel env
+	// (the new patchClaudeCodeOtelEnv block — added in a follow-up
+	// commit) still run, giving complete telemetry without traffic
+	// interception. Operator can flip enforcement back on with
+	// guardrail.claudecode_enforcement_enabled: true in config.yaml.
+	if opts.ClaudeCodeEnforcement {
+		if err := c.writeEnvOverride(opts); err != nil {
+			return fmt.Errorf("claudecode env override: %w", err)
+		}
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -87,13 +99,25 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	hookScript := filepath.Join(hookDir, "claude-code-hook.sh")
+	// Hooks register unconditionally — they post to
+	// /api/v1/claudecode/hook (or the equivalent route) and are the
+	// entry point for tool-call telemetry on every install. In
+	// observability mode the hook returns "allow" because the
+	// subprocess sandbox JSON is absent; in enforcement mode the
+	// sandbox decision can also block.
 	if err := c.patchClaudeCodeHooks(opts, hookScript); err != nil {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
 
-	policy := ResolveSubprocessPolicy(SubprocessSandbox)
-	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
-		return fmt.Errorf("claudecode subprocess enforcement: %w", err)
+	// Subprocess sandbox is part of enforcement: it's consulted by
+	// claude-code-hook.sh's PreToolUse handler to decide whether to
+	// BLOCK a tool call. Skipped in observability mode — the hook
+	// still runs but always allows.
+	if opts.ClaudeCodeEnforcement {
+		policy := ResolveSubprocessPolicy(SubprocessSandbox)
+		if err := SetupSubprocessEnforcement(policy, opts); err != nil {
+			return fmt.Errorf("claudecode subprocess enforcement: %w", err)
+		}
 	}
 
 	return nil
