@@ -732,6 +732,58 @@ class TestDetectApiKeyEnvEdgeCases(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# picked_connector hint helper (S8.2 / F32)
+# ---------------------------------------------------------------------------
+
+class TestReadPickedConnector(unittest.TestCase):
+    """Unit tests for _read_picked_connector — the install-time hint reader."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-picked-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _write(self, contents: str) -> None:
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write(contents)
+
+    def test_returns_value_when_file_exists(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self._write("codex\n")
+        self.assertEqual(_read_picked_connector(self.tmp_dir), "codex")
+
+    def test_strips_whitespace_and_lowercases(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self._write("  CODEX  \n")
+        self.assertEqual(_read_picked_connector(self.tmp_dir), "codex")
+
+    def test_returns_none_when_file_missing(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self.assertIsNone(_read_picked_connector(self.tmp_dir))
+
+    def test_returns_none_for_empty_data_dir(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self.assertIsNone(_read_picked_connector(""))
+        self.assertIsNone(_read_picked_connector(None))
+
+    def test_returns_none_for_unknown_value(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self._write("malicious-rm-rf-slash\n")
+        self.assertIsNone(_read_picked_connector(self.tmp_dir))
+
+    def test_caps_read_size_against_huge_files(self):
+        """A pathologically large file must not be slurped into memory."""
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        # Pad the file with garbage well beyond the legitimate name.
+        # The reader bounds to 64 bytes so the trailing junk is ignored,
+        # and the leading garbage will not match a connector name —
+        # i.e. we must get None, not a hang or OOM.
+        self._write("x" * (1024 * 1024))
+        self.assertIsNone(_read_picked_connector(self.tmp_dir))
+
+
+# ---------------------------------------------------------------------------
 # setup guardrail CLI command
 # ---------------------------------------------------------------------------
 
@@ -856,6 +908,92 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: OpenClaw (openclaw)", result.output)
         self.assertIn("Connector setup will run automatically", result.output)
+
+    # ----- picked_connector hint (S8.2 / F32) ----------------------------
+
+    def test_picked_connector_hint_drives_default(self):
+        """`<data_dir>/picked_connector` defaults gc.connector when no flag is given."""
+        from defenseclaw.commands.cmd_setup import setup
+        # Simulate scripts/install.sh --connector codex having recorded
+        # the operator's choice. The CLI should pick it up without
+        # requiring --connector / --agent on every subsequent setup call.
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("codex\n")
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: Codex (codex)", result.output)
+
+    def test_explicit_connector_flag_beats_picked_hint(self):
+        """--connector wins over the install-time picked_connector hint."""
+        from defenseclaw.commands.cmd_setup import setup
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("codex\n")
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail",
+             "--non-interactive", "--connector", "claudecode",
+             "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: Claude Code (claudecode)", result.output)
+
+    def test_agent_alias_still_works(self):
+        """--agent is preserved as an alias of --connector for backward compat."""
+        from defenseclaw.commands.cmd_setup import setup
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail",
+             "--non-interactive", "--agent", "zeptoclaw",
+             "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
+
+    def test_picked_connector_hint_invalid_value_is_ignored(self):
+        """Garbage in picked_connector falls back to openclaw, not a crash."""
+        from defenseclaw.commands.cmd_setup import setup
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("not-a-connector\n")
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
+
+    def test_picked_connector_hint_does_not_override_explicit_existing(self):
+        """If gc.connector is already a non-default value, the hint must not flip it."""
+        from defenseclaw.commands.cmd_setup import setup
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("codex\n")
+        # Operator previously ran `setup guardrail --connector zeptoclaw`
+        # and saved it. The picked_connector hint must not silently
+        # downgrade their explicit choice on the next bare re-run.
+        self.app.cfg.guardrail.connector = "zeptoclaw"
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
 
     def test_shows_disable_instructions(self):
         from defenseclaw.commands.cmd_setup import setup

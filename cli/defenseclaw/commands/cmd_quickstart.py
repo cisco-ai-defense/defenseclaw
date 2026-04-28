@@ -75,6 +75,7 @@ from defenseclaw.context import AppContext
     help="Re-run all steps even if the environment is already initialized.",
 )
 @click.option(
+    "--connector",
     "--agent",
     "agent_name",
     type=click.Choice(
@@ -82,7 +83,9 @@ from defenseclaw.context import AppContext
         case_sensitive=False,
     ),
     default=None,
-    help="Agent framework connector (default: auto-detect or openclaw).",
+    help="Agent framework connector (alias: --agent). "
+         "Defaults to <data_dir>/picked_connector when set by the installer, "
+         "else auto-detect, else openclaw.",
 )
 @click.option(
     "--skip-gateway",
@@ -112,13 +115,31 @@ def quickstart_cmd(
     from defenseclaw.bootstrap import bootstrap_env
     from defenseclaw.commands.cmd_setup import (
         _detect_openclaw_gateway_token,
+        _read_picked_connector,
         execute_guardrail_setup,
     )
     from defenseclaw.credentials import mask
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
-    connector = agent_name or "openclaw"
+    # Connector resolution mirrors `setup guardrail --non-interactive`:
+    # explicit flag > install-time picked_connector hint > "openclaw".
+    # We deliberately skip filesystem auto-detect here because
+    # quickstart is a non-interactive flow used by `make all` and
+    # `install.sh --quickstart` — silently flipping the connector
+    # because ``~/.claude`` happens to exist on a developer's machine
+    # would surprise both the operator and CI. Resolving here (rather
+    # than inside execute_guardrail_setup) keeps the [3/5] / [4/5] log
+    # lines accurate so the operator sees which connector quickstart
+    # is actually configuring.
+    if agent_name:
+        connector = agent_name
+    else:
+        # We have not loaded the config yet, so use the canonical
+        # default data path. This matches the path the installer
+        # writes to (DEFENSECLAW_HOME or ~/.defenseclaw).
+        data_dir = str(cfg_mod.default_data_path())
+        connector = _read_picked_connector(data_dir) or "openclaw"
 
     click.echo()
     click.echo(f"  DefenseClaw v{__version__} — quickstart")
