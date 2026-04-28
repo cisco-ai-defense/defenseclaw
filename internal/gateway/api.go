@@ -1440,7 +1440,11 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, a.connectorName(), SharedAgentRegistry().AgentID(), tIn, tOut)
+			agentName := a.connectorName()
+			if reg := SharedAgentRegistry(); reg != nil && reg.AgentName() != "" {
+				agentName = reg.AgentName()
+			}
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, agentName, SharedAgentRegistry().AgentID(), tIn, tOut)
 		}
 	}
 
