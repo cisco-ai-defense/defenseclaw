@@ -42,6 +42,15 @@ EXPECTED_PROVENANCE_FIELDS = {
     "schema_version", "content_hash", "generation", "binary_version",
 }
 
+# Connector names emitted by Connector.Name() in
+# internal/gateway/connector/{openclaw,zeptoclaw,claudecode,codex}.go.
+# The empty string is a legal "no connector picked yet" placeholder
+# emitted by the gateway before `defenseclaw setup connector` has run.
+# These four names are the contract every downstream consumer
+# (Splunk APM dashboards, OTLP collector validation, audit drill-down)
+# pivots on; drift here is a multi-week diagnostic rabbit-hole.
+EXPECTED_CLAW_MODE_ENUM = {"openclaw", "zeptoclaw", "claudecode", "codex", ""}
+
 
 def load_json(path: Path) -> dict:
     try:
@@ -110,18 +119,49 @@ def check_envelope(doc: dict) -> bool:
     return ok
 
 
+def check_resource(doc: dict) -> bool:
+    """Pin the claw.mode enum on schemas/otel/resource.schema.json.
+
+    Splunk APM dashboards, OTLP collector validation, and audit
+    drill-down all key off this attribute. If a developer adds a new
+    connector and forgets to update the schema, downstream consumers
+    silently start dropping records — and the empty-string fallback
+    masks it for fresh installs that haven't picked a connector yet.
+    Pin the enum here so the drift is caught at lint time, not at
+    incident time.
+    """
+    props = doc.get("properties", {})
+    mode = props.get("defenseclaw.claw.mode", {})
+    enum = set(mode.get("enum") or [])
+    missing = EXPECTED_CLAW_MODE_ENUM - enum
+    extra = enum - EXPECTED_CLAW_MODE_ENUM
+    if missing or extra:
+        print(
+            "check_schemas: otel/resource.schema.json: defenseclaw.claw.mode "
+            f"enum drift missing={sorted(missing)} extra={sorted(extra)}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def main() -> int:
     if not SCHEMA_DIR.is_dir():
         print(f"check_schemas: schema dir not found: {SCHEMA_DIR}", file=sys.stderr)
         return 2
 
     ok = True
-    for path in sorted(SCHEMA_DIR.glob("*.json")):
+    # Validate top-level schemas/*.json plus subtree schemas (e.g.
+    # schemas/otel/*.json). The recursive walk catches additions like
+    # the OTel resource/metrics/span schemas that ship in nested
+    # directories and would otherwise drift unchecked.
+    for path in sorted(SCHEMA_DIR.rglob("*.json")):
         doc = load_json(path)
         if not ensure_valid_meta(doc, path):
             ok = False
             continue
-        print(f"check_schemas: {path.name} OK")
+        rel = path.relative_to(SCHEMA_DIR)
+        print(f"check_schemas: {rel} OK")
 
     audit_path = SCHEMA_DIR / "audit-event.json"
     if audit_path.exists():
@@ -134,6 +174,14 @@ def main() -> int:
             ok = False
     else:
         print("check_schemas: gateway-event-envelope.json missing", file=sys.stderr)
+        ok = False
+
+    resource_path = SCHEMA_DIR / "otel" / "resource.schema.json"
+    if resource_path.exists():
+        if not check_resource(load_json(resource_path)):
+            ok = False
+    else:
+        print("check_schemas: schemas/otel/resource.schema.json missing", file=sys.stderr)
         ok = False
 
     return 0 if ok else 1

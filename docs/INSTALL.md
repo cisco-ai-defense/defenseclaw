@@ -656,7 +656,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw (default) | nemoclaw | opencode | claudecode (future)
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 
