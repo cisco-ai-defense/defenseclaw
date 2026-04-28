@@ -11,10 +11,12 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -136,6 +138,36 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 			dir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
+			// Plan E1 / round-3 follow-up: when the gateway binary
+			// was built without the OpenClaw extension (CI runner
+			// uses `make sync-openclaw-extension` which writes a
+			// .placeholder), OpenClaw.Setup() returns "openclaw
+			// extension is not bundled" and switchConnectorLocked
+			// rolls back. That's an environment-not-built skip,
+			// not a parity violation. Pre-flight the Setup against
+			// a throwaway connector so we can skip cleanly instead
+			// of fighting the rollback path.
+			if target == "openclaw" {
+				probe, _ := reg.Get("openclaw")
+				probe.SetCredentials("tok", "mk")
+				probeOpts := connector.SetupOpts{
+					DataDir:   t.TempDir(),
+					ProxyAddr: "127.0.0.1:4000",
+					APIAddr:   "127.0.0.1:18970",
+				}
+				if err := probe.Setup(context.Background(), probeOpts); err != nil {
+					if strings.Contains(err.Error(), "openclaw extension is not bundled") {
+						t.Skipf("openclaw extension not bundled in this gateway build — same skip case as TestConnectorLifecycle_Matrix/openclaw")
+					}
+					// Best-effort cleanup; the test continues either
+					// way and a real Setup error will surface again
+					// from the actual switchConnectorLocked call below.
+					_ = probe.Teardown(context.Background(), probeOpts)
+				} else {
+					_ = probe.Teardown(context.Background(), probeOpts)
+				}
+			}
+
 			// Always start from codex (a different connector when
 			// target != codex; same connector when target == codex
 			// — the no-op path is also a valid parity case).
@@ -192,6 +224,29 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
+
+			// Same OpenClaw extension probe as
+			// TestSwitchConnector_PerConnectorPersistsState — skip
+			// the openclaw cell when the gateway binary was built
+			// with only the placeholder.
+			if target == "openclaw" {
+				probe, _ := reg.Get("openclaw")
+				probe.SetCredentials("tok", "mk")
+				probeOpts := connector.SetupOpts{
+					DataDir:   t.TempDir(),
+					ProxyAddr: "127.0.0.1:4000",
+					APIAddr:   "127.0.0.1:18970",
+				}
+				if err := probe.Setup(context.Background(), probeOpts); err != nil {
+					if strings.Contains(err.Error(), "openclaw extension is not bundled") {
+						t.Skipf("openclaw extension not bundled in this gateway build")
+					}
+					_ = probe.Teardown(context.Background(), probeOpts)
+				} else {
+					_ = probe.Teardown(context.Background(), probeOpts)
+				}
+			}
+
 			start, _ := reg.Get("codex")
 			start.SetCredentials("tok", "mk")
 
