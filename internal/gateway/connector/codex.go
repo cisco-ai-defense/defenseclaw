@@ -488,11 +488,66 @@ func (c *CodexConnector) cleanupLegacyEnvFiles(opts SetupOpts) {
 // CodexConfigPathOverride allows tests to redirect the config path.
 var CodexConfigPathOverride string
 
+// CodexAuthPathOverride allows tests to redirect ~/.codex/auth.json.
+// Used by detectCodexChatGPTMode() so we can exercise both auth-mode
+// branches without touching the operator's real auth file.
+var CodexAuthPathOverride string
+
 func codexConfigPath() string {
 	if CodexConfigPathOverride != "" {
 		return CodexConfigPathOverride
 	}
 	return filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+}
+
+func codexAuthPath() string {
+	if CodexAuthPathOverride != "" {
+		return CodexAuthPathOverride
+	}
+	return filepath.Join(os.Getenv("HOME"), ".codex", "auth.json")
+}
+
+// codexChatGPTBackendURL is the upstream Codex CLI talks to when the
+// user is logged in via ChatGPT/Plus (auth_mode="chatgpt"). The real
+// codex CLI source builds requests as `<base>/responses` against this
+// URL, so it doubles as the `base_url` we synthesize into the provider
+// snapshot — Route() concatenates the incoming `/responses` suffix to
+// produce `https://chatgpt.com/backend-api/codex/responses`, which is
+// the only endpoint the ChatGPT access token is valid against.
+//
+// IMPORTANT: openai's `api.openai.com/v1/responses` endpoint will NOT
+// accept this token, so synthesizing api.openai.com when the operator
+// is in chatgpt mode produces a permanent 401 loop ("Reconnecting…")
+// in the codex TUI. See also: gateway-rooted regression where every
+// codex request returned a `passthrough → https://api.openai.com/v1/
+// responses` line in gateway.log followed by no usable response.
+const codexChatGPTBackendURL = "https://chatgpt.com/backend-api/codex"
+
+// detectCodexChatGPTMode returns true when ~/.codex/auth.json exists
+// and reports `"auth_mode": "chatgpt"`. Returns false (with no error
+// surfaced) when the file is missing, malformed, or names a different
+// auth_mode — both are valid states (operator may not have logged in
+// yet, or may be using OPENAI_API_KEY).
+//
+// Why we don't propagate read errors: this function is consulted from
+// patchCodexConfig() to *choose a default*, and missing/corrupt
+// auth.json is a legitimate state that should not block Setup. The
+// caller falls back to the api.openai.com default in that case, which
+// is correct for the OPENAI_API_KEY auth path.
+func detectCodexChatGPTMode() bool {
+	raw, err := os.ReadFile(codexAuthPath())
+	if err != nil {
+		return false
+	}
+	// We only need a single field; ignore everything else (auth.json
+	// also stores tokens that are not safe to surface here).
+	var probe struct {
+		AuthMode string `json:"auth_mode"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(probe.AuthMode), "chatgpt")
 }
 
 type codexConfigBackup struct {
@@ -678,8 +733,26 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	// upstream URL to attach when codex sends `/c/codex/responses`,
 	// and the proxy would 502. Operator overrides (custom base_url
 	// via openai_base_url, or a backed-up reserved block) win.
+	//
+	// Auth-mode-aware default: when ~/.codex/auth.json reports
+	// `auth_mode: "chatgpt"` (the user logged in via ChatGPT/Plus
+	// rather than supplying an OPENAI_API_KEY), the *only* endpoint
+	// the issued access token is valid against is
+	// `chatgpt.com/backend-api/codex/responses`. Defaulting to
+	// `api.openai.com/v1` in that mode produces a permanent 401 loop
+	// in the codex TUI ("Reconnecting… 5/5"), because Codex retries
+	// indefinitely on opaque upstream errors. The operator's explicit
+	// `openai_base_url` (captured in backup.OriginalOpenAIBaseURL)
+	// always wins over both defaults so an enterprise gateway override
+	// is preserved. Env var OPENAI_API_KEY remains the env key in both
+	// modes — Route() forwards the incoming Authorization header
+	// verbatim, which carries the ChatGPT access token in chatgpt mode
+	// and the OPENAI_API_KEY-derived bearer in api-key mode.
 	if _, ok := pristineProviders["openai"]; !ok {
 		openaiBaseURL := "https://api.openai.com/v1"
+		if detectCodexChatGPTMode() {
+			openaiBaseURL = codexChatGPTBackendURL
+		}
 		if backup.HadOpenAIBaseURL && backup.OriginalOpenAIBaseURL != "" {
 			openaiBaseURL = backup.OriginalOpenAIBaseURL
 		} else if backupExists {

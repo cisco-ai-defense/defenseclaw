@@ -1767,6 +1767,15 @@ func TestCodex_Setup_SynthesizesOpenAISnapshot(t *testing.T) {
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
 
+	// Pin auth.json to a path that does not exist so the detection
+	// helper returns false deterministically. Without this, a dev
+	// machine where the user has run `codex login` (which writes
+	// auth_mode="chatgpt" to ~/.codex/auth.json) would flip this
+	// test's expected default to the chatgpt backend URL — a flaky
+	// pass/fail that depends on the dev's local Codex login state.
+	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
+	defer func() { CodexAuthPathOverride = "" }()
+
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(nil, opts); err != nil {
@@ -1780,6 +1789,190 @@ func TestCodex_Setup_SynthesizesOpenAISnapshot(t *testing.T) {
 	}
 	if openai.BaseURL != "https://api.openai.com/v1" {
 		t.Errorf("synthetic openai BaseURL = %q, want canonical OpenAI URL", openai.BaseURL)
+	}
+}
+
+// TestCodex_Setup_SynthesizesChatGPTBackendWhenAuthModeChatGPT pins the
+// real-world regression we hit while running `defenseclaw setup
+// guardrail` against a Codex CLI that was logged in via ChatGPT/Plus
+// (auth_mode="chatgpt"). With OPENAI_API_KEY=null the only endpoint
+// that accepts the issued access_token is
+// `chatgpt.com/backend-api/codex/responses`. Synthesizing the
+// canonical `api.openai.com/v1` upstream produced a permanent 401
+// upstream-error loop, surfacing in the codex TUI as "Reconnecting…
+// 5/5" with hooks firing but no completion ever returning.
+//
+// We assert the synthetic snapshot points at the chatgpt backend URL,
+// because Route() concatenates the incoming `/responses` suffix to
+// produce the full upstream — and that's the only URL the user's auth
+// token will be valid against.
+func TestCodex_Setup_SynthesizesChatGPTBackendWhenAuthModeChatGPT(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	// Realistic auth.json shape from a `codex login` ChatGPT flow.
+	// We do NOT seed real tokens — the function under test only reads
+	// `auth_mode`. Anything else here is just shape padding.
+	authPath := filepath.Join(dir, "auth.json")
+	authJSON := `{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"x","access_token":"y","refresh_token":"z"}}`
+	if err := os.WriteFile(authPath, []byte(authJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexAuthPathOverride = authPath
+	defer func() { CodexAuthPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	snap := c.ProviderSnapshot()
+	openai, ok := snap["openai"]
+	if !ok {
+		t.Fatalf("snapshot missing synthetic 'openai' entry; got=%v", snap)
+	}
+	if openai.BaseURL != codexChatGPTBackendURL {
+		t.Fatalf(
+			"chatgpt-mode synthetic BaseURL = %q, want %q\n\n"+
+				"This is the bug surfaced by the defenseclaw setup guardrail flow on a\n"+
+				"`codex login`-authenticated CLI: api.openai.com/v1 will reject the issued\n"+
+				"ChatGPT access_token with 401, and the codex TUI loops forever on\n"+
+				"\"Reconnecting…\". The chatgpt backend URL is the only valid target.",
+			openai.BaseURL, codexChatGPTBackendURL,
+		)
+	}
+}
+
+// TestCodex_Setup_OperatorOpenAIBaseURLOverridesChatGPTDefault pins
+// that an explicit operator `openai_base_url` in their config (e.g.
+// an enterprise reverse-proxy or a custom Bifrost endpoint) wins over
+// BOTH the api.openai.com default AND the chatgpt-mode default.
+// Without this guard, an operator who set up an enterprise gateway
+// once and later logged in via ChatGPT would silently lose that
+// override on the next Setup() pass.
+func TestCodex_Setup_OperatorOpenAIBaseURLOverridesChatGPTDefault(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	enterpriseURL := "https://gateway.corp.example/openai"
+	original := `model = "gpt-5"
+openai_base_url = "` + enterpriseURL + `"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	authPath := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"auth_mode":"chatgpt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexAuthPathOverride = authPath
+	defer func() { CodexAuthPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	snap := c.ProviderSnapshot()
+	openai, ok := snap["openai"]
+	if !ok {
+		t.Fatalf("snapshot missing synthetic 'openai' entry; got=%v", snap)
+	}
+	if openai.BaseURL != enterpriseURL {
+		t.Fatalf("operator openai_base_url override lost: got %q, want %q", openai.BaseURL, enterpriseURL)
+	}
+}
+
+// TestDetectCodexChatGPTMode_ReturnsFalseOnMissingOrMalformed pins the
+// safe-default behavior of detectCodexChatGPTMode() — it must NOT
+// return true (which would force a chatgpt.com routing) when auth.json
+// is absent, malformed, or names a non-chatgpt mode. Symmetrically, it
+// MUST return true when auth.json is well-formed and reports
+// "chatgpt", regardless of casing.
+func TestDetectCodexChatGPTMode_ReturnsFalseOnMissingOrMalformed(t *testing.T) {
+	dir := t.TempDir()
+
+	cases := []struct {
+		name    string
+		setup   func() string // returns auth path (or "" for missing-file case)
+		want    bool
+		comment string
+	}{
+		{
+			name:    "missing file",
+			setup:   func() string { return filepath.Join(dir, "does-not-exist.json") },
+			want:    false,
+			comment: "operator may not have run `codex login` yet",
+		},
+		{
+			name: "malformed JSON",
+			setup: func() string {
+				p := filepath.Join(dir, "broken.json")
+				_ = os.WriteFile(p, []byte("not-json{{"), 0o600)
+				return p
+			},
+			want:    false,
+			comment: "manual edit / disk corruption must not flip routing",
+		},
+		{
+			name: "apikey mode",
+			setup: func() string {
+				p := filepath.Join(dir, "apikey.json")
+				_ = os.WriteFile(p, []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake"}`), 0o600)
+				return p
+			},
+			want:    false,
+			comment: "OPENAI_API_KEY users must keep api.openai.com routing",
+		},
+		{
+			name: "chatgpt mode lowercase",
+			setup: func() string {
+				p := filepath.Join(dir, "chatgpt.json")
+				_ = os.WriteFile(p, []byte(`{"auth_mode":"chatgpt"}`), 0o600)
+				return p
+			},
+			want: true,
+		},
+		{
+			name: "chatgpt mode mixed case",
+			setup: func() string {
+				p := filepath.Join(dir, "chatgpt-mixed.json")
+				_ = os.WriteFile(p, []byte(`{"auth_mode":"ChatGPT"}`), 0o600)
+				return p
+			},
+			want:    true,
+			comment: "case-insensitive match — auth.json shape isn't a public contract",
+		},
+		{
+			name: "empty auth_mode",
+			setup: func() string {
+				p := filepath.Join(dir, "empty-mode.json")
+				_ = os.WriteFile(p, []byte(`{}`), 0o600)
+				return p
+			},
+			want:    false,
+			comment: "absent field defaults to false (safe: keeps api.openai.com)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			CodexAuthPathOverride = tc.setup()
+			defer func() { CodexAuthPathOverride = "" }()
+			got := detectCodexChatGPTMode()
+			if got != tc.want {
+				t.Fatalf("detectCodexChatGPTMode() = %v, want %v (%s)", got, tc.want, tc.comment)
+			}
+		})
 	}
 }
 
