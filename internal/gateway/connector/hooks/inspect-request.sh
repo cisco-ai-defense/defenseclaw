@@ -1,8 +1,19 @@
 #!/bin/bash
-# defenseclaw-managed-hook v1
+# defenseclaw-managed-hook v2
 # DefenseClaw PreRequest hook — inspects user query before it is sent to the LLM.
 # Reads the user message content from stdin (JSON with "content" field).
 set -euo pipefail
+
+# Fail-open guard. If the operator has disabled the guardrail or fully
+# uninstalled DefenseClaw, exit 0 immediately so the agent isn't
+# bricked by a hook calling a gateway that no longer exists. The
+# sentinel is created by `defenseclaw setup guardrail --disable` and
+# is removed by `--enable`. A missing DEFENSECLAW_HOME directory is
+# treated as a hard uninstall.
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  exit 0
+fi
 
 CONTENT=$(cat)
 

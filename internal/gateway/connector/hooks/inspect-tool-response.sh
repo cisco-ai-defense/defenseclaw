@@ -1,8 +1,14 @@
 #!/bin/bash
-# defenseclaw-managed-hook v1
+# defenseclaw-managed-hook v2
 # DefenseClaw PostToolUse hook — inspects tool execution output before it goes back to the LLM.
 # Reads tool output from stdin. TOOL_NAME is set by the agent framework.
 set -euo pipefail
+
+# Fail-open guard. See inspect-request.sh for rationale.
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+  exit 0
+fi
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_OUTPUT=$(cat)
