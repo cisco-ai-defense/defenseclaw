@@ -183,14 +183,37 @@ def _list_skills_via_sidecar(app: AppContext) -> dict[str, Any] | None:
 
 
 def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get the full skill list — tries sidecar API first, then local binary."""
+    """Get the full skill list, dispatching on the active connector.
+
+    For ``openclaw`` (the historical default) we keep the sidecar →
+    CLI fallback chain. For Codex / Claude Code / ZeptoClaw we walk
+    the connector-specific skill directories via
+    :func:`defenseclaw.skill_list.list_skills` (S4.4 adapter).
+
+    The returned shape stays ``{"skills": [...]}`` — same as
+    ``openclaw skills list --json`` — so every downstream caller in
+    this module continues to work unchanged.
+    """
     if app is not None:
+        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        if connector != "openclaw":
+            from defenseclaw.skill_list import list_skills as _adapter_list
+            return {"skills": _adapter_list(app.cfg)}
+
+        # OpenClaw: prefer the live sidecar — it sees runtime state
+        # the static CLI doesn't (recently-toggled skills, etc.).
         result = _list_skills_via_sidecar(app)
         if result is not None:
             return result
 
     out = _run_openclaw("skills", "list", "--json")
     if out is None:
+        # Last-ditch fallback: walk the OpenClaw filesystem layout so
+        # `defenseclaw skill list` doesn't go silent when the
+        # `openclaw` binary isn't on PATH (sandbox installs, CI, etc.).
+        if app is not None and hasattr(app.cfg, "skill_dirs"):
+            from defenseclaw.skill_list import list_skills as _adapter_list
+            return {"skills": _adapter_list(app.cfg, prefer_cli=False)}
         return None
     try:
         return json.loads(out)
@@ -199,8 +222,21 @@ def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] 
 
 
 def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get info for a single skill — tries sidecar first, then local binary."""
+    """Get info for a single skill.
+
+    For OpenClaw, prefers the sidecar → CLI fallback chain. For
+    other connectors, walks the connector-specific skill
+    directories — there is no per-connector ``info`` subcommand.
+    """
     if app is not None:
+        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        if connector != "openclaw":
+            from defenseclaw.skill_list import list_skills as _adapter_list
+            for s in _adapter_list(app.cfg):
+                if s.get("name") == name:
+                    return s
+            return None
+
         full = _list_skills_via_sidecar(app)
         if full is not None:
             for s in full.get("skills", []):
