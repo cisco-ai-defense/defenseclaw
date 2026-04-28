@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +20,9 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // TestOTLPIngest_Logs_AcceptsValidPayload pins the success path: a
@@ -145,6 +149,169 @@ func TestOTLPIngest_Metrics_AcceptsValidPayload(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	otelProvider, err := telemetry.NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer otelProvider.Shutdown(context.Background())
+
+	a := &APIServer{}
+	a.SetOTelProvider(otelProvider)
+	body := `{
+		"resourceLogs": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "codex-cli"}}]
+			},
+			"scopeLogs": [{
+				"logRecords": [{
+					"attributes": [
+						{"key": "event.name", "value": {"stringValue": "codex.sse_event"}},
+						{"key": "event.kind", "value": {"stringValue": "response.completed"}},
+						{"key": "model", "value": {"stringValue": "gpt-5-codex"}},
+						{"key": "input_token_count", "value": {"stringValue": "123"}},
+						{"key": "output_token_count", "value": {"stringValue": "45"}},
+						{"key": "cached_token_count", "value": {"stringValue": "7"}},
+						{"key": "reasoning_token_count", "value": {"stringValue": "11"}}
+					]
+				}]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "codex")
+	w := httptest.NewRecorder()
+
+	a.handleOTLPLogs(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
+	if tokenMetric == nil {
+		t.Fatal("expected gen_ai.client.token.usage metric")
+	}
+	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
+	}
+
+	var gotInput, gotOutput bool
+	for _, dp := range tokenHist.DataPoints {
+		var tokenType, agentName string
+		for _, attr := range dp.Attributes.ToSlice() {
+			switch string(attr.Key) {
+			case "gen_ai.token.type":
+				tokenType = attr.Value.AsString()
+			case "gen_ai.agent.name":
+				agentName = attr.Value.AsString()
+			}
+		}
+		if agentName != "codex" {
+			t.Fatalf("gen_ai.agent.name = %q, want codex", agentName)
+		}
+		switch tokenType {
+		case "input":
+			gotInput = dp.Sum == 123
+		case "output":
+			gotOutput = dp.Sum == 45
+		}
+	}
+	if !gotInput || !gotOutput {
+		t.Fatalf("token histogram missing input/output sums: input=%v output=%v", gotInput, gotOutput)
+	}
+}
+
+func TestOTLPIngest_Metrics_PromotesClaudeCodeTokenUsage(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	otelProvider, err := telemetry.NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer otelProvider.Shutdown(context.Background())
+
+	a := &APIServer{}
+	a.SetOTelProvider(otelProvider)
+	body := `{
+		"resourceMetrics": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "claude-code"}}]
+			},
+			"scopeMetrics": [{
+				"metrics": [{
+					"name": "claude_code.token.usage",
+					"sum": {
+						"dataPoints": [
+							{
+								"attributes": [
+									{"key": "type", "value": {"stringValue": "input"}},
+									{"key": "model", "value": {"stringValue": "claude-sonnet-4-5"}}
+								],
+								"asInt": "321"
+							},
+							{
+								"attributes": [
+									{"key": "type", "value": {"stringValue": "cacheRead"}},
+									{"key": "model", "value": {"stringValue": "claude-sonnet-4-5"}}
+								],
+								"asDouble": 17
+							}
+						]
+					}
+				}]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "claudecode")
+	w := httptest.NewRecorder()
+
+	a.handleOTLPMetrics(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
+	if tokenMetric == nil {
+		t.Fatal("expected gen_ai.client.token.usage metric")
+	}
+	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
+	}
+
+	got := map[string]float64{}
+	for _, dp := range tokenHist.DataPoints {
+		var tokenType, agentName string
+		for _, attr := range dp.Attributes.ToSlice() {
+			switch string(attr.Key) {
+			case "gen_ai.token.type":
+				tokenType = attr.Value.AsString()
+			case "gen_ai.agent.name":
+				agentName = attr.Value.AsString()
+			}
+		}
+		if agentName != "claudecode" {
+			t.Fatalf("gen_ai.agent.name = %q, want claudecode", agentName)
+		}
+		got[tokenType] = dp.Sum
+	}
+	if got["input"] != 321 || got["cacheRead"] != 17 {
+		t.Fatalf("token histogram sums = %#v, want input=321 cacheRead=17", got)
 	}
 }
 

@@ -502,8 +502,15 @@ def _print_install_result(name: str, result) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_ctx
 def list_plugins(app: AppContext, as_json: bool) -> None:
-    """List installed plugins with scan severity."""
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    """List installed plugins for the active connector with scan severity."""
+    # Use ``active_connector()`` (guardrail.connector → claw.mode → openclaw)
+    # so the connector string used for phantom-row gating matches what the
+    # data layer (``cfg.plugin_dirs()``) is actually walking. The legacy
+    # ``guardrail.connector``-only read missed installs configured solely
+    # via ``claw.mode``.
+    connector = (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+    )
     # Plan C6: pass the full cfg so _merge_all_plugins can consult
     # cfg.plugin_dirs() for host-side plugin enumeration. Falls back
     # to None for callers that have not migrated.
@@ -511,23 +518,30 @@ def list_plugins(app: AppContext, as_json: bool) -> None:
     scan_map = _build_plugin_scan_map(app.store)
     actions_map = _build_plugin_actions_map(app.store)
 
-    if not plugins and not scan_map:
+    if not plugins and (connector != "openclaw" or not scan_map):
         click.echo(f"No plugins found. Check your {connector} installation and plugin directories.")
         return
 
     known_ids = {p["id"] for p in plugins}
-    for scan_id in scan_map:
-        if scan_id not in known_ids:
-            plugins.append({
-                "id": scan_id,
-                "name": scan_id,
-                "description": "",
-                "version": "",
-                "origin": "scan-history",
-                "enabled": False,
-                "source": "scan-history",
-            })
-            known_ids.add(scan_id)
+    # Phantom scan-history rows are connector-untagged in the shared audit
+    # DB and were historically OpenClaw-owned. Showing them on a
+    # non-OpenClaw connector would leak OpenClaw plugins into the Codex /
+    # Claude Code / ZeptoClaw view (the bug users reported on the Skills
+    # tab also applies to Plugins). Only inject them when the active
+    # connector is OpenClaw.
+    if connector == "openclaw":
+        for scan_id in scan_map:
+            if scan_id not in known_ids:
+                plugins.append({
+                    "id": scan_id,
+                    "name": scan_id,
+                    "description": "",
+                    "version": "",
+                    "origin": "scan-history",
+                    "enabled": False,
+                    "source": "scan-history",
+                })
+                known_ids.add(scan_id)
 
     if as_json:
         _print_plugin_list_json(plugins, scan_map, actions_map)

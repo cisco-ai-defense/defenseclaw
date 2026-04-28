@@ -125,8 +125,15 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// Surface 1: Install the embedded plugin into OpenClaw and register it
 	// in openclaw.json. Enabling the connector is the *only* step an
 	// operator needs — no separate `defenseclaw setup guardrail` phase.
+	configPath := filepath.Join(openClawHome(), "openclaw.json")
+	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+		return fmt.Errorf("openclaw config backup: %w", err)
+	}
 	if err := installOpenClawExtension(openClawHome()); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
+	}
+	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+		return fmt.Errorf("openclaw config backup hash: %w", err)
 	}
 
 	// Surface 2: Plugin subprocess enforcement
@@ -147,8 +154,21 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	var errs []string
 
-	if err := uninstallOpenClawExtension(openClawHome()); err != nil {
-		errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
+	configPath := filepath.Join(openClawHome(), "openclaw.json")
+	if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+		errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
+	} else if restored {
+		extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
+		parentDir := filepath.Join(openClawHome(), "extensions")
+		if err := safeRemoveAll(extDir, parentDir); err != nil {
+			errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
+		}
+	} else {
+		if err := uninstallOpenClawExtension(openClawHome()); err != nil {
+			errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
+		} else {
+			discardManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json")
+		}
 	}
 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {

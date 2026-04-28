@@ -106,15 +106,15 @@
       "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "req/min"}}}]
     },
 
-    {"type": "row", "title": "Codex notify (turn-complete)", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Codex notify (Codex only)", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
       "title": "Notify events per second by type / result",
-      "description": "Codex notify-bridge events. Result=malformed in this panel means the bridge sent a body that didn't parse as JSON — investigate codex schema drift.",
+      "description": "Codex-only notify-bridge events. This stays at zero when Claude Code is the active connector. Result=malformed means the bridge sent a body that did not parse as JSON.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (type, result) (rate(defenseclaw_codex_notify_total[$__rate_interval]))", "legendFormat": "{{type}} · {{result}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (type, result) (rate(defenseclaw_codex_notify_total[$__rate_interval])) or on() vector(0)", "legendFormat": "{{type}} · {{result}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops"}}
     },
     {
@@ -123,7 +123,7 @@
       "description": "Last-5m totals by codex's `type` and `status` fields. status=success vs status=failed lets you spot turns the model gave up on.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sort_desc(sum by (type, status, result) (increase(defenseclaw_codex_notify_total[5m])))", "instant": true, "format": "table", "refId": "A"}],
+      "targets": [{"expr": "sort_desc(sum by (type, status, result) (increase(defenseclaw_codex_notify_total[5m])) or on() vector(0))", "instant": true, "format": "table", "refId": "A"}],
       "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "events/5m"}}}]
     },
 
@@ -131,11 +131,11 @@
 
     {
       "type": "timeseries",
-      "title": "Hook-emitted audit events / sec",
-      "description": "Audit rows for tool-call / tool-result / codex.notify.* — this is the hook channel of the observability story. A persistent positive value here with zero on the OTel logs panel below means OTel export is broken (token? CSRF? firewall?).",
+      "title": "Gateway hook invocations / sec",
+      "description": "Hook requests that reached the gateway, grouped by connector/event/result. Client-side spawn failures happen before this metric; they show in the agent UI and should disappear after stale hooks are removed or the client restarts.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
-      "targets": [{"expr": "connector:defenseclaw_hooks:rate5m", "legendFormat": "{{action}}", "refId": "A"}],
+      "targets": [{"expr": "connector:defenseclaw_hook_invocations:rate5m or on() vector(0)", "legendFormat": "{{connector}} · {{event_type}} · {{result}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops"}}
     },
     {
@@ -152,20 +152,20 @@
 
     {
       "type": "timeseries",
-      "title": "Tokens / sec by service.name + direction",
-      "description": "OTel GenAI semconv counter (gen_ai.client.token.usage). Claude Code emits these natively when CLAUDE_CODE_ENABLE_TELEMETRY=1; codex emits them when [otel] is configured. Filter by service.name to see codex vs claudecode separately.",
+      "title": "Tokens / sec by connector + direction",
+      "description": "OTel GenAI semconv counter (gen_ai.client.token.usage). Codex token counts are promoted from its response.completed OTLP log events; Claude Code token counts are promoted from claude_code.token.usage; proxy traffic records token usage directly.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (service_name, gen_ai_token_type) (rate(gen_ai_client_token_usage_tokens_sum[$__rate_interval]))", "legendFormat": "{{service_name}} · {{gen_ai_token_type}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (gen_ai_agent_name, gen_ai_token_type) (rate(gen_ai_client_token_usage_sum[$__rate_interval])) or on() vector(0)", "legendFormat": "{{gen_ai_agent_name}} · {{gen_ai_token_type}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops"}}
     },
     {
       "type": "timeseries",
       "title": "LLM operation duration p95 by service",
-      "description": "OTel GenAI gen_ai.client.operation.duration. p95 stays under your model's typical response time when the service is healthy.",
+      "description": "OTel GenAI gen_ai.client.operation.duration. This stays at zero until native GenAI duration histograms arrive.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
-      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "{{service_name}}", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval]))) or on() vector(0)", "legendFormat": "{{service_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
 
@@ -174,10 +174,10 @@
     {
       "type": "logs",
       "title": "Connector telemetry log stream",
-      "description": "OTel log records emitted by the gateway when it accepts an OTLP batch or codex notify. Search by event.name=defenseclaw.otel.ingest or event.name=defenseclaw.codex.notify, then by source to filter to one connector.",
+      "description": "OTel log records emitted by the gateway when it accepts an OTLP batch or connector hook/notify event. Search by action=otel.ingest.*, codex.notify.*, codex-hook, or claude-code-hook.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 50, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} | json | event_name=~\"defenseclaw\\\\.(otel\\\\.ingest|codex\\\\.notify)\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | action=~\"otel.ingest.*|codex.notify.*|codex-hook|claude-code-hook\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

@@ -959,6 +959,28 @@ func (p *LogsPanel) View() string {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
 			fmt.Sprintf("%d lines", totalLines)))
 	}
+
+	// Redaction state indicator. Surfaced inline in the Logs header
+	// rather than buried in a help screen because operators
+	// debugging "why are user prompts showing as <redacted len=…>"
+	// — or, conversely, "why does the audit DB contain raw PII?" —
+	// need to see the current state at a glance. The badge mirrors
+	// the Go `redaction.DisableAll()` check so it reflects either
+	// the persisted ``privacy.disable_redaction`` flag or the
+	// ``DEFENSECLAW_DISABLE_REDACTION`` env override.
+	if redactionDisabledForLogsBadge() {
+		rawBadge := lipgloss.NewStyle().
+			Background(lipgloss.Color("196")). // red — same vocabulary as PAUSED warning
+			Foreground(lipgloss.Color("230")).
+			Bold(true).
+			Padding(0, 1).
+			Render("RAW")
+		b.WriteString("   ")
+		b.WriteString(rawBadge)
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
+			"redaction off — `defenseclaw setup redaction on` to re-enable"))
+	}
 	b.WriteString("\n")
 
 	// Row 1: Filter bar — wider buttons with more padding
@@ -1143,11 +1165,11 @@ func (p *LogsPanel) View() string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	if p.source == logSourceVerdicts {
 		b.WriteString(hint.Render(fmt.Sprintf(
-			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · a/t/s chips · J judge history.",
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · a/t/s chips · J judge history · R redaction.",
 			logSourceNames[p.source])))
 	} else {
 		b.WriteString(hint.Render(fmt.Sprintf(
-			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · e errors · w warnings.",
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · e errors · w warnings · R redaction.",
 			logSourceNames[p.source])))
 		// Gateway / Watchdog tabs tail free-form stderr logs that
 		// mostly carry startup chatter. Operators looking for

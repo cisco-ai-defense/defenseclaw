@@ -151,6 +151,10 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("codex config.toml patch: %w", err)
 	}
 
+	if opts.InstallCodeGuard {
+		warnNativeCodeGuardInstall(c.Name(), ensureCodexCodeGuardSkill(ctx, opts))
+	}
+
 	// Subprocess sandbox is part of the enforcement path: the policy
 	// is consulted by codex-hook.sh's PreToolUse handler to decide
 	// whether to BLOCK a tool call. In observability-only mode
@@ -177,6 +181,9 @@ func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		return fmt.Errorf("codex teardown: subprocess enforcement: %w", err)
+	}
+	if err := writeDisabledCodexHook(opts); err != nil {
+		return fmt.Errorf("codex teardown: disabled hook: %w", err)
 	}
 	return nil
 }
@@ -647,6 +654,9 @@ var codexHookGroups = []struct {
 
 func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) error {
 	configPath := codexConfigPath()
+	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
+		return fmt.Errorf("capture codex config backup: %w", err)
+	}
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -949,6 +959,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	if err := atomicWriteFile(configPath, out, 0o600); err != nil {
 		return fmt.Errorf("write codex config: %w", err)
 	}
+	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
+		return fmt.Errorf("update codex config backup hash: %w", err)
+	}
 
 	return nil
 }
@@ -1047,14 +1060,22 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 //	endpoint = "http://127.0.0.1:18970/v1/logs"
 //	protocol = "json"
 //	headers = { x-defenseclaw-token = "<token>" }
+//	[otel.trace_exporter.otlp-http]
+//	endpoint = "http://127.0.0.1:18970/v1/traces"
+//	protocol = "json"
+//	headers = { x-defenseclaw-token = "<token>" }
+//	[otel.metrics_exporter.otlp-http]
+//	endpoint = "http://127.0.0.1:18970/v1/metrics"
+//	protocol = "json"
+//	headers = { x-defenseclaw-token = "<token>" }
 //
-// The ``protocol`` field is REQUIRED by codex's serde-deserialized
-// schema — omitting it produces ``invalid configuration: missing
+// The `protocol` field is REQUIRED by codex's serde-deserialized
+// schema - omitting it produces `invalid configuration: missing
 // field `protocol` in `otel.exporter``` at codex startup, which
 // blocks the entire CLI from launching (not just OTel export). We
-// hard-code ``"json"`` because the gateway's OTLP-HTTP receiver
-// (internal/gateway/otel_ingest.go) accepts ``application/json`` only
-// and 415s any ``application/x-protobuf`` body — a mismatched
+// hard-code `"json"` because the gateway's OTLP-HTTP receiver
+// (internal/gateway/otel_ingest.go) accepts `application/json` only
+// and 415s any `application/x-protobuf` body - a mismatched
 // protocol would silently drop every batch instead of erroring out.
 //
 // log_user_prompt = false is the privacy-preserving default: codex's
@@ -1070,7 +1091,6 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 // receiver can distinguish OTel traffic from hook/REST traffic in
 // audit logs.
 func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
-	endpoint := "http://" + opts.APIAddr + "/v1/logs"
 	headers := map[string]interface{}{}
 	if opts.APIToken != "" {
 		headers["x-defenseclaw-token"] = opts.APIToken
@@ -1081,11 +1101,10 @@ func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 	// header is the same one the CLI and inspect hooks set —
 	// codex's OTel exporter merges it into every outbound POST.
 	headers["x-defenseclaw-client"] = "codex-otel/1.0"
-	return map[string]interface{}{
-		"log_user_prompt": false,
-		"exporter": map[string]interface{}{
+	exporterFor := func(path string) map[string]interface{} {
+		return map[string]interface{}{
 			"otlp-http": map[string]interface{}{
-				"endpoint": endpoint,
+				"endpoint": "http://" + opts.APIAddr + path,
 				// "json" matches the kebab-case serde tag for
 				// OtelHttpProtocol::Json. Codex's deserializer is
 				// case-sensitive (rename_all = "kebab-case") — "JSON"
@@ -1094,14 +1113,20 @@ func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 				"protocol": "json",
 				"headers":  headers,
 			},
-		},
+		}
+	}
+	return map[string]interface{}{
+		"log_user_prompt":  false,
+		"exporter":         exporterFor("/v1/logs"),
+		"trace_exporter":   exporterFor("/v1/traces"),
+		"metrics_exporter": exporterFor("/v1/metrics"),
 	}
 }
 
 // writeCodexNotifyBridge writes ~/.defenseclaw/notify-bridge.sh, the
 // shell shim codex invokes on agent-turn-complete. The script POSTs
 // codex's JSON arg to /api/v1/codex/notify with the gateway token
-// baked in. We use ``--max-time 5`` and ``--silent --show-error``
+// baked in. We use `--max-time 5` and `--silent --show-error`
 // so a transient gateway outage doesn't make codex's notify chain
 // hang or print noise to the operator's terminal — telemetry is
 // best-effort, the agent's UX is not.
@@ -1150,6 +1175,24 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 	return nil
 }
 
+// writeDisabledCodexHook leaves a no-op tombstone at the path older
+// Codex processes may have cached before teardown. The config restore
+// removes the hook registration for new Codex sessions; this keeps
+// already-running sessions from surfacing repeated "hook failed" noise.
+func writeDisabledCodexHook(opts SetupOpts) error {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("ensure hook dir: %w", err)
+	}
+	body := "#!/bin/bash\n" +
+		"# defenseclaw-managed-hook disabled\n" +
+		"# Codex connector was torn down. Existing Codex processes may\n" +
+		"# keep this hook path cached until restart, so exit successfully\n" +
+		"# without forwarding stale payloads.\n" +
+		"exit 0\n"
+	return atomicWriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte(body), 0o700)
+}
+
 // isCodexReservedProviderID reports whether name is one of the
 // built-in provider IDs Codex 5.x rejects under [model_providers.*].
 // See codexReservedProviderIDs for the full list and rationale.
@@ -1169,6 +1212,13 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	}
 
 	configPath := codexConfigPath()
+	if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "[codex] managed config restore skipped: %v\n", err)
+	} else if restored {
+		c.cleanupCodexRestoreArtifacts(opts, configPath)
+		return
+	}
+
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		return
@@ -1178,29 +1228,35 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		return
 	}
 
-	// Restore the top-level openai_base_url to the operator's pristine
-	// value (or remove it entirely if they hadn't set one). This is
-	// the inverse of the Setup-time `cfg["openai_base_url"] = proxyURL`.
-	if backup.HadOpenAIBaseURL {
-		cfg["openai_base_url"] = backup.OriginalOpenAIBaseURL
-	} else {
-		delete(cfg, "openai_base_url")
+	proxyURL := "http://" + opts.ProxyAddr + "/c/codex"
+
+	// Restore the top-level openai_base_url only when it still points
+	// at DefenseClaw. If the operator changed it after Setup, leave
+	// their newer value alone; the exact managed-backup restore path
+	// above handles the no-drift case byte-for-byte.
+	if cur, _ := cfg["openai_base_url"].(string); cur == proxyURL {
+		if backup.HadOpenAIBaseURL {
+			cfg["openai_base_url"] = backup.OriginalOpenAIBaseURL
+		} else {
+			delete(cfg, "openai_base_url")
+		}
 	}
 
-	// Restore non-reserved provider base_urls. Reserved blocks are
-	// re-attached below from a separate backup channel — restoring
-	// them here would skip operators whose original config had a
-	// [model_providers.openai] entry that we stripped on Setup.
+	// Restore non-reserved provider base_urls only for entries that
+	// still point at the DefenseClaw proxy. User-edited provider URLs
+	// win on drifted configs.
 	if providers, ok := cfg["model_providers"].(map[string]interface{}); ok {
 		for name, p := range providers {
 			pm, ok := p.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			if orig, had := backup.OriginalBaseURLs[name]; had {
-				pm["base_url"] = orig
-			} else {
-				delete(pm, "base_url")
+			if cur, _ := pm["base_url"].(string); cur == proxyURL {
+				if orig, had := backup.OriginalBaseURLs[name]; had {
+					pm["base_url"] = orig
+				} else {
+					delete(pm, "base_url")
+				}
 			}
 			providers[name] = pm
 		}
@@ -1228,14 +1284,22 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		}
 	}
 
-	if backup.HadHooksKey && len(backup.OriginalHooks) > 0 {
-		var orig interface{}
-		if err := json.Unmarshal(backup.OriginalHooks, &orig); err == nil {
-			cfg["hooks"] = orig
-		} else {
-			delete(cfg, "hooks")
+	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+		hooksDir := filepath.Join(opts.DataDir, "hooks")
+		for eventType, val := range hooks {
+			remaining := removeOwnedHooks(val, hooksDir)
+			if len(remaining) == 0 {
+				delete(hooks, eventType)
+			} else {
+				hooks[eventType] = remaining
+			}
 		}
-	} else {
+		if len(hooks) == 0 {
+			delete(cfg, "hooks")
+		} else {
+			cfg["hooks"] = hooks
+		}
+	} else if !backup.HadHooksKey {
 		delete(cfg, "hooks")
 	}
 
@@ -1250,28 +1314,30 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		}
 	}
 
-	// Restore the operator's pristine [otel] block. Either replace
-	// our gateway-pointed entry with the original or delete the key
-	// entirely. The same applies to notify.
-	if backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
+	// Restore OTel/notify only if the current values are still the
+	// DefenseClaw-managed values. If the operator edited either field
+	// after Setup, preserve their newer config.
+	managedOtel := codexValueMatches(cfg["otel"], buildCodexOtelBlock(opts)) || codexOtelBlockLooksManaged(cfg["otel"], opts)
+	if managedOtel && backup.HadOtelBlock && len(backup.OriginalOtel) > 0 {
 		var orig interface{}
 		if err := json.Unmarshal(backup.OriginalOtel, &orig); err == nil {
 			cfg["otel"] = orig
 		} else {
 			delete(cfg, "otel")
 		}
-	} else {
+	} else if managedOtel {
 		delete(cfg, "otel")
 	}
 
-	if backup.HadNotify && len(backup.OriginalNotify) > 0 {
+	managedNotify := []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
+	if codexValueMatches(cfg["notify"], managedNotify) && backup.HadNotify && len(backup.OriginalNotify) > 0 {
 		var orig interface{}
 		if err := json.Unmarshal(backup.OriginalNotify, &orig); err == nil {
 			cfg["notify"] = orig
 		} else {
 			delete(cfg, "notify")
 		}
-	} else {
+	} else if codexValueMatches(cfg["notify"], managedNotify) {
 		delete(cfg, "notify")
 	}
 
@@ -1280,9 +1346,20 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 		// existing (already-patched) config in place rather than the
 		// half-written attempt. atomicWriteFile guarantees that
 		// invariant. See S0.11.
-		_ = atomicWriteFile(configPath, out, 0o600)
+		if err := atomicWriteFile(configPath, out, 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "[codex] restore write failed: %v\n", err)
+			return
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[codex] restore marshal failed: %v\n", err)
+		return
 	}
 
+	discardManagedFileBackup(opts.DataDir, c.Name(), "config.toml")
+	c.cleanupCodexRestoreArtifacts(opts, configPath)
+}
+
+func (c *CodexConnector) cleanupCodexRestoreArtifacts(opts SetupOpts, configPath string) {
 	// Remove any stale hooks.json from an earlier version that
 	// mistakenly used the file-path approach, plus the notify bridge
 	// shim we wrote in Setup.
@@ -1290,4 +1367,43 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	_ = os.Remove(hooksPath)
 	_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
 	_ = os.Remove(filepath.Join(opts.DataDir, "codex_config_backup.json"))
+}
+
+func codexValueMatches(a, b interface{}) bool {
+	aj, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bj, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return string(aj) == string(bj)
+}
+
+func codexOtelBlockLooksManaged(v interface{}, opts SetupOpts) bool {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	return codexExporterLooksManaged(m["exporter"], "http://"+opts.APIAddr+"/v1/logs")
+}
+
+func codexExporterLooksManaged(v interface{}, endpoint string) bool {
+	exporter, ok := v.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if got, _ := otlpHTTP["endpoint"].(string); got != endpoint {
+		return false
+	}
+	headers, _ := otlpHTTP["headers"].(map[string]interface{})
+	if headers == nil {
+		return false
+	}
+	return headers["x-defenseclaw-source"] == "codex" || headers["x-defenseclaw-client"] == "codex-otel/1.0"
 }

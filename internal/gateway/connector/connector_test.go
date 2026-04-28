@@ -36,6 +36,75 @@ import (
 
 // --- Helper tests ---
 
+func TestManagedFileBackup_RestoresExactWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "agent.json")
+	if err := os.WriteFile(target, []byte(`{"hooks":["original"]}`), 0o640); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	if err := captureManagedFileBackup(dir, "codex", "config", target); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if err := os.WriteFile(target, []byte(`{"hooks":["defenseclaw"]}`), 0o600); err != nil {
+		t.Fatalf("patch target: %v", err)
+	}
+	if err := updateManagedFileBackupPostHash(dir, "codex", "config", target); err != nil {
+		t.Fatalf("post hash: %v", err)
+	}
+
+	restored, err := restoreManagedFileBackupIfUnchanged(dir, "codex", "config", target)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !restored {
+		t.Fatal("restoreManagedFileBackupIfUnchanged returned false, want true")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if string(got) != `{"hooks":["original"]}` {
+		t.Fatalf("restored bytes = %q", got)
+	}
+}
+
+func TestManagedFileBackup_SkipsWhenUserEditedAfterSetup(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "agent.json")
+	if err := os.WriteFile(target, []byte(`{"hooks":["original"]}`), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	if err := captureManagedFileBackup(dir, "claudecode", "settings", target); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if err := os.WriteFile(target, []byte(`{"hooks":["defenseclaw"]}`), 0o600); err != nil {
+		t.Fatalf("patch target: %v", err)
+	}
+	if err := updateManagedFileBackupPostHash(dir, "claudecode", "settings", target); err != nil {
+		t.Fatalf("post hash: %v", err)
+	}
+	if err := os.WriteFile(target, []byte(`{"hooks":["defenseclaw","user-added"]}`), 0o600); err != nil {
+		t.Fatalf("user edit: %v", err)
+	}
+
+	restored, err := restoreManagedFileBackupIfUnchanged(dir, "claudecode", "settings", target)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if restored {
+		t.Fatal("restoreManagedFileBackupIfUnchanged restored a drifted file")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read drifted: %v", err)
+	}
+	if string(got) != `{"hooks":["defenseclaw","user-added"]}` {
+		t.Fatalf("drifted bytes changed: %q", got)
+	}
+}
+
 func TestExtractBearerKey(t *testing.T) {
 	tests := []struct {
 		input string
@@ -975,6 +1044,68 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	initial := `{"hooks":{"Notification":[{"hooks":[{"type":"command","command":"/usr/bin/true"}]}]}}`
+	if err := os.WriteFile(settingsPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read patched settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse patched settings: %v", err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	notification := hooks["Notification"].([]interface{})
+	notification = append(notification, map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": "/tmp/user-added-hook"},
+		},
+	})
+	hooks["Notification"] = notification
+	settings["hooks"] = hooks
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal user-edited settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
+		t.Fatalf("write user-edited settings: %v", err)
+	}
+
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	if strings.Contains(string(data), "claude-code-hook.sh") {
+		t.Fatalf("DefenseClaw hook survived teardown:\n%s", data)
+	}
+	if !strings.Contains(string(data), "/usr/bin/true") || !strings.Contains(string(data), "/tmp/user-added-hook") {
+		t.Fatalf("user hooks were not preserved:\n%s", data)
+	}
+}
+
 // --- Codex connector tests ---
 
 func TestCodex_Authenticate_Token(t *testing.T) {
@@ -1458,8 +1589,10 @@ env_key = "OPENAI_API_KEY"
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	os.WriteFile(configPath, []byte(`model_provider = "openai"
-`), 0o644)
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
 
@@ -1712,10 +1845,36 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 		t.Errorf("x-defenseclaw-token header = %v, want %q",
 			headers["x-defenseclaw-token"], "test-token-codex-otel")
 	}
+
+	traceExporter, _ := otelBlock["trace_exporter"].(map[string]interface{})
+	if traceExporter == nil {
+		t.Fatal("[otel.trace_exporter] missing — codex traces would be posted to the logs endpoint")
+	}
+	traceOTLPHTTP, _ := traceExporter["otlp-http"].(map[string]interface{})
+	traceEndpoint, _ := traceOTLPHTTP["endpoint"].(string)
+	if !strings.Contains(traceEndpoint, "/v1/traces") {
+		t.Errorf("trace exporter endpoint = %q, want /v1/traces", traceEndpoint)
+	}
+	if traceOTLPHTTP["protocol"] != "json" {
+		t.Errorf("trace exporter protocol = %v, want json", traceOTLPHTTP["protocol"])
+	}
+
+	metricsExporter, _ := otelBlock["metrics_exporter"].(map[string]interface{})
+	if metricsExporter == nil {
+		t.Fatal("[otel.metrics_exporter] missing — codex.turn.token_usage metrics would stay on the default exporter")
+	}
+	metricsOTLPHTTP, _ := metricsExporter["otlp-http"].(map[string]interface{})
+	metricsEndpoint, _ := metricsOTLPHTTP["endpoint"].(string)
+	if !strings.Contains(metricsEndpoint, "/v1/metrics") {
+		t.Errorf("metrics exporter endpoint = %q, want /v1/metrics", metricsEndpoint)
+	}
+	if metricsOTLPHTTP["protocol"] != "json" {
+		t.Errorf("metrics exporter protocol = %v, want json", metricsOTLPHTTP["protocol"])
+	}
 }
 
 // TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete
-// telemetry path. Codex shells out to ``notify`` with a JSON arg
+// telemetry path. Codex shells out to `notify` with a JSON arg
 // describing each completed turn (per https://developers.openai.com
 // /codex/config-advanced). Our Setup writes a per-instance bash
 // bridge that POSTs the JSON to /api/v1/codex/notify. Without
@@ -1855,6 +2014,154 @@ env_key = "OPENAI_API_KEY"
 	// so the operator's config.toml returns to its pre-setup shape.
 	if strings.Contains(rewritten, "codex-hook.sh") {
 		t.Errorf("Teardown left hook script reference in config.toml\nfile:\n%s", rewritten)
+	}
+}
+
+func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	setupHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read setup hook: %v", err)
+	}
+	if !strings.Contains(string(setupHook), "/api/v1/codex/hook") {
+		t.Fatalf("setup hook does not forward to Codex hook API\nfile:\n%s", setupHook)
+	}
+
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	info, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("disabled hook missing after teardown: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
+	}
+
+	disabledHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read disabled hook: %v", err)
+	}
+	disabled := string(disabledHook)
+	if !strings.Contains(disabled, "defenseclaw-managed-hook disabled") {
+		t.Errorf("disabled hook missing tombstone marker\nfile:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "exit 0") {
+		t.Errorf("disabled hook must exit successfully\nfile:\n%s", disabled)
+	}
+	if strings.Contains(disabled, "/api/v1/codex/hook") {
+		t.Errorf("disabled hook still forwards stale payloads\nfile:\n%s", disabled)
+	}
+}
+
+func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(nil, opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read setup config: %v", err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse setup config: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	promptHooks := hooks["UserPromptSubmit"].([]interface{})
+	promptHooks = append(promptHooks, map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":    "command",
+				"command": "/tmp/user-codex-hook",
+				"timeout": int64(2),
+			},
+		},
+	})
+	hooks["UserPromptSubmit"] = promptHooks
+	cfg["hooks"] = hooks
+	out, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal user-edited config: %v", err)
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		t.Fatalf("write user-edited config: %v", err)
+	}
+
+	if err := c.Teardown(nil, opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	restored := string(data)
+	if strings.Contains(restored, "codex-hook.sh") {
+		t.Fatalf("DefenseClaw hook survived teardown:\n%s", restored)
+	}
+	if !strings.Contains(restored, "/tmp/user-codex-hook") {
+		t.Fatalf("user hook was not preserved:\n%s", restored)
+	}
+}
+
+func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T) {
+	opts := SetupOpts{APIAddr: "127.0.0.1:18970"}
+	legacy := map[string]interface{}{
+		"log_user_prompt": false,
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:18970/v1/logs",
+				"protocol": "json",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacy, opts) {
+		t.Fatal("legacy DefenseClaw-managed Codex [otel] block was not recognized")
+	}
+
+	user := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "https://otel.example.com/v1/logs",
+				"protocol": "json",
+				"headers":  map[string]interface{}{"x-defenseclaw-source": "codex"},
+			},
+		},
+	}
+	if codexOtelBlockLooksManaged(user, opts) {
+		t.Fatal("non-DefenseClaw Codex [otel] block was classified as managed")
 	}
 }
 
@@ -3564,6 +3871,9 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
 		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %v, want \"1\"", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
+	if env["DEFENSECLAW_FAIL_MODE"] != "open" {
+		t.Errorf("DEFENSECLAW_FAIL_MODE = %v, want \"open\" for observability-only installs", env["DEFENSECLAW_FAIL_MODE"])
+	}
 	if env["OTEL_LOGS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want \"otlp\"", env["OTEL_LOGS_EXPORTER"])
 	}
@@ -3638,6 +3948,9 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 	}
 	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
 		t.Errorf("OTel keys not merged in alongside operator keys (got CLAUDE_CODE_ENABLE_TELEMETRY=%v)", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
+	}
+	if env["DEFENSECLAW_FAIL_MODE"] != "open" {
+		t.Errorf("DEFENSECLAW_FAIL_MODE not merged: got %v", env["DEFENSECLAW_FAIL_MODE"])
 	}
 }
 

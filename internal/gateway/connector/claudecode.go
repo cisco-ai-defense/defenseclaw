@@ -71,6 +71,10 @@ func (c *ClaudeCodeConnector) AllowedHosts() []string {
 		// Marketplace + docs CDN.
 		"docs.anthropic.com",
 		"console.anthropic.com",
+		// Project CodeGuard native plugin installation.
+		"github.com",
+		"api.github.com",
+		"objects.githubusercontent.com",
 	}
 }
 
@@ -120,6 +124,10 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// observability and enforcement modes.
 	if err := c.patchClaudeCodeOtelEnv(opts); err != nil {
 		return fmt.Errorf("claudecode otel env: %w", err)
+	}
+
+	if opts.InstallCodeGuard {
+		warnNativeCodeGuardInstall(c.Name(), ensureClaudeCodeCodeGuardPlugin(ctx))
 	}
 
 	// Subprocess sandbox is part of enforcement: it's consulted by
@@ -458,6 +466,10 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	settingsPath := claudeCodeSettingsPath()
 
 	return withFileLock(settingsPath, func() error {
+		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
+			return fmt.Errorf("capture claude settings backup: %w", err)
+		}
+
 		settings := map[string]interface{}{}
 		data, err := os.ReadFile(settingsPath)
 		if err != nil && !os.IsNotExist(err) {
@@ -521,19 +533,23 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			return fmt.Errorf("marshal claude settings: %w", err)
 		}
 
-		return atomicWriteFile(settingsPath, out, 0o644)
+		if err := atomicWriteFile(settingsPath, out, 0o644); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
-// claudeCodeOtelEnvKeys is the canonical set of OpenTelemetry-related
-// environment variable names Claude Code consumes (see
-// https://code.claude.com/docs/en/monitoring-usage). We track them by
+// claudeCodeOtelEnvKeys is the canonical set of DefenseClaw-managed
+// Claude Code environment variable names, mostly OpenTelemetry-related
+// (see https://code.claude.com/docs/en/monitoring-usage). We track them by
 // name so Teardown can strip our additions without nuking unrelated
 // operator-set keys, and so backup-on-first-patch preserves the
 // operator's pristine values for any keys we overwrite. Keep this
 // list in sync with the CLAUDE_CODE_* / OTEL_* vars Claude reads.
 var claudeCodeOtelEnvKeys = []string{
 	"CLAUDE_CODE_ENABLE_TELEMETRY",
+	"DEFENSECLAW_FAIL_MODE",
 	"OTEL_METRICS_EXPORTER",
 	"OTEL_LOGS_EXPORTER",
 	"OTEL_EXPORTER_OTLP_PROTOCOL",
@@ -583,8 +599,13 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	// https://code.claude.com/docs/en/monitoring-usage and is
 	// the safe default for a forwarder that doesn't have an OTel
 	// SDK on the receive path.
+	failMode := "open"
+	if opts.ClaudeCodeEnforcement {
+		failMode = "closed"
+	}
 	return map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"DEFENSECLAW_FAIL_MODE":        failMode,
 		"OTEL_METRICS_EXPORTER":        "otlp",
 		"OTEL_LOGS_EXPORTER":           "otlp",
 		"OTEL_EXPORTER_OTLP_PROTOCOL":  "http/json",
@@ -666,7 +687,10 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		if err != nil {
 			return fmt.Errorf("marshal claude settings (otel env): %w", err)
 		}
-		return atomicWriteFile(settingsPath, out, 0o644)
+		if err := atomicWriteFile(settingsPath, out, 0o644); err != nil {
+			return err
+		}
+		return updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "settings.json", settingsPath)
 	})
 }
 
@@ -693,6 +717,13 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	settingsPath := claudeCodeSettingsPath()
 
 	return withFileLock(settingsPath, func() error {
+		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
+			return fmt.Errorf("managed settings restore: %w", err)
+		} else if restored {
+			os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
+			return nil
+		}
+
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
 			return fmt.Errorf("read claude settings for restore: %w", err)
@@ -703,13 +734,22 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			return fmt.Errorf("parse claude settings for restore: %w", err)
 		}
 
-		if backup.HadHooksKey && len(backup.OriginalHooks) > 0 && string(backup.OriginalHooks) != "null" {
-			var orig interface{}
-			if err := json.Unmarshal(backup.OriginalHooks, &orig); err != nil {
-				return fmt.Errorf("unmarshal original hooks from backup: %w", err)
+		if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
+			hooksDir := filepath.Join(opts.DataDir, "hooks")
+			for eventType, val := range hooks {
+				remaining := removeOwnedHooks(val, hooksDir)
+				if len(remaining) == 0 {
+					delete(hooks, eventType)
+				} else {
+					hooks[eventType] = remaining
+				}
 			}
-			settings["hooks"] = orig
-		} else {
+			if len(hooks) == 0 {
+				delete(settings, "hooks")
+			} else {
+				settings["hooks"] = hooks
+			}
+		} else if !backup.HadHooksKey {
 			delete(settings, "hooks")
 		}
 
@@ -751,6 +791,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 		}
 
 		os.Remove(filepath.Join(opts.DataDir, "claudecode_backup.json"))
+		discardManagedFileBackup(opts.DataDir, c.Name(), "settings.json")
 		return nil
 	})
 }

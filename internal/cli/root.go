@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -73,6 +74,15 @@ Run without arguments to start the sidecar daemon.`,
 		if err != nil {
 			return fmt.Errorf("failed to load config — run 'defenseclaw init' first: %w", err)
 		}
+		// Apply the persisted redaction kill-switch BEFORE any
+		// audit-store / telemetry init so even the very first
+		// log lines emitted during startup honor the operator's
+		// choice. The setter is idempotent and atomic, so a TUI
+		// that flips the flag at runtime can call it directly
+		// without restarting the sidecar — but the canonical
+		// surface is this startup wiring, so a config + restart
+		// gives the same effect with a clearer audit trail.
+		applyPrivacyConfig(cfg)
 		version.SetBinaryVersion(appVersion)
 
 		auditStore, err = audit.NewStore(cfg.AuditDB)
@@ -126,6 +136,37 @@ func Execute() int {
 		return 1
 	}
 	return 0
+}
+
+// applyPrivacyConfig honours the persisted Privacy.DisableRedaction
+// flag at sidecar startup. Two reasons it lives here as a tiny
+// dedicated function rather than inline in PersistentPreRunE:
+//
+//  1. Tests can call it with a synthesized *config.Config to assert
+//     the redaction package picks up the flag without spinning up
+//     a full Cobra root.
+//  2. Future privacy fields (per-sink scope, custom redactor
+//     profiles) land here too, keeping the wiring local to one
+//     auditable touchpoint instead of growing PreRunE.
+//
+// We also emit a loud warning when the kill-switch is on so the
+// operator state is obvious in any startup transcript — the
+// unconditional-redaction contract documented in OBSERVABILITY.md
+// is being violated by design, and silent activation is exactly
+// the failure mode that contract exists to prevent.
+func applyPrivacyConfig(c *config.Config) {
+	if c == nil {
+		return
+	}
+	redaction.SetDisableAll(c.Privacy.DisableRedaction)
+	if c.Privacy.DisableRedaction {
+		fmt.Fprintln(os.Stderr,
+			"warning: privacy.disable_redaction=true — ALL sinks (audit DB, "+
+				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
+				"prompts, judge bodies, and verdict reasons. Disable in "+
+				"shared/multi-tenant deployments via "+
+				"`defenseclaw config set privacy.disable_redaction false`.")
+	}
 }
 
 func initOTelProvider() {

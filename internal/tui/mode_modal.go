@@ -27,15 +27,15 @@ import (
 // presentation order: guardrail-supporting connectors first
 // (openclaw, zeptoclaw), observability-only connectors below
 // (codex, claudecode). The keyboard shortcut is always the connector's
-// initial letter so muscle memory is trivial; ``c`` is reserved for
-// ``codex`` and ``k`` for ``claudecode`` (the alternative letter on
+// initial letter so muscle memory is trivial; `c` is reserved for
+// `codex` and `k` for `claudecode` (the alternative letter on
 // "claude" since c/codex would collide).
 type modeChoice struct {
-	wire     string // canonical config value (openclaw / zeptoclaw / codex / claudecode)
-	label    string // user-facing display name
-	hotkey   rune   // single-letter shortcut for this row
-	guardOK  bool   // does this connector support enforcement?
-	tagline  string // one-line description shown in the row
+	wire    string // canonical config value (openclaw / zeptoclaw / codex / claudecode)
+	label   string // user-facing display name
+	hotkey  rune   // single-letter shortcut for this row
+	guardOK bool   // does this connector support enforcement?
+	tagline string // one-line description shown in the row
 }
 
 var modePickerChoices = []modeChoice{
@@ -159,11 +159,11 @@ func (p *ModePickerModal) previewForSwitch(dest string) string {
 	destGuard := isGuardrailSupporting(dest)
 	switch {
 	case prevGuard && destGuard:
-		return "Inherits current guardrail config (mode, scanner, judge, port)."
+		return "Inherits current guardrail config; previous integration is restored first."
 	case !destGuard:
-		return "Switches to observability-only — proxy disabled, hooks + OTel wired."
+		return "Switches to observability-only — restores previous integration, then wires hooks + OTel."
 	case prevGuard != destGuard && destGuard:
-		return "Enables guardrail in observe mode (no auto-enforcement)."
+		return "Enables guardrail in observe mode (no auto-enforcement) after restoring previous integration."
 	}
 	return ""
 }
@@ -238,6 +238,8 @@ func (p *ModePickerModal) View() string {
 		b.WriteString(dim.Render("→ ") + lipgloss.NewStyle().Bold(true).Render(destLabel) + dim.Render(": "+preview))
 		b.WriteString("\n")
 	}
+	b.WriteString(dim.Render("DefenseClaw keeps hash-checked backups and preserves non-DefenseClaw hooks/settings on teardown."))
+	b.WriteString("\n")
 	b.WriteString("\n")
 	if p.theme != nil {
 		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c jump  •  enter confirm  •  esc close"))

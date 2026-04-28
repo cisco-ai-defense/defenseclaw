@@ -168,7 +168,18 @@ groups:
       - record: connector:defenseclaw_hooks:rate5m
         expr: |
           sum by (action) (
-            rate(defenseclaw_audit_events_total{action=~"tool-call|tool-result|codex\\.notify.*"}[5m])
+            rate(defenseclaw_audit_events_total{action=~"tool-call|tool-result|codex-hook|claude-code-hook|codex\\.notify.*"}[5m])
           )
+      - record: connector:defenseclaw_hook_invocations:rate5m
+        expr: |
+          sum by (connector, event_type, result, reason) (
+            rate(defenseclaw_connector_hook_invocations_total[5m])
+          )
+      - record: connector:defenseclaw_hook_latency:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, connector, event_type, result) (
+              rate(defenseclaw_connector_hook_latency_milliseconds_bucket[5m])
+            ))
       - record: connector:defenseclaw_otel_logs:rate5m
         expr: sum by (source) (rate(defenseclaw_otel_ingest_records_total{signal="logs"}[5m]))

@@ -200,6 +200,9 @@ func TestModePickerModal_ViewMentionsAllChoices(t *testing.T) {
 	if !strings.Contains(out, "esc close") {
 		t.Fatalf("View should show the help footer. Output:\n%s", out)
 	}
+	if !strings.Contains(out, "hash-checked backups") {
+		t.Fatalf("View should explain teardown backup safety. Output:\n%s", out)
+	}
 }
 
 // TestModePickerModal_NotVisibleViewIsEmpty makes sure callers who

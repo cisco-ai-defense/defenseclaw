@@ -32,9 +32,31 @@ import (
 // them. We deliberately use t.Cleanup over defer so the previous
 // override (when one is already in flight from another suite) is
 // restored even if the subtest fails.
+//
+// Belt-and-suspenders: we ALSO call t.Setenv("HOME", tmpHome). Every
+// connector's *Path() helper falls back to ``os.Getenv("HOME")``
+// when its override is empty, so if a future refactor (or a fresh
+// test added here without the override goroutine) ever leaves a
+// global at "" mid-test, the fallback path lands inside tmpHome
+// instead of the developer's real home. Without this we have
+// already seen ~/.claude/settings.json get polluted with hook
+// commands pointing at long-deleted ``/var/folders/.../T/Test...``
+// dirs — Claude Code then logs "hook script: No such file or
+// directory" on every session start.
+//
+// t.Setenv automatically restores HOME at test cleanup time and is
+// disallowed in parallel tests (which is desirable here — both
+// callers of applyHermeticConnectorHomes deliberately serialize
+// their subtests).
 func applyHermeticConnectorHomes(t *testing.T) {
 	t.Helper()
 	tmpHome := t.TempDir()
+
+	// Defense in depth: also redirect HOME so any helper that
+	// bypasses the *PathOverride seam still lands inside tmpHome.
+	// Go's testing framework restores the previous HOME at test
+	// completion automatically.
+	t.Setenv("HOME", tmpHome)
 
 	prevOC := connector.OpenClawHomeOverride
 	connector.OpenClawHomeOverride = filepath.Join(tmpHome, ".openclaw")
@@ -69,6 +91,40 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	}
 	if err := os.MkdirAll(filepath.Dir(connector.CodexConfigPathOverride), 0o755); err != nil {
 		t.Logf("hermetic codex dir mkdir warning: %v", err)
+	}
+}
+
+// TestApplyHermeticConnectorHomes_RedirectsHOME guards the
+// belt-and-suspenders defense added to applyHermeticConnectorHomes:
+// dropping t.Setenv("HOME", tmpHome) would silently re-open the
+// regression where ~/.claude/settings.json was getting polluted by
+// test-temp hook paths (e.g. "/var/folders/.../T/Test.../001/hooks/
+// claude-code-hook.sh"). Claude Code's hook bus reads those paths
+// at every session start, so a leaked entry produces a "No such
+// file or directory" error on every UserPromptSubmit until the
+// developer manually edits settings.json.
+//
+// We assert the post-conditions of the helper directly rather than
+// running a full Setup → settings.json round-trip, because the
+// failure mode we are guarding against — fallback to
+// `os.Getenv("HOME")` — surfaces in the resolved path, not in the
+// connector's serialization logic.
+func TestApplyHermeticConnectorHomes_RedirectsHOME(t *testing.T) {
+	realHome := os.Getenv("HOME")
+	applyHermeticConnectorHomes(t)
+	got := os.Getenv("HOME")
+	if got == realHome {
+		t.Errorf("HOME still points at %q after applyHermeticConnectorHomes — t.Setenv defense missing", realHome)
+	}
+	// Every per-connector path override must now resolve UNDER the
+	// new HOME (or under the dedicated tmpHome dir — same root).
+	if !strings.HasPrefix(connector.ClaudeCodeSettingsPathOverride, got) {
+		t.Errorf("ClaudeCodeSettingsPathOverride = %q does not live under tmp HOME %q",
+			connector.ClaudeCodeSettingsPathOverride, got)
+	}
+	if !strings.HasPrefix(connector.CodexConfigPathOverride, got) {
+		t.Errorf("CodexConfigPathOverride = %q does not live under tmp HOME %q",
+			connector.CodexConfigPathOverride, got)
 	}
 }
 

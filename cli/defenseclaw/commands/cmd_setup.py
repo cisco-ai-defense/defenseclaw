@@ -1352,6 +1352,50 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
 }
 
+_CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
+    "openclaw": (
+        "~/.openclaw/openclaw.json plugin allow/load entries",
+        "~/.openclaw/extensions/defenseclaw/",
+        "~/.defenseclaw/hooks/ and subprocess policy files",
+    ),
+    "zeptoclaw": (
+        "~/.zeptoclaw/config.json providers.*.api_base",
+        "~/.zeptoclaw/config.json safety.allow_private_endpoints",
+        "~/.defenseclaw/hooks/ and subprocess policy files",
+    ),
+    "claudecode": (
+        "~/.claude/settings.json hooks",
+        "~/.claude/settings.json env OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY",
+        "Claude Code Project CodeGuard plugin (installed once and left enabled)",
+        "~/.defenseclaw/hooks/ and subprocess policy files",
+    ),
+    "codex": (
+        "~/.codex/config.toml hooks / features.codex_hooks",
+        "~/.codex/config.toml otel / notify",
+        "~/.codex/skills/software-security Project CodeGuard skill (installed once and left enabled)",
+        "~/.defenseclaw/hooks/ and notify bridge files",
+    ),
+}
+
+
+def _print_connector_mutation_notice(connector: str, *, switching_from: str | None = None) -> None:
+    """Tell operators which agent-owned files DefenseClaw will edit.
+
+    The Go connector setup stores hash-checked snapshots before touching
+    these files. On teardown, unchanged files are restored byte-for-byte;
+    drifted files fall back to removing only DefenseClaw-owned hooks,
+    OTel env, notify, plugin, and proxy entries.
+    """
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    prefix = f"  DefenseClaw will update {label} integration files"
+    if switching_from and switching_from != connector:
+        old = _CONNECTOR_META.get(switching_from, {}).get("label", switching_from)
+        prefix = f"  Switching from {old} first tears down its DefenseClaw integration, then updates {label}"
+    click.echo(prefix + ":")
+    for surface in _CONNECTOR_CHANGE_SURFACES.get(connector, ()):
+        click.echo(f"    - {surface}")
+    click.echo("  A hash-checked backup is stored before edits; teardown restores or surgically removes only DefenseClaw-owned entries.")
+
 
 def _read_picked_connector(data_dir: str | None) -> str | None:
     """Read the connector hint written by ``scripts/install.sh``.
@@ -1455,6 +1499,8 @@ def _print_connector_info(name: str) -> None:
     click.echo(f"    Connector:         {meta['label']} ({name})")
     click.echo(f"    Tool inspection:   {tool_display}")
     click.echo(f"    Subprocess policy: {meta['subprocess_policy']}")
+    click.echo()
+    _print_connector_mutation_notice(name)
     if tool_mode == "response-scan":
         click.echo()
         click.secho(
@@ -1907,6 +1953,8 @@ def _print_connector_observability_banner(connector: str) -> None:
     click.echo(f"  To later turn enforcement on, set guardrail.{enforcement_flag}=true")
     click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
     click.echo()
+    _print_connector_mutation_notice(connector)
+    click.echo()
 
 
 def _print_observability_summary(connector: str) -> None:
@@ -2252,6 +2300,7 @@ def _apply_connector_mode_switch(
             f"{_CONNECTOR_META[new_connector]['label']} "
             f"(observability-only — proxy disabled)"
         )
+        _print_connector_mutation_notice(new_connector, switching_from=prev)
         return _apply_connector_observability_only(
             app, connector=new_connector, restart=restart,
         )
@@ -2294,6 +2343,8 @@ def _apply_connector_mode_switch(
         # Don't auto-enable judge — that's an opt-in toggle that
         # implies an LLM API call per inspection. Leave whatever was
         # there.
+
+    _print_connector_mutation_notice(new_connector, switching_from=prev)
 
     try:
         cfg.save()
@@ -2384,6 +2435,131 @@ def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> Non
     if not ok:
         raise click.ClickException(
             f"failed to switch to {connector!r} — see errors above"
+        )
+
+
+@setup.command("redaction")
+@click.argument(
+    "action",
+    type=click.Choice(("on", "off", "status"), case_sensitive=False),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after toggling. The redaction "
+        "kill-switch is read at sidecar boot, so a flip without "
+        "restart leaves the previous state in effect for the running "
+        "process. Use --no-restart only when the sidecar is offline."
+    ),
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Skip the interactive confirmation prompt when turning "
+         "redaction off. Required for non-TTY callers (TUI, scripts).",
+)
+@pass_ctx
+def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> None:
+    """Persistently enable or disable PII / prompt redaction.
+
+    \b
+    DefenseClaw redacts user prompts, judge bodies, evidence
+    windows, and verdict reasons by default before they reach any
+    sink (stderr, audit DB, OTel logs, Splunk HEC, webhooks). For
+    single-tenant lab installs that need to see raw content
+    end-to-end (prompt-engineering debugging, false-positive
+    triage), this command flips the persistent kill-switch
+    documented in OBSERVABILITY.md.
+
+    \b
+    WARNING: when redaction is OFF, the audit DB and every
+    downstream telemetry sink will store raw PII. Only use this in
+    deployments where every sink lives inside the same trust
+    boundary as the sidecar.
+
+    \b
+    Examples:
+      defenseclaw setup redaction status
+      defenseclaw setup redaction off --yes
+      defenseclaw setup redaction on
+    """
+    action = action.strip().lower()
+    cfg = app.cfg
+    current = bool(cfg.privacy.disable_redaction)
+
+    if action == "status":
+        env_override = os.environ.get("DEFENSECLAW_DISABLE_REDACTION", "").strip().lower()
+        env_on = env_override in {"1", "true", "yes", "on"}
+        click.echo("  Redaction state:")
+        click.echo(
+            f"    config (privacy.disable_redaction): "
+            f"{'OFF (raw passthrough)' if current else 'ON (redacted)'}"
+        )
+        click.echo(
+            f"    env (DEFENSECLAW_DISABLE_REDACTION): "
+            f"{'set (' + env_override + ')' if env_override else '(unset)'}"
+        )
+        effective = current or env_on
+        click.echo(
+            f"    effective at sidecar boot: "
+            f"{'OFF — raw content will be persisted to ALL sinks' if effective else 'ON — placeholders only'}"
+        )
+        return
+
+    desired = action == "off"  # off = disable_redaction = True
+    if desired == current:
+        state = "OFF" if current else "ON"
+        click.echo(f"  • Redaction is already {state}; nothing to change.")
+        return
+
+    if desired and not yes:
+        # Loud, multi-line warning so the operator can't miss the
+        # privacy implications of the flip. Click.confirm reads
+        # from stdin; CI / TUI callers pass --yes to bypass.
+        click.echo()
+        click.echo("  ⚠️  TURNING REDACTION OFF")
+        click.echo()
+        click.echo("  This will persistently disable PII redaction in the sidecar.")
+        click.echo("  After restart, EVERY sink (audit DB, OTel logs, Splunk HEC,")
+        click.echo("  webhooks, gateway.log) will receive UNREDACTED prompts,")
+        click.echo("  judge bodies, evidence windows, and verdict reasons.")
+        click.echo()
+        click.echo("  Only proceed if every downstream sink lives inside the")
+        click.echo("  same trust boundary as this install.")
+        click.echo()
+        click.confirm("  Disable redaction?", abort=True)
+
+    cfg.privacy.disable_redaction = desired
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        raise click.ClickException("config save failed") from exc
+
+    new_state = "OFF (raw passthrough)" if desired else "ON (redacted)"
+    click.echo(f"  ✓ privacy.disable_redaction set to {desired!s}")
+    click.echo(f"  ✓ Redaction state on next sidecar boot: {new_state}")
+
+    if restart:
+        click.echo()
+        click.echo("  Restarting gateway so the redaction state takes effect...")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        click.echo()
+        click.echo("  ⚠ Skipped restart (--no-restart). The running sidecar still")
+        click.echo("    enforces the previous redaction state. Restart manually:")
+        click.echo("       defenseclaw-gateway restart")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-redaction-toggle",
+            "config",
+            f"disable_redaction={desired!s}",
         )
 
 

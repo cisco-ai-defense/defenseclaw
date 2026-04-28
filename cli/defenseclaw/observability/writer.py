@@ -439,6 +439,13 @@ def _apply_otel_preset(
         existing_headers["x-honeycomb-dataset"] = inputs["dataset"]
     if existing_headers:
         otel["headers"] = existing_headers
+    if preset.otel_tls_insecure:
+        tls = otel.setdefault("tls", {})
+        if not isinstance(tls, dict):
+            warnings.append("otel.tls: replaced non-mapping value")
+            tls = {}
+            otel["tls"] = tls
+        tls["insecure"] = True
 
     signals_set = set(signals)
     for sig in ("traces", "metrics", "logs"):
@@ -569,6 +576,8 @@ def _build_sink_entry(
         headers = dict(preset.otel_headers)
         if headers:
             block["headers"] = headers
+        if inputs.get("insecure"):
+            block["insecure"] = _parse_bool(inputs.get("insecure", "false"))
         # Allow an explicit url_path input to override per-signal paths
         # (logs-only case for HTTP protocol).
         if inputs.get("url_path"):

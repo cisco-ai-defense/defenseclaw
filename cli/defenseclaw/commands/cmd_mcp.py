@@ -146,21 +146,28 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
             actions_str,
         )
 
-    for name, ae in actions_map.items():
-        if name in config_names:
-            continue
-        if ae.actions.is_empty():
-            continue
-        actions_str = ae.actions.summary()
-        table.add_row(
-            f"[dim]{name}[/dim]",
-            "[dim]—[/dim]",
-            "[dim]removed from config[/dim]",
-            "",
-            "-",
-            "[dim]enforcement only[/dim]",
-            actions_str,
-        )
+    # Orphan-action rows ("removed from config") are connector-untagged
+    # in the shared audit DB. Showing them on a non-OpenClaw connector
+    # leaks OpenClaw-era MCP actions into the Codex / Claude Code /
+    # ZeptoClaw view. Only surface them when the active connector is
+    # OpenClaw — otherwise the connector-aware ``cfg.mcp_servers()`` is
+    # already authoritative.
+    if connector == "openclaw":
+        for name, ae in actions_map.items():
+            if name in config_names:
+                continue
+            if ae.actions.is_empty():
+                continue
+            actions_str = ae.actions.summary()
+            table.add_row(
+                f"[dim]{name}[/dim]",
+                "[dim]—[/dim]",
+                "[dim]removed from config[/dim]",
+                "",
+                "-",
+                "[dim]enforcement only[/dim]",
+                actions_str,
+            )
 
     console.print(table)
 

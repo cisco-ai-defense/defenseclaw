@@ -449,6 +449,7 @@ def _apply_local_otlp_config(
             # ``protocol`` is declared on the preset; callers can still
             # force http here for SDKs that can't speak grpc locally.
             "protocol": protocol,
+            "insecure": "true",
         },
         app.cfg.data_dir,
         name=service_name,
@@ -488,6 +489,7 @@ def _apply_local_otlp_audit_sink(
         {
             "endpoint": endpoint,
             "protocol": protocol,
+            "insecure": "true",
         },
         app.cfg.data_dir,
         name=_AUDIT_SINK_NAME,

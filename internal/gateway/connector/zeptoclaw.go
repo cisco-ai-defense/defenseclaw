@@ -496,6 +496,10 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 	configPath := zeptoClawConfigPath()
 
 	return withFileLock(configPath, func() error {
+		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "config.json", configPath); err != nil {
+			return fmt.Errorf("capture zeptoclaw config backup: %w", err)
+		}
+
 		config := map[string]interface{}{}
 		data, err := os.ReadFile(configPath)
 		if err != nil && !os.IsNotExist(err) {
@@ -599,7 +603,10 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 			return fmt.Errorf("marshal zeptoclaw config: %w", err)
 		}
 
-		return atomicWriteFile(configPath, out, 0o644)
+		if err := atomicWriteFile(configPath, out, 0o644); err != nil {
+			return err
+		}
+		return updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "config.json", configPath)
 	})
 }
 
@@ -612,6 +619,13 @@ func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) error {
 	configPath := zeptoClawConfigPath()
 
 	return withFileLock(configPath, func() error {
+		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "config.json", configPath); err != nil {
+			return fmt.Errorf("managed config restore: %w", err)
+		} else if restored {
+			os.Remove(filepath.Join(opts.DataDir, "zeptoclaw_backup.json"))
+			return nil
+		}
+
 		data, err := os.ReadFile(configPath)
 		if err != nil {
 			return fmt.Errorf("read zeptoclaw config for restore: %w", err)
@@ -622,24 +636,57 @@ func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) error {
 			return fmt.Errorf("parse zeptoclaw config for restore: %w", err)
 		}
 
+		proxyURL := "http://" + opts.ProxyAddr + "/c/zeptoclaw"
+		originalProviders := map[string]interface{}{}
 		if len(backup.OriginalProviders) > 0 && string(backup.OriginalProviders) != "null" {
-			var orig interface{}
-			if err := json.Unmarshal(backup.OriginalProviders, &orig); err != nil {
+			if err := json.Unmarshal(backup.OriginalProviders, &originalProviders); err != nil {
 				return fmt.Errorf("unmarshal original providers: %w", err)
 			}
-			config["providers"] = orig
-		} else {
-			delete(config, "providers")
+		}
+		if providers, ok := config["providers"].(map[string]interface{}); ok {
+			for name, val := range providers {
+				prov, ok := val.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if cur, _ := prov["api_base"].(string); cur != proxyURL {
+					continue
+				}
+				if origVal, ok := originalProviders[name]; ok {
+					if origProv, ok := origVal.(map[string]interface{}); ok {
+						if origBase, ok := origProv["api_base"]; ok {
+							prov["api_base"] = origBase
+						} else {
+							delete(prov, "api_base")
+						}
+					}
+				} else {
+					delete(prov, "api_base")
+				}
+				providers[name] = prov
+			}
+			config["providers"] = providers
 		}
 
+		originalSafety := map[string]interface{}{}
 		if len(backup.OriginalSafety) > 0 && string(backup.OriginalSafety) != "null" {
-			var orig interface{}
-			if err := json.Unmarshal(backup.OriginalSafety, &orig); err != nil {
+			if err := json.Unmarshal(backup.OriginalSafety, &originalSafety); err != nil {
 				return fmt.Errorf("unmarshal original safety: %w", err)
 			}
-			config["safety"] = orig
-		} else {
-			delete(config, "safety")
+		}
+		if safety, ok := config["safety"].(map[string]interface{}); ok {
+			if cur, _ := safety["allow_private_endpoints"].(bool); cur {
+				if orig, ok := originalSafety["allow_private_endpoints"]; ok {
+					safety["allow_private_endpoints"] = orig
+				} else {
+					delete(safety, "allow_private_endpoints")
+				}
+			}
+			if len(safety) == 0 {
+				delete(config, "safety")
+			} else {
+				config["safety"] = safety
+			}
 		}
 
 		out, err := json.MarshalIndent(config, "", "  ")
@@ -652,6 +699,7 @@ func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) error {
 		}
 
 		os.Remove(filepath.Join(opts.DataDir, "zeptoclaw_backup.json"))
+		discardManagedFileBackup(opts.DataDir, c.Name(), "config.json")
 		return nil
 	})
 }

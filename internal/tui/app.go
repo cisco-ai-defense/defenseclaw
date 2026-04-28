@@ -147,9 +147,10 @@ type Model struct {
 	detail     DetailModal
 	palette    PaletteModel
 	actionMenu ActionMenu
-	mcpSetForm MCPSetForm
-	modePicker ModePickerModal
-	helpOpen   bool
+	mcpSetForm     MCPSetForm
+	modePicker     ModePickerModal
+	redactionModal RedactionToggleModal
+	helpOpen       bool
 
 	// Persistent command input
 	cmdInput      textinput.Model
@@ -232,8 +233,9 @@ func New(deps Deps) Model {
 		detail:     NewDetailModal(),
 		palette:    NewPaletteModel(theme, registry, executor),
 		actionMenu: NewActionMenu(theme),
-		mcpSetForm: NewMCPSetForm(),
-		modePicker: NewModePickerModal(theme),
+		mcpSetForm:     NewMCPSetForm(),
+		modePicker:     NewModePickerModal(theme),
+		redactionModal: NewRedactionToggleModal(theme),
 
 		cmdInput: ti,
 
@@ -1851,6 +1853,67 @@ func (m Model) handleModePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleRedactionModalKey runs while the [R]-from-Logs overlay is
+// open. The contract:
+//
+//   - esc / q: close without changing anything
+//   - enter:   dispatch `defenseclaw setup redaction <on|off> --yes`
+//              and switch to the Activity panel so the operator
+//              watches the restart progress.
+//
+// Any other key is a no-op so a stray keystroke can't accidentally
+// flip privacy state. Hotkey shortcuts (e.g. "y" = yes) are
+// deliberately NOT supported here — the modal exists to make the
+// privacy implications unambiguous and rushing past it on a single
+// letter undermines the whole point.
+func (m Model) handleRedactionModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.redactionModal.Hide()
+		return m, nil
+	case "enter":
+		return m.confirmRedactionToggle()
+	}
+	return m, nil
+}
+
+// confirmRedactionToggle dispatches the chosen redaction action
+// through the Python CLI and switches to the Activity panel so the
+// user sees the gateway restart output. We always pass --yes
+// because the modal IS the confirmation step — the consent prompt
+// in cmd_setup.py exists for non-TUI invocations.
+//
+// We also flip the in-process redaction.SetDisableAll override
+// IMMEDIATELY so the Logs panel "RAW" badge updates before the
+// sidecar finishes restarting. The badge tracks operator INTENT
+// (which is what the modal captured); the actual gateway.log
+// content catches up a moment later when the new sidecar boots
+// with applyPrivacyConfig.
+func (m Model) confirmRedactionToggle() (tea.Model, tea.Cmd) {
+	action := m.redactionModal.DesiredAction()
+	m.redactionModal.Hide()
+
+	// Mirror the about-to-be-persisted state in this process so the
+	// Logs panel badge flips immediately. Order matters here: we
+	// flip BEFORE spawning the subprocess because the executor is
+	// async and the badge would otherwise lag by however long the
+	// gateway restart takes.
+	switch action {
+	case "off":
+		applyTUIRedactionOverride(true)
+	case "on":
+		applyTUIRedactionOverride(false)
+	}
+
+	cmd := m.executor.Execute(
+		"defenseclaw",
+		[]string{"setup", "redaction", action, "--yes"},
+		"setup redaction "+action,
+	)
+	m.activePanel = PanelActivity
+	return m, cmd
+}
+
 // confirmModePicker dispatches the chosen mode through the Python
 // CLI and switches to the Activity panel so the user sees the
 // restart output. We always pass --yes because the modal IS the
@@ -2219,6 +2282,25 @@ func (m Model) handleToolsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// Redaction-toggle modal owns the keyboard while visible. Handled
+	// BEFORE every other Logs-panel shortcut so e.g. typing "R" inside
+	// the modal doesn't re-open it, and Esc/Enter close-or-confirm
+	// instead of being interpreted as panel shortcuts (Enter would
+	// otherwise open a Verdicts detail modal underneath).
+	if m.redactionModal.IsVisible() {
+		return m.handleRedactionModalKey(msg)
+	}
+	// `R` (uppercase — lowercase is reserved for "regex search later"
+	// and stays untouched) opens the redaction kill-switch modal.
+	// Available regardless of the active log source because all three
+	// sources (Gateway / Verdicts / Watchdog) share the same redaction
+	// pipeline; flipping the switch affects them uniformly.
+	if key == "R" && !m.logs.searching {
+		m.redactionModal.SetSize(m.width, m.height)
+		m.redactionModal.Show(redactionDisabledForLogsBadge())
+		return m, nil
+	}
 	// On the Verdicts source, Enter opens a detail modal for the
 	// most-recent visible event. We intercept before handing the
 	// key to the panel so the panel's own "search entry" path
@@ -2616,6 +2698,14 @@ func (m Model) View() tea.View {
 	if m.modePicker.IsVisible() {
 		m.modePicker.SetSize(m.width, m.height)
 		return m.tuiShellView(m.modePicker.View())
+	}
+
+	// Redaction kill-switch overlay (Logs [R]). Same overlay-instead-
+	// of-inline rationale as the mode picker — the modal is a
+	// blocking confirmation, not a side-panel widget.
+	if m.redactionModal.IsVisible() {
+		m.redactionModal.SetSize(m.width, m.height)
+		return m.tuiShellView(m.redactionModal.View())
 	}
 
 	// Detail modal

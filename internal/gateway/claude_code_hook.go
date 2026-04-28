@@ -81,23 +81,35 @@ type claudeCodeHookResponse struct {
 
 func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		if a.otel != nil {
+			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "method", 0)
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var payload map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if a.otel != nil {
+			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "invalid_json", 0)
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 	b, _ := json.Marshal(payload)
 	var req claudeCodeHookRequest
 	if err := json.Unmarshal(b, &req); err != nil {
+		if a.otel != nil {
+			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "invalid_payload", 0)
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Claude Code hook payload"})
 		return
 	}
 	req.Payload = payload
 	if req.HookEventName == "" {
+		if a.otel != nil {
+			a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", "unknown", "rejected", "missing_event", 0)
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
 		return
 	}
@@ -120,6 +132,11 @@ func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request)
 	}
 
 	if a.otel != nil {
+		reason := resp.Action
+		if resp.WouldBlock {
+			reason = "would_block"
+		}
+		a.otel.RecordConnectorHookInvocation(r.Context(), "claudecode", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 		a.otel.RecordInspectEvaluation(r.Context(), "claudecode:"+req.HookEventName, resp.Action, resp.Severity)
 		a.otel.RecordInspectLatency(r.Context(), "claudecode:"+req.HookEventName, float64(elapsed.Milliseconds()))
 	}

@@ -204,6 +204,18 @@ type SetupPanel struct {
 	// fixes the issue.
 	wizFormError string
 
+	// wizFormReveal flips the password-kind render path from the
+	// mask (``****abcd``) to the raw underlying value so operators
+	// can sanity-check API keys, tokens, and env-resolved secrets
+	// without leaving the TUI. Toggled with Ctrl+T (only surfaced
+	// in the help line when the active form actually has a
+	// password-kind field). Reset to ``false`` whenever a form is
+	// opened, closed, or rebuilt (preset/whtype change) so a
+	// reveal never silently persists across forms — the operator
+	// must opt-in each time, which keeps the default screen-share
+	// safe.
+	wizFormReveal bool
+
 	// Wizard output terminal (shows command output after form submission)
 	wizRunning bool
 	wizRunIdx  int // which wizard is running
@@ -956,6 +968,7 @@ func (p *SetupPanel) showWizardForm(idx int) {
 	p.wizFormScroll = 0
 	p.wizFormError = ""
 	p.wizRunIdx = idx
+	p.wizFormReveal = false
 }
 
 func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string, string) {
@@ -991,6 +1004,14 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 		p.wizFormFields = nil
 		p.wizFormError = ""
 		p.wizRunIdx = -1
+		p.wizFormReveal = false
+	case "ctrl+t":
+		// Reveal/hide masked password-kind fields. No-op when the
+		// active form has no password fields so the keystroke
+		// doesn't silently consume in surprising contexts.
+		if p.wizardFormHasPasswordField() {
+			p.wizFormReveal = !p.wizFormReveal
+		}
 	case "up", "k":
 		if p.wizFormCursor > 0 {
 			p.wizFormCursor--
@@ -1053,6 +1074,7 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 				next := f.Options[(cur+1)%len(f.Options)]
 				p.wizFormFields = observabilityWizardFields(next)
 				p.wizFormCursor = 0
+				p.wizFormReveal = false
 			}
 		case "whtype":
 			// Same behaviour as "preset" but rebuilds via
@@ -1069,6 +1091,7 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 				next := f.Options[(cur+1)%len(f.Options)]
 				p.wizFormFields = webhookWizardFields(next)
 				p.wizFormCursor = 0
+				p.wizFormReveal = false
 			}
 		default:
 			p.wizFormEditing = true
@@ -1112,6 +1135,7 @@ func (p *SetupPanel) submitWizardForm() (bool, string, []string, string) {
 
 	p.wizFormActive = false
 	p.wizFormFields = nil
+	p.wizFormReveal = false
 	p.wizardStatus[idx] = "running..."
 	p.wizRunning = true
 	p.wizOutput = []string{fmt.Sprintf("-- Running %s Setup (non-interactive) --", name), ""}
@@ -1137,6 +1161,20 @@ func (p *SetupPanel) missingRequiredFields() []string {
 		}
 	}
 	return missing
+}
+
+// wizardFormHasPasswordField reports whether the active wizard form
+// contains any masked-render field. Used to gate the Ctrl+T reveal
+// keystroke and the corresponding help-line hint so neither appears
+// in forms with nothing to reveal (e.g. plain bool/choice wizards
+// where Ctrl+T would be a confusing no-op).
+func (p *SetupPanel) wizardFormHasPasswordField() bool {
+	for _, f := range p.wizFormFields {
+		if f.Kind == "password" {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *SetupPanel) buildWizardArgs(idx int) []string {
@@ -2238,15 +2276,28 @@ func (p *SetupPanel) renderWizardForm() string {
 				}
 				val = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Render(label)
 			case "password":
-				// Secret-like field: render a mask so the value
-				// doesn't leak into TUI screen recordings or bug
-				// reports. The underlying CLI still sees the
+				// Secret-like field: render a mask by default so the
+				// value doesn't leak into TUI screen recordings or
+				// bug reports. The underlying CLI still sees the
 				// plaintext value via --token.
-				if f.Value == "" {
+				//
+				// When the operator explicitly toggles reveal mode
+				// (Ctrl+T) we render the raw value in a yellow,
+				// italic style so the unmasked state is visually
+				// loud — the goal is to make accidental
+				// over-the-shoulder leaks obvious, not silent.
+				switch {
+				case f.Value == "":
 					val = dim.Render("(empty)")
-				} else if len(f.Value) <= 4 {
+				case p.wizFormReveal:
+					revealed := lipgloss.NewStyle().
+						Foreground(lipgloss.Color("220")).
+						Italic(true).
+						Render(f.Value)
+					val = revealed + " " + dim.Render("(revealed — Ctrl+T to hide)")
+				case len(f.Value) <= 4:
 					val = dim.Render("****")
-				} else {
+				default:
 					val = dim.Render("****" + f.Value[len(f.Value)-4:])
 				}
 			default:
@@ -2286,7 +2337,20 @@ func (p *SetupPanel) renderWizardForm() string {
 	runBtn := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("34")).Padding(0, 2)
 	b.WriteString("  " + runBtn.Render("Ctrl+R  Run Setup"))
 	b.WriteString("\n\n")
-	b.WriteString("  " + dim.Render("[Enter/Space] Toggle/Edit  [Up/Down] Navigate  [Ctrl+R] Run  [Esc] Cancel"))
+	helpLine := "[Enter/Space] Toggle/Edit  [Up/Down] Navigate  [Ctrl+R] Run  [Esc] Cancel"
+	// Only surface the reveal hint when the active form actually
+	// has a masked field — otherwise the keystroke is a confusing
+	// no-op and the help line stays cluttered. The hint flips its
+	// label to reflect the current state ("Reveal" vs. "Hide") so
+	// the operator always knows what Ctrl+T will do next.
+	if p.wizardFormHasPasswordField() {
+		if p.wizFormReveal {
+			helpLine += "  [Ctrl+T] Hide secrets"
+		} else {
+			helpLine += "  [Ctrl+T] Reveal secrets"
+		}
+	}
+	b.WriteString("  " + dim.Render(helpLine))
 	b.WriteString("\n")
 
 	return b.String()

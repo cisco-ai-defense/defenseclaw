@@ -841,6 +841,22 @@ class GuardrailConfig:
 
 
 @dataclass
+class PrivacyConfig:
+    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
+
+    ``disable_redaction`` is the persistent kill-switch documented in
+    the Go redaction package: when True the sidecar bypasses every
+    ForSink* helper at startup, including persistent sinks (audit DB,
+    OTel logs, Splunk HEC, webhooks). It violates the
+    unconditional-redaction contract documented in OBSERVABILITY.md
+    by design — only enable on single-tenant installs where every
+    downstream sink lives inside the same trust boundary.
+    """
+
+    disable_redaction: bool = False
+
+
+@dataclass
 class Config:
     data_dir: str = ""
     # Unified v5 LLM configuration. Every LLM-using component resolves
@@ -871,6 +887,7 @@ class Config:
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
+    privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -1108,6 +1125,14 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         # after a load/save cycle.
         if wh.get("name", "") == "":
             wh.pop("name", None)
+    # Mirror Go's ``yaml:"privacy,omitempty"`` — drop the block
+    # entirely when it carries only defaults so existing configs
+    # without a ``privacy:`` block stay byte-identical after a
+    # load/save round-trip. The block reappears the moment any
+    # field flips off-default (e.g. ``disable_redaction: true``).
+    privacy = d.get("privacy")
+    if isinstance(privacy, dict) and not any(privacy.values()):
+        d.pop("privacy", None)
     return d
 
 
@@ -1655,10 +1680,25 @@ def load() -> Config:
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
+        privacy=_merge_privacy(raw.get("privacy")),
     )
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     return cfg
+
+
+def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
+    """Build a :class:`PrivacyConfig` from the YAML ``privacy:`` block.
+
+    Defaults match the Go side (``disable_redaction: false``) so a
+    config without the block keeps the historical
+    redact-by-default contract.
+    """
+    if not isinstance(raw, dict):
+        return PrivacyConfig()
+    return PrivacyConfig(
+        disable_redaction=bool(raw.get("disable_redaction", False)),
+    )
 
 
 def default_config() -> Config:

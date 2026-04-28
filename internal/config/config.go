@@ -181,6 +181,35 @@ type Config struct {
 	// detected at Load() and emit a hard migration error.
 	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+	Privacy    PrivacyConfig   `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+}
+
+// PrivacyConfig groups privacy/redaction toggles. Today it carries
+// only the redaction kill-switch; future fields (per-sink redaction
+// scope, custom redactor profiles) land here so operators have a
+// single section to audit.
+//
+// Scope: this is a deliberate, persistent operator decision.
+// Defaults match the existing redacting-by-default behavior so a
+// fresh install or a config without a `privacy:` block keeps the
+// historical contract documented in OBSERVABILITY.md.
+type PrivacyConfig struct {
+	// DisableRedaction, when true, instructs the sidecar to bypass
+	// every ForSink* redaction helper at startup — including
+	// persistent sinks (SQLite audit, OTel log exporters, Splunk
+	// HEC, webhooks). Equivalent to setting
+	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
+	// the choice survives restarts and TUI invocations without
+	// per-shell env-var ceremony.
+	//
+	// WARNING: this violates the unconditional-redaction contract
+	// documented in OBSERVABILITY.md. Only enable on single-tenant
+	// installs where every downstream sink already lives inside
+	// the same trust boundary (e.g. lab / prompt-engineering use).
+	// The CLI emits a loud warning on flip-on, and the loader logs
+	// a warning at every Load() so the runtime state stays
+	// auditable.
+	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level

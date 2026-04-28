@@ -87,6 +87,16 @@ type SetupOpts struct {
 	// branch for those connectors.
 	CodexEnforcement      bool
 	ClaudeCodeEnforcement bool
+
+	// InstallCodeGuard enables one-time, native Project CodeGuard
+	// bootstrapping for connectors that have their own extension
+	// mechanism. Codex gets the upstream `software-security` skill
+	// under ~/.codex/skills; Claude Code gets the upstream
+	// codeguard-security plugin through `claude plugin`. These native
+	// integrations are intentionally not torn down when the operator
+	// changes connectors: they are user-visible security tooling, not
+	// DefenseClaw hook/proxy state.
+	InstallCodeGuard bool
 }
 
 // Connector is the contract every agent framework adapter implements.

@@ -1142,6 +1142,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// truth without re-reading config from disk.
 		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
 		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
+		InstallCodeGuard:      true,
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the

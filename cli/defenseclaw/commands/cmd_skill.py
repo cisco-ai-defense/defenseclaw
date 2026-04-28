@@ -354,7 +354,7 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 @click.option("--json", "as_json", is_flag=True, help="Output merged skill list as JSON")
 @pass_ctx
 def list_skills(app: AppContext, as_json: bool) -> None:
-    """List all OpenClaw skills with their latest scan severity."""
+    """List all skills for the active connector with their latest scan severity."""
 
     oc_list = _list_openclaw_skills_full(app)
     skills = oc_list.get("skills", []) if oc_list else []
@@ -362,44 +362,67 @@ def list_skills(app: AppContext, as_json: bool) -> None:
     scan_map = _build_scan_map(app.store)
     actions_map = _build_actions_map(app.store)
 
-    if not skills and not actions_map and not scan_map:
+    # The ``actions`` and ``scan_results`` tables are connector-untagged in
+    # the shared audit DB (see cli/defenseclaw/db.py). Phantom rows from
+    # those maps were historically OpenClaw-owned, so injecting them on a
+    # non-OpenClaw connector (codex, claudecode, zeptoclaw) would surface
+    # skills that the active framework does not actually have on disk —
+    # which is exactly the leak users were seeing in the Skills tab. Only
+    # surface phantoms when the active connector is OpenClaw; for the
+    # other connectors, the connector-aware filesystem walk
+    # (skill_list.list_skills → cfg.skill_dirs()) is the source of truth.
+    show_audit_phantoms = (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+    ) == "openclaw"
+
+    if not skills and (not show_audit_phantoms or (not actions_map and not scan_map)):
         if as_json:
             click.echo("[]")
             return
-        click.echo("No skills found. Is openclaw installed?")
+        connector = (
+            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        )
+        if connector == "openclaw":
+            click.echo("No skills found. Is openclaw installed?")
+        else:
+            click.echo(
+                f"No skills found for connector={connector!r} "
+                f"(checked the connector-specific skill directories).",
+            )
         return
 
     known_names = {s.get("name", "") for s in skills}
 
-    for name, ae in actions_map.items():
-        if name not in known_names:
-            skills.append({
-                "name": name,
-                "description": "",
-                "emoji": "",
-                "eligible": False,
-                "disabled": ae.actions.runtime == "disable",
-                "blockedByAllowlist": False,
-                "source": "enforcement",
-                "bundled": False,
-                "homepage": "",
-            })
-            known_names.add(name)
+    if show_audit_phantoms:
+        for name, ae in actions_map.items():
+            if name not in known_names:
+                skills.append({
+                    "name": name,
+                    "description": "",
+                    "emoji": "",
+                    "eligible": False,
+                    "disabled": ae.actions.runtime == "disable",
+                    "blockedByAllowlist": False,
+                    "source": "enforcement",
+                    "bundled": False,
+                    "homepage": "",
+                })
+                known_names.add(name)
 
-    for name in scan_map:
-        if name not in known_names:
-            skills.append({
-                "name": name,
-                "description": "",
-                "emoji": "",
-                "eligible": False,
-                "disabled": False,
-                "blockedByAllowlist": False,
-                "source": "scan-history",
-                "bundled": False,
-                "homepage": "",
-            })
-            known_names.add(name)
+        for name in scan_map:
+            if name not in known_names:
+                skills.append({
+                    "name": name,
+                    "description": "",
+                    "emoji": "",
+                    "eligible": False,
+                    "disabled": False,
+                    "blockedByAllowlist": False,
+                    "source": "scan-history",
+                    "bundled": False,
+                    "homepage": "",
+                })
+                known_names.add(name)
 
     if as_json:
         _print_skill_list_json(skills, scan_map, actions_map)

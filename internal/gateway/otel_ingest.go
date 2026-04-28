@@ -45,6 +45,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -208,9 +209,346 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	// local-observability-stack's Loki receives codex/claudecode
 	// telemetry directly — no extra audit OTLP sink needed.
 	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
+	for _, usage := range extractOTLPTokenUsage(body, signal, source) {
+		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), usage.tokenType, usage.tokens)
+	}
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
 	writeOTLPSuccess(w)
+}
+
+type otelTokenUsage struct {
+	operationName string
+	providerName  string
+	model         string
+	agentName     string
+	tokenType     string
+	tokens        int64
+}
+
+// extractOTLPTokenUsage promotes connector-native OTLP log fields into
+// DefenseClaw's canonical GenAI token histogram. Codex emits token usage
+// on log records, and Claude Code emits its own claude_code.token.usage
+// counter instead of the GenAI semconv histogram:
+//
+//	event.name="codex.sse_event"
+//	event.kind="response.completed"
+//	input_token_count / output_token_count / cached_token_count / ...
+//	claude_code.token.usage{type=input|output|cacheRead|cacheCreation,model=...}
+//
+// The gateway still keeps the raw OTLP receiver small; this extraction
+// is deliberately narrow and low-cardinality so dashboards get token
+// spend without storing raw prompts or replaying arbitrary OTLP metrics.
+func extractOTLPTokenUsage(body []byte, signal otelIngestSignal, source string) []otelTokenUsage {
+	if len(body) == 0 {
+		return nil
+	}
+	switch signal {
+	case otelSignalLogs:
+		return extractOTLPLogTokenUsage(body, source)
+	case otelSignalMetrics:
+		return extractOTLPMetricTokenUsage(body, source)
+	default:
+		return nil
+	}
+}
+
+func extractOTLPLogTokenUsage(body []byte, source string) []otelTokenUsage {
+	var envelope struct {
+		ResourceLogs []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeLogs []struct {
+				LogRecords []struct {
+					Attributes []otlpAttribute `json:"attributes"`
+				} `json:"logRecords"`
+			} `json:"scopeLogs"`
+		} `json:"resourceLogs"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+
+	var out []otelTokenUsage
+	for _, resource := range envelope.ResourceLogs {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		serviceName := otlpString(resourceAttrs, "service.name")
+		for _, scope := range resource.ScopeLogs {
+			for _, rec := range scope.LogRecords {
+				attrs := otlpAttributesToMap(rec.Attributes)
+				eventName := otlpString(attrs, "event.name")
+				eventKind := otlpString(attrs, "event.kind")
+
+				inputTokens := otlpInt(attrs,
+					"input_token_count",
+					"gen_ai.usage.input_tokens",
+					"codex.turn.token_usage.input_tokens",
+				)
+				outputTokens := otlpInt(attrs,
+					"output_token_count",
+					"gen_ai.usage.output_tokens",
+					"codex.turn.token_usage.output_tokens",
+				)
+				if inputTokens <= 0 && outputTokens <= 0 {
+					continue
+				}
+
+				// For Codex, only response.completed carries complete
+				// per-response token counts. This avoids counting partial
+				// or diagnostic events that happen to include token-ish
+				// fields in future releases.
+				if eventName == "codex.sse_event" && eventKind != "response.completed" {
+					continue
+				}
+
+				agentName := source
+				if agentName == "" || agentName == "unknown" {
+					agentName = firstNonEmpty(
+						otlpString(attrs, "gen_ai.agent.name"),
+						serviceName,
+						"unknown",
+					)
+				}
+				out = append(out, otelTokenUsage{
+					operationName: firstNonEmpty(otlpString(attrs, "gen_ai.operation.name"), "chat"),
+					providerName:  firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
+					model: firstNonEmpty(
+						otlpString(attrs, "gen_ai.response.model"),
+						otlpString(attrs, "gen_ai.request.model"),
+						otlpString(attrs, "model"),
+						"unknown",
+					),
+					agentName: agentName,
+					tokenType: "input",
+					tokens:    inputTokens,
+				})
+				out = append(out, otelTokenUsage{
+					operationName: firstNonEmpty(otlpString(attrs, "gen_ai.operation.name"), "chat"),
+					providerName:  firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
+					model: firstNonEmpty(
+						otlpString(attrs, "gen_ai.response.model"),
+						otlpString(attrs, "gen_ai.request.model"),
+						otlpString(attrs, "model"),
+						"unknown",
+					),
+					agentName: agentName,
+					tokenType: "output",
+					tokens:    outputTokens,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
+	var envelope struct {
+		ResourceMetrics []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeMetrics []struct {
+				Metrics []struct {
+					Name  string           `json:"name"`
+					Unit  string           `json:"unit"`
+					Sum   otlpMetricPoints `json:"sum"`
+					Gauge otlpMetricPoints `json:"gauge"`
+				} `json:"metrics"`
+			} `json:"scopeMetrics"`
+		} `json:"resourceMetrics"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+
+	var out []otelTokenUsage
+	for _, resource := range envelope.ResourceMetrics {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		serviceName := otlpString(resourceAttrs, "service.name")
+		for _, scope := range resource.ScopeMetrics {
+			for _, metric := range scope.Metrics {
+				if metric.Name != "claude_code.token.usage" {
+					continue
+				}
+				points := metric.Sum.DataPoints
+				if len(points) == 0 {
+					points = metric.Gauge.DataPoints
+				}
+				for _, point := range points {
+					attrs := otlpAttributesToMap(point.Attributes)
+					tokenType := normalizeClaudeCodeTokenType(otlpString(attrs, "type"))
+					tokens := otlpDataPointInt(point.AsInt, point.AsDouble)
+					if tokenType == "" || tokens <= 0 {
+						continue
+					}
+					agentName := source
+					if agentName == "" || agentName == "unknown" {
+						agentName = firstNonEmpty(serviceName, "claudecode")
+					}
+					out = append(out, otelTokenUsage{
+						operationName: "chat",
+						providerName:  firstNonEmpty(source, serviceName, "claudecode"),
+						model:         firstNonEmpty(otlpString(attrs, "model"), "unknown"),
+						agentName:     agentName,
+						tokenType:     tokenType,
+						tokens:        tokens,
+					})
+				}
+			}
+		}
+	}
+	return out
+}
+
+type otlpMetricPoints struct {
+	DataPoints []struct {
+		Attributes []otlpAttribute `json:"attributes"`
+		AsInt      json.RawMessage `json:"asInt"`
+		AsDouble   json.RawMessage `json:"asDouble"`
+	} `json:"dataPoints"`
+}
+
+type otlpAttribute struct {
+	Key   string          `json:"key"`
+	Value json.RawMessage `json:"value"`
+}
+
+func otlpAttributesToMap(attrs []otlpAttribute) map[string]interface{} {
+	out := make(map[string]interface{}, len(attrs))
+	for _, attr := range attrs {
+		if attr.Key == "" {
+			continue
+		}
+		out[attr.Key] = decodeOTLPAnyValue(attr.Value)
+	}
+	return out
+}
+
+func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
+	var v struct {
+		StringValue *string      `json:"stringValue"`
+		IntValue    *json.Number `json:"intValue"`
+		DoubleValue *float64     `json:"doubleValue"`
+		BoolValue   *bool        `json:"boolValue"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil
+	}
+	switch {
+	case v.StringValue != nil:
+		return *v.StringValue
+	case v.IntValue != nil:
+		if i, err := v.IntValue.Int64(); err == nil {
+			return i
+		}
+		return v.IntValue.String()
+	case v.DoubleValue != nil:
+		return *v.DoubleValue
+	case v.BoolValue != nil:
+		return *v.BoolValue
+	default:
+		return nil
+	}
+}
+
+func otlpString(attrs map[string]interface{}, key string) string {
+	v, ok := attrs[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(x)
+	default:
+		return ""
+	}
+}
+
+func otlpInt(attrs map[string]interface{}, keys ...string) int64 {
+	for _, key := range keys {
+		v, ok := attrs[key]
+		if !ok || v == nil {
+			continue
+		}
+		switch x := v.(type) {
+		case int64:
+			return x
+		case float64:
+			return int64(x)
+		case string:
+			if i, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64); err == nil {
+				return i
+			}
+			if f, err := strconv.ParseFloat(strings.TrimSpace(x), 64); err == nil {
+				return int64(f)
+			}
+		}
+	}
+	return 0
+}
+
+func otlpDataPointInt(rawInt, rawDouble json.RawMessage) int64 {
+	if len(rawInt) > 0 && string(rawInt) != "null" {
+		if n := parseOTLPNumber(rawInt); n > 0 {
+			return n
+		}
+	}
+	if len(rawDouble) > 0 && string(rawDouble) != "null" {
+		return parseOTLPNumber(rawDouble)
+	}
+	return 0
+}
+
+func parseOTLPNumber(raw json.RawMessage) int64 {
+	var asNumber json.Number
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&asNumber); err == nil {
+		if i, intErr := asNumber.Int64(); intErr == nil {
+			return i
+		}
+		if f, floatErr := strconv.ParseFloat(asNumber.String(), 64); floatErr == nil {
+			return int64(f)
+		}
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		asString = strings.TrimSpace(asString)
+		if i, intErr := strconv.ParseInt(asString, 10, 64); intErr == nil {
+			return i
+		}
+		if f, floatErr := strconv.ParseFloat(asString, 64); floatErr == nil {
+			return int64(f)
+		}
+	}
+	return 0
+}
+
+func normalizeClaudeCodeTokenType(tokenType string) string {
+	switch strings.TrimSpace(tokenType) {
+	case "input", "output", "cacheRead", "cacheCreation":
+		return strings.TrimSpace(tokenType)
+	default:
+		return ""
+	}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // otelIngestActionForSignal maps the inbound signal to the typed

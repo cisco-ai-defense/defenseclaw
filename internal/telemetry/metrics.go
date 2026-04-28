@@ -18,6 +18,7 @@ package telemetry
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -66,6 +67,8 @@ type metricsSet struct {
 	// Inspect metrics
 	inspectEvaluations metric.Int64Counter
 	inspectLatency     metric.Float64Histogram
+	hookInvocations    metric.Int64Counter
+	hookLatency        metric.Float64Histogram
 
 	// Audit store metrics
 	auditDBErrors metric.Int64Counter
@@ -260,6 +263,22 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of input and output tokens used."),
 		metric.WithExplicitBucketBoundaries(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.hookInvocations, err = m.Int64Counter("defenseclaw.connector.hook.invocations",
+		metric.WithUnit("{hook}"),
+		metric.WithDescription("Connector hook invocations observed by the gateway."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.hookLatency, err = m.Float64Histogram("defenseclaw.connector.hook.latency",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Connector hook handler latency."),
 	)
 	if err != nil {
 		return nil, err
@@ -941,6 +960,26 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
+	if prompt > 0 {
+		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, "input", prompt)
+	}
+	if completion > 0 {
+		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, "output", completion)
+	}
+}
+
+// RecordLLMTokenUsage records one token-usage data point with an explicit
+// token type. It is used for connector-native counters such as Claude Code's
+// cacheRead/cacheCreation token categories, while RecordLLMTokens preserves
+// the common input/output call-site contract.
+func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, providerName, model, agentName, agentID, tokenType string, tokens int64) {
+	if !p.Enabled() || p.metrics == nil || tokens <= 0 {
+		return
+	}
+	tokenType = strings.TrimSpace(tokenType)
+	if tokenType == "" {
+		tokenType = "unknown"
+	}
 	commonAttrs := []attribute.KeyValue{
 		attribute.String("gen_ai.operation.name", operationName),
 		attribute.String("gen_ai.provider.name", providerName),
@@ -952,14 +991,8 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 	if agentID != "" {
 		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.id", agentID))
 	}
-	if prompt > 0 {
-		attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", "input")}, commonAttrs...)
-		p.metrics.genAITokenUsage.Record(ctx, float64(prompt), metric.WithAttributes(attrs...))
-	}
-	if completion > 0 {
-		attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", "output")}, commonAttrs...)
-		p.metrics.genAITokenUsage.Record(ctx, float64(completion), metric.WithAttributes(attrs...))
-	}
+	attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", tokenType)}, commonAttrs...)
+	p.metrics.genAITokenUsage.Record(ctx, float64(tokens), metric.WithAttributes(attrs...))
 }
 
 // RecordLLMDuration records LLM call duration per OTel GenAI semconv.
@@ -1101,6 +1134,40 @@ func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durati
 	p.metrics.inspectLatency.Record(ctx, durationMs, metric.WithAttributes(
 		attribute.String("tool", tool),
 	))
+}
+
+// RecordConnectorHookInvocation records a hook request that reached the
+// gateway. Client-side spawn failures happen before this point, but this metric
+// gives dashboards a durable count of handled hooks, gateway rejections, and
+// handler latency.
+func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector, eventType, result, reason string, durationMs float64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	result = strings.TrimSpace(result)
+	if result == "" {
+		result = "unknown"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "none"
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("connector", connector),
+		attribute.String("event_type", eventType),
+		attribute.String("result", result),
+		attribute.String("reason", reason),
+	}
+	p.metrics.hookInvocations.Add(ctx, 1, metric.WithAttributes(attrs...))
+	p.metrics.hookLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
 }
 
 // RecordAuditDBError records an SQLite audit store operation failure.

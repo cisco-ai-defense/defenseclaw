@@ -217,6 +217,20 @@ class WriterOTelPresetTests(unittest.TestCase):
         dotenv = _read_dotenv(tmp)
         self.assertEqual(dotenv.get(PRESETS["datadog"].token_env), "dd-key-abc")
 
+    def test_local_otlp_marks_collector_transport_insecure(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "local-otlp",
+            {"endpoint": "127.0.0.1:4317"},
+            tmp,
+        )
+
+        doc = _read_yaml(tmp)
+        otel = doc.get("otel") or {}
+        self.assertTrue((otel.get("tls") or {}).get("insecure"))
+        self.assertEqual(otel.get("traces", {}).get("protocol"), "grpc")
+        self.assertEqual(otel.get("traces", {}).get("endpoint"), "127.0.0.1:4317")
+
     def test_dry_run_does_not_write(self) -> None:
         _, tmp = _make_tmp_ctx()
         before = _read_yaml(tmp)
@@ -314,7 +328,7 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         _, tmp = _make_tmp_ctx()
         result = apply_preset(
             "otlp",
-            {"endpoint": "127.0.0.1:4317", "protocol": "grpc"},
+            {"endpoint": "127.0.0.1:4317", "protocol": "grpc", "insecure": "true"},
             tmp,
             name="local-otlp-logs",
             target_override="audit_sinks",
@@ -332,6 +346,7 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         # ``_strip_scheme`` keeps host:port intact (no leading ``http://``).
         self.assertEqual(block.get("endpoint"), "127.0.0.1:4317")
         self.assertEqual(block.get("protocol"), "grpc")
+        self.assertTrue(block.get("insecure"))
 
         # And re-applying with the same name must update in place
         # rather than appending a duplicate — the writer's shallow
@@ -339,7 +354,7 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         # idempotent across re-invocations.
         apply_preset(
             "otlp",
-            {"endpoint": "127.0.0.1:4317", "protocol": "grpc"},
+            {"endpoint": "127.0.0.1:4317", "protocol": "grpc", "insecure": "true"},
             tmp,
             name="local-otlp-logs",
             target_override="audit_sinks",
