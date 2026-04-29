@@ -66,11 +66,21 @@ from defenseclaw.paths import (
 @click.option("--llm-provider", default="", help="Unified LLM provider (openai, anthropic, ollama, etc.).")
 @click.option("--llm-model", default="", help="Unified LLM model, preferably provider/model.")
 @click.option("--llm-api-key", default="", help="LLM API key to save into .env (config stores only the env name).")
-@click.option("--llm-api-key-env", default="DEFENSECLAW_LLM_KEY", show_default=True, help="Env var name for the unified LLM key.")
+@click.option(
+    "--llm-api-key-env",
+    default="DEFENSECLAW_LLM_KEY",
+    show_default=True,
+    help="Env var name for the unified LLM key.",
+)
 @click.option("--llm-base-url", default="", help="Local/proxy LLM base URL.")
 @click.option("--cisco-endpoint", default="", help="Cisco AI Defense endpoint.")
 @click.option("--cisco-api-key", default="", help="Cisco AI Defense key to save into .env.")
-@click.option("--cisco-api-key-env", default="CISCO_AI_DEFENSE_API_KEY", show_default=True, help="Env var name for Cisco AI Defense key.")
+@click.option(
+    "--cisco-api-key-env",
+    default="CISCO_AI_DEFENSE_API_KEY",
+    show_default=True,
+    help="Env var name for Cisco AI Defense key.",
+)
 @click.option("--start-gateway/--no-start-gateway", default=None, help="Start the gateway sidecar after setup.")
 @click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
 @click.option("--json-summary", is_flag=True, help="Emit the final first-run report as JSON.")
@@ -461,7 +471,8 @@ def _normalize_connector_arg(connector: str | None) -> str:
 
 
 def _render_first_run_report(report, renderer) -> None:
-    renderer.title("DefenseClaw First-Run", f"status={report.status} connector={report.connector} profile={report.profile}")
+    subtitle = f"status={report.status} connector={report.connector} profile={report.profile}"
+    renderer.title("DefenseClaw First-Run", subtitle)
     renderer.section("Setup")
     for step in report.setup:
         renderer.step(step.status, step.name, step.detail)
