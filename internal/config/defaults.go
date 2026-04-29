@@ -149,6 +149,10 @@ func DefaultConfig() *Config {
 				Exfil:         true,
 				Timeout:       30.0,
 			},
+			HILT: HILTConfig{
+				Enabled:     false,
+				MinSeverity: "HIGH",
+			},
 		},
 		// AuditSinks is empty by default — operators opt in to forwarding
 		// by adding entries (splunk_hec / otlp_logs / http_jsonl). The

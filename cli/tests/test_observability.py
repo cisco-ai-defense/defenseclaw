@@ -41,7 +41,6 @@ import yaml
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup_observability import observability as observability_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.observability import (
@@ -408,8 +407,25 @@ class ObservabilityCLITests(unittest.TestCase):
             "--signals", "traces,metrics",
         ])
         self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Redaction: ON (redacted telemetry)", result.output)
+        self.assertIn("defenseclaw setup redaction off --yes", result.output)
         doc = _read_yaml(self.tmp)
         self.assertTrue(doc.get("otel", {}).get("enabled"))
+
+    def test_add_reports_raw_redaction_status_without_prompting(self) -> None:
+        self.app.cfg.privacy.disable_redaction = True
+        result = self._invoke([
+            "add", "otlp",
+            "--non-interactive",
+            "--target", "audit_sinks",
+            "--endpoint", "collector.example.com:4317",
+            "--protocol", "grpc",
+            "--name", "lab-otlp",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Redaction: OFF (RAW telemetry; privacy.disable_redaction=true)", result.output)
+        self.assertIn("defenseclaw setup redaction on", result.output)
+        self.assertNotIn("Disable redaction?", result.output)
 
     def test_add_splunk_hec_then_disable(self) -> None:
         r1 = self._invoke([

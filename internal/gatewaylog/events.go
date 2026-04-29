@@ -134,6 +134,22 @@ const (
 	// LLM shape respectively. Emitted regardless of allow/block so
 	// operators can confirm coverage of the silent-bypass surface.
 	EventEgress EventType = "egress"
+
+	// EventLLMPrompt records a user/model prompt submitted through
+	// a monitored agent surface. Payload content is redacted by the
+	// gateway emit choke point unless redaction is explicitly
+	// disabled for the deployment.
+	EventLLMPrompt EventType = "llm_prompt"
+
+	// EventLLMResponse records model output and links it back to the
+	// prompt event it replies to when the source surface exposes
+	// enough turn/session data to build that correlation.
+	EventLLMResponse EventType = "llm_response"
+
+	// EventToolInvocation records an agent tool call or result. A
+	// call and its result share ToolCallID/ToolID so SIEM consumers
+	// can join input and output without scraping free-form details.
+	EventToolInvocation EventType = "tool_invocation"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -162,7 +178,7 @@ const (
 	// StageSessionMessage marks the observational WebSocket
 	// session.message scan path. The prompt has already been sent
 	// to the LLM by the time this stage fires, so verdicts here
-	// produce audit + notification but not block.
+	// produce audit but not block or confirm.
 	StageSessionMessage Stage = "session_message"
 	// StageMultiTurn marks verdicts emitted by the cross-turn
 	// injection tracker when repeated injection patterns are
@@ -266,8 +282,11 @@ type Event struct {
 	//     specific event.
 	AgentID           string `json:"agent_id,omitempty"`
 	AgentName         string `json:"agent_name,omitempty"`
+	AgentType         string `json:"agent_type,omitempty"`
 	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+	UserID            string `json:"user_id,omitempty"`
+	UserName          string `json:"user_name,omitempty"`
 	PolicyID          string `json:"policy_id,omitempty"`
 	DestinationApp    string `json:"destination_app,omitempty"`
 	ToolName          string `json:"tool_name,omitempty"`
@@ -332,6 +351,9 @@ type Event struct {
 	ScanFinding *ScanFindingPayload `json:"scan_finding,omitempty"`
 	Activity    *ActivityPayload    `json:"activity,omitempty"`
 	Egress      *EgressPayload      `json:"egress,omitempty"`
+	LLMPrompt   *LLMPromptPayload   `json:"llm_prompt,omitempty"`
+	LLMResponse *LLMResponsePayload `json:"llm_response,omitempty"`
+	Tool        *ToolPayload        `json:"tool_invocation,omitempty"`
 }
 
 // StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
@@ -362,6 +384,12 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.Activity)
 	case e.Egress != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.Egress)
+	case e.LLMPrompt != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.LLMPrompt)
+	case e.LLMResponse != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.LLMResponse)
+	case e.Tool != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
 	}
 }
 
@@ -409,7 +437,7 @@ func SidecarInstanceID() string {
 // SIEM without re-deriving shape for every sink.
 type VerdictPayload struct {
 	Stage      Stage    `json:"stage"`
-	Action     string   `json:"action"`               // allow | warn | block
+	Action     string   `json:"action"`               // allow | warn | alert | confirm | block
 	Reason     string   `json:"reason,omitempty"`     // short, redacted
 	Categories []string `json:"categories,omitempty"` // e.g. [pii.email, injection.system_prompt]
 	LatencyMs  int64    `json:"latency_ms,omitempty"`
@@ -583,4 +611,43 @@ type EgressPayload struct {
 	Decision     string `json:"decision"`
 	Reason       string `json:"reason,omitempty"`
 	Source       string `json:"source"`
+}
+
+// LLMPromptPayload records the prompt body submitted to a monitored model.
+// Prompt and RawRequestBody are sink-scrubbed by gateway.emitEvent unless
+// redaction is disabled.
+type LLMPromptPayload struct {
+	PromptID       string `json:"prompt_id"`
+	TurnID         string `json:"turn_id,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Prompt         string `json:"prompt,omitempty"`
+	RawRequestBody string `json:"raw_request_body,omitempty"`
+	Source         string `json:"source,omitempty"`
+}
+
+// LLMResponsePayload records model output and its prompt correlation. Response
+// and RawResponseBody follow the same redaction contract as LLMPromptPayload.
+type LLMResponsePayload struct {
+	ResponseID      string   `json:"response_id"`
+	ReplyToPromptID string   `json:"reply_to_prompt_id,omitempty"`
+	TurnID          string   `json:"turn_id,omitempty"`
+	Response        string   `json:"response,omitempty"`
+	RawResponseBody string   `json:"raw_response_body,omitempty"`
+	FinishReasons   []string `json:"finish_reasons,omitempty"`
+	Source          string   `json:"source,omitempty"`
+}
+
+// ToolPayload records one phase of a model-selected or agent-executed tool
+// invocation. ToolInput and ToolOutput are content-bearing and are redacted by
+// the gateway emit choke point unless redaction is disabled.
+type ToolPayload struct {
+	ToolCallID      string `json:"tool_call_id,omitempty"`
+	Phase           string `json:"phase"` // call | result
+	TurnID          string `json:"turn_id,omitempty"`
+	Tool            string `json:"tool"`
+	ToolInput       string `json:"tool_input,omitempty"`
+	ToolOutput      string `json:"tool_output,omitempty"`
+	ExitCode        *int   `json:"exit_code,omitempty"`
+	ReplyToPromptID string `json:"reply_to_prompt_id,omitempty"`
+	Source          string `json:"source,omitempty"`
 }

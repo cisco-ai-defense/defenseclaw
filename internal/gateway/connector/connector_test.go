@@ -31,6 +31,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -766,6 +767,87 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 	}
 }
 
+func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{
+		"approvals": {
+			"plugin": {
+				"mode": "both",
+				"targets": [{"channel": "slack", "to": "#secops"}]
+			}
+		}
+	}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{
+		DataDir:     dir,
+		ProxyAddr:   "127.0.0.1:4000",
+		APIAddr:     "127.0.0.1:18970",
+		HILTEnabled: true,
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after Setup: %v", err)
+	}
+	approvals, _ := cfg["approvals"].(map[string]interface{})
+	pluginApprovals, _ := approvals["plugin"].(map[string]interface{})
+	if pluginApprovals["enabled"] != true {
+		t.Fatalf("approvals.plugin.enabled = %v, want true", pluginApprovals["enabled"])
+	}
+	if pluginApprovals["mode"] != "both" {
+		t.Fatalf("approvals.plugin.mode = %v, want preserved both", pluginApprovals["mode"])
+	}
+	if targets, _ := pluginApprovals["targets"].([]interface{}); len(targets) != 1 {
+		t.Fatalf("approvals.plugin.targets clobbered: %v", pluginApprovals["targets"])
+	}
+}
+
+func TestOpenClaw_Setup_HILTDefaultsPluginApprovalMode(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", HILTEnabled: true}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("openclaw.json not valid JSON after Setup: %v", err)
+	}
+	approvals, _ := cfg["approvals"].(map[string]interface{})
+	pluginApprovals, _ := approvals["plugin"].(map[string]interface{})
+	if pluginApprovals["enabled"] != true {
+		t.Fatalf("approvals.plugin.enabled = %v, want true", pluginApprovals["enabled"])
+	}
+	if pluginApprovals["mode"] != "session" {
+		t.Fatalf("approvals.plugin.mode = %v, want session", pluginApprovals["mode"])
+	}
+}
+
 func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 	requireOpenClawExtensionBundle(t)
 
@@ -843,6 +925,9 @@ func TestOpenClaw_Route(t *testing.T) {
 	}
 	if cs.RawModel != "gpt-4o" {
 		t.Errorf("RawModel = %q", cs.RawModel)
+	}
+	if string(cs.RawBody) != string(body) {
+		t.Errorf("RawBody = %q, want original OpenClaw request body", string(cs.RawBody))
 	}
 	if !cs.Stream {
 		t.Error("expected Stream=true")
@@ -1988,6 +2073,72 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 }
 
+func TestCodex_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	pristine := `model = "gpt-5"
+
+[otel]
+log_user_prompt = false
+`
+	if err := os.WriteFile(configPath, []byte(pristine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
+	defer func() { CodexAuthPathOverride = "" }()
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-codex-raw",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid patched TOML: %v", err)
+	}
+	otelBlock, _ := parsed["otel"].(map[string]interface{})
+	if got, _ := otelBlock["log_user_prompt"].(bool); !got {
+		t.Fatalf("log_user_prompt = %v, want true when redaction is disabled", got)
+	}
+
+	// Force the surgical restore path and flip the runtime switch back
+	// before teardown. Detection must still recognize the raw-mode OTel
+	// block and restore the operator's pristine value.
+	redaction.SetDisableAll(false)
+	discardManagedFileBackup(dir, c.Name(), "config.toml")
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	raw, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	parsed = map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid restored TOML: %v", err)
+	}
+	otelBlock, _ = parsed["otel"].(map[string]interface{})
+	if got, _ := otelBlock["log_user_prompt"].(bool); got {
+		t.Fatalf("log_user_prompt = %v after teardown, want restored false", got)
+	}
+}
+
 // TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete
 // telemetry path. Codex shells out to `notify` with a JSON arg
 // describing each completed turn (per https://developers.openai.com
@@ -2946,6 +3097,9 @@ func TestZeptoClaw_Route(t *testing.T) {
 	}
 	if cs.RawAPIKey != "sk-openai-key" {
 		t.Errorf("RawAPIKey = %q", cs.RawAPIKey)
+	}
+	if string(cs.RawBody) != string(body) {
+		t.Errorf("RawBody = %q, want original ZeptoClaw request body", string(cs.RawBody))
 	}
 	// No provider snapshot loaded → no upstream to resolve; proxy will fall
 	// back to configured-model / default-provider paths as before.
@@ -4080,6 +4234,9 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["OTEL_LOGS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want \"otlp\"", env["OTEL_LOGS_EXPORTER"])
 	}
+	if _, present := env["OTEL_LOG_USER_PROMPTS"]; present {
+		t.Errorf("OTEL_LOG_USER_PROMPTS should be absent by default; got %v", env["OTEL_LOG_USER_PROMPTS"])
+	}
 	if env["OTEL_METRICS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_METRICS_EXPORTER = %v, want \"otlp\"", env["OTEL_METRICS_EXPORTER"])
 	}
@@ -4101,6 +4258,78 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 		t.Fatalf("stat settings.json: %v", err)
 	} else if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Errorf("settings.json mode = %#o, want 0600 because OTel headers include the gateway token", mode)
+	}
+}
+
+func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	pristine := `{
+		"env": {
+			"OTEL_LOG_USER_PROMPTS": "0",
+			"PATH": "/custom/bin:/usr/bin"
+		}
+	}`
+	if err := os.WriteFile(settingsPath, []byte(pristine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-claude-raw",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read patched settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse patched settings: %v", err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	if env["OTEL_LOG_USER_PROMPTS"] != "1" {
+		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v, want \"1\" when redaction is disabled", env["OTEL_LOG_USER_PROMPTS"])
+	}
+
+	// Force the backup-driven restore path and turn redaction back on
+	// before teardown. The prompt logging setting should still return
+	// to the operator's original value.
+	redaction.SetDisableAll(false)
+	discardManagedFileBackup(dir, c.Name(), "settings.json")
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	settings = map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	env, _ = settings["env"].(map[string]interface{})
+	if env["OTEL_LOG_USER_PROMPTS"] != "0" {
+		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v after teardown, want restored \"0\"", env["OTEL_LOG_USER_PROMPTS"])
+	}
+	if env["PATH"] != "/custom/bin:/usr/bin" {
+		t.Fatalf("PATH = %v after teardown, want pristine value", env["PATH"])
 	}
 }
 
@@ -4693,7 +4922,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx))
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false)
 		}(i)
 	}
 	wg.Wait()

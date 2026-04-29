@@ -18,7 +18,8 @@
      with minimum >= 7.
    - ``gateway-event-envelope.json`` declares the full provenance
      quartet and the v7 event_type enum (verdict / judge / lifecycle
-     / error / diagnostic / scan / scan_finding / activity).
+     / error / diagnostic / scan / scan_finding / activity / egress
+     / LLM/tool telemetry events).
 
 Run via ``make check-schemas``.
 """
@@ -36,6 +37,7 @@ SCHEMA_DIR = ROOT / "schemas"
 EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
+    "llm_prompt", "llm_response", "tool_invocation",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {

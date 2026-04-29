@@ -30,8 +30,10 @@ import rego.v1
 #
 # Static data (data.guardrail in data.json):
 #   severity_rank.<SEV>           - int ranking (CRITICAL=4, HIGH=3, ...)
-#   block_threshold               - minimum severity rank to block (default 3 = HIGH)
+#   block_threshold               - minimum severity rank to block (default 4 = CRITICAL)
 #   alert_threshold               - minimum severity rank to alert (default 2 = MEDIUM)
+#   hilt.enabled                  - whether HIGH+ can require approval before allow/block
+#   hilt.min_severity             - minimum severity for confirmation (default HIGH)
 #   cisco_trust_level             - "full" | "advisory" | "none"
 
 default severity := "NONE"
@@ -67,21 +69,31 @@ else := "NONE"
 severity := effective_severity
 
 # --- Determine action ---
-# Priority: observe override > advisory downgrade > block > alert > allow
+# Priority: observe override > advisory downgrade > block > confirm > alert > allow
 # Using else-chain to avoid conflict errors.
 
 action := "alert" if {
 	input.mode == "observe"
-	_highest_sev_rank >= data.guardrail.block_threshold
+	_highest_sev_rank >= data.guardrail.alert_threshold
 } else := "alert" if {
 	data.guardrail.cisco_trust_level == "advisory"
 	_cisco_sev_rank >= data.guardrail.block_threshold
 	_local_sev_rank < data.guardrail.alert_threshold
 } else := "block" if {
 	_highest_sev_rank >= data.guardrail.block_threshold
+} else := "confirm" if {
+	input.mode == "action"
+	_hilt_enabled
+	_highest_sev_rank >= _hilt_min_rank
 } else := "alert" if {
 	_highest_sev_rank >= data.guardrail.alert_threshold
 } else := "allow"
+
+_hilt := object.get(data.guardrail, "hilt", {})
+
+_hilt_enabled := object.get(_hilt, "enabled", false)
+
+_hilt_min_rank := object.get(data.guardrail.severity_rank, object.get(_hilt, "min_severity", "HIGH"), 3)
 
 # --- Build reason ---
 

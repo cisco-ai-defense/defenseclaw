@@ -117,6 +117,8 @@ func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request)
 	req.CWD = sanitizeHookCWD(req.CWD)
 	req.NewCWD = sanitizeHookCWD(req.NewCWD)
 	req.OldCWD = sanitizeHookCWD(req.OldCWD)
+	rawEventIDs := a.rememberClaudeCodeRawHookEvents(req)
+	a.emitClaudeCodeHookLLMEvent(r.Context(), req, rawEventIDs, b)
 
 	t0 := time.Now()
 	resp := a.evaluateClaudeCodeHook(r.Context(), req)
@@ -143,9 +145,11 @@ func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request)
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "claude-code-hook", req.HookEventName,
-			fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-				resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed))
+		details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
+			resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
+		details = appendRawTelemetryDetails(details, "raw_payload", b)
+		details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
+		_ = a.logger.LogActionCtx(r.Context(), "claude-code-hook", req.HookEventName, details)
 	}
 
 	a.writeJSON(w, http.StatusOK, resp)
@@ -212,8 +216,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	} else if mode != "action" && rawAction == "block" {
 		action = "allow"
 	}
-	if mode != "action" && rawAction == "alert" {
+	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
 		action = "allow"
+	}
+	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
+		action = "alert"
 	}
 	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
 		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
@@ -301,6 +308,13 @@ func claudeCodeCanEnforce(event string) bool {
 
 func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, additional string) map[string]interface{} {
 	event := req.HookEventName
+	if action == "confirm" && event == "PreToolUse" {
+		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "ask",
+			"permissionDecisionReason": reasonOrDefaultClaudeCode(reason),
+		}}
+	}
 	if action == "block" {
 		switch event {
 		case "PreToolUse":

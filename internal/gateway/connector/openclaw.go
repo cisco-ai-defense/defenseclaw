@@ -139,7 +139,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
 		return fmt.Errorf("openclaw config backup: %w", err)
 	}
-	if err := installOpenClawExtension(openClawHome()); err != nil {
+	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
@@ -195,7 +195,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 // <ocHome>/extensions/defenseclaw and registers the plugin in
 // <ocHome>/openclaw.json. Idempotent: re-running leaves the config in the
 // same shape (single allow entry, single load path, enabled=true).
-func installOpenClawExtension(ocHome string) error {
+func installOpenClawExtension(ocHome string, enablePluginApprovals bool) error {
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
 	parentDir := filepath.Join(ocHome, "extensions")
 
@@ -207,7 +207,7 @@ func installOpenClawExtension(ocHome string) error {
 	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
-	if err := patchOpenClawConfig(configPath, extDir); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
 	return nil
@@ -280,7 +280,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 // patchOpenClawConfig reads openclaw.json (creates it if missing), ensures
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
 // in plugins.load.paths. Other sections are left untouched.
-func patchOpenClawConfig(configPath, extDir string) error {
+func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) error {
 	return withFileLock(configPath, func() error {
 		cfg := map[string]interface{}{}
 		if data, err := os.ReadFile(configPath); err == nil && len(data) > 0 {
@@ -313,6 +313,22 @@ func patchOpenClawConfig(configPath, extDir string) error {
 		plugins["load"] = load
 
 		cfg["plugins"] = plugins
+		if enablePluginApprovals {
+			approvals, _ := cfg["approvals"].(map[string]interface{})
+			if approvals == nil {
+				approvals = map[string]interface{}{}
+			}
+			pluginApprovals, _ := approvals["plugin"].(map[string]interface{})
+			if pluginApprovals == nil {
+				pluginApprovals = map[string]interface{}{}
+			}
+			pluginApprovals["enabled"] = true
+			if _, ok := pluginApprovals["mode"]; !ok {
+				pluginApprovals["mode"] = "session"
+			}
+			approvals["plugin"] = pluginApprovals
+			cfg["approvals"] = approvals
+		}
 
 		out, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {

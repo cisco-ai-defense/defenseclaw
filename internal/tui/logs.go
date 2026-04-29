@@ -49,12 +49,13 @@ var logSourceNames = [logSourceCount]string{"Gateway", "Verdicts", "OTEL", "Watc
 // verdictActionFilters cycle the Verdicts source through structured
 // action filters. Matches the action field of gatewaylog.VerdictPayload.
 // Empty string means "show all actions".
-var verdictActionFilters = []string{"", "block", "alert", "allow"}
+var verdictActionFilters = []string{"", "block", "alert", "confirm", "allow"}
 var verdictActionLabels = map[string]string{
-	"":      "All actions",
-	"block": "Block",
-	"alert": "Alert",
-	"allow": "Allow",
+	"":        "All actions",
+	"block":   "Block",
+	"alert":   "Alert",
+	"confirm": "Confirm",
+	"allow":   "Allow",
 }
 
 // verdictEventTypeFilters cycle the Verdicts source through

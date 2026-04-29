@@ -20,21 +20,19 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.config import (
     Config,
     GuardrailConfig,
     default_config,
-    load,
 )
 from defenseclaw.guardrail import (
     _backup,
@@ -49,8 +47,8 @@ from defenseclaw.guardrail import (
     restore_openclaw_config,
     uninstall_openclaw_plugin,
 )
-from tests.helpers import make_app_context, cleanup_app
 
+from tests.helpers import cleanup_app, make_app_context
 
 # ---------------------------------------------------------------------------
 # GuardrailConfig dataclass
@@ -65,6 +63,8 @@ class TestGuardrailConfig(unittest.TestCase):
         self.assertEqual(gc.model, "")
         self.assertEqual(gc.api_key_env, "")
         self.assertEqual(gc.block_message, "")
+        self.assertFalse(gc.hilt.enabled)
+        self.assertEqual(gc.hilt.min_severity, "HIGH")
 
     def test_default_config_includes_guardrail(self):
         cfg = default_config()
@@ -91,6 +91,8 @@ class TestGuardrailConfig(unittest.TestCase):
                     block_message="Blocked by policy. Contact security@acme.com.",
                 ),
             )
+            cfg.guardrail.hilt.enabled = True
+            cfg.guardrail.hilt.min_severity = "HIGH"
             cfg.save()
 
             import yaml
@@ -105,6 +107,8 @@ class TestGuardrailConfig(unittest.TestCase):
             self.assertEqual(g["model_name"], "claude-opus")
             self.assertEqual(g["api_key_env"], "ANTHROPIC_API_KEY")
             self.assertEqual(g["block_message"], "Blocked by policy. Contact security@acme.com.")
+            self.assertEqual(g["hilt"]["enabled"], True)
+            self.assertEqual(g["hilt"]["min_severity"], "HIGH")
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +391,58 @@ class TestPatchOpenclawConfig(unittest.TestCase):
             result = patch_openclaw_config(path, "", 4000, "sk-dc-test", "")
             # Should succeed without error regardless of empty model_name
             self.assertIsNotNone(result)
+
+    def test_enables_plugin_approvals_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._make_openclaw_json(tmpdir)
+
+            patch_openclaw_config(
+                path,
+                "claude-opus",
+                4000,
+                "sk-dc-test",
+                "",
+                enable_plugin_approvals=True,
+            )
+
+            with open(path) as f:
+                cfg = json.load(f)
+
+            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
+            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "session")
+
+    def test_preserves_existing_plugin_approval_routing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._make_openclaw_json(tmpdir)
+            with open(path) as f:
+                cfg = json.load(f)
+            cfg["approvals"] = {
+                "plugin": {
+                    "mode": "both",
+                    "targets": [{"channel": "slack", "to": "#secops"}],
+                }
+            }
+            with open(path, "w") as f:
+                json.dump(cfg, f)
+
+            patch_openclaw_config(
+                path,
+                "claude-opus",
+                4000,
+                "sk-dc-test",
+                "",
+                enable_plugin_approvals=True,
+            )
+
+            with open(path) as f:
+                cfg = json.load(f)
+
+            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
+            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "both")
+            self.assertEqual(
+                cfg["approvals"]["plugin"]["targets"],
+                [{"channel": "slack", "to": "#secops"}],
+            )
 
 
 class TestRestoreOpenclawConfig(unittest.TestCase):
@@ -946,6 +1002,50 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: Claude Code (claudecode)", result.output)
 
+    def test_non_interactive_claudecode_action_enables_enforcement(self):
+        from defenseclaw.commands.cmd_setup import setup
+        self.app.cfg.claw.home_dir = self.tmp_dir
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--connector",
+                "claudecode",
+                "--mode",
+                "action",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.guardrail.claudecode_enforcement_enabled)
+        self.assertEqual(self.app.cfg.guardrail.mode, "action")
+
+    def test_non_interactive_codex_observe_flag_enables_enforcement(self):
+        from defenseclaw.commands.cmd_setup import setup
+        self.app.cfg.claw.home_dir = self.tmp_dir
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--connector",
+                "codex",
+                "--mode",
+                "observe",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.guardrail.codex_enforcement_enabled)
+        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+
     def test_agent_alias_still_works(self):
         """--agent is preserved as an alias of --connector for backward compat."""
         from defenseclaw.commands.cmd_setup import setup
@@ -1033,6 +1133,39 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             raw = yaml.safe_load(f)
         self.assertEqual(raw["guardrail"]["block_message"], custom_msg)
 
+    def test_non_interactive_advanced_hilt_and_redaction_flags(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--mode",
+                "action",
+                "--rule-pack",
+                "strict",
+                "--human-approval",
+                "--hilt-min-severity",
+                "MEDIUM",
+                "--disable-redaction",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("guardrail.hilt.enabled", result.output)
+        self.assertIn("privacy.disable_redaction", result.output)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
+        self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
+        self.assertTrue(raw["privacy"]["disable_redaction"])
+        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+
     def test_block_message_written_to_runtime_json(self):
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
@@ -1081,6 +1214,99 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(setup, ["guardrail", "--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--block-message", result.output)
+
+    def test_interactive_advanced_configures_hilt(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        user_input = "\n".join([
+            "",          # enable guardrail
+            "2",         # action mode
+            "",          # local scanner
+            "n",         # no LLM judge
+            "y",         # configure advanced options
+            "",          # default port
+            "",          # no custom block message
+            "y",         # enable human approval
+            "MEDIUM",    # approval min severity
+            "n",         # keep redaction on
+            "",
+        ])
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Human Approval (HILT)", result.output)
+        self.assertIn("guardrail.hilt.enabled", result.output)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
+        self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
+        self.assertNotIn("privacy", raw)
+
+    def test_interactive_advanced_can_disable_redaction(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        user_input = "\n".join([
+            "",       # enable guardrail
+            "2",      # action mode
+            "",       # local scanner
+            "n",      # no LLM judge
+            "y",      # configure advanced options
+            "",       # default port
+            "",       # no custom block message
+            "n",      # no human approval
+            "y",      # disable redaction
+            "y",      # acknowledge raw-content warning
+            "",
+        ])
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Disabling redaction writes RAW content", result.output)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["privacy"]["disable_redaction"])
+        self.assertFalse(raw["guardrail"]["hilt"]["enabled"])
+
+    def test_interactive_advanced_observe_reports_hilt_inactive(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        user_input = "\n".join([
+            "",      # enable guardrail
+            "",      # observe mode
+            "",      # local scanner
+            "n",     # no LLM judge
+            "y",     # configure advanced options
+            "",      # default port
+            "n",     # keep redaction on
+            "",
+        ])
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Human approval is action-mode only", result.output)
+        self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
 
 
 # ---------------------------------------------------------------------------

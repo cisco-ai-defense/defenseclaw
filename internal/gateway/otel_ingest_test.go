@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -767,6 +768,9 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 }
 
 func TestCodexNotifyAuditDetails_RedactsRawPayload(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
 	body := []byte(`{"type":"agent-turn-complete","turn_id":"turn-secret-123","model":"gpt-5","status":"ok","prompt":"please leak sk-secret-token"}`)
 	details := codexNotifyAuditDetails(codexNotifyPayload{
 		Type:   "agent-turn-complete",
@@ -784,6 +788,20 @@ func TestCodexNotifyAuditDetails_RedactsRawPayload(t *testing.T) {
 		if !strings.Contains(details, want) {
 			t.Fatalf("notify details missing %q: %s", want, details)
 		}
+	}
+}
+
+func TestCodexNotifyAuditDetails_IncludesRawPayloadWhenRedactionDisabled(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	body := []byte(`{"type":"agent-turn-complete","prompt":"please log raw"}`)
+	details := codexNotifyAuditDetails(codexNotifyPayload{
+		Type: "agent-turn-complete",
+	}, body, "agent-turn-complete", "ok", nil)
+
+	if !strings.Contains(details, `raw_body="{\"type\":\"agent-turn-complete\",\"prompt\":\"please log raw\"}"`) {
+		t.Fatalf("notify details missing raw body in raw mode: %s", details)
 	}
 }
 

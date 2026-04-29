@@ -61,6 +61,7 @@ def patch_openclaw_config(
     original_model: str,
     guardrail_host: str = "localhost",
     data_dir: str = "",
+    enable_plugin_approvals: bool = False,
 ) -> str | None:
     """Register the DefenseClaw plugin in openclaw.json.
 
@@ -116,6 +117,12 @@ def patch_openclaw_config(
     paths = load.setdefault("paths", [])
     if install_path not in paths:
         paths.append(install_path)
+
+    if enable_plugin_approvals:
+        approvals = cfg.setdefault("approvals", {})
+        plugin_approvals = approvals.setdefault("plugin", {})
+        plugin_approvals["enabled"] = True
+        plugin_approvals.setdefault("mode", "session")
 
     with _preserve_ownership(path):
         with open(path, "w") as f:

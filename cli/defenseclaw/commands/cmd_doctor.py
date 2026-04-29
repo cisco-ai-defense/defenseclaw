@@ -204,6 +204,39 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
 
 
+def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
+    guardrail = getattr(cfg, "guardrail", None)
+    hilt = getattr(guardrail, "hilt", None)
+    if not bool(getattr(hilt, "enabled", False)):
+        _emit("pass", "Human approval", "disabled (default)", r=r)
+        return
+
+    min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
+    mode = (getattr(guardrail, "mode", "") or "observe").lower()
+    if mode != "action":
+        _emit("warn", "Human approval", f"enabled at {min_sev}, but guardrail.mode is observe", r=r)
+        return
+
+    if connector == "openclaw":
+        _emit("pass", "Human approval", f"OpenClaw prompts supported at {min_sev}+", r=r)
+    elif connector == "claudecode":
+        _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
+    elif connector == "codex":
+        _emit(
+            "warn", "Human approval",
+            "Codex uses native PermissionRequest prompts only; PreToolUse ask is unsupported",
+            r=r,
+        )
+    elif connector == "zeptoclaw":
+        _emit(
+            "warn", "Human approval",
+            "ZeptoClaw has no native before-tool hook; unsupported confirmations alert only",
+            r=r,
+        )
+    else:
+        _emit("warn", "Human approval", f"connector {connector!r} support is unknown", r=r)
+
+
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     db_path = cfg.audit_db
     if os.path.isfile(db_path):
@@ -1084,6 +1117,7 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         _check_codex_hooks(cfg, r)
     elif active_connector == "zeptoclaw":
         _check_zeptoclaw_config(cfg, r)
+    _check_hilt_support(cfg, active_connector, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
         click.echo()

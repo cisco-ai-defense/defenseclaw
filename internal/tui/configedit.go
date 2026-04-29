@@ -172,6 +172,10 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.AllowEmptyProviders = boolVal
 	case "guardrail.allow_unknown_llm_domains":
 		c.Guardrail.AllowUnknownLLMDomains = boolVal
+	case "guardrail.hilt.enabled":
+		c.Guardrail.HILT.Enabled = boolVal
+	case "guardrail.hilt.min_severity":
+		c.Guardrail.HILT.MinSeverity = strings.ToUpper(strings.TrimSpace(val))
 	case "guardrail.codex_enforcement_enabled":
 		c.Guardrail.CodexEnforcementEnabled = boolVal
 	case "guardrail.claudecode_enforcement_enabled":

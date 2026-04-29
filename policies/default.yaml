@@ -56,8 +56,11 @@ first_party_allow_list:
       - ".codex/skills"
 
 guardrail:
-  block_threshold: 3
+  block_threshold: 4
   alert_threshold: 2
+  hilt:
+    enabled: false
+    min_severity: HIGH
   cisco_trust_level: full
   patterns:
     injection:

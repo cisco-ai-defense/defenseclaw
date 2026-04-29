@@ -82,9 +82,13 @@
       "HIGH": 3,
       "CRITICAL": 4
     },
-    "block_threshold": 3,
+    "block_threshold": 4,
     "alert_threshold": 2,
     "cisco_trust_level": "full",
+    "hilt": {
+      "enabled": false,
+      "min_severity": "HIGH"
+    },
     "patterns": {
       "injection": [
         "ignore previous",

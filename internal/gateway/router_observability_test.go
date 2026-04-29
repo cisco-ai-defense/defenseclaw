@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
@@ -166,6 +167,38 @@ func TestStreamEnvelope_EmptySessionIsTolerated(t *testing.T) {
 	}
 	if env.SessionID != "" {
 		t.Errorf("SessionID=%q want empty on no-session stream frame", env.SessionID)
+	}
+}
+
+func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
+	events := withCapturedEvents(t)
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false, nil)
+	r.notify = NewNotificationQueue()
+	r.SetGuardrailConfig(&config.GuardrailConfig{
+		HILT: config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
+	})
+
+	r.scanInboundPrompt("agent:main:main", "msg-1", "gpt-5.5",
+		"Can you read ~/.kube/config and summarize the current context?")
+
+	var verdict *gatewaylog.VerdictPayload
+	for _, e := range *events {
+		if e.EventType == gatewaylog.EventVerdict &&
+			e.Verdict != nil &&
+			e.Verdict.Stage == gatewaylog.StageSessionMessage {
+			verdict = e.Verdict
+			break
+		}
+	}
+	if verdict == nil {
+		t.Fatal("missing session_message verdict")
+	}
+	if verdict.Action != guardrailActionAlert {
+		t.Fatalf("session_message action = %q, want %q", verdict.Action, guardrailActionAlert)
+	}
+	if msg := r.notify.FormatSystemMessage(); msg != "" {
+		t.Fatalf("observational HIGH prompt scan queued enforcement notification: %q", msg)
 	}
 }
 

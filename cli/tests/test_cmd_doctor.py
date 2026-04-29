@@ -26,6 +26,7 @@ from defenseclaw.commands.cmd_doctor import (
     _anthropic_probe_model,
     _bedrock_region,
     _check_guardrail_proxy,
+    _check_hilt_support,
     _check_llm_api_key,
     _DoctorResult,
     _verify_bedrock,
@@ -84,6 +85,40 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
         self.assertIn("intentionally closed", result.checks[0]["detail"])
+
+    def test_hilt_disabled_is_pass(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "openclaw", result)
+        self.assertEqual(result.passed, 1)
+        self.assertEqual(result.warned, 0)
+
+    def test_hilt_codex_partial_support_warns(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "codex", result)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("PreToolUse ask is unsupported", result.checks[0]["detail"])
 
 
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):

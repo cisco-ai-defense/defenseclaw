@@ -29,6 +29,7 @@ import subprocess
 
 import click
 
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
@@ -1297,6 +1298,7 @@ def _fetch_connector_names(cfg=None) -> list[str]:
 
 
 _CONNECTOR_NAMES = _CONNECTOR_NAMES_FALLBACK
+_HILT_MIN_SEVERITIES = ["HIGH", "MEDIUM", "LOW", "CRITICAL"]
 
 _CONNECTOR_META: dict[str, dict[str, str]] = {
     "openclaw": {
@@ -1494,6 +1496,124 @@ def _print_connector_info(name: str) -> None:
         )
 
 
+def _hilt_support_note(connector: str) -> str:
+    """Return the operator-facing HILT support note for a connector."""
+    if connector == "openclaw":
+        return "OpenClaw supports DefenseClaw approval prompts for tool actions."
+    if connector == "claudecode":
+        return "Claude Code supports native PreToolUse ask prompts."
+    if connector == "codex":
+        return "Codex is partial: PermissionRequest prompts are native; PreToolUse ask is unsupported."
+    if connector == "zeptoclaw":
+        return "ZeptoClaw is partial: proxy-gated confirmations only; unsupported surfaces alert."
+    return "Support depends on the connector surface."
+
+
+def _configure_hilt_interactive(gc) -> None:
+    """Prompt for human approval settings from the guardrail advanced section."""
+    click.echo()
+    click.echo("  Human Approval (HILT)")
+    click.echo("  ─────────────────────")
+    if (gc.mode or "observe").lower() != "action":
+        click.echo("  Human approval is action-mode only.")
+        click.echo("  Current mode is observe, so approvals are inactive and no prompts will appear.")
+        return
+
+    connector = gc.connector or "openclaw"
+    click.echo(f"  {_hilt_support_note(connector)}")
+    click.echo("  CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
+    enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
+    gc.hilt.enabled = enabled
+    if not enabled:
+        gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
+        return
+
+    default_min = (gc.hilt.min_severity or "HIGH").upper()
+    if default_min not in _HILT_MIN_SEVERITIES:
+        default_min = "HIGH"
+    gc.hilt.min_severity = click.prompt(
+        "  Approval minimum severity",
+        type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
+        default=default_min,
+    ).upper()
+
+
+def _configure_redaction_interactive(app: AppContext) -> None:
+    """Prompt for the persistent redaction kill-switch from Advanced setup."""
+    click.echo()
+    click.echo("  Redaction")
+    click.echo("  ─────────")
+    current_disabled = bool(app.cfg.privacy.disable_redaction)
+    if current_disabled:
+        click.secho(
+            "  Redaction is currently OFF: raw prompts, responses, judge bodies, "
+            "and verdict reasons may be persisted.",
+            fg="yellow",
+        )
+        keep_disabled = click.confirm("  Keep redaction disabled?", default=False)
+        app.cfg.privacy.disable_redaction = keep_disabled
+        if not keep_disabled:
+            click.echo("  ✓ Redaction will be re-enabled after restart.")
+        return
+
+    click.echo("  Redaction is ON by default and is recommended for normal operation.")
+    if not click.confirm("  Disable redaction for debugging?", default=False):
+        app.cfg.privacy.disable_redaction = False
+        return
+
+    click.secho(
+        "  Disabling redaction writes RAW content to audit DB, OTel logs, "
+        "Splunk/webhook sinks, and local logs.",
+        fg="yellow",
+    )
+    click.confirm("  I understand; disable redaction?", default=False, abort=True)
+    app.cfg.privacy.disable_redaction = True
+
+
+def _apply_guardrail_extra_options(
+    app: AppContext,
+    gc,
+    *,
+    rule_pack: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
+    disable_redaction: bool | None,
+) -> None:
+    """Apply guardrail options shared by the CLI and TUI non-interactive wizard."""
+
+    if rule_pack is not None:
+        policy_root = app.cfg.policy_dir or os.path.join(app.cfg.data_dir, "policies")
+        gc.rule_pack_dir = os.path.join(policy_root, "guardrail", rule_pack)
+    if human_approval is not None:
+        gc.hilt.enabled = bool(human_approval)
+    if hilt_min_severity is not None:
+        gc.hilt.min_severity = str(hilt_min_severity or "HIGH").upper()
+    elif not gc.hilt.min_severity:
+        gc.hilt.min_severity = "HIGH"
+    if disable_redaction is not None:
+        app.cfg.privacy.disable_redaction = bool(disable_redaction)
+
+
+def _connector_enforcement_flag(connector: str) -> str | None:
+    """Return the per-connector proxy/enforcement flag for native-hook connectors."""
+    if connector == "codex":
+        return "codex_enforcement_enabled"
+    if connector == "claudecode":
+        return "claudecode_enforcement_enabled"
+    return None
+
+
+def _set_connector_enforcement(gc, connector: str, enabled: bool) -> None:
+    flag = _connector_enforcement_flag(connector)
+    if flag:
+        setattr(gc, flag, bool(enabled))
+
+
+def _connector_enforcement_enabled(gc, connector: str) -> bool:
+    flag = _connector_enforcement_flag(connector)
+    return bool(getattr(gc, flag, False)) if flag else True
+
+
 # ---------------------------------------------------------------------------
 # setup guardrail
 # ---------------------------------------------------------------------------
@@ -1513,8 +1633,8 @@ def _print_connector_info(name: str) -> None:
                    "by the installer, else filesystem auto-detection, else openclaw.")
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
-@click.option("--scanner-mode", type=click.Choice(["local", "remote"]), default=None,
-              help="Scanner mode (local patterns or remote Cisco API)")
+@click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None,
+              help="Scanner mode (local patterns, remote Cisco API, or both)")
 @click.option("--cisco-endpoint", default=None, help="Cisco AI Defense API endpoint")
 @click.option("--cisco-api-key-env", default=None, help="Env var name holding Cisco AI Defense API key")
 @click.option("--cisco-timeout-ms", type=int, default=None, help="Cisco AI Defense timeout (ms)")
@@ -1524,9 +1644,18 @@ def _print_connector_info(name: str) -> None:
 @click.option("--detection-strategy",
               type=click.Choice(["regex_only", "regex_judge", "judge_first"]), default=None,
               help="Detection strategy (regex_only, regex_judge, judge_first)")
+@click.option("--rule-pack", type=click.Choice(["default", "strict", "permissive"]), default=None,
+              help="Guardrail rule-pack profile")
 @click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
 @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key")
+@click.option("--human-approval/--no-human-approval", default=None,
+              help="Enable or disable human approval (HILT) for risky actions")
+@click.option("--hilt-min-severity",
+              type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False), default=None,
+              help="Minimum severity that asks for human approval")
+@click.option("--disable-redaction/--enable-redaction", default=None,
+              help="Disable or enable prompt/log redaction")
 @click.option("--restart/--no-restart", default=True,
               help="Restart gateway and openclaw after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
@@ -1541,7 +1670,8 @@ def setup_guardrail(
     guard_mode, guard_port,
     scanner_mode, cisco_endpoint, cisco_api_key_env, cisco_timeout_ms,
     block_message,
-    detection_strategy, judge_model, judge_api_base, judge_api_key_env,
+    detection_strategy, rule_pack, judge_model, judge_api_base, judge_api_key_env,
+    human_approval, hilt_min_severity, disable_redaction,
     restart: bool,
     verify: bool,
     non_interactive: bool,
@@ -1601,6 +1731,10 @@ def setup_guardrail(
             if picked:
                 gc.connector = picked
         gc.mode = guard_mode or gc.mode or "observe"
+        if gc.connector in ("codex", "claudecode") and (
+            guard_mode is not None or gc.mode == "action"
+        ):
+            _set_connector_enforcement(gc, gc.connector, True)
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
             aid.endpoint = cisco_endpoint
@@ -1613,6 +1747,14 @@ def setup_guardrail(
             gc.block_message = block_message
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
+        _apply_guardrail_extra_options(
+            app,
+            gc,
+            rule_pack=rule_pack,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            disable_redaction=disable_redaction,
+        )
         if judge_model is not None:
             gc.judge.model = judge_model
             gc.judge.enabled = True
@@ -1659,6 +1801,14 @@ def setup_guardrail(
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         _interactive_guardrail_setup(app, gc, agent_name=agent_name)
+        _apply_guardrail_extra_options(
+            app,
+            gc,
+            rule_pack=rule_pack,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            disable_redaction=disable_redaction,
+        )
 
     if not gc.enabled:
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
@@ -1681,12 +1831,16 @@ def setup_guardrail(
         ("guardrail.model_name", gc.model_name),
         ("guardrail.api_key_env", gc.api_key_env),
         ("guardrail.detection_strategy", gc.detection_strategy),
+        ("guardrail.rule_pack_dir", gc.rule_pack_dir),
     ]
     if gc.api_base:
         rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     if gc.block_message:
         truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
         rows.append(("guardrail.block_message", truncated))
+    rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
+    rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+    rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
         rows.append(("guardrail.judge.model", gc.judge.model))
@@ -1732,7 +1886,9 @@ def setup_guardrail(
     if app.logger:
         app.logger.log_action(
             "setup-guardrail", "config",
-            f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} model={gc.model}",
+            f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
+            f"model={gc.model} hilt={bool(gc.hilt.enabled)!s} "
+            f"disable_redaction={bool(app.cfg.privacy.disable_redaction)!s}",
         )
 
 
@@ -1933,7 +2089,7 @@ def _print_connector_observability_banner(connector: str) -> None:
     click.echo()
 
 
-def _print_observability_summary(connector: str) -> None:
+def _print_observability_summary(connector: str, cfg=None) -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
     click.echo()
@@ -1948,6 +2104,8 @@ def _print_observability_summary(connector: str) -> None:
     ]
     for k, v in rows:
         click.echo(f"    {k + ':':<22s} {v}")
+    click.echo()
+    print_redaction_status_hint(cfg)
     click.echo()
     click.echo("  Next steps:")
     click.echo(
@@ -2081,7 +2239,7 @@ def _setup_observability_alias(
         )
 
     _maybe_bring_up_local_stack(app, auto=with_local_stack)
-    _print_observability_summary(connector)
+    _print_observability_summary(connector, app.cfg)
 
 
 @setup.command("codex")
@@ -2621,76 +2779,77 @@ def _interactive_guardrail_setup(
     _print_connector_info(gc.connector)
     click.echo()
 
-    # Codex and Claude Code default to observability-only mode: hooks +
-    # native OTel telemetry, NO traffic interception. The Go-side
-    # connector Setup gates every enforcement code path on the matching
-    # ``*_enforcement_enabled`` flag (see ``CodexEnforcementEnabled`` /
-    # ``ClaudeCodeEnforcementEnabled`` in internal/config/config.go),
-    # and the Python wizard mirrors that here: skip every prompt that
-    # only matters when the proxy is in the data path (enforcement
-    # mode, scanner engine, LLM judge config, block message). The
-    # operator can flip enforcement on later by editing config.yaml
-    # directly — re-running ``defenseclaw setup guardrail`` will then
-    # run the full prompt set.
-    #
-    # OpenClaw and ZeptoClaw fall through to the full-prompts path
-    # because they were designed around traffic interception from day
-    # one and have no observability-only equivalent.
-    observability_only = gc.connector in ("codex", "claudecode")
-    if observability_only:
+    # Codex and Claude Code have two valid setup modes. Their default
+    # aliases (`setup codex`, `setup claude-code`) stay observability-only,
+    # but the guardrail wizard must also expose the full guardrail path so
+    # operators can choose action mode and HILT without hand-editing YAML.
+    if gc.connector in ("codex", "claudecode"):
         proxy_port = gc.port or 4000
+        label = _CONNECTOR_META.get(gc.connector, {}).get("label", gc.connector)
         click.echo("  ┌──────────────────────────────────────────────────────────────┐")
-        click.echo("  │  Observability mode (enforcement disabled by default)        │")
+        click.echo("  │  Connector integration mode                                  │")
         click.echo("  └──────────────────────────────────────────────────────────────┘")
         click.echo()
-        click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
-        click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
+        click.echo(f"  {label} can run in either mode:")
         click.echo()
-        click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
-        click.echo("      UserPromptSubmit, Stop, PermissionRequest) → /api/v1/<connector>/hook")
-        click.echo("    • OTel: native exporter writes structured logs + metrics")
-        click.echo("      (raw API bodies, model + token counts) to /v1/logs and /v1/metrics")
-        click.echo("    • Notify: agent-turn-complete events (codex only) → /api/v1/codex/notify")
+        click.echo("    [1] observability-only — hooks + OTel, direct native upstream, no blocking")
+        click.echo("    [2] guardrail setup    — hooks + OTel + proxy path; choose observe/action next")
         click.echo()
-        click.echo("  No proxy listener binds; no openai_base_url / ANTHROPIC_BASE_URL")
-        click.echo("  override is written. Existing enforcement code stays in place behind")
-        enforcement_flag = (
-            "codex_enforcement_enabled" if gc.connector == "codex" else "claudecode_enforcement_enabled"
+        default_choice = "2" if (
+            _connector_enforcement_enabled(gc, gc.connector) or gc.mode == "action"
+        ) else "1"
+        integration_choice = click.prompt(
+            "  Select integration mode",
+            type=click.Choice(["1", "2"]),
+            default=default_choice,
         )
-        click.echo(f"  the guardrail.{enforcement_flag} flag — flip to true in")
-        click.echo("  ~/.defenseclaw/config.yaml + restart the gateway to re-engage the proxy.")
-        click.echo()
+        if integration_choice == "1":
+            click.echo()
+            click.echo("  Observability-only mode")
+            click.echo("  ───────────────────────")
+            click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
+            click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
+            click.echo()
+            click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
+            click.echo("      UserPromptSubmit, Stop, PermissionRequest) → /api/v1/<connector>/hook")
+            click.echo("    • OTel: native exporter writes structured logs + metrics")
+            click.echo("      (raw API bodies, model + token counts) to /v1/logs and /v1/metrics")
+            click.echo("    • Notify: agent-turn-complete events (codex only) → /api/v1/codex/notify")
+            click.echo()
+            if not click.confirm("  Enable observability for " + gc.connector + "?", default=True):
+                gc.enabled = False
+                return
 
-        if not click.confirm("  Enable observability for " + gc.connector + "?", default=True):
-            gc.enabled = False
+            # Sensible "if-you-ever-flip-enforcement-on" defaults so the
+            # config.yaml stays loadable. The Go gateway never reads these
+            # fields when enforcement is off — they live as forward-looking
+            # state for the operator who later wants to switch modes.
+            gc.enabled = True
+            gc.mode = "observe"
+            gc.scanner_mode = "local"
+            gc.port = proxy_port
+            gc.judge.enabled = False
+            gc.detection_strategy = "regex_only"
+            gc.detection_strategy_completion = "regex_only"
+            _set_connector_enforcement(gc, gc.connector, False)
+            click.echo()
+            click.echo("  ✓ Observability mode enabled (no traffic interception)")
+            click.echo("  ✓ Hooks + OTel + notify telemetry will be wired automatically at gateway boot")
+            click.echo()
             return
 
-        # Sensible "if-you-ever-flip-enforcement-on" defaults so the
-        # config.yaml stays loadable. The Go gateway never reads these
-        # fields when enforcement is off — they live as forward-looking
-        # state for the operator who later wants to switch modes.
-        gc.enabled = True
-        gc.mode = "observe"
-        gc.scanner_mode = "local"
-        gc.port = proxy_port
-        gc.judge.enabled = False
-        gc.detection_strategy = "regex_only"
-        gc.detection_strategy_completion = "regex_only"
-        if gc.connector == "codex":
-            gc.codex_enforcement_enabled = False
-        else:
-            gc.claudecode_enforcement_enabled = False
+        _set_connector_enforcement(gc, gc.connector, True)
         click.echo()
-        click.echo("  ✓ Observability mode enabled (no traffic interception)")
-        click.echo("  ✓ Hooks + OTel + notify telemetry will be wired automatically at gateway boot")
-        click.echo()
-        return
+        click.echo("  ✓ Guardrail setup selected; hooks + OTel stay enabled.")
 
     model_name = gc.model_name or gc.model or ""
     if model_name:
         click.echo(f"  Detected LLM:  {model_name}")
     proxy_port = gc.port or 4000
-    click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
+    if gc.connector in ("codex", "claudecode"):
+        click.echo(f"  Proxy port:    {proxy_port} (enabled for this connector setup)")
+    else:
+        click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
     click.echo()
 
     if not click.confirm("  Enable guardrail?", default=True):
@@ -2938,6 +3097,8 @@ def _interactive_guardrail_setup(
                 gc.block_message = click.prompt("  Block message", default=gc.block_message or "")
             else:
                 gc.block_message = ""
+        _configure_hilt_interactive(gc)
+        _configure_redaction_interactive(app)
 
 
 
@@ -3470,6 +3631,8 @@ def setup_splunk(
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
+    print_redaction_status_hint(app.cfg)
+    click.echo()
     _print_splunk_next_steps(did_o11y, did_logs)
 
     if app.logger:
@@ -3530,6 +3693,8 @@ def _interactive_splunk_setup(
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
+    print_redaction_status_hint(app.cfg)
+    click.echo()
     _print_splunk_next_steps(did_o11y, did_logs)
 
     if app.logger:

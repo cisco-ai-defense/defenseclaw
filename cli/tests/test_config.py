@@ -959,6 +959,15 @@ class TestGuardrailHostField(unittest.TestCase):
         gc = _merge_guardrail(None, "/tmp")
         self.assertEqual(gc.host, "localhost")
 
+    def test_merge_guardrail_hilt_defaults_and_alias(self):
+        default_gc = _merge_guardrail({}, "/tmp")
+        self.assertFalse(default_gc.hilt.enabled)
+        self.assertEqual(default_gc.hilt.min_severity, "HIGH")
+
+        aliased = _merge_guardrail({"hitl": {"enabled": True, "min_severity": "medium"}}, "/tmp")
+        self.assertTrue(aliased.hilt.enabled)
+        self.assertEqual(aliased.hilt.min_severity, "MEDIUM")
+
 
 class TestOpenShellModeField(unittest.TestCase):
     def test_default_mode_empty(self):

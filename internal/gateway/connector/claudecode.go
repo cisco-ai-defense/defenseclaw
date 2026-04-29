@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // ClaudeCodeConnector handles all security surfaces for Claude Code.
@@ -565,6 +567,7 @@ var claudeCodeOtelEnvKeys = []string{
 	"OTEL_EXPORTER_OTLP_PROTOCOL",
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
 	"OTEL_EXPORTER_OTLP_HEADERS",
+	"OTEL_LOG_USER_PROMPTS",
 	"OTEL_RESOURCE_ATTRIBUTES",
 	"OTEL_SERVICE_NAME",
 }
@@ -577,12 +580,11 @@ var claudeCodeOtelEnvKeys = []string{
 // telemetry as originating from a Claude Code process so the gateway
 // can fan out to per-connector dashboards.
 //
-// Privacy note: we set OTEL_LOG_USER_PROMPTS = false equivalent by
-// NOT enabling Claude's prompt-content telemetry — Claude Code's OTel
-// emitter follows its own redaction defaults documented at the
-// monitoring-usage URL above. Operators who want richer prompt logs
-// in OTel must opt in via Claude's own settings flag (separate from
-// our wiring, intentionally).
+// Privacy note: Claude Code redacts prompt content by default. When
+// DefenseClaw redaction is explicitly disabled, we set
+// OTEL_LOG_USER_PROMPTS=1 so Claude's native OTel follows the same raw
+// prompt contract as DefenseClaw's own hook/proxy telemetry. Teardown
+// restores the operator's pristine env block.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	endpoint := "http://" + opts.APIAddr
 	headers := []string{
@@ -613,7 +615,7 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	if opts.ClaudeCodeEnforcement {
 		failMode = "closed"
 	}
-	return map[string]string{
+	env := map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 		"DEFENSECLAW_FAIL_MODE":        failMode,
 		"OTEL_METRICS_EXPORTER":        "otlp",
@@ -624,6 +626,10 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 		"OTEL_SERVICE_NAME":            "claudecode",
 		"OTEL_RESOURCE_ATTRIBUTES":     "service.name=claudecode,defenseclaw.connector=claudecode",
 	}
+	if redaction.DisableAll() {
+		env["OTEL_LOG_USER_PROMPTS"] = "1"
+	}
+	return env
 }
 
 // patchClaudeCodeOtelEnv merges OpenTelemetry env vars into

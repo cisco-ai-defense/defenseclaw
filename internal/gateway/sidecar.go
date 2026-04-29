@@ -53,6 +53,7 @@ type Sidecar struct {
 	otel     *telemetry.Provider
 	notify   *NotificationQueue
 	opa      *policy.Engine
+	hilt     *HILTApprovalManager
 	webhooks *WebhookDispatcher
 
 	alertCtx    context.Context
@@ -156,6 +157,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
+	router.SetGuardrailConfig(&cfg.Guardrail)
+	hilt := NewHILTApprovalManager(client, logger, otel)
+	router.SetHILTApprovalManager(hilt)
 	// Seed defaults for the observability contract so every span /
 	// audit row knows which agent (framework mode) and policy
 	// signed off on the event even when the incoming stream does
@@ -377,6 +381,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		otel:        otel,
 		notify:      notify,
 		webhooks:    webhooks,
+		hilt:        hilt,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -1150,6 +1155,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// truth without re-reading config from disk.
 		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
 		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
+		HILTEnabled:           s.cfg.Guardrail.HILT.Enabled,
 		InstallCodeGuard:      true,
 	}
 
@@ -1182,13 +1188,18 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises
-		// no usable upstream provider. Without this, the gateway would
-		// accept agent traffic and fail every request once it tries to
-		// dial a non-existent upstream — far better to crash at boot
-		// where the operator sees the misconfiguration immediately.
-		// The cfg.Guardrail.AllowEmptyProviders flag opts test harnesses
-		// out of the gate (CI fixtures with stub upstreams, etc.).
-		if probe, ok := conn.(connector.ProviderProbe); ok && !s.cfg.Guardrail.AllowEmptyProviders {
+		// no usable upstream provider for a proxy-bound data path.
+		// Without this, the gateway would accept agent traffic and fail
+		// every request once it tries to dial a non-existent upstream —
+		// far better to crash at boot where the operator sees the
+		// misconfiguration immediately.
+		//
+		// Codex and Claude Code observability-only mode is intentionally
+		// different: the proxy listener does not bind and the agent talks
+		// directly to its native SSO/API upstream. There is no DefenseClaw
+		// proxy upstream to validate, so probing here would reject valid
+		// SSO-only installs before telemetry can start.
+		if probe, ok := conn.(connector.ProviderProbe); ok && shouldRunProviderProbeForConnector(conn, &s.cfg.Guardrail) {
 			count, err := probe.HasUsableProviders()
 			if err != nil {
 				s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -1304,6 +1315,16 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	}
 }
 
+func shouldRunProviderProbeForConnector(conn connector.Connector, gc *config.GuardrailConfig) bool {
+	if gc == nil {
+		return true
+	}
+	if gc.AllowEmptyProviders {
+		return false
+	}
+	return proxyShouldBindForConnector(conn, gc)
+}
+
 func configuredConnectorName(cfg *config.Config) string {
 	if cfg == nil {
 		return ""
@@ -1386,6 +1407,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
+	api.SetHILTApprovalManager(s.hilt)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}

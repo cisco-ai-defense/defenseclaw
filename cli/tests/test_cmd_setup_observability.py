@@ -108,6 +108,8 @@ class TestObservabilityWizard(unittest.TestCase):
 
         with patch("defenseclaw.commands.cmd_setup.click.confirm",
                    return_value=True), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt",
+                   return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
                    return_value=connector), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info",
@@ -151,6 +153,8 @@ class TestObservabilityWizard(unittest.TestCase):
         app, gc = _make_app("codex")
         with patch("defenseclaw.commands.cmd_setup.click.confirm",
                    return_value=False), \
+             patch("defenseclaw.commands.cmd_setup.click.prompt",
+                   return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
                    return_value="codex"), \
              patch("defenseclaw.commands.cmd_setup._print_connector_info",
@@ -159,6 +163,54 @@ class TestObservabilityWizard(unittest.TestCase):
                    return_value=None):
             _interactive_guardrail_setup(app, gc, agent_name="codex")
         self.assertFalse(gc.enabled)
+
+    def test_claudecode_action_flow_sets_enforcement_true(self):
+        app, gc = _make_app("claudecode")
+
+        prompts = iter(["2", "2", "1"])
+        confirms = iter([True, False, False])
+
+        with patch("defenseclaw.commands.cmd_setup.click.prompt",
+                   side_effect=lambda *args, **kwargs: next(prompts)), \
+             patch("defenseclaw.commands.cmd_setup.click.confirm",
+                   side_effect=lambda *args, **kwargs: next(confirms)), \
+             patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
+                   return_value="claudecode"), \
+             patch("defenseclaw.commands.cmd_setup._print_connector_info",
+                   return_value=None), \
+             patch("defenseclaw.commands.cmd_setup.click.echo",
+                   return_value=None):
+            _interactive_guardrail_setup(app, gc, agent_name="claudecode")
+
+        self.assertTrue(gc.enabled)
+        self.assertTrue(gc.claudecode_enforcement_enabled)
+        self.assertEqual(gc.mode, "action")
+        self.assertEqual(gc.scanner_mode, "local")
+        self.assertFalse(gc.judge.enabled)
+
+    def test_codex_guardrail_observe_flow_sets_enforcement_true(self):
+        app, gc = _make_app("codex")
+
+        prompts = iter(["2", "1", "1"])
+        confirms = iter([True, False, False])
+
+        with patch("defenseclaw.commands.cmd_setup.click.prompt",
+                   side_effect=lambda *args, **kwargs: next(prompts)), \
+             patch("defenseclaw.commands.cmd_setup.click.confirm",
+                   side_effect=lambda *args, **kwargs: next(confirms)), \
+             patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
+                   return_value="codex"), \
+             patch("defenseclaw.commands.cmd_setup._print_connector_info",
+                   return_value=None), \
+             patch("defenseclaw.commands.cmd_setup.click.echo",
+                   return_value=None):
+            _interactive_guardrail_setup(app, gc, agent_name="codex")
+
+        self.assertTrue(gc.enabled)
+        self.assertTrue(gc.codex_enforcement_enabled)
+        self.assertEqual(gc.mode, "observe")
+        self.assertEqual(gc.scanner_mode, "local")
+        self.assertFalse(gc.judge.enabled)
 
     def test_openclaw_does_not_use_observability_path(self):
         """OpenClaw must fall through to the full enforcement-prompts

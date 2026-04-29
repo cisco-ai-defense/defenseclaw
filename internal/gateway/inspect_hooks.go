@@ -141,7 +141,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 		return
 	}
-	verdict := buildVerdict(ruleFindings, "prompt")
+	verdict := a.buildVerdict(ruleFindings, "prompt", false)
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
@@ -207,7 +207,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 		return
 	}
-	verdict := buildVerdict(ruleFindings, "completion")
+	verdict := a.buildVerdict(ruleFindings, "completion", false)
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
@@ -274,7 +274,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 		return
 	}
-	verdict := buildVerdict(ruleFindings, "tool_response")
+	verdict := a.buildVerdict(ruleFindings, "tool_response", false)
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
@@ -313,6 +313,18 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 
 // buildVerdict converts rule findings into a ToolInspectVerdict.
 func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerdict {
+	return buildVerdictWithConfig(ruleFindings, direction, nil, false)
+}
+
+func (a *APIServer) buildVerdict(ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
+	cfg := (*config.Config)(nil)
+	if a != nil {
+		cfg = a.scannerCfg
+	}
+	return buildVerdictWithConfig(ruleFindings, direction, cfg, confirmable)
+}
+
+func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, confirmable bool) *ToolInspectVerdict {
 	if len(ruleFindings) == 0 {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
@@ -320,10 +332,7 @@ func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerd
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	action := "alert"
-	if severity == "HIGH" || severity == "CRITICAL" {
-		action = "block"
-	}
+	action := guardrailRuntimeAction(cfg, severity, confirmable)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {

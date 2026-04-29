@@ -829,6 +829,12 @@ class WebhookConfig:
 
 
 @dataclass
+class HILTConfig:
+    enabled: bool = False
+    min_severity: str = "HIGH"
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
@@ -868,6 +874,7 @@ class GuardrailConfig:
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
     connector: str = ""  # empty => fall back to claw.mode; otherwise openclaw | zeptoclaw | claudecode | codex
+    hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``codex_enforcement_enabled`` gates the proxy-redirect /
     # blocking path for the Codex connector. Default ``False`` means
     # codex talks DIRECTLY to its native upstream — observability
@@ -1468,6 +1475,9 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
 def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConfig:
     if not raw:
         return GuardrailConfig()
+    hilt_raw = raw.get("hilt")
+    if hilt_raw is None:
+        hilt_raw = raw.get("hitl")
     return GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
@@ -1489,8 +1499,18 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
         connector=raw.get("connector", ""),
+        hilt=_merge_hilt(hilt_raw),
         codex_enforcement_enabled=raw.get("codex_enforcement_enabled", False),
         claudecode_enforcement_enabled=raw.get("claudecode_enforcement_enabled", False),
+    )
+
+
+def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
+    if not raw:
+        return HILTConfig()
+    return HILTConfig(
+        enabled=bool(raw.get("enabled", False)),
+        min_severity=str(raw.get("min_severity", "HIGH") or "HIGH").upper(),
     )
 
 

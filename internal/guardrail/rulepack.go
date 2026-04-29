@@ -111,6 +111,7 @@ type RulesFileYAML struct {
 // RuleDefYAML is a single detection rule definition in YAML.
 type RuleDefYAML struct {
 	ID         string   `yaml:"id"`
+	Enabled    *bool    `yaml:"enabled,omitempty"`
 	Pattern    string   `yaml:"pattern"`
 	Title      string   `yaml:"title"`
 	Severity   string   `yaml:"severity"`

@@ -26,6 +26,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // EmitStartupSpan creates a short-lived span to verify the trace export pipeline
@@ -302,6 +304,9 @@ func (p *Provider) StartToolSpan(
 		attribute.Bool("defenseclaw.tool.dangerous", dangerous),
 		attribute.String("defenseclaw.tool.provider", toolProvider),
 	)
+	if redaction.DisableAll() && len(args) > 0 {
+		span.SetAttributes(attribute.String("defenseclaw.tool.args", string(args)))
+	}
 
 	if skillKey != "" {
 		span.SetAttributes(attribute.String("defenseclaw.tool.skill_key", skillKey))
@@ -343,6 +348,25 @@ func (p *Provider) StartToolSpan(
 	return ctx, span
 }
 
+// SetRawSpanString adds a raw string attribute only when the operator has
+// explicitly disabled redaction. This is the narrow escape hatch for
+// single-tenant/debug installs that want full prompt/tool telemetry while
+// preserving the default low-content span contract.
+func (p *Provider) SetRawSpanString(span trace.Span, key, value string) {
+	if span == nil || key == "" || value == "" || !redaction.DisableAll() {
+		return
+	}
+	span.SetAttributes(attribute.String(key, value))
+}
+
+// SetRawSpanStringSlice is the slice variant of SetRawSpanString.
+func (p *Provider) SetRawSpanStringSlice(span trace.Span, key string, values []string) {
+	if span == nil || key == "" || len(values) == 0 || !redaction.DisableAll() {
+		return
+	}
+	span.SetAttributes(attribute.StringSlice(key, values))
+}
+
 // EndToolSpan ends an active tool call span with result data.
 // Metrics are always recorded when OTel is enabled, even if the span is nil
 // (traces disabled).
@@ -374,7 +398,8 @@ func (p *Provider) EndToolSpan(span trace.Span, exitCode, outputLen int, startTi
 }
 
 // StartApprovalSpan starts a new OTel span for an exec approval request.
-// Raw command strings and argv are not exported to avoid leaking tokens or secrets.
+// Raw command strings and argv are exported only when redaction is explicitly
+// disabled.
 //
 // cor carries optional correlation identifiers (session, run, policy,
 // destination). Empty fields are skipped; older callers that still
@@ -400,6 +425,17 @@ func (p *Provider) StartApprovalSpan(
 		attribute.String("defenseclaw.approval.command_name", baseCommand(command)),
 		attribute.Int("defenseclaw.approval.argc", len(argv)),
 	)
+	if redaction.DisableAll() {
+		if command != "" {
+			span.SetAttributes(attribute.String("defenseclaw.approval.command", command))
+		}
+		if len(argv) > 0 {
+			span.SetAttributes(attribute.StringSlice("defenseclaw.approval.argv", argv))
+		}
+		if cwd != "" {
+			span.SetAttributes(attribute.String("defenseclaw.approval.cwd", cwd))
+		}
+	}
 	if cor.ToolID != "" {
 		span.SetAttributes(attribute.String("gen_ai.tool.call.id", cor.ToolID))
 	}

@@ -91,6 +91,43 @@ func TestRenderGatewayBody_IsValidJSONWithPayload(t *testing.T) {
 	}
 }
 
+func TestRenderGatewayBody_IncludesLLMContentPayload(t *testing.T) {
+	exitCode := 0
+	e := gatewaylog.Event{
+		EventType: gatewaylog.EventToolInvocation,
+		Severity:  gatewaylog.SeverityInfo,
+		SessionID: "sess-1",
+		UserID:    "alice",
+		AgentType: "codex",
+		Provider:  "openai",
+		Model:     "gpt-5.5",
+		Tool: &gatewaylog.ToolPayload{
+			ToolCallID:      "tool-1",
+			Phase:           "result",
+			Tool:            "shell",
+			ToolInput:       `{"cmd":"echo raw"}`,
+			ToolOutput:      "raw tool output",
+			ExitCode:        &exitCode,
+			ReplyToPromptID: "prompt-1",
+		},
+	}
+
+	body := renderGatewayBody(e)
+	var parsed gatewaylog.Event
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("body not JSON: %v (%s)", err, body)
+	}
+	if parsed.Tool == nil {
+		t.Fatalf("tool payload missing from OTel body: %s", body)
+	}
+	if parsed.Tool.ToolInput != e.Tool.ToolInput || parsed.Tool.ToolOutput != e.Tool.ToolOutput {
+		t.Fatalf("tool content lost in OTel body: %+v", parsed.Tool)
+	}
+	if parsed.Tool.ReplyToPromptID != "prompt-1" || parsed.UserID != "alice" || parsed.AgentType != "codex" {
+		t.Fatalf("correlation envelope lost in OTel body: %+v", parsed)
+	}
+}
+
 // TestEmitGatewayEvent_VerdictLogAttributes verifies every top-level
 // envelope field + verdict-specific attribute lands on the OTel log
 // record. This is the contract receivers (Splunk/Loki/Grafana)
@@ -290,8 +327,11 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 		TraceID:           "trace-contract",
 		AgentID:           "agent-contract",
 		AgentName:         "openclaw",
+		AgentType:         "coding-agent",
 		AgentInstanceID:   "inst-contract",
 		SidecarInstanceID: "sidecar-pinned-on-event",
+		UserID:            "user-contract",
+		UserName:          "alice",
 		PolicyID:          "policy-contract",
 		DestinationApp:    "destapp-contract",
 		ToolName:          "tool-name-contract",
@@ -323,8 +363,11 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 	assertAttrString(t, rec, "defenseclaw.trace_id", "trace-contract")
 	assertAttrString(t, rec, "defenseclaw.agent_id", "agent-contract")
 	assertAttrString(t, rec, "defenseclaw.agent_name", "openclaw")
+	assertAttrString(t, rec, "defenseclaw.agent_type", "coding-agent")
 	assertAttrString(t, rec, "defenseclaw.agent_instance_id", "inst-contract")
 	assertAttrString(t, rec, "defenseclaw.sidecar_instance_id", "sidecar-pinned-on-event")
+	assertAttrString(t, rec, "defenseclaw.user_id", "user-contract")
+	assertAttrString(t, rec, "defenseclaw.user_name", "alice")
 	assertAttrString(t, rec, "defenseclaw.policy_id", "policy-contract")
 	assertAttrString(t, rec, "defenseclaw.destination_app", "destapp-contract")
 	assertAttrString(t, rec, "defenseclaw.tool_name", "tool-name-contract")
@@ -368,6 +411,36 @@ func TestEmitGatewayEvent_NilPayloadDoesNotPanic(t *testing.T) {
 	})
 	if got := len(exp.snapshot()); got != 1 {
 		t.Fatalf("records=%d want 1 (envelope still emits on nil payload)", got)
+	}
+}
+
+func TestEmitGatewayEvent_LLMEventAttributes(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	exitCode := 2
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventToolInvocation,
+		Severity:  gatewaylog.SeverityInfo,
+		SessionID: "sess-llm",
+		ToolName:  "shell",
+		ToolID:    "call-1",
+		Tool: &gatewaylog.ToolPayload{
+			ToolCallID:      "call-1",
+			Phase:           "result",
+			TurnID:          "turn-1",
+			Tool:            "shell",
+			ExitCode:        &exitCode,
+			ReplyToPromptID: "prompt-1",
+			Source:          "codex",
+		},
+	})
+	rec := exp.snapshot()[0]
+	assertAttrString(t, rec, "defenseclaw.gateway.event_type", "tool_invocation")
+	assertAttrString(t, rec, "defenseclaw.tool.phase", "result")
+	assertAttrString(t, rec, "defenseclaw.tool.call_id", "call-1")
+	assertAttrString(t, rec, "defenseclaw.turn_id", "turn-1")
+	assertAttrString(t, rec, "defenseclaw.llm.reply_to_prompt_id", "prompt-1")
+	if got, ok := intAttrValue(rec, "defenseclaw.tool.exit_code"); !ok || got != 2 {
+		t.Fatalf("defenseclaw.tool.exit_code=%d ok=%v, want 2", got, ok)
 	}
 }
 

@@ -218,11 +218,20 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 	if e.AgentName != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_name", e.AgentName))
 	}
+	if e.AgentType != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent_type", e.AgentType))
+	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))
 	}
 	if e.SidecarInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.sidecar_instance_id", e.SidecarInstanceID))
+	}
+	if e.UserID != "" {
+		attrs = append(attrs, log.String("defenseclaw.user_id", e.UserID))
+	}
+	if e.UserName != "" {
+		attrs = append(attrs, log.String("defenseclaw.user_name", e.UserName))
 	}
 	if e.PolicyID != "" {
 		attrs = append(attrs, log.String("defenseclaw.policy_id", e.PolicyID))
@@ -320,6 +329,47 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		if d := e.Diagnostic; d != nil {
 			attrs = append(attrs,
 				log.String("defenseclaw.diagnostic.component", d.Component))
+		}
+	case gatewaylog.EventLLMPrompt:
+		if p := e.LLMPrompt; p != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.llm.prompt_id", p.PromptID),
+				log.String("defenseclaw.llm.source", p.Source),
+			)
+			if p.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", p.TurnID))
+			}
+		}
+	case gatewaylog.EventLLMResponse:
+		if r := e.LLMResponse; r != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.llm.response_id", r.ResponseID),
+				log.String("defenseclaw.llm.reply_to_prompt_id", r.ReplyToPromptID),
+				log.String("defenseclaw.llm.source", r.Source),
+			)
+			if r.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", r.TurnID))
+			}
+			if len(r.FinishReasons) > 0 {
+				attrs = append(attrs, log.String("defenseclaw.llm.finish_reasons", strings.Join(r.FinishReasons, ",")))
+			}
+		}
+	case gatewaylog.EventToolInvocation:
+		if t := e.Tool; t != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.tool.phase", t.Phase),
+				log.String("defenseclaw.tool.call_id", t.ToolCallID),
+				log.String("defenseclaw.tool.source", t.Source),
+			)
+			if t.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", t.TurnID))
+			}
+			if t.ReplyToPromptID != "" {
+				attrs = append(attrs, log.String("defenseclaw.llm.reply_to_prompt_id", t.ReplyToPromptID))
+			}
+			if t.ExitCode != nil {
+				attrs = append(attrs, log.Int("defenseclaw.tool.exit_code", *t.ExitCode))
+			}
 		}
 	}
 

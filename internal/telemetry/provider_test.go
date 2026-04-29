@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -121,6 +122,80 @@ func TestDisabledProvider_StartToolSpan_NoPanic(t *testing.T) {
 	}
 	if ctx == nil {
 		t.Error("context should not be nil")
+	}
+}
+
+func TestStartToolSpan_RawArgsOnlyWhenRedactionDisabled(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartToolSpan(context.Background(), "shell", "running",
+		json.RawMessage(`{"secret":"abc123"}`), false, "", "builtin", "",
+		ToolSpanContext{})
+	p.EndToolSpan(span, 0, 0, time.Now(), "shell", "builtin")
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	if _, ok := attrByKey(spans[0].Attributes, "defenseclaw.tool.args"); ok {
+		t.Fatal("raw tool args were exported while redaction was enabled")
+	}
+
+	redaction.SetDisableAll(true)
+	p, exp = newTracingProvider(t)
+	_, span = p.StartToolSpan(context.Background(), "shell", "running",
+		json.RawMessage(`{"secret":"abc123"}`), false, "", "builtin", "",
+		ToolSpanContext{})
+	p.EndToolSpan(span, 0, 0, time.Now(), "shell", "builtin")
+	spans = exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d raw-mode spans, want 1", len(spans))
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.tool.args"); !ok || got.AsString() != `{"secret":"abc123"}` {
+		t.Fatalf("raw tool args attr = %q ok=%v, want exact JSON", got.AsString(), ok)
+	}
+}
+
+func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartApprovalSpan(context.Background(), "approval-1", "/usr/bin/curl",
+		[]string{"-H", "Authorization: Bearer secret"}, "/tmp/work",
+		ToolSpanContext{})
+	p.EndApprovalSpan(span, "approved", "ok", false, false)
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	for _, key := range []string{"defenseclaw.approval.command", "defenseclaw.approval.argv", "defenseclaw.approval.cwd"} {
+		if _, ok := attrByKey(spans[0].Attributes, key); ok {
+			t.Fatalf("%s exported while redaction was enabled", key)
+		}
+	}
+
+	redaction.SetDisableAll(true)
+	p, exp = newTracingProvider(t)
+	_, span = p.StartApprovalSpan(context.Background(), "approval-1", "/usr/bin/curl",
+		[]string{"-H", "Authorization: Bearer secret"}, "/tmp/work",
+		ToolSpanContext{})
+	p.EndApprovalSpan(span, "approved", "ok", false, false)
+	spans = exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d raw-mode spans, want 1", len(spans))
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.approval.command"); !ok || got.AsString() != "/usr/bin/curl" {
+		t.Fatalf("raw command attr = %q ok=%v, want /usr/bin/curl", got.AsString(), ok)
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.approval.argv"); !ok {
+		t.Fatal("raw argv attr missing in raw mode")
+	} else if argv := got.AsStringSlice(); len(argv) != 2 || argv[1] != "Authorization: Bearer secret" {
+		t.Fatalf("raw argv attr = %#v, want original argv", argv)
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.approval.cwd"); !ok || got.AsString() != "/tmp/work" {
+		t.Fatalf("raw cwd attr = %q ok=%v, want /tmp/work", got.AsString(), ok)
 	}
 }
 

@@ -456,6 +456,7 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 	content.WriteString(title + "\n")
 
 	dimLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	const labelWidth = 17
 
 	if p.cfg != nil {
 		modeRaw := string(p.cfg.Claw.Mode)
@@ -465,6 +466,11 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 		}
 		rows := [][2]string{
 			{"Agent", modeLabel},
+			{"Redaction", p.redactionStatusText()},
+			{"Policy posture", p.policyPostureText()},
+			{"Enforcement", p.connectorEnforcementText()},
+			{"Human approval", p.hiltStatusText()},
+			{"Approval support", p.hiltSupportText()},
 			{"Environment", p.cfg.Environment},
 			{"Policy dir", p.cfg.PolicyDir},
 			{"Data dir", p.cfg.DataDir},
@@ -493,13 +499,156 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 			rows = append(rows, [2]string{"AI Defense", p.cfg.CiscoAIDefense.Endpoint})
 		}
 		for _, r := range rows {
-			fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-14s", r[0])), r[1])
+			fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-*s", labelWidth, r[0])), r[1])
 		}
 	} else {
 		content.WriteString(dimLabel.Render(" (config not loaded)") + "\n")
+		fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-*s", labelWidth, "Redaction")), p.redactionStatusText())
+		fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-*s", labelWidth, "Human approval")), p.hiltStatusText())
 	}
 
 	return box.Render(content.String())
+}
+
+func (p *OverviewPanel) redactionStatusText() string {
+	if p.redactionDisabled() {
+		return p.theme.Critical.Render("OFF (RAW)")
+	}
+	return p.theme.Clean.Render("ON (redacted)")
+}
+
+func (p *OverviewPanel) redactionDisabled() bool {
+	if redactionDisabledForLogsBadge() {
+		return true
+	}
+	return p.cfg != nil && p.cfg.Privacy.DisableRedaction
+}
+
+func (p *OverviewPanel) hiltStatusText() string {
+	if p.cfg == nil || !p.cfg.Guardrail.HILT.Enabled {
+		return p.theme.Dimmed.Render("OFF")
+	}
+
+	minSeverity := strings.ToUpper(strings.TrimSpace(p.cfg.Guardrail.HILT.MinSeverity))
+	if minSeverity == "" {
+		minSeverity = "HIGH"
+	}
+	mode := strings.ToLower(strings.TrimSpace(p.cfg.Guardrail.Mode))
+	if mode == "" {
+		mode = "observe"
+	}
+	confirmRange := minSeverity
+	if minSeverity != "HIGH" {
+		confirmRange += "+"
+	}
+	label := fmt.Sprintf("ON %s", confirmRange)
+	if mode != "action" {
+		return p.theme.Medium.Render(label + " (inactive)")
+	}
+	return p.theme.High.Render(label + " (CRIT blocks)")
+}
+
+func (p *OverviewPanel) policyPostureText() string {
+	if p.cfg == nil {
+		return p.theme.Dimmed.Render("unknown")
+	}
+
+	profile := guardrailProfileName(p.cfg.Guardrail.RulePackDir)
+	switch profile {
+	case "strict":
+		return p.theme.High.Render("strict: block MEDIUM+")
+	case "permissive":
+		return p.theme.Clean.Render("permissive: block CRITICAL")
+	default:
+		return p.theme.Medium.Render("balanced: block CRIT, alert MED+")
+	}
+}
+
+func guardrailProfileName(rulePackDir string) string {
+	profile := strings.ToLower(strings.TrimSpace(rulePackDir))
+	if profile == "" {
+		return "balanced"
+	}
+	parts := strings.FieldsFunc(profile, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) > 0 {
+		profile = parts[len(parts)-1]
+	}
+	if profile == "default" {
+		return "balanced"
+	}
+	return profile
+}
+
+func (p *OverviewPanel) connectorEnforcementText() string {
+	if p.cfg == nil {
+		return p.theme.Dimmed.Render("unknown")
+	}
+	if !p.cfg.Guardrail.Enabled {
+		return p.theme.Dimmed.Render("disabled")
+	}
+
+	connector := p.activeConnectorName()
+	switch connector {
+	case "codex":
+		if p.cfg.Guardrail.CodexEnforcementEnabled {
+			return p.theme.High.Render("Codex proxy enforcement")
+		}
+		return p.theme.Medium.Render("Codex observe-only hooks")
+	case "claudecode":
+		if p.cfg.Guardrail.ClaudeCodeEnforcementEnabled {
+			return p.theme.High.Render("Claude Code proxy enforcement")
+		}
+		return p.theme.Medium.Render("Claude Code observe-only hooks")
+	case "zeptoclaw":
+		return p.theme.High.Render("ZeptoClaw proxy-gated")
+	case "openclaw":
+		return p.theme.High.Render("OpenClaw proxy enforcement")
+	default:
+		return p.theme.Medium.Render(FriendlyConnectorName(connector) + " connector")
+	}
+}
+
+func (p *OverviewPanel) hiltSupportText() string {
+	if p.cfg == nil || !p.cfg.Guardrail.HILT.Enabled {
+		return p.theme.Dimmed.Render("disabled")
+	}
+
+	var label string
+	switch p.activeConnectorName() {
+	case "openclaw":
+		label = "supported: tools/outbound"
+	case "claudecode":
+		label = "supported: PreToolUse ask"
+	case "codex":
+		label = "partial: PermissionRequest"
+	case "zeptoclaw":
+		label = "partial: proxy-gated"
+	default:
+		label = "unknown connector support"
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(p.cfg.Guardrail.Mode), "action") {
+		label += " (inactive)"
+	}
+	if strings.HasPrefix(label, "supported:") {
+		return p.theme.Clean.Render(label)
+	}
+	return p.theme.Medium.Render(label)
+}
+
+func (p *OverviewPanel) activeConnectorName() string {
+	if p.cfg == nil {
+		return "openclaw"
+	}
+	if name := strings.ToLower(strings.TrimSpace(p.cfg.Guardrail.Connector)); name != "" {
+		return name
+	}
+	if mode := strings.ToLower(strings.TrimSpace(string(p.cfg.Claw.Mode))); mode != "" {
+		return mode
+	}
+	return "openclaw"
 }
 
 func (p *OverviewPanel) renderStatsBox(w int) string {

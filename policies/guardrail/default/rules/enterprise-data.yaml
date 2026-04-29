@@ -4,7 +4,7 @@ rules:
   - id: ENT-BULK-SSN
     pattern: '\b\d{3}-\d{2}-\d{4}\b'
     title: "US Social Security Number"
-    severity: CRITICAL
+    severity: HIGH
     confidence: 0.85
     tags: [pii, regulated]
 

@@ -194,6 +194,12 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
 	}
+	if cfg.Guardrail.HILT.Enabled {
+		t.Error("guardrail.hilt.enabled should default false")
+	}
+	if cfg.Guardrail.HILT.MinSeverity != "HIGH" {
+		t.Errorf("guardrail.hilt.min_severity = %q, want HIGH", cfg.Guardrail.HILT.MinSeverity)
+	}
 	if cfg.Guardrail.Host != "" {
 		t.Errorf("expected default guardrail host empty (Viper default), got %q", cfg.Guardrail.Host)
 	}

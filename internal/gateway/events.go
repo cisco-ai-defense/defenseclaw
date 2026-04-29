@@ -216,6 +216,36 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		cp.Cause = redaction.ForSinkString(cp.Cause)
 		e.Error = &cp
 	}
+	if p := e.LLMPrompt; p != nil {
+		cp := *p
+		if cp.Prompt != "" {
+			cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+		}
+		if cp.RawRequestBody != "" {
+			cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+		}
+		e.LLMPrompt = &cp
+	}
+	if r := e.LLMResponse; r != nil {
+		cp := *r
+		if cp.Response != "" {
+			cp.Response = redaction.ForSinkMessageContent(cp.Response)
+		}
+		if cp.RawResponseBody != "" {
+			cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+		}
+		e.LLMResponse = &cp
+	}
+	if t := e.Tool; t != nil {
+		cp := *t
+		if cp.ToolInput != "" {
+			cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+		}
+		if cp.ToolOutput != "" {
+			cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+		}
+		e.Tool = &cp
+	}
 	w.Emit(e)
 }
 

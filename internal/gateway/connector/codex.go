@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -665,7 +666,7 @@ type codexConfigBackup struct {
 
 	// HadOtelBlock / OriginalOtel back up the operator's pristine
 	// [otel] block. Setup overwrites this with our own
-	// {log_user_prompt = false, exporter = otlp-http to gateway},
+	// {log_user_prompt = redaction-dependent, exporter = otlp-http to gateway},
 	// regardless of enforcement mode (OTel telemetry runs end-to-end
 	// in observability mode too — that's the whole point of the
 	// observability default). Teardown restores the original or
@@ -1130,11 +1131,11 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 // protocol would silently drop every batch instead of erroring out.
 //
 // log_user_prompt = false is the privacy-preserving default: codex's
-// native OTel emits prompt text only when this is true. We capture
-// the prompt text via the UserPromptSubmit hook instead, which gives
-// us per-prompt audit + redaction control. Operators who want raw
-// prompts in OTel too can flip the value in config.toml after
-// Setup runs — Teardown's restore preserves that override.
+// native OTel emits prompt text only when this is true. When redaction
+// is explicitly disabled, DefenseClaw flips it to true so native Codex
+// OTel joins the same raw-content mode as the hook/proxy telemetry.
+// Teardown restores the operator's pristine [otel] block or deletes
+// ours if there was none.
 //
 // Headers carry the gateway token so the OTLP-HTTP receiver can
 // authenticate the codex CLI process the same way the hook script
@@ -1167,7 +1168,7 @@ func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"log_user_prompt":  false,
+		"log_user_prompt":  redaction.DisableAll(),
 		"exporter":         exporterFor("/v1/logs"),
 		"trace_exporter":   exporterFor("/v1/traces"),
 		"metrics_exporter": exporterFor("/v1/metrics"),

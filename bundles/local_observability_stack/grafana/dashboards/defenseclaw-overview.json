@@ -219,7 +219,41 @@
       "title": "All gateway events",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 38, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} | json | line_format \"{{.defenseclaw_gateway_event_type}} | {{.defenseclaw_verdict_action}}{{.defenseclaw_judge_action}}{{.defenseclaw_error_code}} | {{__line__}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | line_format \"{{.defenseclaw_gateway_event_type}} | {{.defenseclaw_verdict_action}}{{.defenseclaw_judge_action}}{{.defenseclaw_error_code}} | {{__line__}}\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    },
+
+    {
+      "type": "row",
+      "title": "LLM prompt / response / tool events",
+      "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "LLM events / min",
+      "description": "Normalized prompt, response, and tool invocation gateway events. Content fields follow the current DefenseClaw redaction setting.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 51, "w": 6, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_events_emitted_total{event_type=~\"llm_prompt|llm_response|tool_invocation\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM events by type",
+      "description": "Prompt, response, and tool events emitted from proxy traffic, Codex hooks/OTLP, Claude Code hooks/OTLP, OpenClaw, and ZeptoClaw.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 6, "y": 51, "w": 18, "h": 8},
+      "targets": [{"expr": "sum by (event_type) (rate(defenseclaw_gateway_events_emitted_total{event_type=~\"llm_prompt|llm_response|tool_invocation\"}[$__rate_interval]))", "legendFormat": "{{event_type}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "logs",
+      "title": "LLM prompt/response/tool event stream",
+      "description": "Open a row's log details to inspect prompt, response, tool input, and tool output fields. When redaction is enabled those fields remain sanitized.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 59, "w": 24, "h": 12},
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\" | line_format \"{{.defenseclaw_gateway_event_type}} | user={{.defenseclaw_user_id}} name={{.defenseclaw_user_name}} | agent={{.defenseclaw_agent_type}}/{{.defenseclaw_agent_name}} | model={{.defenseclaw_llm_model}} | session={{.defenseclaw_session_id}} | prompt={{.defenseclaw_llm_prompt_id}} response={{.defenseclaw_llm_response_id}} tool={{.defenseclaw_tool_call_id}} | {{__line__}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

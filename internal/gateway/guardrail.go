@@ -1512,6 +1512,36 @@ func lastUserText(messages []ChatMessage) string {
 	return ""
 }
 
+func promptInspectionText(userText string) string {
+	return stripOpenClawUntrustedEnvelope(userText)
+}
+
+func stripOpenClawUntrustedEnvelope(userText string) string {
+	trimmed := strings.TrimSpace(userText)
+	if !strings.HasPrefix(trimmed, "Sender (untrusted metadata):") {
+		return userText
+	}
+	fenceStart := strings.Index(trimmed, "```")
+	if fenceStart < 0 {
+		return userText
+	}
+	afterFence := trimmed[fenceStart+len("```"):]
+	fenceEnd := strings.Index(afterFence, "```")
+	if fenceEnd < 0 {
+		return userText
+	}
+	rest := strings.TrimSpace(afterFence[fenceEnd+len("```"):])
+	if strings.HasPrefix(rest, "[") {
+		if close := strings.Index(rest, "]"); close >= 0 && close < 128 {
+			rest = strings.TrimSpace(rest[close+1:])
+		}
+	}
+	if rest == "" {
+		return userText
+	}
+	return rest
+}
+
 // isHeartbeatMessage detects OpenClaw's internal liveness probes that should
 // bypass guardrail inspection. The heartbeat sends a short system prompt
 // ("Read HEARTBEAT.md") + expects "HEARTBEAT_OK" back; flagging it as prompt

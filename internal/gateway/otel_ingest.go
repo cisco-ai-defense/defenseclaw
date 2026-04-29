@@ -170,12 +170,14 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		// help (the body is malformed). Audit + meter + emit a
 		// WARN log so dashboards / alerts surface the drift
 		// without the exporter retrying.
+		details := fmt.Sprintf("malformed OTLP-JSON payload: %v (size=%d bytes)", parseErr, len(body))
+		details = a.appendRawOTLPDetails(details, source, signal, body)
 		ev := audit.Event{
 			Timestamp: time.Now().UTC(),
 			Action:    string(audit.ActionOTelIngestMalformed),
 			Target:    fmt.Sprintf("otlp:%s", signal),
 			Actor:     source,
-			Details:   fmt.Sprintf("malformed OTLP-JSON payload: %v (size=%d bytes)", parseErr, len(body)),
+			Details:   details,
 			Severity:  "WARN",
 			AgentName: source,
 		}
@@ -185,10 +187,11 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		// bodyBytes so volume dashboards still see the request.
 		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
 		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "malformed", 0, bodyBytes,
-			fmt.Sprintf("malformed OTLP-JSON payload: %v", parseErr))
+			a.appendRawOTLPDetails(fmt.Sprintf("malformed OTLP-JSON payload: %v", parseErr), source, signal, body))
 		writeOTLPSuccess(w)
 		return
 	}
+	summary = a.appendRawOTLPDetails(summary, source, signal, body)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -1260,7 +1263,7 @@ func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result str
 	if parseErr != nil {
 		parts = append(parts, "parse_error="+redaction.ForSinkReason(parseErr.Error()))
 	}
-	return strings.Join(parts, " ")
+	return appendRawTelemetryDetails(strings.Join(parts, " "), "raw_body", body)
 }
 
 // sanitizeNotifyType strips characters unsafe for an audit Action

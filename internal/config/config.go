@@ -851,6 +851,11 @@ func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 	return c.APIKey
 }
 
+type HILTConfig struct {
+	Enabled     bool   `mapstructure:"enabled"      yaml:"enabled"`
+	MinSeverity string `mapstructure:"min_severity" yaml:"min_severity"`
+}
+
 type GuardrailConfig struct {
 	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
 	Mode        string `mapstructure:"mode"                 yaml:"mode"`
@@ -894,6 +899,7 @@ type GuardrailConfig struct {
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
 	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// Detection strategy: "regex_only" (default), "regex_judge", "judge_first".
 	// Per-direction overrides take precedence over the global setting.
@@ -1258,6 +1264,9 @@ func Load() (*Config, error) {
 				"binary": s,
 			})
 		}
+	}
+	if !viper.IsSet("guardrail.hilt") && viper.IsSet("guardrail.hitl") {
+		viper.Set("guardrail.hilt", viper.Get("guardrail.hitl"))
 	}
 
 	// v3 → v4 hard migration: the `splunk:` block was removed in favor
@@ -1903,6 +1912,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
+	viper.SetDefault("guardrail.hilt.enabled", false)
+	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)

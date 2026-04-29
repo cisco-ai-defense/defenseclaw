@@ -174,10 +174,33 @@
     {
       "type": "logs",
       "title": "Connector telemetry log stream",
-      "description": "OTel log records emitted by the gateway when it accepts an OTLP batch or connector hook/notify event. Search by action=otel.ingest.*, codex.notify.*, codex-hook, or claude-code-hook.",
+      "description": "OTel log records emitted by the gateway when it accepts an OTLP batch or connector hook/notify event, plus normalized LLM prompt/response/tool events from connectors.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 50, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | action=~\"otel.ingest.*|codex.notify.*|codex-hook|claude-code-hook\"", "refId": "A"}],
+      "timeFrom": "15m",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | (action=~\"otel.ingest.*|codex.notify.*|codex-hook|claude-code-hook\" or defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\")", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    },
+
+    {"type": "row", "title": "Normalized LLM events", "gridPos": {"x": 0, "y": 62, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Prompt / response / tool event rate",
+      "description": "Gateway-normalized LLM events by event type. These are deduplicated against hook and native OTLP sources before emission.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 63, "w": 8, "h": 8},
+      "targets": [{"expr": "sum by (event_type) (rate(defenseclaw_gateway_events_emitted_total{event_type=~\"llm_prompt|llm_response|tool_invocation\"}[$__rate_interval]))", "legendFormat": "{{event_type}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "logs",
+      "title": "Normalized LLM event stream",
+      "description": "Correlates user, agent, model, provider session ID, prompt ID, response ID, and tool call ID. Content is raw only when DefenseClaw redaction is disabled.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 8, "y": 63, "w": 16, "h": 8},
+      "timeFrom": "15m",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\" | line_format \"{{.defenseclaw_gateway_event_type}} | user={{.defenseclaw_user_id}} name={{.defenseclaw_user_name}} | agent={{.defenseclaw_agent_type}}/{{.defenseclaw_agent_name}} | model={{.defenseclaw_llm_model}} | session={{.defenseclaw_session_id}} | prompt={{.defenseclaw_llm_prompt_id}} response={{.defenseclaw_llm_response_id}} tool={{.defenseclaw_tool_call_id}} | {{__line__}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.io/schemas/gateway-event-envelope.json",
   "title": "DefenseClaw Gateway Event Envelope (v7)",
-  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects (`verdict`, `judge`, `lifecycle`, `error`, `diagnostic`, `scan`, `scan_finding`, `activity`) is populated and selected by `event_type`.",
+  "description": "One JSONL line emitted by the DefenseClaw gateway sidecar to gateway.jsonl / stderr / HTTP sinks. The envelope carries correlation + provenance; exactly one of the type-specific payload sub-objects is populated and selected by `event_type`.",
   "type": "object",
   "required": ["ts", "event_type", "severity", "schema_version"],
   "properties": {
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -29,8 +29,11 @@
 
     "agent_id":            { "type": ["string", "null"] },
     "agent_name":          { "type": ["string", "null"] },
+    "agent_type":          { "type": ["string", "null"] },
     "agent_instance_id":   { "type": ["string", "null"] },
     "sidecar_instance_id": { "type": ["string", "null"] },
+    "user_id":             { "type": ["string", "null"] },
+    "user_name":           { "type": ["string", "null"] },
 
     "policy_id":       { "type": ["string", "null"] },
     "destination_app": { "type": ["string", "null"] },
@@ -51,7 +54,10 @@
     "scan":            { "$ref": "https://defenseclaw.io/schemas/scan-event.json#/$defs/ScanPayload" },
     "scan_finding":    { "$ref": "https://defenseclaw.io/schemas/scan-finding-event.json#/$defs/ScanFindingPayload" },
     "activity":        { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" },
-    "egress":          { "$ref": "#/$defs/EgressPayload" }
+    "egress":          { "$ref": "#/$defs/EgressPayload" },
+    "llm_prompt":      { "$ref": "#/$defs/LLMPromptPayload" },
+    "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
+    "tool_invocation": { "$ref": "#/$defs/ToolPayload" }
   },
   "oneOf": [
     { "required": ["verdict"] },
@@ -62,7 +68,10 @@
     { "required": ["scan"] },
     { "required": ["scan_finding"] },
     { "required": ["activity"] },
-    { "required": ["egress"] }
+    { "required": ["egress"] },
+    { "required": ["llm_prompt"] },
+    { "required": ["llm_response"] },
+    { "required": ["tool_invocation"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -70,7 +79,7 @@
       "required": ["stage", "action"],
       "properties": {
         "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final", "session_message", "multi_turn", "block_list", "approval"] },
-        "action":     { "type": "string", "enum": ["allow", "warn", "block"] },
+        "action":     { "type": "string", "enum": ["allow", "warn", "alert", "confirm", "block"] },
         "reason":     { "type": ["string", "null"] },
         "categories": { "type": ["array", "null"], "items": { "type": "string" } },
         "latency_ms": { "type": ["integer", "null"] }
@@ -131,6 +140,46 @@
         "decision":       { "type": "string", "enum": ["allow", "block"] },
         "reason":         { "type": ["string", "null"] },
         "source":         { "type": "string", "enum": ["go", "ts"] }
+      }
+    },
+    "LLMPromptPayload": {
+      "type": "object",
+      "required": ["prompt_id"],
+      "properties": {
+        "prompt_id":        { "type": "string" },
+        "turn_id":          { "type": ["string", "null"] },
+        "role":             { "type": ["string", "null"] },
+        "prompt":           { "type": ["string", "null"] },
+        "raw_request_body": { "type": ["string", "null"] },
+        "source":           { "type": ["string", "null"] }
+      }
+    },
+    "LLMResponsePayload": {
+      "type": "object",
+      "required": ["response_id"],
+      "properties": {
+        "response_id":         { "type": "string" },
+        "reply_to_prompt_id":  { "type": ["string", "null"] },
+        "turn_id":             { "type": ["string", "null"] },
+        "response":            { "type": ["string", "null"] },
+        "raw_response_body":   { "type": ["string", "null"] },
+        "finish_reasons":      { "type": ["array", "null"], "items": { "type": "string" } },
+        "source":              { "type": ["string", "null"] }
+      }
+    },
+    "ToolPayload": {
+      "type": "object",
+      "required": ["phase", "tool"],
+      "properties": {
+        "tool_call_id":       { "type": ["string", "null"] },
+        "phase":              { "type": "string", "enum": ["call", "result"] },
+        "turn_id":            { "type": ["string", "null"] },
+        "tool":               { "type": "string" },
+        "tool_input":         { "type": ["string", "null"] },
+        "tool_output":        { "type": ["string", "null"] },
+        "exit_code":          { "type": ["integer", "null"] },
+        "reply_to_prompt_id": { "type": ["string", "null"] },
+        "source":             { "type": ["string", "null"] }
       }
     }
   }

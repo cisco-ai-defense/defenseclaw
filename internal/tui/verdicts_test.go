@@ -87,6 +87,7 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 		`{"ts":"2026-04-16T12:00:00Z","event_type":"verdict","severity":"INFO","verdict":{"stage":"final","action":"allow","reason":"clean"}}`,
 		`{"ts":"2026-04-16T12:00:01Z","event_type":"verdict","severity":"MEDIUM","verdict":{"stage":"final","action":"alert","reason":"pii-med"}}`,
 		`{"ts":"2026-04-16T12:00:02Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"block","reason":"pii-hi"}}`,
+		`{"ts":"2026-04-16T12:00:02Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"confirm","reason":"hilt"}}`,
 		`# this line is not JSON and must be skipped`,
 		``,
 		`{"ts":"2026-04-16T12:00:03Z","event_type":"judge","severity":"MEDIUM","judge":{"kind":"injection","action":"alert"}}`,
@@ -98,11 +99,11 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 	p := &LogsPanel{}
 	p.source = logSourceVerdicts
 
-	// No filter: keep all 4 parseable events (3 verdicts + 1 judge).
+	// No filter: keep all 5 parseable events (4 verdicts + 1 judge).
 	p.verdictAction = ""
 	p.loadVerdicts(path)
-	if got := len(p.verdicts); got != 4 {
-		t.Fatalf("no-filter verdicts=%d want 4: %+v", got, p.verdicts)
+	if got := len(p.verdicts); got != 5 {
+		t.Fatalf("no-filter verdicts=%d want 5: %+v", got, p.verdicts)
 	}
 
 	// block filter: keep only rows whose .action == "block". Both
@@ -120,6 +121,15 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 	}
 	if got := len(p.verdicts); got != 1 {
 		t.Fatalf("filtered row count=%d want 1 (only the block verdict)", got)
+	}
+
+	p.verdictAction = "confirm"
+	p.loadVerdicts(path)
+	if got := len(p.verdicts); got != 1 {
+		t.Fatalf("confirm-filter row count=%d want 1", got)
+	}
+	if p.verdicts[0].action != "confirm" {
+		t.Fatalf("confirm filter selected action=%q want confirm", p.verdicts[0].action)
 	}
 }
 
@@ -226,12 +236,16 @@ func TestCycleVerdictAction_RotatesThroughAllThenWrapsToEmpty(t *testing.T) {
 		t.Fatalf("step2=%q want alert", p.verdictAction)
 	}
 	p.cycleVerdictAction()
+	if p.verdictAction != "confirm" {
+		t.Fatalf("step3=%q want confirm", p.verdictAction)
+	}
+	p.cycleVerdictAction()
 	if p.verdictAction != "allow" {
-		t.Fatalf("step3=%q want allow", p.verdictAction)
+		t.Fatalf("step4=%q want allow", p.verdictAction)
 	}
 	p.cycleVerdictAction()
 	if p.verdictAction != "" {
-		t.Fatalf("step4=%q want empty (wrap)", p.verdictAction)
+		t.Fatalf("step5=%q want empty (wrap)", p.verdictAction)
 	}
 }
 

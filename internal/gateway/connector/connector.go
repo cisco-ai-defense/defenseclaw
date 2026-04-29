@@ -88,6 +88,12 @@ type SetupOpts struct {
 	CodexEnforcement      bool
 	ClaudeCodeEnforcement bool
 
+	// HILTEnabled tells connectors with native approval surfaces to wire
+	// their host approval delivery path. For OpenClaw this enables plugin
+	// approval forwarding so approval prompts can reach chat-origin
+	// sessions instead of living only in the native approval queue.
+	HILTEnabled bool
+
 	// InstallCodeGuard enables one-time, native Project CodeGuard
 	// bootstrapping for connectors that have their own extension
 	// mechanism. Codex gets the upstream `software-security` skill

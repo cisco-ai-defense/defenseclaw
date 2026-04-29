@@ -467,6 +467,10 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Let the sidecar boot when no upstream LLM providers are detected. Useful only for tests/stubs."},
 				{Label: "Allow Unknown LLM Domains", Key: "guardrail.allow_unknown_llm_domains", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.AllowUnknownLLMDomains),
 					Hint: "Permit unknown LLM-looking hosts. Keep off in production so the proxy fails closed."},
+				{Label: "Human Approval", Key: "guardrail.hilt.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.HILT.Enabled),
+					Hint: "Ask before supported high-risk actions in action mode. Defaults off; strict blocks still win."},
+				{Label: "Approval Min Severity", Key: "guardrail.hilt.min_severity", Kind: "choice", Value: hiltMinSeverityValue(c.Guardrail.HILT.MinSeverity), Options: []string{"HIGH", "MEDIUM", "LOW", "CRITICAL"},
+					Hint: "Minimum severity that can become a human approval prompt when Human Approval is on."},
 				{Label: "Codex Enforcement", Key: "guardrail.codex_enforcement_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.CodexEnforcementEnabled),
 					Hint: "Put Codex traffic in the blocking proxy path. Off keeps Codex in observe mode."},
 				{Label: "Claude Code Enforcement", Key: "guardrail.claudecode_enforcement_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.ClaudeCodeEnforcementEnabled),
@@ -1369,6 +1373,14 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 
 		switch f.Kind {
 		case "bool":
+			if idx == wizardGuardrail && (f.Flag == "--human-approval" || f.Flag == "--disable-redaction") {
+				if f.Value == "yes" && f.Flag != "" {
+					base = append(base, f.Flag)
+				} else if f.Value == "no" && f.NoFlag != "" {
+					base = append(base, f.NoFlag)
+				}
+				continue
+			}
 			// Bool defaults match the CLI's defaults, so we only
 			// need to send the toggle when the user changed it.
 			if f.Value == f.Default {
@@ -1572,6 +1584,9 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 	judgeBaseDefault := ""
 	port := ""
 	blockMsg := ""
+	hiltEnabled := "no"
+	hiltMinSeverity := "HIGH"
+	redactionDisabled := "no"
 	ciscoEndpoint := ""
 	ciscoKeyEnv := ""
 	ciscoTimeout := ""
@@ -1591,6 +1606,13 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 			port = fmt.Sprintf("%d", g.Port)
 		}
 		blockMsg = g.BlockMessage
+		if g.HILT.Enabled {
+			hiltEnabled = "yes"
+		}
+		hiltMinSeverity = hiltMinSeverityValue(g.HILT.MinSeverity)
+		if p.cfg.Privacy.DisableRedaction {
+			redactionDisabled = "yes"
+		}
 
 		// Resolve rule pack from dir path
 		if g.RulePackDir != "" {
@@ -1676,6 +1698,12 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 		{Label: "Endpoint", Flag: "--cisco-endpoint", Kind: "string", Value: ciscoEndpoint, Hint: "Cisco AI Defense API URL (remote/both mode)"},
 		{Label: "API Key Env", Flag: "--cisco-api-key-env", Kind: "string", Value: ciscoKeyEnv, Hint: "Env var holding Cisco API key"},
 		{Label: "Timeout (ms)", Flag: "--cisco-timeout-ms", Kind: "int", Value: ciscoTimeout, Hint: "Cisco AI Defense timeout"},
+
+		// ─── Advanced ───
+		{Label: "Advanced", Kind: "section"},
+		{Label: "Human Approval", Flag: "--human-approval", NoFlag: "--no-human-approval", Kind: "bool", Default: hiltEnabled, Value: hiltEnabled, Hint: "Ask before HIGH+ risky actions when connector support is available"},
+		{Label: "Approval Min Severity", Flag: "--hilt-min-severity", Kind: "choice", Options: []string{"HIGH", "MEDIUM", "LOW", "CRITICAL"}, Value: hiltMinSeverity, Default: hiltMinSeverity, Hint: "Minimum severity that asks for human approval when enabled"},
+		{Label: "Disable Redaction", Flag: "--disable-redaction", NoFlag: "--enable-redaction", Kind: "bool", Default: redactionDisabled, Value: redactionDisabled, Hint: "Debug only: writes raw prompt/log content to local and forwarded sinks"},
 
 		// ─── Post-Setup ───
 		{Label: "Post-Setup", Kind: "section"},
@@ -2231,9 +2259,46 @@ func (p *SetupPanel) RevertConfig() error {
 	if err != nil {
 		return err
 	}
+	p.SetConfig(newCfg)
+	return nil
+}
+
+// SetConfig replaces the editor's config snapshot and rebuilds the
+// visible fields while preserving the active section when possible.
+func (p *SetupPanel) SetConfig(newCfg *config.Config) {
+	activeName := ""
+	if p.activeSection >= 0 && p.activeSection < len(p.sections) {
+		activeName = p.sections[p.activeSection].Name
+	}
+
 	p.cfg = newCfg
 	p.loadSections()
-	return nil
+
+	if activeName != "" {
+		for i, sec := range p.sections {
+			if sec.Name == activeName {
+				p.activeSection = i
+				break
+			}
+		}
+	}
+	if p.activeSection >= len(p.sections) {
+		p.activeSection = 0
+	}
+	if p.activeSection < 0 {
+		p.activeSection = 0
+	}
+	if sec := p.currentSection(); sec != nil {
+		if p.activeLine >= len(sec.Fields) {
+			p.activeLine = len(sec.Fields) - 1
+		}
+		if p.activeLine < 0 {
+			p.activeLine = p.firstEditableLine()
+		}
+		if p.scroll >= len(sec.Fields) {
+			p.scroll = 0
+		}
+	}
 }
 
 // GetConfig returns the current config pointer held by the setup panel.
@@ -2964,6 +3029,15 @@ func agentHookModeValue(mode string) string {
 		return "observe"
 	}
 	return mode
+}
+
+func hiltMinSeverityValue(severity string) string {
+	switch strings.ToUpper(strings.TrimSpace(severity)) {
+	case "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		return strings.ToUpper(strings.TrimSpace(severity))
+	default:
+		return "HIGH"
+	}
 }
 
 func agentHookFields(label, prefix string, h config.AgentHookConfig) []configField {

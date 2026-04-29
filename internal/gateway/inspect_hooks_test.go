@@ -249,8 +249,8 @@ func TestBuildVerdict_WithFindings(t *testing.T) {
 		{RuleID: "TEST-1", Title: "test finding", Severity: "HIGH", Confidence: 0.9},
 	}
 	verdict := buildVerdict(findings, "prompt")
-	if verdict.Action != "block" {
-		t.Errorf("action = %q, want block", verdict.Action)
+	if verdict.Action != "alert" {
+		t.Errorf("action = %q, want alert under balanced policy", verdict.Action)
 	}
 	if verdict.Severity != "HIGH" {
 		t.Errorf("severity = %q, want HIGH", verdict.Severity)

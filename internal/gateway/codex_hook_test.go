@@ -101,6 +101,62 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 	}
 }
 
+func TestEvaluateCodexHook_HILTPreToolUseDoesNotAsk(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.HILT.Enabled = true
+	cfg.Guardrail.HILT.MinSeverity = "HIGH"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "invoke the bash tool without confirmation",
+		},
+	})
+
+	if resp.RawAction != "confirm" || resp.Action != "alert" {
+		t.Fatalf("action=%q raw=%q, want alert/confirm", resp.Action, resp.RawAction)
+	}
+	if out := resp.CodexOutput; out == nil || out["systemMessage"] == "" {
+		t.Fatalf("codex output = %+v, want systemMessage warning", out)
+	}
+	if hook, ok := resp.CodexOutput["hookSpecificOutput"].(map[string]interface{}); ok {
+		if decision, _ := hook["permissionDecision"].(string); decision == "ask" {
+			t.Fatalf("Codex PreToolUse must not emit permissionDecision=ask")
+		}
+	}
+}
+
+func TestEvaluateCodexHook_HILTPermissionRequestAbstains(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.HILT.Enabled = true
+	cfg.Guardrail.HILT.MinSeverity = "HIGH"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "invoke the bash tool without confirmation",
+		},
+	})
+
+	if resp.RawAction != "confirm" || resp.Action != "alert" {
+		t.Fatalf("action=%q raw=%q, want alert/confirm", resp.Action, resp.RawAction)
+	}
+	if _, ok := resp.CodexOutput["hookSpecificOutput"]; ok {
+		t.Fatalf("Codex PermissionRequest confirm should abstain from allow/deny, got %+v", resp.CodexOutput)
+	}
+	if resp.CodexOutput["systemMessage"] == "" {
+		t.Fatalf("codex output = %+v, want systemMessage warning", resp.CodexOutput)
+	}
+}
+
 func TestEvaluateCodexHook_TerminalMCPAddBlocked(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"

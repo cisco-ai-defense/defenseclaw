@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -130,5 +131,69 @@ func TestProfilePosture_StrictIsStricterThanDefault(t *testing.T) {
 	if severityRank[strict.SingleCategoryMaxSev] < severityRank[def.SingleCategoryMaxSev] {
 		t.Errorf("strict single-category cap %q is softer than default %q",
 			strict.SingleCategoryMaxSev, def.SingleCategoryMaxSev)
+	}
+}
+
+func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
+	_, selfPath, _, _ := runtime.Caller(0)
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+
+	cases := []struct {
+		profile string
+		want    string
+	}{
+		{"strict", "CRITICAL"},
+		{"default", "HIGH"},
+		{"permissive", "HIGH"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.profile, func(t *testing.T) {
+			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
+			if rp == nil {
+				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
+			}
+
+			got := ""
+			for _, rf := range rp.RuleFiles {
+				for _, rule := range rf.Rules {
+					if rule.ID == "ENT-BULK-SSN" {
+						got = rule.Severity
+					}
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("%s ENT-BULK-SSN severity = %q, want %q", tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
+	_, selfPath, _, _ := runtime.Caller(0)
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+
+	for _, profile := range []string{"strict", "default", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			if rp == nil || rp.InjectionJudge() == nil {
+				t.Fatalf("LoadRulePack(%s) missing injection judge", profile)
+			}
+			prompt := rp.InjectionJudge().SystemPrompt
+			for _, needle := range []string{
+				"<<<SAMPLE>>>",
+				"Output formatting constraints",
+				"Teams chat IDs",
+				"reply only OK",
+			} {
+				if !strings.Contains(prompt, needle) {
+					t.Fatalf("%s injection prompt missing %q", profile, needle)
+				}
+			}
+		})
 	}
 }

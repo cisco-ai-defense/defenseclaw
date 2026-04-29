@@ -39,6 +39,7 @@ from typing import Any
 
 import click
 
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import local_observability_bridge_bin
 
@@ -212,7 +213,7 @@ def up_cmd(
                     err=True,
                 )
 
-    _print_stack_summary(contract, audit_sink_enabled=sink_applied)
+    _print_stack_summary(contract, audit_sink_enabled=sink_applied, cfg=app.cfg)
 
     if app.logger:
         app.logger.log_action(
@@ -611,7 +612,7 @@ def _parse_signals(raw: str) -> tuple[str, ...]:
 
 
 def _print_stack_summary(
-    contract: dict[str, Any], *, audit_sink_enabled: bool = False,
+    contract: dict[str, Any], *, audit_sink_enabled: bool = False, cfg: Any = None,
 ) -> None:
     click.echo()
     click.echo("  Local observability stack is up:")
@@ -632,6 +633,8 @@ def _print_stack_summary(
             "  Audit sink:  not configured (--no-audit-sink / --no-config). "
             "The gateway 'Sinks' row stays DISABLED until an audit sink is added."
         )
+    click.echo()
+    print_redaction_status_hint(cfg)
     click.echo()
     click.echo("  Next steps:")
     click.echo("    defenseclaw-gateway restart         # pick up the new config")

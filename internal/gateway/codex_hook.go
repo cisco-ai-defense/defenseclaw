@@ -100,6 +100,8 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CWD = sanitizeHookCWD(req.CWD)
+	rawEventIDs := a.rememberCodexRawHookEvents(req)
+	a.emitCodexHookLLMEvent(r.Context(), req, rawEventIDs, b)
 
 	t0 := time.Now()
 	resp := a.evaluateCodexHook(r.Context(), req)
@@ -126,9 +128,11 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "codex-hook", req.HookEventName,
-			fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-				resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed))
+		details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
+			resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
+		details = appendRawTelemetryDetails(details, "raw_payload", b)
+		details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
+		_ = a.logger.LogActionCtx(r.Context(), "codex-hook", req.HookEventName, details)
 	}
 
 	a.writeJSON(w, http.StatusOK, resp)
@@ -188,8 +192,11 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if mode != "action" && rawAction == "block" {
 		action = "allow"
 	}
-	if mode != "action" && rawAction == "alert" {
+	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
 		action = "allow"
+	}
+	if mode == "action" && rawAction == "confirm" {
+		action = "alert"
 	}
 	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
 		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
@@ -256,11 +263,11 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
 	}
-	resp.CodexOutput = codexOutput(event, action, safeReason, additional)
+	resp.CodexOutput = codexOutput(event, action, rawAction, safeReason, additional)
 	return resp
 }
 
-func codexOutput(event, action, reason, additional string) map[string]interface{} {
+func codexOutput(event, action, rawAction, reason, additional string) map[string]interface{} {
 	if action == "block" {
 		switch event {
 		case "PreToolUse":
@@ -293,6 +300,16 @@ func codexOutput(event, action, reason, additional string) map[string]interface{
 				}
 			}
 			return out
+		}
+	}
+
+	if rawAction == "confirm" {
+		if additional == "" {
+			additional = "DefenseClaw wants user confirmation for this action."
+		}
+		switch event {
+		case "PermissionRequest", "PreToolUse":
+			return map[string]interface{}{"systemMessage": additional}
 		}
 	}
 
@@ -341,14 +358,7 @@ func reasonOrDefault(reason string) string {
 }
 
 func normalizeCodexAction(action string) string {
-	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "block", "deny":
-		return "block"
-	case "alert", "warn", "warning":
-		return "alert"
-	default:
-		return "allow"
-	}
+	return normalizedGuardrailAction(action)
 }
 
 func codexToolName(req codexHookRequest) string {

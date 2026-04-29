@@ -31,6 +31,8 @@ interface SidecarConfig {
   baseUrl: string;
   token: string;
   guardrailPort: number;
+  approvalTimeoutS: number;
+  hiltEnabled: boolean;
 }
 
 let cached: SidecarConfig | undefined;
@@ -48,6 +50,8 @@ export function loadSidecarConfig(): SidecarConfig {
   let host = DEFAULT_HOST;
   let apiPort = DEFAULT_API_PORT;
   let guardrailPort = 4000;
+  let approvalTimeoutS = 30;
+  let hiltEnabled = false;
   let token = "";
 
   try {
@@ -58,6 +62,9 @@ export function loadSidecarConfig(): SidecarConfig {
       if (gw && typeof gw === "object") {
         if (typeof gw["host"] === "string" && gw["host"]) host = gw["host"];
         if (typeof gw["api_port"] === "number") apiPort = gw["api_port"];
+        if (typeof gw["approval_timeout_s"] === "number" && gw["approval_timeout_s"] > 0) {
+          approvalTimeoutS = gw["approval_timeout_s"];
+        }
         if (typeof gw["token"] === "string" && gw["token"]) token = gw["token"];
         const tokenEnv =
           typeof gw["token_env"] === "string" && gw["token_env"]
@@ -69,6 +76,12 @@ export function loadSidecarConfig(): SidecarConfig {
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
       if (gr && typeof gr === "object") {
         if (typeof gr["port"] === "number") guardrailPort = gr["port"];
+        const hilt =
+          (gr["hilt"] as Record<string, unknown> | undefined) ??
+          (gr["hitl"] as Record<string, unknown> | undefined);
+        if (hilt && typeof hilt === "object" && typeof hilt["enabled"] === "boolean") {
+          hiltEnabled = hilt["enabled"];
+        }
       }
     }
   } catch {
@@ -84,7 +97,15 @@ export function loadSidecarConfig(): SidecarConfig {
     token = readDotEnvToken(DEFAULT_TOKEN_ENV);
   }
 
-  cached = { host, apiPort, baseUrl: `http://${host}:${apiPort}`, token, guardrailPort };
+  cached = {
+    host,
+    apiPort,
+    baseUrl: `http://${host}:${apiPort}`,
+    token,
+    guardrailPort,
+    approvalTimeoutS,
+    hiltEnabled,
+  };
   return cached;
 }
 

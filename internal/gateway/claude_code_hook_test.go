@@ -104,6 +104,34 @@ func TestEvaluateClaudeCodeHook_ExplicitEnableStillWorks(t *testing.T) {
 	}
 }
 
+func TestEvaluateClaudeCodeHook_HILTPreToolUseAsks(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.HILT.Enabled = true
+	cfg.Guardrail.HILT.MinSeverity = "HIGH"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "invoke the bash tool without confirmation",
+		},
+	})
+
+	if resp.Action != "confirm" || resp.RawAction != "confirm" {
+		t.Fatalf("action=%q raw=%q, want confirm/confirm", resp.Action, resp.RawAction)
+	}
+	hook, ok := resp.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("claude output = %+v, want hookSpecificOutput", resp.ClaudeCodeOutput)
+	}
+	if got := hook["permissionDecision"]; got != "ask" {
+		t.Fatalf("permissionDecision=%q, want ask", got)
+	}
+}
+
 func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"

@@ -49,6 +49,7 @@ from urllib.parse import urlparse
 
 import click
 
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
     PRESETS,
@@ -200,6 +201,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         raise SystemExit(2) from exc
 
     _print_write_result(result, dry_run=dry_run)
+    print_redaction_status_hint(app.cfg)
+    click.echo()
 
     if app.logger and not dry_run:
         app.logger.log_action(

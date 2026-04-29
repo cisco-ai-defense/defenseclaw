@@ -310,6 +310,11 @@ func isInitCommand(cmd string) bool {
 	return cmd == "init first-run" || cmd == "init" || strings.HasPrefix(cmd, "init ")
 }
 
+func isSetupCommand(cmd string) bool {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	return cmd == "setup" || strings.HasPrefix(cmd, "setup ")
+}
+
 // doctorCacheLoadedMsg carries either a successfully-loaded
 // DoctorCache or a soft load error. We always include both so the
 // Update handler can decide whether to toast the error — a
@@ -462,6 +467,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activePanel = PanelOverview
 				m.toasts.Push(ToastSuccess, "First-run setup complete")
 				postCmds = append(postCmds, m.pollHealth(), m.loadDoctorCacheCmd())
+			}
+		} else if msg.ExitCode == 0 && isSetupCommand(msg.Command) {
+			if err := m.reloadConfigAfterSetupCommand(); err != nil {
+				m.toasts.Push(ToastError, "config reload failed: "+err.Error())
+			} else {
+				m.toasts.Push(ToastInfo, "Config reloaded from disk")
+				postCmds = append(postCmds, m.pollHealth())
 			}
 		}
 		if len(postCmds) > 0 {
@@ -2962,6 +2974,23 @@ func (m *Model) reloadRuntimeAfterInit() error {
 	m.setup = NewSetupPanel(m.theme, cfg, m.executor)
 	m.activity.dataDir = dataDir
 	m.resizePanels()
+	m.propagateConnector()
+	m.refresh()
+	return nil
+}
+
+func (m *Model) reloadConfigAfterSetupCommand() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	m.cfg = cfg
+	m.overview.cfg = cfg
+	m.overview.SetHealth(m.health)
+	m.policy.cfg = cfg
+	m.logs.dataDir = cfg.DataDir
+	m.setup.SetConfig(cfg)
+	m.activity.dataDir = cfg.DataDir
 	m.propagateConnector()
 	m.refresh()
 	return nil

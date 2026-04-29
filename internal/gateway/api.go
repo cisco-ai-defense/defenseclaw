@@ -61,6 +61,7 @@ type APIServer struct {
 	addr       string
 	scannerCfg *config.Config
 	otel       *telemetry.Provider
+	hilt       *HILTApprovalManager
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -71,10 +72,15 @@ type APIServer struct {
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                sync.Mutex
-	claudeCodeLastComponentScan time.Time
-	codexMu                     sync.Mutex
-	codexLastComponentScan      time.Time
+	claudeCodeMu                 sync.Mutex
+	claudeCodeLastComponentScan  time.Time
+	codexMu                      sync.Mutex
+	codexLastComponentScan       time.Time
+	rawTelemetryMu               sync.Mutex
+	rawTelemetryDedupe           *rawTelemetryDeduper
+	llmPromptMu                  sync.Mutex
+	llmPromptBySourceSession     map[string]string
+	llmPromptBySourceSessionTurn map[string]string
 
 	connectorRegistry *connector.Registry
 }
@@ -85,9 +91,16 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
 }
 
+func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
+	a.hilt = m
+}
+
 func (a *APIServer) connectorName() string {
 	if a.scannerCfg != nil {
 		if c := strings.TrimSpace(a.scannerCfg.Guardrail.Connector); c != "" {
+			return strings.ToLower(c)
+		}
+		if c := strings.TrimSpace(string(a.scannerCfg.Claw.Mode)); c != "" {
 			return strings.ToLower(c)
 		}
 	}

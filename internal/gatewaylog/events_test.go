@@ -140,6 +140,7 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	for _, banned := range []string{
 		`,"verdict":{`, `,"judge":{`, `,"lifecycle":{`,
 		`,"error":{`, `,"diagnostic":{`, `,"scan_finding":{`, `,"activity":{`,
+		`,"llm_prompt":{`, `,"llm_response":{`, `,"tool_invocation":{`,
 	} {
 		if strings.Contains(s, banned) {
 			t.Errorf("marshalled event should not carry %s for EventScan: %s", banned, s)
