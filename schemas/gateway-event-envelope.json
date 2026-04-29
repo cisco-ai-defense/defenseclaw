@@ -9,7 +9,7 @@
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "agent_telemetry"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -37,11 +37,11 @@
     "tool_name":       { "type": ["string", "null"] },
     "tool_id":         { "type": ["string", "null"] },
 
-    "tenant_id":        { "type": ["string", "null"], "description": "RESERVED (v7): logical tenancy boundary for hosted/SaaS deployments. Unpopulated until a matching producer ships." },
-    "workspace_id":     { "type": ["string", "null"], "description": "RESERVED (v7): sub-tenant workspace/organization/team scope. Unpopulated until a matching producer ships." },
-    "environment":      { "type": ["string", "null"], "description": "RESERVED (v7): deployment environment (dev|staging|prod|sandbox). Unpopulated until a matching producer ships." },
-    "deployment_mode":  { "type": ["string", "null"], "description": "RESERVED (v7): sidecar deployment mode (standalone|managed|edge|ci). Unpopulated until a matching producer ships." },
-    "discovery_source": { "type": ["string", "null"], "description": "RESERVED (v7): how the monitored agent/tool was discovered (registry|manual|scan|import). Unpopulated until a matching producer ships." },
+    "tenant_id":        { "type": ["string", "null"], "description": "Logical tenancy boundary for hosted/SaaS deployments. Populated from config tenant_id when set." },
+    "workspace_id":     { "type": ["string", "null"], "description": "Sub-tenant workspace, organization, or team scope. Populated from config workspace_id when set." },
+    "environment":      { "type": ["string", "null"], "description": "Deployment environment. Populated from config environment when set." },
+    "deployment_mode":  { "type": ["string", "null"], "description": "Sidecar deployment mode such as standalone, managed, edge, or ci. Populated from config deployment_mode when set." },
+    "discovery_source": { "type": ["string", "null"], "description": "How the monitored agent or tool was discovered. Populated from config discovery_source when set." },
 
     "verdict":         { "$ref": "#/$defs/VerdictPayload" },
     "judge":           { "$ref": "#/$defs/JudgePayload" },
@@ -51,8 +51,7 @@
     "scan":            { "$ref": "https://defenseclaw.io/schemas/scan-event.json#/$defs/ScanPayload" },
     "scan_finding":    { "$ref": "https://defenseclaw.io/schemas/scan-finding-event.json#/$defs/ScanFindingPayload" },
     "activity":        { "$ref": "https://defenseclaw.io/schemas/activity-event.json#/$defs/ActivityPayload" },
-    "egress":          { "$ref": "#/$defs/EgressPayload" },
-    "agent_telemetry": { "$ref": "#/$defs/AgentTelemetryPayload" }
+    "egress":          { "$ref": "#/$defs/EgressPayload" }
   },
   "oneOf": [
     { "required": ["verdict"] },
@@ -63,8 +62,7 @@
     { "required": ["scan"] },
     { "required": ["scan_finding"] },
     { "required": ["activity"] },
-    { "required": ["egress"] },
-    { "required": ["agent_telemetry"] }
+    { "required": ["egress"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -133,23 +131,6 @@
         "decision":       { "type": "string", "enum": ["allow", "block"] },
         "reason":         { "type": ["string", "null"] },
         "source":         { "type": "string", "enum": ["go", "ts"] }
-      }
-    },
-    "AgentTelemetryPayload": {
-      "type": "object",
-      "description": "Connector observability ingest summary. Emitted by the OTLP-HTTP receiver (/v1/logs, /v1/metrics, /v1/traces) and the codex notify webhook (/api/v1/codex/notify). Lets downstream consumers (TUI, SIEM rollup) treat connector-side telemetry as a first-class envelope rather than scraping audit-event Details.",
-      "required": ["channel", "source"],
-      "properties": {
-        "channel":      { "type": "string", "enum": ["otlp.logs", "otlp.metrics", "otlp.traces", "codex.notify", "hooks"], "description": "Which connector telemetry channel produced this event." },
-        "source":       { "type": "string", "enum": ["codex", "claudecode", "openclaw", "zeptoclaw", "unknown"], "description": "Self-asserted x-defenseclaw-source header validated by tokenAuth before reaching this layer." },
-        "result":       { "type": ["string", "null"], "enum": ["ok", "malformed", null], "description": "Whether the inbound payload parsed (ok) or failed schema (malformed). Malformed events still record bytes/records for volume dashboards." },
-        "records":      { "type": ["integer", "null"], "minimum": 0, "description": "Leaf record count (logRecords / data points / spans) for OTLP signals; 0 / absent for non-OTLP channels." },
-        "bytes":        { "type": ["integer", "null"], "minimum": 0, "description": "Inbound body size in bytes." },
-        "summary":      { "type": ["string", "null"], "description": "Human-readable one-line summary mirroring the audit Details column." },
-        "notify_type":  { "type": ["string", "null"], "description": "Codex notify type after sanitizeNotifyType ([a-z0-9._-]{1,64}). Present only for channel=codex.notify." },
-        "notify_status":{ "type": ["string", "null"], "description": "Codex notify status string when present in the inbound payload." },
-        "turn_id":      { "type": ["string", "null"], "description": "Codex turn id, when present." },
-        "model":        { "type": ["string", "null"], "description": "Codex / claudecode model identifier when surfaced by the inbound payload." }
       }
     }
   }

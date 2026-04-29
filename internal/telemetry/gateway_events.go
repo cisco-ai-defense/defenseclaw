@@ -47,6 +47,7 @@ func stampEnvelope(e *gatewaylog.Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = gatewaylog.SidecarInstanceID()
 	}
+	gatewaylog.StampAgentWatchContext(e)
 }
 
 // RecordGatewayEvent derives metric observations from a single
@@ -234,6 +235,21 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 	}
 	if e.ToolID != "" {
 		attrs = append(attrs, log.String("defenseclaw.tool_id", e.ToolID))
+	}
+	if e.TenantID != "" {
+		attrs = append(attrs, log.String("defenseclaw.tenant_id", e.TenantID))
+	}
+	if e.WorkspaceID != "" {
+		attrs = append(attrs, log.String("defenseclaw.workspace_id", e.WorkspaceID))
+	}
+	if e.Environment != "" {
+		attrs = append(attrs, log.String("defenseclaw.environment", e.Environment))
+	}
+	if e.DeploymentMode != "" {
+		attrs = append(attrs, log.String("defenseclaw.deployment_mode", e.DeploymentMode))
+	}
+	if e.DiscoverySource != "" {
+		attrs = append(attrs, log.String("defenseclaw.discovery_source", e.DiscoverySource))
 	}
 	// Provenance quartet — lets downstream consumers filter by config
 	// generation / schema version without scraping the JSON body.

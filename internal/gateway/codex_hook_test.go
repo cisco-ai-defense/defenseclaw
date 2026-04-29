@@ -101,6 +101,204 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 	}
 }
 
+func TestEvaluateCodexHook_TerminalMCPAddBlocked(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.Default = "deny"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "codex mcp add rogue -- npx -y @modelcontextprotocol/server-filesystem",
+		},
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.Severity != "HIGH" {
+		t.Fatalf("severity=%q, want HIGH", resp.Severity)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+}
+
+func TestEvaluateCodexHook_DirectMCPAddBlocked(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "mcp add rogue -- npx -y mcp-server-demo",
+		},
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.Reason == "" {
+		t.Fatal("expected asset-policy block reason")
+	}
+}
+
+func TestEvaluateCodexHook_ObserveAssetPolicyWouldBlock(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "observe"
+	cfg.AssetPolicy.MCP.Default = "deny"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
+	}
+	if !resp.WouldBlock {
+		t.Fatal("observe-mode asset policy match should be reported as would_block")
+	}
+}
+
+func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.Default = "deny"
+	cfg.AssetPolicy.MCP.RuntimeDetection.TerminalCommands = false
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "codex mcp add rogue -- npx -y @modelcontextprotocol/server-filesystem",
+		},
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("action=%q raw=%q, want allow/allow", resp.Action, resp.RawAction)
+	}
+	if resp.WouldBlock {
+		t.Fatal("terminal runtime detection disabled should not report would_block")
+	}
+}
+
+func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.Default = "deny"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "npx -y @modelcontextprotocol/server-filesystem /tmp",
+		},
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
+	}
+	if !resp.WouldBlock {
+		t.Fatal("unknown terminal MCP should default to would_block")
+	}
+}
+
+func TestEvaluateCodexHook_UnknownTerminalMCPCanBlock(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.Default = "deny"
+	cfg.AssetPolicy.MCP.RuntimeDetection.UnknownTerminalMCP = "action"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput: map[string]interface{}{
+			"command": "npx -y @modelcontextprotocol/server-filesystem /tmp",
+		},
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+}
+
+func TestMergeAssetDecision_ObserveDoesNotDowngradeExistingBlock(t *testing.T) {
+	decision := config.AssetPolicyDecision{
+		Action:    "allow",
+		RawAction: "block",
+		Reason:    "asset policy would block",
+	}
+
+	action, rawAction, severity, reason, findings, wouldBlock := mergeAssetDecision(
+		decision,
+		true,
+		"PreToolUse",
+		"block",
+		"block",
+		"CRITICAL",
+		"scanner blocked tool call",
+		[]string{"TRUST-JAILBREAK"},
+	)
+
+	if action != "block" || rawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", action, rawAction)
+	}
+	if severity != "CRITICAL" {
+		t.Fatalf("severity=%q, want CRITICAL", severity)
+	}
+	if reason != "scanner blocked tool call" {
+		t.Fatalf("reason=%q, want scanner reason preserved", reason)
+	}
+	if !wouldBlock {
+		t.Fatal("observe asset policy should still be reported as would_block")
+	}
+	if !containsString(findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", findings)
+	}
+}
+
 func TestGitChangedFiles_MaliciousGitConfig(t *testing.T) {
 	dir := t.TempDir()
 	gitDir := dir + "/.git"

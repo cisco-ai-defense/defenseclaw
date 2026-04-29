@@ -701,6 +701,58 @@ class PluginActionsConfig:
 
 
 @dataclass
+class AssetRuntimeDetectionConfig:
+    enabled: bool = True
+    terminal_commands: bool = True
+    unknown_terminal_mcp: str = "observe"
+
+
+@dataclass
+class AssetPolicyRule:
+    name: str = ""
+    connector: str = ""
+    reason: str = ""
+    url: str = ""
+    command: str = ""
+    args_prefix: list[str] = field(default_factory=list)
+    transport: str = ""
+    source_path_contains: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AssetTypePolicy:
+    default: str = "allow"
+    registry_required: bool = False
+    registry: list[AssetPolicyRule] = field(default_factory=list)
+    allowed: list[AssetPolicyRule] = field(default_factory=list)
+    denied: list[AssetPolicyRule] = field(default_factory=list)
+    runtime_detection: AssetRuntimeDetectionConfig = field(default_factory=AssetRuntimeDetectionConfig)
+
+
+def _default_runtime_asset_type_policy() -> AssetTypePolicy:
+    return AssetTypePolicy()
+
+
+def _default_nonruntime_asset_type_policy() -> AssetTypePolicy:
+    return AssetTypePolicy(
+        runtime_detection=AssetRuntimeDetectionConfig(
+            enabled=False,
+            terminal_commands=False,
+            unknown_terminal_mcp="observe",
+        ),
+    )
+
+
+@dataclass
+class AssetPolicyConfig:
+    enabled: bool = False
+    mode: str = "observe"
+    mcp: AssetTypePolicy = field(default_factory=_default_runtime_asset_type_policy)
+    skill: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+    plugin: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+
+
+@dataclass
 class FirewallConfig:
     config_file: str = ""
     rules_file: str = ""
@@ -876,6 +928,10 @@ class Config:
     plugin_dir: str = ""
     policy_dir: str = ""
     environment: str = ""
+    tenant_id: str = ""
+    workspace_id: str = ""
+    deployment_mode: str = ""
+    discovery_source: str = ""
     claw: ClawConfig = field(default_factory=ClawConfig)
     inspect_llm: InspectLLMConfig = field(default_factory=InspectLLMConfig)
     cisco_ai_defense: CiscoAIDefenseConfig = field(default_factory=CiscoAIDefenseConfig)
@@ -890,6 +946,7 @@ class Config:
     skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
+    asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
 
@@ -1137,7 +1194,14 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     privacy = d.get("privacy")
     if isinstance(privacy, dict) and not any(privacy.values()):
         d.pop("privacy", None)
+    if d.get("asset_policy") == _default_asset_policy_dict():
+        d.pop("asset_policy", None)
     return d
+
+
+def _default_asset_policy_dict() -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(AssetPolicyConfig())
 
 
 def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
@@ -1297,6 +1361,75 @@ def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
         low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
         info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
     )
+
+
+def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
+    if not isinstance(raw, dict):
+        return AssetPolicyConfig()
+    return AssetPolicyConfig(
+        enabled=bool(raw.get("enabled", False)),
+        mode=str(raw.get("mode", "observe") or "observe"),
+        mcp=_merge_asset_type_policy(raw.get("mcp"), runtime=True),
+        skill=_merge_asset_type_policy(raw.get("skill"), runtime=False),
+        plugin=_merge_asset_type_policy(raw.get("plugin"), runtime=False),
+    )
+
+
+def _merge_asset_type_policy(raw: dict[str, Any] | None, *, runtime: bool) -> AssetTypePolicy:
+    if not isinstance(raw, dict):
+        base = AssetTypePolicy()
+    else:
+        base = AssetTypePolicy(
+            default=str(raw.get("default", "allow") or "allow"),
+            registry_required=bool(raw.get("registry_required", False)),
+            registry=_merge_asset_rules(raw.get("registry")),
+            allowed=_merge_asset_rules(raw.get("allowed")),
+            denied=_merge_asset_rules(raw.get("denied")),
+            runtime_detection=_merge_asset_runtime_detection(raw.get("runtime_detection")),
+        )
+    if not runtime:
+        base.runtime_detection = AssetRuntimeDetectionConfig(
+            enabled=False,
+            terminal_commands=False,
+            unknown_terminal_mcp="observe",
+        )
+    return base
+
+
+def _merge_asset_runtime_detection(raw: dict[str, Any] | None) -> AssetRuntimeDetectionConfig:
+    if not isinstance(raw, dict):
+        return AssetRuntimeDetectionConfig()
+    return AssetRuntimeDetectionConfig(
+        enabled=bool(raw.get("enabled", True)),
+        terminal_commands=bool(raw.get("terminal_commands", True)),
+        unknown_terminal_mcp=str(raw.get("unknown_terminal_mcp", "observe") or "observe"),
+    )
+
+
+def _merge_asset_rules(raw: Any) -> list[AssetPolicyRule]:
+    if not isinstance(raw, list):
+        return []
+    rules: list[AssetPolicyRule] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        args_prefix = entry.get("args_prefix", [])
+        if not isinstance(args_prefix, list):
+            args_prefix = []
+        source_path_contains = entry.get("source_path_contains", [])
+        if not isinstance(source_path_contains, list):
+            source_path_contains = []
+        rules.append(AssetPolicyRule(
+            name=str(entry.get("name", "") or ""),
+            connector=str(entry.get("connector", "") or ""),
+            reason=str(entry.get("reason", "") or ""),
+            url=str(entry.get("url", "") or ""),
+            command=str(entry.get("command", "") or ""),
+            args_prefix=[str(v) for v in args_prefix],
+            transport=str(entry.get("transport", "") or ""),
+            source_path_contains=[str(v) for v in source_path_contains],
+        ))
+    return rules
 
 
 def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
@@ -1626,6 +1759,10 @@ def load() -> Config:
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),
         policy_dir=raw.get("policy_dir", os.path.join(data_dir, "policies")),
         environment=raw.get("environment", detect_environment()),
+        tenant_id=raw.get("tenant_id", ""),
+        workspace_id=raw.get("workspace_id", ""),
+        deployment_mode=raw.get("deployment_mode", ""),
+        discovery_source=raw.get("discovery_source", ""),
         claw=ClawConfig(
             mode=raw.get("claw", {}).get("mode", "openclaw"),
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
@@ -1698,6 +1835,7 @@ def load() -> Config:
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
+        asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
         privacy=_merge_privacy(raw.get("privacy")),
     )
@@ -1731,6 +1869,7 @@ def default_config() -> Config:
         plugin_dir=os.path.join(data_dir, "plugins"),
         policy_dir=os.path.join(data_dir, "policies"),
         environment=detect_environment(),
+        asset_policy=AssetPolicyConfig(),
         scanners=ScannersConfig(
             codeguard=os.path.join(data_dir, "codeguard-rules"),
         ),

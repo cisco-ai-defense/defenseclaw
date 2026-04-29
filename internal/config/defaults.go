@@ -88,6 +88,7 @@ func DefaultConfig() *Config {
 		PluginDir:     "",
 		PolicyDir:     filepath.Join(dataDir, "policies"),
 		Environment:   string(DetectEnvironment()),
+		AssetPolicy:   DefaultAssetPolicy(),
 		Claw: ClawConfig{
 			Mode:       clawMode,
 			HomeDir:    "~/.openclaw",

@@ -103,3 +103,66 @@ func TestEvaluateClaudeCodeHook_ExplicitEnableStillWorks(t *testing.T) {
 		t.Errorf("RawAction = %q, want block", resp.RawAction)
 	}
 }
+
+func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.Severity != "HIGH" {
+		t.Fatalf("severity=%q, want HIGH", resp.Severity)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_AssetPolicyPostToolUseWouldBlock(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.Default = "deny"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "mcp__rogue__search",
+		ToolResponse:  map[string]interface{}{"ok": true},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
+	}
+	if !resp.WouldBlock {
+		t.Fatal("PostToolUse asset policy match should be reported as would_block")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}

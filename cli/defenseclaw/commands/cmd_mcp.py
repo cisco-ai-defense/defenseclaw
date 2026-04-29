@@ -686,6 +686,12 @@ def set_server(
         name=name,
         fallback_actions=app.cfg.mcp_actions,
         source_path="",
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        command=cmd,
+        args=_parse_args(args_str) if args_str else [],
+        url=url,
+        transport=transport,
+        asset_policy=app.cfg.asset_policy,
     )
 
     if pre_decision.verdict == "blocked":
@@ -747,6 +753,12 @@ def set_server(
             scan_result=result,
             fallback_actions=app.cfg.mcp_actions,
             source_path=cmd or url or "",
+            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            command=cmd,
+            args=_parse_args(args_str) if args_str else [],
+            url=url,
+            transport=transport,
+            asset_policy=app.cfg.asset_policy,
         )
         if post_decision.verdict == "rejected":
             pe = PolicyEngine(app.store)
@@ -779,6 +791,12 @@ def set_server(
             scan_result=result,
             fallback_actions=app.cfg.mcp_actions,
             source_path=cmd or url or "",
+            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            command=cmd,
+            args=_parse_args(args_str) if args_str else [],
+            url=url,
+            transport=transport,
+            asset_policy=app.cfg.asset_policy,
         )
         if post_decision.action.install == "allow":
             pe.allow("mcp", name, "scan clean or within policy")

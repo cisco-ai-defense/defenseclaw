@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -44,10 +45,13 @@ type codexHookRequest struct {
 	ToolInput            map[string]interface{} `json:"tool_input,omitempty"`
 	ToolResponse         interface{}            `json:"tool_response,omitempty"`
 	Prompt               string                 `json:"prompt,omitempty"`
+	AgentID              string                 `json:"agent_id,omitempty"`
+	AgentType            string                 `json:"agent_type,omitempty"`
 	StopHookActive       bool                   `json:"stop_hook_active,omitempty"`
 	LastAssistantMessage string                 `json:"last_assistant_message,omitempty"`
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
+	Payload              map[string]interface{} `json:"-"`
 }
 
 type codexHookResponse struct {
@@ -71,14 +75,23 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req codexHookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
+	if err != nil {
 		if a.otel != nil {
 			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_json", 0)
 		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
+	var req codexHookRequest
+	if err := json.Unmarshal(b, &req); err != nil {
+		if a.otel != nil {
+			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_payload", 0)
+		}
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Codex hook payload"})
+		return
+	}
+	req.Payload = payload
 	if req.HookEventName == "" {
 		if a.otel != nil {
 			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "missing_event", 0)
@@ -128,6 +141,8 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	}
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	assetDecision := config.AssetPolicyDecision{}
+	assetMatched := false
 	switch req.HookEventName {
 	case "SessionStart":
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
@@ -153,12 +168,14 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Args:      codexToolArgs(req),
 			Direction: "tool_call",
 		})
+		assetDecision, assetMatched = a.codexMCPAssetDecision(ctx, req)
 	case "PostToolUse":
 		verdict = a.inspectMessageContent(&ToolInspectRequest{
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",
 		})
+		assetDecision, assetMatched = a.codexMCPAssetDecision(ctx, req)
 	case "Stop":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
@@ -173,6 +190,17 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	}
 	if mode != "action" && rawAction == "alert" {
 		action = "allow"
+	}
+	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+	)
+	action = mergedAction
+	rawAction = mergedRawAction
+	verdict.Severity = mergedSeverity
+	verdict.Reason = mergedReason
+	verdict.Findings = mergedFindings
+	if assetWouldBlock {
+		wouldBlock = true
 	}
 	return codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
 }

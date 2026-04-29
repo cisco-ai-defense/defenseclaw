@@ -51,6 +51,10 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `service.version` | string | `0.5.0` | build-time `version` var |
 | `service.namespace` | string | `ai-governance` | hardcoded |
 | `deployment.environment` | string | `macos` | `config.Environment` |
+| `defenseclaw.tenant.id` | string | `tenant-a` | `config.tenant_id` when set |
+| `defenseclaw.workspace.id` | string | `workspace-1` | `config.workspace_id` when set |
+| `defenseclaw.deployment.mode` | string | `standalone` | `config.deployment_mode` when set |
+| `defenseclaw.discovery.source` | string | `registry` | `config.discovery_source` when set |
 | `host.name` | string | `dgx-spark-01` | `os.Hostname()` |
 | `host.arch` | string | `arm64` | `runtime.GOARCH` |
 | `os.type` | string | `darwin` | `runtime.GOOS` |
@@ -368,12 +372,8 @@ Uses [OTEL GenAI semantic conventions](https://opentelemetry.io/docs/specs/semco
 
 | Metric | Attributes |
 |---|---|
-| `gen_ai.client.token.usage` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` (`input`/`output`) |
-| `gen_ai.client.operation.duration` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model` |
-
-> **TODO**: Add `gen_ai.agent.name` to metric attributes when available
-> from the parent `invoke_agent` span. See
-> [OTEL-IMPLEMENTATION-STATUS.md](OTEL-IMPLEMENTATION-STATUS.md) §1.
+| `gen_ai.client.token.usage` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` (`input`/`output`), `gen_ai.agent.name` / `gen_ai.agent.id` when known |
+| `gen_ai.client.operation.duration` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.name` / `gen_ai.agent.id` when known |
 
 ### 5e. Guardrail Span ✅ IMPLEMENTED
 
@@ -547,13 +547,10 @@ All metrics use the `defenseclaw.*` namespace.
 
 | Metric | Type | Unit | Buckets | Attributes |
 |---|---|---|---|---|
-| `gen_ai.client.token.usage` | Histogram | `{token}` | 1,4,16,64,256,1K,4K,16K,64K,256K,1M,4M,16M,64M | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` |
-| `gen_ai.client.operation.duration` | Histogram | `s` | 0.01,0.02,0.04,...,81.92 | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model` |
+| `gen_ai.client.token.usage` | Histogram | `{token}` | 1,4,16,64,256,1K,4K,16K,64K,256K,1M,4M,16M,64M | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type`, `gen_ai.agent.name` / `gen_ai.agent.id` when known |
+| `gen_ai.client.operation.duration` | Histogram | `s` | 0.01,0.02,0.04,...,81.92 | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.name` / `gen_ai.agent.id` when known |
 
 > **Note**: Buckets follow [OTel GenAI semconv metrics spec](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-metrics.md). `gen_ai.token.type` values are `input` and `output`.
-
-> **TODO**: Add `gen_ai.agent.name` attribute to these metrics when the
-> agent name is available from the parent `invoke_agent` span context.
 
 ### Alert Metrics
 
