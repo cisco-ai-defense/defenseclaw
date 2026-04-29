@@ -30,7 +30,7 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
     _verify_bedrock,
 )
-from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, OpenShellConfig
+from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, LLMConfig, OpenShellConfig
 
 
 class DoctorGuardrailTests(unittest.TestCase):
@@ -55,6 +55,35 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.passed, 1)
         warn_checks = [c for c in result.checks if c["status"] == "warn"]
         self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_codex_observability_mode_skips_proxy_port_probe(self, mock_probe):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                model="",
+                port=4000,
+                connector="codex",
+                codex_enforcement_enabled=False,
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "codex"
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.warned, 0)
+        self.assertEqual(result.passed, 1)
+        self.assertIn("intentionally closed", result.checks[0]["detail"])
 
 
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
@@ -88,10 +117,11 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     @patch.dict(os.environ, {"BIFROST_API_KEY": "ABSKtest-not-an-anthropic-key"}, clear=False)
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key",
            return_value="ABSKtest-not-an-anthropic-key")
+    @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
     @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
-    def test_bedrock_inference_profile_does_not_route_to_anthropic(
-        self, mock_openai, mock_anthropic, _mock_resolve,
+    def test_bedrock_inference_profile_routes_to_bedrock(
+        self, mock_openai, mock_anthropic, mock_bedrock, _mock_resolve,
     ):
         cfg = self._make_cfg(
             model="amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -101,14 +131,30 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
 
         _check_llm_api_key(cfg, r)
 
+        mock_bedrock.assert_called_once()
         mock_anthropic.assert_not_called()
         mock_openai.assert_not_called()
-        self.assertEqual(r.failed, 0, r.checks)
-        self.assertEqual(r.passed, 1)
-        self.assertTrue(
-            any("cannot verify provider" in (c.get("detail") or "") for c in r.checks),
-            r.checks,
+
+    @patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": "ABSKtoken=="}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSKtoken==")
+    @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
+    def test_explicit_bedrock_provider_routes_even_with_bare_model(
+        self, mock_bedrock, _mock_resolve,
+    ):
+        cfg = self._make_cfg(
+            model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            api_key_env="DEFENSECLAW_LLM_KEY",
         )
+        cfg.llm = LLMConfig(
+            provider="bedrock",
+            model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            api_key_env="DEFENSECLAW_LLM_KEY",
+        )
+        r = _DoctorResult()
+
+        _check_llm_api_key(cfg, r)
+
+        mock_bedrock.assert_called_once()
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False)
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-ant-test")

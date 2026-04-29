@@ -164,7 +164,8 @@ func (s *SkillScanner) SupportedTargets() []string { return []string{"skill"} }
 func (s *SkillScanner) buildArgs(target string) []string {
 	args := []string{"scan", "--format", "json"}
 
-	if s.Config.UseLLM {
+	useLLM := s.Config.UseLLM && skillScannerSupportsLLMProvider(s.LLM.ProviderPrefix())
+	if useLLM {
 		args = append(args, "--use-llm")
 	}
 	if s.Config.UseBehavioral {
@@ -182,10 +183,10 @@ func (s *SkillScanner) buildArgs(target string) []string {
 	if s.Config.UseAIDefense {
 		args = append(args, "--use-aidefense")
 	}
-	if s.LLM.Provider != "" {
+	if useLLM && s.LLM.Provider != "" {
 		args = append(args, "--llm-provider", s.LLM.Provider)
 	}
-	if s.Config.LLMConsensus > 0 {
+	if useLLM && s.Config.LLMConsensus > 0 {
 		args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))
 	}
 	if s.Config.Policy != "" {
@@ -197,6 +198,15 @@ func (s *SkillScanner) buildArgs(target string) []string {
 
 	args = append(args, target)
 	return args
+}
+
+func skillScannerSupportsLLMProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "anthropic", "openai":
+		return true
+	default:
+		return false
+	}
 }
 
 // scanEnv returns the process environment with skill-scanner-specific

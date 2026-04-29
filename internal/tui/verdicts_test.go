@@ -161,6 +161,59 @@ func TestLoadVerdicts_MissingFilePopulatesError(t *testing.T) {
 	}
 }
 
+func TestLoadVerdicts_RoutesOTELAndCodexRowsToOTELSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.jsonl")
+	content := strings.Join([]string{
+		`{"ts":"2026-04-16T12:00:00Z","event_type":"lifecycle","severity":"INFO","lifecycle":{"subsystem":"telemetry","transition":"sent","details":{"action":"otel.ingest.logs","records":"2"}}}`,
+		`{"ts":"2026-04-16T12:00:01Z","event_type":"activity","severity":"INFO","activity":{"actor":"codex","action":"codex.notify.agent-turn-complete","target_type":"session","target_id":"abc"}}`,
+		`{"ts":"2026-04-16T12:00:02Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"block","reason":"pii"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	p := &LogsPanel{source: logSourceVerdicts}
+	p.loadVerdicts(path)
+	if got := len(p.verdicts); got != 1 {
+		t.Fatalf("verdict rows=%d want 1: %+v", got, p.verdicts)
+	}
+	if got := len(p.otelRows); got != 2 {
+		t.Fatalf("otel rows=%d want 2: %+v", got, p.otelRows)
+	}
+	verdictText := strings.Join(p.lines[logSourceVerdicts], "\n")
+	if strings.Contains(verdictText, "otel.ingest") || strings.Contains(verdictText, "codex.notify") {
+		t.Fatalf("Verdicts source leaked telemetry rows:\n%s", verdictText)
+	}
+	otelText := strings.Join(p.lines[logSourceOTEL], "\n")
+	for _, needle := range []string{"OTEL", "CODEX", "otel.ingest.logs", "codex.notify.agent-turn-complete"} {
+		if !strings.Contains(otelText, needle) {
+			t.Fatalf("OTEL source missing %q:\n%s", needle, otelText)
+		}
+	}
+}
+
+func TestSelectedOTELRow_RespectsSearchFilter(t *testing.T) {
+	p := &LogsPanel{source: logSourceOTEL, height: 24, width: 80}
+	p.otelRows = []verdictRow{
+		{eventType: "lifecycle", lifecycleDetails: map[string]string{"action": "otel.ingest.logs"}},
+		{eventType: "activity", activityAct: "codex.notify.agent-turn-complete"},
+	}
+	p.lines[logSourceOTEL] = []string{
+		"OTEL INFO action=otel.ingest.logs",
+		"CODEX INFO action=codex.notify.agent-turn-complete",
+	}
+	p.searchText = "codex.notify"
+
+	got := p.SelectedOTELRow()
+	if got == nil {
+		t.Fatal("SelectedOTELRow returned nil with a matching row")
+	}
+	if got.activityAct != "codex.notify.agent-turn-complete" {
+		t.Fatalf("selected action=%q want codex notify row", got.activityAct)
+	}
+}
+
 func TestCycleVerdictAction_RotatesThroughAllThenWrapsToEmpty(t *testing.T) {
 	p := &LogsPanel{}
 	// Start at default empty -> first cycle must land on "block".

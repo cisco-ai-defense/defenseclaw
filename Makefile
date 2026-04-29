@@ -412,7 +412,11 @@ go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
 
 ts-test:
-	cd $(PLUGIN_DIR) && npx vitest run
+	cd $(PLUGIN_DIR) && \
+		if [ ! -x node_modules/.bin/vitest ]; then \
+			NODE_ENV=development npm ci --include=dev; \
+		fi && \
+		npx --no-install vitest run
 
 rego-test:
 	PATH="$(GOBIN):$(PATH)" opa test policies/rego/ -v

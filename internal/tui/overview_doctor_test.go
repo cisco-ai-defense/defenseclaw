@@ -121,6 +121,50 @@ func TestOverview_DoctorBox_WithFailures(t *testing.T) {
 	}
 }
 
+func TestOverview_ZeroRequestNotice_CodexObservabilityUsesHookGuidance(t *testing.T) {
+	t.Parallel()
+	p := newOverviewForTest()
+	p.cfg.Claw.Mode = config.ClawMode("codex")
+	p.cfg.Guardrail.Connector = "codex"
+	p.cfg.Guardrail.CodexEnforcementEnabled = false
+	p.SetHealth(&HealthSnapshot{
+		UptimeMS: int64(3 * time.Minute / time.Millisecond),
+		Connector: &ConnectorHealth{
+			Name:     "codex",
+			State:    "running",
+			Requests: 0,
+		},
+	})
+
+	out := stripANSI(p.View(120, 40))
+	if !strings.Contains(out, "0 hook events") {
+		t.Fatalf("expected Codex hook-event guidance, got:\n%s", out)
+	}
+	if strings.Contains(out, "gateway port") {
+		t.Fatalf("Codex observability mode should not suggest gateway port routing, got:\n%s", out)
+	}
+}
+
+func TestOverview_ZeroRequestNotice_OpenClawKeepsGatewayPortGuidance(t *testing.T) {
+	t.Parallel()
+	p := newOverviewForTest()
+	p.cfg.Claw.Mode = config.ClawOpenClaw
+	p.cfg.Guardrail.Connector = "openclaw"
+	p.SetHealth(&HealthSnapshot{
+		UptimeMS: int64(3 * time.Minute / time.Millisecond),
+		Connector: &ConnectorHealth{
+			Name:     "openclaw",
+			State:    "running",
+			Requests: 0,
+		},
+	})
+
+	out := stripANSI(p.View(120, 40))
+	if !strings.Contains(out, "gateway port") {
+		t.Fatalf("expected OpenClaw gateway-port guidance, got:\n%s", out)
+	}
+}
+
 func TestOverview_DoctorBox_StaleCache(t *testing.T) {
 	t.Parallel()
 	p := newOverviewForTest()

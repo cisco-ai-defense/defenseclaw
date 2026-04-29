@@ -259,14 +259,37 @@ func (p *OverviewPanel) buildNotices() {
 		if p.health.Connector.Requests == 0 && uptime > 60*time.Second {
 			p.notices = append(p.notices, notice{
 				"info",
-				fmt.Sprintf(
-					"%s connector has seen 0 requests after %s — verify your agent is dialing the gateway port (gateway.port)",
-					FriendlyConnectorName(live),
-					formatDuration(uptime),
-				),
+				zeroConnectorRequestsNotice(p.cfg, live, uptime),
 			})
 		}
 	}
+}
+
+func zeroConnectorRequestsNotice(cfg *config.Config, connectorName string, uptime time.Duration) string {
+	name := FriendlyConnectorName(connectorName)
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "codex":
+		if cfg != nil && !cfg.Guardrail.CodexEnforcementEnabled {
+			return fmt.Sprintf(
+				"%s connector has seen 0 hook events after %s — normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists",
+				name,
+				formatDuration(uptime),
+			)
+		}
+	case "claudecode":
+		if cfg != nil && !cfg.Guardrail.ClaudeCodeEnforcementEnabled {
+			return fmt.Sprintf(
+				"%s connector has seen 0 hook events after %s — normal until Claude Code emits a hook event; verify Claude Code hooks if this persists",
+				name,
+				formatDuration(uptime),
+			)
+		}
+	}
+	return fmt.Sprintf(
+		"%s connector has seen 0 requests after %s — verify your agent is dialing the gateway port (gateway.port)",
+		name,
+		formatDuration(uptime),
+	)
 }
 
 // keysOverflowSuffix renders a compact " (+N more)" tail when the
@@ -765,6 +788,8 @@ func (p *OverviewPanel) renderQuickActions(width int) string {
 
 	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	dangerKey := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	dangerText := lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 
 	actions := []string{
 		key.Render("[s]") + dim.Render(" Scan all"),
@@ -774,7 +799,9 @@ func (p *OverviewPanel) renderQuickActions(width int) string {
 		key.Render("[m]") + dim.Render(" Mode"),
 		key.Render("[p]") + dim.Render(" Policy"),
 		key.Render("[l]") + dim.Render(" Logs"),
+		key.Render("[R]") + dim.Render(" Redaction"),
 		key.Render("[u]") + dim.Render(" Upgrade"),
+		dangerKey.Render("[X]") + dangerText.Render(" Uninstall"),
 		key.Render("[?]") + dim.Render(" Help"),
 	}
 
@@ -799,7 +826,9 @@ var quickActionDefs = []struct {
 	{"m", 8},  // "[m] Mode"
 	{"p", 10}, // "[p] Policy"
 	{"l", 8},  // "[l] Logs"
+	{"R", 13}, // "[R] Redaction"
 	{"u", 11}, // "[u] Upgrade"
+	{"X", 13}, // "[X] Uninstall"
 	{"?", 8},  // "[?] Help"
 }
 

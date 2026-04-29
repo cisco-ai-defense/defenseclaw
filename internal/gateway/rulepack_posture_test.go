@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"testing"
 
@@ -76,6 +77,33 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 			if ij.SingleCategoryMaxSev != tc.wantSingleCategoryCap {
 				t.Errorf("profile=%s: single_category_max_severity = %q, want %q",
 					tc.profile, ij.SingleCategoryMaxSev, tc.wantSingleCategoryCap)
+			}
+		})
+	}
+}
+
+func TestGuardrailPolicyProfilesHaveGoCompatibleRegexes(t *testing.T) {
+	_, selfPath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve caller path")
+	}
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+
+	for _, profile := range []string{"strict", "default", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			if rp == nil {
+				t.Fatalf("LoadRulePack(%s) returned nil", profile)
+			}
+			for _, rf := range rp.RuleFiles {
+				for _, rule := range rf.Rules {
+					if _, err := regexp.Compile(rule.Pattern); err != nil {
+						t.Fatalf("%s/%s rule %s has invalid Go regexp %q: %v",
+							profile, rf.Category, rule.ID, rule.Pattern, err)
+					}
+				}
 			}
 		})
 	}

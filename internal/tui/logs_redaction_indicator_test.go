@@ -32,7 +32,7 @@ func TestLogsPanel_RedactionBadge_VisibleWhenDisabled(t *testing.T) {
 	panel := &LogsPanel{
 		theme:  DefaultTheme(),
 		source: logSourceGateway,
-		lines:  [logSourceCount][]string{{"line one"}, {}, {}},
+		lines:  [logSourceCount][]string{{"line one"}, {}, {}, {}},
 		width:  120,
 		height: 24,
 	}

@@ -390,6 +390,11 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("skip", "Guardrail proxy", "disabled", r=r)
         return
 
+    closed_detail = _guardrail_proxy_intentionally_closed(cfg)
+    if closed_detail:
+        _emit("pass", "Guardrail proxy", closed_detail, r=r)
+        return
+
     if not cfg.guardrail.model:
         _emit(
             "warn", "Guardrail proxy",
@@ -404,6 +409,23 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
     else:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
+
+
+def _guardrail_proxy_intentionally_closed(cfg) -> str:
+    """Return a detail string when the proxy port is expected to be closed.
+
+    Codex and Claude Code default to observability-only mode: hooks and
+    native OTel feed DefenseClaw, but the agent talks directly to its
+    upstream provider. In that mode port 4000 is deliberately unbound, so
+    doctor must not report a hard proxy failure.
+    """
+    connector = _active_connector(cfg)
+    gc = cfg.guardrail
+    if connector == "codex" and not getattr(gc, "codex_enforcement_enabled", False):
+        return "observability-only for Codex — proxy port intentionally closed"
+    if connector == "claudecode" and not getattr(gc, "claudecode_enforcement_enabled", False):
+        return "observability-only for Claude Code — proxy port intentionally closed"
+    return ""
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
@@ -461,23 +483,21 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     if not api_key:
         _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})", r=r)
         return
-    # Route by *provider prefix* (the segment before the first "/"). The
-    # env-name prefix is a last-resort fallback ONLY used when the model
-    # string is empty or has no provider prefix — routing on env name can
-    # easily misfire (e.g. an operator reusing ANTHROPIC_API_KEY to hold a
-    # bearer token for a proxy). Provider prefixes come from OpenClaw's
-    # model registry; see https://docs.openclaw.ai/providers/.
-    provider = ""
-    if "/" in model:
+    # Route by the resolved provider prefix first. A bare Bedrock model
+    # with ``provider: bedrock`` is valid config; treating the bare model
+    # id as the provider made doctor say it "cannot verify" Bedrock keys.
+    # Env-name fallback remains last-resort only for empty provider/model
+    # configs so a misleading variable name cannot override an explicit
+    # provider.
+    provider = llm.provider_prefix()
+    if not provider and "/" in model:
         provider = model.split("/", 1)[0].lower()
-    elif model:
-        provider = model.lower()
 
     if provider == "anthropic":
         _verify_anthropic(api_key, r, model)
     elif provider == "openai":
         _verify_openai(api_key, r)
-    elif provider == "bedrock":
+    elif provider in ("bedrock", "amazon-bedrock"):
         _verify_bedrock(api_key, r)
     elif provider == "" and env_name.startswith("ANTHROPIC"):
         # Model string missing — fall back to env name prefix.
@@ -489,7 +509,7 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     else:
         _emit(
             "pass", "LLM API key",
-            f"{env_name} is set (cannot verify provider '{model}')", r=r,
+            f"{env_name} is set (cannot verify provider '{provider or model}')", r=r,
         )
 
 

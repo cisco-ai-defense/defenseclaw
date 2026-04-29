@@ -148,6 +148,7 @@ type Model struct {
 	mcpSetForm     MCPSetForm
 	modePicker     ModePickerModal
 	redactionModal RedactionToggleModal
+	uninstallModal UninstallModal
 
 	helpOpen bool
 
@@ -237,6 +238,7 @@ func New(deps Deps) Model {
 		mcpSetForm:     NewMCPSetForm(),
 		modePicker:     NewModePickerModal(theme),
 		redactionModal: NewRedactionToggleModal(theme),
+		uninstallModal: NewUninstallModal(theme),
 
 		cmdInput: ti,
 
@@ -615,6 +617,9 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		m.detail.Hide()
 		return m, nil
 	}
+	if m.modePicker.IsVisible() || m.redactionModal.IsVisible() || m.uninstallModal.IsVisible() {
+		return m, nil
+	}
 	// If a panel has an in-panel overlay/form/editor open, don't let
 	// a click on the tab strip above silently flip panels out from
 	// underneath it — the user is clearly focused on the overlay
@@ -771,6 +776,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					// pre-focused on the active connector.
 					m.modePicker.Show(m.activeConnectorForPicker())
 					return m, nil
+				case "R":
+					return m.showRedactionModal()
 				case "p":
 					m.activePanel = PanelPolicy
 				case "l":
@@ -779,6 +786,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
 					m.activePanel = PanelActivity
 					return m, cmd
+				case "X":
+					return m.showUninstallModal()
 				case "?":
 					m.helpOpen = true
 				}
@@ -1041,12 +1050,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		// click.
 		if idx, ok := m.logs.LogRowHitTest(relY); ok {
 			m.logs.SetCursor(idx)
-			if m.logs.source == logSourceVerdicts {
-				if row := m.logs.SelectedVerdict(); row != nil {
-					pairs := verdictDetailPairs(*row)
-					m.detail.SetSize(m.width, m.height)
-					m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
-				}
+			if row := m.selectedStructuredLogRow(); row != nil {
+				m.openStructuredLogDetail(*row)
 			}
 			return m, nil
 		}
@@ -1103,6 +1108,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.detail.Hide()
 		}
 		return m, nil
+	}
+
+	if m.redactionModal.IsVisible() {
+		return m.handleRedactionModalKey(msg)
+	}
+	if m.uninstallModal.IsVisible() {
+		return m.handleUninstallModalKey(msg)
 	}
 
 	if m.firstRun.Active() {
@@ -1185,6 +1197,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case "/":
+		if m.activePanel == PanelLogs {
+			return m.handlePanelKey(msg)
+		}
 		return m.startFilter()
 
 	// Number keys switch panels
@@ -1835,6 +1850,8 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// dashboard agree on which entry is "active".
 		m.modePicker.Show(m.activeConnectorForPicker())
 		return m, nil
+	case "R":
+		return m.showRedactionModal()
 	case "p":
 		m.activePanel = PanelPolicy
 	case "l":
@@ -1843,6 +1860,8 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
 		m.activePanel = PanelActivity
 		return m, cmd
+	case "X":
+		return m.showUninstallModal()
 	}
 	return m, nil
 }
@@ -1906,6 +1925,58 @@ func (m Model) handleRedactionModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		return m.confirmRedactionToggle()
 	}
 	return m, nil
+}
+
+func (m Model) showRedactionModal() (tea.Model, tea.Cmd) {
+	m.redactionModal.SetSize(m.width, m.height)
+	m.redactionModal.Show(redactionDisabledForLogsBadge())
+	return m, nil
+}
+
+func (m Model) handleUninstallModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.uninstallModal.Hide()
+		return m, nil
+	case "up", "k":
+		m.uninstallModal.CursorUp()
+		return m, nil
+	case "down", "j":
+		m.uninstallModal.CursorDown()
+		return m, nil
+	case "enter":
+		return m.confirmUninstall()
+	}
+	if r := []rune(msg.String()); len(r) == 1 {
+		if m.uninstallModal.SelectByHotkey(r[0]) {
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m Model) showUninstallModal() (tea.Model, tea.Cmd) {
+	m.uninstallModal.SetSize(m.width, m.height)
+	m.uninstallModal.Show()
+	return m, nil
+}
+
+func uninstallArgsForOption(option UninstallOption) ([]string, string) {
+	switch option {
+	case UninstallKeepData:
+		return []string{"uninstall", "--yes"}, "uninstall --yes"
+	case UninstallWipeData:
+		return []string{"uninstall", "--all", "--yes"}, "uninstall --all --yes"
+	default:
+		return []string{"uninstall", "--dry-run"}, "uninstall dry-run"
+	}
+}
+
+func (m Model) confirmUninstall() (tea.Model, tea.Cmd) {
+	args, displayName := uninstallArgsForOption(m.uninstallModal.Selected())
+	m.uninstallModal.Hide()
+	m.activePanel = PanelActivity
+	return m, m.executor.Execute("defenseclaw", args, displayName)
 }
 
 // confirmRedactionToggle dispatches the chosen redaction action
@@ -2324,23 +2395,19 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	// `R` (uppercase — lowercase is reserved for "regex search later"
 	// and stays untouched) opens the redaction kill-switch modal.
-	// Available regardless of the active log source because all three
-	// sources (Gateway / Verdicts / Watchdog) share the same redaction
+	// Available regardless of the active log source because every
+	// source (Gateway / Verdicts / OTEL / Watchdog) shares the redaction
 	// pipeline; flipping the switch affects them uniformly.
 	if key == "R" && !m.logs.searching {
-		m.redactionModal.SetSize(m.width, m.height)
-		m.redactionModal.Show(redactionDisabledForLogsBadge())
-		return m, nil
+		return m.showRedactionModal()
 	}
-	// On the Verdicts source, Enter opens a detail modal for the
+	// On structured log sources, Enter opens a detail modal for the
 	// most-recent visible event. We intercept before handing the
 	// key to the panel so the panel's own "search entry" path
 	// doesn't swallow Enter while searching is inactive.
-	if key == "enter" && !m.logs.searching && m.logs.source == logSourceVerdicts {
-		if row := m.logs.SelectedVerdict(); row != nil {
-			pairs := verdictDetailPairs(*row)
-			m.detail.SetSize(m.width, m.height)
-			m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
+	if key == "enter" && !m.logs.searching {
+		if row := m.selectedStructuredLogRow(); row != nil {
+			m.openStructuredLogDetail(*row)
 			return m, nil
 		}
 	}
@@ -2348,7 +2415,7 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// with the raw log line so operators can copy-paste without
 	// truncation. The Verdicts branch above already handles its
 	// source because its modal is richer (structured kv pairs).
-	if key == "enter" && !m.logs.searching && m.logs.source != logSourceVerdicts {
+	if key == "enter" && !m.logs.searching && m.logs.source != logSourceVerdicts && m.logs.source != logSourceOTEL {
 		if line := m.logs.SelectedRawLine(); line != "" {
 			m.detail.SetSize(m.width, m.height)
 			m.detail.Show(fmt.Sprintf("%s log line", logSourceNames[m.logs.source]), [][2]string{{"Line", line}})
@@ -2380,6 +2447,26 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.logs, cmd = m.logs.Update(msg)
 	return m, cmd
+}
+
+func (m Model) selectedStructuredLogRow() *verdictRow {
+	switch m.logs.source {
+	case logSourceVerdicts:
+		return m.logs.SelectedVerdict()
+	case logSourceOTEL:
+		return m.logs.SelectedOTELRow()
+	default:
+		return nil
+	}
+}
+
+func (m *Model) openStructuredLogDetail(row verdictRow) {
+	title := "Gateway event"
+	if m.logs.source == logSourceOTEL {
+		title = "OTEL event"
+	}
+	m.detail.SetSize(m.width, m.height)
+	m.detail.Show(fmt.Sprintf("%s — %s", title, strings.ToUpper(row.eventType)), verdictDetailPairs(row))
 }
 
 // judgeResponsesDetailPairs formats a slice of audit.JudgeResponse
@@ -2742,6 +2829,11 @@ func (m Model) View() tea.View {
 	if m.redactionModal.IsVisible() {
 		m.redactionModal.SetSize(m.width, m.height)
 		return m.tuiShellView(m.redactionModal.View())
+	}
+
+	if m.uninstallModal.IsVisible() {
+		m.uninstallModal.SetSize(m.width, m.height)
+		return m.tuiShellView(m.uninstallModal.View())
 	}
 
 	// Detail modal
@@ -3284,6 +3376,7 @@ func (m Model) renderHelp() string {
 			{"/", "Search"},
 			{"e", "Errors only"},
 			{"w", "Warnings+"},
+			{"R", "Open redaction on/off confirmation"},
 			{"G / g", "Jump to end / start"},
 		}},
 		{"Policy Panel (7)", [][2]string{
@@ -3299,10 +3392,13 @@ func (m Model) renderHelp() string {
 			{"s", "Scan all skills"},
 			{"d", "Run doctor"},
 			{"g", "Setup guardrail"},
+			{"m", "Switch connector mode"},
+			{"R", "Open redaction on/off confirmation"},
 			{"p", "Go to Policy"},
 			{"i", "Go to Inventory"},
 			{"l", "Go to Logs"},
 			{"u", "Upgrade"},
+			{"X", "Uninstall DefenseClaw"},
 		}},
 	}
 

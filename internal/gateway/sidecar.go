@@ -399,7 +399,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	})
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
-	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" {
+	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" &&
+		proxyShouldBindForConfiguredConnector(&s.cfg.Guardrail) {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — relying on fetch-interceptor routing.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml only if you need a fixed advertised model name.\n")
 	}
@@ -1294,6 +1295,20 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		return true
 	}
 	switch conn.Name() {
+	case "codex":
+		return gc.CodexEnforcementEnabled
+	case "claudecode":
+		return gc.ClaudeCodeEnforcementEnabled
+	default:
+		return true
+	}
+}
+
+func proxyShouldBindForConfiguredConnector(gc *config.GuardrailConfig) bool {
+	if gc == nil {
+		return true
+	}
+	switch gc.Connector {
 	case "codex":
 		return gc.CodexEnforcementEnabled
 	case "claudecode":

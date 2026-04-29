@@ -89,6 +89,18 @@ func TestHandleKeyInventoryDigitsStayLocal(t *testing.T) {
 	}
 }
 
+func TestHandleKeySlashStartsLogsSearch(t *testing.T) {
+	model := New(Deps{Version: "test"})
+	model.activePanel = PanelLogs
+
+	next, _ := model.handleKey(digitKey("/"))
+	got := next.(Model)
+
+	if !got.logs.searching {
+		t.Fatal("slash on Logs panel must enter Logs search mode")
+	}
+}
+
 func TestHandleAuditKeyExportsJSON(t *testing.T) {
 	store := newTestAuditStore(t)
 	if err := store.LogEvent(audit.Event{

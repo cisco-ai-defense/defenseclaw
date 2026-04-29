@@ -39,6 +39,8 @@ from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 if TYPE_CHECKING:
     pass
 
+_SKILL_SCANNER_LLM_PROVIDERS = frozenset({"", "anthropic", "openai"})
+
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     """Back-compat shim — mirrors the one in ``mcp.py``. Kept local so
@@ -111,7 +113,7 @@ class SkillScannerWrapper:
         build_kwargs: dict = {"policy": policy}
         if cfg.use_behavioral:
             build_kwargs["use_behavioral"] = True
-        if cfg.use_llm:
+        if cfg.use_llm and _skill_scanner_provider_supported(llm.provider_prefix()):
             build_kwargs["use_llm"] = True
             # skill-scanner accepts the LiteLLM-style ``provider/model``
             # string via llm_model; we still pass ``llm_provider``
@@ -209,3 +211,15 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+def _skill_scanner_provider_supported(provider: str) -> bool:
+    """Return whether cisco-ai-skill-scanner accepts ``llm_provider``.
+
+    The upstream scanner currently restricts providers to Anthropic and
+    OpenAI. When DefenseClaw's unified LLM is Bedrock (or another
+    provider), forcing ``--llm-provider bedrock`` makes every scan fail
+    before static/behavioral analyzers can run. In that case we keep the
+    scan alive by omitting the optional LLM analyzer.
+    """
+    return provider.strip().lower() in _SKILL_SCANNER_LLM_PROVIDERS

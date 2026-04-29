@@ -48,6 +48,8 @@ var policyTabNames = [policyTabCount]string{
 	"Policies", "Rule Packs", "Judge Prompts", "Suppressions", "OPA / Rego",
 }
 
+var preferredJudgeOrder = []string{"injection", "pii", "tool-injection", "exfil"}
+
 // PolicyPanel provides full browsing, editing, and testing of guardrail
 // rule packs, judge prompts, suppressions, and OPA/Rego policies.
 type PolicyPanel struct {
@@ -167,10 +169,34 @@ func (p *PolicyPanel) load() {
 		p.suppressions = rp.Suppressions
 	}
 
-	p.judgeNames = []string{"injection", "pii", "tool-injection"}
+	p.judgeNames = orderedJudgeNames(p.judgeYAMLs)
 
 	// Load OPA Rego files
 	p.loadRegoFiles()
+}
+
+func orderedJudgeNames(judges map[string]*guardrail.JudgeYAML) []string {
+	if len(judges) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(judges))
+	seen := make(map[string]bool, len(judges))
+	for _, name := range preferredJudgeOrder {
+		if _, ok := judges[name]; ok {
+			names = append(names, name)
+			seen[name] = true
+		}
+	}
+
+	var extra []string
+	for name := range judges {
+		if !seen[name] {
+			extra = append(extra, name)
+		}
+	}
+	sort.Strings(extra)
+	return append(names, extra...)
 }
 
 func discoverPacks(dir string) []string {
@@ -732,6 +758,7 @@ func (p *PolicyPanel) switchPack(name string) {
 	if rp != nil {
 		p.packRules = rp.RuleFiles
 		p.judgeYAMLs = rp.JudgeConfigs
+		p.judgeNames = orderedJudgeNames(p.judgeYAMLs)
 		p.suppressions = rp.Suppressions
 	}
 }

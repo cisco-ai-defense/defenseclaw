@@ -64,6 +64,48 @@ func TestSetupSections_EverySectionHasSummary(t *testing.T) {
 	}
 }
 
+func TestSetupConfigSectionTabsWrapAndHitTest(t *testing.T) {
+	p := SetupPanel{
+		width:         34,
+		height:        24,
+		mode:          setupModeConfig,
+		activeSection: 0,
+		activeLine:    0,
+		scroll:        3,
+		sections: []configSection{
+			{Name: "General", Summary: "summary", Fields: []configField{{Label: "A", Kind: "string"}}},
+			{Name: "Agent", Summary: "summary", Fields: []configField{{Label: "B", Kind: "string"}}},
+			{Name: "Privacy", Summary: "summary", Fields: []configField{{Label: "C", Kind: "string"}}},
+			{Name: "Connector Hooks", Summary: "summary", Fields: []configField{{Label: "D", Kind: "string"}}},
+			{Name: "OpenTelemetry", Summary: "summary", Fields: []configField{{Label: "E", Kind: "string"}}},
+		},
+	}
+
+	rows := p.configSectionTabRows()
+	if len(rows) < 2 {
+		t.Fatalf("expected wrapped section tabs, got %d row(s): %+v", len(rows), rows)
+	}
+
+	target := rows[1][0]
+	p.handleConfigClick(target.start, 3)
+	if p.activeSection != target.index {
+		t.Fatalf("click on wrapped tab selected section %d, want %d", p.activeSection, target.index)
+	}
+	if p.scroll != 0 {
+		t.Fatalf("section tab click should reset scroll, got %d", p.scroll)
+	}
+
+	fieldY := p.configFieldsStartY()
+	if fieldY <= 4 {
+		t.Fatalf("field start y=%d did not account for wrapped tabs + summary", fieldY)
+	}
+	p.activeLine = -1
+	p.handleConfigClick(0, fieldY)
+	if p.activeLine != 0 {
+		t.Fatalf("field click selected activeLine=%d want 0", p.activeLine)
+	}
+}
+
 // TestApplyConfigField_GatewayExtraFields covers the three knobs we
 // newly surfaced in the TUI (TLSSkipVerify, ApprovalTimeout,
 // DeviceKeyFile). They existed in config.yaml already but the

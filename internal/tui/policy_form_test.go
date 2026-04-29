@@ -413,6 +413,62 @@ func TestLoadPolicies_ActiveMarker(t *testing.T) {
 	}
 }
 
+func TestPolicyPanelLoad_IncludesEmbeddedExfilJudgePrompt(t *testing.T) {
+	packDir := t.TempDir()
+	p := NewPolicyPanel(nil, &config.Config{
+		Guardrail: config.GuardrailConfig{RulePackDir: packDir},
+	})
+	p.load()
+
+	if _, ok := p.judgeYAMLs["exfil"]; !ok {
+		t.Fatalf("embedded exfil judge was not loaded; judges=%v", p.judgeNames)
+	}
+	if !stringSliceContains(p.judgeNames, "exfil") {
+		t.Fatalf("Judge Prompts list omitted exfil; judges=%v", p.judgeNames)
+	}
+
+	p.judgeCursor = stringSliceIndex(p.judgeNames, "exfil")
+	out := p.viewJudge(120, 40)
+	for _, needle := range []string{
+		"exfil",
+		"data-exfiltration safety classifier",
+		"Sensitive File Access",
+		"Exfiltration Channel",
+	} {
+		if !strings.Contains(out, needle) {
+			t.Fatalf("exfil prompt view missing %q:\n%s", needle, out)
+		}
+	}
+}
+
+func TestOrderedJudgeNames_PreservesKnownOrderAndIncludesExtras(t *testing.T) {
+	got := orderedJudgeNames(map[string]*guardrail.JudgeYAML{
+		"custom":         {},
+		"pii":            {},
+		"exfil":          {},
+		"injection":      {},
+		"tool-injection": {},
+		"aaa":            {},
+	})
+	want := []string{"injection", "pii", "tool-injection", "exfil", "aaa", "custom"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("orderedJudgeNames=%v, want %v", got, want)
+	}
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	return stringSliceIndex(values, needle) >= 0
+}
+
+func stringSliceIndex(values []string, needle string) int {
+	for i, value := range values {
+		if value == needle {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestRuleDetailEdit_LaunchesEditorOnSourceFile is the follow-up to
 // the user report "how do I edit the rule?" — the rule detail
 // overlay must expose an editor path so they're not stuck reading

@@ -464,6 +464,43 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertTrue(result.is_clean())
         self.assertEqual(result.scanner, "skill-scanner")
 
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_skips_llm_analyzer_for_unsupported_provider(self, mock_convert):
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+        from defenseclaw.models import ScanResult
+        from datetime import datetime, timezone
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True, use_behavioral=True)
+        llm = LLMConfig(provider="bedrock", model="us.anthropic.claude-haiku")
+        with patch.dict("sys.modules", {
+            "skill_scanner": mock_sdk_module,
+            "skill_scanner.core": MagicMock(),
+            "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build_analyzers),
+            "skill_scanner.core.scan_policy": MagicMock(),
+        }):
+            scanner = SkillScannerWrapper(cfg, llm=llm)
+            result = scanner.scan("/tmp/skill")
+
+        self.assertTrue(result.is_clean())
+        kwargs = build_analyzers.call_args.kwargs
+        self.assertNotIn("use_llm", kwargs)
+        self.assertNotIn("llm_provider", kwargs)
+        self.assertTrue(kwargs["use_behavioral"])
+
 
 class TestMCPScannerCommonConfigs(unittest.TestCase):
     """Tests for MCPScannerWrapper using shared InspectLLM and CiscoAIDefense configs."""

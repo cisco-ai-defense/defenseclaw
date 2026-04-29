@@ -168,6 +168,12 @@ type configField struct {
 	Hint string
 }
 
+type setupSectionTabHit struct {
+	index int
+	start int
+	end   int
+}
+
 // wizardFormField defines a single field in a wizard setup form.
 type wizardFormField struct {
 	Label    string
@@ -1977,6 +1983,77 @@ func (p *SetupPanel) handleWizardClick(x, y int) (bool, string, []string, string
 	return false, "", nil, ""
 }
 
+func (p *SetupPanel) configSectionTabRows() [][]setupSectionTabHit {
+	if len(p.sections) == 0 {
+		return nil
+	}
+	maxWidth := p.width
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+
+	var rows [][]setupSectionTabHit
+	var row []setupSectionTabHit
+	cursor := 0
+	for i, sec := range p.sections {
+		w := lipgloss.Width(sec.Name) + 2
+		sep := 0
+		if len(row) > 0 {
+			sep = 1
+		}
+		if len(row) > 0 && cursor+sep+w > maxWidth {
+			rows = append(rows, row)
+			row = nil
+			cursor = 0
+			sep = 0
+		}
+		start := cursor + sep
+		row = append(row, setupSectionTabHit{
+			index: i,
+			start: start,
+			end:   start + w,
+		})
+		cursor = start + w
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func (p *SetupPanel) configSectionTabLineCount() int {
+	rows := p.configSectionTabRows()
+	if len(rows) == 0 {
+		return 1
+	}
+	return len(rows)
+}
+
+func (p *SetupPanel) configSectionTabHit(x, y int) (int, bool) {
+	rowIdx := y - 2
+	rows := p.configSectionTabRows()
+	if rowIdx < 0 || rowIdx >= len(rows) {
+		return 0, false
+	}
+	for _, hit := range rows[rowIdx] {
+		if x >= hit.start && x < hit.end {
+			return hit.index, true
+		}
+	}
+	return 0, false
+}
+
+func (p *SetupPanel) configFieldsStartY() int {
+	y := 2 + p.configSectionTabLineCount() + 1
+	if sec := p.currentSection(); sec != nil && sec.Summary != "" {
+		y += 2
+	}
+	return y
+}
+
 func (p *SetupPanel) handleConfigClick(x, y int) (bool, string, []string, string) {
 	// Row 0: mode tabs
 	if y == 0 {
@@ -1986,24 +2063,20 @@ func (p *SetupPanel) handleConfigClick(x, y int) (bool, string, []string, string
 		return false, "", nil, ""
 	}
 
-	// Row 2: section tabs
-	if y == 2 {
-		cursor := 0
-		for i, sec := range p.sections {
-			w := lipgloss.Width(sec.Name) + 2
-			if x >= cursor && x < cursor+w+1 {
-				p.activeSection = i
-				p.activeLine = p.firstEditableLine()
-				p.scroll = 0
-				return false, "", nil, ""
-			}
-			cursor += w + 1
-		}
+	// Row 2..N: wrapped section tabs.
+	if idx, ok := p.configSectionTabHit(x, y); ok {
+		p.activeSection = idx
+		p.activeLine = p.firstEditableLine()
+		p.scroll = 0
+		return false, "", nil, ""
+	}
+	if y >= 2 && y < p.configFieldsStartY() {
 		return false, "", nil, ""
 	}
 
-	// Row 4+: config fields
-	fieldY := y - 4
+	// Config fields start after mode tabs, wrapped section tabs,
+	// their spacer row, and the optional section summary.
+	fieldY := y - p.configFieldsStartY()
 	if fieldY >= 0 && p.activeSection < len(p.sections) {
 		idx := p.scroll + fieldY
 		sec := &p.sections[p.activeSection]
@@ -2067,7 +2140,7 @@ func (p *SetupPanel) HandleMouseMotion(x, y int) {
 	}
 
 	if p.mode == setupModeConfig {
-		fieldY := y - 4
+		fieldY := y - p.configFieldsStartY()
 		if fieldY >= 0 && p.activeSection < len(p.sections) {
 			idx := p.scroll + fieldY
 			sec := p.sections[p.activeSection]
@@ -2591,16 +2664,21 @@ func (p *SetupPanel) renderConfigEditor() string {
 	activeTabStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
 	inactiveTabStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Padding(0, 1)
 
-	var tabs []string
-	for i, sec := range p.sections {
-		if i == p.activeSection {
-			tabs = append(tabs, activeTabStyle.Render(sec.Name))
-		} else {
-			tabs = append(tabs, inactiveTabStyle.Render(sec.Name))
+	rows := p.configSectionTabRows()
+	for _, row := range rows {
+		var tabs []string
+		for _, hit := range row {
+			sec := p.sections[hit.index]
+			if hit.index == p.activeSection {
+				tabs = append(tabs, activeTabStyle.Render(sec.Name))
+			} else {
+				tabs = append(tabs, inactiveTabStyle.Render(sec.Name))
+			}
 		}
+		b.WriteString(strings.Join(tabs, " "))
+		b.WriteString("\n")
 	}
-	b.WriteString(strings.Join(tabs, " "))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	if p.activeSection < 0 || p.activeSection >= len(p.sections) {
 		return b.String()
@@ -2626,6 +2704,9 @@ func (p *SetupPanel) renderConfigEditor() string {
 	// original p.height-8 baseline and just pay for the extra
 	// summary/help/hint rows we now render.
 	extraFooter := 2 // hint row + blank spacer above it
+	if rows := p.configSectionTabLineCount(); rows > 1 {
+		extraFooter += rows - 1
+	}
 	if sec.Summary != "" {
 		extraFooter += 2
 	}

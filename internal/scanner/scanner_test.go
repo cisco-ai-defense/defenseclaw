@@ -84,6 +84,25 @@ func TestSkillScanner_ScanEnv_InjectsLLMKey(t *testing.T) {
 	}
 }
 
+func TestSkillScanner_BuildArgsSkipsUnsupportedLLMProvider(t *testing.T) {
+	ss := NewSkillScannerFromLLM(
+		config.SkillScannerConfig{UseLLM: true, UseBehavioral: true},
+		config.LLMConfig{Provider: "bedrock", Model: "us.anthropic.claude-haiku"},
+		config.CiscoAIDefenseConfig{},
+	)
+
+	args := strings.Join(ss.buildArgs("/tmp/skill"), " ")
+	if strings.Contains(args, "--use-llm") {
+		t.Fatalf("unsupported provider must not enable skill-scanner LLM analyzer: %s", args)
+	}
+	if strings.Contains(args, "--llm-provider") {
+		t.Fatalf("unsupported provider must not pass --llm-provider: %s", args)
+	}
+	if !strings.Contains(args, "--use-behavioral") {
+		t.Fatalf("static/behavioral scan flags should remain active: %s", args)
+	}
+}
+
 func TestSkillScanner_ScanEnv_InjectsCiscoKey(t *testing.T) {
 	os.Unsetenv("AI_DEFENSE_API_KEY")
 
