@@ -248,6 +248,88 @@ func emitVerdict(
 	})
 }
 
+// TaintEscalationDetails carries the structured fields produced by
+// guardrail.rego's taint_escalation block, so the audit emitter can
+// thread them through to gateway.jsonl + OTel without re-marshaling.
+type TaintEscalationDetails struct {
+	Path                  string
+	Tier                  string
+	Steps                 int
+	BaseSeverityRank      int
+	EffectiveSeverityRank int
+	TaintedFiles          []string
+	Sources               []string
+	EventsSinceSource     int
+	NetworkDestExcluded   bool
+}
+
+// emitTaintEscalation records a taint-driven severity bump as a
+// first-class verdict event. The same finding strings that produced
+// the base verdict are forwarded so SIEM correlations stay intact;
+// the categories list is enriched with `taint:<path>` and
+// `taint_files:<count>` so downstream queries can filter on
+// session-level chains without parsing the reason text.
+//
+// Caller already produced a verdict payload; this emit is in addition
+// to (not in place of) the StageRegex / StageJudge verdicts, so the
+// audit trail captures both the underlying finding and the chain
+// decision.
+func emitTaintEscalation(
+	ctx context.Context,
+	direction gatewaylog.Direction,
+	model string,
+	action string,
+	severity gatewaylog.Severity,
+	reason string,
+	findings []string,
+	details TaintEscalationDetails,
+	latencyMs int64,
+) {
+	cats := []string{
+		"surface:tool_call",
+		"taint:" + details.Path,
+		"taint_tier:" + details.Tier,
+	}
+	if len(details.TaintedFiles) > 0 {
+		cats = append(cats, fmt.Sprintf("taint_files:%d", len(details.TaintedFiles)))
+	}
+	if details.NetworkDestExcluded {
+		cats = append(cats, "taint_network_excluded:true")
+	}
+	if details.EventsSinceSource > 0 {
+		cats = append(cats, fmt.Sprintf("taint_events_since_source:%d", details.EventsSinceSource))
+	}
+	// Deduplicate finding strings — the same rule can fire multiple
+	// times within one tool_calls batch (cp + mv on the same file).
+	if len(findings) > 0 {
+		seen := make(map[string]struct{}, len(findings))
+		dedup := findings[:0]
+		for _, f := range findings {
+			if _, ok := seen[f]; ok {
+				continue
+			}
+			seen[f] = struct{}{}
+			dedup = append(dedup, f)
+		}
+		findings = dedup
+		_ = findings // silence "declared and not used" if cats path skipped
+	}
+
+	emitEvent(ctx, gatewaylog.Event{
+		EventType: gatewaylog.EventVerdict,
+		Severity:  severity,
+		Direction: direction,
+		Model:     model,
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:      gatewaylog.StageTaintEscalation,
+			Action:     action,
+			Reason:     reason,
+			Categories: cats,
+			LatencyMs:  latencyMs,
+		},
+	})
+}
+
 // JudgeEmitOpts carries optional correlation for judge persistence and payloads.
 type JudgeEmitOpts struct {
 	Findings       []gatewaylog.Finding

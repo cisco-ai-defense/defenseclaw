@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -75,6 +76,23 @@ type EventRouter struct {
 	activeSessions   map[string]time.Time // sessionKey → last seen
 
 	contextTracker *ContextTracker
+
+	// taint is the per-process session-level taint tracker shared
+	// with the GuardrailProxy. Wired in by Sidecar after the rule
+	// pack is loaded.
+	taint *TaintTracker
+
+	// policyEngine is the OPA engine used for taint-driven severity
+	// escalation in handleToolCall. Wired in by Sidecar.Run() once
+	// the engine has compiled successfully; remains nil when OPA
+	// is unavailable, in which case the router falls back to the
+	// non-escalated verdict.
+	policyEngine *policy.Engine
+
+	// policyTier is the operator-selected guardrail handle
+	// ("default" | "strict" | "permissive"). Used to resolve
+	// data.guardrail.taint.<tier> in the Rego policy.
+	policyTier string
 
 	// defaultAgentName is the fallback for agent_name when the
 	// incoming event doesn't supply one. Populated from
@@ -189,6 +207,29 @@ func (r *EventRouter) pruneSessionsLocked() {
 // SetJudge configures the LLM judge for tool call injection detection.
 func (r *EventRouter) SetJudge(j *LLMJudge) {
 	r.judge = j
+}
+
+// SetTaintTracker installs the shared session taint tracker. Nil-safe:
+// callers that don't construct one (e.g. tests, minimal builds) fall
+// through with empty TaintContext and the OPA policy emits no
+// escalation.
+func (r *EventRouter) SetTaintTracker(t *TaintTracker) {
+	r.taint = t
+}
+
+// SetPolicyEngine installs the OPA engine used for taint-driven
+// severity escalation. Called by Sidecar.Run() after the engine has
+// compiled. A nil engine means OPA is unavailable — the router falls
+// back to the local-rule verdict without escalation.
+func (r *EventRouter) SetPolicyEngine(e *policy.Engine) {
+	r.policyEngine = e
+}
+
+// SetPolicyTier sets the policy tier ("default" | "strict" |
+// "permissive") used when calling OPA for taint escalation. Empty
+// falls back to "default" inside Rego.
+func (r *EventRouter) SetPolicyTier(tier string) {
+	r.policyTier = tier
 }
 
 // SetDefaultAgentName sets the agent name fallback used when incoming
@@ -1135,21 +1176,70 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
 	flaggedPattern := ""
+
+	// Session taint: feed the per-session tracker so that this tool
+	// call's findings + shell ops become part of the running session
+	// state shared with the HTTP proxy. Even when no escalation
+	// fires, the Observe/Record pair is what powers later
+	// "credential read N events ago → exfil now" detections on
+	// either surface.
+	taintEnabled := r.taint != nil && payload.SessionID != ""
+	var taintEscalated *ScanVerdict
+	var taintCtxView TaintContext
+	if taintEnabled {
+		r.taint.Observe(payload.SessionID)
+		ops := ParseExec(payload.Tool, string(payload.Args))
+		r.taint.RecordShellOps(payload.SessionID, ops)
+		if len(findings) > 0 {
+			r.taint.Record(payload.SessionID, findings)
+		}
+		taintCtxView = r.taint.BuildTaintContext(payload.SessionID, findings, ops)
+		// Only consult OPA when the tool actually exhibited a
+		// consumer signal; otherwise the WS path stays as
+		// stateless as before.
+		if (taintCtxView.HasStrongConsumer || taintCtxView.HasWeakConsumer) && r.rp != nil {
+			taintEscalated = r.runTaintEscalation(payload, findings, severity, taintCtxView)
+			if taintEscalated != nil {
+				severity = taintEscalated.Severity
+				dangerous = taintEscalated.Action == "block" ||
+					severityRank[severity] >= severityRank["HIGH"]
+			}
+		}
+	}
+
 	if dangerous {
-		flaggedPattern = findings[0].RuleID
-		r.logStreamToolAction(payload.SessionID, "gateway-tool-call-flagged", payload.Tool, payload.ID,
-			fmt.Sprintf("reason=%s severity=%s confidence=%.2f",
-				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
-		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
+		if len(findings) > 0 {
+			flaggedPattern = findings[0].RuleID
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-flagged", payload.Tool, payload.ID,
+				fmt.Sprintf("reason=%s severity=%s confidence=%.2f",
+					findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
+			fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
+		} else if taintEscalated != nil {
+			flaggedPattern = "TAINT-ESCALATION"
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-flagged", payload.Tool, payload.ID,
+				fmt.Sprintf("reason=session-taint severity=%s action=%s",
+					taintEscalated.Severity, taintEscalated.Action))
+			fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call (taint): %s — %s\n", payload.Tool, taintEscalated.Reason)
+		}
 
 		if r.otel != nil {
+			alertDetails := map[string]string{"rule_id": flaggedPattern, "action": "flagged"}
+			if taintEscalated != nil {
+				alertDetails["taint_escalation"] = "true"
+			}
+			summary := fmt.Sprintf("Dangerous tool call: %s", payload.Tool)
+			if len(findings) > 0 {
+				summary = fmt.Sprintf("Dangerous tool call: %s — %s", payload.Tool, findings[0].Title)
+			} else if taintEscalated != nil {
+				summary = fmt.Sprintf("Dangerous tool call: %s — taint escalation: %s", payload.Tool, taintEscalated.Reason)
+			}
 			r.otel.EmitRuntimeAlert(
 				telemetry.AlertToolCallFlagged,
 				severity,
 				telemetry.SourceToolInspect,
-				fmt.Sprintf("Dangerous tool call: %s — %s", payload.Tool, findings[0].Title),
+				summary,
 				map[string]string{"tool": payload.Tool},
-				map[string]string{"rule_id": flaggedPattern, "action": "flagged"},
+				alertDetails,
 				"", "",
 			)
 		}
@@ -1212,6 +1302,128 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			provider:  "builtin",
 		})
 		r.spanMu.Unlock()
+	}
+}
+
+// runTaintEscalation calls OPA's guardrail policy with the per-session
+// TaintContext attached, returning an escalated verdict when Rego
+// reports a non-empty taint_escalation block. Returns nil when the
+// engine isn't wired, the eval errors, or no escalation occurred —
+// callers fall through to the unmodified scan verdict.
+//
+// We construct a synthetic LocalResult from the rule scan so Rego's
+// existing severity-merge logic still considers them, even if the
+// router never called OPA before for this surface.
+func (r *EventRouter) runTaintEscalation(payload ToolCallPayload, findings []RuleFinding, severity string, taintCtx TaintContext) *ScanVerdict {
+	if r.policyEngine == nil {
+		return nil
+	}
+
+	// Tier comes from the rule-pack profile (default/strict/
+	// permissive). Empty string is fine — the Rego policy falls
+	// back to the default tier internally. Avoid using
+	// defaultPolicyID here: that field carries the action mode
+	// ("observe"/"action"), which would resolve to a missing tier.
+	tier := r.policyTier
+
+	bridged := &policy.GuardrailTaintContext{
+		HasStrongConsumer:       taintCtx.HasStrongConsumer,
+		HasWeakConsumer:         taintCtx.HasWeakConsumer,
+		HasTaintSourceInSession: taintCtx.HasTaintSourceInSession,
+		TaintedFilesReferenced:  taintCtx.TaintedFilesReferenced,
+		SourceFindings:          taintCtx.SourceFindings,
+		MaxConsumerConfidence:   taintCtx.MaxConsumerConfidence,
+		NetworkDestExcluded:     taintCtx.NetworkDestExcluded,
+		EventsSinceSource:       taintCtx.EventsSinceSource,
+	}
+
+	input := policy.GuardrailInput{
+		Direction:    "tool-call",
+		Model:        "",
+		Mode:         "action",
+		ScannerMode:  "local",
+		PolicyTier:   tier,
+		TaintContext: bridged,
+	}
+	if len(findings) > 0 && severity != "" && severity != "NONE" {
+		top := make([]string, 0, 5)
+		for i, f := range findings {
+			if i >= 5 {
+				break
+			}
+			top = append(top, f.RuleID+":"+f.Title)
+		}
+		input.LocalResult = &policy.GuardrailScanResult{
+			Action:   actionForSeverity(severity),
+			Severity: severity,
+			Reason:   strings.Join(top, ", "),
+			Findings: FindingStrings(findings),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	out, err := r.policyEngine.EvaluateGuardrail(ctx, input)
+	if err != nil || out == nil || out.TaintEscalation == nil {
+		return nil
+	}
+
+	r.logStreamToolAction(payload.SessionID, "gateway-taint-escalation", payload.Tool, payload.ID,
+		fmt.Sprintf("severity=%s action=%s path=%s tier=%s steps=%d events_since_source=%d",
+			out.Severity, out.Action,
+			out.TaintEscalation.Path, out.TaintEscalation.Tier,
+			out.TaintEscalation.Steps, out.TaintEscalation.EventsSinceSource))
+
+	// Emit a first-class StageTaintEscalation verdict event so
+	// gateway.jsonl / OTel pick up the chain decision alongside
+	// the StageRegex verdict (if any) that produced the base
+	// finding. We use the rich Rego output here directly — no need
+	// to recompute steps/ranks — so the emitted record is
+	// authoritative.
+	vctx := ContextWithSessionID(context.Background(), payload.SessionID)
+	emitTaintEscalation(
+		vctx,
+		gatewaylog.DirectionPrompt,
+		payload.Tool,
+		out.Action,
+		mapSeverityToGatewayLog(out.Severity),
+		out.Reason,
+		FindingStrings(findings),
+		TaintEscalationDetails{
+			Path:                  out.TaintEscalation.Path,
+			Tier:                  out.TaintEscalation.Tier,
+			Steps:                 out.TaintEscalation.Steps,
+			BaseSeverityRank:      out.TaintEscalation.BaseSeverityRank,
+			EffectiveSeverityRank: out.TaintEscalation.EffectiveSeverityRank,
+			TaintedFiles:          out.TaintEscalation.TaintedFiles,
+			Sources:               out.TaintEscalation.Sources,
+			EventsSinceSource:     out.TaintEscalation.EventsSinceSource,
+			NetworkDestExcluded:   out.TaintEscalation.NetworkDestExcluded,
+		},
+		0,
+	)
+
+	return &ScanVerdict{
+		Action:         out.Action,
+		Severity:       out.Severity,
+		Reason:         out.Reason,
+		Findings:       FindingStrings(findings),
+		ScannerSources: out.ScannerSources,
+	}
+}
+
+// actionForSeverity maps a severity rank to the conventional verdict
+// action used by the rule scanner. Mirrors the proxy's
+// inspectToolCalls() default ("alert" for low severities, "block" for
+// HIGH/CRITICAL) so OPA receives a consistent baseline.
+func actionForSeverity(severity string) string {
+	switch severity {
+	case "HIGH", "CRITICAL":
+		return "block"
+	case "MEDIUM", "LOW":
+		return "alert"
+	default:
+		return "allow"
 	}
 }
 

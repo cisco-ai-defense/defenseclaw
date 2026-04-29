@@ -134,6 +134,13 @@ const (
 	// StageApproval marks verdicts emitted by the exec-approval
 	// pipeline when a dangerous command is denied before running.
 	StageApproval Stage = "approval"
+	// StageTaintEscalation marks verdicts whose severity was
+	// bumped by session-level taint context (e.g. credential read
+	// followed by exfil/destruction). The underlying scan
+	// findings still fire their own StageRegex / StageJudge
+	// verdicts; this stage names the OPA decision that took the
+	// chain into account so SIEMs can correlate.
+	StageTaintEscalation Stage = "taint_escalation"
 )
 
 // Direction is request-layer (user -> model) vs completion-layer

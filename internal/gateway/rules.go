@@ -105,10 +105,18 @@ var commandRules = []PatternRule{
 	{ID: "CMD-PYTHON-C", Pattern: regexp.MustCompile(`(?i)\bpython[23]?\s+-c\s+`), Title: "Python inline execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
 	{ID: "CMD-PERL-E", Pattern: regexp.MustCompile(`(?i)\bperl\s+-e\s+`), Title: "Perl inline execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
 	{ID: "CMD-RUBY-E", Pattern: regexp.MustCompile(`(?i)\bruby\s+-e\s+`), Title: "Ruby inline execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
-	// Destructive operations
-	{ID: "CMD-RM-RF", Pattern: regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/(?:$|["'\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["'\s,}\]]))`), Title: "Recursive force delete from critical root path", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"destructive"}},
-	{ID: "CMD-MKFS", Pattern: regexp.MustCompile(`(?i)\bmkfs\b`), Title: "Filesystem format command", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"destructive"}},
-	{ID: "CMD-DD-IF", Pattern: regexp.MustCompile(`(?i)\bdd\s+if=`), Title: "dd disk write", Severity: "HIGH", Confidence: 0.80, Tags: []string{"destructive"}},
+	// Destructive operations.
+	//
+	// These rules are tagged "taint-consumer" so the OPA policy can
+	// escalate verdicts when the destruction targets a tainted or
+	// baseline-sensitive file (e.g. agent dumps creds and then deletes
+	// them to cover its tracks). Without taint, they fire at their
+	// normal severity.
+	{ID: "CMD-RM-RF", Pattern: regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/(?:$|["'\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["'\s,}\]]))`), Title: "Recursive force delete from critical root path", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"destructive", "taint-consumer"}},
+	{ID: "CMD-MKFS", Pattern: regexp.MustCompile(`(?i)\bmkfs\b`), Title: "Filesystem format command", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"destructive", "taint-consumer"}},
+	{ID: "CMD-DD-IF", Pattern: regexp.MustCompile(`(?i)\bdd\s+if=`), Title: "dd disk write", Severity: "HIGH", Confidence: 0.80, Tags: []string{"destructive", "taint-consumer"}},
+	{ID: "CMD-SHRED", Pattern: regexp.MustCompile(`(?i)\bshred\b\s+(?:-[a-zA-Z]+\s+)*\S+`), Title: "shred (secure file destruction)", Severity: "HIGH", Confidence: 0.85, Tags: []string{"destructive", "taint-consumer"}},
+	{ID: "CMD-TRUNCATE-ZERO", Pattern: regexp.MustCompile(`(?i)\btruncate\b\s+(?:--size=0|--size=\+0|-s\s+\+?0)\b`), Title: "truncate to zero (file destruction)", Severity: "HIGH", Confidence: 0.85, Tags: []string{"destructive", "taint-consumer"}},
 	// Privilege escalation
 	{ID: "CMD-CHMOD-WORLD", Pattern: regexp.MustCompile(`(?i)\bchmod\s+[0-7]*[0-7][0-7][2367]\s`), Title: "chmod world-writable", Severity: "HIGH", Confidence: 0.80, Tags: []string{"privilege"}},
 	{ID: "CMD-CHOWN-ROOT", Pattern: regexp.MustCompile(`(?i)\bchown\s+root\b`), Title: "chown to root", Severity: "HIGH", Confidence: 0.75, Tags: []string{"privilege"}},
@@ -119,10 +127,23 @@ var commandRules = []PatternRule{
 	{ID: "CMD-SYSTEMCTL", Pattern: regexp.MustCompile(`(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b`), Title: "Suspicious systemd persistence enablement", Severity: "HIGH", Confidence: 0.82, Tags: []string{"persistence"}},
 	// Network reconnaissance
 	{ID: "CMD-NETCAT-LISTEN", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*)*-?l`), Title: "Netcat listener", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "reverse-shell"}},
-	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
-	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
+	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration", "taint-consumer"}},
+	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration", "taint-consumer"}},
 	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
+	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential", "taint-source"}},
+	// Chain detection sources — tag-only multi-step taint flags.
+	//
+	// CHAIN-CRED-FILE-READ catches `cat`/`head`/`tail`/`less`/`more` on
+	// known credential locations. The path-rule equivalents (PATH-AWS-CREDS
+	// etc.) already produce a HIGH/CRITICAL finding; the chain rule sits
+	// at MEDIUM with lower confidence so it doesn't double-block on its
+	// own — its job is to set the session-level taint flag for OPA's
+	// weak escalation path.
+	{ID: "CHAIN-CRED-FILE-READ", Pattern: regexp.MustCompile(`(?i)\b(?:cat|head|tail|less|more|bat|view)\s+(?:-[a-zA-Z]+\s+(?:\d+\s+)?)*\S*(?:\.aws/credentials|\.aws/config|\.ssh/id_|\.ssh/.*_(?:rsa|ed25519|ecdsa|dsa)|\.kube/config|\.docker/config\.json|\.gnupg/|\.npmrc|\.pypirc|\.git-credentials|\.netrc|/etc/shadow|/proc/self/environ|/proc/\d+/environ)`), Title: "Read of credential file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive", "taint-source"}},
+	// CHAIN-SECRET-GREP — grep/awk/sed/ripgrep with secret-pattern
+	// keywords. Catches the common reconnaissance step where an agent
+	// hunts for secrets embedded in arbitrary files before exfiltration.
+	{ID: "CHAIN-SECRET-GREP", Pattern: regexp.MustCompile(`(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack|ag|awk|sed)\b\s+(?:-[a-zA-Z]+\s+)*(?:["'][^"']*(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|private[_\-]?key|aws_(?:access|secret)|bearer|sk-(?:live|test|proj|ant)|ghp_|gho_|github_pat_)[^"']*["']|(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|private[_\-]?key))`), Title: "Secret-pattern hunt across files", Severity: "MEDIUM", Confidence: 0.78, Tags: []string{"credential", "taint-source"}},
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +617,43 @@ func hasTag(tags []string, tag string) bool {
 		}
 	}
 	return false
+}
+
+// IsTaintSource reports whether a finding establishes session-level
+// taint. Driven entirely by the rule definition's tag list — no
+// hardcoded rule IDs — so operators can introduce new sources by
+// editing YAML.
+func IsTaintSource(f RuleFinding) bool {
+	return hasTag(f.Tags, taintSourceTag)
+}
+
+// IsTaintConsumer reports whether a finding represents an action that,
+// in a tainted context, indicates exfiltration or destructive
+// evidence-tampering (curl/wget upload, rm/dd/shred/truncate/mkfs, etc.).
+func IsTaintConsumer(f RuleFinding) bool {
+	return hasTag(f.Tags, taintConsumerTag)
+}
+
+// FilterTaintSources returns only the findings tagged as taint sources.
+func FilterTaintSources(findings []RuleFinding) []RuleFinding {
+	var out []RuleFinding
+	for _, f := range findings {
+		if IsTaintSource(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// FilterTaintConsumers returns only the findings tagged as taint consumers.
+func FilterTaintConsumers(findings []RuleFinding) []RuleFinding {
+	var out []RuleFinding
+	for _, f := range findings {
+		if IsTaintConsumer(f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func clampConfidence(c float64) float64 {

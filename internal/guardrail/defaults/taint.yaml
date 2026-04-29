@@ -1,0 +1,45 @@
+# Embedded default taint configuration.
+#
+# This is the fallback used by LoadRulePack when an operator's rule-pack
+# directory does not contain its own taint.yaml. It mirrors the
+# policies/guardrail/default/taint.yaml shipped on disk so the embedded
+# binary works out of the box.
+#
+# Schema version 1.
+version: 1
+
+flag_decay_events: 10
+file_taint_decay_events: 30
+
+sensitive_files:
+  - "~/.aws/credentials"
+  - "~/.aws/config"
+  - "~/.ssh/id_*"
+  - "~/.ssh/*_rsa"
+  - "~/.ssh/*_ed25519"
+  - "~/.ssh/*_ecdsa"
+  - "~/.ssh/*_dsa"
+  - "~/.kube/config"
+  - "~/.docker/config.json"
+  - "~/.gnupg/**"
+  - "~/.npmrc"
+  - "~/.pypirc"
+  - "~/.git-credentials"
+  - "~/.netrc"
+  - "**/.env"
+  - "**/.env.*"
+  - "/etc/shadow"
+  - "/etc/passwd"
+  - "/etc/sudoers"
+  - "/proc/*/environ"
+  - "/proc/self/environ"
+
+network_exclusions:
+  - "127.0.0.0/8"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "::1"
+  - "localhost"
+
+session_idle_ttl_seconds: 3600

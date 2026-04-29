@@ -761,6 +761,128 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 	}
 }
 
+// ApplyTaintEscalation runs OPA's guardrail policy purely as a
+// severity-escalation pass for already-merged tool-call findings.
+//
+// The proxy's inspectToolCalls() and the EventRouter's WS scan path
+// don't normally route through OPA — they call ScanAllRules() and
+// emit a verdict directly. That keeps tool-call inspection cheap, but
+// it means session-level taint context (built from the per-session
+// TaintTracker) never touches a policy decision. This helper closes
+// that gap: callers ScanAllRules() first, build a TaintContext via
+// taint_tracker.BuildTaintContext(), then call here so guardrail.rego
+// can decide whether to bump severity (e.g. credential read followed
+// by curl POST -> CRITICAL).
+//
+// Fall-through is intentional and exhaustive:
+//
+//   - nil engine (policyDir not set, engine load failure): return merged
+//   - nil merged verdict, nil taintCtx, or no signal in taintCtx: return merged
+//   - OPA eval error: return merged (engine load errors already logged)
+//
+// The result is always a fully-populated *ScanVerdict suitable for
+// returning to the proxy. ScannerSources picks up "taint-tracker" via
+// guardrail.rego when escalation actually fires; we do not synthesize
+// it here.
+func (g *GuardrailInspector) ApplyTaintEscalation(
+	ctx context.Context,
+	direction, model, mode string,
+	merged *ScanVerdict,
+	tier string,
+	taintCtx *policy.GuardrailTaintContext,
+) *ScanVerdict {
+	if merged == nil {
+		return merged
+	}
+	// Skip OPA entirely when there is no taint signal to consume.
+	// Tool-call inspection runs on every event; bypassing the
+	// engine in the no-signal case keeps the hot path cheap.
+	if taintCtx == nil ||
+		(!taintCtx.HasStrongConsumer && !taintCtx.HasWeakConsumer) {
+		return merged
+	}
+	engine := g.policyEngine()
+	if engine == nil {
+		return merged
+	}
+
+	input := policy.GuardrailInput{
+		Direction:     direction,
+		Model:         model,
+		Mode:          mode,
+		ScannerMode:   g.scannerMode,
+		ContentLength: 0,
+		PolicyTier:    tier,
+		TaintContext:  taintCtx,
+	}
+	if merged.Severity != "NONE" && merged.Severity != "" {
+		input.LocalResult = &policy.GuardrailScanResult{
+			Action:   merged.Action,
+			Severity: merged.Severity,
+			Reason:   merged.Reason,
+			Findings: merged.Findings,
+		}
+	}
+
+	opaStart := time.Now()
+	opaCtx, endOPA := g.startPhaseSpan(ctx, "opa.taint")
+	out, err := engine.EvaluateGuardrail(opaCtx, input)
+	opaLatency := time.Since(opaStart).Milliseconds()
+	if err != nil || out == nil {
+		endOPA("", "", opaLatency)
+		return merged
+	}
+	endOPA(out.Action, out.Severity, opaLatency)
+
+	// When Rego didn't emit an escalation block, fall back to the
+	// caller's merged verdict so we don't accidentally downgrade or
+	// rewrite findings. The Rego policy only emits a non-empty
+	// taint_escalation when steps > 0.
+	if out.TaintEscalation == nil {
+		return merged
+	}
+
+	// Preserve the original finding strings — escalation only
+	// changes severity / action / reason, never the underlying
+	// rule_ids (so audit trails remain accurate).
+	return &ScanVerdict{
+		Action:         out.Action,
+		Severity:       out.Severity,
+		Reason:         out.Reason,
+		Findings:       merged.Findings,
+		ScannerSources: dedupAppend(merged.ScannerSources, out.ScannerSources...),
+	}
+}
+
+// dedupAppend returns the union of `base` and `extra` preserving order
+// (base first). Used by ApplyTaintEscalation to merge scanner sources
+// without duplicating "tool-call-inspect" / "taint-tracker" tags.
+func dedupAppend(base []string, extra ...string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, s := range base {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range extra {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Local pattern scanning
 // ---------------------------------------------------------------------------

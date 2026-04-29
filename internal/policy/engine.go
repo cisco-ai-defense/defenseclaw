@@ -163,11 +163,49 @@ func (e *Engine) EvaluateGuardrail(ctx context.Context, input GuardrailInput) (*
 
 	sources := toStringSlice(result, "scanner_sources")
 	return &GuardrailOutput{
-		Action:         stringVal(result, "action"),
-		Severity:       stringVal(result, "severity"),
-		Reason:         stringVal(result, "reason"),
-		ScannerSources: sources,
+		Action:          stringVal(result, "action"),
+		Severity:        stringVal(result, "severity"),
+		Reason:          stringVal(result, "reason"),
+		ScannerSources:  sources,
+		TaintEscalation: extractTaintEscalation(result),
 	}, nil
+}
+
+// extractTaintEscalation pulls guardrail.rego's `taint_escalation`
+// block out of the result map. The Rego policy emits this block only
+// when session taint context bumped severity, so callers can treat a
+// non-nil return as "this verdict was influenced by taint".
+//
+// Defensive against partial / type-mismatched output: any field that
+// fails to type-assert is silently dropped, which is preferable to
+// failing the whole evaluation just because Rego shipped a
+// numerically-typed integer.
+func extractTaintEscalation(result map[string]interface{}) *GuardrailTaintEscalation {
+	raw, ok := result["taint_escalation"]
+	if !ok || raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]interface{})
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := &GuardrailTaintEscalation{
+		Path:                  stringVal(m, "path"),
+		Tier:                  stringVal(m, "tier"),
+		Steps:                 intVal(m, "steps"),
+		BaseSeverityRank:      intVal(m, "base_severity_rank"),
+		EffectiveSeverityRank: intVal(m, "effective_severity_rank"),
+		TaintedFiles:          toStringSlice(m, "tainted_files"),
+		Sources:               toStringSlice(m, "sources"),
+		EventsSinceSource:     intVal(m, "events_since_source"),
+		NetworkDestExcluded:   boolVal(m, "network_dest_excluded"),
+	}
+	// Treat an empty path/tier as "no escalation"; the Rego policy
+	// shouldn't emit this block in that state, but be defensive.
+	if out.Path == "" && out.Tier == "" && out.Steps == 0 {
+		return nil
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +538,33 @@ func stringVal(m map[string]interface{}, key string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return s
+}
+
+// intVal pulls an integer out of an OPA result map. OPA's JSON
+// numbers ride in as either json.Number or float64 depending on the
+// runtime path; both shapes are handled. Returns 0 when missing or
+// unconvertible.
+func intVal(m map[string]interface{}, key string) int {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		if iv, err := n.Int64(); err == nil {
+			return int(iv)
+		}
+		if fv, err := n.Float64(); err == nil {
+			return int(fv)
+		}
+	}
+	return 0
 }
 
 func boolVal(m map[string]interface{}, key string) bool {

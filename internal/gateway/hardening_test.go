@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 // ---------------------------------------------------------------------------
@@ -138,7 +140,7 @@ func TestInspectToolCalls_ParseError(t *testing.T) {
 	proxy := newTestProxy(t, prov, insp, "action")
 
 	malformed := json.RawMessage(`{not a valid tool calls array}`)
-	verdict := proxy.inspectToolCalls(context.Background(), malformed)
+	verdict := proxy.inspectToolCalls(context.Background(), malformed, "", "gpt-4", "action")
 	if verdict == nil {
 		t.Fatal("expected non-nil verdict on parse error")
 	}
@@ -155,10 +157,10 @@ func TestInspectToolCalls_Empty(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 
-	if v := proxy.inspectToolCalls(context.Background(), nil); v != nil {
+	if v := proxy.inspectToolCalls(context.Background(), nil, "", "gpt-4", "action"); v != nil {
 		t.Errorf("expected nil for empty input, got %+v", v)
 	}
-	if v := proxy.inspectToolCalls(context.Background(), json.RawMessage(``)); v != nil {
+	if v := proxy.inspectToolCalls(context.Background(), json.RawMessage(``), "", "gpt-4", "action"); v != nil {
 		t.Errorf("expected nil for empty bytes, got %+v", v)
 	}
 }
@@ -267,7 +269,7 @@ func TestInspectToolCallsMalformedJSONBlocks(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 
-	verdict := proxy.inspectToolCalls(context.Background(), json.RawMessage(`{not valid json`))
+	verdict := proxy.inspectToolCalls(context.Background(), json.RawMessage(`{not valid json`), "", "gpt-4", "action")
 	if verdict == nil {
 		t.Fatal("expected non-nil verdict for malformed JSON")
 	}
@@ -284,10 +286,10 @@ func TestInspectToolCallsNilReturnsNil(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
 
-	if v := proxy.inspectToolCalls(context.Background(), nil); v != nil {
+	if v := proxy.inspectToolCalls(context.Background(), nil, "", "gpt-4", "action"); v != nil {
 		t.Errorf("expected nil verdict for nil input, got %+v", v)
 	}
-	if v := proxy.inspectToolCalls(context.Background(), json.RawMessage(``)); v != nil {
+	if v := proxy.inspectToolCalls(context.Background(), json.RawMessage(``), "", "gpt-4", "action"); v != nil {
 		t.Errorf("expected nil verdict for empty input, got %+v", v)
 	}
 }
@@ -884,3 +886,7 @@ func (m *mockInspectorBlockAll) InspectMidStream(ctx context.Context, direction,
 }
 
 func (m *mockInspectorBlockAll) SetScannerMode(_ string) {}
+
+func (m *mockInspectorBlockAll) ApplyTaintEscalation(_ context.Context, _, _, _ string, merged *ScanVerdict, _ string, _ *policy.GuardrailTaintContext) *ScanVerdict {
+	return merged
+}

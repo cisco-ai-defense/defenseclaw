@@ -1,0 +1,37 @@
+# Taint state configuration for the "permissive" policy tier.
+#
+# Permissive tier shortens decay windows and broadens network
+# exclusions so taint signals stop affecting verdicts more quickly.
+# Combined with data.guardrail.taint.permissive (which sets mode:
+# "observe" and zero escalation steps), this tier emits taint context
+# for telemetry without ever blocking based on it.
+#
+# Schema version 1.
+version: 1
+
+flag_decay_events: 5
+file_taint_decay_events: 15
+
+sensitive_files:
+  - "~/.aws/credentials"
+  - "~/.ssh/id_*"
+  - "~/.git-credentials"
+  - "~/.netrc"
+  - "/etc/shadow"
+  - "/etc/passwd"
+  - "/proc/*/environ"
+  - "/proc/self/environ"
+
+network_exclusions:
+  - "127.0.0.0/8"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "169.254.0.0/16"
+  - "::1"
+  - "fc00::/7"
+  - "localhost"
+  - ".internal"
+  - ".local"
+
+session_idle_ttl_seconds: 1800

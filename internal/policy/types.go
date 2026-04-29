@@ -75,14 +75,61 @@ type GuardrailInput struct {
 	LocalResult   *GuardrailScanResult `json:"local_result"`
 	CiscoResult   *GuardrailScanResult `json:"cisco_result"`
 	ContentLength int                  `json:"content_length"`
+
+	// PolicyTier is the operator-selected guardrail mode handle
+	// ("default" | "strict" | "permissive"). Rego resolves
+	// data.guardrail.taint.<tier> from this value to pick
+	// escalation knobs without round-tripping through config files.
+	// Optional — empty falls back to "default" inside Rego.
+	PolicyTier string `json:"policy_tier,omitempty"`
+
+	// TaintContext is the per-evaluation overlay built by the
+	// session TaintTracker (Go) and consumed by the guardrail Rego
+	// policy. Omitted when no tracker is wired (legacy / tests),
+	// in which case Rego skips the taint escalation branches.
+	TaintContext *GuardrailTaintContext `json:"taint_context,omitempty"`
+}
+
+// GuardrailTaintContext mirrors gateway.TaintContext on the policy
+// boundary. Kept as a structurally identical, package-local type to
+// avoid an import cycle (internal/gateway already imports
+// internal/policy via policy.Engine.EvaluateGuardrail). The gateway
+// builds a TaintContext via TaintTracker.BuildTaintContext and
+// converts to this view immediately before the OPA call.
+type GuardrailTaintContext struct {
+	HasStrongConsumer       bool     `json:"has_strong_consumer"`
+	HasWeakConsumer         bool     `json:"has_weak_consumer"`
+	HasTaintSourceInSession bool     `json:"has_taint_source_in_session"`
+	TaintedFilesReferenced  []string `json:"tainted_files_referenced"`
+	SourceFindings          []string `json:"source_findings"`
+	MaxConsumerConfidence   float64  `json:"max_consumer_confidence"`
+	NetworkDestExcluded     bool     `json:"network_dest_excluded"`
+	EventsSinceSource       int      `json:"events_since_source"`
 }
 
 // GuardrailOutput is the OPA-determined verdict returned to the Python guardrail.
 type GuardrailOutput struct {
-	Action         string   `json:"action"`
-	Severity       string   `json:"severity"`
-	Reason         string   `json:"reason"`
-	ScannerSources []string `json:"scanner_sources"`
+	Action           string                    `json:"action"`
+	Severity         string                    `json:"severity"`
+	Reason           string                    `json:"reason"`
+	ScannerSources   []string                  `json:"scanner_sources"`
+	TaintEscalation  *GuardrailTaintEscalation `json:"taint_escalation,omitempty"`
+}
+
+// GuardrailTaintEscalation is the structured telemetry block emitted
+// by guardrail.rego when taint context bumped severity. Nil when no
+// escalation occurred, so callers can treat presence as "this verdict
+// was influenced by session taint".
+type GuardrailTaintEscalation struct {
+	Path                  string   `json:"path"`
+	Tier                  string   `json:"tier"`
+	Steps                 int      `json:"steps"`
+	BaseSeverityRank      int      `json:"base_severity_rank"`
+	EffectiveSeverityRank int      `json:"effective_severity_rank"`
+	TaintedFiles          []string `json:"tainted_files,omitempty"`
+	Sources               []string `json:"sources,omitempty"`
+	EventsSinceSource     int      `json:"events_since_source"`
+	NetworkDestExcluded   bool     `json:"network_dest_excluded"`
 }
 
 // FirewallInput is the structured input passed to the OPA firewall policy.

@@ -41,6 +41,11 @@ type RulePack struct {
 	JudgeConfigs   map[string]*JudgeYAML
 	SensitiveTools *SensitiveToolsConfig
 	RuleFiles      []*RulesFileYAML
+	// Taint holds STATE-bound configuration for the session-level taint
+	// tracker. Policy decision knobs (escalation steps, mode, confidence
+	// thresholds) live in OPA Rego data, NOT here. May be nil if no
+	// taint.yaml is present and no embedded default applies.
+	Taint *TaintStateConfig
 }
 
 // SuppressionsConfig maps to suppressions.yaml.
@@ -131,6 +136,19 @@ type SensitiveTool struct {
 	MinEntitiesAlert int    `yaml:"min_entities_for_alert,omitempty"`
 }
 
+// TaintStateConfig maps to taint.yaml. It is intentionally state-bound:
+// only knobs needed by the in-memory tracker live here. Anything the
+// Rego policy uses to make decisions (escalation step counts, mode,
+// confidence thresholds) lives in OPA data and is loaded separately.
+type TaintStateConfig struct {
+	Version               int      `yaml:"version"`
+	FlagDecayEvents       int      `yaml:"flag_decay_events"`
+	FileTaintDecayEvents  int      `yaml:"file_taint_decay_events"`
+	SensitiveFiles        []string `yaml:"sensitive_files"`
+	NetworkExclusions     []string `yaml:"network_exclusions"`
+	SessionIdleTTLSeconds int      `yaml:"session_idle_ttl_seconds"`
+}
+
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
@@ -145,6 +163,7 @@ func LoadRulePack(dir string) *RulePack {
 
 	rp.Suppressions = loadYAML[SuppressionsConfig](dir, "suppressions.yaml")
 	rp.SensitiveTools = loadYAML[SensitiveToolsConfig](dir, "sensitive-tools.yaml")
+	rp.Taint = loadYAML[TaintStateConfig](dir, "taint.yaml")
 
 	for _, name := range []string{"pii", "injection", "tool-injection"} {
 		jc := loadYAML[JudgeYAML](dir, filepath.Join("judge", name+".yaml"))
@@ -326,6 +345,18 @@ func (rp *RulePack) Validate() {
 			checkPattern("rule:"+rf.Category, r.ID, r.Pattern)
 		}
 	}
+
+	if rp.Taint != nil {
+		if rp.Taint.Version != 1 {
+			log.Printf("guardrail: taint.yaml version %d unsupported, expected 1", rp.Taint.Version)
+		}
+		if rp.Taint.FlagDecayEvents < 0 {
+			log.Printf("guardrail: taint.yaml flag_decay_events must be non-negative; got %d", rp.Taint.FlagDecayEvents)
+		}
+		if rp.Taint.FileTaintDecayEvents < 0 {
+			log.Printf("guardrail: taint.yaml file_taint_decay_events must be non-negative; got %d", rp.Taint.FileTaintDecayEvents)
+		}
+	}
 }
 
 // checkPattern compiles pattern and logs a warning if it is invalid.
@@ -359,6 +390,10 @@ func (rp *RulePack) String() string {
 	for _, rf := range rp.RuleFiles {
 		nRules += len(rf.Rules)
 	}
-	return fmt.Sprintf("RulePack{judges=%d, suppressions=%d, sensitive_tools=%d, rule_files=%d, rules=%d}",
-		len(rp.JudgeConfigs), nSupp, nTools, nRuleFiles, nRules)
+	taintLoaded := false
+	if rp.Taint != nil {
+		taintLoaded = true
+	}
+	return fmt.Sprintf("RulePack{judges=%d, suppressions=%d, sensitive_tools=%d, rule_files=%d, rules=%d, taint=%v}",
+		len(rp.JudgeConfigs), nSupp, nTools, nRuleFiles, nRules, taintLoaded)
 }

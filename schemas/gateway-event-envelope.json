@@ -69,8 +69,8 @@
       "type": "object",
       "required": ["stage", "action"],
       "properties": {
-        "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final", "session_message", "multi_turn", "block_list", "approval"] },
-        "action":     { "type": "string", "enum": ["allow", "warn", "block"] },
+        "stage":      { "type": "string", "enum": ["regex", "judge", "cisco_ai_defense", "opa", "final", "session_message", "multi_turn", "block_list", "approval", "taint_escalation"] },
+        "action":     { "type": "string", "enum": ["allow", "warn", "block", "alert"] },
         "reason":     { "type": ["string", "null"] },
         "categories": { "type": ["array", "null"], "items": { "type": "string" } },
         "latency_ms": { "type": ["integer", "null"] }

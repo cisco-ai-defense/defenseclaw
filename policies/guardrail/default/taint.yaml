@@ -1,0 +1,71 @@
+# Taint state configuration for the "default" policy tier.
+#
+# This file controls only STATE-bound knobs consumed by the Go-side
+# TaintTracker. Policy decisions (escalation step counts, observe vs
+# action mode, confidence thresholds, etc.) live in OPA Rego under
+# data.guardrail.taint.default — see policies/rego/data.json.
+#
+# Schema version 1.
+version: 1
+
+# flag_decay_events controls how many tool-call events a session-level
+# taint flag remains "live" for escalation. After flag_decay_events
+# events without re-recording, the flag stops contributing to weak
+# (session-level) escalation.
+flag_decay_events: 10
+
+# file_taint_decay_events controls how long a tracked file path remains
+# tainted (after a sensitive write/copy/redirect) before it stops
+# contributing to strong escalation. Larger than flag_decay_events
+# because file persistence is a stronger signal than ambient session
+# context.
+file_taint_decay_events: 30
+
+# sensitive_files lists paths that are treated as taint sources without
+# requiring an explicit YAML rule match. Glob syntax:
+#   *  matches any chars except /
+#   ** matches zero or more path components (including empty)
+#   ?  matches a single char except /
+# Reads of these paths establish file-level taint on any output;
+# consumers that reference them are strong consumers.
+sensitive_files:
+  - "~/.aws/credentials"
+  - "~/.aws/config"
+  - "~/.ssh/id_*"
+  - "~/.ssh/*_rsa"
+  - "~/.ssh/*_ed25519"
+  - "~/.ssh/*_ecdsa"
+  - "~/.ssh/*_dsa"
+  - "~/.kube/config"
+  - "~/.docker/config.json"
+  - "~/.gnupg/**"
+  - "~/.npmrc"
+  - "~/.pypirc"
+  - "~/.git-credentials"
+  - "~/.netrc"
+  - "**/.env"
+  - "**/.env.*"
+  - "/etc/shadow"
+  - "/etc/passwd"
+  - "/etc/sudoers"
+  - "/proc/*/environ"
+  - "/proc/self/environ"
+
+# network_exclusions are CIDR ranges and hostnames whose presence in a
+# consumer's network destination suppresses weak (session-level)
+# escalation. Strong escalation (file-level) is NOT affected — a
+# tainted file uploaded to localhost is still suspicious. CIDR and
+# hostname syntax both supported; bare IPs become /32 (or /128) ranges.
+network_exclusions:
+  - "127.0.0.0/8"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "::1"
+  - "localhost"
+
+# session_idle_ttl_seconds is the wall-clock time after which a session
+# with no activity is evicted from the in-memory tracker. This is purely
+# memory hygiene and NEVER affects taint decisions for live sessions —
+# all decay decisions are event-count based.
+session_idle_ttl_seconds: 3600

@@ -73,24 +73,43 @@ rules:
     severity: LOW
     confidence: 0.55
     tags: [execution]
+  # Destructive operations.
+  #
+  # These rules are tagged "taint-consumer" so the OPA policy can
+  # escalate verdicts when the destruction targets a tainted or
+  # baseline-sensitive file (e.g. agent dumps creds and then deletes
+  # them to cover its tracks). Without taint, they fire at their
+  # normal severity.
   - id: CMD-RM-RF
     pattern: '(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/(?:$|["''\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["''\s,}\]]))'
     title: "Recursive force delete from critical root path"
     severity: CRITICAL
     confidence: 0.95
-    tags: [destructive]
+    tags: [destructive, taint-consumer]
   - id: CMD-MKFS
     pattern: '(?i)\bmkfs\b'
     title: "Filesystem format command"
     severity: CRITICAL
     confidence: 0.90
-    tags: [destructive]
+    tags: [destructive, taint-consumer]
   - id: CMD-DD-IF
     pattern: '(?i)\bdd\s+if='
     title: "dd disk write"
     severity: HIGH
     confidence: 0.80
-    tags: [destructive]
+    tags: [destructive, taint-consumer]
+  - id: CMD-SHRED
+    pattern: '(?i)\bshred\b\s+(?:-[a-zA-Z]+\s+)*\S+'
+    title: "shred (secure file destruction)"
+    severity: HIGH
+    confidence: 0.85
+    tags: [destructive, taint-consumer]
+  - id: CMD-TRUNCATE-ZERO
+    pattern: '(?i)\btruncate\b\s+(?:--size=0|--size=\+0|-s\s+\+?0)\b'
+    title: "truncate to zero (file destruction)"
+    severity: HIGH
+    confidence: 0.85
+    tags: [destructive, taint-consumer]
   - id: CMD-CHMOD-WORLD
     pattern: '(?i)\bchmod\s+[0-7]*[0-7][0-7][2367]\s'
     title: "chmod world-writable"
@@ -138,13 +157,13 @@ rules:
     title: "curl file upload"
     severity: HIGH
     confidence: 0.85
-    tags: [network, exfiltration]
+    tags: [network, exfiltration, taint-consumer]
   - id: CMD-WGET-POST
     pattern: '(?i)\bwget\b\s+.*--post-(?:data|file)'
     title: "wget POST data exfil"
     severity: HIGH
     confidence: 0.85
-    tags: [network, exfiltration]
+    tags: [network, exfiltration, taint-consumer]
   - id: CMD-SOCAT-EXEC
     pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
     title: "socat with EXEC (reverse shell)"
@@ -156,4 +175,27 @@ rules:
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80
-    tags: [credential]
+    tags: [credential, taint-source]
+  # Chain detection sources — tag-only multi-step taint flags.
+  #
+  # CHAIN-CRED-FILE-READ catches cat/head/tail/less/more/bat/view on
+  # known credential locations. The path-rule equivalents (PATH-AWS-CREDS
+  # etc.) already produce a HIGH/CRITICAL finding; the chain rule sits
+  # at MEDIUM with lower confidence so it doesn't double-block on its
+  # own — its job is to set the session-level taint flag for OPA's
+  # weak escalation path.
+  - id: CHAIN-CRED-FILE-READ
+    pattern: '(?i)\b(?:cat|head|tail|less|more|bat|view)\s+(?:-[a-zA-Z]+\s+(?:\d+\s+)?)*\S*(?:\.aws/credentials|\.aws/config|\.ssh/id_|\.ssh/.*_(?:rsa|ed25519|ecdsa|dsa)|\.kube/config|\.docker/config\.json|\.gnupg/|\.npmrc|\.pypirc|\.git-credentials|\.netrc|/etc/shadow|/proc/self/environ|/proc/\d+/environ)'
+    title: "Read of credential file"
+    severity: MEDIUM
+    confidence: 0.80
+    tags: [credential, file-sensitive, taint-source]
+  # CHAIN-SECRET-GREP — grep/awk/sed/ripgrep with secret-pattern
+  # keywords. Catches the common reconnaissance step where an agent
+  # hunts for secrets embedded in arbitrary files before exfiltration.
+  - id: CHAIN-SECRET-GREP
+    pattern: '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack|ag|awk|sed)\b\s+(?:-[a-zA-Z]+\s+)*(?:["''][^"'']*(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|private[_\-]?key|aws_(?:access|secret)|bearer|sk-(?:live|test|proj|ant)|ghp_|gho_|github_pat_)[^"'']*["'']|(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token|private[_\-]?key))'
+    title: "Secret-pattern hunt across files"
+    severity: MEDIUM
+    confidence: 0.78
+    tags: [credential, taint-source]

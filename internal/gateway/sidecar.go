@@ -54,6 +54,15 @@ type Sidecar struct {
 	opa      *policy.Engine
 	webhooks *WebhookDispatcher
 
+	// taint is the per-process session taint tracker, shared between
+	// the EventRouter (WebSocket scan path) and the GuardrailProxy
+	// (HTTP /v1/chat/completions path) so multi-step credential-then-
+	// exfil chains escalate consistently regardless of which surface
+	// observed the source. Constructed from rp.Taint at boot; nil
+	// when the rule pack ships no taint config (legacy bundles, unit
+	// tests).
+	taint *TaintTracker
+
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
 	alertWg     sync.WaitGroup
@@ -158,6 +167,34 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
 	router.SetRulePack(rp)
 	ApplyRulePackOverrides(rp)
+
+	// Construct the per-process session taint tracker from the rule
+	// pack's taint.yaml block. The same tracker is shared between the
+	// EventRouter (WS scan path) and GuardrailProxy (HTTP /v1/chat/
+	// completions path) so a credential-source observed on one
+	// surface escalates an exfil/destructive consumer observed on the
+	// other within the same session. Rule packs without taint.yaml
+	// land here with a nil rp.Taint and no tracker — taint policy in
+	// OPA degrades gracefully to a no-op (empty TaintContext).
+	var taintTracker *TaintTracker
+	if rp != nil && rp.Taint != nil {
+		ts := rp.Taint
+		taintCfg := TaintConfig{
+			FlagDecayEvents:      ts.FlagDecayEvents,
+			FileTaintDecayEvents: ts.FileTaintDecayEvents,
+			SensitiveFiles:       ts.SensitiveFiles,
+			NetworkExclusions:    ts.NetworkExclusions,
+			SessionIdleTTL:       time.Duration(ts.SessionIdleTTLSeconds) * time.Second,
+		}
+		taintTracker = NewTaintTracker(taintCfg, 0)
+		router.SetTaintTracker(taintTracker)
+		fmt.Fprintf(os.Stderr,
+			"[sidecar] session taint tracker enabled (flag_decay=%d events, file_decay=%d events, sensitive_files=%d, network_exclusions=%d, idle_ttl=%ds)\n",
+			ts.FlagDecayEvents, ts.FileTaintDecayEvents, len(ts.SensitiveFiles), len(ts.NetworkExclusions), ts.SessionIdleTTLSeconds)
+	} else {
+		fmt.Fprintln(os.Stderr,
+			"[sidecar] session taint tracker disabled (rule pack has no taint.yaml)")
+	}
 
 	// Wire LLM judge when enabled. The judge handles tool-call injection
 	// detection AND tool-result PII inspection (via inspectToolResult),
@@ -361,6 +398,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		otel:        otel,
 		notify:      notify,
 		webhooks:    webhooks,
+		taint:       taintTracker,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -409,6 +447,18 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
 			emitError(ctx, "opa", "init-failed", "falling back to built-in policies", err)
 		}
+	}
+
+	// Wire OPA + policy tier into the router so handleToolCall can
+	// run the taint-escalation pass on WebSocket-delivered tool
+	// calls. The tier name is the basename of rule_pack_dir
+	// ("default" | "strict" | "permissive") — it lines up with
+	// data.guardrail.taint.<tier> in the Rego store. Nil-safe: the
+	// router falls back to non-escalated verdicts when either the
+	// engine or the tracker is missing.
+	if s.router != nil {
+		s.router.SetPolicyEngine(s.opa)
+		s.router.SetPolicyTier(taintTier(s.cfg.Guardrail.RulePackDir))
 	}
 
 	var wg sync.WaitGroup
@@ -944,6 +994,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if err == nil && proxy != nil {
 		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		// Tier (default/strict/permissive) drives the Rego data
+		// lookup for taint escalation; it's distinct from the
+		// observe/action policy id above.
+		proxy.SetPolicyTier(taintTier(s.cfg.Guardrail.RulePackDir))
+		// Share the same taint tracker as the EventRouter so HTTP
+		// (chat) and WS (tool/result) surfaces converge on a single
+		// session view. Nil-safe when rp.Taint is missing.
+		if s.taint != nil {
+			proxy.SetTaintTracker(s.taint)
+		}
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -1191,4 +1251,29 @@ func (s *Sidecar) Client() *Client {
 // Health returns the shared health tracker.
 func (s *Sidecar) Health() *SidecarHealth {
 	return s.health
+}
+
+// taintTier extracts the rule-pack profile name (default | strict |
+// permissive) from a guardrail.rule_pack_dir path. The OPA Rego
+// policy uses this to resolve data.guardrail.taint.<tier>; an
+// empty string falls through to "default" inside Rego, which keeps
+// existing operator configs (no rule_pack_dir set) safe.
+//
+// Examples:
+//
+//	~/.defenseclaw/policies/guardrail/strict      -> "strict"
+//	/etc/defenseclaw/policies/guardrail/permissive/ -> "permissive"
+//	"" or "/some/other/dir"                       -> "default"
+func taintTier(rulePackDir string) string {
+	rulePackDir = strings.TrimRight(strings.TrimSpace(rulePackDir), "/")
+	if rulePackDir == "" {
+		return "default"
+	}
+	base := filepath.Base(rulePackDir)
+	switch base {
+	case "default", "strict", "permissive":
+		return base
+	default:
+		return "default"
+	}
 }

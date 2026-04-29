@@ -1,0 +1,50 @@
+# Taint state configuration for the "strict" policy tier.
+#
+# Strict tier widens the decay windows so taint persists longer, and
+# extends the sensitive-files list to include developer-credential
+# paths that the default tier doesn't watch (e.g. private cloud-
+# specific tokens). Policy thresholds (require_taint_source,
+# min_consumer_confidence) are tightened separately in
+# data.guardrail.taint.strict — see policies/rego/data.json.
+#
+# Schema version 1.
+version: 1
+
+flag_decay_events: 30
+file_taint_decay_events: 100
+
+sensitive_files:
+  - "~/.aws/credentials"
+  - "~/.aws/config"
+  - "~/.aws/*.json"
+  - "~/.ssh/id_*"
+  - "~/.ssh/*_rsa"
+  - "~/.ssh/*_ed25519"
+  - "~/.ssh/*_ecdsa"
+  - "~/.ssh/*_dsa"
+  - "~/.kube/config"
+  - "~/.kube/**"
+  - "~/.docker/config.json"
+  - "~/.gnupg/**"
+  - "~/.npmrc"
+  - "~/.pypirc"
+  - "~/.git-credentials"
+  - "~/.netrc"
+  - "**/.env"
+  - "**/.env.*"
+  - "/etc/shadow"
+  - "/etc/passwd"
+  - "/etc/sudoers"
+  - "/etc/ssh/**"
+  - "/etc/kubernetes/**"
+  - "/proc/*/environ"
+  - "/proc/self/environ"
+  - "/var/lib/kubelet/**"
+  - "/var/run/secrets/**"
+
+network_exclusions:
+  - "127.0.0.0/8"
+  - "::1"
+  - "localhost"
+
+session_idle_ttl_seconds: 7200

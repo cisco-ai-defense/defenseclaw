@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"golang.org/x/time/rate"
 )
 
@@ -126,6 +127,13 @@ func (m *mockInspector) InspectMidStream(ctx context.Context, direction, content
 }
 
 func (m *mockInspector) SetScannerMode(_ string) {}
+
+// ApplyTaintEscalation is a no-op for the mock — it returns the merged
+// verdict unchanged. Tests that want to validate taint escalation
+// should drive the full GuardrailInspector.
+func (m *mockInspector) ApplyTaintEscalation(_ context.Context, _, _, _ string, merged *ScanVerdict, _ string, _ *policy.GuardrailTaintContext) *ScanVerdict {
+	return merged
+}
 
 func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
 	m.mu.Lock()
@@ -940,6 +948,10 @@ func (c *conditionalInspector) InspectMidStream(ctx context.Context, direction, 
 }
 
 func (c *conditionalInspector) SetScannerMode(_ string) {}
+
+func (c *conditionalInspector) ApplyTaintEscalation(_ context.Context, _, _, _ string, merged *ScanVerdict, _ string, _ *policy.GuardrailTaintContext) *ScanVerdict {
+	return merged
+}
 
 // ---------------------------------------------------------------------------
 // e) Edge case tests

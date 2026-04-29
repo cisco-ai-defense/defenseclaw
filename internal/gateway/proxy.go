@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
@@ -71,6 +72,14 @@ type ContentInspector interface {
 	Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
 	InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
 	SetScannerMode(mode string)
+	// ApplyTaintEscalation runs OPA's guardrail policy with a per-
+	// session TaintContext attached so multi-step credential→exfil
+	// chains can bump severity above what each individual finding
+	// reports. Tool-call inspection (which doesn't normally hit
+	// OPA) feeds verdicts through here. A nil engine, a missing
+	// taint context, or a Rego eval error all fall through to the
+	// merged verdict unchanged.
+	ApplyTaintEscalation(ctx context.Context, direction, model, mode string, merged *ScanVerdict, tier string, taintCtx *policy.GuardrailTaintContext) *ScanVerdict
 }
 
 // GuardrailProxy is a pure Go LLM proxy that accepts OpenAI-compatible
@@ -114,6 +123,21 @@ type GuardrailProxy struct {
 	// Splunk Local Bridge / AgentWatch summary work correctly.
 	defaultAgentName string
 	defaultPolicyID  string
+
+	// policyTier is the operator-selected rule-pack profile
+	// ("default" | "strict" | "permissive"), derived from
+	// filepath.Base(cfg.Guardrail.RulePackDir). Used to resolve
+	// data.guardrail.taint.<tier> in the Rego policy. Distinct
+	// from defaultPolicyID, which carries the action mode
+	// ("observe"/"action") for span attribution.
+	policyTier string
+
+	// taint is the per-process session-level taint tracker shared
+	// with the EventRouter. May be nil when the rule pack has no
+	// taint config (purely for backward compat / unit tests); in
+	// that case callers fall through with an empty TaintContext
+	// and the OPA policy emits no escalation.
+	taint *TaintTracker
 }
 
 // SetDefaultAgentName sets the agent name fallback for OTel spans when
@@ -125,6 +149,20 @@ func (p *GuardrailProxy) SetDefaultAgentName(name string) {
 // SetDefaultPolicyID sets the active guardrail / admission policy id.
 func (p *GuardrailProxy) SetDefaultPolicyID(id string) {
 	p.defaultPolicyID = id
+}
+
+// SetTaintTracker installs the shared session taint tracker. Must be
+// called before Run(); a nil tracker disables taint-driven escalation
+// without disabling the rest of the guardrail pipeline.
+func (p *GuardrailProxy) SetTaintTracker(t *TaintTracker) {
+	p.taint = t
+}
+
+// SetPolicyTier sets the rule-pack profile name ("default" |
+// "strict" | "permissive") used when calling OPA for taint
+// escalation. Empty string falls back to "default" inside Rego.
+func (p *GuardrailProxy) SetPolicyTier(tier string) {
+	p.policyTier = tier
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -1659,7 +1697,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 
 	// --- Post-call inspection: tool call arguments ---
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		if verdict := p.inspectToolCalls(r.Context(), resp.Choices[0].Message.ToolCalls); verdict != nil {
+		if verdict := p.inspectToolCalls(r.Context(), resp.Choices[0].Message.ToolCalls, r.Header.Get("X-Conversation-ID"), aliasModel, mode); verdict != nil {
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				if p.otel != nil && llmSpan != nil {
@@ -1972,7 +2010,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	tcBlocked := false
 	toolCallCount := countToolCalls(assembledTC)
 	if len(assembledTC) > 0 {
-		if verdict := p.inspectToolCalls(r.Context(), assembledTC); verdict != nil {
+		if verdict := p.inspectToolCalls(r.Context(), assembledTC, r.Header.Get("X-Conversation-ID"), aliasModel, mode); verdict != nil {
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil)
 			if verdict.Action == "block" && mode == "action" {
 				tcBlocked = true
@@ -3311,7 +3349,18 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // inspectToolCalls scans tool call arguments in an OpenAI-format tool_calls
 // JSON array. Returns a block verdict if any HIGH/CRITICAL findings, nil
 // otherwise.
-func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON json.RawMessage) *ScanVerdict {
+//
+// sessionID is used to thread per-session taint state through the
+// shared TaintTracker (Observe/Record/RecordShellOps and
+// BuildTaintContext). When the X-Conversation-ID header is missing,
+// callers pass an empty string and taint tracking is skipped (one-shot
+// requests don't carry session-level chains, so this is a safe
+// fall-through).
+//
+// model and mode are forwarded to the OPA escalation pass so
+// guardrail.rego can apply the correct tier knobs and observe-vs-action
+// gating without the proxy having to know the policy details.
+func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON json.RawMessage, sessionID, model, mode string) *ScanVerdict {
 	if len(toolCallsJSON) == 0 {
 		return nil
 	}
@@ -3337,6 +3386,18 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		}
 	}
 
+	// Taint pre-pass: bump the per-session event counter once for
+	// the whole tool_calls batch, then walk each call to record
+	// findings + shell ops. The aggregate ShellOps lets a single
+	// build-context call cover the whole batch (cheaper than
+	// per-call OPA evals for chains where one tool sets up another).
+	taintEnabled := p.taint != nil && sessionID != ""
+	var aggOps ShellOps
+	if taintEnabled {
+		p.taint.Observe(sessionID)
+		aggOps = ShellOps{WriteSources: map[string][]string{}}
+	}
+
 	var allFindings []RuleFinding
 	for _, tc := range toolCalls {
 		toolName := tc.Function.Name
@@ -3344,6 +3405,16 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 
 		findings := ScanAllRules(args, toolName)
 		allFindings = append(allFindings, findings...)
+
+		if taintEnabled {
+			ops := ParseExec(toolName, args)
+			mergeShellOps(&aggOps, ops)
+			p.taint.RecordShellOps(sessionID, ops)
+		}
+	}
+
+	if taintEnabled && len(allFindings) > 0 {
+		p.taint.Record(sessionID, allFindings)
 	}
 
 	if len(allFindings) == 0 {
@@ -3380,12 +3451,206 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		p.otel.RecordGuardrailEvaluation(ctx, "tool-call-inspect", action)
 	}
 
-	return &ScanVerdict{
+	merged := &ScanVerdict{
 		Action:         action,
 		Severity:       severity,
 		Reason:         strings.Join(top, ", "),
 		Findings:       FindingStrings(allFindings),
 		ScannerSources: []string{"tool-call-inspect"},
+	}
+
+	// Apply session-taint escalation via OPA. Returns merged
+	// untouched when the inspector is a mock or the tracker is
+	// disabled, so existing tests keep their semantics.
+	if taintEnabled && p.inspector != nil {
+		tier := p.policyTier
+		tctx := p.taint.BuildTaintContext(sessionID, allFindings, aggOps)
+		bridged := bridgeTaintContext(tctx)
+		escalated := p.inspector.ApplyTaintEscalation(ctx, "tool-call", model, mode, merged, tier, bridged)
+		if escalated != nil {
+			// Emit a structured taint-escalation event for audit
+			// trails when severity actually changed.
+			if escalated.Severity != merged.Severity || escalated.Action != merged.Action {
+				p.emitProxyTaintEscalation(ctx, sessionID, model, mode, merged, escalated, tctx)
+			}
+			merged = escalated
+		}
+	}
+
+	return merged
+}
+
+// mergeShellOps folds `b` into `a` for batch-level taint context
+// construction. Concretely: every tool call inside one tool_calls
+// array participates in the same session step, so we want a single
+// aggregated ShellOps view when calling BuildTaintContext.
+//
+// `a` is mutated in place. Slices are appended (no dedup — duplicates
+// are harmless to BuildTaintContext, which only checks membership);
+// the WriteSources map is upserted; Suspicious is sticky-true; and
+// NetworkDest takes the first non-empty value (most often there's
+// only one consumer per batch anyway).
+func mergeShellOps(a *ShellOps, b ShellOps) {
+	if a == nil {
+		return
+	}
+	a.Reads = append(a.Reads, b.Reads...)
+	a.Writes = append(a.Writes, b.Writes...)
+	a.UploadSources = append(a.UploadSources, b.UploadSources...)
+	a.Deletes = append(a.Deletes, b.Deletes...)
+	if a.WriteSources == nil {
+		a.WriteSources = map[string][]string{}
+	}
+	for dst, srcs := range b.WriteSources {
+		a.WriteSources[dst] = append(a.WriteSources[dst], srcs...)
+	}
+	if a.NetworkDest == "" && b.NetworkDest != "" {
+		a.NetworkDest = b.NetworkDest
+	}
+	if b.Suspicious {
+		a.Suspicious = true
+	}
+}
+
+// bridgeTaintContext converts the gateway-side TaintContext (state
+// view) into the policy-side GuardrailTaintContext (data overlay).
+// Two structurally-identical types exist to avoid an import cycle:
+// internal/gateway already depends on internal/policy, so internal/
+// policy cannot reach back into internal/gateway for the type. The
+// JSON tags are aligned so OPA sees the same key set either way.
+func bridgeTaintContext(t TaintContext) *policy.GuardrailTaintContext {
+	return &policy.GuardrailTaintContext{
+		HasStrongConsumer:       t.HasStrongConsumer,
+		HasWeakConsumer:         t.HasWeakConsumer,
+		HasTaintSourceInSession: t.HasTaintSourceInSession,
+		TaintedFilesReferenced:  t.TaintedFilesReferenced,
+		SourceFindings:          t.SourceFindings,
+		MaxConsumerConfidence:   t.MaxConsumerConfidence,
+		NetworkDestExcluded:     t.NetworkDestExcluded,
+		EventsSinceSource:       t.EventsSinceSource,
+	}
+}
+
+// emitProxyTaintEscalation produces a first-class verdict event for
+// taint-driven severity bumps observed in the HTTP /v1/chat/
+// completions tool-call inspection path. The event lands in
+// gateway.jsonl + OTel via the shared gatewaylog Writer alongside
+// (not in place of) the StageRegex verdict that produced the base
+// finding, so SIEMs see both the trigger and the chain decision.
+//
+// The TaintContext fields ride in the categories list so existing
+// dashboards can filter on `taint:strong` / `taint:weak` without
+// parsing free-form reason text.
+func (p *GuardrailProxy) emitProxyTaintEscalation(
+	ctx context.Context,
+	sessionID, model, mode string,
+	base, escalated *ScanVerdict,
+	tctx TaintContext,
+) {
+	if escalated == nil {
+		return
+	}
+
+	// Surface the chain "path" that Rego picked. Strong is the
+	// confident credential→exfil path; weak is the conservative
+	// path used when consumer confidence is borderline. This
+	// mirrors guardrail.rego's _taint_steps_strong / _weak split.
+	path := "weak"
+	if tctx.HasStrongConsumer {
+		path = "strong"
+	}
+
+	details := TaintEscalationDetails{
+		Path:                path,
+		Tier:                p.policyTier,
+		Steps:               severityStepDelta(base.Severity, escalated.Severity),
+		BaseSeverityRank:    severityRankFor(base.Severity),
+		EffectiveSeverityRank: severityRankFor(escalated.Severity),
+		TaintedFiles:        tctx.TaintedFilesReferenced,
+		Sources:             tctx.SourceFindings,
+		EventsSinceSource:   tctx.EventsSinceSource,
+		NetworkDestExcluded: tctx.NetworkDestExcluded,
+	}
+
+	emitTaintEscalation(
+		ctx,
+		gatewaylog.DirectionCompletion,
+		model,
+		escalated.Action,
+		mapSeverityToGatewayLog(escalated.Severity),
+		escalated.Reason,
+		escalated.Findings,
+		details,
+		0,
+	)
+
+	// Keep the operator-facing audit log line so existing log
+	// scrapers / runbooks that key off "guardrail-taint-escalation"
+	// keep working.
+	if p.logger != nil {
+		files := strings.Join(tctx.TaintedFilesReferenced, ",")
+		if len(files) > 256 {
+			files = files[:256] + "..."
+		}
+		srcs := strings.Join(tctx.SourceFindings, ",")
+		if len(srcs) > 256 {
+			srcs = srcs[:256] + "..."
+		}
+		_ = p.logger.LogActionCtx(ctx, "guardrail-taint-escalation", model,
+			fmt.Sprintf("session=%s severity=%s action=%s mode=%s path=%s strong=%t weak=%t conf=%.2f tainted_files=[%s] sources=[%s] events_since_source=%d",
+				sessionID, escalated.Severity, escalated.Action, mode, path,
+				tctx.HasStrongConsumer, tctx.HasWeakConsumer,
+				tctx.MaxConsumerConfidence, files, srcs,
+				tctx.EventsSinceSource))
+	}
+}
+
+// severityStepDelta returns base→effective rank distance, capped at
+// the gatewaylog rank table size so a CRITICAL→CRITICAL escalation
+// path reads as "0 steps" without going negative when severities are
+// identical.
+func severityStepDelta(base, effective string) int {
+	d := severityRankFor(effective) - severityRankFor(base)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// severityRankFor mirrors guardrail.rego's _sev_rank table. Kept in
+// gateway-package scope (not gatewaylog) because it's a policy
+// concern, not a logging concern.
+func severityRankFor(s string) int {
+	switch strings.ToUpper(s) {
+	case "NONE", "":
+		return 0
+	case "LOW":
+		return 1
+	case "MEDIUM":
+		return 2
+	case "HIGH":
+		return 3
+	case "CRITICAL":
+		return 4
+	default:
+		return 0
+	}
+}
+
+// mapSeverityToGatewayLog converts the gateway's text severity into
+// the gatewaylog.Severity enum used by the structured audit writer.
+func mapSeverityToGatewayLog(s string) gatewaylog.Severity {
+	switch strings.ToUpper(s) {
+	case "LOW":
+		return gatewaylog.SeverityLow
+	case "MEDIUM":
+		return gatewaylog.SeverityMedium
+	case "HIGH":
+		return gatewaylog.SeverityHigh
+	case "CRITICAL":
+		return gatewaylog.SeverityCritical
+	default:
+		return gatewaylog.SeverityInfo
 	}
 }
 
