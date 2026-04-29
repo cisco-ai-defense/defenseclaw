@@ -311,6 +311,32 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	allowList := w.buildListEntries(pe, "allow")
 	fallbackProfile := policy.LoadFallbackProfile(w.cfg.PolicyDir)
 
+	assetDecision := w.cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+		TargetType:     targetType,
+		Name:           evt.Name,
+		Connector:      watcherConnectorName(w.cfg),
+		SourcePath:     evt.Path,
+		RuntimeSurface: "watcher",
+	})
+	if assetDecision.Enabled && assetDecision.RawAction == "block" {
+		if w.otel != nil {
+			w.otel.EmitPolicyDecision("asset-policy", assetDecision.Action, evt.Name, targetType, assetDecision.Reason, map[string]string{
+				"source":          assetDecision.Source,
+				"registry_status": assetDecision.RegistryStatus,
+				"runtime_surface": "watcher",
+				"would_block":     fmt.Sprintf("%t", assetDecision.WouldBlock),
+			})
+		}
+		if assetDecision.Action == "block" {
+			_ = w.logger.LogAction("install-rejected", evt.Path,
+				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
+			w.enforceBlock(ctx, evt)
+			w.recordAdmission(ctx, "blocked", targetType)
+			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
+			return res
+		}
+	}
+
 	// Phase 1: pre-scan OPA evaluation (no scan_result yet).
 	if w.opa != nil {
 		input := policy.AdmissionInput{
@@ -775,6 +801,16 @@ func (w *InstallWatcher) recordAdmission(ctx context.Context, decision, targetTy
 	if w.otel != nil {
 		w.otel.RecordAdmissionDecision(ctx, decision, targetType, "watcher")
 	}
+}
+
+func watcherConnectorName(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if strings.TrimSpace(cfg.Guardrail.Connector) != "" {
+		return strings.ToLower(strings.TrimSpace(cfg.Guardrail.Connector))
+	}
+	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
 }
 
 func classifyWatcherScanError(err error) string {

@@ -32,6 +32,47 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+type AgentWatchContext struct {
+	TenantID        string
+	WorkspaceID     string
+	Environment     string
+	DeploymentMode  string
+	DiscoverySource string
+}
+
+var agentWatchContext atomic.Value
+
+func SetAgentWatchContext(ctx AgentWatchContext) {
+	agentWatchContext.Store(ctx)
+}
+
+func CurrentAgentWatchContext() AgentWatchContext {
+	v, _ := agentWatchContext.Load().(AgentWatchContext)
+	return v
+}
+
+func StampAgentWatchContext(e *Event) {
+	if e == nil {
+		return
+	}
+	ctx := CurrentAgentWatchContext()
+	if e.TenantID == "" {
+		e.TenantID = ctx.TenantID
+	}
+	if e.WorkspaceID == "" {
+		e.WorkspaceID = ctx.WorkspaceID
+	}
+	if e.Environment == "" {
+		e.Environment = ctx.Environment
+	}
+	if e.DeploymentMode == "" {
+		e.DeploymentMode = ctx.DeploymentMode
+	}
+	if e.DiscoverySource == "" {
+		e.DiscoverySource = ctx.DiscoverySource
+	}
+}
+
 // EventType enumerates the five first-class categories of gateway
 // observability events. Sinks and filters key off this value.
 type EventType string
@@ -232,14 +273,12 @@ type Event struct {
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
 
-	// Multi-tenant / fleet-scoping fields (v7 reserved, unpopulated).
+	// Multi-tenant / fleet-scoping fields.
 	//
-	// These are intentionally declared ahead of the code paths that
-	// will set them so the wire format is forward-stable: a rolling
-	// fleet upgrade can ship a new sidecar that emits these attributes
-	// without forcing every indexer/SIEM to relearn the schema. All
-	// five are `omitempty` — until the corresponding producer lights
-	// them up they stay off the wire and off the JSON line entirely.
+	// These are stamped from config at the writer / OTel choke points
+	// when set. All five are `omitempty`, so deployments that do not
+	// provide common Agent Watch context keep the historical compact
+	// event shape.
 	//
 	//   - TenantID: logical tenancy boundary for hosted / SaaS
 	//     deployments. One DefenseClaw sidecar can front agents owned
@@ -259,12 +298,6 @@ type Event struct {
 	//     monitored agent/tool (registry | manual | scan | import).
 	//     Feeds asset-management systems without a separate discovery
 	//     table.
-	//
-	// NOTE: do NOT populate these until the matching producer lands.
-	// They are declared here so every downstream consumer (gateway.jsonl
-	// indexer, audit sinks, OTLP translator, TUI parser, Splunk HEC
-	// adapter) can safely pass them through today and start projecting
-	// them once a producer ships.
 	TenantID        string `json:"tenant_id,omitempty"`
 	WorkspaceID     string `json:"workspace_id,omitempty"`
 	Environment     string `json:"environment,omitempty"`

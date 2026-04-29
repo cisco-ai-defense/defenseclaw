@@ -312,6 +312,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
             name=plugin_name,
             source_path=pre_install_source,
             fallback_actions=app.cfg.plugin_actions,
+            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            asset_policy=app.cfg.asset_policy,
         )
 
     # --- Block list check ---
@@ -406,6 +408,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
                     source_path=provenance_path,
                     scan_result=result,
                     fallback_actions=app.cfg.plugin_actions,
+                    connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+                    asset_policy=app.cfg.asset_policy,
                 )
 
                 if post_decision.verdict == "allowed":

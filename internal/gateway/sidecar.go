@@ -85,6 +85,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// lockstep with audit.SetProcessAgentInstanceID — the two setters
 	// live in separate packages only to avoid an import cycle.
 	gatewaylog.SetSidecarInstanceID(agentInstanceID)
+	gatewaylog.SetAgentWatchContext(gatewaylog.AgentWatchContext{
+		TenantID:        cfg.TenantID,
+		WorkspaceID:     cfg.WorkspaceID,
+		Environment:     cfg.Environment,
+		DeploymentMode:  cfg.DeploymentMode,
+		DiscoverySource: cfg.DiscoverySource,
+	})
 
 	// Seed run_id so every audit row / gateway.jsonl event / OTel
 	// record in this sidecar run carries a non-empty correlation

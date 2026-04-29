@@ -739,6 +739,8 @@ def _apply_scan_enforcement(
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        asset_policy=app.cfg.asset_policy,
     )
 
     if decision.verdict == "allowed":
@@ -1758,6 +1760,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         name=skill_name,
         source_path=name,
         fallback_actions=app.cfg.skill_actions,
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        asset_policy=app.cfg.asset_policy,
     )
 
     if pre_decision.verdict == "blocked":
@@ -1816,6 +1820,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        asset_policy=app.cfg.asset_policy,
     )
 
     if post_decision.verdict == "allowed":

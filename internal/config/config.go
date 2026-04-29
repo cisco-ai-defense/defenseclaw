@@ -155,29 +155,34 @@ type Config struct {
 	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
 	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
 
-	DataDir        string                     `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB        string                     `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string                     `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
-	Agent          AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
-	InspectLLM     InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
-	CiscoAIDefense CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig                `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway        GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
-	ClaudeCode     AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
-	Codex          AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
-	ConnectorHooks map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
+	DataDir         string                     `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB         string                     `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment     string                     `mapstructure:"environment"      yaml:"environment"`
+	TenantID        string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
+	WorkspaceID     string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
+	DeploymentMode  string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
+	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
+	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
+	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell       OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
+	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
+	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
+	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
@@ -1759,6 +1764,10 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("plugin_dir", filepath.Join(dataDir, "plugins"))
 	viper.SetDefault("policy_dir", filepath.Join(dataDir, "policies"))
 	viper.SetDefault("environment", string(DetectEnvironment()))
+	viper.SetDefault("tenant_id", "")
+	viper.SetDefault("workspace_id", "")
+	viper.SetDefault("deployment_mode", "")
+	viper.SetDefault("discovery_source", "")
 	viper.SetDefault("claw.mode", string(ClawOpenClaw))
 	viper.SetDefault("claw.home_dir", "~/.openclaw")
 	viper.SetDefault("claw.config_file", "~/.openclaw/openclaw.json")
@@ -1871,6 +1880,19 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("plugin_actions.info.file", string(FileActionNone))
 	viper.SetDefault("plugin_actions.info.runtime", string(RuntimeEnable))
 	viper.SetDefault("plugin_actions.info.install", string(InstallNone))
+
+	viper.SetDefault("asset_policy.enabled", false)
+	viper.SetDefault("asset_policy.mode", AssetPolicyModeObserve)
+	for _, target := range []string{"mcp", "skill", "plugin"} {
+		viper.SetDefault("asset_policy."+target+".default", "allow")
+		viper.SetDefault("asset_policy."+target+".registry_required", false)
+		viper.SetDefault("asset_policy."+target+".registry", []AssetPolicyRule{})
+		viper.SetDefault("asset_policy."+target+".allowed", []AssetPolicyRule{})
+		viper.SetDefault("asset_policy."+target+".denied", []AssetPolicyRule{})
+	}
+	viper.SetDefault("asset_policy.mcp.runtime_detection.enabled", true)
+	viper.SetDefault("asset_policy.mcp.runtime_detection.terminal_commands", true)
+	viper.SetDefault("asset_policy.mcp.runtime_detection.unknown_terminal_mcp", AssetPolicyModeObserve)
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")

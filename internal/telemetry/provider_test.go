@@ -802,6 +802,34 @@ func TestBuildResource_DefaultServiceName(t *testing.T) {
 	t.Error("service.name attribute not found")
 }
 
+func TestBuildResource_AgentWatchContextAttributes(t *testing.T) {
+	cfg := disabledCfg()
+	cfg.TenantID = "tenant-a"
+	cfg.WorkspaceID = "workspace-1"
+	cfg.DeploymentMode = "standalone"
+	cfg.DiscoverySource = "registry"
+
+	res := buildResource(cfg, "1.0.0")
+	got := map[string]string{}
+	iter := res.Iter()
+	for iter.Next() {
+		kv := iter.Attribute()
+		got[string(kv.Key)] = kv.Value.AsString()
+	}
+
+	for key, want := range map[string]string{
+		"defenseclaw.tenant.id":        "tenant-a",
+		"defenseclaw.workspace.id":     "workspace-1",
+		"deployment.environment":       "test",
+		"defenseclaw.deployment.mode":  "standalone",
+		"defenseclaw.discovery.source": "registry",
+	} {
+		if got[key] != want {
+			t.Errorf("%s=%q, want %q", key, got[key], want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // OTel metric verification tests — ensure guardrail metrics are actually
 // recorded with the correct instruments and attribute values.

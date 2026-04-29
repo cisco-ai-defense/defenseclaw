@@ -20,50 +20,50 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import defenseclaw.config as config_mod
 from defenseclaw.config import (
-    CiscoAIDefenseConfig,
-    Config,
-    ClawConfig,
     DEFAULT_OPENSHELL_VERSION,
     DEFAULT_SANDBOX_HOME,
+    AssetPolicyConfig,
+    AssetPolicyRule,
+    CiscoAIDefenseConfig,
+    ClawConfig,
+    Config,
     GatewayConfig,
-    GatewayWatcherConfig,
-    GatewayWatcherSkillConfig,
+    GatewayWatcherPluginConfig,
+    GuardrailConfig,
     InspectLLMConfig,
     MCPScannerConfig,
-    GatewayWatcherPluginConfig,
-    PluginActionsConfig,
-    GuardrailConfig,
     OpenShellConfig,
+    PluginActionsConfig,
     SeverityAction,
     SkillActionsConfig,
     SkillScannerConfig,
-    WebhookConfig,
     WatchConfig,
+    WebhookConfig,
     _dedup,
     _expand,
     _merge_cisco_ai_defense,
     _merge_gateway_watcher,
+    _merge_guardrail,
     _merge_inspect_llm,
     _merge_mcp_scanner,
     _merge_openshell,
     _merge_plugin_actions,
-    _merge_guardrail,
     _merge_severity_action,
     _merge_skill_actions,
     _merge_webhooks,
+    config_path,
     default_config,
     default_data_path,
-    config_path,
     detect_environment,
     load,
 )
@@ -268,6 +268,14 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertFalse(mc.scan_resources)
         self.assertFalse(mc.scan_instructions)
 
+    def test_default_asset_policy_runtime_detection_scope(self):
+        cfg = default_config()
+        self.assertFalse(cfg.asset_policy.enabled)
+        self.assertTrue(cfg.asset_policy.mcp.runtime_detection.enabled)
+        self.assertTrue(cfg.asset_policy.mcp.runtime_detection.terminal_commands)
+        self.assertFalse(cfg.asset_policy.skill.runtime_detection.enabled)
+        self.assertFalse(cfg.asset_policy.plugin.runtime_detection.enabled)
+
 
 class TestConfigLoadSave(unittest.TestCase):
     def test_load_missing_config_returns_defaults(self):
@@ -333,6 +341,43 @@ class TestConfigLoadSave(unittest.TestCase):
 
             self.assertFalse(loaded.watch.rescan_enabled)
             self.assertEqual(loaded.watch.rescan_interval_min, 15)
+
+    def test_asset_policy_roundtrip(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                asset_policy=AssetPolicyConfig(enabled=True, mode="action"),
+            )
+            cfg.asset_policy.mcp.registry_required = True
+            cfg.asset_policy.mcp.registry = [AssetPolicyRule(name="github", connector="codex")]
+            cfg.asset_policy.skill.default = "deny"
+            cfg.save()
+
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+
+            self.assertTrue(raw["asset_policy"]["enabled"])
+            self.assertEqual(raw["asset_policy"]["mode"], "action")
+            self.assertTrue(raw["asset_policy"]["mcp"]["registry_required"])
+            self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["name"], "github")
+            self.assertFalse(raw["asset_policy"]["skill"]["runtime_detection"]["enabled"])
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+
+            self.assertTrue(loaded.asset_policy.enabled)
+            self.assertEqual(loaded.asset_policy.mode, "action")
+            self.assertTrue(loaded.asset_policy.mcp.registry_required)
+            self.assertEqual(loaded.asset_policy.mcp.registry[0].connector, "codex")
+            self.assertEqual(loaded.asset_policy.skill.default, "deny")
 
 
 class TestClawPaths(unittest.TestCase):

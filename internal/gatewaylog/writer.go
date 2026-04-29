@@ -176,6 +176,7 @@ func (w *Writer) Emit(e Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = SidecarInstanceID()
 	}
+	StampAgentWatchContext(&e)
 	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
 	// payload using the per-boot device-key-derived HMAC key. No-op
 	// when SetTelemetryHMACSeed has not been called (boot ordering

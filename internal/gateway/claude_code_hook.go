@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -165,6 +166,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	}
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	assetDecision := config.AssetPolicyDecision{}
+	assetMatched := false
 	switch req.HookEventName {
 	case "SessionStart":
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
@@ -182,8 +185,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodePromptContent(req), Direction: "prompt"})
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call"})
+		assetDecision, assetMatched = a.claudeCodeMCPAssetDecision(ctx, req)
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result"})
+		assetDecision, assetMatched = a.claudeCodeMCPAssetDecision(ctx, req)
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -209,6 +214,17 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	}
 	if mode != "action" && rawAction == "alert" {
 		action = "allow"
+	}
+	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+	)
+	action = mergedAction
+	rawAction = mergedRawAction
+	verdict.Severity = mergedSeverity
+	verdict.Reason = mergedReason
+	verdict.Findings = mergedFindings
+	if assetWouldBlock {
+		wouldBlock = true
 	}
 	return claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
 }
