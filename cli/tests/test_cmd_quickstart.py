@@ -28,6 +28,10 @@ from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 class QuickstartProfileDefaultsTests(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-quickstart-")
+        self.home_dir = os.path.join(self.tmp_dir, "home")
+        self.empty_path = os.path.join(self.tmp_dir, "empty-bin")
+        os.makedirs(self.home_dir, exist_ok=True)
+        os.makedirs(self.empty_path, exist_ok=True)
         self.runner = CliRunner()
 
     def tearDown(self):
@@ -37,7 +41,11 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         return self.runner.invoke(
             quickstart_cmd,
             args,
-            env={"DEFENSECLAW_HOME": self.tmp_dir},
+            env={
+                "DEFENSECLAW_HOME": self.tmp_dir,
+                "HOME": self.home_dir,
+                "PATH": self.empty_path,
+            },
         )
 
     def test_codex_defaults_to_observe_profile(self):

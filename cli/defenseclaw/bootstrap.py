@@ -360,8 +360,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     ))
 
     for s in _scanner_availability(cfg):
-        if s.status == "fail":
-            s.status = "warn"
+        if s.status == "warn":
             s.detail += " — scans are unavailable until this binary is installed"
         steps.append(s)
 
@@ -515,7 +514,7 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
         if path:
             out.append(StepResult(label, "pass", path))
         else:
-            out.append(StepResult(label, "fail", f"{binary!r} not on PATH", next_command))
+            out.append(StepResult(label, "warn", f"{binary!r} not on PATH", next_command))
     return out
 
 
