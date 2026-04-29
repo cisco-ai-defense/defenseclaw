@@ -97,6 +97,52 @@ func TestBuildRegistry(t *testing.T) {
 	})
 }
 
+func TestBuildRegistryIncludesEnterpriseSetupSurfaces(t *testing.T) {
+	registry := BuildRegistry()
+	seen := make(map[string]CmdEntry, len(registry))
+	for _, entry := range registry {
+		seen[entry.TUIName] = entry
+	}
+
+	required := []string{
+		"init first-run",
+		"quickstart",
+		"doctor --fix",
+		"keys set",
+		"setup redaction",
+		"setup observability add",
+		"setup local-observability reset",
+		"setup webhook add",
+		"skill search",
+		"uninstall dry-run",
+		"reset --yes",
+		"connector verify",
+		"connector teardown",
+		"gateway provenance show",
+	}
+	for _, name := range required {
+		if _, ok := seen[name]; !ok {
+			t.Errorf("BuildRegistry missing %q", name)
+		}
+	}
+
+	if entry := seen["doctor --fix"]; !containsArg(entry.CLIArgs, "--fix") || !containsArg(entry.CLIArgs, "--yes") {
+		t.Fatalf("doctor --fix should route to doctor --fix --yes, got %v", entry.CLIArgs)
+	}
+	if entry := seen["setup redaction"]; !entry.NeedsArg || entry.ArgHint == "" {
+		t.Fatalf("setup redaction should prompt for status/on/off, got %+v", entry)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestMatchCommand(t *testing.T) {
 	registry := BuildRegistry()
 

@@ -17,33 +17,27 @@
 """defenseclaw quickstart — zero-prompt first-run setup.
 
 Designed for ``make all`` and ``install.sh --quickstart``. Picks safe
-defaults (observe mode, local scanner, no judge) and runs every step
+defaults (observe profile, local scanner, no judge) and runs every step
 of the install flow without asking the user a single question. Power
-users who want something different should use ``defenseclaw init
---enable-guardrail`` or ``defenseclaw setup guardrail`` instead.
+users who want something different should use ``defenseclaw init`` or
+``defenseclaw setup guardrail`` instead.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import subprocess
 import sys
 
 import click
-
-from defenseclaw import __version__
-from defenseclaw.context import AppContext
 
 
 @click.command("quickstart")
 @click.option(
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
-    default="observe",
-    show_default=True,
-    help="Guardrail mode. 'observe' logs findings only; 'action' blocks when critical.",
+    default=None,
+    show_default="observe",
+    help="Protection profile. observe logs findings; action blocks.",
 )
 @click.option(
     "--scanner",
@@ -85,15 +79,16 @@ from defenseclaw.context import AppContext
     default=None,
     help="Agent framework connector (alias: --agent). "
          "Defaults to <data_dir>/picked_connector when set by the installer, "
-         "else auto-detect, else openclaw.",
+         "else codex.",
 )
 @click.option(
     "--skip-gateway",
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
 )
+@click.option("--json-summary", is_flag=True, help="Emit the first-run summary as JSON.")
 def quickstart_cmd(
-    mode: str,
+    mode: str | None,
     scanner_mode: str,
     with_judge: bool,
     non_interactive: bool,
@@ -101,6 +96,7 @@ def quickstart_cmd(
     force: bool,
     agent_name: str | None,
     skip_gateway: bool,
+    json_summary: bool,
 ) -> None:
     """Zero-prompt end-to-end setup with safe defaults.
 
@@ -109,271 +105,32 @@ def quickstart_cmd(
     are listed at the end so the operator knows exactly what (if
     anything) to wire up before the guardrail becomes useful.
     """
-    _ = non_interactive, yes  # accepted for script compatibility
-
     from defenseclaw import config as cfg_mod
-    from defenseclaw.bootstrap import bootstrap_env
-    from defenseclaw.commands.cmd_setup import (
-        _detect_openclaw_gateway_token,
-        _read_picked_connector,
-        execute_guardrail_setup,
-    )
-    from defenseclaw.credentials import mask
-    from defenseclaw.db import Store
-    from defenseclaw.logger import Logger
+    from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+    from defenseclaw.commands.cmd_init import _render_first_run_report
+    from defenseclaw.commands.cmd_setup import _read_picked_connector
+    from defenseclaw.ux import CLIRenderer
 
-    # Connector resolution mirrors `setup guardrail --non-interactive`:
-    # explicit flag > install-time picked_connector hint > "openclaw".
-    # We deliberately skip filesystem auto-detect here because
-    # quickstart is a non-interactive flow used by `make all` and
-    # `install.sh --quickstart` — silently flipping the connector
-    # because ``~/.claude`` happens to exist on a developer's machine
-    # would surprise both the operator and CI. Resolving here (rather
-    # than inside execute_guardrail_setup) keeps the [3/5] / [4/5] log
-    # lines accurate so the operator sees which connector quickstart
-    # is actually configuring.
     if agent_name:
         connector = agent_name
     else:
-        # We have not loaded the config yet, so use the canonical
-        # default data path. This matches the path the installer
-        # writes to (DEFENSECLAW_HOME or ~/.defenseclaw).
         data_dir = str(cfg_mod.default_data_path())
-        connector = _read_picked_connector(data_dir) or "openclaw"
+        connector = _read_picked_connector(data_dir) or "codex"
 
-    click.echo()
-    click.echo(f"  DefenseClaw v{__version__} — quickstart")
-    click.echo("  ──────────────────────────────────────────────────────")
-    click.echo()
+    profile = mode or "observe"
 
-    # --- Step 1: load-or-create config ---
-    try:
-        cfg = cfg_mod.load()
-        new_config = False
-    except Exception:
-        cfg = cfg_mod.default_config()
-        new_config = True
-
-    if force:
-        click.echo("  [1/5] Forcing re-init (--force)")
-    elif new_config:
-        click.echo("  [1/5] Creating fresh configuration…")
+    report = run_first_run(FirstRunOptions(
+        connector=connector,
+        profile=profile,
+        scanner_mode=scanner_mode,
+        with_judge=with_judge,
+        start_gateway=not skip_gateway,
+        verify=True,
+        force=force,
+    ))
+    if json_summary:
+        click.echo(json.dumps(report.to_dict(), indent=2))
     else:
-        click.echo("  [1/5] Reusing existing configuration…")
-    cfg.environment = cfg_mod.detect_environment()
-    cfg.save()
-    click.echo(f"        config:  {cfg_mod.config_path()}")
-    click.echo(f"        data:    {cfg.data_dir}")
-
-    # --- Step 2: bootstrap dirs, DB, policies, gateway defaults ---
-    click.echo()
-    click.echo("  [2/5] Bootstrapping environment…")
-    store = Store(cfg.audit_db)
-    store.init()
-    logger = Logger(store, cfg.splunk)
-    try:
-        report = bootstrap_env(cfg, logger)
-        _render_bootstrap_report(report)
-    finally:
-        # Bootstrap doesn't close store/logger — we'll reuse both below.
-        pass
-
-    # --- Step 3: Gateway token auto-detection ---
-    click.echo()
-    click.echo(f"  [3/5] Detecting gateway token (connector: {connector})…")
-    if connector == "openclaw":
-        token = _detect_openclaw_gateway_token(cfg.claw.config_file)
-        if token:
-            click.echo(f"        ✓ OPENCLAW_GATEWAY_TOKEN = {mask(token)}")
-            cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
-        else:
-            click.echo("        ⚠ No OpenClaw token detected.")
-            click.echo("          This is expected if you're running DefenseClaw before OpenClaw")
-            click.echo("          is set up. Re-run 'defenseclaw quickstart' after installing OpenClaw.")
-    else:
-        if not cfg.gateway.device_key_file:
-            cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
-        click.echo(f"        ℹ {connector} connector uses device-key auth (no token needed).")
-        click.echo(f"        device key: {cfg.gateway.device_key_file}")
-
-    # --- Step 4: apply safe guardrail defaults + execute setup ---
-    click.echo()
-    click.echo(f"  [4/5] Configuring guardrail (mode={mode}, scanner={scanner_mode}, connector={connector})…")
-    gc = cfg.guardrail
-    gc.enabled = True
-    gc.mode = mode
-    gc.scanner_mode = scanner_mode
-    gc.connector = connector
-    gc.judge.enabled = with_judge
-
-    app = AppContext()
-    app.cfg = cfg
-    app.store = store
-    app.logger = logger
-
-    # For OpenClaw connector, verify its config file exists before patching.
-    # Other connectors handle their own setup in the Go gateway.
-    if connector == "openclaw":
-        oc_path = (
-            os.path.expanduser(cfg.claw.config_file)
-            if cfg.claw.config_file.startswith("~/")
-            else cfg.claw.config_file
-        )
-        if not os.path.isfile(oc_path):
-            click.echo(f"        ⚠ OpenClaw config not found at {cfg.claw.config_file}")
-            click.echo("          Guardrail will be saved but not activated. Run 'defenseclaw setup guardrail'")
-            click.echo("          after installing OpenClaw to patch its config.")
-            gc.enabled = False
-            cfg.save()
-            guardrail_ok = False
-            warnings: list[str] = [f"OpenClaw config missing at {cfg.claw.config_file}"]
-        else:
-            guardrail_ok, warnings = execute_guardrail_setup(app, save_config=True)
-    else:
-        guardrail_ok, warnings = execute_guardrail_setup(app, save_config=True)
-
-    for w in warnings:
-        click.echo(f"        ⚠ {w}")
-
-    # --- Step 5: start the sidecar ---
-    click.echo()
-    if skip_gateway:
-        click.echo("  [5/5] Skipping sidecar start (--skip-gateway).")
-    else:
-        click.echo("  [5/5] Starting sidecar…")
-        _start_sidecar(cfg, guardrail_ok)
-
-    # --- Summary ---
-    click.echo()
-    click.echo("  ──────────────────────────────────────────────────────")
-    _print_credentials_summary(cfg)
-    click.echo()
-    click.echo("  Next steps:")
-    click.echo("    defenseclaw doctor          Verify the installation")
-    click.echo("    defenseclaw keys list       See which API keys are missing")
-    click.echo("    defenseclaw status          Check sidecar + guardrail status")
-    click.echo()
-
-    # Cleanup shared handles we opened above.
-    try:
-        logger.close()
-    finally:
-        store.close()
-
-    # Quickstart reports a non-zero exit only when the environment is in
-    # a definitely-unusable state. Missing OpenClaw is *expected* on
-    # first install, so we treat it as a warning rather than an error.
-    if report.errors:
+        _render_first_run_report(report, CLIRenderer())
+    if report.status == "needs_attention":
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _render_bootstrap_report(report) -> None:
-    """One-line status for each bootstrap step."""
-    new_marker = "created" if report.is_new_config else "preserved"
-    click.echo(f"        config:  {new_marker}")
-    click.echo(f"        audit:   {report.audit_db}")
-    if report.rego_seeded:
-        click.echo(f"        rego:    {report.rego_seeded}")
-    if report.guardrail_profiles_seeded:
-        click.echo(
-            "        rule packs: seeded " + ", ".join(report.guardrail_profiles_seeded)
-        )
-    if report.guardrail_profiles_preserved:
-        click.echo(
-            "        rule packs: preserved " + ", ".join(report.guardrail_profiles_preserved)
-        )
-    if report.splunk_bridge_dest:
-        state = "preserved" if report.splunk_bridge_preserved else "seeded"
-        click.echo(f"        splunk:  {state} {report.splunk_bridge_dest}")
-    for err in report.errors:
-        click.echo(f"        ✗ {err}")
-
-
-def _start_sidecar(cfg, guardrail_ok: bool) -> None:
-    """Start ``defenseclaw-gateway`` and optionally restart after guardrail patch."""
-    gw = shutil.which("defenseclaw-gateway")
-    if gw is None:
-        click.echo("        ⚠ defenseclaw-gateway not on PATH — run 'make gateway-install'")
-        return
-
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
-    if _sidecar_running(pid_file):
-        click.echo("        ✓ sidecar already running")
-        if guardrail_ok:
-            # Reload config so the new guardrail settings take effect.
-            _run([gw, "restart"], timeout=15)
-            click.echo("        ✓ sidecar restarted to apply guardrail")
-        return
-
-    result = _run([gw, "start"], timeout=30)
-    if result is not None and result.returncode == 0:
-        pid = _read_pid(pid_file)
-        if pid:
-            click.echo(f"        ✓ sidecar started (PID {pid})")
-        else:
-            click.echo("        ✓ sidecar started")
-    else:
-        click.echo("        ✗ sidecar failed to start — run 'defenseclaw-gateway status'")
-
-
-def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess | None:
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-
-
-def _sidecar_running(pid_file: str) -> bool:
-    pid = _read_pid(pid_file)
-    if pid is None:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-
-
-def _read_pid(pid_file: str) -> int | None:
-    try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-        try:
-            return int(raw)
-        except ValueError:
-            return int(json.loads(raw)["pid"])
-    except (FileNotFoundError, ValueError, KeyError, OSError, TypeError):
-        return None
-
-
-def _print_credentials_summary(cfg) -> None:
-    """Summarize which credentials are set vs. required vs. optional."""
-    from defenseclaw.credentials import Requirement
-    from defenseclaw.credentials import classify as _classify
-
-    statuses = _classify(cfg)
-    required_missing = [s for s in statuses if s.requirement is Requirement.REQUIRED and not s.resolution.is_set]
-    optional_missing = [s for s in statuses if s.requirement is Requirement.OPTIONAL and not s.resolution.is_set]
-    set_count = sum(1 for s in statuses if s.resolution.is_set)
-
-    click.echo(f"  API keys: {set_count} set, {len(required_missing)} required missing, "
-               f"{len(optional_missing)} optional missing.")
-
-    if required_missing:
-        click.echo()
-        click.echo("  REQUIRED keys not yet set:")
-        for s in required_missing:
-            click.echo(f"    • {s.resolution.env_name}  —  {s.spec.description}")
-
-    if optional_missing:
-        click.echo()
-        click.echo("  Optional keys (run 'defenseclaw keys list' for the full list):")
-        # Only show the first few to keep the summary short.
-        for s in optional_missing[:4]:
-            click.echo(f"    • {s.resolution.env_name}  —  {s.spec.description}")
-        if len(optional_missing) > 4:
-            click.echo(f"    … and {len(optional_missing) - 4} more")

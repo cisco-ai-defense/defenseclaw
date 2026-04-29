@@ -42,6 +42,9 @@ func TestApplyConfigField_OTelFullSurface(t *testing.T) {
 		{"otel.enabled", "true", func(c *config.Config) bool { return c.OTel.Enabled }},
 		{"otel.protocol", "http/protobuf", func(c *config.Config) bool { return c.OTel.Protocol == "http/protobuf" }},
 		{"otel.endpoint", "https://collector:4318", func(c *config.Config) bool { return c.OTel.Endpoint == "https://collector:4318" }},
+		{"otel.headers", "x-api-key=abc,env=prod", func(c *config.Config) bool {
+			return c.OTel.Headers["x-api-key"] == "abc" && c.OTel.Headers["env"] == "prod"
+		}},
 		{"otel.tls.insecure", "true", func(c *config.Config) bool { return c.OTel.TLS.Insecure }},
 		{"otel.tls.ca_cert", "/etc/ssl/ca.pem", func(c *config.Config) bool { return c.OTel.TLS.CACert == "/etc/ssl/ca.pem" }},
 
@@ -72,6 +75,9 @@ func TestApplyConfigField_OTelFullSurface(t *testing.T) {
 		{"otel.batch.max_export_batch_size", "1024", func(c *config.Config) bool { return c.OTel.Batch.MaxExportBatchSize == 1024 }},
 		{"otel.batch.scheduled_delay_ms", "10000", func(c *config.Config) bool { return c.OTel.Batch.ScheduledDelayMs == 10000 }},
 		{"otel.batch.max_queue_size", "4096", func(c *config.Config) bool { return c.OTel.Batch.MaxQueueSize == 4096 }},
+		{"otel.resource.attributes", "service.name=defenseclaw,deployment.environment=prod", func(c *config.Config) bool {
+			return c.OTel.Resource.Attributes["service.name"] == "defenseclaw" && c.OTel.Resource.Attributes["deployment.environment"] == "prod"
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
@@ -109,7 +115,7 @@ func TestSetupSections_OTelShape(t *testing.T) {
 		"otel.endpoint",
 		"otel.tls.insecure",
 		"otel.tls.ca_cert",
-		"otel.headers.summary",
+		"otel.headers",
 		"otel.traces.enabled",
 		"otel.traces.sampler",
 		"otel.traces.sampler_arg",
@@ -130,7 +136,7 @@ func TestSetupSections_OTelShape(t *testing.T) {
 		"otel.batch.max_export_batch_size",
 		"otel.batch.scheduled_delay_ms",
 		"otel.batch.max_queue_size",
-		"otel.resource.summary",
+		"otel.resource.attributes",
 	}
 	seen := map[string]bool{}
 	for _, f := range otel.Fields {

@@ -36,21 +36,9 @@ func TestSetupSections_EveryInteractiveFieldHasHint(t *testing.T) {
 	p := NewSetupPanel(nil, &config.Config{}, nil)
 	p.loadSections()
 
-	// These keys map to list-based editors (Audit Sinks, Webhooks,
-	// OTel headers/resource attrs) where the editing happens via a
-	// dedicated sub-panel. The summary row is rendered as a header
-	// and therefore doesn't need a per-field Hint.
-	listEditors := map[string]bool{
-		"otel.headers.summary":  true,
-		"otel.resource.summary": true,
-	}
-
 	for _, sec := range p.sections {
 		for _, f := range sec.Fields {
 			if f.Kind == "header" {
-				continue
-			}
-			if listEditors[f.Key] {
 				continue
 			}
 			if strings.TrimSpace(f.Hint) == "" {

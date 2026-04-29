@@ -138,6 +138,7 @@ type Model struct {
 	activity  ActivityPanel
 	tools     ToolsPanel
 	setup     SetupPanel
+	firstRun  FirstRunPanel
 
 	// Overlays
 	detail     DetailModal
@@ -182,6 +183,7 @@ type Model struct {
 type Deps struct {
 	Store           *audit.Store
 	Config          *config.Config
+	FirstRun        bool
 	OpenshellBinary string
 	AnchorName      string
 	Version         string
@@ -228,6 +230,7 @@ func New(deps Deps) Model {
 		activity:       NewActivityPanel(theme, dataDir),
 		tools:          NewToolsPanel(deps.Store),
 		setup:          NewSetupPanel(theme, deps.Config, executor),
+		firstRun:       NewFirstRunPanel(theme, deps.FirstRun),
 		detail:         NewDetailModal(),
 		palette:        NewPaletteModel(theme, registry, executor),
 		actionMenu:     NewActionMenu(theme),
@@ -253,6 +256,9 @@ func New(deps Deps) Model {
 	// of any data panel shows the right "Source: …" banner before
 	// /health has had time to round-trip.
 	m.propagateConnector()
+	if deps.FirstRun {
+		m.activePanel = PanelSetup
+	}
 	return m
 }
 
@@ -295,6 +301,11 @@ func (m *Model) propagateConnector() {
 func isDoctorCommand(cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
 	return cmd == "doctor" || strings.HasPrefix(cmd, "doctor ")
+}
+
+func isInitCommand(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	return cmd == "init first-run" || cmd == "init" || strings.HasPrefix(cmd, "init ")
 }
 
 // doctorCacheLoadedMsg carries either a successfully-loaded
@@ -440,6 +451,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// regardless of the exit code.
 		if isDoctorCommand(msg.Command) {
 			postCmds = append(postCmds, m.loadDoctorCacheCmd())
+		}
+		if msg.ExitCode == 0 && isInitCommand(msg.Command) {
+			if err := m.reloadRuntimeAfterInit(); err != nil {
+				m.toasts.Push(ToastError, "init reload failed: "+err.Error())
+			} else {
+				m.firstRun.active = false
+				m.activePanel = PanelOverview
+				m.toasts.Push(ToastSuccess, "First-run setup complete")
+				postCmds = append(postCmds, m.pollHealth(), m.loadDoctorCacheCmd())
+			}
 		}
 		if len(postCmds) > 0 {
 			return m, tea.Batch(postCmds...)
@@ -1080,6 +1101,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "enter", "q":
 			m.detail.Hide()
+		}
+		return m, nil
+	}
+
+	if m.firstRun.Active() {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		runCmd, binary, args, displayName := m.firstRun.HandleKey(msg)
+		if runCmd {
+			m.activePanel = PanelActivity
+			return m, m.executor.Execute(binary, args, displayName)
 		}
 		return m, nil
 	}
@@ -2679,6 +2712,11 @@ func (m Model) View() tea.View {
 		return m.tuiShellView("Loading DefenseClaw TUI...")
 	}
 
+	if m.firstRun.Active() {
+		m.firstRun.SetSize(m.width, m.height)
+		return m.tuiShellView(m.firstRun.View())
+	}
+
 	// Help overlay
 	if m.helpOpen {
 		return m.tuiShellView(m.renderHelp())
@@ -2800,6 +2838,43 @@ func (m *Model) refresh() {
 	m.lastRefresh = time.Now()
 }
 
+func (m *Model) reloadRuntimeAfterInit() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	store, err := audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		return err
+	}
+	if err := store.Init(); err != nil {
+		store.Close()
+		return err
+	}
+	if m.store != nil {
+		m.store.Close()
+	}
+	m.store = store
+	m.cfg = cfg
+	dataDir := cfg.DataDir
+	m.overview = NewOverviewPanel(m.theme, cfg, m.version)
+	m.alerts = NewAlertsPanel(store, dataDir)
+	m.skills = NewSkillsPanel(store)
+	m.mcps = NewMCPsPanel(store)
+	m.plugins = NewPluginsPanel(m.theme, store)
+	m.inventory = NewInventoryPanel(m.theme, m.executor, store)
+	m.policy = NewPolicyPanel(m.theme, cfg)
+	m.logs = NewLogsPanel(m.theme, cfg)
+	m.auditHist = NewAuditPanel(m.theme, store)
+	m.tools = NewToolsPanel(store)
+	m.setup = NewSetupPanel(m.theme, cfg, m.executor)
+	m.activity.dataDir = dataDir
+	m.resizePanels()
+	m.propagateConnector()
+	m.refresh()
+	return nil
+}
+
 func (m Model) exportAuditJSON(path string) error {
 	if m.store == nil {
 		return fmt.Errorf("audit store not available")
@@ -2851,6 +2926,7 @@ func (m *Model) resizePanels() {
 	m.tools.SetSize(m.width, panelH)
 	m.detail.SetSize(m.width, m.height)
 	m.actionMenu.SetSize(m.width, m.height)
+	m.firstRun.SetSize(m.width, m.height)
 	m.logs.SetSize(m.width, panelH)
 	m.activity.SetSize(m.width, panelH)
 }

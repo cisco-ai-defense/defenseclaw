@@ -620,6 +620,8 @@ func TestOpenClaw_Authenticate_NoCredentials(t *testing.T) {
 }
 
 func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
 	// Enabling the OpenClaw connector must be sufficient to make OpenClaw
 	// route through DefenseClaw — no separate `defenseclaw setup guardrail`
 	// step. Setup() therefore has to copy the extension into OpenClaw's
@@ -712,6 +714,8 @@ func TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig(t *testing.T) {
 }
 
 func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
 	// Sidecar boots many times. Re-running Setup must leave the config in
 	// the same shape (single allow entry, single load path), not produce
 	// duplicates.
@@ -763,6 +767,8 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 }
 
 func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
 	dir := t.TempDir()
 	ocHome := filepath.Join(dir, "openclaw-home")
 	os.MkdirAll(ocHome, 0o755)
@@ -805,6 +811,13 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 	}
 	if !found {
 		t.Error("Teardown clobbered unrelated plugins.allow entry")
+	}
+}
+
+func requireOpenClawExtensionBundle(t *testing.T) {
+	t.Helper()
+	if !OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
 }
 
