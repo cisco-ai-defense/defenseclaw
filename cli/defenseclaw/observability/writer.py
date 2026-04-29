@@ -554,13 +554,18 @@ def _build_sink_entry(
             host = inputs.get("host", "localhost")
             port = inputs.get("port", "8088")
             endpoint = f"https://{host}:{port}/services/collector/event"
+        if not endpoint.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                f"splunk HEC endpoint must start with http:// or https:// (got {endpoint!r})",
+            )
+        verify_tls_default = "true" if preset.id == "splunk-enterprise" else "false"
         base["splunk_hec"] = {
             "endpoint": endpoint,
             "token_env": preset.token_env,
             "index": inputs.get("index", "defenseclaw"),
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
-            "verify_tls": _parse_bool(inputs.get("verify_tls", "false")),
+            "verify_tls": _parse_bool(inputs.get("verify_tls", verify_tls_default)),
         }
     elif kind == _SINK_KIND_OTLP_LOGS:
         endpoint = inputs.get("endpoint", "").strip()
@@ -669,9 +674,17 @@ def _destination_name(
         return override
     # Deterministic default names — short, human-readable, and unique
     # enough per-host that a user can pick them out of a list.
-    if preset.id == "splunk-hec":
+    if preset.id in ("splunk-hec", "splunk-enterprise"):
         host = inputs.get("host", "localhost")
-        return f"splunk-hec-{_slug(host)}"
+        if preset.id == "splunk-enterprise":
+            endpoint = inputs.get("endpoint", "")
+            if "://" in endpoint:
+                from urllib.parse import urlparse
+
+                host = urlparse(endpoint).hostname or host
+            elif endpoint:
+                host = endpoint.split("/", 1)[0].split(":", 1)[0] or host
+        return f"{preset.id}-{_slug(host)}"
     if preset.id == "webhook":
         url = inputs.get("url", "")
         host = url.split("/")[2] if "://" in url else "webhook"
@@ -819,6 +832,10 @@ def _sink_preset_id(sink: dict[str, Any]) -> str:
     """
     kind = sink.get("kind", "")
     if kind == _SINK_KIND_SPLUNK_HEC:
+        name = str(sink.get("name", "") or "")
+        endpoint = str((sink.get("splunk_hec") or {}).get("endpoint", "") or "")
+        if name.startswith("splunk-enterprise-") or _is_remote_splunk_endpoint(endpoint):
+            return "splunk-enterprise"
         return "splunk-hec"
     if kind == _SINK_KIND_HTTP_JSONL:
         return "webhook"
@@ -837,6 +854,16 @@ def _sink_preset_id(sink: dict[str, Any]) -> str:
             return "splunk-o11y"
         return "otlp"
     return ""
+
+
+def _is_remote_splunk_endpoint(endpoint: str) -> bool:
+    if not endpoint:
+        return False
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = (parsed.hostname or "").lower()
+    return host not in ("", "localhost", "127.0.0.1", "::1")
 
 
 # ---------------------------------------------------------------------------

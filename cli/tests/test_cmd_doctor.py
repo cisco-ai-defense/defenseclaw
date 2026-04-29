@@ -17,6 +17,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -29,6 +30,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_llm_api_key,
     _DoctorResult,
+    _probe_splunk_hec,
     _verify_bedrock,
 )
 from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, LLMConfig, OpenShellConfig
@@ -281,6 +283,31 @@ class AnthropicProbeModelTests(unittest.TestCase):
             os.environ.pop("DEFENSECLAW_ANTHROPIC_PROBE_MODEL", None)
             got = _anthropic_probe_model("")
         self.assertEqual(got, _ANTHROPIC_DEFAULT_PROBE_MODEL)
+
+
+class DoctorObservabilityLabelTests(unittest.TestCase):
+    @patch(
+        "defenseclaw.commands.cmd_doctor._resolve_audit_sink_endpoint_and_token",
+        return_value=("https://splunk.example.com:8088/services/collector/event", "hec-token"),
+    )
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
+    def test_splunk_enterprise_probe_label(self, _mock_probe, _mock_resolve):
+        cfg = SimpleNamespace(data_dir="/tmp/defenseclaw")
+        dest = SimpleNamespace(
+            name="splunk-enterprise-splunk-example-com",
+            kind="splunk_hec",
+            preset_id="splunk-enterprise",
+            endpoint="https://splunk.example.com:8088/services/collector/event",
+        )
+        result = _DoctorResult()
+
+        _probe_splunk_hec(cfg, dest, result)
+
+        self.assertEqual(result.passed, 1)
+        self.assertEqual(
+            result.checks[0]["label"],
+            "splunk-enterprise-splunk-example-com (Splunk Enterprise (HEC))",
+        )
 
 
 class DoctorCacheWriteTests(unittest.TestCase):

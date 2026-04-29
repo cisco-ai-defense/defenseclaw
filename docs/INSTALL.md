@@ -521,11 +521,15 @@ defenseclaw setup splunk
 |------|-------------|
 | `--o11y` | Enable Splunk Observability Cloud (OTLP traces + metrics) |
 | `--logs` | Enable local Splunk via Docker (HEC) |
+| `--enterprise` | Enable remote Splunk Enterprise via HEC endpoint + token |
 | `--realm REALM` | Splunk O11y realm |
 | `--access-token TOKEN` | Splunk O11y access token |
+| `--hec-endpoint URL` | Remote Splunk Enterprise HEC endpoint |
+| `--hec-token TOKEN` | Remote Splunk Enterprise HEC token |
+| `--skip-test` | Skip the live HEC probe after remote Splunk Enterprise setup |
 | `--app-name NAME` | Application name for traces |
-| `--disable` | Disable integration(s); combine with `--o11y` / `--logs` to scope |
-| `--non-interactive` | Requires at least `--o11y` or `--logs` |
+| `--disable` | Disable integration(s); combine with `--o11y` / `--logs` / `--enterprise` to scope |
+| `--non-interactive` | Requires at least `--o11y`, `--logs`, or `--enterprise` |
 
 The `--logs` option requires Docker and sets up a local Splunk runtime with the
 DefenseClaw Splunk bridge (`splunk-claw-bridge`). That runtime starts directly
@@ -538,12 +542,26 @@ https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/config
 # Enable Splunk Observability Cloud
 defenseclaw setup splunk --o11y --realm us1 --access-token $SPLUNK_TOKEN --non-interactive
 
+# Enable remote Splunk Enterprise HEC
+defenseclaw setup splunk --enterprise \
+  --hec-endpoint https://splunk.example.com:8088/services/collector/event \
+  --hec-token "$SPLUNK_HEC_TOKEN" \
+  --index defenseclaw \
+  --non-interactive
+
 # Enable local Splunk logs (requires Docker)
 defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
 
 # Disable both
 defenseclaw setup splunk --disable
 ```
+
+For `--enterprise`, the Splunk administrator must already have enabled HTTP
+Event Collector, created an active HEC token, and allowed the configured index.
+DefenseClaw stores the token in `~/.defenseclaw/.env` as
+`DEFENSECLAW_SPLUNK_HEC_TOKEN` and writes only `token_env` to `config.yaml`.
+Setup sends one best-effort HEC probe event after writing config so you can
+see whether Splunk returns `200 OK`; use `--skip-test` to suppress that probe.
 
 ### `defenseclaw doctor`
 

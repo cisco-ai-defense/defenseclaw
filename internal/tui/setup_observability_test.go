@@ -39,6 +39,11 @@ func TestObservabilityWizardFields_PresetRebuildsForm(t *testing.T) {
 			mustNotHave: []string{"Realm", "URL"},
 		},
 		{
+			preset:      "splunk-enterprise",
+			mustHave:    []string{"Endpoint", "Index", "HEC Token"},
+			mustNotHave: []string{"Host", "Port", "Realm"},
+		},
+		{
 			preset:   "webhook",
 			mustHave: []string{"URL", "Method", "Verify TLS"},
 			// Webhook has no "Signals" field because its target is
@@ -88,7 +93,7 @@ func TestObservabilityWizardFields_PresetRebuildsForm(t *testing.T) {
 // preset that takes a token must declare Kind=="password".
 func TestObservabilityWizardFields_TokenIsPasswordKind(t *testing.T) {
 	presetsWithTokens := []string{
-		"splunk-o11y", "splunk-hec", "datadog", "honeycomb",
+		"splunk-o11y", "splunk-hec", "splunk-enterprise", "datadog", "honeycomb",
 		"newrelic", "grafana-cloud",
 	}
 	for _, id := range presetsWithTokens {
@@ -168,6 +173,67 @@ func TestBuildWizardArgs_ObservabilityAlwaysPassesDefaults(t *testing.T) {
 	for _, want := range mustContain {
 		if !strings.Contains(joined, want) {
 			t.Errorf("default-only submit missing %q\n  args: %v", want, args)
+		}
+	}
+}
+
+func TestBuildWizardArgs_SplunkEnterpriseEndpointAndToken(t *testing.T) {
+	p := &SetupPanel{
+		wizRunIdx:     wizardObservability,
+		wizFormFields: observabilityWizardFields("splunk-enterprise"),
+	}
+	for i := range p.wizFormFields {
+		switch p.wizFormFields[i].Flag {
+		case "--endpoint":
+			p.wizFormFields[i].Value = "https://splunk.example.com:8088/services/collector/event"
+		case "--token":
+			p.wizFormFields[i].Value = "hec-token"
+		}
+	}
+
+	args := p.buildWizardArgs(wizardObservability)
+	joined := strings.Join(args, " ")
+	mustContain := []string{
+		"setup observability add splunk-enterprise",
+		"--endpoint https://splunk.example.com:8088/services/collector/event",
+		"--token hec-token",
+		"--index defenseclaw",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(joined, want) {
+			t.Errorf("enterprise args missing %q\n  args: %v", want, args)
+		}
+	}
+}
+
+func TestBuildWizardArgs_SetupSplunkEnterpriseProbeSkip(t *testing.T) {
+	p := &SetupPanel{wizRunIdx: wizardSplunk}
+	p.wizFormFields = p.wizardFormDefs(wizardSplunk)
+	for i := range p.wizFormFields {
+		switch p.wizFormFields[i].Flag {
+		case "--enterprise":
+			p.wizFormFields[i].Value = "yes"
+		case "--hec-endpoint":
+			p.wizFormFields[i].Value = "https://splunk.example.com:8088/services/collector/event"
+		case "--hec-token":
+			p.wizFormFields[i].Value = "hec-token"
+		case "--skip-test":
+			p.wizFormFields[i].Value = "yes"
+		}
+	}
+
+	args := p.buildWizardArgs(wizardSplunk)
+	joined := strings.Join(args, " ")
+	mustContain := []string{
+		"setup splunk",
+		"--enterprise",
+		"--hec-endpoint https://splunk.example.com:8088/services/collector/event",
+		"--hec-token hec-token",
+		"--skip-test",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(joined, want) {
+			t.Errorf("setup splunk enterprise args missing %q\n  args: %v", want, args)
 		}
 	}
 }
@@ -267,15 +333,16 @@ func TestSubmitWizardForm_ProceedsWhenRequiredFilled(t *testing.T) {
 // reverse direction.
 func TestObservabilityPresets_MatchPythonRegistry(t *testing.T) {
 	expected := map[string]bool{
-		"splunk-o11y":   true,
-		"splunk-hec":    true,
-		"datadog":       true,
-		"honeycomb":     true,
-		"newrelic":      true,
-		"grafana-cloud": true,
-		"local-otlp":    true,
-		"otlp":          true,
-		"webhook":       true,
+		"splunk-o11y":       true,
+		"splunk-hec":        true,
+		"splunk-enterprise": true,
+		"datadog":           true,
+		"honeycomb":         true,
+		"newrelic":          true,
+		"grafana-cloud":     true,
+		"local-otlp":        true,
+		"otlp":              true,
+		"webhook":           true,
 	}
 	got := make(map[string]bool, len(observabilityPresets))
 	for _, p := range observabilityPresets {
