@@ -109,8 +109,8 @@ class InstallSmokeMatrixTests(unittest.TestCase):
     """Per-connector lifecycle round-trip smoke tests."""
 
     def _run_setup_disable_uninstall_for(self, connector_name: str) -> None:
-        from defenseclaw.commands.cmd_setup import execute_guardrail_setup
         from defenseclaw.commands import cmd_uninstall
+        from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
         with _IsolatedHome() as home:
             app = _build_app_with_connector(home, connector_name)
@@ -152,7 +152,7 @@ class InstallSmokeMatrixTests(unittest.TestCase):
 
             # 3. The uninstall planner produces a coherent dry-run plan
             #    rooted under the tmp data dir.  We use the safe defaults
-            #    (no binary removal, no openclaw revert).
+            #    (no binary removal; connector teardown is reversible).
             with patch.dict(
                 os.environ,
                 {"DEFENSECLAW_HOME": os.path.join(home, ".defenseclaw")},
@@ -161,8 +161,7 @@ class InstallSmokeMatrixTests(unittest.TestCase):
                 plan = cmd_uninstall._build_plan(
                     wipe_data=False,
                     binaries=False,
-                    revert_openclaw=False,
-                    remove_plugin=False,
+                    remove_plugin=True,
                 )
             self.assertTrue(
                 plan.data_dir,

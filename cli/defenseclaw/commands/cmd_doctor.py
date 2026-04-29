@@ -1368,7 +1368,7 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         + "; ".join(parts)
         + ". Run 'defenseclaw doctor --fix' to invoke "
         "'defenseclaw-gateway connector teardown' for each, or "
-        "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
+        "'defenseclaw uninstall' for a full connector sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
 

@@ -26,10 +26,9 @@ Connector polymorphism (S7.3)
 -----------------------------
 Removal of the agent framework's defenseclaw artifacts is delegated to
 ``defenseclaw-gateway connector teardown`` — the canonical sentinel that
-each connector adapter implements (S7.2). This keeps the Python flow
-honest: it never has to know how Codex / Claude Code / ZeptoClaw
-configure themselves, which previously meant the OpenClaw teardown was
-the only one that worked.
+each connector adapter implements (S7.2). Uninstall fans that sentinel
+out across every known connector, not just the active one, so switching
+connectors cannot leave stale hooks or backups behind.
 
 The Python side still owns OpenClaw-specific revert paths as a fallback
 for very old gateway binaries (pre-S7.2) where the ``connector teardown``
@@ -41,6 +40,7 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -48,6 +48,7 @@ from dataclasses import dataclass
 import click
 
 from defenseclaw import config as config_module
+from defenseclaw import connector_paths
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -55,23 +56,29 @@ from defenseclaw import config as config_module
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
 
+# Connector names are normally sourced from connector_paths.KNOWN_CONNECTORS.
+# The active connector may still be a plugin connector, so validate it before
+# passing it to the gateway as a subprocess argument.
+_CONNECTOR_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
 
 @dataclass
 class UninstallPlan:
     """Aggregated summary of what an uninstall/reset intends to do."""
 
     stop_gateway: bool = True
-    revert_openclaw: bool = True
     remove_plugin: bool = True
     remove_data_dir: bool = False
     remove_binaries: bool = False
     data_dir: str = ""
     openclaw_config_file: str = ""
     openclaw_home: str = ""
-    # connector is the active framework adapter to tear down. Resolved
-    # from cfg.active_connector() at plan-build time and surfaced in
-    # _render_plan so the operator sees what's about to be touched.
+    # connector is the active framework adapter. It is kept for display
+    # and backwards-compatible direct test construction; connectors is
+    # the ordered teardown set. When connectors is empty, helpers fall
+    # back to the singleton active connector.
     connector: str = "openclaw"
+    connectors: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +92,11 @@ class UninstallPlan:
     is_flag=True,
     help="Additionally remove the defenseclaw + defenseclaw-gateway binaries from ~/.local/bin.",
 )
-@click.option("--keep-openclaw", is_flag=True, help="Do NOT revert ~/.openclaw/openclaw.json or remove the plugin.")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without touching the system.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def uninstall_cmd(
     wipe_data: bool,
     binaries: bool,
-    keep_openclaw: bool,
     dry_run: bool,
     yes: bool,
 ) -> None:
@@ -99,8 +104,7 @@ def uninstall_cmd(
     plan = _build_plan(
         wipe_data=wipe_data,
         binaries=binaries,
-        revert_openclaw=not keep_openclaw,
-        remove_plugin=not keep_openclaw,
+        remove_plugin=True,
     )
     _render_plan(plan, dry_run=dry_run)
 
@@ -124,15 +128,14 @@ def uninstall_cmd(
 def reset_cmd(yes: bool) -> None:
     """Wipe ~/.defenseclaw so 'defenseclaw quickstart' starts clean.
 
-    Keeps binaries and the OpenClaw plugin installed so reinstall is
-    fast. For a full uninstall use 'defenseclaw uninstall --all
-    --binaries'.
+    Keeps binaries installed, but restores connector configs to their
+    pre-DefenseClaw state. For a full uninstall use 'defenseclaw
+    uninstall --all --binaries'.
     """
     plan = _build_plan(
         wipe_data=True,
         binaries=False,
-        revert_openclaw=True,
-        remove_plugin=False,  # keep plugin around for quick re-enable
+        remove_plugin=True,
     )
     _render_plan(plan, dry_run=False)
 
@@ -179,7 +182,6 @@ def _build_plan(
     *,
     wipe_data: bool,
     binaries: bool,
-    revert_openclaw: bool,
     remove_plugin: bool,
 ) -> UninstallPlan:
     data_dir = str(config_module.default_data_path())
@@ -199,10 +201,10 @@ def _build_plan(
         openclaw_config_file = os.path.join(openclaw_home, "openclaw.json")
 
     connector = _resolve_active_connector(cfg)
+    connectors = _planned_teardown_connectors(connector)
 
     return UninstallPlan(
         stop_gateway=True,
-        revert_openclaw=revert_openclaw,
         remove_plugin=remove_plugin,
         remove_data_dir=wipe_data,
         remove_binaries=binaries,
@@ -210,37 +212,44 @@ def _build_plan(
         openclaw_config_file=openclaw_config_file,
         openclaw_home=openclaw_home,
         connector=connector,
+        connectors=connectors,
     )
 
 
 def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
+    connectors = _connectors_to_teardown(plan)
     click.echo()
     click.echo("  ── Uninstall plan ────────────────────────────────────")
     click.echo()
     click.echo(f"  • active connector:    {plan.connector}")
     click.echo(f"  • stop sidecar:        {'yes' if plan.stop_gateway else 'no'}")
-    if plan.connector == "openclaw":
+    if connectors:
         click.echo(
-            f"  • revert openclaw.json: {'yes' if plan.revert_openclaw else 'no'} "
-            f"({plan.openclaw_config_file})"
+            "  • teardown connectors: "
+            f"yes ({', '.join(connectors)} via gateway connector teardown)"
         )
-        click.echo(f"  • remove plugin:        {'yes' if plan.remove_plugin else 'no'}")
     else:
-        click.echo(
-            f"  • teardown {plan.connector}:    "
-            f"{'yes (via gateway connector teardown)' if plan.revert_openclaw else 'no'}"
-        )
+        click.echo("  • teardown connectors: no")
+    click.echo(
+        f"  • revert openclaw.json: {'yes' if 'openclaw' in connectors else 'no'} "
+        f"({plan.openclaw_config_file})"
+    )
+    click.echo(
+        "  • remove OpenClaw plugin: "
+        f"{'yes' if plan.remove_plugin and 'openclaw' in connectors else 'no'}"
+    )
     click.echo(f"  • wipe {plan.data_dir}: {'yes' if plan.remove_data_dir else 'no'}")
     click.echo(f"  • remove binaries:     {'yes' if plan.remove_binaries else 'no'}")
     click.echo()
 
 
 def _execute_plan(plan: UninstallPlan) -> None:
+    connectors = _connectors_to_teardown(plan)
     if plan.stop_gateway:
         _stop_gateway()
-    if plan.revert_openclaw:
+    if connectors:
         _connector_teardown(plan)
-    if plan.remove_plugin and plan.connector == "openclaw":
+    if plan.remove_plugin and "openclaw" in connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed the
         # connector's hook scripts and config patches, so there is
@@ -291,35 +300,79 @@ def _gateway_supports_connector_teardown() -> bool:
     return "teardown" in combined and "list-backups" in combined
 
 
-def _connector_teardown(plan: UninstallPlan) -> None:
-    """Run connector teardown via the canonical sentinel, falling back
-    to the OpenClaw-specific Python helpers when the gateway binary
-    is too old (pre-S7.2) or the connector isn't OpenClaw.
+def _planned_teardown_connectors(
+    active_connector: str,
+) -> tuple[str, ...]:
+    """Return the ordered connector set for uninstall teardown.
 
-    For non-OpenClaw connectors the Python fallback path is **not**
-    safe — calling ``restore_openclaw_config`` against a Codex install
-    would corrupt it — so we hard-fail in that case with a clear
-    remediation pointing at the gateway upgrade path.
+    Built-ins come from the shared connector path registry so the Python
+    CLI stays in lockstep with the other connector-aware commands. A
+    safe active plugin connector is appended because it may not appear
+    in the static built-in list.
     """
-    if _gateway_supports_connector_teardown():
-        if _run_gateway_connector_teardown(plan.connector):
-            return
-        click.echo(
-            f"  ⚠ gateway connector teardown for {plan.connector} reported errors — "
-            f"see output above"
-        )
-        if plan.connector != "openclaw":
-            return
+    names: list[str] = []
+    for name in connector_paths.KNOWN_CONNECTORS:
+        normalized = connector_paths.normalize(name)
+        names.append(normalized)
 
-    if plan.connector in _PYTHON_FALLBACK_CONNECTORS:
-        _revert_openclaw_python(plan)
+    active = connector_paths.normalize(active_connector)
+    if _is_safe_connector_name(active) and active not in names:
+        names.append(active)
+    return tuple(dict.fromkeys(names))
+
+
+def _connectors_to_teardown(plan: UninstallPlan) -> tuple[str, ...]:
+    """Return a de-duplicated, validated teardown list for *plan*."""
+    candidates = plan.connectors or (plan.connector,)
+    names: list[str] = []
+    for candidate in candidates:
+        name = connector_paths.normalize(candidate)
+        if not _is_safe_connector_name(name):
+            click.echo(f"  ⚠ skipping invalid connector name {candidate!r}")
+            continue
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _is_safe_connector_name(name: str) -> bool:
+    return bool(_CONNECTOR_NAME_RE.fullmatch(name))
+
+
+def _connector_teardown(plan: UninstallPlan) -> None:
+    """Run planned connector teardowns via the canonical sentinel.
+
+    For non-OpenClaw connectors the Python fallback path is **not** safe
+    — calling ``restore_openclaw_config`` against a Codex install would
+    corrupt it — so unsupported connectors get a clear warning while the
+    uninstall continues with the rest of the plan.
+    """
+    connectors = _connectors_to_teardown(plan)
+    if not connectors:
+        click.echo("  · no connector teardown requested")
         return
 
-    click.echo(
-        f"  ⚠ no Python fallback for connector '{plan.connector}'.\n"
-        f"     Upgrade defenseclaw-gateway to v0.7+ (introduces "
-        f"'connector teardown') and re-run 'defenseclaw uninstall'."
-    )
+    gateway_supported = _gateway_supports_connector_teardown()
+    for connector in connectors:
+        if gateway_supported:
+            if _run_gateway_connector_teardown(connector):
+                continue
+            click.echo(
+                f"  ⚠ gateway connector teardown for {connector} reported errors — "
+                f"see output above"
+            )
+            if connector != "openclaw":
+                continue
+
+        if connector in _PYTHON_FALLBACK_CONNECTORS:
+            _revert_openclaw_python(plan)
+            continue
+
+        click.echo(
+            f"  ⚠ no Python fallback for connector '{connector}'.\n"
+            f"     Upgrade defenseclaw-gateway to v0.7+ (introduces "
+            f"'connector teardown') and re-run 'defenseclaw uninstall'."
+        )
 
 
 def _run_gateway_connector_teardown(connector: str) -> bool:
@@ -329,6 +382,11 @@ def _run_gateway_connector_teardown(connector: str) -> bool:
     is forwarded to the operator so they can see exactly what each
     adapter restored.
     """
+    connector = connector_paths.normalize(connector)
+    if not _is_safe_connector_name(connector):
+        click.echo(f"  ⚠ refusing invalid connector name {connector!r}")
+        return False
+
     gw = shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
