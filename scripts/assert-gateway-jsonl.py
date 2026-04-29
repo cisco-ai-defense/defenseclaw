@@ -77,6 +77,14 @@ REQUIRED_EVENT_FIELDS = {
     # body-shape are optional on some paths; branch/decision/source are
     # always present per EgressPayload in internal/gatewaylog/events.go.
     "egress":     {"branch", "decision", "source"},
+    # v7.1 LLM/tool telemetry emitted by monitored agent surfaces.
+    # Required fields mirror schemas/gateway-event-envelope.json and
+    # internal/gatewaylog/events.go; content-bearing fields are
+    # optional because the gateway redaction choke point may scrub
+    # them before the event hits disk.
+    "llm_prompt":      {"prompt_id"},
+    "llm_response":    {"response_id"},
+    "tool_invocation": {"phase", "tool"},
 }
 
 VALID_EVENT_TYPES = set(REQUIRED_EVENT_FIELDS.keys())
