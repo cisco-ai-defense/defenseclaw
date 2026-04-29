@@ -3304,6 +3304,10 @@ func TestConnectorPrefixStripper(t *testing.T) {
 }
 
 func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
+	if !connector.OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 
@@ -3379,6 +3383,10 @@ func TestSwitchConnectorLocked_UnknownConnectorIgnored(t *testing.T) {
 }
 
 func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
+	if !connector.OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 	codexConn, _ := reg.Get("codex")

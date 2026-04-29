@@ -24,7 +24,7 @@ import (
 )
 
 // ------------------------------------------------------------------
-// P2-#12 — Unified LLM editor, Cisco AI Defense read-only, Firewall
+// P2-#12 — Unified LLM editor, Cisco AI Defense editor, Firewall
 // read-only.
 //
 // Originally this covered the v4 inspect_llm: block; with the v5
@@ -128,11 +128,11 @@ func TestSetupSections_UnifiedLLMEditable(t *testing.T) {
 	}
 }
 
-// TestSetupSections_CiscoAIDefenseReadOnly verifies the section is
-// present and every row is kind=header so the config form's Enter
-// binding never enters edit mode. This is the whole point of the
-// read-only designation.
-func TestSetupSections_CiscoAIDefenseReadOnly(t *testing.T) {
+// TestSetupSections_CiscoAIDefenseEditable verifies the section is
+// present and exposes the endpoint/key/rule fields operators need for
+// first-run remote/both scanner setup. api_key must be Kind=password so
+// the renderer masks it.
+func TestSetupSections_CiscoAIDefenseEditable(t *testing.T) {
 	c := &config.Config{
 		CiscoAIDefense: config.CiscoAIDefenseConfig{
 			Endpoint:     "https://us.api.inspect.aidefense.security.cisco.com",
@@ -154,9 +154,28 @@ func TestSetupSections_CiscoAIDefenseReadOnly(t *testing.T) {
 		t.Fatal("Cisco AI Defense section missing")
 		return
 	}
+	want := map[string]string{
+		"cisco_ai_defense.endpoint":      "string",
+		"cisco_ai_defense.api_key":       "password",
+		"cisco_ai_defense.api_key_env":   "string",
+		"cisco_ai_defense.timeout_ms":    "int",
+		"cisco_ai_defense.enabled_rules": "string",
+	}
+	seen := map[string]bool{}
 	for _, f := range cisco.Fields {
-		if f.Kind != "header" {
-			t.Errorf("%s must be read-only, got kind=%q", f.Key, f.Kind)
+		if kind, ok := want[f.Key]; ok {
+			seen[f.Key] = true
+			if f.Kind != kind {
+				t.Errorf("%s Kind=%q, want %q", f.Key, f.Kind, kind)
+			}
+			if f.Hint == "" {
+				t.Errorf("%s missing Hint", f.Key)
+			}
+		}
+	}
+	for key := range want {
+		if !seen[key] {
+			t.Errorf("Cisco AI Defense section missing key %q", key)
 		}
 	}
 	// The rules summary must include both entries so operators can
@@ -173,56 +192,26 @@ func TestSetupSections_CiscoAIDefenseReadOnly(t *testing.T) {
 	}
 }
 
-// TestSetupSections_CiscoAIDefenseAPIKeyStates exercises the three
-// API-key states the operator cares about: inline, env-resolved, and
-// unset. Each must render a distinct, non-leaking summary string.
-func TestSetupSections_CiscoAIDefenseAPIKeyStates(t *testing.T) {
-	t.Run("inline_redacted", func(t *testing.T) {
-		c := &config.Config{CiscoAIDefense: config.CiscoAIDefenseConfig{APIKey: "secret"}}
-		fields := ciscoAIDefenseFields(c)
-		var v string
-		for _, f := range fields {
-			if f.Key == "cisco_ai_defense.api_key" {
-				v = f.Value
-			}
+// TestSetupSections_CiscoAIDefenseAPIKeyUsesPasswordKind keeps the
+// masking contract close to the section helper. The field may hold the
+// raw value internally for editing; the render path masks all
+// Kind=password fields.
+func TestSetupSections_CiscoAIDefenseAPIKeyUsesPasswordKind(t *testing.T) {
+	c := &config.Config{CiscoAIDefense: config.CiscoAIDefenseConfig{APIKey: "secret"}}
+	fields := ciscoAIDefenseFields(c)
+	var apiKey configField
+	for _, f := range fields {
+		if f.Key == "cisco_ai_defense.api_key" {
+			apiKey = f
+			break
 		}
-		if strings.Contains(v, "secret") {
-			t.Errorf("api_key row leaked the cleartext: %q", v)
-		}
-		if !strings.Contains(v, "redacted") {
-			t.Errorf("expected redacted marker, got %q", v)
-		}
-	})
-	t.Run("env_unresolved", func(t *testing.T) {
-		t.Setenv("UNIT_TEST_UNSET_KEY_CAD", "")
-		c := &config.Config{CiscoAIDefense: config.CiscoAIDefenseConfig{APIKeyEnv: "UNIT_TEST_UNSET_KEY_CAD"}}
-		fields := ciscoAIDefenseFields(c)
-		var v string
-		for _, f := range fields {
-			if f.Key == "cisco_ai_defense.api_key" {
-				v = f.Value
-			}
-		}
-		if !strings.Contains(v, "UNIT_TEST_UNSET_KEY_CAD") {
-			t.Errorf("missing env var name: %q", v)
-		}
-		if !strings.Contains(v, "not set") {
-			t.Errorf("env_unresolved should advertise 'not set', got %q", v)
-		}
-	})
-	t.Run("unset", func(t *testing.T) {
-		c := &config.Config{}
-		fields := ciscoAIDefenseFields(c)
-		var v string
-		for _, f := range fields {
-			if f.Key == "cisco_ai_defense.api_key" {
-				v = f.Value
-			}
-		}
-		if v != "(unset)" {
-			t.Errorf("unset expected '(unset)', got %q", v)
-		}
-	})
+	}
+	if apiKey.Kind != "password" {
+		t.Fatalf("api_key Kind=%q, want password", apiKey.Kind)
+	}
+	if apiKey.Value != "secret" {
+		t.Fatalf("api_key Value should keep editable raw value, got %q", apiKey.Value)
+	}
 }
 
 // TestSetupSections_FirewallReadOnly mirrors the CiscoAIDefense test
@@ -266,16 +255,24 @@ func TestSetupSections_FirewallReadOnly(t *testing.T) {
 	}
 }
 
-// TestApplyConfigField_CiscoAIDefenseNoOp reinforces that applying a
-// cisco_ai_defense.* key silently no-ops (the switch falls through
-// and actions-matrix prefix doesn't match). This prevents a future
-// refactor from accidentally adding an edit path.
-func TestApplyConfigField_CiscoAIDefenseNoOp(t *testing.T) {
+// TestApplyConfigField_CiscoAIDefenseWrites verifies the TUI config
+// editor can now update the full Cisco AI Defense block.
+func TestApplyConfigField_CiscoAIDefenseWrites(t *testing.T) {
 	c := &config.Config{}
-	applyConfigField(c, "cisco_ai_defense.api_key", "attacker-set-secret")
-	if c.CiscoAIDefense.APIKey != "" {
-		t.Errorf("applyConfigField should never mutate cisco_ai_defense.api_key, got %q", c.CiscoAIDefense.APIKey)
+	applyConfigField(c, "cisco_ai_defense.endpoint", "https://example.test")
+	applyConfigField(c, "cisco_ai_defense.api_key", "new-secret")
+	applyConfigField(c, "cisco_ai_defense.api_key_env", "CISCO_TEST_KEY")
+	applyConfigField(c, "cisco_ai_defense.timeout_ms", "4500")
+	applyConfigField(c, "cisco_ai_defense.enabled_rules", "pii,exfil")
+	if c.CiscoAIDefense.Endpoint != "https://example.test" ||
+		c.CiscoAIDefense.APIKey != "new-secret" ||
+		c.CiscoAIDefense.APIKeyEnv != "CISCO_TEST_KEY" ||
+		c.CiscoAIDefense.TimeoutMs != 4500 ||
+		strings.Join(c.CiscoAIDefense.EnabledRules, ",") != "pii,exfil" {
+		t.Fatalf("Cisco AI Defense edits did not land: %+v", c.CiscoAIDefense)
 	}
+
+	// Firewall is still deliberately read-only.
 	applyConfigField(c, "firewall.config_file", "/tmp/evil.conf")
 	if c.Firewall.ConfigFile != "" {
 		t.Errorf("applyConfigField should never mutate firewall paths, got %q", c.Firewall.ConfigFile)

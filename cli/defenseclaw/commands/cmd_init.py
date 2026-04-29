@@ -21,6 +21,7 @@ Mirrors internal/cli/init.go.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -40,8 +41,65 @@ from defenseclaw.paths import (
 @click.option("--skip-install", is_flag=True, help="Skip automatic scanner dependency installation")
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
 @click.option("--sandbox", is_flag=True, help="Set up sandbox mode (Linux only: creates sandbox user and directories)")
+@click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
+@click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
+@click.option(
+    "--connector",
+    type=click.Choice(["codex", "claudecode", "claude-code", "zeptoclaw", "openclaw"], case_sensitive=False),
+    default=None,
+    help="Agent connector to configure.",
+)
+@click.option(
+    "--profile",
+    type=click.Choice(["observe", "action"], case_sensitive=False),
+    default=None,
+    help="Protection profile. Defaults to observe.",
+)
+@click.option(
+    "--scanner-mode",
+    type=click.Choice(["local", "remote", "both"], case_sensitive=False),
+    default="local",
+    show_default=True,
+    help="Scanner backend to configure.",
+)
+@click.option("--with-judge/--no-judge", default=False, help="Enable or disable the LLM judge.")
+@click.option("--llm-provider", default="", help="Unified LLM provider (openai, anthropic, ollama, etc.).")
+@click.option("--llm-model", default="", help="Unified LLM model, preferably provider/model.")
+@click.option("--llm-api-key", default="", help="LLM API key to save into .env (config stores only the env name).")
+@click.option("--llm-api-key-env", default="DEFENSECLAW_LLM_KEY", show_default=True, help="Env var name for the unified LLM key.")
+@click.option("--llm-base-url", default="", help="Local/proxy LLM base URL.")
+@click.option("--cisco-endpoint", default="", help="Cisco AI Defense endpoint.")
+@click.option("--cisco-api-key", default="", help="Cisco AI Defense key to save into .env.")
+@click.option("--cisco-api-key-env", default="CISCO_AI_DEFENSE_API_KEY", show_default=True, help="Env var name for Cisco AI Defense key.")
+@click.option("--start-gateway/--no-start-gateway", default=None, help="Start the gateway sidecar after setup.")
+@click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
+@click.option("--json-summary", is_flag=True, help="Emit the final first-run report as JSON.")
+@click.option("--verbose", is_flag=True, help="Show full subprocess/setup output.")
 @pass_ctx
-def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbox: bool) -> None:
+def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
+    app: AppContext,
+    skip_install: bool,
+    enable_guardrail: bool,
+    sandbox: bool,
+    non_interactive: bool,
+    yes: bool,
+    connector: str | None,
+    profile: str | None,
+    scanner_mode: str,
+    with_judge: bool,
+    llm_provider: str,
+    llm_model: str,
+    llm_api_key: str,
+    llm_api_key_env: str,
+    llm_base_url: str,
+    cisco_endpoint: str,
+    cisco_api_key: str,
+    cisco_api_key_env: str,
+    start_gateway: bool | None,
+    verify: bool | None,
+    json_summary: bool,
+    verbose: bool,
+) -> None:
     """Initialize DefenseClaw environment.
 
     Creates ~/.defenseclaw/, default config, SQLite database,
@@ -51,6 +109,47 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     import platform
+
+    if _use_guided_first_run(
+        non_interactive=non_interactive,
+        yes=yes,
+        connector=connector,
+        profile=profile,
+        with_judge=with_judge,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_api_key=llm_api_key,
+        llm_base_url=llm_base_url,
+        cisco_endpoint=cisco_endpoint,
+        cisco_api_key=cisco_api_key,
+        start_gateway=start_gateway,
+        verify=verify,
+        json_summary=json_summary,
+    ):
+        _run_first_run_cmd(
+            skip_install=skip_install,
+            enable_guardrail=enable_guardrail,
+            sandbox=sandbox,
+            non_interactive=non_interactive,
+            yes=yes,
+            connector=connector,
+            profile=profile,
+            scanner_mode=scanner_mode,
+            with_judge=with_judge,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_api_key=llm_api_key,
+            llm_api_key_env=llm_api_key_env,
+            llm_base_url=llm_base_url,
+            cisco_endpoint=cisco_endpoint,
+            cisco_api_key=cisco_api_key,
+            cisco_api_key_env=cisco_api_key_env,
+            start_gateway=start_gateway,
+            verify=verify,
+            json_summary=json_summary,
+            verbose=verbose,
+        )
+        return
 
     from defenseclaw.config import config_path, default_config, detect_environment, load
     from defenseclaw.db import Store
@@ -209,6 +308,169 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool, sandbo
     click.echo("    defenseclaw mcp scan --all   Scan configured MCP servers")
 
     store.close()
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return click.get_text_stream("stdin").isatty()
+    except Exception:
+        return False
+
+
+def _use_guided_first_run(**kwargs) -> bool:
+    if kwargs.get("json_summary"):
+        return True
+    if kwargs.get("non_interactive") or kwargs.get("yes"):
+        return True
+    if kwargs.get("connector") or kwargs.get("profile"):
+        return True
+    if kwargs.get("with_judge"):
+        return True
+    if kwargs.get("start_gateway") is not None or kwargs.get("verify") is not None:
+        return True
+    for key in (
+        "llm_provider",
+        "llm_model",
+        "llm_api_key",
+        "llm_base_url",
+        "cisco_endpoint",
+        "cisco_api_key",
+    ):
+        if kwargs.get(key):
+            return True
+    return _stdin_is_tty()
+
+
+def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
+    *,
+    skip_install: bool,
+    enable_guardrail: bool,
+    sandbox: bool,
+    non_interactive: bool,
+    yes: bool,
+    connector: str | None,
+    profile: str | None,
+    scanner_mode: str,
+    with_judge: bool,
+    llm_provider: str,
+    llm_model: str,
+    llm_api_key: str,
+    llm_api_key_env: str,
+    llm_base_url: str,
+    cisco_endpoint: str,
+    cisco_api_key: str,
+    cisco_api_key_env: str,
+    start_gateway: bool | None,
+    verify: bool | None,
+    json_summary: bool,
+    verbose: bool,
+) -> None:
+    from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+    from defenseclaw.ux import CLIRenderer
+
+    if not non_interactive and not yes and not json_summary and _stdin_is_tty():
+        connector, profile, scanner_mode, with_judge, start_gateway, verify = _prompt_first_run(
+            connector=connector,
+            profile=profile,
+            scanner_mode=scanner_mode,
+            with_judge=with_judge,
+            start_gateway=start_gateway,
+            verify=verify,
+        )
+
+    connector = _normalize_connector_arg(connector)
+    if profile is None:
+        profile = "observe"
+    if start_gateway is None:
+        start_gateway = False
+    if verify is None:
+        verify = True
+
+    opts = FirstRunOptions(
+        connector=connector,
+        profile=profile,
+        scanner_mode=scanner_mode,
+        with_judge=with_judge,
+        skip_install=skip_install,
+        sandbox=sandbox,
+        start_gateway=start_gateway,
+        verify=verify,
+        verbose=verbose,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        llm_api_key=llm_api_key,
+        llm_api_key_env=llm_api_key_env,
+        llm_base_url=llm_base_url,
+        cisco_endpoint=cisco_endpoint,
+        cisco_api_key=cisco_api_key,
+        cisco_api_key_env=cisco_api_key_env,
+    )
+    report = run_first_run(opts)
+    if json_summary:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _render_first_run_report(report, CLIRenderer())
+    if report.status == "needs_attention":
+        raise SystemExit(1)
+
+
+def _prompt_first_run(
+    *,
+    connector: str | None,
+    profile: str | None,
+    scanner_mode: str,
+    with_judge: bool,
+    start_gateway: bool | None,
+    verify: bool | None,
+) -> tuple[str, str, str, bool, bool, bool]:
+    click.echo()
+    click.echo(click.style("  DefenseClaw First-Run Setup", fg="cyan", bold=True))
+    click.echo("  " + click.style("This wizard writes config.yaml, then runs targeted readiness checks.", dim=True))
+    click.echo()
+    connector_choices = ["codex", "claudecode", "zeptoclaw", "openclaw"]
+    connector = _normalize_connector_arg(connector) if connector else click.prompt(
+        "  Connector",
+        type=click.Choice(connector_choices, case_sensitive=False),
+        default="codex",
+        show_choices=True,
+    )
+    if profile is None:
+        profile = click.prompt(
+            "  Protection profile",
+            type=click.Choice(["observe", "action"], case_sensitive=False),
+            default="observe",
+            show_choices=True,
+        )
+    scanner_mode = click.prompt(
+        "  Scanner mode",
+        type=click.Choice(["local", "remote", "both"], case_sensitive=False),
+        default=scanner_mode or "local",
+        show_choices=True,
+    )
+    with_judge = click.confirm("  Enable LLM judge now?", default=with_judge)
+    start_gateway = click.confirm("  Start gateway after setup?", default=bool(start_gateway))
+    verify = click.confirm("  Run targeted readiness checks?", default=True if verify is None else bool(verify))
+    return connector, profile, scanner_mode, with_judge, start_gateway, verify
+
+
+def _normalize_connector_arg(connector: str | None) -> str:
+    value = (connector or "codex").strip().lower()
+    if value in {"claude-code", "claude_code", "claude"}:
+        return "claudecode"
+    return value
+
+
+def _render_first_run_report(report, renderer) -> None:
+    renderer.title("DefenseClaw First-Run", f"status={report.status} connector={report.connector} profile={report.profile}")
+    renderer.section("Setup")
+    for step in report.setup:
+        renderer.step(step.status, step.name, step.detail)
+    renderer.section("Readiness")
+    for step in report.readiness:
+        renderer.step(step.status, step.name, step.detail)
+    renderer.section("Next")
+    for cmd in report.next_commands[:5]:
+        renderer.echo(f"  {cmd}")
 
 
 def _seed_rego_policies(policy_dir: str) -> None:
@@ -781,4 +1043,3 @@ def _print_health_summary(health: dict | None) -> None:
         click.echo(f"  Health:        {', '.join(parts)}")
     else:
         click.echo("  Health:        ok ✓")
-

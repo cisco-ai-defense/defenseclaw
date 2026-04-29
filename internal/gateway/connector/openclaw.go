@@ -69,6 +69,13 @@ func openClawExtensionAvailable() bool {
 	return false
 }
 
+// OpenClawExtensionAvailable reports whether this gateway build embeds the
+// optional OpenClaw extension bundle. Non-OpenClaw connectors do not require
+// it, and default builds may intentionally contain only the placeholder.
+func OpenClawExtensionAvailable() bool {
+	return openClawExtensionAvailable()
+}
+
 // OpenClawHomeOverride lets tests redirect the OpenClaw home directory so
 // Setup/Teardown write into a scratch path instead of ~/.openclaw.
 var OpenClawHomeOverride string

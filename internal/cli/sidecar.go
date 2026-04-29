@@ -380,7 +380,7 @@ func fetchConnectorMode(client *http.Client, bind string, port int) *connectorMo
 // Mode label color hint:
 //
 //	guardrail     → enforcement (proxy in data path)
-//	observability → telemetry-only (no proxy intercept)
+//	observability → observe-only (no proxy intercept)
 //
 // We don't ANSI-color the output here because the CLI honors the
 // surrounding terminal preferences (NO_COLOR, dumb terminals); the

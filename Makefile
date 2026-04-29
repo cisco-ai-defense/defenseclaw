@@ -14,7 +14,7 @@ DIST_DIR    := dist
 
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
@@ -66,13 +66,26 @@ path:
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
 quickstart:
-	@if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
+	@connector="$${CONNECTOR:-codex}"; \
+	profile="$${PROFILE:-observe}"; \
+	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
 		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
+	elif [ "$$connector" = "none" ]; then \
+		echo "CONNECTOR=none set — skipping first-run setup"; \
+		echo "  Run later: defenseclaw init"; \
 	elif [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
-		"$(INSTALL_DIR)/defenseclaw" quickstart --non-interactive --yes \
+		"$(INSTALL_DIR)/defenseclaw" init --non-interactive --yes \
+			--connector "$$connector" \
+			--profile "$$profile" \
+			--scanner-mode "$${SCANNER_MODE:-local}" \
+			--no-start-gateway --verify \
 			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
-		"$(VENV)/bin/defenseclaw" quickstart --non-interactive --yes \
+		"$(VENV)/bin/defenseclaw" init --non-interactive --yes \
+			--connector "$$connector" \
+			--profile "$$profile" \
+			--scanner-mode "$${SCANNER_MODE:-local}" \
+			--no-start-gateway --verify \
 			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 	else \
 		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
@@ -136,12 +149,16 @@ build: pycli gateway plugin
 	@echo ""
 	@echo "Run 'make install' to install all components."
 
-install: cli-install gateway-install plugin-install
+install: cli-install gateway-install maybe-openclaw-plugin-install
 	@echo ""
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
-	@echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"
+	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
+	else \
+		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
+	fi
 	@echo ""
 	@echo "Next steps:"
 	@echo "  source $(VENV)/bin/activate"
@@ -158,6 +175,13 @@ install: cli-install gateway-install plugin-install
 		echo "Sandbox mode (Linux only):"; \
 		echo "  On a Linux host, use 'defenseclaw init --sandbox' to set up"; \
 		echo "  openshell-sandbox standalone mode with network isolation."; \
+	fi
+
+maybe-openclaw-plugin-install:
+	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+		$(MAKE) plugin-install; \
+	else \
+		echo "Skipping OpenClaw plugin install (CONNECTOR=$${CONNECTOR:-codex})."; \
 	fi
 
 # ---------------------------------------------------------------------------
