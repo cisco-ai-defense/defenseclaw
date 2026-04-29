@@ -138,9 +138,19 @@ func TestResolveActiveConnectorName_GuardrailFallback(t *testing.T) {
 	}
 }
 
+func TestResolveActiveConnectorName_ClawModeFallback(t *testing.T) {
+	dir := t.TempDir()
+	defer withConnectorState(t, dir, "")()
+	cfg.Claw.Mode = "Codex"
+	if got := resolveActiveConnectorName(dir); got != "codex" {
+		t.Fatalf("claw.mode should be used when guardrail.connector is empty: got %q", got)
+	}
+}
+
 func TestResolveActiveConnectorName_LegacyDefault(t *testing.T) {
 	dir := t.TempDir()
 	defer withConnectorState(t, dir, "")()
+	cfg.Claw.Mode = ""
 	if got := resolveActiveConnectorName(dir); got != "openclaw" {
 		t.Fatalf("expected legacy default openclaw: got %q", got)
 	}

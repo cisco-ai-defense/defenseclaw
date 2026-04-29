@@ -400,7 +400,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
 	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" &&
-		proxyShouldBindForConfiguredConnector(&s.cfg.Guardrail) {
+		proxyShouldBindForConfiguredConnector(s.cfg) {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — relying on fetch-interceptor routing.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml only if you need a fixed advertised model name.\n")
 	}
@@ -692,7 +692,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	// the watcher useful for the OpenClaw default flow even while a
 	// freshly-broken connector name is being debugged.
 	reg := connector.NewDefaultRegistry()
-	conn, err := resolveActiveConnector(reg, s.cfg.Guardrail.Connector, "watcher")
+	conn, err := resolveActiveConnector(reg, configuredConnectorName(s.cfg), "watcher")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
 	}
@@ -1081,7 +1081,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
 		}
 	}
-	conn, err := resolveActiveConnector(registry, s.cfg.Guardrail.Connector, "guardrail")
+	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.cfg), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
 		// not exist. Returning here aborts sidecar boot so the operator
@@ -1304,15 +1304,25 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	}
 }
 
-func proxyShouldBindForConfiguredConnector(gc *config.GuardrailConfig) bool {
-	if gc == nil {
+func configuredConnectorName(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(cfg.Guardrail.Connector); name != "" {
+		return strings.ToLower(name)
+	}
+	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
+}
+
+func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
+	if cfg == nil {
 		return true
 	}
-	switch gc.Connector {
+	switch configuredConnectorName(cfg) {
 	case "codex":
-		return gc.CodexEnforcementEnabled
+		return cfg.Guardrail.CodexEnforcementEnabled
 	case "claudecode":
-		return gc.ClaudeCodeEnforcementEnabled
+		return cfg.Guardrail.ClaudeCodeEnforcementEnabled
 	default:
 		return true
 	}

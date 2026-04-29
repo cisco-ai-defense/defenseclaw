@@ -867,7 +867,7 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
-    connector: str = "openclaw"  # openclaw | zeptoclaw | claudecode | codex
+    connector: str = ""  # empty => fall back to claw.mode; otherwise openclaw | zeptoclaw | claudecode | codex
     # ``codex_enforcement_enabled`` gates the proxy-redirect /
     # blocking path for the Codex connector. Default ``False`` means
     # codex talks DIRECTLY to its native upstream — observability
@@ -1488,7 +1488,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
-        connector=raw.get("connector", "openclaw"),
+        connector=raw.get("connector", ""),
         codex_enforcement_enabled=raw.get("codex_enforcement_enabled", False),
         claudecode_enforcement_enabled=raw.get("claudecode_enforcement_enabled", False),
     )

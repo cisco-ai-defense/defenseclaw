@@ -146,7 +146,7 @@ func init() {
 
 // resolveActiveConnectorName returns the connector name to operate on for
 // teardown/verify, honouring --connector first, then the on-disk active
-// connector marker, then guardrail.connector, then "openclaw".
+// connector marker, then guardrail.connector, then claw.mode, then "openclaw".
 func resolveActiveConnectorName(dataDir string) string {
 	if name := strings.TrimSpace(connectorFlagName); name != "" {
 		return strings.ToLower(name)
@@ -159,6 +159,9 @@ func resolveActiveConnectorName(dataDir string) string {
 	if cfg != nil {
 		if name := strings.TrimSpace(cfg.Guardrail.Connector); name != "" {
 			return strings.ToLower(name)
+		}
+		if mode := strings.TrimSpace(string(cfg.Claw.Mode)); mode != "" {
+			return strings.ToLower(mode)
 		}
 	}
 	return "openclaw"

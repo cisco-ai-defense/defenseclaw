@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -54,6 +55,16 @@ func TestResolveActiveConnector_WhitespaceTreatedAsEmpty(t *testing.T) {
 	}
 	if conn == nil || conn.Name() != "openclaw" {
 		t.Fatalf("whitespace name should default to openclaw, got %v", conn)
+	}
+}
+
+func TestConfiguredConnectorNameFallsBackToClawMode(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = ""
+	cfg.Claw.Mode = "Codex"
+	if got := configuredConnectorName(cfg); got != "codex" {
+		t.Fatalf("configuredConnectorName = %q, want codex", got)
 	}
 }
 

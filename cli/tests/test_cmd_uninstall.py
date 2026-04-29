@@ -25,6 +25,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+import click
 from click.testing import CliRunner
 
 
@@ -240,12 +241,12 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
             fallback.assert_called_once()
 
     def test_hard_fails_when_non_openclaw_and_gateway_old(self):
-        with capture_click_output() as buf, \
-             patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
+        with patch.object(cmd_uninstall, "_gateway_supports_connector_teardown",
                           return_value=False), \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback:
+             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback, \
+             self.assertRaises(click.ClickException) as raised:
             cmd_uninstall._connector_teardown(self._plan("codex"))
-        text = buf.getvalue()
+        text = str(raised.exception)
         fallback.assert_not_called()
         self.assertIn("no Python fallback", text)
         self.assertIn("codex", text)
@@ -266,10 +267,13 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
                           return_value=True), \
              patch.object(cmd_uninstall, "_run_gateway_connector_teardown",
                           return_value=False), \
-             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback:
+             patch.object(cmd_uninstall, "_revert_openclaw_python") as fallback, \
+             self.assertRaises(click.ClickException) as raised:
             cmd_uninstall._connector_teardown(self._plan("codex"))
         fallback.assert_not_called()
         self.assertIn("reported errors", buf.getvalue())
+        self.assertIn("aborting uninstall", str(raised.exception))
+        self.assertIn("codex teardown failed", str(raised.exception))
 
 
 class GatewaySupportProbeTests(unittest.TestCase):
@@ -331,6 +335,26 @@ class ExecutePlanConnectorTests(unittest.TestCase):
             stop_mock.assert_called_once()
             teardown_mock.assert_called_once_with(plan)
             plugin_mock.assert_not_called()
+            wipe_mock.assert_not_called()
+            bin_mock.assert_not_called()
+        finally:
+            for c in ctx_mgrs:
+                c.__exit__(None, None, None)
+
+    def test_teardown_failure_aborts_before_wipe_or_binaries(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connector="codex",
+            data_dir="/tmp/dc",
+            remove_data_dir=True,
+            remove_binaries=True,
+        )
+        ctx_mgrs = self._common_patches()
+        try:
+            mocks = [c.__enter__() for c in ctx_mgrs]
+            _, teardown_mock, _, wipe_mock, bin_mock = mocks
+            teardown_mock.side_effect = click.ClickException("teardown failed")
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._execute_plan(plan)
             wipe_mock.assert_not_called()
             bin_mock.assert_not_called()
         finally:

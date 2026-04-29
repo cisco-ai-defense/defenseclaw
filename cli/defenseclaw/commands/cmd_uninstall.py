@@ -309,16 +309,20 @@ def _connector_teardown(plan: UninstallPlan) -> None:
             f"see output above"
         )
         if plan.connector != "openclaw":
-            return
+            raise click.ClickException(
+                f"aborting uninstall: {plan.connector} teardown failed, so "
+                "DefenseClaw will not remove data or binaries that may be "
+                "needed to restore the agent configuration"
+            )
 
     if plan.connector in _PYTHON_FALLBACK_CONNECTORS:
         _revert_openclaw_python(plan)
         return
 
-    click.echo(
-        f"  ⚠ no Python fallback for connector '{plan.connector}'.\n"
-        f"     Upgrade defenseclaw-gateway to v0.7+ (introduces "
-        f"'connector teardown') and re-run 'defenseclaw uninstall'."
+    raise click.ClickException(
+        f"aborting uninstall: no Python fallback for connector '{plan.connector}'. "
+        "Upgrade defenseclaw-gateway to v0.7+ (introduces 'connector teardown') "
+        "and re-run 'defenseclaw uninstall'."
     )
 
 

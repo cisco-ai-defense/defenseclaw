@@ -1897,7 +1897,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
 	viper.SetDefault("guardrail.scanner_mode", "both")
-	viper.SetDefault("guardrail.connector", "openclaw")
+	viper.SetDefault("guardrail.connector", "")
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)

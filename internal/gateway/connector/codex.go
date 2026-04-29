@@ -64,6 +64,11 @@ type CodexConnector struct {
 	// snapshotMu protects providers.
 	snapshotMu sync.RWMutex
 	providers  map[string]CodexProviderEntry
+	// activeProvider mirrors config.toml's top-level model_provider.
+	// Codex does not forward that context to the proxy, so Route()
+	// must remember it from Setup to avoid selecting an arbitrary
+	// provider out of the snapshot map when multiple providers exist.
+	activeProvider string
 }
 
 // CodexProviderEntry is a resolved provider record captured at Setup
@@ -321,6 +326,12 @@ func (c *CodexConnector) SetProviderSnapshot(snap map[string]CodexProviderEntry)
 	c.providers = snap
 }
 
+func (c *CodexConnector) setActiveProvider(name string) {
+	c.snapshotMu.Lock()
+	defer c.snapshotMu.Unlock()
+	c.activeProvider = strings.TrimSpace(name)
+}
+
 // ProviderSnapshot returns a copy of the provider table.
 func (c *CodexConnector) ProviderSnapshot() map[string]CodexProviderEntry {
 	c.snapshotMu.RLock()
@@ -363,6 +374,17 @@ func (c *CodexConnector) HasUsableProviders() (int, error) {
 func (c *CodexConnector) resolveUpstream() (string, string) {
 	c.snapshotMu.RLock()
 	defer c.snapshotMu.RUnlock()
+
+	if c.activeProvider != "" {
+		if e, ok := c.providers[c.activeProvider]; ok {
+			if e.APIKey != "" && e.BaseURL != "" {
+				return e.BaseURL, e.APIKey
+			}
+			if e.BaseURL != "" {
+				return e.BaseURL, ""
+			}
+		}
+	}
 
 	for _, e := range c.providers {
 		if e.APIKey != "" && e.BaseURL != "" {
@@ -708,6 +730,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			return fmt.Errorf("parse codex config: %w", err)
 		}
 	}
+	c.setActiveProvider(codexActiveProviderFromConfig(cfg))
 
 	backupPath := filepath.Join(opts.DataDir, "codex_config_backup.json")
 	backupExists := false
@@ -1035,6 +1058,14 @@ func buildCodexProviderSnapshot(providers map[string]interface{}) map[string]Cod
 		snapshot[name] = entry
 	}
 	return snapshot
+}
+
+func codexActiveProviderFromConfig(cfg map[string]interface{}) string {
+	if cfg == nil {
+		return ""
+	}
+	name, _ := cfg["model_provider"].(string)
+	return strings.TrimSpace(name)
 }
 
 // buildCodexHooksTable produces the [hooks] HookEventsToml structure

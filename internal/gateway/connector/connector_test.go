@@ -1502,6 +1502,58 @@ func TestCodex_Route_ResolvesUpstreamFromSnapshot(t *testing.T) {
 	}
 }
 
+func TestCodex_Route_PrefersConfiguredModelProvider(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model_provider = "openrouter"
+
+[model_providers.azure]
+name = "azure"
+base_url = "https://azure.example/openai"
+api_key = "azure-key"
+
+[model_providers.openrouter]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
+	defer func() { CodexAuthPathOverride = "" }()
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-active-provider")
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", CodexEnforcement: true}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	c.snapshotMu.RLock()
+	active := c.activeProvider
+	c.snapshotMu.RUnlock()
+	if active != "openrouter" {
+		t.Fatalf("activeProvider = %q, want openrouter", active)
+	}
+
+	body := []byte(`{"model":"gpt-5"}`)
+	r := httptest.NewRequest("POST", "/responses", nil)
+	r.Header.Set("Authorization", "Bearer incoming-client-key")
+	cs, err := c.Route(r, body)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if cs.RawUpstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("RawUpstream = %q, want active model_provider upstream", cs.RawUpstream)
+	}
+	if cs.RawAPIKey != "sk-or-active-provider" {
+		t.Errorf("RawAPIKey = %q, want active model_provider key", cs.RawAPIKey)
+	}
+}
+
 // TestCodex_Setup_CapturesProviderSnapshot verifies Setup reads each
 // [model_providers.*] entry from config.toml, resolves its env_key to
 // a live API key from the environment, and populates the in-memory
@@ -4164,6 +4216,77 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 	}
 	if env["DEFENSECLAW_FAIL_MODE"] != "open" {
 		t.Errorf("DEFENSECLAW_FAIL_MODE not merged: got %v", env["DEFENSECLAW_FAIL_MODE"])
+	}
+}
+
+func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	pristine := `{
+		"env": {
+			"OTEL_LOGS_EXPORTER": "console",
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example/v1",
+			"OTEL_SERVICE_NAME": "operator-claude",
+			"PATH": "/custom/bin:/usr/bin"
+		}
+	}`
+	if err := os.WriteFile(settingsPath, []byte(pristine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-tok",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	// Force the surgical backup path instead of exact managed-file
+	// restore so this test exercises claudecode_backup.json's env
+	// snapshot, which is what connector switch/uninstall uses after
+	// user drift.
+	discardManagedFileBackup(dir, c.Name(), "settings.json")
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	if env["OTEL_LOGS_EXPORTER"] != "console" {
+		t.Errorf("OTEL_LOGS_EXPORTER = %v, want pristine value", env["OTEL_LOGS_EXPORTER"])
+	}
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example/v1" {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %v, want pristine value", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	if env["OTEL_SERVICE_NAME"] != "operator-claude" {
+		t.Errorf("OTEL_SERVICE_NAME = %v, want pristine value", env["OTEL_SERVICE_NAME"])
+	}
+	if env["PATH"] != "/custom/bin:/usr/bin" {
+		t.Errorf("PATH = %v, want pristine value", env["PATH"])
+	}
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Errorf("DEFENSECLAW_FAIL_MODE survived teardown: %v", env)
 	}
 }
 

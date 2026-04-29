@@ -192,8 +192,9 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 					}
 				}
 				if envMap, ok := settings["env"].(map[string]interface{}); ok {
+					managedEnv := buildClaudeCodeOtelEnv(opts)
 					for _, key := range claudeCodeOtelEnvKeys {
-						if _, present := envMap[key]; present {
+						if value, present := envMap[key]; present && claudeCodeOtelValueLooksManaged(key, value, managedEnv[key]) {
 							residual = append(residual, fmt.Sprintf("settings.json env[%s] still contains defenseclaw OTel env", key))
 						}
 					}
@@ -376,9 +377,9 @@ type claudeCodeBackup struct {
 	// Teardown we delete the key entirely in the first case so the
 	// settings.json shape exactly matches the pristine state.
 	// OriginalEnv stores the raw JSON of the operator's env block
-	// (excluding any OTel-prefixed keys we added) so partial overrides
-	// the operator had set on non-OTel keys (e.g. PATH, NODE_OPTIONS)
-	// are preserved verbatim.
+	// before DefenseClaw overlays its OTel keys. This includes any
+	// pre-existing OTel settings so teardown can restore the user's
+	// original collector/exporter values exactly.
 	HadEnvKey   bool            `json:"had_env_key"`
 	OriginalEnv json.RawMessage `json:"original_env,omitempty"`
 }
@@ -635,10 +636,9 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 // Read-modify-write is protected by the same advisory file lock as
 // patchClaudeCodeHooks; concurrent gateway starts will serialize.
 // On first patch (i.e. claudecode_backup.json doesn't yet have an
-// HadEnvKey marker), we capture the operator's pristine env block
-// minus any pre-existing OTel-prefixed keys so Teardown can restore
-// it verbatim. Subsequent patches reuse the captured backup — we
-// never re-snapshot a partially-modified env.
+// HadEnvKey marker), we capture the operator's pristine env block so
+// Teardown can restore it verbatim. Subsequent patches reuse the
+// captured backup — we never re-snapshot a partially-modified env.
 func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 	settingsPath := claudeCodeSettingsPath()
 
@@ -670,9 +670,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				envMap, _ := envRaw.(map[string]interface{})
 				pristine := map[string]interface{}{}
 				for k, v := range envMap {
-					if !isClaudeCodeOtelKey(k) {
-						pristine[k] = v
-					}
+					pristine[k] = v
 				}
 				if raw, err := json.Marshal(pristine); err == nil {
 					backup.OriginalEnv = raw
@@ -713,6 +711,29 @@ func isClaudeCodeOtelKey(name string) bool {
 		}
 	}
 	return false
+}
+
+func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed string) bool {
+	got, _ := value.(string)
+	if got == "" {
+		return false
+	}
+	switch key {
+	case "DEFENSECLAW_FAIL_MODE":
+		return true
+	case "OTEL_EXPORTER_OTLP_ENDPOINT":
+		return managed != "" && got == managed
+	case "OTEL_EXPORTER_OTLP_HEADERS":
+		return strings.Contains(got, "x-defenseclaw-source=claudecode") ||
+			strings.Contains(got, "x-defenseclaw-client=claudecode-otel/1.0") ||
+			strings.Contains(got, "x-defenseclaw-token=")
+	case "OTEL_RESOURCE_ATTRIBUTES":
+		return strings.Contains(got, "defenseclaw.connector=claudecode")
+	case "OTEL_SERVICE_NAME":
+		return got == "claudecode"
+	default:
+		return false
+	}
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.

@@ -285,6 +285,20 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertIsInstance(cfg, Config)
             self.assertEqual(cfg.claw.mode, "openclaw")
 
+    def test_load_missing_guardrail_connector_falls_back_to_claw_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text(
+                "claw:\n  mode: codex\n"
+                "guardrail:\n  enabled: true\n  port: 4000\n",
+                encoding="utf-8",
+            )
+            with patch("defenseclaw.config.default_data_path", return_value=data_dir):
+                cfg = load()
+        self.assertEqual(cfg.guardrail.connector, "")
+        self.assertEqual(cfg.active_connector(), "codex")
+
     def test_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
