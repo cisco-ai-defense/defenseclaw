@@ -89,6 +89,17 @@
       "domains": ["bedrock-runtime."],
       "profile_id": null,
       "env_keys": []
+    },
+    {
+    "name": "openai",
+    "domains": [
+    "nemoclaw.",
+    "nemoclaw-nemoclaw."
+    ],
+    "profile_id": "openai:default",
+    "env_keys": [
+        "OPENCLAW_GATEWAY_TOKEN"
+    ]
     }
   ],
   "ollama_ports": [11434]
