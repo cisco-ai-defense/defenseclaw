@@ -40,6 +40,7 @@ E2E_ENABLE_RECOVERY="${E2E_ENABLE_RECOVERY:-false}"
 E2E_REQUIRE_RECOVERY="${E2E_REQUIRE_RECOVERY:-false}"
 OPENCLAW_MODEL_PATCHED="${OPENCLAW_MODEL_PATCHED:-false}"
 OPENCLAW_MODEL_BACKUP_PATH="${OPENCLAW_MODEL_BACKUP_PATH:-/tmp/defenseclaw-openclaw.full-live.backup.json}"
+ANTHROPIC_PASSTHROUGH_RAN="${ANTHROPIC_PASSTHROUGH_RAN:-false}"
 
 sanitize_name() {
     printf '%s' "$1" | tr -cs '[:alnum:]._-' '-'
@@ -135,6 +136,29 @@ wait_for_url() {
     return 1
 }
 
+derive_proxy_master_key() {
+    python3 - <<'PY'
+import hashlib
+import os
+
+key_file = os.path.expanduser("~/.defenseclaw/device.key")
+try:
+    with open(key_file, "rb") as f:
+        data = f.read()
+except OSError:
+    print("")
+else:
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        data,
+        b"defenseclaw-proxy-master-key",
+        100_000,
+        dklen=32,
+    ).hex()
+    print(f"sk-dc-{digest}")
+PY
+}
+
 start_openclaw_gateway() {
     if is_full_live; then
         openclaw gateway start
@@ -145,10 +169,46 @@ start_openclaw_gateway() {
     fi
 }
 
+openclaw_gateway_reachable() {
+    python3 - <<'PY'
+import socket
+import sys
+
+try:
+    with socket.create_connection(("127.0.0.1", 18789), timeout=1):
+        pass
+except OSError:
+    sys.exit(1)
+PY
+}
+
+wait_for_openclaw_gateway() {
+    local timeout="${1:-30}"
+    local interval="${2:-2}"
+    local deadline=$((SECONDS + timeout))
+    while [ $SECONDS -lt $deadline ]; do
+        if openclaw_gateway_reachable; then
+            return 0
+        fi
+        sleep "$interval"
+    done
+    return 1
+}
+
 restart_openclaw_gateway() {
     openclaw gateway stop 2>/dev/null || true
     sleep 1
     start_openclaw_gateway
+}
+
+ensure_openclaw_gateway_running() {
+    local timeout="${1:-45}"
+    if wait_for_openclaw_gateway "$timeout" 2; then
+        return 0
+    fi
+    echo "  OpenClaw gateway not reachable — restarting..."
+    restart_openclaw_gateway
+    wait_for_openclaw_gateway "$timeout" 2
 }
 
 extract_json() {
@@ -824,6 +884,10 @@ wait_for_openclaw_plugin_enabled_state() {
 }
 
 wait_for_sidecar_subsystems_running() {
+    wait_for_sidecar_health_snapshot "${1:-60}" >/dev/null
+}
+
+wait_for_sidecar_health_snapshot() {
     local timeout="${1:-60}"
     local deadline=$((SECONDS + timeout))
     local health gateway_state watcher_state api_state
@@ -833,6 +897,7 @@ wait_for_sidecar_subsystems_running() {
         watcher_state=$(echo "$health" | jq -r '.watcher.state // .watcher // empty' 2>/dev/null || true)
         api_state=$(echo "$health" | jq -r '.api.state // .api // empty' 2>/dev/null || true)
         if [ "$gateway_state" = "running" ] && [ "$watcher_state" = "running" ] && [ "$api_state" = "running" ]; then
+            printf '%s\n' "$health"
             return 0
         fi
         sleep 2
@@ -875,6 +940,10 @@ wait_for_alert_action_increase() {
 # $1 seconds (default 30), the sidecar is explicitly restarted.
 ensure_sidecar_connected() {
     local quick_timeout="${1:-30}"
+    if wait_for_sidecar_subsystems_running "$quick_timeout"; then
+        return 0
+    fi
+    ensure_openclaw_gateway_running 30 || true
     if wait_for_sidecar_subsystems_running "$quick_timeout"; then
         return 0
     fi
@@ -1073,7 +1142,9 @@ phase_start() {
 
     echo "  Starting OpenClaw gateway..."
     start_openclaw_gateway
-    sleep 5
+    if ! wait_for_openclaw_gateway 30 2; then
+        echo "  [diag] OpenClaw gateway did not become reachable before sidecar start"
+    fi
 
     echo "  Starting DefenseClaw sidecar (with up to 3 bring-up attempts)..."
     # Self-heal pattern: the ARM64 self-hosted runner occasionally sees the
@@ -1204,7 +1275,16 @@ phase_health() {
     phase_timer_start
 
     local health
-    health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    health=$(wait_for_sidecar_health_snapshot 60 || true)
+    if [ -z "$health" ]; then
+        echo "  [diag] sidecar subsystems did not all reach running before health assertions"
+        ensure_openclaw_gateway_running 30 || true
+        health=$(wait_for_sidecar_health_snapshot 30 || true)
+    fi
+
+    if [ -z "$health" ]; then
+        health=$(curl -sf "$SIDECAR_URL/health" 2>/dev/null || echo "{}")
+    fi
     echo "  Full health JSON:"
     echo "$health" | jq '.' 2>/dev/null || echo "$health"
 
@@ -2139,6 +2219,8 @@ phase_status_doctor() {
     phase_timer_start
 
     local status_out status_rc doctor_out doctor_rc
+    ensure_openclaw_gateway_running 30 || true
+    ensure_sidecar_connected 30 || true
 
     set +e
     status_out=$(defenseclaw status 2>&1)
@@ -2249,6 +2331,8 @@ phase_skill_api() {
     phase_timer_start
 
     local skill_dir_root unique_skill target_skill payload resp entry alerts disable_count enable_count enabled_state
+    ensure_openclaw_gateway_running 30 || true
+    ensure_sidecar_connected 30 || true
     skill_dir_root=$(first_skill_dir || true)
     unique_skill="${E2E_PREFIX}-api-skill"
     target_skill="$unique_skill"
@@ -2362,49 +2446,39 @@ PY
         return
     fi
 
-    master_key=$(python3 - <<'PY'
-import hashlib
-import hmac
-import os
-
-key_file = os.path.expanduser("~/.defenseclaw/device.key")
-try:
-    with open(key_file, "rb") as f:
-        data = f.read()
-    digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
-    print(f"sk-dc-{digest}")
-except OSError:
-    print("sk-dc-local-dev")
-PY
-)
+    master_key="$(derive_proxy_master_key)"
 
     gateway_token="$(get_gateway_token)"
 
     # ── 6a. Master key auth (legacy path) ──
-    response=$(curl -sS --max-time 45 \
-        -H "Authorization: Bearer $master_key" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
-        "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-
-    err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-    if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
-        echo "  Retrying guardrail request after transient provider error..."
-        sleep 5
+    if [ -n "$master_key" ]; then
         response=$(curl -sS --max-time 45 \
             -H "Authorization: Bearer $master_key" \
             -H "Content-Type: application/json" \
             -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
             "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-    fi
 
-    echo "$response" | jq '.' 2>/dev/null || echo "$response"
-    content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-    err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-    if echo "$content" | grep -q "E2E_OK"; then
-        pass "guardrail round-trip (master key): LLM responded with E2E_OK"
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
+            echo "  Retrying guardrail request after transient provider error..."
+            sleep 5
+            response=$(curl -sS --max-time 45 \
+                -H "Authorization: Bearer $master_key" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
+                "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
+        fi
+
+        echo "$response" | jq '.' 2>/dev/null || echo "$response"
+        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
+        if echo "$content" | grep -q "E2E_OK"; then
+            pass "guardrail round-trip (master key): LLM responded with E2E_OK"
+        else
+            fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
+        fi
     else
-        fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
+        skip "guardrail round-trip (master key)" "device key is unavailable"
     fi
 
     # ── 6b. X-DC-Auth header auth (hardened auth path) ──
@@ -2466,6 +2540,7 @@ PY
             content=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)
             err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
             if echo "$content" | grep -q "E2E_PASSTHROUGH_OK"; then
+                ANTHROPIC_PASSTHROUGH_RAN="true"
                 pass "guardrail passthrough (Anthropic /v1/messages): response received"
             else
                 fail "guardrail passthrough (Anthropic /v1/messages): response received" "err='$err' response='$response'"
@@ -2488,21 +2563,7 @@ phase_provider_detection() {
     phase_timer_start
 
     local master_key response http_code gateway_token
-    master_key=$(python3 - <<'PY'
-import hashlib
-import hmac
-import os
-
-key_file = os.path.expanduser("~/.defenseclaw/device.key")
-try:
-    with open(key_file, "rb") as f:
-        data = f.read()
-    digest = hmac.new(b"defenseclaw-proxy-master-key", data, hashlib.sha256).hexdigest()[:32]
-    print(f"sk-dc-{digest}")
-except OSError:
-    print("sk-dc-local-dev")
-PY
-)
+    master_key="$(derive_proxy_master_key)"
     gateway_token="$(get_gateway_token)"
 
     # Guardrail proxy must be running for these tests.
@@ -3514,7 +3575,11 @@ phase_splunk() {
         # Bedrock stays signal-bearing without requiring OpenAI-style SSE deltas.
         splunk_assert_results "Splunk: guardrail response-path inspection events (completion or Bedrock stream)" \
             '(action=guardrail-verdict) (details="*direction=completion*" OR *converse-stream*) | head 5'
-        splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) target="anthropic*" | head 5'
+        if [ "${ANTHROPIC_PASSTHROUGH_RAN:-false}" = "true" ]; then
+            splunk_assert_results "Splunk: guardrail passthrough events present" '(action=guardrail-verdict) target="anthropic*" | head 5'
+        else
+            skip "Splunk: guardrail passthrough events present" "Anthropic passthrough was not exercised in this run"
+        fi
         splunk_assert_results "Splunk: agent lifecycle events present" '(action=gateway-agent-start OR action=gateway-agent-end) | head 5'
         splunk_assert_results "Splunk: runtime tool inspection events present" '(action=inspect-tool-allow OR action=inspect-tool-block) | head 5'
         if is_true "$E2E_ENABLE_PLUGIN_LIFECYCLE"; then

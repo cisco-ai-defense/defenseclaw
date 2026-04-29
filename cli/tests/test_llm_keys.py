@@ -138,7 +138,7 @@ class TestDeriveMasterKey(unittest.TestCase):
             k2 = llm_keys.derive_master_key(key_path)
             self.assertEqual(k1, k2)
             self.assertTrue(k1.startswith("sk-dc-"))
-            self.assertEqual(len(k1), 6 + 32)
+            self.assertEqual(len(k1), 6 + 64)
 
     def test_raises_on_missing(self):
         # Patch Path so the fallback ``~/.defenseclaw/device.key``

@@ -296,7 +296,14 @@ if [ -f /root/.defenseclaw/device.key ]; then
     MASTER_KEY=$(python3 -c "
 import hashlib; from pathlib import Path
 data = (Path.home()/'.defenseclaw/device.key').read_bytes()
-print(f'sk-dc-{hashlib.sha256(data).hexdigest()[:16]}')
+digest = hashlib.pbkdf2_hmac(
+    'sha256',
+    data,
+    b'defenseclaw-proxy-master-key',
+    100_000,
+    dklen=32,
+).hex()
+print(f'sk-dc-{digest}')
 " 2>/dev/null)
 fi
 

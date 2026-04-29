@@ -628,7 +628,7 @@ class TestDeriveMasterKey(unittest.TestCase):
 
             key = _derive_master_key(key_file)
             self.assertTrue(key.startswith("sk-dc-"))
-            self.assertEqual(len(key), 6 + 32)  # HMAC-SHA256 → 32 hex chars
+            self.assertEqual(len(key), 6 + 64)  # PBKDF2-SHA256, 32 bytes encoded as hex
 
     def test_deterministic(self):
         with tempfile.TemporaryDirectory() as tmpdir:

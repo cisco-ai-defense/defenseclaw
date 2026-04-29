@@ -35,7 +35,6 @@ inheriting the OpenClaw config-patch logic.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import os
 from pathlib import Path
 
@@ -123,10 +122,9 @@ def derive_master_key(device_key_file: str) -> str:
     to a static key because that produces predictable proxy
     credentials (a credential-stuffing oracle).
 
-    Implementation note: ``hmac.new`` over the raw key bytes with a
-    fixed string label is intentional — we want determinism across
-    sidecar restarts so the gateway can re-issue the same proxy
-    bearer without forcing every scanner to re-fetch a new value.
+    Implementation note: this matches the Go proxy's PBKDF2-SHA256
+    derivation so the gateway can re-issue the same proxy bearer across
+    restarts without falling back to an unstretched device-key digest.
     """
     candidates = [device_key_file]
     default_path = os.path.join(str(Path.home()), ".defenseclaw", "device.key")
@@ -138,9 +136,13 @@ def derive_master_key(device_key_file: str) -> str:
         try:
             with open(path, "rb") as f:
                 data = f.read()
-            digest = hmac.new(
-                b"defenseclaw-proxy-master-key", data, hashlib.sha256
-            ).hexdigest()[:32]
+            digest = hashlib.pbkdf2_hmac(
+                "sha256",
+                data,
+                b"defenseclaw-proxy-master-key",
+                100_000,
+                dklen=32,
+            ).hex()
             return f"sk-dc-{digest}"
         except OSError:
             continue
