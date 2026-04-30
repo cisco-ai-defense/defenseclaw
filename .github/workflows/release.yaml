@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "*.*.*"
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -11,7 +10,10 @@ permissions:
   packages: write
 
 jobs:
-  release:
+  # -----------------------------------------------------------------
+  # Build Go gateway binaries for all platforms via goreleaser
+  # -----------------------------------------------------------------
+  gateway:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,24 +31,75 @@ jobs:
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          args: release --clean
+          args: release --clean --skip=publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/upload-artifact@v4
         with:
-          python-version: "3.13"
+          name: gateway-archives
+          path: dist/*.tar.gz
+
+  # -----------------------------------------------------------------
+  # Build Python CLI wheel
+  # -----------------------------------------------------------------
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
 
-      - name: Build CLI wheel and plugin tarball
+      - name: Build CLI wheel
+        run: make dist-cli
+
+      - name: Build plugin tarball
+        run: make dist-plugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-and-plugin
+          path: |
+            dist/*.whl
+            dist/defenseclaw-plugin-*.tar.gz
+
+  # -----------------------------------------------------------------
+  # Upload all artifacts to the GitHub release
+  # -----------------------------------------------------------------
+  upload:
+    needs: [gateway, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-archives
+          path: dist/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-and-plugin
+          path: dist/
+
+      - name: Generate checksums
         run: |
-          make dist-cli
-          make dist-plugin
+          cd dist
+          shasum -a 256 *.tar.gz *.whl > checksums.txt
 
-      - name: Upload CLI and plugin to release
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF#refs/tags/}" dist/*.whl dist/defenseclaw-plugin-*.tar.gz
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          gh release upload "$tag" \
+            dist/*.tar.gz \
+            dist/*.whl \
+            dist/checksums.txt \
+            --clobber
