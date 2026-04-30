@@ -727,7 +727,7 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 	store, logger := newOTLPIngestTestStore(t)
 	a := &APIServer{store: store, logger: logger}
 
-	body := `{"type": "agent-turn-complete", "turn_id": "turn-abc", "model": "gpt-5", "status": "success"}`
+	body := `{"type": "agent-turn-complete", "turn-id": "turn-abc", "model": "gpt-5", "status": "success"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -757,7 +757,7 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 		t.Errorf("audit Action %q matches neither IsKnownAction nor IsKnownActionPrefix", rows[0].Action)
 	}
 	if rows[0].SessionID != "turn-abc" {
-		t.Errorf("SessionID = %q, want %q (codex notify rows must carry turn_id for SIEM rollups)", rows[0].SessionID, "turn-abc")
+		t.Errorf("SessionID = %q, want %q (codex notify rows must fall back to turn-id when thread-id is absent)", rows[0].SessionID, "turn-abc")
 	}
 	if strings.Contains(rows[0].Details, body) {
 		t.Fatalf("Details stored raw notify body: %q", rows[0].Details)
@@ -771,7 +771,7 @@ func TestCodexNotifyAuditDetails_RedactsRawPayload(t *testing.T) {
 	redaction.SetDisableAll(false)
 	t.Cleanup(func() { redaction.SetDisableAll(false) })
 
-	body := []byte(`{"type":"agent-turn-complete","turn_id":"turn-secret-123","model":"gpt-5","status":"ok","prompt":"please leak sk-secret-token"}`)
+	body := []byte(`{"type":"agent-turn-complete","turn-id":"turn-secret-123","model":"gpt-5","status":"ok","prompt":"please leak sk-secret-token"}`)
 	details := codexNotifyAuditDetails(codexNotifyPayload{
 		Type:   "agent-turn-complete",
 		TurnID: "turn-secret-123",
@@ -813,7 +813,7 @@ func TestCodexNotify_NoTypePersistsBareAction(t *testing.T) {
 	store, logger := newOTLPIngestTestStore(t)
 	a := &APIServer{store: store, logger: logger}
 
-	body := `{"turn_id": "turn-xyz"}`
+	body := `{"turn-id": "turn-xyz"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -831,5 +831,40 @@ func TestCodexNotify_NoTypePersistsBareAction(t *testing.T) {
 	}
 	if got, want := rows[0].Action, string(audit.ActionCodexNotify); got != want {
 		t.Errorf("Action = %q, want %q (no type → bare codex.notify)", got, want)
+	}
+}
+
+func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+
+	body := `{"type":"agent-turn-complete","thread-id":"thread-123","turn-id":"turn-abc","model":"gpt-5","status":"success"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleCodexNotify(w, req)
+	logger.Close()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	rows, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if got, want := rows[0].SessionID, "thread-123"; got != want {
+		t.Fatalf("SessionID = %q, want %q", got, want)
+	}
+	if !strings.Contains(rows[0].Details, "thread_id=") {
+		t.Fatalf("Details missing thread_id summary: %q", rows[0].Details)
+	}
+	if !strings.Contains(rows[0].Details, "turn_id=") {
+		t.Fatalf("Details missing turn_id summary: %q", rows[0].Details)
 	}
 }

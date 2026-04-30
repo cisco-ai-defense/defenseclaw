@@ -17,12 +17,29 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func attrByKey(kv []attribute.KeyValue, key string) (attribute.Value, bool) {
+	for _, a := range kv {
+		if string(a.Key) == key {
+			return a.Value, true
+		}
+	}
+	return attribute.Value{}, false
+}
 
 // trustExploitKeyword returns a CRITICAL-severity trigger phrase without
 // embedding the literal string in this source file — otherwise the
@@ -423,5 +440,72 @@ func TestSanitizeHookCWD_Traversal(t *testing.T) {
 	got := sanitizeHookCWD(t.TempDir())
 	if got == "" {
 		t.Error("sanitizeHookCWD(valid absolute dir) returned empty")
+	}
+}
+
+func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exp),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer otel.SetTracerProvider(prev)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	api := &APIServer{}
+	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleCodexHook))
+
+	body, err := json.Marshal(codexHookRequest{
+		HookEventName: "PreToolUse",
+		SessionID:     "session-123",
+		TurnID:        "turn-123",
+		Model:         "gpt-5.5",
+		ToolName:      "Bash",
+		ToolUseID:     "tool-call-123",
+		AgentID:       "openai_codex",
+		AgentType:     "codex",
+		ToolInput: map[string]interface{}{
+			"command": "pwd",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans want 1", len(spans))
+	}
+	s := spans[0]
+	if s.Name != "POST /api/v1/codex/hook" {
+		t.Fatalf("span name=%q want POST /api/v1/codex/hook", s.Name)
+	}
+
+	for key, want := range map[string]string{
+		"gen_ai.conversation.id":         "session-123",
+		"defenseclaw.session_id":         "session-123",
+		"gen_ai.agent.name":              "codex",
+		"gen_ai.agent.id":                "openai_codex",
+		"defenseclaw.codex.hook.event":   "PreToolUse",
+		"defenseclaw.turn_id":            "turn-123",
+		"defenseclaw.codex.hook.turn_id": "turn-123",
+		"gen_ai.request.model":           "gpt-5.5",
+		"gen_ai.tool.name":               "Bash",
+		"gen_ai.tool.call.id":            "tool-call-123",
+	} {
+		got, ok := attrByKey(s.Attributes, key)
+		if !ok || got.AsString() != want {
+			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
+		}
 	}
 }

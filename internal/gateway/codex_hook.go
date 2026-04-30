@@ -27,6 +27,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -100,11 +103,12 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CWD = sanitizeHookCWD(req.CWD)
+	ctx := enrichCodexHookContext(r.Context(), req)
 	rawEventIDs := a.rememberCodexRawHookEvents(req)
-	a.emitCodexHookLLMEvent(r.Context(), req, rawEventIDs, b)
+	a.emitCodexHookLLMEvent(ctx, req, rawEventIDs, b)
 
 	t0 := time.Now()
-	resp := a.evaluateCodexHook(r.Context(), req)
+	resp := a.evaluateCodexHook(ctx, req)
 	elapsed := time.Since(t0)
 
 	if a.health != nil {
@@ -122,9 +126,9 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		if resp.WouldBlock {
 			reason = "would_block"
 		}
-		a.otel.RecordConnectorHookInvocation(r.Context(), "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(r.Context(), "codex:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(r.Context(), "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
+		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
+		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
+		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
 	}
 
 	if a.logger != nil {
@@ -132,10 +136,64 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 			resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
 		details = appendRawTelemetryDetails(details, "raw_payload", b)
 		details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-		_ = a.logger.LogActionCtx(r.Context(), "codex-hook", req.HookEventName, details)
+		_ = a.logger.LogActionCtx(ctx, "codex-hook", req.HookEventName, details)
 	}
 
 	a.writeJSON(w, http.StatusOK, resp)
+}
+
+func enrichCodexHookContext(ctx context.Context, req codexHookRequest) context.Context {
+	ctx = ContextWithSessionID(ctx, req.SessionID)
+	agentName := strings.TrimSpace(req.AgentType)
+	if agentName == "" {
+		agentName = "codex"
+	}
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
+		AgentID:   strings.TrimSpace(req.AgentID),
+		AgentName: agentName,
+	})
+	enrichHTTPSpanFromContext(ctx)
+	enrichCodexHookSpan(ctx, req)
+	return ctx
+}
+
+func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	if req.SessionID != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.conversation.id", req.SessionID),
+			attribute.String("defenseclaw.session_id", req.SessionID),
+		)
+	}
+	agentName := strings.TrimSpace(req.AgentType)
+	if agentName == "" {
+		agentName = "codex"
+	}
+	span.SetAttributes(attribute.String("gen_ai.agent.name", agentName))
+	if req.AgentID != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.id", req.AgentID))
+	}
+	if req.HookEventName != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.hook.event", req.HookEventName))
+	}
+	if req.TurnID != "" {
+		span.SetAttributes(
+			attribute.String("defenseclaw.turn_id", req.TurnID),
+			attribute.String("defenseclaw.codex.hook.turn_id", req.TurnID),
+		)
+	}
+	if req.Model != "" {
+		span.SetAttributes(attribute.String("gen_ai.request.model", req.Model))
+	}
+	if req.ToolName != "" {
+		span.SetAttributes(attribute.String("gen_ai.tool.name", req.ToolName))
+	}
+	if req.ToolUseID != "" {
+		span.SetAttributes(attribute.String("gen_ai.tool.call.id", req.ToolUseID))
+	}
 }
 
 func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest) codexHookResponse {
