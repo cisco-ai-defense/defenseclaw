@@ -18,6 +18,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fail fast with a clear message if a release already exists for this
+      # tag. Immutable releases cannot accept post-create asset uploads, so a
+      # pre-existing release for this tag will leave us unable to attach any
+      # binaries, SBOMs, signatures, or wheels.
+      - name: Verify no pre-existing release blocks atomic creation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error title=Release already exists::A release for tag '$TAG' already exists at https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
+            echo "::error::With Immutable Releases enabled, the workflow cannot attach assets to a pre-existing release."
+            echo "::error::Either delete that release and re-tag, or push a fresh tag (e.g. a patch bump). Do NOT manually create the GitHub release before pushing the tag."
+            exit 1
+          fi
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

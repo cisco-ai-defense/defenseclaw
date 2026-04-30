@@ -59,6 +59,12 @@ homebrew_casks:
       owner: cisco-ai-defense
       name: homebrew-tap
       token: "{{ .Env.GITHUB_TOKEN }}"
+    # release.disable is on (immutable releases require atomic creation in CI),
+    # so GoReleaser cannot infer the cask download URL from the release config.
+    # Point at the canonical GitHub release-asset URL that our workflow will
+    # populate via `gh release create` immediately after this step.
+    url:
+      template: "https://github.com/cisco-ai-defense/defenseclaw/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
     skip_upload: auto
     name: defenseclaw
     homepage: "https://github.com/cisco-ai-defense/defenseclaw"
