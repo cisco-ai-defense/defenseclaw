@@ -31,7 +31,7 @@
 // When an audit event flows through the Logger, the signer:
 //
 //  1. Constructs a Receipt from the event fields.
-//  2. Computes the JCS-canonical (RFC 8785) form of the signable payload.
+//  2. Computes the deterministic canonical JSON form of the signable payload.
 //  3. Signs the canonical bytes with Ed25519.
 //  4. Writes the signed receipt as a JSON file to the output directory.
 //  5. Updates the chain hash for the next receipt.
@@ -87,7 +87,7 @@ func NewSigner(cfg Config) (*Signer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("receipt: read key %s: %w", cfg.KeyPath, err)
 		}
-		seed, err := decodeSeedFromPEM(raw)
+		seed, err := decodeSeed(raw)
 		if err != nil {
 			return nil, fmt.Errorf("receipt: parse key %s: %w", cfg.KeyPath, err)
 		}
@@ -168,12 +168,13 @@ func (s *Signer) PublicKeyHex() string {
 	return s.pubKeyHex
 }
 
-// ---- JCS (RFC 8785) canonicalization ----
+// ---- Receipt canonicalization ----
 
-// jcs produces a deterministic JSON serialization by sorting object
-// keys lexicographically at every nesting depth. This is a minimal
-// implementation sufficient for the receipt schema (flat objects with
-// string values and one level of nesting).
+// jcs produces deterministic canonical JSON for the DefenseClaw receipt
+// schema subset by sorting object keys lexicographically at every nesting
+// depth and using encoding/json for primitive values. It is intentionally
+// scoped to the flat receipt payloads emitted by this package rather than
+// claiming a complete RFC 8785 implementation for arbitrary JSON values.
 func jcs(v interface{}) ([]byte, error) {
 	switch val := v.(type) {
 	case map[string]interface{}:
@@ -238,13 +239,11 @@ func fullMap(r *Receipt) map[string]interface{} {
 	return m
 }
 
-// decodeSeedFromPEM extracts the 32-byte Ed25519 seed from a
-// PEM-encoded private key. Supports the raw 32-byte seed format
-// (as produced by `openssl genpkey -algorithm ed25519`).
-func decodeSeedFromPEM(raw []byte) ([]byte, error) {
-	// Simple approach: look for 32 bytes of key material.
-	// A full PEM parser would use encoding/pem + crypto/x509,
-	// but for Ed25519 seeds the raw format is common.
+// decodeSeed extracts the 32-byte Ed25519 seed from one of the persisted
+// key formats documented for receipts.key_path: a raw 32-byte seed, a
+// 64-character hex seed, or Go's 64-byte ed25519 private key format
+// (seed || public key).
+func decodeSeed(raw []byte) ([]byte, error) {
 	s := strings.TrimSpace(string(raw))
 
 	// Try hex-encoded 32-byte seed (64 hex chars).
@@ -265,5 +264,5 @@ func decodeSeedFromPEM(raw []byte) ([]byte, error) {
 		return raw[:32], nil
 	}
 
-	return nil, fmt.Errorf("unsupported key format (expected 32-byte Ed25519 seed, got %d bytes)", len(raw))
+	return nil, fmt.Errorf("unsupported key format (expected raw 32-byte seed, 64-character hex seed, or 64-byte Go ed25519 private key; got %d bytes)", len(raw))
 }

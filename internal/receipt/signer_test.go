@@ -40,6 +40,88 @@ func TestNewSigner_EphemeralKey(t *testing.T) {
 	}
 }
 
+func TestNewSigner_HexSeedKeyPath(t *testing.T) {
+	dir := t.TempDir()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	keyPath := filepath.Join(dir, "ed25519-seed.hex")
+	if err := os.WriteFile(keyPath, []byte(hex.EncodeToString(seed)), 0o600); err != nil {
+		t.Fatalf("WriteFile key: %v", err)
+	}
+
+	s, err := NewSigner(Config{OutputDir: dir, KeyPath: keyPath})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	expectedPriv := ed25519.NewKeyFromSeed(seed)
+	expectedPub := expectedPriv.Public().(ed25519.PublicKey)
+	if s.PublicKeyHex() != hex.EncodeToString(expectedPub) {
+		t.Fatalf("public key = %q, want %q", s.PublicKeyHex(), hex.EncodeToString(expectedPub))
+	}
+}
+
+func TestSignEvent_PersistedReceiptVerifiesOffline(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewSigner(Config{OutputDir: dir})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	rcpt, receiptHash, err := s.SignEvent("claw:write_file", "deny", "policy-prod", "agent-1", "sess-1", "malicious content detected")
+	if err != nil {
+		t.Fatalf("SignEvent: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 receipt file, got %d", len(entries))
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var persisted Receipt
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal persisted receipt: %v", err)
+	}
+	if persisted.ReceiptID != rcpt.ReceiptID {
+		t.Fatalf("persisted receipt_id = %q, want %q", persisted.ReceiptID, rcpt.ReceiptID)
+	}
+
+	canonical, err := jcs(signableMap(&persisted))
+	if err != nil {
+		t.Fatalf("canonicalize persisted signable payload: %v", err)
+	}
+	sigBytes, err := hex.DecodeString(persisted.Signature)
+	if err != nil {
+		t.Fatalf("decode persisted signature: %v", err)
+	}
+	pubBytes, err := hex.DecodeString(persisted.PublicKey)
+	if err != nil {
+		t.Fatalf("decode persisted public key: %v", err)
+	}
+	if !ed25519.Verify(pubBytes, canonical, sigBytes) {
+		t.Fatal("persisted receipt signature verification failed")
+	}
+
+	fullCanonical, err := jcs(fullMap(&persisted))
+	if err != nil {
+		t.Fatalf("canonicalize persisted full receipt: %v", err)
+	}
+	fullHash := sha256.Sum256(fullCanonical)
+	expectedHash := "sha256:" + hex.EncodeToString(fullHash[:])
+	if receiptHash != expectedHash {
+		t.Fatalf("receipt hash = %q, want %q", receiptHash, expectedHash)
+	}
+}
+
 func TestSignEvent_ProducesValidReceipt(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewSigner(Config{OutputDir: dir})

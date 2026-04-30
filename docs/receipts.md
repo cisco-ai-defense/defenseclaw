@@ -25,7 +25,7 @@ Add to your DefenseClaw configuration:
 receipts:
   enabled: true
   output_dir: ./defenseclaw-receipts
-  # key_path: /path/to/ed25519-seed.key  # optional; ephemeral key if omitted
+  # key_path: /path/to/ed25519-seed.key  # optional; raw 32-byte seed, 64-char hex seed, or 64-byte Go key
 ```
 
 Or set environment variables:
@@ -35,7 +35,7 @@ export DEFENSECLAW_RECEIPTS_ENABLED=true
 export DEFENSECLAW_RECEIPTS_OUTPUT_DIR=./defenseclaw-receipts
 ```
 
-When enabled, receipt JSON files accumulate in the output directory alongside normal operation. The gateway's performance is not measurably affected (Ed25519 signing is sub-microsecond).
+When enabled, receipt JSON files accumulate in the output directory alongside normal operation. The gateway performs receipt signing after the normal audit fan-out path. Signing failures are logged and do not block the primary audit event.
 
 ## Receipt format
 
@@ -52,20 +52,20 @@ Each receipt is a JSON file:
   "agent_id": "agent-openclaw-1",
   "session_id": "sess-abc123",
   "reason": "malicious content detected by Inspect Engine",
-  "signature": "ed25519:7b4a...",
-  "public_key": "ed25519:cafebabe..."
+  "signature": "7b4a...",
+  "public_key": "cafebabe..."
 }
 ```
 
 ### Hash chain
 
-Every receipt includes `previous_receipt_hash`, which is the SHA-256 hash of the previous receipt's canonical (RFC 8785 JCS) form. This creates a tamper-evident chain: modifying, inserting, deleting, or reordering any receipt breaks every downstream hash.
+Every receipt includes `previous_receipt_hash`, which is the SHA-256 hash of the previous receipt's deterministic canonical JSON form. This creates a tamper-evident chain: modifying, inserting, deleting, or reordering any receipt breaks every downstream hash.
 
 The first receipt in a session has an empty `previous_receipt_hash` (genesis receipt).
 
 ### Signature
 
-The `signature` field is an Ed25519 signature over the JCS-canonical form of the receipt payload (all fields except `signature` and `public_key`). The `public_key` field contains the hex-encoded Ed25519 public key for verification.
+The `signature` field is a hex-encoded Ed25519 signature over the deterministic canonical JSON form of the receipt payload (all fields except `signature` and `public_key`). The `public_key` field contains the hex-encoded Ed25519 public key for verification.
 
 ## Verifying receipts
 
@@ -84,24 +84,24 @@ Exit codes:
 
 1. Parse the receipt JSON.
 2. Remove the `signature` and `public_key` fields.
-3. Serialize the remaining fields using JCS (RFC 8785) canonical form.
+3. Serialize the remaining fields using the receipt canonical JSON form: lexicographically sorted object keys and JSON primitives.
 4. Verify the Ed25519 signature over the canonical bytes using the public key.
-5. For chain verification: serialize the *full* receipt (including signature and public_key) using JCS, compute SHA-256, and confirm it matches the next receipt's `previous_receipt_hash`.
+5. For chain verification: serialize the *full* receipt (including signature and public_key) using the same receipt canonical JSON form, compute SHA-256, and confirm it matches the next receipt's `previous_receipt_hash`.
 
 ## Format standard
 
-The receipt format conforms to [draft-farley-acta-signed-receipts](https://datatracker.ietf.org/doc/draft-farley-acta-signed-receipts/) (IETF Internet-Draft). Four independent implementations emit the same format:
+The receipt format is designed to align with [draft-farley-acta-signed-receipts](https://datatracker.ietf.org/doc/draft-farley-acta-signed-receipts/) (IETF Internet-Draft). Related implementations emit compatible signed decision receipts:
 
 - **protect-mcp** (TypeScript, MCP hosts)
 - **protect-mcp-adk** (Python, Google ADK)
 - **sb-runtime** (Rust, OS sandbox)
 - **APS governance hook** (Python, CrewAI / LangChain)
 
-DefenseClaw receipts are cross-verifiable with receipts from any of these implementations using the same `@veritasacta/verify` CLI.
+DefenseClaw receipts are intended to be cross-verifiable with the same `@veritasacta/verify` CLI using the documented canonicalization and hex signature/public-key encoding.
 
 ## Security considerations
 
-- **Key management**: In production, provide a persistent Ed25519 key via `key_path`. Ephemeral keys (the default) are suitable for development but produce receipts that cannot be verified after a gateway restart.
+- **Key management**: In production, provide a persistent Ed25519 key via `key_path`. Supported persisted formats are a raw 32-byte seed, a 64-character hex seed, or a 64-byte Go ed25519 private key. Ephemeral keys (the default) are suitable for development but produce receipts that cannot be tied to the same gateway identity after a restart.
 - **Output directory**: Protect the receipt output directory with appropriate filesystem permissions. Receipts contain decision metadata (tool names, policy IDs, timestamps) that may be sensitive.
 - **Clock accuracy**: Receipt timestamps come from the system clock. NTP synchronization is recommended for cross-system correlation.
 

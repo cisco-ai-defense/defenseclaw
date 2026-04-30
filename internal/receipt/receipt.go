@@ -85,8 +85,10 @@ type Config struct {
 	// Default: "./defenseclaw-receipts".
 	OutputDir string `json:"output_dir" yaml:"output_dir"`
 
-	// KeyPath is the path to a PEM-encoded Ed25519 private key.
-	// If empty, a new ephemeral key is generated on startup
-	// (suitable for development; not recommended for production).
+	// KeyPath is the path to an Ed25519 signing seed. Supported
+	// formats are a raw 32-byte seed, a 64-character hex seed, or
+	// a 64-byte Go ed25519 private key (seed || public key). If
+	// empty, a new ephemeral key is generated on startup (suitable
+	// for development; not recommended for production).
 	KeyPath string `json:"key_path" yaml:"key_path"`
 }
