@@ -157,7 +157,7 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 	// SetOTelProvider / SetSinks during shutdown cannot tear the
 	// interface reads below (L1 finding: writes to interface fields
 	// are two-word stores and are not atomic on most architectures).
-	sinksMgr, otel, structured := l.snapshot()
+	sinksMgr, otel, structured, _ := l.snapshot()
 
 	row := e.toRow()
 	if err := l.store.InsertNetworkEgressEvent(row); err != nil {

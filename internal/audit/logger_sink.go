@@ -21,7 +21,7 @@ func (l *Logger) sinkDeliveryHook(ctx context.Context, kind, sinkName string, er
 	if l == nil || l.store == nil {
 		return
 	}
-	_, tel, _ := l.snapshot()
+	_, tel, _, _ := l.snapshot()
 	prov := version.Current()
 	now := time.Now().UTC()
 	retryCount := 0
@@ -114,7 +114,7 @@ func sinkFailureReason(err error) string {
 }
 
 func (l *Logger) emitSinkFailureAuditAndGateway(ctx context.Context, sinkName, kind string, code gatewaylog.ErrorCode, err error) {
-	_, otel, emitter := l.snapshot()
+	_, otel, emitter, _ := l.snapshot()
 	ev := gatewaylog.Event{
 		Timestamp: time.Now().UTC(),
 		EventType: gatewaylog.EventError,

@@ -99,6 +99,12 @@ type Event struct {
 	BinaryVersion     string `json:"binary_version,omitempty"`
 	AgentID           string `json:"agent_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+
+	// ReceiptHash is the SHA-256 hash of the signed decision receipt
+	// for this event, if receipt signing is enabled. The hash links
+	// the SQLite audit row to the portable receipt file produced by
+	// the internal/receipt package. NULL when receipts are disabled.
+	ReceiptHash string `json:"receipt_hash,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.
@@ -838,6 +844,25 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Migration 11: receipt_hash links audit_events rows to their
+		// corresponding signed decision receipt files produced by
+		// internal/receipt. NULL when receipt signing is disabled.
+		// Enables: SELECT * FROM audit_events WHERE receipt_hash IS NOT NULL
+		description: "add receipt_hash column for signed decision receipt correlation",
+		apply: func(ex dbExecer) error {
+			exists, err := hasColumnDB(ex, "audit_events", "receipt_hash")
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err := ex.Exec(`ALTER TABLE audit_events ADD COLUMN receipt_hash TEXT`); err != nil {
+					return fmt.Errorf("alter audit_events.receipt_hash: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1044,6 +1069,21 @@ func (s *Store) LogEvent(e Event) error {
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
+	}
+	return nil
+}
+
+// SetReceiptHash stamps the receipt_hash column on an existing
+// audit_events row. Called by the receipt signer after producing a
+// signed decision receipt for the event. The hash links the SQLite
+// row to the portable receipt file so operators can correlate them.
+func (s *Store) SetReceiptHash(eventID, hash string) error {
+	_, err := s.execDB(context.Background(), "audit",
+		`UPDATE audit_events SET receipt_hash = ? WHERE id = ?`,
+		hash, eventID,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: set receipt_hash for %s: %w", eventID, err)
 	}
 	return nil
 }

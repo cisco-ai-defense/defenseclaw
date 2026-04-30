@@ -129,7 +129,7 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 
 	if err := l.store.InsertActivityEvent(row); err != nil {
-		_, otel, _ := l.snapshot()
+		_, otel, _, _ := l.snapshot()
 		if otel != nil {
 			otel.RecordAuditDBError(context.Background(), "insert_activity_event")
 		}
@@ -174,14 +174,14 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 	}
 	auditEv = sanitizeEvent(auditEv)
 	if err := l.store.LogEvent(auditEv); err != nil {
-		_, otel, _ := l.snapshot()
+		_, otel, _, _ := l.snapshot()
 		if otel != nil {
 			otel.RecordAuditDBError(context.Background(), "insert_activity_audit")
 		}
 		return err
 	}
 
-	sinksMgr, otel, structured := l.snapshot()
+	sinksMgr, otel, structured, _ := l.snapshot()
 	if otel != nil {
 		otel.RecordAuditEvent(context.Background(), auditEv.Action, auditEv.Severity)
 		otel.RecordActivityTotal(context.Background(), action, targetType, actor, len(in.Diff))
