@@ -51,6 +51,9 @@ changelog:
       - "^chore:"
       - "Merge pull request"
 
+release:
+  disable: "true"
+
 homebrew_casks:
   - repository:
       owner: cisco-ai-defense
