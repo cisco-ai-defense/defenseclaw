@@ -164,8 +164,13 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		// validated the credential.
 		source = "unknown"
 	}
-
 	ctx := r.Context()
+	sessionID := extractOTLPSessionID(body, signal)
+	if sessionID != "" {
+		ctx = ContextWithSessionID(ctx, sessionID)
+		enrichHTTPSpanFromContext(ctx)
+		enrichOTLPIngestSpan(ctx, sessionID)
+	}
 	bodyBytes := int64(len(body))
 	summary, stats, parseErr := summarizeOTLPPayload(body, signal)
 	if parseErr != nil {
@@ -184,6 +189,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 			Details:   details,
 			Severity:  "WARN",
 			AgentName: source,
+			SessionID: sessionID,
 		}
 		_ = persistAuditEvent(a.logger, a.store, ev)
 		// Record metrics + emit OTel log for the malformed branch.
@@ -205,6 +211,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		Details:   summary,
 		Severity:  "INFO",
 		AgentName: source,
+		SessionID: sessionID,
 	}
 	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
 		// Best-effort: failing to persist must NOT cause the
@@ -228,6 +235,77 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
 	writeOTLPSuccess(w)
+}
+
+func enrichOTLPIngestSpan(ctx context.Context, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.String("gen_ai.conversation.id", sessionID))
+}
+
+func extractOTLPSessionID(body []byte, signal otelIngestSignal) string {
+	if len(body) == 0 {
+		return ""
+	}
+	switch signal {
+	case otelSignalLogs:
+		return extractOTLPLogSessionID(body)
+	default:
+		return ""
+	}
+}
+
+func extractOTLPLogSessionID(body []byte) string {
+	var envelope struct {
+		ResourceLogs []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeLogs []struct {
+				LogRecords []struct {
+					Attributes []otlpAttribute `json:"attributes"`
+				} `json:"logRecords"`
+			} `json:"scopeLogs"`
+		} `json:"resourceLogs"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+
+	for _, resource := range envelope.ResourceLogs {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		if sessionID := otlpSessionID(resourceAttrs); sessionID != "" {
+			return sessionID
+		}
+		for _, scope := range resource.ScopeLogs {
+			for _, rec := range scope.LogRecords {
+				attrs := otlpAttributesToMap(rec.Attributes)
+				for k, v := range resourceAttrs {
+					if _, exists := attrs[k]; !exists {
+						attrs[k] = v
+					}
+				}
+				if sessionID := otlpSessionID(attrs); sessionID != "" {
+					return sessionID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func otlpSessionID(attrs map[string]interface{}) string {
+	return firstNonEmpty(
+		otlpString(attrs, "session.id"),
+		otlpString(attrs, "session_id"),
+		otlpString(attrs, "gen_ai.conversation.id"),
+		otlpString(attrs, "conversation.id"),
+	)
 }
 
 type otelTokenUsage struct {
