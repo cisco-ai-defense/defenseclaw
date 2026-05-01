@@ -2541,7 +2541,6 @@ func TestRateLimitMiddleware(t *testing.T) {
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "observe")
 
-	// Tight limiter: 1 req/s, burst 2
 	proxy.limiter = rate.NewLimiter(rate.Limit(1), 2)
 
 	body := mustJSON(t, map[string]interface{}{
@@ -2554,7 +2553,6 @@ func TestRateLimitMiddleware(t *testing.T) {
 	mux.HandleFunc("/v1/chat/completions", proxy.handleChatCompletion)
 	handler := proxy.rateLimitMiddleware(mux)
 
-	// Burst of 2 should succeed
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -2565,7 +2563,6 @@ func TestRateLimitMiddleware(t *testing.T) {
 		}
 	}
 
-	// Third request should be rate limited
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -3107,5 +3104,190 @@ func TestResponsesTextFromContent_PrettyPrintedArray(t *testing.T) {
 	got := responsesTextFromContent(content)
 	if got != "hello" {
 		t.Errorf("responsesTextFromContent with leading whitespace = %q, want %q", got, "hello")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Model governance integration tests
+// ---------------------------------------------------------------------------
+
+func newGovTestProxy(t *testing.T, gov config.ModelGovernanceConfig, govData map[string]interface{}, mode string) *GuardrailProxy {
+	t.Helper()
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	p := newTestProxy(t, prov, insp, mode)
+	if govData != nil {
+		opa := newTestOPA(t, govData)
+		p.governor = NewModelGovernor(gov, opa)
+	} else {
+		p.governor = NewModelGovernor(gov, nil)
+	}
+	return p
+}
+
+func TestGovernanceDeniedModelReturnsBlock(t *testing.T) {
+	proxy := newGovTestProxy(t, config.ModelGovernanceConfig{
+		Enabled:      true,
+		Mode:         "enforce",
+		BlockMessage: "Blocked by governance",
+	}, map[string]interface{}{
+		"providers": map[string]interface{}{"allow": []string{}, "deny": []string{}},
+		"models":    map[string]interface{}{"allow": []string{}, "deny": []string{"gpt-3.5-*"}},
+	}, "observe")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-3.5-turbo",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+
+	rec := postChat(t, proxy, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+	if !strings.Contains(rec.Body.String(), "Blocked by governance") {
+		t.Errorf("response body should contain governance block message, got: %s", rec.Body.String())
+	}
+}
+
+func TestGovernanceDeniedProviderReturnsBlock(t *testing.T) {
+	proxy := newGovTestProxy(t, config.ModelGovernanceConfig{
+		Enabled:      true,
+		Mode:         "enforce",
+		BlockMessage: "Provider not allowed",
+	}, map[string]interface{}{
+		"providers": map[string]interface{}{"allow": []string{}, "deny": []string{"bedrock"}},
+		"models":    map[string]interface{}{"allow": []string{}, "deny": []string{}},
+	}, "observe")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "claude-3.5-sonnet",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://bedrock-runtime.us-east-1.amazonaws.com/model/invoke")
+	rec := httptest.NewRecorder()
+	proxy.handleChatCompletion(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+	if !strings.Contains(rec.Body.String(), "Provider not allowed") {
+		t.Errorf("response should contain block message, got: %s", rec.Body.String())
+	}
+}
+
+func TestGovernanceAllowedModelProceedsToInspection(t *testing.T) {
+	proxy := newGovTestProxy(t, config.ModelGovernanceConfig{
+		Enabled: true,
+		Mode:    "enforce",
+	}, map[string]interface{}{
+		"providers": map[string]interface{}{"allow": []string{}, "deny": []string{}},
+		"models":    map[string]interface{}{"allow": []string{"gpt-4o", "gpt-4o-*"}, "deny": []string{}},
+	}, "observe")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+
+	rec := postChat(t, proxy, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got == "true" {
+		t.Fatal("allowed model should not be blocked")
+	}
+}
+
+func TestGovernanceMonitorModeDoesNotBlock(t *testing.T) {
+	proxy := newGovTestProxy(t, config.ModelGovernanceConfig{
+		Enabled:      true,
+		Mode:         "monitor",
+		BlockMessage: "Monitored block",
+	}, map[string]interface{}{
+		"providers": map[string]interface{}{"allow": []string{}, "deny": []string{}},
+		"models":    map[string]interface{}{"allow": []string{}, "deny": []string{"gpt-3.5-*"}},
+	}, "observe")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-3.5-turbo",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+
+	rec := postChat(t, proxy, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got == "true" {
+		t.Fatal("monitor mode should not block the request")
+	}
+}
+
+func TestGovernanceDisabledAllowsEverything(t *testing.T) {
+	proxy := newGovTestProxy(t, config.ModelGovernanceConfig{
+		Enabled: false,
+	}, nil, "observe")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-3.5-turbo",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+
+	rec := postChat(t, proxy, body)
+
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got == "true" {
+		t.Fatal("disabled governance should not block anything")
+	}
+}
+
+func TestGovernanceDeniedModelStreaming(t *testing.T) {
+	proxy := newGovTestProxy(t, config.ModelGovernanceConfig{
+		Enabled:      true,
+		Mode:         "enforce",
+		BlockMessage: "Streaming governance block",
+	}, map[string]interface{}{
+		"providers": map[string]interface{}{"allow": []string{}, "deny": []string{}},
+		"models":    map[string]interface{}{"allow": []string{}, "deny": []string{"gpt-3.5-*"}},
+	}, "observe")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":  "gpt-3.5-turbo",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+
+	rec := postChat(t, proxy, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-DefenseClaw-Blocked"); got != "true" {
+		t.Fatalf("X-DefenseClaw-Blocked = %q, want true", got)
+	}
+	if !strings.Contains(rec.Body.String(), "Streaming governance block") {
+		t.Errorf("streaming response should contain governance block message, got: %s", rec.Body.String())
 	}
 }

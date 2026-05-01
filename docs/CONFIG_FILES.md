@@ -326,3 +326,69 @@ webhooks:
 | **Set by** | `defenseclaw setup webhook` (preferred) or operator via `config.yaml`. |
 | **Read by** | **Go sidecar** at startup via `config.Load()`. **Python CLI** via `config.load()` (round-trips the cooldown tri-state, read-only for display). |
 | **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block, …) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors); 4xx are treated as permanent. |
+
+## Model Governance Config
+
+The `model_governance` section controls which LLM models and providers are permitted through the guardrail proxy. When enabled, requests for disallowed models or providers are blocked before content inspection, preventing shadow AI and enforcing data residency.
+
+The `config.yaml` section controls runtime behavior (enabled, mode, messaging). The actual
+allow/deny lists live in the **OPA Rego data layer** (`policies/rego/data.json`), consistent
+with how all other policy decisions (admission, guardrail, firewall, skill_actions) are managed.
+
+**config.yaml — runtime knobs:**
+
+```yaml
+model_governance:
+  enabled: true
+  mode: enforce              # enforce | monitor (log-only)
+  block_message: "This model or provider is not authorized by your organization's policy."
+  log_allowed: false         # if true, log allowed requests too (verbose)
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable model/provider governance. |
+| `mode` | string | `"enforce"` | `enforce` blocks denied requests; `monitor` logs but does not block. |
+| `block_message` | string | `"This model or provider is not authorized by your organization's policy."` | User-facing message returned in the blocked response. |
+| `log_allowed` | bool | `false` | Log allowed requests for auditing. |
+
+**data.json — allow/deny policy (OPA Rego data layer):**
+
+The `model_governance` key in `policies/rego/data.json` defines the allow/deny lists:
+
+```json
+{
+  "model_governance": {
+    "providers": {
+      "allow": [],
+      "deny": ["openrouter", "bedrock"]
+    },
+    "models": {
+      "allow": ["gpt-4o", "gpt-4o-*", "claude-*"],
+      "deny": ["gpt-3.5-*"]
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `providers.allow` | []string | `[]` | If non-empty, only these providers are permitted. |
+| `providers.deny` | []string | `[]` | Providers to block. Deny overrides allow. |
+| `models.allow` | []string | `[]` | If non-empty, only these models are permitted. Supports glob patterns (e.g. `gpt-4o-*`, `claude-*`). |
+| `models.deny` | []string | `[]` | Models to block. Supports glob patterns. |
+
+**Semantics:**
+- Provider names match canonical names from `providers.json`: `openai`, `anthropic`, `azure`, `gemini`, `bedrock`, `openrouter`, `ollama`.
+- Allow lists are evaluated first; if non-empty, only listed items pass.
+- Deny lists are checked next; any match blocks. Deny overrides allow when both match.
+- Model patterns support glob matching via OPA's `glob.match` (e.g. `gpt-4o-*`, `claude-*`).
+- All matching is case-insensitive.
+- Policy decisions are made by the `model_governance.rego` Rego policy, evaluated by the OPA engine.
+- Denied requests emit a `model-governance-deny` audit event with severity HIGH, which is also dispatched to configured webhooks.
+
+| | |
+|---|---|
+| **Set by** | Operator — runtime config in `config.yaml`; allow/deny rules in `policies/rego/data.json`. Reloadable via the API policy reload endpoint. |
+| **Read by** | **Go sidecar** at startup. The `ModelGovernor` wraps the OPA `policy.Engine` and checks are applied before guardrail content inspection. |
+| **Effect** | In `enforce` mode, denied requests receive a blocked response (OpenAI-compatible format) and are logged as audit events. In `monitor` mode, denials are logged but requests proceed normally. |
