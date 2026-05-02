@@ -157,6 +157,44 @@ func TestStartToolSpan_RawArgsOnlyWhenRedactionDisabled(t *testing.T) {
 	}
 }
 
+func TestStartToolSpan_EmitsSessionToolPolicyCorrelation(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	_, span := p.StartToolSpan(context.Background(), "shell", "running",
+		json.RawMessage(`{"cmd":"rg -n observed_agent_session ."}`), false, "", "builtin", "",
+		ToolSpanContext{
+			ToolID:         "tool-123",
+			SessionID:      "session-123",
+			RunID:          "run-123",
+			DestinationApp: "builtin",
+			PolicyID:       "policy-allow-shell",
+			AgentName:      "codex",
+			AgentID:        "openai_codex",
+		})
+	p.EndToolSpan(span, 0, 0, time.Now(), "shell", "builtin")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+
+	for key, want := range map[string]string{
+		"gen_ai.tool.call.id":         "tool-123",
+		"gen_ai.conversation.id":      "session-123",
+		"defenseclaw.run.id":          "run-123",
+		"defenseclaw.destination.app": "builtin",
+		"defenseclaw.policy.id":       "policy-allow-shell",
+		"gen_ai.agent.name":           "codex",
+		"gen_ai.agent.id":             "openai_codex",
+		"gen_ai.operation.name":       "execute_tool",
+		"gen_ai.tool.name":            "shell",
+	} {
+		got, ok := attrByKey(spans[0].Attributes, key)
+		if !ok || got.AsString() != want {
+			t.Fatalf("%s = %q ok=%v, want %q", key, got.AsString(), ok, want)
+		}
+	}
+}
+
 func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
 	redaction.SetDisableAll(false)
 	t.Cleanup(func() { redaction.SetDisableAll(false) })

@@ -39,6 +39,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -50,6 +51,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -1146,16 +1150,18 @@ func extractServiceName(resourceRaw json.RawMessage) string {
 
 // codexNotifyPayload mirrors the documented codex notify JSON shape
 // (https://developers.openai.com/codex/config-advanced). We capture
-// the fields the SIEM rollup needs (type, turn-id, model, status)
+// the fields the SIEM rollup and session correlation need (type,
+// thread-id, turn-id, model, status)
 // and intentionally do not persist unknown fields verbatim. The schema
 // is deliberately permissive: codex bumps the notify shape across
 // releases and we never want schema drift to make the gateway 400 a
 // real event.
 type codexNotifyPayload struct {
-	Type   string `json:"type"`
-	TurnID string `json:"turn_id"`
-	Model  string `json:"model,omitempty"`
-	Status string `json:"status,omitempty"`
+	Type     string `json:"type"`
+	ThreadID string `json:"thread-id,omitempty"`
+	TurnID   string `json:"turn-id,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 // handleCodexNotify accepts agent-turn-complete events from the
@@ -1214,6 +1220,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
+	sessionID := codexNotifySessionID(p)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -1223,7 +1230,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Severity:  severity,
 		AgentName: "codex",
-		SessionID: p.TurnID,
+		SessionID: sessionID,
 	}
 	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)
@@ -1233,13 +1240,52 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	// record so the local-stack dashboards see codex turn-completes
 	// without configuring an audit OTLP sink. Cardinality is bounded
 	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
-	ctx := r.Context()
+	ctx := ContextWithSessionID(r.Context(), sessionID)
+	enrichHTTPSpanFromContext(ctx)
+	enrichCodexNotifySpan(ctx, p, kind, result)
 	a.otel.RecordCodexNotify(ctx, kind, p.Status, result)
 	a.otel.EmitCodexNotifyLog(ctx, kind, p.Status, result, p.TurnID, p.Model)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
+}
+
+func codexNotifySessionID(p codexNotifyPayload) string {
+	if p.ThreadID != "" {
+		return p.ThreadID
+	}
+	return p.TurnID
+}
+
+func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, result string) {
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	sessionID := codexNotifySessionID(p)
+	if sessionID != "" {
+		span.SetAttributes(
+			attribute.String("gen_ai.conversation.id", sessionID),
+			attribute.String("defenseclaw.session_id", sessionID),
+		)
+	}
+	span.SetAttributes(attribute.String("gen_ai.agent.name", "codex"))
+	if p.TurnID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.notify.turn_id", p.TurnID))
+	}
+	if kind != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.notify.type", kind))
+	}
+	if result != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.notify.result", result))
+	}
+	if p.Status != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.notify.status", p.Status))
+	}
+	if p.Model != "" {
+		span.SetAttributes(attribute.String("gen_ai.response.model", p.Model))
+	}
 }
 
 func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result string, parseErr error) string {
@@ -1250,6 +1296,9 @@ func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result str
 		"result=" + result,
 		fmt.Sprintf("body_len=%d", len(body)),
 		"body_sha256_prefix=" + sumHex[:16],
+	}
+	if p.ThreadID != "" {
+		parts = append(parts, "thread_id="+redaction.ForSinkEntity(p.ThreadID))
 	}
 	if p.TurnID != "" {
 		parts = append(parts, "turn_id="+redaction.ForSinkEntity(p.TurnID))
