@@ -201,6 +201,31 @@ func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {
 	return nil
 }
 
+// providerBearerMatchesSnapshot accepts loopback callers that present the
+// same provider api_key ZeptoClaw has in config (the snapshot is taken before
+// api_base is rewritten to the proxy). Remote callers cannot use this path.
+func (c *ZeptoClawConnector) providerBearerMatchesSnapshot(r *http.Request) bool {
+	if !IsLoopback(r) {
+		return false
+	}
+	auth := r.Header.Get("Authorization")
+	key := ExtractBearerKey(auth)
+	if key == "" || strings.HasPrefix(key, "sk-dc-") {
+		return false
+	}
+	c.snapshotMu.RLock()
+	defer c.snapshotMu.RUnlock()
+	for _, e := range c.providers {
+		if e.APIKey == "" {
+			continue
+		}
+		if SecureTokenMatch(key, e.APIKey) {
+			return true
+		}
+	}
+	return false
+}
+
 // Authenticate enforces credentials on every ZeptoClaw request — no more
 // unconditional loopback bypass (plan B1 / S0.3). The previous behavior
 // allowed any local process to hit /c/zeptoclaw/* and have its
@@ -215,6 +240,12 @@ func (c *ZeptoClawConnector) VerifyClean(opts SetupOpts) error {
 // hooks/inspect-*.sh scripts (which run on the same host) inject the
 // X-DC-Auth header bearing the synthesized gateway token. That token
 // flow is what keeps loopback callers authenticated post-boot.
+//
+// The ZeptoClaw process itself sends only the upstream provider credential
+// in Authorization (e.g. Bedrock bearer). After B1 we still require either
+// X-DC-Auth, the master key, or—on loopback only—a bearer that matches an
+// api_key captured in the Setup-time provider snapshot (same secret Zepto
+// has in ~/.zeptoclaw/config.json).
 func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
@@ -228,6 +259,10 @@ func (c *ZeptoClawConnector) Authenticate(r *http.Request) bool {
 		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
+	}
+
+	if c.gatewayToken != "" && c.providerBearerMatchesSnapshot(r) {
+		return true
 	}
 
 	// Narrow loopback-allow ONLY for the unconfigured-gateway window.

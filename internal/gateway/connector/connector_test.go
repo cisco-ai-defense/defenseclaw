@@ -3082,6 +3082,33 @@ func TestZeptoClaw_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	}
 }
 
+// TestZeptoClaw_Authenticate_ProviderSnapshotBearerLoopback: ZeptoClaw's
+// HTTP client sends the upstream key in Authorization only; when a gateway
+// token is configured it cannot inject X-DC-Auth. Loopback + bearer matching
+// the Setup snapshot must still authenticate.
+func TestZeptoClaw_Authenticate_ProviderSnapshotBearerLoopback(t *testing.T) {
+	c := NewZeptoClawConnector()
+	c.SetCredentials("gw-tok-configured", "")
+	c.SetProviderSnapshot(map[string]ZeptoClawProviderEntry{
+		"bedrock": {APIKey: "aws-bedrock-bearer-from-zepto-config", APIBase: "https://bedrock-runtime.us-east-1.amazonaws.com"},
+	})
+
+	r := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
+	r.RemoteAddr = "127.0.0.1:54321"
+	r.Header.Set("Authorization", "Bearer aws-bedrock-bearer-from-zepto-config")
+
+	if !c.Authenticate(r) {
+		t.Fatal("loopback with Authorization matching provider snapshot must pass when gateway token is configured")
+	}
+
+	r2 := httptest.NewRequest("POST", "/c/zeptoclaw/v1/chat/completions", nil)
+	r2.RemoteAddr = "10.0.0.5:54321"
+	r2.Header.Set("Authorization", "Bearer aws-bedrock-bearer-from-zepto-config")
+	if c.Authenticate(r2) {
+		t.Fatal("non-loopback must not authenticate via provider snapshot bearer alone")
+	}
+}
+
 func TestZeptoClaw_Route(t *testing.T) {
 	c := NewZeptoClawConnector()
 	body := []byte(`{"model":"gpt-4o","stream":false}`)

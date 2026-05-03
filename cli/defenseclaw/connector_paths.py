@@ -470,9 +470,7 @@ def _read_mcp_settings_block(
         cursor = cursor.get(k)
         if cursor is None:
             return []
-    if not isinstance(cursor, dict):
-        return []
-    return _parse_mcp_servers_dict(cursor)
+    return _parse_mcp_servers_value(cursor)
 
 
 def _read_dotmcp_json(path: str) -> list[MCPServerEntry]:
@@ -561,15 +559,40 @@ def _parse_mcp_servers_text(text: str) -> list[MCPServerEntry]:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return []
-    if not isinstance(parsed, dict):
-        return []
-    return _parse_mcp_servers_dict(parsed)
+    return _parse_mcp_servers_value(parsed)
+
+
+def _parse_mcp_servers_value(servers: Any) -> list[MCPServerEntry]:
+    if isinstance(servers, dict):
+        return _parse_mcp_servers_dict(servers)
+    if isinstance(servers, list):
+        return _parse_mcp_servers_list(servers)
+    return []
 
 
 def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
     out: list[MCPServerEntry] = []
     for name, cfg in servers.items():
         if not isinstance(cfg, dict):
+            continue
+        out.append(MCPServerEntry(
+            name=name,
+            command=cfg.get("command", "") or "",
+            args=list(cfg.get("args", []) or []),
+            env=dict(cfg.get("env", {}) or {}),
+            url=cfg.get("url", "") or "",
+            transport=cfg.get("transport", "") or "",
+        ))
+    return out
+
+
+def _parse_mcp_servers_list(servers: list[Any]) -> list[MCPServerEntry]:
+    out: list[MCPServerEntry] = []
+    for cfg in servers:
+        if not isinstance(cfg, dict):
+            continue
+        name = str(cfg.get("name", "") or "")
+        if not name:
             continue
         out.append(MCPServerEntry(
             name=name,

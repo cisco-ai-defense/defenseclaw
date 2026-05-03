@@ -76,6 +76,22 @@ func TestInferProviderNew(t *testing.T) {
 	}
 }
 
+func TestCompositeModelForUpstream_BedrockZeptoNoDoublePrefix(t *testing.T) {
+	// URL inference yields "bedrock" for bedrock-runtime.* hosts; the body
+	// already names amazon-bedrock/… (OpenClaw / Zepto stock string).
+	got := compositeModelForUpstream("bedrock", "amazon-bedrock/us.anthropic.claude-sonnet-4-6")
+	want := "amazon-bedrock/us.anthropic.claude-sonnet-4-6"
+	if got != want {
+		t.Errorf("compositeModelForUpstream(bedrock, amazon-bedrock/…) = %q, want %q", got, want)
+	}
+	if got := compositeModelForUpstream("bedrock", "bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0"); got != "bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0" {
+		t.Errorf("verbatim bedrock-prefixed model: got %q", got)
+	}
+	if got := compositeModelForUpstream("openai", "gpt-4o"); got != "openai/gpt-4o" {
+		t.Errorf("unprefixed + URL prefix: got %q", got)
+	}
+}
+
 func TestSplitModel_NewProviders(t *testing.T) {
 	tests := []struct {
 		input     string

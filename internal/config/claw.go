@@ -204,6 +204,41 @@ func parseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
+func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+
+	var servers []struct {
+		Name      string            `json:"name"`
+		Command   string            `json:"command"`
+		Args      []string          `json:"args"`
+		Env       map[string]string `json:"env"`
+		URL       string            `json:"url"`
+		Transport string            `json:"transport"`
+	}
+	if err := json.Unmarshal(trimmed, &servers); err != nil {
+		return nil, fmt.Errorf("config: parse mcp servers: %w", err)
+	}
+
+	entries := make([]MCPServerEntry, 0, len(servers))
+	for _, s := range servers {
+		if strings.TrimSpace(s.Name) == "" {
+			continue
+		}
+		entries = append(entries, MCPServerEntry{
+			Name:      s.Name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Transport,
+		})
+	}
+	return entries, nil
+}
+
 func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	workspace := filepath.Join(homeDir, "workspace")
 	if oc != nil && oc.Agents.Defaults.Workspace != "" {
@@ -571,31 +606,28 @@ func readMCPFromZeptoConfig(path string) ([]MCPServerEntry, error) {
 
 	var cfg struct {
 		MCP struct {
-			Servers map[string]struct {
-				Command   string            `json:"command"`
-				Args      []string          `json:"args"`
-				Env       map[string]string `json:"env"`
-				URL       string            `json:"url"`
-				Transport string            `json:"transport"`
-			} `json:"servers"`
+			Servers json.RawMessage `json:"servers"`
 		} `json:"mcp"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
-
-	entries := make([]MCPServerEntry, 0, len(cfg.MCP.Servers))
-	for name, s := range cfg.MCP.Servers {
-		entries = append(entries, MCPServerEntry{
-			Name:      name,
-			Command:   s.Command,
-			Args:      s.Args,
-			Env:       s.Env,
-			URL:       s.URL,
-			Transport: s.Transport,
-		})
+	if len(cfg.MCP.Servers) == 0 {
+		return nil, nil
 	}
-	return entries, nil
+
+	trimmed := bytes.TrimSpace(cfg.MCP.Servers)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	switch trimmed[0] {
+	case '{':
+		return parseMCPServersJSON(cfg.MCP.Servers)
+	case '[':
+		return parseMCPServersJSONArray(cfg.MCP.Servers)
+	default:
+		return nil, nil
+	}
 }
 
 func dedupMCPEntries(entries []MCPServerEntry) []MCPServerEntry {

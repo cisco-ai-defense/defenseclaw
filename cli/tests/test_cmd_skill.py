@@ -192,6 +192,30 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False)
 
+    @patch("defenseclaw.config.Config.skill_dirs")
+    def test_scan_all_accepts_connector_filesystem_path_field(self, mock_skill_dirs):
+        from defenseclaw.commands.cmd_skill import _scan_all
+
+        skill_root = os.path.join(self.tmp_dir, ".zeptoclaw", "skills")
+        skill_dir = os.path.join(skill_root, "zepto-skill")
+        os.makedirs(skill_dir)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Zepto skill\n")
+        mock_skill_dirs.return_value = [skill_root]
+        self.app.cfg.active_connector = lambda: "zeptoclaw"  # type: ignore[method-assign]
+        scanner = MagicMock()
+        scanner.scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+
+        _scan_all(self.app, scanner, as_json=False)
+
+        scanner.scan.assert_called_once_with(skill_dir)
+
 
 class TestSkillInstall(SkillCommandTestBase):
     @patch("defenseclaw.enforce.admission.evaluate_admission")

@@ -178,6 +178,7 @@ def _list_skills_from_filesystem(cfg: Config) -> list[dict[str, Any]]:
                 "disabled": False,
                 "source": skill_dir,
                 "bundled": False,
+                "baseDir": full,
                 "path": full,
             }
             rows.append(row)

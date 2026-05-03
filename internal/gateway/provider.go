@@ -276,6 +276,22 @@ func splitModel(model string) (provider, modelID string) {
 	return "", model
 }
 
+// compositeModelForUpstream builds the "provider/model" string passed to
+// NewProviderWithBase from resolveProviderFromHeaders. When the JSON body
+// already uses a known provider prefix (e.g. amazon-bedrock/…, anthropic/…),
+// that value is kept verbatim so a URL-derived prefix like "bedrock" is not
+// prepended again (which would yield bedrock/amazon-bedrock/… and break
+// Bifrost routing for ZeptoClaw + regional Bedrock endpoints).
+func compositeModelForUpstream(urlInferredPrefix string, bodyModel string) string {
+	if prov, _ := splitModel(bodyModel); prov != "" {
+		return bodyModel
+	}
+	if urlInferredPrefix != "" {
+		return urlInferredPrefix + "/" + bodyModel
+	}
+	return bodyModel
+}
+
 // providerHTTPClient is used for passthrough upstream requests in the proxy.
 // No client-level Timeout is set because each call site passes a
 // context.WithTimeout — a client-level timeout would race with that.
