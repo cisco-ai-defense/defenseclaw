@@ -73,8 +73,8 @@ var wizardDescriptions = [wizardCount]string{
 	"Configure MCP scanner analyzers and which components to scan (prompts, resources, instructions).",
 	"Configure gateway connection settings (host, port, TLS, auto-approve, reconnect parameters).",
 	"Configure LLM guardrail proxy (mode, model, scanner mode, judge settings).",
-	"Configure Splunk HEC integration for SIEM (endpoint, token, index, source).",
-	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
+	"Configure Splunk HEC integration for SIEM (local bridge or remote Enterprise endpoint).",
+	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Splunk Enterprise, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
 	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
 }
@@ -103,8 +103,8 @@ var wizardHowTo = [wizardCount]string{
 		"Tip: start in 'observe' mode to measure false positives before flipping to 'action'.",
 	// Splunk
 	"Runs: defenseclaw setup splunk\n" +
-		"What you'll need: HEC endpoint (https://…:8088), HEC token env var, index name.\n" +
-		"Tip: this adds a Splunk HEC entry to audit_sinks[] — the old single splunk.* block is deprecated.",
+		"What you'll need: for Enterprise, HEC endpoint + token; for local, Docker and Splunk terms acceptance.\n" +
+		"Tip: --enterprise writes audit_sinks[] only; --logs starts the local bridge.",
 	// Observability
 	"Runs: defenseclaw setup observability add <preset>\n" +
 		"What you'll need: vendor realm/region, ingest token env var, optional service.name/environment overrides.\n" +
@@ -129,6 +129,7 @@ var wizardHowTo = [wizardCount]string{
 var observabilityPresets = [][2]string{
 	{"splunk-o11y", "Splunk Observability Cloud"},
 	{"splunk-hec", "Splunk HEC"},
+	{"splunk-enterprise", "Splunk Enterprise HEC"},
 	{"datadog", "Datadog"},
 	{"honeycomb", "Honeycomb"},
 	{"newrelic", "New Relic"},
@@ -1768,8 +1769,12 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 		return []wizardFormField{
 			{Label: "Enable O11y", Flag: "--o11y", Kind: "bool", Default: "no", Value: "no", Hint: "Splunk Observability Cloud (OTLP)"},
 			{Label: "Enable Local Logs", Flag: "--logs", Kind: "bool", Default: "no", Value: "no", Hint: "Local Splunk via Docker (HEC)"},
+			{Label: "Enable Enterprise", Flag: "--enterprise", Kind: "bool", Default: "no", Value: "no", Hint: "Remote Splunk Enterprise HEC endpoint + token"},
 			{Label: "Realm", Flag: "--realm", Kind: "string", Hint: "O11y realm (e.g. us1, us0, eu0)"},
 			{Label: "Access Token", Flag: "--access-token", Kind: "string", Hint: "Splunk O11y access token"},
+			{Label: "HEC Endpoint", Flag: "--hec-endpoint", Kind: "string", Hint: "Remote HEC URL (https://host:8088/services/collector/event)"},
+			{Label: "HEC Token", Flag: "--hec-token", Kind: "password", Hint: "Remote Splunk Enterprise HEC token"},
+			{Label: "Skip HEC Test", Flag: "--skip-test", Kind: "bool", Default: "no", Value: "no", Hint: "Skip the live Enterprise HEC probe after setup"},
 			{Label: "App Name", Flag: "--app-name", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
 			{Label: "Traces", Flag: "--traces", NoFlag: "--no-traces", Kind: "bool", Default: "yes", Value: "yes"},
 			{Label: "Metrics", Flag: "--metrics", NoFlag: "--no-metrics", Kind: "bool", Default: "yes", Value: "yes"},
@@ -1856,6 +1861,14 @@ func observabilityWizardFields(presetID string) []wizardFormField {
 			wizardFormField{Label: "Sourcetype", Flag: "--sourcetype", Kind: "string", Default: "_json", Value: "_json"},
 			wizardFormField{Label: "Verify TLS", Flag: "--verify-tls", NoFlag: "--no-verify-tls", Kind: "bool", Default: "no", Value: "no"},
 			wizardFormField{Label: "HEC Token", Flag: "--token", Kind: "password", Hint: "Splunk HEC token (leave blank if already in $DEFENSECLAW_SPLUNK_HEC_TOKEN)"},
+		)
+	case "splunk-enterprise":
+		fields = append(fields,
+			wizardFormField{Label: "Endpoint", Flag: "--endpoint", Kind: "string", Required: true, Hint: "https://host:8088/services/collector/event"},
+			wizardFormField{Label: "Index", Flag: "--index", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
+			wizardFormField{Label: "Source", Flag: "--source", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
+			wizardFormField{Label: "Sourcetype", Flag: "--sourcetype", Kind: "string", Default: "_json", Value: "_json"},
+			wizardFormField{Label: "HEC Token", Flag: "--token", Kind: "password", Hint: "Splunk Enterprise HEC token (leave blank if already in $DEFENSECLAW_SPLUNK_HEC_TOKEN)"},
 		)
 	case "datadog":
 		fields = append(fields,

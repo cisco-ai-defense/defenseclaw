@@ -92,6 +92,8 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
             self.assertFalse(r["disabled"])
             self.assertFalse(r["bundled"])
             self.assertEqual(r["source"], skill_root)
+            self.assertEqual(r["baseDir"], os.path.join(skill_root, r["name"]))
+            self.assertEqual(r["path"], os.path.join(skill_root, r["name"]))
 
     def test_claudecode_walks_disk(self):
         cfg = _make_cfg(self.tmp, "claudecode")

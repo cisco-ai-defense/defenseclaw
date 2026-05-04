@@ -521,11 +521,15 @@ defenseclaw setup splunk
 |------|-------------|
 | `--o11y` | Enable Splunk Observability Cloud (OTLP traces + metrics) |
 | `--logs` | Enable local Splunk via Docker (HEC) |
+| `--enterprise` | Enable remote Splunk Enterprise via HEC endpoint + token |
 | `--realm REALM` | Splunk O11y realm |
 | `--access-token TOKEN` | Splunk O11y access token |
+| `--hec-endpoint URL` | Remote Splunk Enterprise HEC endpoint |
+| `--hec-token TOKEN` | Remote Splunk Enterprise HEC token |
+| `--skip-test` | Skip the live HEC probe after remote Splunk Enterprise setup |
 | `--app-name NAME` | Application name for traces |
-| `--disable` | Disable integration(s); combine with `--o11y` / `--logs` to scope |
-| `--non-interactive` | Requires at least `--o11y` or `--logs` |
+| `--disable` | Disable integration(s); combine with `--o11y` / `--logs` / `--enterprise` to scope |
+| `--non-interactive` | Requires at least `--o11y`, `--logs`, or `--enterprise` |
 
 The `--logs` option requires Docker and sets up a local Splunk runtime with the
 DefenseClaw Splunk bridge (`splunk-claw-bridge`). That runtime starts directly
@@ -538,12 +542,26 @@ https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.2/config
 # Enable Splunk Observability Cloud
 defenseclaw setup splunk --o11y --realm us1 --access-token $SPLUNK_TOKEN --non-interactive
 
+# Enable remote Splunk Enterprise HEC
+defenseclaw setup splunk --enterprise \
+  --hec-endpoint https://splunk.example.com:8088/services/collector/event \
+  --hec-token "$SPLUNK_HEC_TOKEN" \
+  --index defenseclaw \
+  --non-interactive
+
 # Enable local Splunk logs (requires Docker)
 defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
 
 # Disable both
 defenseclaw setup splunk --disable
 ```
+
+For `--enterprise`, the Splunk administrator must already have enabled HTTP
+Event Collector, created an active HEC token, and allowed the configured index.
+DefenseClaw stores the token in `~/.defenseclaw/.env` as
+`DEFENSECLAW_SPLUNK_HEC_TOKEN` and writes only `token_env` to `config.yaml`.
+Setup sends one best-effort HEC probe event after writing config so you can
+see whether Splunk returns `200 OK`; use `--skip-test` to suppress that probe.
 
 ### `defenseclaw doctor`
 
@@ -580,6 +598,120 @@ defenseclaw doctor
 Other setup commands run a subset of these checks when `--verify` is
 enabled (the default). If verification fails, the output suggests
 running `defenseclaw doctor` for the full report.
+
+---
+
+## Upgrading
+
+### Upgrading from 0.2.0 to 0.3.0
+
+Release 0.2.0 does not include the `defenseclaw upgrade` CLI command. Use the
+standalone upgrade shell script instead:
+
+```bash
+# Upgrade to 0.3.0 (downloads from GitHub Releases)
+curl -sSfL https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh \
+  | bash -s -- --version 0.3.0
+```
+
+Or, if you have the repository cloned:
+
+```bash
+./scripts/upgrade.sh --version 0.3.0
+```
+
+Add `--yes` to skip the confirmation prompt.
+
+The script will:
+
+1. Verify release artifacts exist on GitHub before touching anything
+2. Download the gateway binary and Python CLI wheel to a temp directory
+3. Back up `~/.defenseclaw/` config files and `~/.openclaw/openclaw.json`
+4. Stop the gateway, install the new artifacts, run migrations
+5. Restart the gateway and verify health
+
+After this upgrade completes, the `defenseclaw upgrade` CLI command becomes
+available for all future upgrades.
+
+#### 0.3.0 migration: legacy model provider cleanup
+
+The 0.2.0 guardrail setup redirected LLM traffic by writing provider and model
+entries directly into `~/.openclaw/openclaw.json`:
+
+- `models.providers.defenseclaw` and/or `models.providers.litellm` — proxy
+  provider definitions that routed calls through the guardrail
+- `agents.defaults.model.primary` set to `defenseclaw/<model>` or
+  `litellm/<model>` — forced all agent calls through the proxy provider
+
+In 0.3.0, routing is handled transparently by a fetch interceptor in the
+OpenClaw plugin, so these entries are no longer needed.
+
+The migration uses a **pristine-backup restore** strategy. When DefenseClaw's
+guardrail was first enabled, it captured a one-time snapshot of the original
+`openclaw.json` (before any DefenseClaw modifications). The migration:
+
+1. Restores `openclaw.json` from that pristine backup — removing all
+   DefenseClaw-injected entries in one clean step
+2. Re-applies only the minimal plugin registration that 0.3.0 needs
+   (`plugins.allow`, `plugins.entries`, `plugins.load.paths`)
+3. Saves a `.pre-0.3.0-migration` backup of the current file before
+   overwriting, for safety
+
+If no pristine backup exists (e.g. guardrail was never enabled, or the backup
+was deleted), the migration falls back to **surgical removal**: it deletes
+`models.providers.defenseclaw` / `models.providers.litellm` and strips the
+proxy prefix from `agents.defaults.model.primary`.
+
+If none of these legacy entries exist, the migration is a no-op.
+
+### Upgrading from 0.3.0 and later
+
+Starting with 0.3.0, use the built-in CLI command:
+
+```bash
+# Upgrade to the latest release
+defenseclaw upgrade
+
+# Upgrade to a specific version
+defenseclaw upgrade --version 0.4.0
+
+# Skip confirmation prompt
+defenseclaw upgrade --yes
+```
+
+The CLI command performs the same steps as the shell script: pre-flight
+artifact verification, config backup, stop-install-migrate-restart, and
+health polling. See the [CLI Reference](CLI.md#upgrade) for full flag
+documentation.
+
+### What gets upgraded
+
+| Component | Updated by upgrade | Notes |
+|-----------|-------------------|-------|
+| Gateway binary (`defenseclaw-gateway`) | Yes | Replaced from release tarball |
+| Python CLI (`defenseclaw`) | Yes | Replaced from release wheel |
+| OpenClaw plugin | No | Plugin is release-specific; installed by `install.sh` only |
+| Config files | Preserved | Backed up before upgrade, migrations patch if needed |
+| Policies | Preserved | Backed up; not overwritten |
+
+### Rollback
+
+If an upgrade fails or causes issues, restore from the timestamped backup:
+
+```bash
+# Backups are saved to ~/.defenseclaw/backups/upgrade-<timestamp>/
+ls ~/.defenseclaw/backups/
+
+# Restore config files
+cp ~/.defenseclaw/backups/upgrade-20260429T120000/config.yaml ~/.defenseclaw/
+cp ~/.defenseclaw/backups/upgrade-20260429T120000/openclaw.json ~/.openclaw/
+
+# Downgrade to the previous version
+defenseclaw upgrade --version 0.2.0
+# Or use the shell script if the CLI is broken:
+curl -sSfL https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/upgrade.sh \
+  | bash -s -- --version 0.2.0
+```
 
 ---
 

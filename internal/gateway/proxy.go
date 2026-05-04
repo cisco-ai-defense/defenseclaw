@@ -1466,22 +1466,20 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		return nil
 	}
 
-	// Bedrock uses AWS Sigv4 authentication — it cannot be forwarded via the
-	// Chat Completions translation path because the provider wrapper only
-	// supports Bearer-token auth. Bedrock traffic must go through the
-	// passthrough handler which preserves the original SDK-signed request.
-	if prefix == "bedrock" {
-		fmt.Fprintf(os.Stderr, "[guardrail] bedrock traffic must use passthrough — rejecting from chat completions handler\n")
-		return nil
-	}
-
 	// Azure requires the specific resource endpoint as baseURL.
+	// Bedrock (ZeptoClaw / OpenClaw) uses regional bedrock-runtime URLs with
+	// ABSK bearer keys — Bifrost handles that path; pin BaseURL to the snapshot
+	// origin so the tenant routes to the correct region.
 	baseURL := ""
 	if prefix == "azure" {
 		baseURL = req.TargetURL
 	}
+	if prefix == "bedrock" {
+		baseURL = strings.TrimRight(req.TargetURL, "/")
+	}
 
-	provider, err := NewProviderWithBase(prefix+"/"+req.Model, req.TargetAPIKey, baseURL)
+	modelArg := compositeModelForUpstream(prefix, req.Model)
+	provider, err := NewProviderWithBase(modelArg, req.TargetAPIKey, baseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] provider error: %v\n", err)
 		return nil

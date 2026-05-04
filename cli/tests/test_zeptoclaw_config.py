@@ -137,6 +137,35 @@ class ZeptoClawMCPReaderTests(unittest.TestCase):
             self.assertEqual(remote.url, "https://example.com/mcp")
             self.assertEqual(remote.transport, "http")
 
+    def test_reads_zeptoclaw_native_servers_array(self):
+        with _IsolatedHome() as home:
+            cfg_path = os.path.join(home, ".zeptoclaw", "config.json")
+            os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+            with open(cfg_path, "w") as fh:
+                json.dump(
+                    {
+                        "mcp": {
+                            "servers": [
+                                {
+                                    "name": "zc-stdio",
+                                    "command": "node",
+                                    "args": ["mcp.js"],
+                                },
+                                {
+                                    "name": "zc-remote",
+                                    "url": "https://example.com/mcp",
+                                    "transport": "http",
+                                },
+                            ]
+                        },
+                    },
+                    fh,
+                )
+
+            entries = connector_paths.mcp_servers("zeptoclaw")
+            names = sorted(e.name for e in entries)
+            self.assertEqual(names, ["zc-remote", "zc-stdio"])
+
     def test_missing_config_returns_empty_not_error(self):
         with _IsolatedHome():
             entries = connector_paths.mcp_servers("zeptoclaw")

@@ -85,7 +85,8 @@ def observability() -> None:
     separate ``webhooks[]`` list and not an audit-sink.
     Splunk configuration authored with ``defenseclaw setup splunk``
     remains fully back-compatible (those flags are aliases for
-    ``observability add splunk-o11y`` / ``splunk-hec``).
+    ``observability add splunk-o11y`` / ``splunk-hec`` /
+    ``splunk-enterprise``).
     """
 
 
@@ -153,7 +154,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
           --non-interactive --site us5 --token "$DD_API_KEY"
     \b
       # Interactive (default)
-      defenseclaw setup observability add splunk-hec
+      defenseclaw setup observability add splunk-enterprise
     """
     preset = resolve_preset(preset_id.lower())
 
@@ -231,15 +232,15 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         click.echo("  Add one with: defenseclaw setup observability add <preset>")
         return
     click.echo()
-    click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<14} ENDPOINT")
-    click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 14} {'-' * 40}")
+    click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
+    click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
     for d in dests:
         endpoint = d.endpoint or "(none)"
         if len(endpoint) > 60:
             endpoint = endpoint[:57] + "..."
         click.echo(
             f"  {d.name:<40} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
-            f"{(d.preset_id or '-'):<14} {endpoint}",
+            f"{(d.preset_id or '-'):<18} {endpoint}",
         )
     click.echo()
 
@@ -324,7 +325,8 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
         click.echo(f"  Warning: destination {name!r} is currently disabled.")
 
     click.echo()
-    click.echo(f"  Testing {name} [{d.kind}]: {d.endpoint or '(no endpoint)'}")
+    label = "Splunk Enterprise (HEC)" if d.preset_id == "splunk-enterprise" else d.kind
+    click.echo(f"  Testing {name} [{label}]: {d.endpoint or '(no endpoint)'}")
     if d.target == "otel":
         _test_otel(app.cfg.data_dir, timeout=timeout)
     elif d.kind == "splunk_hec":
@@ -531,6 +533,11 @@ def _test_otel(data_dir: str, *, timeout: float) -> None:
 
 
 def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
+    ok, message = probe_splunk_hec(data_dir, name, timeout=timeout)
+    click.echo(f"  {'✓' if ok else '✗'} {message}")
+
+
+def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tuple[bool, str]:
     import yaml
 
     cfg_path = os.path.join(data_dir, "config.yaml")
@@ -542,8 +549,7 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
         None,
     )
     if sink is None:
-        click.echo(f"  ✗ sink {name!r} vanished between list and probe")
-        return
+        return False, f"sink {name!r} vanished between list and probe"
     hec = sink.get("splunk_hec") or {}
     endpoint = str(hec.get("endpoint", "") or "")
     token_env = str(hec.get("token_env", "") or "")
@@ -551,8 +557,7 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
     if not token:
         token = _peek_dotenv(data_dir, token_env)
     if not token:
-        click.echo(f"  ✗ token not set (env={token_env})")
-        return
+        return False, f"token not set (env={token_env})"
     verify_tls = bool(hec.get("verify_tls", False))
     body = _json.dumps({
         "event": "defenseclaw observability test",
@@ -571,20 +576,19 @@ def _test_splunk_hec(data_dir: str, name: str, *, timeout: float) -> None:
     )
     parsed = urlparse(endpoint)
     if parsed.scheme not in ("http", "https"):
-        click.echo(f"  ✗ endpoint must be http(s):// (got {endpoint!r})")
-        return
+        return False, f"endpoint must be http(s):// (got {endpoint!r})"
     ctx = ssl.create_default_context()
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
-            click.echo(f"  ✓ HEC responded {resp.status} {resp.reason}")
+            return True, f"HEC responded {resp.status} {resp.reason}"
     except urllib.error.HTTPError as exc:
         hint = "check token/index permissions" if exc.code in (401, 403) else ""
-        click.echo(f"  ✗ HTTP {exc.code} {exc.reason} {hint}")
+        return False, f"HTTP {exc.code} {exc.reason} {hint}".strip()
     except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
-        click.echo(f"  ✗ {exc}")
+        return False, str(exc)
 
 
 def _test_otlp_logs(data_dir: str, name: str, *, timeout: float) -> None:

@@ -779,7 +779,7 @@ def _check_observability(cfg, r: _DoctorResult) -> None:
         return
 
     for d in destinations:
-        label_kind = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
+        label_kind = _destination_label_kind(d, PRESETS)
         label = f"{d.name} ({label_kind})"
 
         if not d.enabled:
@@ -835,9 +835,10 @@ def _probe_otel_destination(cfg, d, r: _DoctorResult) -> None:
 
 def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
     """HEC probe: POST a single test event with the resolved token."""
+    label = f"{d.name} ({_splunk_hec_label_kind(d)})"
     endpoint, token = _resolve_audit_sink_endpoint_and_token(cfg, d)
     if not endpoint or not token:
-        _emit("fail", f"{d.name} (Splunk HEC)", "endpoint or token missing", r=r)
+        _emit("fail", label, "endpoint or token missing", r=r)
         return
 
     code, body = _http_probe(
@@ -851,7 +852,6 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
         timeout=10.0,
     )
 
-    label = f"{d.name} (Splunk HEC)"
     if code == 200:
         _emit("pass", label, endpoint, r=r)
     elif code in (401, 403):
@@ -860,6 +860,20 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
         _emit("warn", label, f"unreachable: {body[:100]}", r=r)
     else:
         _emit("warn", label, f"HTTP {code}", r=r)
+
+
+def _destination_label_kind(d, presets) -> str:
+    if d.kind == "splunk_hec":
+        return _splunk_hec_label_kind(d)
+    if d.preset_id in presets:
+        return presets[d.preset_id].display_name
+    return d.kind
+
+
+def _splunk_hec_label_kind(d) -> str:
+    if d.preset_id == "splunk-enterprise":
+        return "Splunk Enterprise (HEC)"
+    return "Splunk HEC"
 
 
 def _probe_otlp_logs(cfg, d, r: _DoctorResult) -> None:

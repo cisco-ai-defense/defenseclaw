@@ -141,6 +141,27 @@ SPLUNK_HEC = Preset(
     ),
 )
 
+SPLUNK_ENTERPRISE = Preset(
+    id="splunk-enterprise",
+    display_name="Splunk Enterprise HEC",
+    target="audit_sinks",
+    sink_kind="splunk_hec",
+    description="Remote Splunk Enterprise audit events via HTTP Event Collector",
+    token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN",
+    token_label="Splunk Enterprise HEC token",
+    prompts=(
+        (
+            "endpoint",
+            "https://splunk.example.com:8088/services/collector/event",
+            "Splunk Enterprise HEC endpoint",
+            "",
+        ),
+        ("index", "defenseclaw", "HEC index", "defenseclaw"),
+        ("source", "defenseclaw", "HEC source", "defenseclaw"),
+        ("sourcetype", "_json", "HEC sourcetype", "_json"),
+    ),
+)
+
 DATADOG = Preset(
     id="datadog",
     display_name="Datadog",
@@ -301,6 +322,7 @@ PRESETS: dict[str, Preset] = {
     for p in (
         SPLUNK_O11Y,
         SPLUNK_HEC,
+        SPLUNK_ENTERPRISE,
         DATADOG,
         HONEYCOMB,
         NEWRELIC,
@@ -330,6 +352,7 @@ def preset_choices() -> list[str]:
     return [
         "splunk-o11y",
         "splunk-hec",
+        "splunk-enterprise",
         "datadog",
         "honeycomb",
         "newrelic",

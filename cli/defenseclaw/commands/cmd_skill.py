@@ -624,8 +624,8 @@ def scan(
     scan_dir = scan_path
     if not scan_dir:
         info = _get_openclaw_skill_info(target, app)
-        if info and info.get("baseDir"):
-            scan_dir = info["baseDir"]
+        if info and _skill_info_path(info):
+            scan_dir = _skill_info_path(info) or ""
         else:
             resolved = _resolve_path(app, target)
             if resolved:
@@ -832,10 +832,11 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
     if skill_names:
         for name in skill_names:
             info = _get_openclaw_skill_info(name, app)
-            if not info or not info.get("baseDir"):
+            base_dir = _skill_info_path(info) if info else ""
+            if not base_dir:
                 click.echo(f"[scan] warning: no baseDir for {name}", err=True)
                 continue
-            targets.append((name, info["baseDir"]))
+            targets.append((name, base_dir))
         sources = sorted({os.path.dirname(p) for _, p in targets if p})
     else:
         # Fall back to directory scan
@@ -926,6 +927,16 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
         if os.path.isdir(candidate):
             return candidate
     return None
+
+
+def _skill_info_path(info: dict[str, Any] | None) -> str:
+    if not info:
+        return ""
+    for key in ("baseDir", "path", "filePath"):
+        value = info.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 # ---------------------------------------------------------------------------

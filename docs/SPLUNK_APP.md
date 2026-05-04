@@ -9,6 +9,10 @@ not a replacement for direct Splunk Observability Cloud setup. It is a local,
 single-instance investigation surface for development, testing, and security
 workflow validation.
 
+For an existing remote Splunk Enterprise deployment, use
+`defenseclaw setup splunk --enterprise` instead. That path forwards audit
+events to an existing HEC endpoint and does not install this local Splunk app.
+
 For the legal and local-scope guardrails for this workflow, see
 [INSTALL.md](INSTALL.md).
 

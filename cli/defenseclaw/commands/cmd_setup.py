@@ -3533,13 +3533,24 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
               help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
 @click.option("--logs", "enable_logs", is_flag=True, default=False,
               help="Enable local Splunk via Docker (HEC logs + dashboards, Free mode)")
+@click.option("--enterprise", "enable_enterprise", is_flag=True, default=False,
+              help="Enable remote Splunk Enterprise via HEC endpoint + token")
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
 @click.option("--access-token", default=None, help="Splunk O11y access token")
+@click.option("--hec-endpoint", default=None,
+              help="Remote Splunk Enterprise HEC endpoint")
+@click.option("--hec-token", default=None,
+              help="Remote Splunk Enterprise HEC token")
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
-@click.option("--index", "logs_index", default=None, help="HEC index for --logs (default: defenseclaw_local)")
-@click.option("--source", "logs_source", default=None, help="HEC source for --logs (default: defenseclaw)")
+@click.option("--index", "logs_index", default=None,
+              help=(
+                  "HEC index for --logs/--enterprise "
+                  "(default: defenseclaw_local for local, defenseclaw for enterprise)"
+              ))
+@click.option("--source", "logs_source", default=None,
+              help="HEC source for --logs/--enterprise (default: defenseclaw)")
 @click.option("--sourcetype", "logs_sourcetype", default=None,
-              help="HEC sourcetype for --logs (default: defenseclaw:json)")
+              help="HEC sourcetype for --logs/--enterprise (default: defenseclaw:json for local, _json for enterprise)")
 @click.option("--traces/--no-traces", "enable_traces", default=None,
               help="Enable/disable trace export (O11y)")
 @click.option("--metrics/--no-metrics", "enable_metrics", default=None,
@@ -3549,6 +3560,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--disable", is_flag=True, help="Disable Splunk integration(s)")
 @click.option("--accept-splunk-license", is_flag=True,
               help="Acknowledge the Splunk General Terms for local Splunk enablement")
+@click.option("--skip-test", is_flag=True,
+              help="Skip the live HEC probe after remote Splunk Enterprise setup")
 @click.option("--show-credentials", is_flag=True, help="Show Splunk Web login credentials")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
@@ -3556,8 +3569,11 @@ def setup_splunk(
     app: AppContext,
     enable_o11y: bool,
     enable_logs: bool,
+    enable_enterprise: bool,
     realm: str | None,
     access_token: str | None,
+    hec_endpoint: str | None,
+    hec_token: str | None,
     app_name: str | None,
     logs_index: str | None,
     logs_source: str | None,
@@ -3567,12 +3583,13 @@ def setup_splunk(
     enable_logs_export: bool | None,
     disable: bool,
     accept_splunk_license: bool,
+    skip_test: bool,
     show_credentials: bool,
     non_interactive: bool,
 ) -> None:
     """Configure Splunk integration for DefenseClaw.
 
-    Two independent pipelines are available:
+    Three independent pipelines are available:
 
     \b
       --o11y   Splunk Observability Cloud (traces + metrics via OTLP HTTP)
@@ -3581,6 +3598,11 @@ def setup_splunk(
       --logs   Local Splunk (Docker, HEC logs + dashboards)
                Starts the bundled profile in Splunk Free mode from day 1.
                Requires Docker.
+    \b
+      --enterprise
+               Remote Splunk Enterprise HEC endpoint + token.
+               No Docker, local bridge, or Splunk-side automation.
+               Sends one best-effort HEC probe unless --skip-test is set.
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
@@ -3589,19 +3611,23 @@ def setup_splunk(
         return
 
     if disable:
-        _disable_splunk(app, enable_o11y, enable_logs, non_interactive)
+        _disable_splunk(app, enable_o11y, enable_logs, enable_enterprise, non_interactive)
         return
 
-    if not enable_o11y and not enable_logs and not non_interactive:
-        _interactive_splunk_setup(app, realm, access_token, app_name)
+    if not enable_o11y and not enable_logs and not enable_enterprise and not non_interactive:
+        _interactive_splunk_setup(app, realm, access_token, app_name, skip_test=skip_test)
         return
 
-    if not enable_o11y and not enable_logs and non_interactive:
-        click.echo("  error: specify --o11y, --logs, or both with --non-interactive", err=True)
+    if not enable_o11y and not enable_logs and not enable_enterprise and non_interactive:
+        click.echo(
+            "  error: specify --o11y, --logs, --enterprise, or a combination with --non-interactive",
+            err=True,
+        )
         raise SystemExit(1)
 
     did_o11y = False
     did_logs = False
+    did_enterprise = False
 
     if enable_o11y:
         _setup_o11y(app, realm or "us1", access_token, app_name or "defenseclaw",
@@ -3620,7 +3646,20 @@ def setup_splunk(
             sourcetype=logs_sourcetype,
         )
 
-    if not did_o11y and not did_logs:
+    if enable_enterprise:
+        _setup_enterprise(
+            app,
+            hec_endpoint=hec_endpoint,
+            hec_token=hec_token,
+            index=logs_index,
+            source=logs_source,
+            sourcetype=logs_sourcetype,
+            non_interactive=non_interactive,
+            skip_test=skip_test,
+        )
+        did_enterprise = True
+
+    if not did_o11y and not did_logs and not did_enterprise:
         return
 
     # Note: no app.cfg.save() here — the observability writer invoked
@@ -3633,7 +3672,7 @@ def setup_splunk(
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
     click.echo()
-    _print_splunk_next_steps(did_o11y, did_logs)
+    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
 
     if app.logger:
         parts: list[str] = []
@@ -3641,6 +3680,8 @@ def setup_splunk(
             parts.append("o11y=enabled")
         if did_logs:
             parts.append("logs=enabled")
+        if did_enterprise:
+            parts.append("enterprise=enabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
@@ -3653,12 +3694,14 @@ def _interactive_splunk_setup(
     realm: str | None,
     access_token: str | None,
     app_name: str | None,
+    *,
+    skip_test: bool = False,
 ) -> None:
     click.echo()
     click.echo("  Splunk Integration Setup")
     click.echo("  ────────────────────────")
     click.echo()
-    click.echo("  DefenseClaw supports two Splunk pipelines. You can enable one or both.")
+    click.echo("  DefenseClaw supports three Splunk pipelines. You can enable any combination.")
     click.echo()
     click.echo("  1. Splunk Observability Cloud (O11y)")
     click.echo("     Sends traces + metrics + logs via OTLP HTTP directly to Splunk cloud.")
@@ -3669,9 +3712,14 @@ def _interactive_splunk_setup(
     click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
     click.echo("     Requires Docker.")
     click.echo()
+    click.echo("  3. Splunk Enterprise (Remote HEC)")
+    click.echo("     Sends audit events to an existing Splunk Enterprise HEC endpoint.")
+    click.echo("     Requires only a HEC endpoint and HEC token.")
+    click.echo()
 
     did_o11y = False
     did_logs = False
+    did_enterprise = False
 
     if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
         _interactive_o11y(app, realm, access_token, app_name)
@@ -3681,7 +3729,11 @@ def _interactive_splunk_setup(
     if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
         did_logs = _interactive_logs(app)
 
-    if not did_o11y and not did_logs:
+    if click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False):
+        _interactive_enterprise(app, skip_test=skip_test)
+        did_enterprise = True
+
+    if not did_o11y and not did_logs and not did_enterprise:
         click.echo()
         click.echo("  No Splunk pipelines enabled. Run again to configure.")
         return
@@ -3695,7 +3747,7 @@ def _interactive_splunk_setup(
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
     click.echo()
-    _print_splunk_next_steps(did_o11y, did_logs)
+    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
 
     if app.logger:
         parts = []
@@ -3703,6 +3755,8 @@ def _interactive_splunk_setup(
             parts.append("o11y=enabled")
         if did_logs:
             parts.append("logs=enabled")
+        if did_enterprise:
+            parts.append("enterprise=enabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
@@ -3750,6 +3804,21 @@ def _prompt_splunk_token(current: str | None) -> str:
     return current or env_val
 
 
+def _prompt_splunk_hec_token(current: str | None) -> str:
+    env_val = os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    if current:
+        hint = _mask(current)
+    elif env_val:
+        hint = f"from env: {_mask(env_val)}"
+    else:
+        hint = "(not set)"
+
+    val = click.prompt(f"  HEC token [{hint}]", default="", show_default=False, hide_input=True)
+    if val:
+        return val
+    return current or env_val
+
+
 def _interactive_logs(app: AppContext) -> bool:
     click.echo()
     click.echo("  Local Splunk")
@@ -3771,6 +3840,36 @@ def _interactive_logs(app: AppContext) -> bool:
     _apply_logs_config(app, index=index, source=source, sourcetype=sourcetype,
                        bootstrap_bridge=True)
     return True
+
+
+def _interactive_enterprise(app: AppContext, *, skip_test: bool = False) -> None:
+    click.echo()
+    click.echo("  Splunk Enterprise")
+    click.echo("  ─────────────────")
+    click.echo()
+
+    endpoint = click.prompt(
+        "  HEC endpoint",
+        default="https://splunk.example.com:8088/services/collector/event",
+    )
+    token = _prompt_splunk_hec_token(None)
+    if not token:
+        click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
+        raise SystemExit(1)
+    index = click.prompt("  Index name", default="defenseclaw")
+    source = click.prompt("  Source", default="defenseclaw")
+    sourcetype = click.prompt("  Sourcetype", default="_json")
+
+    sink_name = _apply_enterprise_config(
+        app,
+        endpoint=endpoint,
+        token=token,
+        index=index,
+        source=source,
+        sourcetype=sourcetype,
+    )
+    click.echo("  Splunk Enterprise configured (HEC)")
+    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 # ---------------------------------------------------------------------------
@@ -3838,6 +3937,55 @@ def _setup_logs(
     )
     click.echo("  Local Splunk configured (Free mode from day 1)")
     return True
+
+
+def _setup_enterprise(
+    app: AppContext,
+    *,
+    hec_endpoint: str | None,
+    hec_token: str | None,
+    index: str | None = None,
+    source: str | None = None,
+    sourcetype: str | None = None,
+    non_interactive: bool,
+    skip_test: bool = False,
+) -> None:
+    endpoint = (hec_endpoint or "").strip()
+    if not endpoint:
+        if non_interactive:
+            click.echo(
+                "  error: --hec-endpoint is required with --enterprise --non-interactive",
+                err=True,
+            )
+            raise SystemExit(1)
+        endpoint = click.prompt(
+            "  HEC endpoint",
+            default="https://splunk.example.com:8088/services/collector/event",
+        )
+
+    token = hec_token or os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    if not token and non_interactive:
+        click.echo(
+            "  error: --hec-token required (or set DEFENSECLAW_SPLUNK_HEC_TOKEN env var)",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not token:
+        token = _prompt_splunk_hec_token(None)
+    if not token:
+        click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
+        raise SystemExit(1)
+
+    sink_name = _apply_enterprise_config(
+        app,
+        endpoint=endpoint,
+        token=token,
+        index=index or "defenseclaw",
+        source=source or "defenseclaw",
+        sourcetype=sourcetype or "_json",
+    )
+    click.echo("  Splunk Enterprise configured (HEC)")
+    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 def _print_splunk_license_notice() -> None:
@@ -3983,6 +4131,65 @@ def _apply_logs_config(
     _reload_cfg_from_data_dir(app)
 
 
+def _apply_enterprise_config(
+    app: AppContext,
+    *,
+    endpoint: str,
+    token: str,
+    index: str,
+    source: str,
+    sourcetype: str,
+) -> str:
+    """Configure a remote Splunk Enterprise HEC sink.
+
+    This is intentionally config-only: no Docker preflight, local bridge
+    bootstrap, Splunk license prompt, or Splunk-side token/index creation.
+    """
+    from defenseclaw.observability import apply_preset
+
+    try:
+        result = apply_preset(
+            "splunk-enterprise",
+            {
+                "endpoint": endpoint,
+                "index": index,
+                "source": source,
+                "sourcetype": sourcetype,
+            },
+            app.cfg.data_dir,
+            enabled=True,
+            secret_value=token or None,
+        )
+    except ValueError as exc:
+        click.echo(f"  error: {exc}", err=True)
+        raise SystemExit(2) from exc
+    _reload_cfg_from_data_dir(app)
+    return result.name
+
+
+def _maybe_probe_enterprise_hec(
+    app: AppContext,
+    sink_name: str,
+    *,
+    skip_test: bool,
+) -> None:
+    if skip_test:
+        click.echo("  Live HEC probe skipped.")
+        return
+
+    from defenseclaw.commands.cmd_setup_observability import probe_splunk_hec
+
+    click.echo("  Live HEC probe:")
+    try:
+        ok, message = probe_splunk_hec(app.cfg.data_dir, sink_name, timeout=10.0)
+    except OSError as exc:
+        ok, message = False, str(exc)
+    if ok:
+        click.echo(f"    {message}")
+    else:
+        click.echo(f"    warning: {message}")
+
+
 def _reload_cfg_from_data_dir(app: AppContext) -> None:
     """Reload ``app.cfg`` from ``app.cfg.data_dir``.
 
@@ -4108,13 +4315,26 @@ def _port_in_use(port: int) -> bool:
 # Disable
 # ---------------------------------------------------------------------------
 
+def _is_local_splunk_destination(dest) -> bool:
+    return _is_local_hec_endpoint(str(getattr(dest, "endpoint", "") or ""))
+
+
+def _is_local_hec_endpoint(endpoint: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = (parsed.hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
 def _disable_splunk(
     app: AppContext,
     o11y_only: bool,
     logs_only: bool,
+    enterprise_only: bool,
     non_interactive: bool,
 ) -> None:
-    disable_both = not o11y_only and not logs_only
+    disable_both = not o11y_only and not logs_only and not enterprise_only
 
     click.echo()
     click.echo("  Disabling Splunk integration...")
@@ -4131,27 +4351,37 @@ def _disable_splunk(
             pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
-    if disable_both or logs_only:
-        # Find every splunk_hec audit sink and flip enabled=false. The
-        # legacy Config.splunk dataclass hydrates from the first enabled
-        # one, so the gateway will see it as disabled on next load.
+    if disable_both or logs_only or enterprise_only:
+        # Find splunk_hec audit sinks and flip enabled=false. The legacy
+        # Config.splunk dataclass hydrates from the first enabled one, so
+        # the gateway will see it as disabled on next load.
         dests = list_destinations(app.cfg.data_dir)
-        disabled_any = False
+        disabled_local = False
+        disabled_enterprise = False
         for d in dests:
             if d.kind == "splunk_hec" and d.enabled:
+                is_local = _is_local_splunk_destination(d)
+                if not disable_both:
+                    if logs_only and not is_local:
+                        continue
+                    if enterprise_only and is_local:
+                        continue
                 try:
                     set_destination_enabled(d.name, False, app.cfg.data_dir)
-                    disabled_any = True
+                    if is_local:
+                        disabled_local = True
+                    else:
+                        disabled_enterprise = True
                 except ValueError:
                     continue
-        if disabled_any:
-            click.echo("    Splunk Enterprise (HEC): disabled")
-        else:
-            # Still report a "disabled" status so operators (and CI
-            # smoke-tests) can grep for it; the parenthetical clarifies
-            # there was nothing to flip.
-            click.echo("    Splunk Enterprise (HEC): disabled (no active sinks found)")
-        _stop_bridge(app.cfg.data_dir)
+        if disable_both or logs_only:
+            suffix = "" if disabled_local else " (no active local sinks found)"
+            click.echo(f"    Local Splunk (HEC): disabled{suffix}")
+        if disable_both or enterprise_only:
+            suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
+            click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
+        if disable_both or logs_only:
+            _stop_bridge(app.cfg.data_dir)
 
     # Refresh in-memory cfg so callers (and tests) see the YAML state
     # the writer just produced.
@@ -4166,6 +4396,8 @@ def _disable_splunk(
             parts.append("o11y=disabled")
         if disable_both or logs_only:
             parts.append("logs=disabled")
+        if disable_both or enterprise_only:
+            parts.append("enterprise=disabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
@@ -4235,7 +4467,8 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
     if sc.enabled:
-        click.echo("  Splunk Enterprise (HEC):")
+        hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(sc.hec_endpoint) else "Splunk Enterprise (HEC)"
+        click.echo(f"  {hec_label}:")
         click.echo("    Status:      enabled")
         click.echo(f"    HEC:         {sc.hec_endpoint}")
         click.echo(f"    Index:       {sc.index}")
@@ -4248,7 +4481,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
 
-def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
+def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: bool = False) -> None:
     click.echo("  Next steps:")
     click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
     click.echo("       defenseclaw-gateway restart")
@@ -4257,16 +4490,35 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
         click.echo("       Log in with admin / the password from setup output above.")
         click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
+    if did_enterprise:
+        step = "3" if did_logs else "2"
+        click.echo(f"    {step}. Validate data in Splunk Enterprise")
+        click.echo("       index=<configured index> source=defenseclaw")
     click.echo()
     click.echo("  To disable:")
-    if did_o11y and did_logs:
+    if did_o11y and did_logs and did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable                 # all")
+        click.echo("    defenseclaw setup splunk --disable --o11y          # O11y only")
+        click.echo("    defenseclaw setup splunk --disable --logs          # local only")
+        click.echo("    defenseclaw setup splunk --disable --enterprise    # Enterprise only")
+    elif did_o11y and did_logs:
         click.echo("    defenseclaw setup splunk --disable            # both")
         click.echo("    defenseclaw setup splunk --disable --o11y     # O11y only")
         click.echo("    defenseclaw setup splunk --disable --logs     # local only")
+    elif did_o11y and did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable                 # both")
+        click.echo("    defenseclaw setup splunk --disable --o11y          # O11y only")
+        click.echo("    defenseclaw setup splunk --disable --enterprise    # Enterprise only")
+    elif did_logs and did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable                 # both")
+        click.echo("    defenseclaw setup splunk --disable --logs          # local only")
+        click.echo("    defenseclaw setup splunk --disable --enterprise    # Enterprise only")
     elif did_o11y:
         click.echo("    defenseclaw setup splunk --disable --o11y")
     elif did_logs:
         click.echo("    defenseclaw setup splunk --disable --logs")
+    elif did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable --enterprise")
 
 
 def _show_splunk_credentials(data_dir: str) -> None:

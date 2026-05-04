@@ -172,6 +172,35 @@ audit_sinks:
     ca_cert:    /etc/ssl/certs/splunk-ca.pem
 ```
 
+For an existing remote Splunk Enterprise deployment, use the
+`splunk-enterprise` preset or the `setup splunk --enterprise` shortcut.
+The Splunk administrator must already have enabled HEC, created an active HEC
+token, and allowed the index.
+
+```bash
+defenseclaw setup splunk --enterprise \
+  --hec-endpoint https://splunk.example.com:8088/services/collector/event \
+  --hec-token "$SPLUNK_HEC_TOKEN" \
+  --index defenseclaw \
+  --non-interactive
+
+# Equivalent lower-level preset:
+defenseclaw setup observability add splunk-enterprise \
+  --endpoint https://splunk.example.com:8088/services/collector/event \
+  --token "$SPLUNK_HEC_TOKEN" \
+  --index defenseclaw \
+  --non-interactive
+```
+
+DefenseClaw does not create Splunk indexes, HEC tokens, output groups, or
+Splunk apps for this path. Client certificates/mTLS and HEC indexer
+acknowledgment tokens are out of scope for this preset.
+
+`setup splunk --enterprise` sends one best-effort live HEC probe after the
+config write. The probe creates a small synthetic event in the configured
+index and reports `200`, auth failures, or network errors without rolling back
+the config. Add `--skip-test` when configuring ahead of firewall or VPN access.
+
 ### 3.3 `otlp_logs`
 
 ```yaml
