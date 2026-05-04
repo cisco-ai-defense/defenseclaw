@@ -1,121 +1,112 @@
 # Architecture
 
-DefenseClaw is a governance layer for OpenClaw. It orchestrates scanning,
-enforcement, and auditing across existing tools without replacing any component.
+DefenseClaw is a governance layer for agentic AI runtimes. It orchestrates
+scanning, enforcement, and auditing across agent frameworks without replacing
+any component. Four connectors adapt the sidecar to OpenClaw, Claude Code,
+Codex, and ZeptoClaw.
 
 ## System Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              DefenseClaw System                             │
-│                                                                             │
-│  ┌──────────────────────┐     ┌──────────────────────────────────────────┐  │
-│  │  CLI (Python)        │     │  Plugins / Hooks (JS/TS)                │   │
-│  │                      │     │                                         │   │
-│  │  skill-scanner       │     │  OpenClaw plugin (api.on, commands)     │   │
-│  │  mcp-scanner         │     │  before_tool_call → gateway inspect     │   │
-│  │  plugin              │     │  /scan, /block, /allow slash cmds       │   │
-│  │  aibom               │     │                                         │   │
-│  │  codeguard           │     │                                         │   │
-│  │  [custom scanners]   │     │                                         │   │
-│  │  Writes scan results │     │                                         │   │
-│  │  directly to DB      │     │                                         │   │
-│  └──────────┬───────────┘     └───────────────────┬─────────────────────┘   │
-│             │ REST API                            │ REST API                │
-│             │                                     │                         │
-│             ▼                                     ▼                         │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                  DefenseClaw Gateway (Go)                           │    │
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              DefenseClaw System                              │
+│                                                                              │
+│  ┌──────────────────────┐     ┌──────────────────────────────────────────┐   │
+│  │  CLI (Python)        │     │  Connector Hooks & Plugins               │   │
+│  │                      │     │                                          │   │
+│  │  skill-scanner       │     │  OpenClaw: TS fetch interceptor plugin   │   │
+│  │  mcp-scanner         │     │    api.on("before_tool_call")            │   │
+│  │  plugin              │     │    /scan, /block, /allow slash cmds      │   │
+│  │  aibom               │     │                                          │   │
+│  │  codeguard           │     │  Claude Code: 26 shell hook events       │   │
+│  │  [custom scanners]   │     │    POST /api/v1/claude-code/hook         │   │
+│  │  Writes scan results │     │                                          │   │
+│  │  directly to DB      │     │  Codex: 5 shell hook events              │   │
+│  │                      │     │    POST /api/v1/codex/hook               │   │
+│  └──────────┬───────────┘     └───────────────────┬──────────────────────┘   │
+│             │ REST API                            │ REST API / Hooks         │
+│             │                                     │                          │
+│             ▼                                     ▼                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐   │
+│  │                  DefenseClaw Gateway (Go)                             │   │
+│  │                                                                       │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌──────────┐ ┌─────────────────┐         │   │
+│  │  │ REST API  │ │ Audit /   │ │ Policy   │ │ Connector       │         │   │
+│  │  │ Server    │ │ SIEM      │ │ Engine   │ │ Registry        │         │   │
+│  │  │           │ │ Emitter   │ │          │ │                 │         │   │
+│  │  │ Accepts   │ │           │ │ Block /  │ │ 4 built-in      │         │   │
+│  │  │ requests  │ │ Splunk    │ │ Allow /  │ │ connectors +    │         │   │
+│  │  │ from CLI, │ │ HEC, CSV  │ │ Scan     │ │ plugin loader   │         │   │
+│  │  │ hooks,    │ │ export    │ │ gate     │ │ OpenClaw WS v3  │         │   │
+│  │  │ plugins   │ │           │ │          │ │ Hook endpoints  │         │   │
+│  │  └───────────┘ └───────────┘ └──────────┘ └────────┬────────┘         │   │
+│  │                                                     │                 │   │
+│  │  ┌────────────────────────────────────────────┐     │                 │   │
+│  │  │  Inspection Engine (4-stage pipeline)      │     │                 │   │
+│  │  │  /api/v1/inspect/tool                      │     │                 │   │
+│  │  │  1. Regex (113 rules, 6 categories)        │     │                 │   │
+│  │  │  2. Cisco AI Defense (12 cloud rules)      │     │                 │   │
+│  │  │  3. LLM Judge (injection/PII/tool-inj)     │     │                 │   │
+│  │  │  4. OPA policy (7 Rego files)              │     │                 │   │
+│  │  │  + CodeGuard for write/edit tools          │     │                 │   │
+│  │  │  Verdict: allow / alert / block            │     │                 │   │
+│  │  └────────────────────────────────────────────┘     │                 │   │
+│  │                                                     │                 │   │
+│  │  ┌──────────────────┐  ┌──────────────┐             │                 │   │
+│  │  │  SQLite DB       │  │  Guardrail   │             │                 │   │
+│  │  │                  │  │  Proxy       │             │                 │   │
+│  │  │  Audit events    │  │  /c/<name>/  │             │                 │   │
+│  │  │  Scan results    │  │  prefix      │             │                 │   │
+│  │  │  Block/allow     │  │  routing     │             │                 │   │
+│  │  │  Skill inventory │  │              │             │                 │   │
+│  │  └──────────────────┘  └──────┬───────┘             │                 │   │
+│  └──────────────────────────────┼────────────────────┼───────────────────┘   │
+│                                 │                    │                       │
+│             ┌───────────────────┘                    │ per-connector         │
+│             │ runs                                   │ (WS, hooks, proxy)    │
+│             ▼                                        │                       │
+│  ┌──────────────────────────────────┐                │                       │
+│  │  Guardrail Proxy (port 4000)    │                 │                       │
+│  │                                  │                │                       │
+│  │  ┌────────────────────────────┐  │                │                       │
+│  │  │  DefenseClaw Guardrail     │  │                │                       │
+│  │  │  (built-in Go)             │  │                │                       │
+│  │  │                            │  │                │                       │
+│  │  │  pre_call:  prompt scan    │  │                │                       │
+│  │  │  post_call: response scan  │  │                │                       │
+│  │  │    + tool call logging     │  │                │                       │
+│  │  │  streaming: chunk inspect  │  │                │                       │
+│  │  │  mode: observe | action    │  │                │                       │
+│  │  └────────────────────────────┘  │                │                       │
+│  └──────────┬───────────────────────┘                │                       │
+│             │ proxied LLM API calls                  │                       │
+│             ▼                                        ▼                       │
+│  ┌──────────────────────┐   ┌─────────────────────────────────────────────┐  │
+│  │  LLM Provider        │   │  Agent Runtimes                             │  │
+│  │  (Anthropic, OpenAI, │   │                                             │  │
+│  │   Google, etc.)      │   │  OpenClaw: fetch interceptor → proxy        │  │
+│  └──────────────────────┘   │  Claude Code: ANTHROPIC_BASE_URL → proxy    │  │
+│                              │  Codex: OPENAI_BASE_URL → proxy             │  │
+│                              │  ZeptoClaw: api_base config → proxy          │  │
+│                              │                                             │  │
+│                              │  Each runtime sends LLM traffic through     │  │
+│                              │  /c/<connector>/ prefix on port 4000        │  │
+│                              └────────────────────┬────────────────────────┘  │
+│                                                    │                         │
+│                                                    ▼                         │
+│  ┌──────────────────────────────────────────────────────────────────────┐    │
+│  │                   NVIDIA OpenShell Sandbox (optional)                │    │
 │  │                                                                     │    │
-│  │  ┌───────────┐ ┌───────────┐ ┌──────────┐ ┌─────────────────┐       │    │
-│  │  │ REST API  │ │ Audit /   │ │ Policy   │ │ OpenClaw WS     │       │    │
-│  │  │ Server    │ │ SIEM      │ │ Engine   │ │ Client          │       │    │
-│  │  │           │ │ Emitter   │ │          │ │                 │       │    │
-│  │  │ Accepts   │ │           │ │ Block /  │ │ WS protocol v3  │       │    │
-│  │  │ requests  │ │ Splunk    │ │ Allow /  │ │ Subscribes to   │       │    │
-│  │  │ from CLI  │ │ HEC, CSV  │ │ Scan     │ │ all events,     │       │    │
-│  │  │ & plugins │ │ export    │ │ gate     │ │ sends commands  │       │    │
-│  │  └───────────┘ └───────────┘ └──────────┘ └────────┬────────┘       │    │
-│  │                                                     │               │    │
-│  │  ┌────────────────────────────────────────────┐     │               │    │
-│  │  │  Inspection Engine (4-stage pipeline)        │     │              │    │
-│  │  │  /api/v1/inspect/tool                      │     │               │    │
-│  │  │  1. Regex (113 rules, 6 categories)        │     │               │    │
-│  │  │  2. Cisco AI Defense (12 cloud rules)      │     │               │    │
-│  │  │  3. LLM Judge (injection/PII/tool-inj)     │     │               │    │
-│  │  │  4. OPA policy (7 Rego files)              │     │               │    │
-│  │  │  + CodeGuard for write/edit tools          │     │               │    │
-│  │  │  Verdict: allow / alert / block            │     │               │    │
-│  │  └────────────────────────────────────────────┘     │               │    │
-│  │                                                     │               │    │
-│  │  ┌──────────────────┐  ┌──────────────┐             │               │    │
-│  │  │  SQLite DB       │  │  Guardrail   │             │               │    │
-│  │  │                  │  │  Proxy       │             │               │    │
-│  │  │  Audit events    │  │              │             │               │    │
-│  │  │  Scan results    │  │  Runs        │             │               │    │
-│  │  │  Block/allow     │  │  guardrail   │             │               │    │
-│  │  │  Skill inventory │  │  proxy       │             │               │    │
-│  │  └──────────────────┘  └──────┬───────┘             │               │    │
-│  └──────────────────────────────┼────────────────────┼─────────────────┘    │
-│                                 │                    │                      │
-│             ┌───────────────────┘                    │ WS (events           │
-│             │ runs                                   │  + RPC)              │
-│             ▼                                        │                      │
-│  ┌──────────────────────────────────┐                │                      │
-│  │  Guardrail Proxy (port 4000)    │                 │                      │
-│  │                                  │                │                      │
-│  │  ┌────────────────────────────┐  │                │                      │
-│  │  │  DefenseClaw Guardrail     │  │                │                      │
-│  │  │  (built-in Go)             │  │                │                      │
-│  │  │                            │  │                │                      │
-│  │  │  pre_call:  prompt scan    │  │                │                      │
-│  │  │  post_call: response scan  │  │                │                      │
-│  │  │    + tool call logging     │  │                │                      │
-│  │  │  streaming: chunk inspect  │  │                │                      │
-│  │  │  mode: observe | action    │  │                │                      │
-│  │  └────────────────────────────┘  │                │                      │
-│  └──────────┬───────────────────────┘                │                      │
-│             │ proxied LLM API calls                  │                      │
-│             ▼                                        │                      │
-│  ┌──────────────────────┐                            │                      │
-│  │  LLM Provider        │                            │                      │
-│  │  (Anthropic, OpenAI, │                            │                      │
-│  │   Google, etc.)      │                            │                      │
-│  └──────────────────────┘                            │                      │
-│                                                      ▼                      │
-│  ┌───────────────────────────────────────────────────┴───────────────────┐  │
-│  │                      OpenClaw Gateway                                 │  │
-│  │                                                                       │  │
-│  │   Events emitted:                  Commands accepted:                 │  │
-│  │     tool_call / tool_result          exec.approval.resolve            │  │
-│  │     exec.approval.requested          skills.update (enable/disable)   │  │
-│  │     session.tool / agent             config.get / config.patch        │  │
-│  │     session.message                  tools.catalog / skills.status    │  │
-│  │                                      sessions.list / subscribe        │  │
-│  │                                                                       │  │
-│  │   LLM traffic routed through guardrail proxy via fetch interceptor    │  │
-│  │   plugin (patches globalThis.fetch — no openclaw.json model changes) │  │
-│  └──────────────────────────┬─────────────────────────────────────────────┘ │
-│                              │                                              │
-│                              ▼                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                   NVIDIA OpenShell Sandbox                          │    │
-│  │                                                                     │    │
-│  │   OpenClaw runtime executes inside sandbox                          │    │
+│  │   Agent runtime executes inside sandbox                             │    │
 │  │   Kernel-level isolation: filesystem, network, process              │    │
 │  │   Policy YAML controls permissions                                  │    │
-│  │                                                                     │    │
-│  │   ┌────────────────────────────────────────────┐                    │    │
-│  │   │  OpenClaw Agent Runtime                    │                    │    │
-│  │   │    Skills, MCP servers, LLM interactions   │                    │    │
-│  │   └────────────────────────────────────────────┘                    │    │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│                              ┌──────────────────┐                           │
-│                              │  SIEM / SOAR      │                          │
-│                              │  (Splunk, etc.)   │                          │
-│                              └──────────────────┘                           │
-└─────────────────────────────────────────────────────────────────────────────┘
+│  └──────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│                              ┌──────────────────┐                            │
+│                              │  SIEM / SOAR      │                           │
+│                              │  (Splunk, etc.)   │                           │
+│                              └──────────────────┘                            │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Component Responsibilities
@@ -133,17 +124,17 @@ the shared SQLite database.
 | Communicate with gateway | REST API calls to trigger enforcement actions, emit audit events to SIEM, and apply actions to OpenClaw |
 | Output formats | Human-readable (default), JSON (`--json`), table |
 
-### 2. Plugins / Hooks (JS/TS)
+### 2. Connector Hooks & Plugins
 
-The OpenClaw plugin registers a `before_tool_call` hook and three slash
-commands. It connects to the gateway over REST to report activity and
-request enforcement.
+Each connector uses a different mechanism to intercept agent actions and
+report them to the gateway for policy evaluation.
 
-| Responsibility | Detail |
-|----------------|--------|
-| Tool call interception | `api.on("before_tool_call")` — sends tool details to gateway for policy check before execution |
-| Slash commands | `/scan`, `/block`, `/allow` — operator actions from chat |
-| Communicate with gateway | REST API calls to trigger scans, manage block/allow lists |
+| Connector | Mechanism | Detail |
+|-----------|-----------|--------|
+| OpenClaw | TypeScript plugin | `api.on("before_tool_call")` — fetch interceptor patches `globalThis.fetch`; `/scan`, `/block`, `/allow` slash commands |
+| Claude Code | Shell hooks (26 events) | Registered in `~/.claude/settings.json`; hook script POSTs to `/api/v1/claude-code/hook` with event payload; exit code 0=allow, 2=block |
+| Codex | Shell hooks (5 events) | Registered in `~/.codex/config.toml`; hook script POSTs to `/api/v1/codex/hook`; also has `/api/v1/codex/notify` for turn completion |
+| ZeptoClaw | Proxy-only | No hooks or plugins — inspection happens entirely via proxy-side response scanning |
 
 ### 3. DefenseClaw Gateway (Go)
 
@@ -152,8 +143,10 @@ only component with direct access to all subsystems.
 
 | Responsibility | Detail |
 |----------------|--------|
-| REST API server (`:18970`) | Accepts requests from CLI and plugins; CSRF-protected, localhost-bound |
-| Guardrail proxy (`:4000`) | HTTP reverse proxy that inspects all LLM traffic; rate-limited (100/s, burst 200) |
+| REST API server (`:18970`) | Accepts requests from CLI, plugins, and connector hooks; CSRF-protected, localhost-bound |
+| Guardrail proxy (`:4000`) | HTTP reverse proxy that inspects all LLM traffic via `/c/<connector>/` prefix routing; rate-limited (100/s, burst 200) |
+| Connector registry | Loads 4 built-in connectors + plugin connectors from `~/.defenseclaw/plugins/*.so`; collision prevention for names |
+| Connector hook handlers | `handleClaudeCodeHook()` — processes 26 event types with component/file scanning; `handleCodexHook()` — processes 5 event types |
 | OpenClaw WebSocket client | Connects via protocol v3, HMAC-SHA256 challenge-response auth, sequence tracking |
 | Event router | Dispatches WebSocket events (`tool_call`, `tool_result`, `exec.approval.requested`, `session.message`, `agent`) with judge semaphore (cap 16) |
 | Command dispatch | Sends RPC commands to OpenClaw: `exec.approval.resolve`, `skills.update`, `config.get`, `config.patch`, `tools.catalog`, `sessions.list` |
@@ -182,16 +175,22 @@ and plugins (read/write via gateway REST API).
 | Block/allow lists | CLI | Gateway (admission gate) |
 | Skill inventory (AIBOM) | CLI | Gateway, plugins, TUI |
 
-### 5. LLM Guardrail (Fetch Interceptor + Go Proxy)
+### 5. LLM Guardrail (Connector-Aware Proxy)
 
-The guardrail intercepts all LLM traffic between OpenClaw and upstream
-providers. A TypeScript fetch interceptor plugin patches `globalThis.fetch`
-inside OpenClaw's Node.js process, routing all outbound LLM calls through
-the Go guardrail reverse proxy regardless of which provider the user selects.
+The guardrail intercepts all LLM traffic between agent runtimes and upstream
+providers. Each connector routes traffic through the Go reverse proxy on
+port 4000 using a different mechanism:
+
+| Connector | Routing Mechanism |
+|-----------|------------------|
+| OpenClaw | TypeScript fetch interceptor patches `globalThis.fetch` + `https.request`; injects `X-DC-Target-URL` header |
+| Claude Code | `ANTHROPIC_BASE_URL=http://127.0.0.1:4000/c/claudecode` env var redirect |
+| Codex | `OPENAI_BASE_URL=http://127.0.0.1:4000/c/codex` via `config.toml` patch |
+| ZeptoClaw | `api_base: http://127.0.0.1:4000/c/zeptoclaw` in `config.json` |
 
 | Responsibility | Detail |
 |----------------|--------|
-| Universal interception | Fetch interceptor patches `globalThis.fetch` + `https.request`, covering 20+ providers via Bifrost SDK (v1.5.2) |
+| Connector prefix routing | `connectorPrefixStripper` strips `/c/<name>/`, identifies the connector, calls `Route()` for signal extraction, then forwards to upstream |
 | 4-stage inspection | (1) 113 regex rules across 6 categories → (2) Cisco AI Defense cloud scanner (12 rules) → (3) LLM Judge (Claude Sonnet, reentrancy-guarded) → (4) OPA policy verdict aggregation |
 | Detection strategies | `regex_only` (fastest), `regex_judge` (default — regex triages, judge verifies ambiguous), `judge_first` (most accurate, highest cost) |
 | Provider routing | Bifrost SDK routes to correct provider based on model format (`provider/model-name`) and API key prefix inference. Tenant-isolated: each `(provider, sha256(key), baseURL)` gets dedicated client |
@@ -199,15 +198,19 @@ the Go guardrail reverse proxy regardless of which provider the user selects.
 | Auth separation | `X-AI-Auth` header carries the real provider key; `X-DC-Auth` carries the DefenseClaw sidecar token |
 | Observe mode | Logs findings with colored output, never blocks (default, recommended to start) |
 | Action mode | Blocks prompts/responses that match security policies by raising exceptions |
-| Transparent proxy | No agent code changes required — the interceptor is invisible to OpenClaw |
+| Transparent proxy | No agent code changes required — connector setup patches config/env, not agent code |
 | Concurrency | RWMutexes (`rtMu`, `engineMu`, `spanMu`, `cfgMu`), judge semaphore (cap 16), rate limiter (100/s burst 200), connection pool (20 idle, 10/host) |
 
-**How it connects:**
+**How it connects (per connector):**
 
-1. `defenseclaw setup guardrail` registers the plugin in `openclaw.json`
-2. On OpenClaw start, the fetch interceptor activates and patches `globalThis.fetch`
-3. All outbound LLM calls are routed through `localhost:4000` with auth headers injected
-4. The Go proxy inspects traffic, then forwards to the real upstream provider
+1. `defenseclaw-gateway connector setup --connector <name>` patches the agent's config:
+   - OpenClaw: registers fetch interceptor plugin in `openclaw.json`
+   - Claude Code: registers 26 shell hooks in `~/.claude/settings.json` + sets `ANTHROPIC_BASE_URL`
+   - Codex: patches `~/.codex/config.toml` with hooks + `openai_base_url` + notify bridge
+   - ZeptoClaw: patches `api_base` in `~/.zeptoclaw/config.json`
+2. On agent start, LLM traffic flows through `localhost:4000/c/<connector>/`
+3. The proxy strips the prefix, inspects traffic, then forwards to the real upstream
+4. All config patches are backed up with SHA256 tracking (see Managed Backup System in CONNECTORS.md)
 
 See `docs/GUARDRAIL.md` for the full data flow.
 
@@ -216,62 +219,62 @@ See `docs/GUARDRAIL.md` for the full data flow.
 ### Scan and Enforcement Flow
 
 ```
-                CLI (scan)                    Plugin (hook)
-                    │                              │
-                    │ 1. Run scanner                │ 1. OpenClaw event fires
-                    │ 2. Write results to DB        │
-                    │                              │
-                    ▼                              ▼
-              ┌──────────────────────────────────────┐
-              │           Gateway REST API            │
-              │                                      │
-              │  3. Log audit event                  │
-              │  4. Forward to SIEM (if configured)  │
-              │  5. Dispatch to webhooks (if config) │
-              │  6. Evaluate policy (if action req)  │
-              │  7. Send command to OpenClaw via WS   │
-              └──────────────────────────────────────┘
-                              │
-                              ▼
-                    OpenClaw Gateway (WS)
-                              │
-                              ▼
-                  Action applied (e.g. skill
-                  disabled, approval denied,
-                  config patched)
+      CLI (scan)          OpenClaw plugin        Claude Code / Codex hooks
+          │                     │                          │
+          │ 1. Run scanner      │ 1. WS event fires       │ 1. Shell hook fires
+          │ 2. Write to DB      │                          │    POST /api/v1/<connector>/hook
+          │                     │                          │
+          ▼                     ▼                          ▼
+    ┌──────────────────────────────────────────────────────────┐
+    │                    Gateway REST API                       │
+    │                                                          │
+    │  3. Log audit event                                      │
+    │  4. Forward to SIEM (if configured)                      │
+    │  5. Dispatch to webhooks (if configured)                 │
+    │  6. Evaluate policy (if action required)                 │
+    │  7a. OpenClaw: send command via WS (skills.update, etc.) │
+    │  7b. Claude Code/Codex: return verdict in hook response  │
+    │      (exit 0 = allow, exit 2 = block)                    │
+    └──────────────────────────────────────────────────────────┘
 ```
 
 ### LLM Traffic Inspection Flow
 
+Traffic arrives at the proxy via connector-specific routing — the inspection
+pipeline is identical regardless of which connector sent the request.
+
 ```
-  OpenClaw Agent       Fetch Interceptor       Guardrail Proxy        LLM Provider
-       │              (in-process plugin)     (localhost:4000)      (any provider)
-       │                      │                      │                    │
-       │  1. fetch(provider)  │                      │                    │
-       ├─────────────────────►│                      │                    │
-       │                      │                      │                    │
-       │               2. Redirect to localhost      │                    │
-       │                  + X-AI-Auth (provider key) │                    │
-       │                  + X-DC-Target-URL           │                    │
-       │                      ├─────────────────────►│                    │
-       │                      │                      │                    │
-       │                      │  3. pre_call scan    │                    │
-       │                      │     (injection,      │                    │
-       │                      │      secrets, PII)   │                    │
-       │                      │                      │                    │
-       │                      │  [action: block]     │                    │
-       │                      │                      │                    │
-       │                      │                      │  4. Forward        │
-       │                      │                      ├───────────────────►│
-       │                      │                      │◄───────────────────┤
-       │                      │                      │                    │
-       │                      │  5. post_call scan   │                    │
-       │                      │     (leaked secrets, │                    │
-       │                      │      tool anomalies) │                    │
-       │                      │                      │                    │
-       │  6. Response         │◄─────────────────────┤                    │
-       │◄─────────────────────┤                      │                    │
-       │                      │                      │                    │
+  Agent Runtime                   Guardrail Proxy              LLM Provider
+  (any connector)                (localhost:4000)             (any provider)
+       │                                │                          │
+       │  1. LLM API call via:          │                          │
+       │     OpenClaw: fetch intercept  │                          │
+       │     Claude Code: BASE_URL env  │                          │
+       │     Codex: config.toml patch   │                          │
+       │     ZeptoClaw: api_base patch  │                          │
+       ├───────────────────────────────►│                          │
+       │                                │                          │
+       │    2. Strip /c/<connector>/    │                          │
+       │       Identify connector       │                          │
+       │       Call Route() for signals │                          │
+       │                                │                          │
+       │    3. pre_call scan            │                          │
+       │       (injection, secrets,     │                          │
+       │        PII, tool-injection)    │                          │
+       │                                │                          │
+       │    [action mode: may block]    │                          │
+       │                                │                          │
+       │                                │  4. Forward to upstream  │
+       │                                ├─────────────────────────►│
+       │                                │◄─────────────────────────┤
+       │                                │                          │
+       │    5. post_call scan           │                          │
+       │       (leaked secrets,         │                          │
+       │        tool call anomalies)    │                          │
+       │                                │                          │
+       │  6. Response                   │                          │
+       │◄───────────────────────────────┤                          │
+       │                                │                          │
 ```
 
 ### Admission Gate
@@ -375,42 +378,48 @@ resolves implementation by name.
 ## Component Communication Summary
 
 ```
-┌─────────┐    REST     ┌──────────────┐    WS (v3)    ┌──────────────┐
-│   CLI   │───────────▶│  DefenseClaw │──────────────▶│   OpenClaw   │
-│ (Python)│            │   Gateway    │               │   Gateway    │
-└─────────┘            │   (Go)       │◀──────────────│              │
-                        │              │  events        └──────┬───────┘
-┌─────────┐    REST     │  ┌────────┐  │                       │
-│ Plugins │───────────▶│  │Inspect │  │───────▶  SIEM          │ LLM API calls
-│ (JS/TS) │            │  │Engine  │  │                       │ (OpenAI format)
-└─────────┘            │  └────────┘  │◀──────▶  SQLite DB    │
-                        │              │                       ▼
-┌─────────┐   Hooks     │  ┌────────┐  │               ┌──────────────┐
-│ Claude  │───────────▶│  │Connec- │  │               │ LLM Provider │
-│ Code /  │  (shell)    │  │tor Reg │  │               └──────────────┘
-│ Codex   │            │  └────────┘  │
-└─────────┘            │              │
-                        │   runs       │               ┌──────────────┐
-                        │   ──────────────────────────▶│  Guardrail   │
-                        └──────────────┘               │  Proxy       │
-                                                       │  + Guardrail │
-                                                       └──────┬───────┘
-                                                              │
-                                                              ▼
-                                                       LLM Provider
-                                                    (Anthropic, OpenAI…)
+┌─────────┐    REST      ┌──────────────┐    WS (v3)     ┌──────────────┐
+│   CLI   │────────────▶│  DefenseClaw │──────────────▶ │   OpenClaw   │
+│ (Python)│             │   Gateway    │               │   Gateway    │
+└─────────┘             │   (Go)       │◀──────────────│              │
+                         │              │  events        └──────────────┘
+┌─────────┐    REST      │  ┌────────┐  │
+│ OpenClaw│────────────▶│  │Inspect │  │───────▶  SIEM (Splunk HEC,
+│ Plugin  │  (fetch      │  │Engine  │  │          OTLP, JSONL, CSV)
+│ (JS/TS) │  intercept)  │  └────────┘  │
+└─────────┘             │              │◀──────▶  SQLite DB
+                         │  ┌────────┐  │
+┌─────────┐   Hooks      │  │Connec- │  │
+│ Claude  │────────────▶│  │tor Reg │  │
+│ Code    │  (26 shell   │  │(4 built│  │
+└─────────┘   events)    │  │ -in)   │  │
+                         │  └────────┘  │
+┌─────────┐   Hooks      │              │
+│  Codex  │────────────▶│   runs       │               ┌──────────────┐
+│         │  (5 shell    │   ──────────────────────────▶│  Guardrail   │
+└─────────┘   events)    └──────────────┘               │  Proxy :4000 │
+                                                        │  /c/<name>/  │
+┌─────────┐  api_base                                   │  prefix      │
+│ZeptoClaw│─────────── LLM traffic via proxy ──────────▶│  routing     │
+│         │  config                                     └──────┬───────┘
+└─────────┘  patch                                             │
+                                                               ▼
+                                                        LLM Provider
+                                                     (Anthropic, OpenAI…)
 ```
 
 ## Internal Packages (Go Gateway)
 
-The Go gateway is organized into 19 internal packages:
+The Go gateway is organized into 20 internal packages:
 
 | Package | Purpose |
 |---------|---------|
-| `gateway/` | Core: GuardrailProxy (`:4000`), APIServer (`:18970`), WebSocket Client, Event Router, Inspection Engine, LLM Judge, Cisco AI Defense client, Bifrost provider integration |
+| `gateway/` | Core: GuardrailProxy (`:4000`), APIServer (`:18970`), WebSocket Client, Event Router, Inspection Engine, LLM Judge, Cisco AI Defense client, Bifrost provider integration, connector hook handlers (`claude_code_hook.go`, `codex_hook.go`) |
+| `gateway/connector/` | Pluggable connector system (16 files): `Connector` interface + 9 optional sub-interfaces, 4 built-in implementations (OpenClaw, Claude Code, Codex, ZeptoClaw), `Registry` with collision prevention, managed backup (SHA256 drift), atomic file writes with advisory locking, subprocess policy, plugin loader |
 | `audit/` | SQLite WAL store — 8 tables, 5s busy timeout |
 | `cli/` | Go CLI (Cobra commands for gateway, policy, etc.) |
-| `config/` | Full config schema with LLM resolution, hot-reload support |
+| `config/` | Full config schema with `guardrail.connector` selection, `connector_hooks` per-connector config, LLM resolution, hot-reload support |
+| `configs/` | Embedded default configuration files |
 | `daemon/` | PID file management, process lifecycle, lumberjack log rotation |
 | `enforce/` | Block/allow list PolicyEngine (SQLite JSON actions) — distinct from OPA. SkillEnforcer/PluginEnforcer (quarantine), MCPEnforcer (endpoint blocking) |
 | `firewall/` | Kernel-level network filtering (iptables/pfctl). Compiler interface, `RulesHash` drift detection (SHA-256, 12-char hex), `Observe` subsystem (lsof + skill domain scanning) |
@@ -424,7 +433,8 @@ The Go gateway is organized into 19 internal packages:
 | `scanner/` | 9 built-in scanner implementations: ClawShield (injection, malware, PII, secrets, vuln), CodeGuard, MCP scanner, Skill scanner, Plugin scanner. Common `Scanner` interface |
 | `telemetry/` | OpenTelemetry: `guardrail/{stage}` and `guardrail.{phase}` span hierarchy, `inspect/{tool}` spans, 20+ metric instruments (verdicts, judge latency, cache hits, sink delivery, stream lifecycle) |
 | `tui/` | 13-panel Bubbletea dashboard (Lipgloss + Bubbles); 201 TUI command entries |
-| `watcher/` | File system monitoring (fsnotify) with 500ms debounce, three-phase admission gate (pre-scan OPA → scan → post-scan OPA), periodic rescan (60-min default) with 8-type drift detection, policy file watching (2s poll) |
+| `version/` | Build version info and generation bumping for policy reload coordination |
+| `watcher/` | Multi-connector file system monitoring (fsnotify) with 500ms debounce, three-phase admission gate (pre-scan OPA → scan → post-scan OPA), periodic rescan (60-min default) with 8-type drift detection, policy file watching (2s poll) |
 
 ## Multi-Turn Injection Detection
 
