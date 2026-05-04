@@ -5472,6 +5472,26 @@ func TestTokenAuth_AcceptCustomHeader(t *testing.T) {
 	}
 }
 
+func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("loopback OTLP path token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("loopback OTLP path token: next handler was not called")
+	}
+}
+
 func TestTokenAuth_RejectWrongToken(t *testing.T) {
 	api, _ := tokenAuthTestServer(t, "secret-token-123")
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -100,11 +101,9 @@ const otelSourceHeader = "x-defenseclaw-source"
 const otelIngestMaxBatchSummary = 5
 
 // handleOTLPLogs accepts OTLP-HTTP /v1/logs POSTs from CLI processes.
-// Body is OTLP-JSON (Content-Type: application/json) — the protobuf
-// variant is not yet supported because Codex and Claude Code default
-// to JSON over HTTP per their docs. We surface a 415 if the caller
-// sends application/x-protobuf so they get an actionable error
-// rather than a silent parse failure.
+// Body may be OTLP-JSON (application/json) or OTLP protobuf
+// (application/x-protobuf). JSON bodies are summarized structurally;
+// protobuf bodies are accepted and audited by size/hash without full decode.
 func (a *APIServer) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalLogs)
 }
@@ -123,6 +122,27 @@ func (a *APIServer) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalTraces)
 }
 
+func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) {
+	_, source, ok := parseOTLPPathToken(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.TrimSpace(r.Header.Get(otelSourceHeader)) == "" {
+		r.Header.Set(otelSourceHeader, source)
+	}
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/v1/logs"):
+		a.handleOTLPSignal(w, r, otelSignalLogs)
+	case strings.HasSuffix(r.URL.Path, "/v1/metrics"):
+		a.handleOTLPSignal(w, r, otelSignalMetrics)
+	case strings.HasSuffix(r.URL.Path, "/v1/traces"):
+		a.handleOTLPSignal(w, r, otelSignalTraces)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 // handleOTLPSignal is the shared body for all three signal types.
 // It validates the request shape, classifies the source, summarizes
 // the payload into an audit event, and returns 200 with the
@@ -138,13 +158,12 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	}
 
 	contentType := r.Header.Get("Content-Type")
-	if !isOTLPJSONContentType(contentType) {
+	if !isOTLPContentType(contentType) {
 		// Be explicit about why we rejected so the exporter logs
-		// surface the right error. application/x-protobuf is the
-		// other valid OTLP shape; we don't accept it yet.
-		w.Header().Set("Accept", "application/json")
+		// surface the right error.
+		w.Header().Set("Accept", "application/json, application/x-protobuf")
 		http.Error(w,
-			fmt.Sprintf("unsupported content-type %q (defenseclaw OTLP receiver accepts application/json only)", contentType),
+			fmt.Sprintf("unsupported content-type %q (defenseclaw OTLP receiver accepts application/json or application/x-protobuf)", contentType),
 			http.StatusUnsupportedMediaType)
 		return
 	}
@@ -175,6 +194,25 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		enrichOTLPIngestSpan(ctx, sessionID)
 	}
 	bodyBytes := int64(len(body))
+	if isOTLPProtobufContentType(contentType) {
+		hash := sha256.Sum256(body)
+		summary := fmt.Sprintf("otlp-protobuf signal=%s size=%d bytes sha256=%s", signal, len(body), hex.EncodeToString(hash[:8]))
+		ev := audit.Event{
+			Timestamp: time.Now().UTC(),
+			Action:    otelIngestActionForSignal(signal),
+			Target:    fmt.Sprintf("otlp:%s", signal),
+			Actor:     source,
+			Details:   summary,
+			Severity:  "INFO",
+			AgentName: source,
+			SessionID: sessionID,
+		}
+		_ = persistAuditEvent(a.logger, a.store, ev)
+		a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", 0, bodyBytes)
+		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", 0, bodyBytes, summary)
+		writeOTLPSuccess(w)
+		return
+	}
 	summary, stats, parseErr := summarizeOTLPPayload(body, signal)
 	if parseErr != nil {
 		// We log the parse failure but still 200 — the exporter
@@ -1095,15 +1133,59 @@ func otelIngestActionForSignal(signal otelIngestSignal) string {
 // indicates OTLP-JSON. Accepts application/json with optional
 // charset / "; encoding=otlp-json" parameters.
 func isOTLPJSONContentType(ct string) bool {
+	return normalizedContentType(ct) == "application/json"
+}
+
+func isOTLPProtobufContentType(ct string) bool {
+	return normalizedContentType(ct) == "application/x-protobuf"
+}
+
+func isOTLPContentType(ct string) bool {
+	ct = normalizedContentType(ct)
+	return ct == "application/json" || ct == "application/x-protobuf"
+}
+
+func normalizedContentType(ct string) string {
 	ct = strings.ToLower(strings.TrimSpace(ct))
 	if ct == "" {
-		return false
+		return ""
 	}
 	// Strip parameters (anything after ;).
 	if i := strings.Index(ct, ";"); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
 	}
-	return ct == "application/json"
+	return ct
+}
+
+func parseOTLPPathToken(path string) (token string, source string, ok bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 5 || parts[0] != "otlp" || parts[3] != "v1" {
+		return "", "", false
+	}
+	switch parts[4] {
+	case "logs", "metrics", "traces":
+	default:
+		return "", "", false
+	}
+	source = strings.ToLower(strings.TrimSpace(parts[1]))
+	token = strings.TrimSpace(parts[2])
+	if decoded, err := url.PathUnescape(token); err == nil {
+		token = decoded
+	}
+	if source == "" || token == "" {
+		return "", "", false
+	}
+	return token, source, true
+}
+
+func isOTLPEndpointPath(path string) bool {
+	switch path {
+	case "/v1/logs", "/v1/metrics", "/v1/traces":
+		return true
+	default:
+		_, _, ok := parseOTLPPathToken(path)
+		return ok
+	}
 }
 
 // writeOTLPSuccess writes the canonical empty-success OTLP-HTTP

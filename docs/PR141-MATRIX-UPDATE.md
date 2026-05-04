@@ -84,13 +84,13 @@
 
 ---
 
-## 6. `defenseclaw codeguard install-skill`
+## 6. `defenseclaw codeguard install`
 
 | Feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|
-| **Bundled CodeGuard skill copied to disk** | ✅ to `cfg.skill_dirs()[0]` | ✅ 🆕🆕 `cfg.skill_dirs()` now resolves to `~/.zeptoclaw/skills` correctly (connector-aware), skill files placed in correct dir | ✅ 🆕🆕 resolves to `~/.claude/skills` correctly | ✅ 🆕🆕 resolves to `~/.codex/skills` correctly |
-| **Enabled in agent config** | ✅ writes `skills.entries.codeguard.enabled=true` in `openclaw.json` | ⚠️ 🆕🆕 `install_codeguard_skill` now **skips** `_enable_codeguard_in_openclaw()` for non-OpenClaw connectors (line 83-86). Skill is in the right dir — ZeptoClaw auto-discovers skills from its skills dir. | ⚠️ 🆕🆕 same — Claude Code auto-discovers skills from `~/.claude/skills/` | ⚠️ 🆕🆕 same — Codex may not have a skill system, but files are correctly placed |
-| **`ensure_codeguard_skill` at CLI startup** | ✅ | ✅ 🆕🆕 `ensure_codeguard_skill` now takes `connector` param. For non-OpenClaw: skips openclaw binary check, checks if target dir exists instead. Skips `_enable_codeguard_in_openclaw`. `main.py` and `guardrail.py` both pass connector. | ✅ 🆕🆕 same | ✅ 🆕🆕 same |
+| **Bundled CodeGuard skill copied to disk** | opt-in to `cfg.skill_dirs()[0]` | opt-in, connector-aware | opt-in, connector-aware | opt-in, connector-aware |
+| **Enabled in agent config** | opt-in writes `skills.entries.codeguard.enabled=true` in `openclaw.json` | no OpenClaw config mutation | no OpenClaw config mutation | no OpenClaw config mutation |
+| **`ensure_codeguard_skill` at CLI startup** | deprecated no-op | deprecated no-op | deprecated no-op | deprecated no-op |
 
 ---
 
@@ -170,7 +170,7 @@
 | Feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|
 | **Inline guardrail setup + scanners + observability** | ✅ reads `_resolve_openclaw_gateway` from `openclaw.json`; auto-syncs `OPENCLAW_GATEWAY_TOKEN` | ✅ 🆕🆕 `_resolve_gateway_for_connector()` dispatches by connector — returns loopback defaults for non-OpenClaw. `_setup_gateway_defaults()` shows "connector: zeptoclaw" in output and uses connector-specific token env var. | ✅ 🆕🆕 same — shows "connector: claudecode" | ✅ 🆕🆕 same — shows "connector: codex" |
-| **CodeGuard auto-install** | ✅ | ✅ 🆕🆕 `install_codeguard_skill` targets `cfg.skill_dirs()[0]` (connector-aware) and skips `_enable_codeguard_in_openclaw()` | ✅ 🆕🆕 same | ✅ 🆕🆕 same |
+| **CodeGuard native asset install** | opt-in only | opt-in only — `defenseclaw codeguard install --target skill` | opt-in only | opt-in only |
 
 ---
 
@@ -261,12 +261,12 @@
 | §4 | `mcp set` / `mcp unset` | ZeptoClaw, Claude Code, Codex — per-connector config file writers |
 | §5 | `plugin list` | ZeptoClaw, Claude Code, Codex — connector-dispatched merge (DefenseClaw plugins shown) |
 | §5 | `plugin enable` / `plugin disable` | ZeptoClaw, Claude Code, Codex — connector-dispatched ID resolution + agnostic gateway RPC |
-| §6 | CodeGuard skill installed to correct dir | ZeptoClaw, Claude Code, Codex — `cfg.skill_dirs()` connector-aware |
-| §6 | `ensure_codeguard_skill` startup check | ZeptoClaw, Claude Code, Codex — takes connector param, skips OpenClaw-only logic |
+| §6 | CodeGuard skill install target | ZeptoClaw, Claude Code, Codex — `cfg.skill_dirs()` connector-aware when operator explicitly installs |
+| §6 | `ensure_codeguard_skill` startup check | Deprecated no-op; native CodeGuard assets are explicit opt-in only |
 | §7 | AIBOM scan (skills/plugins/MCP) | ZeptoClaw, Claude Code, Codex — filesystem-based inventory |
 | §13 | Sandbox setup/init | ZeptoClaw, Claude Code, Codex — explicit guard with clear error |
 | §14 | `init` gateway auto-detect + token sync | ZeptoClaw, Claude Code, Codex — `_resolve_gateway_for_connector()` dispatches |
-| §14 | `init` CodeGuard auto-install | ZeptoClaw, Claude Code, Codex — targets correct dir, skips OpenClaw enable |
+| §14 | `init` CodeGuard install | No auto-install; use `defenseclaw codeguard install --target skill` |
 | §15 | Quickstart token/config auto-detect | ZeptoClaw, Claude Code, Codex — device-key auth messaging |
 | §18 | All Python CLI items | All 4 — new section, all green |
 

@@ -14,22 +14,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Install and register the CodeGuard OpenClaw skill.
+"""Explicit, opt-in Project CodeGuard native asset installation.
 
-The skill ships inside the DefenseClaw repository at ``skills/codeguard/``.
-This module copies it into the OpenClaw workspace skills directory so the
-agent loads it automatically.
-
-Two entry points:
-
-* ``install_codeguard_skill(cfg)`` — copies the skill files into the
-  highest-priority OpenClaw skills directory (workspace when configured,
-  otherwise ``{claw_home}/skills/codeguard/``) and enables it in
-  ``openclaw.json``.  Called from ``defenseclaw init`` and
-  ``defenseclaw codeguard install-skill``.
-
-* ``ensure_codeguard_skill(claw_home, openclaw_config)`` — lightweight check
-  used on CLI startup to install the skill when OpenClaw appears after init.
+Server-side CodeGuard scanning is always independent from this module. The
+functions here only copy optional native skill/rule assets into agent-owned
+directories when the operator explicitly runs ``defenseclaw codeguard install``.
 """
 
 from __future__ import annotations
@@ -37,149 +26,207 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
+from defenseclaw import connector_paths
 from defenseclaw.paths import bundled_codeguard_dir
 
 
-def install_codeguard_skill(cfg) -> str:
-    """Copy the CodeGuard skill into the active connector's skills directory.
+@dataclass
+class CodeGuardAssetStatus:
+    connector: str
+    target: str
+    path: str
+    status: str
+    detail: str = ""
 
-    Uses ``cfg.skill_dirs()`` to resolve the highest-priority directory
-    (connector-aware: works for OpenClaw, ClaudeCode, Codex, ZeptoClaw).
+    def format(self) -> str:
+        suffix = f" ({self.detail})" if self.detail else ""
+        if self.path:
+            return f"{self.status} {self.path}{suffix}"
+        return f"{self.status}{suffix}"
 
-    Returns a short status string for CLI output.
+
+def codeguard_status(cfg, connector: str | None = None, target: str = "skill") -> CodeGuardAssetStatus:
+    connector = _resolve_connector(cfg, connector)
+    target = _normalize_target(target)
+    path = _target_path(cfg, connector, target)
+    if not path:
+        return CodeGuardAssetStatus(connector, target, "", "unsupported", f"{connector} has no {target} install target")
+    if target == "skill":
+        if _is_codeguard_skill_dir(path):
+            return CodeGuardAssetStatus(connector, target, path, "installed")
+        if os.path.exists(path):
+            return CodeGuardAssetStatus(connector, target, path, "conflict", "existing path is not recognizable as CodeGuard")
+        return CodeGuardAssetStatus(connector, target, path, "missing")
+    if _is_codeguard_rule_file(path):
+        return CodeGuardAssetStatus(connector, target, path, "installed")
+    if os.path.exists(path):
+        return CodeGuardAssetStatus(connector, target, path, "conflict", "existing file is not recognizable as CodeGuard")
+    return CodeGuardAssetStatus(connector, target, path, "missing")
+
+
+def install_codeguard_asset(
+    cfg,
+    *,
+    connector: str | None = None,
+    target: str = "skill",
+    replace: bool = False,
+) -> str:
+    """Install a CodeGuard native asset if absent.
+
+    Existing valid CodeGuard assets are skipped. Existing non-CodeGuard paths
+    are treated as conflicts unless *replace* is true.
     """
-    skill_dirs = cfg.skill_dirs()
-    if not skill_dirs:
-        return "skipped (no skill directories configured)"
+    status = codeguard_status(cfg, connector=connector, target=target)
+    if status.status == "unsupported":
+        return status.format()
+    if status.status == "installed" and not replace:
+        return f"already installed at {status.path}"
+    if status.status == "conflict" and not replace:
+        return f"conflict at {status.path} (use --replace to overwrite)"
 
-    target_parent = skill_dirs[0]
-    target_dir = os.path.join(target_parent, "codeguard")
     source_dir = _find_skill_source()
-
     if source_dir is None:
         return "skipped (skill source not found in package)"
 
-    try:
-        os.makedirs(target_parent, exist_ok=True)
+    if target == "skill":
+        _replace_path(status.path, replace=replace)
+        os.makedirs(os.path.dirname(status.path), exist_ok=True)
+        shutil.copytree(source_dir, status.path)
+        if status.connector == "openclaw":
+            _enable_codeguard_in_openclaw(_expand(cfg.claw.config_file))
+        return f"installed to {status.path}"
 
-        if os.path.isdir(target_dir):
-            shutil.rmtree(target_dir)
-        shutil.copytree(source_dir, target_dir)
-    except OSError as exc:
-        reason = exc.strerror or str(exc)
-        if "ermission" in reason:
-            from defenseclaw.config import load as _load_cfg
-            try:
-                _cfg = _load_cfg()
-                if _cfg.openshell.is_standalone():
-                    return ("skipped (Permission denied — sandbox mode). "
-                            "Use 'defenseclaw sandbox setup' to install skills")
-            except Exception:
-                pass
-        return f"skipped ({reason})"
+    content = _rule_content(source_dir)
+    _replace_path(status.path, replace=replace)
+    os.makedirs(os.path.dirname(status.path), exist_ok=True)
+    with open(status.path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"installed to {status.path}"
 
-    connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
-    if connector.lower() == "openclaw":
-        oc_config = _expand(cfg.claw.config_file)
-        _enable_codeguard_in_openclaw(oc_config)
 
-    return f"installed to {target_dir}"
+def install_codeguard_skill(cfg, connector: str | None = None, replace: bool = False) -> str:
+    """Backward-compatible explicit skill installer."""
+    return install_codeguard_asset(cfg, connector=connector, target="skill", replace=replace)
 
 
 def ensure_codeguard_skill(claw_home: str, openclaw_config: str, connector: str = "") -> None:
-    """Lightweight check: install the skill if the agent exists but the skill doesn't.
+    """Deprecated no-op retained for older callers.
 
-    Designed to be called on CLI startup so that when a user installs the
-    agent after running ``defenseclaw init``, the skill appears automatically
-    on the next ``defenseclaw`` invocation.
+    Native CodeGuard assets are fully opt-in; CLI startup, init, sandbox setup,
+    and sidecar setup must not call through to an implicit installer.
     """
-    connector = (connector or "openclaw").lower()
-    claw_home = _expand(claw_home)
-    oc_config = _expand(openclaw_config)
+    _ = claw_home
+    _ = openclaw_config
+    _ = connector
 
-    target_parent = _resolve_workspace_skills_dir(oc_config)
-    if target_parent is None:
-        target_parent = os.path.join(claw_home, "skills")
 
-    target_dir = os.path.join(target_parent, "codeguard")
+def _resolve_connector(cfg, connector: str | None) -> str:
+    if connector:
+        return connector_paths.normalize(connector)
+    if hasattr(cfg, "active_connector"):
+        return connector_paths.normalize(cfg.active_connector())
+    return connector_paths.normalize(getattr(getattr(cfg, "guardrail", object()), "connector", "") or "openclaw")
 
-    if os.path.isdir(target_dir):
+
+def _normalize_target(target: str) -> str:
+    target = (target or "skill").strip().lower()
+    if target not in {"skill", "rule"}:
+        raise ValueError("target must be 'skill' or 'rule'")
+    return target
+
+
+def _target_path(cfg, connector: str, target: str) -> str:
+    if target == "skill":
+        dirs = connector_paths.skill_dirs(
+            connector,
+            openclaw_home=getattr(getattr(cfg, "claw", object()), "home_dir", None),
+            openclaw_config=getattr(getattr(cfg, "claw", object()), "config_file", None),
+        )
+        return os.path.join(dirs[0], "codeguard") if dirs else ""
+    cwd = os.getcwd()
+    if connector == "cursor":
+        return os.path.join(cwd, ".cursor", "rules", "codeguard.mdc")
+    if connector == "copilot":
+        return os.path.join(cwd, ".github", "instructions", "codeguard.instructions.md")
+    if connector == "windsurf":
+        for parent in (
+            os.path.join(cwd, ".windsurf", "rules"),
+            os.path.join(cwd, ".codeium", "windsurf", "rules"),
+        ):
+            if os.path.isdir(parent):
+                return os.path.join(parent, "codeguard.md")
+        return ""
+    return ""
+
+
+def _replace_path(path: str, *, replace: bool) -> None:
+    if not os.path.exists(path):
         return
-
-    if connector == "openclaw":
-        oc_binary = shutil.which("openclaw")
-        if not os.path.isfile(oc_config) and not oc_binary:
-            return
+    if not replace:
+        return
+    if os.path.isdir(path):
+        shutil.rmtree(path)
     else:
-        if not os.path.isdir(target_parent):
-            return
-
-    source_dir = _find_skill_source()
-    if source_dir is None:
-        return
-
-    os.makedirs(target_parent, exist_ok=True)
-    shutil.copytree(source_dir, target_dir)
-    if connector == "openclaw":
-        _enable_codeguard_in_openclaw(oc_config)
+        os.unlink(path)
 
 
-def _resolve_workspace_skills_dir(openclaw_config: str) -> str | None:
-    """Read the workspace from openclaw.json and return its skills subdir."""
-    data = _read_openclaw_json(openclaw_config)
-    if data is None:
-        return None
-    ws = data.get("agents", {}).get("defaults", {}).get("workspace", "")
-    if ws:
-        return os.path.join(_expand(ws), "skills")
-    return None
-
-
-def _read_openclaw_json(openclaw_config: str) -> dict | None:
-    path = _expand(openclaw_config)
+def _is_codeguard_skill_dir(path: str) -> bool:
+    manifest = os.path.join(path, "SKILL.md")
     try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _enable_codeguard_in_openclaw(openclaw_config: str) -> None:
-    """Ensure ``skills.entries.codeguard`` is enabled in openclaw.json."""
-    path = _expand(openclaw_config)
-    if not os.path.isfile(path):
-        return
-
-    try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return
-
-    skills = cfg.setdefault("skills", {})
-    entries = skills.setdefault("entries", {})
-    cg_entry = entries.get("codeguard")
-    if isinstance(cg_entry, dict) and cg_entry.get("enabled") is True:
-        return
-
-    entries["codeguard"] = {"enabled": True}
-
-    try:
-        with open(path, "w") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
+        text = Path(manifest).read_text(encoding="utf-8")
     except OSError:
-        pass
+        return False
+    return _looks_like_codeguard(text)
+
+
+def _is_codeguard_rule_file(path: str) -> bool:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _looks_like_codeguard(text)
+
+
+def _looks_like_codeguard(text: str) -> bool:
+    return "CodeGuard" in text and ("CG-CRED-" in text or "Project CodeGuard" in text or "defenseclaw:codeguard" in text)
 
 
 def _find_skill_source() -> str | None:
-    """Locate the ``skills/codeguard/`` directory in bundled package data or repo tree."""
     d = bundled_codeguard_dir()
     if d.is_dir() and (d / "SKILL.md").is_file():
         return str(d)
     return None
+
+
+def _rule_content(source_dir: str) -> str:
+    manifest = Path(source_dir, "SKILL.md").read_text(encoding="utf-8")
+    body = manifest.split("---", 2)[-1].strip() if manifest.startswith("---") else manifest.strip()
+    return "<!-- defenseclaw:codeguard managed=true -->\n\n" + body + "\n"
+
+
+def _enable_codeguard_in_openclaw(openclaw_config: str) -> None:
+    path = _expand(openclaw_config)
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    skills = cfg.setdefault("skills", {})
+    entries = skills.setdefault("entries", {})
+    if isinstance(entries.get("codeguard"), dict) and entries["codeguard"].get("enabled") is True:
+        return
+    entries["codeguard"] = {"enabled": True}
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass
 
 
 def _expand(p: str) -> str:

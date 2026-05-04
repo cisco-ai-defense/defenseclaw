@@ -129,13 +129,7 @@ func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
 	}
 }
 
-// TestOTLPIngest_Logs_RejectsNonJSONContentType pins the 415
-// contract. Codex and Claude Code both emit OTLP-JSON; protobuf
-// is intentionally not yet supported. A wrong-Content-Type
-// request must surface a structured 415 (rather than parse
-// failure) so the operator's exporter logs make the protocol
-// mismatch obvious.
-func TestOTLPIngest_Logs_RejectsNonJSONContentType(t *testing.T) {
+func TestOTLPIngest_Logs_AcceptsProtobufContentType(t *testing.T) {
 	a := &APIServer{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader(`payload`))
 	req.Header.Set("Content-Type", "application/x-protobuf")
@@ -143,11 +137,11 @@ func TestOTLPIngest_Logs_RejectsNonJSONContentType(t *testing.T) {
 
 	a.handleOTLPLogs(w, req)
 
-	if w.Code != http.StatusUnsupportedMediaType {
-		t.Errorf("status = %d, want 415; body=%q", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200; body=%q", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "application/json") {
-		t.Errorf("error body should mention application/json so operator knows the supported shape; got %q", w.Body.String())
+	if got := w.Body.String(); got != "{}" {
+		t.Errorf("body = %q, want canonical OTLP empty-success body", got)
 	}
 }
 
@@ -573,6 +567,14 @@ func TestOTLPIngest_IsOTLPJSONContentType_AcceptsParameters(t *testing.T) {
 		got := isOTLPJSONContentType(c.ct)
 		if got != c.want {
 			t.Errorf("isOTLPJSONContentType(%q) = %v, want %v", c.ct, got, c.want)
+		}
+	}
+}
+
+func TestOTLPIngest_IsOTLPContentType_AcceptsJSONAndProtobuf(t *testing.T) {
+	for _, ct := range []string{"application/json", "application/x-protobuf", "application/x-protobuf; charset=utf-8"} {
+		if !isOTLPContentType(ct) {
+			t.Errorf("isOTLPContentType(%q) = false, want true", ct)
 		}
 	}
 }

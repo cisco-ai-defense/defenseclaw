@@ -1014,6 +1014,8 @@ def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
         # OpenClaw has its own enumeration path via the openclaw
         # binary (see _list_openclaw_plugins). Don't double-count.
         return []
+    if name == "copilot":
+        return _list_copilot_plugins()
     try:
         dirs = cfg.plugin_dirs()
     except Exception:
@@ -1031,6 +1033,65 @@ def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
                 continue
             seen_ids.add(pid)
             out.append(entry)
+    return out
+
+
+def _list_copilot_plugins() -> list[dict[str, Any]]:
+    """Best-effort Copilot CLI plugin listing via documented CLI flow."""
+    copilot = shutil.which("copilot")
+    if not copilot:
+        return []
+    try:
+        proc = subprocess.run(
+            [copilot, "plugin", "list", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    plugins = _parse_plugin_list_json(proc.stdout) or _parse_plugin_list_text(proc.stdout)
+    out: list[dict[str, Any]] = []
+    for p in plugins:
+        pid = str(p.get("id") or p.get("name") or "").strip()
+        if not pid:
+            continue
+        out.append({
+            "id": pid,
+            "name": str(p.get("name") or pid),
+            "version": str(p.get("version") or ""),
+            "enabled": p.get("enabled", True),
+            "source": "host:copilot",
+            "path": "",
+        })
+    return out
+
+
+def _parse_plugin_list_json(text: str) -> list[dict[str, Any]]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        plugins = data.get("plugins", data.get("items", []))
+    else:
+        plugins = data
+    if not isinstance(plugins, list):
+        return []
+    return [p for p in plugins if isinstance(p, dict)]
+
+
+def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith(("name", "plugin")):
+            continue
+        name = line.split()[0]
+        out.append({"id": name, "name": name})
     return out
 
 

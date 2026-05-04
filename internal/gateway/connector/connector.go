@@ -119,14 +119,11 @@ type SetupOpts struct {
 	// semantics.
 	HookFailMode string
 
-	// InstallCodeGuard enables one-time, native Project CodeGuard
-	// bootstrapping for connectors that have their own extension
-	// mechanism. Codex gets the upstream `software-security` skill
-	// under ~/.codex/skills; Claude Code gets the upstream
-	// codeguard-security plugin through `claude plugin`. These native
-	// integrations are intentionally not torn down when the operator
-	// changes connectors: they are user-visible security tooling, not
-	// DefenseClaw hook/proxy state.
+	// InstallCodeGuard enables explicit, opt-in native Project CodeGuard
+	// bootstrapping for connectors that have their own extension mechanism.
+	// The sidecar default is false; CLI startup/init/setup must not flip it
+	// implicitly. Server-side CodeGuard scanning remains independent from
+	// native skill/rule/plugin installation.
 	InstallCodeGuard bool
 }
 
@@ -177,6 +174,73 @@ type HookCapability struct {
 	SupportsFailClosed bool     `json:"supports_fail_closed"`
 	Scope              string   `json:"scope"`
 	ConfigPath         string   `json:"config_path,omitempty"`
+}
+
+// SurfaceCapability describes an installable/readable connector surface other
+// than hook verdict delivery. These surfaces are deliberately modeled
+// separately from enforcement/HILT so setup can install MCP servers, skills,
+// rules, plugins, or agents without implying the connector can block or ask.
+type SurfaceCapability struct {
+	Supported       bool     `json:"supported"`
+	Scope           string   `json:"scope,omitempty"`
+	ConfigPaths     []string `json:"config_paths,omitempty"`
+	ReadPaths       []string `json:"read_paths,omitempty"`
+	WritePaths      []string `json:"write_paths,omitempty"`
+	InstallTargets  []string `json:"install_targets,omitempty"`
+	DiscoveryOnly   bool     `json:"discovery_only,omitempty"`
+	RequiresOptIn   bool     `json:"requires_opt_in,omitempty"`
+	SupportsBackup  bool     `json:"supports_backup,omitempty"`
+	SupportsRestore bool     `json:"supports_restore,omitempty"`
+	Notes           []string `json:"notes,omitempty"`
+}
+
+// CodeGuardCapability models native Project CodeGuard asset installation for
+// a connector. Server-side CodeGuard scanning remains independent from this:
+// these flags only describe optional skill/rule/plugin assets placed into the
+// agent's own configuration directories.
+type CodeGuardCapability struct {
+	Supported      bool     `json:"supported"`
+	InstallTargets []string `json:"install_targets,omitempty"`
+	OptInOnly      bool     `json:"opt_in_only"`
+	AutoInstall    bool     `json:"auto_install"`
+	Idempotent     bool     `json:"idempotent"`
+	ConflictSafe   bool     `json:"conflict_safe"`
+	Notes          []string `json:"notes,omitempty"`
+}
+
+// TelemetryCapability advertises native and hook-generated telemetry channels
+// for a connector. Native OTLP means the vendor CLI can emit OTLP directly to
+// DefenseClaw; hook telemetry is synthesized by DefenseClaw hook handlers.
+type TelemetryCapability struct {
+	NativeOTLP       bool             `json:"native_otlp"`
+	NativeSignals    []string         `json:"native_signals,omitempty"`
+	HookSignals      []string         `json:"hook_signals,omitempty"`
+	ConfigPaths      []string         `json:"config_paths,omitempty"`
+	Env              []EnvRequirement `json:"env,omitempty"`
+	AuthMode         string           `json:"auth_mode,omitempty"`
+	EndpointTemplate string           `json:"endpoint_template,omitempty"`
+	SourceModes      []string         `json:"source_modes,omitempty"`
+	Notes            []string         `json:"notes,omitempty"`
+}
+
+// ConnectorCapabilities is the first-class capability matrix used by setup,
+// doctor, API metadata, and future installer flows. HookCapabilityProvider
+// remains as a compatibility shim for the verdict mapper.
+type ConnectorCapabilities struct {
+	Hooks     HookCapability      `json:"hooks"`
+	MCP       SurfaceCapability   `json:"mcp"`
+	Skills    SurfaceCapability   `json:"skills"`
+	Rules     SurfaceCapability   `json:"rules"`
+	Plugins   SurfaceCapability   `json:"plugins"`
+	Agents    SurfaceCapability   `json:"agents"`
+	CodeGuard CodeGuardCapability `json:"codeguard"`
+	Telemetry TelemetryCapability `json:"telemetry"`
+}
+
+// ConnectorCapabilityProvider — optional, connectors that can describe their
+// installable/readable local surfaces implement this richer matrix.
+type ConnectorCapabilityProvider interface {
+	Capabilities(opts SetupOpts) ConnectorCapabilities
 }
 
 // HookCapabilityProvider — optional, connectors that install native agent

@@ -683,32 +683,34 @@ Operational controls:
   ```
   before shipping.
 
-## 9. Connector observability (codex / claudecode)
+## 9. Connector observability
 
-DefenseClaw runs codex and Claude Code in **observability mode** by
-default: enforcement is gated off, and three telemetry channels feed
-audit events + Prometheus counters + Grafana panels without modifying
-either tool's traffic plane.
+DefenseClaw runs Codex, Claude Code, and the hook-first agent connectors in
+**observability mode** by default: enforcement is gated off, and connector
+telemetry feeds audit events + Prometheus counters + Grafana panels without
+modifying the agent traffic plane unless the connector explicitly supports it.
 
 ### 9.1 Channels
 
-1. **Hooks** — codex `notify-bridge.sh` and Claude Code `~/.claude/
-   settings.json` `hooks` post structured JSON to
-   `/api/v1/codex/hook` and `/api/v1/claude-code/hook`. The gateway
-   persists each event under audit `action=tool-call` /
-   `action=tool-result`.
+1. **Hooks** — connector hook scripts post structured JSON to their
+   `/api/v1/<connector>/hook` endpoints. The gateway normalizes connector,
+   source, session/turn IDs, hook event, tool, workspace, decision,
+   `raw_action`, `would_block`, fail mode, and duration into audit, logs,
+   spans, and counters.
 
-2. **Native OTel** — both connectors emit OTLP-JSON over HTTP. The
-   gateway's local OTLP receiver accepts:
+2. **Native OTel/OTLP** — Codex and Claude Code use header-token OTLP;
+   Gemini CLI uses settings.json with a loopback path token because custom
+   OTLP headers are not documented; Copilot CLI can be pointed at the gateway
+   with documented process environment variables. The gateway's local OTLP
+   receiver accepts OTLP/HTTP JSON and protobuf on:
    - `POST /v1/logs`     → `audit.action=otel.ingest.logs`
    - `POST /v1/metrics`  → `audit.action=otel.ingest.metrics`
    - `POST /v1/traces`   → `audit.action=otel.ingest.traces`
    - Malformed body      → `audit.action=otel.ingest.malformed` (WARN)
 
-   The receiver also re-emits one OTel log record per accepted batch
-   via the gateway's own OTel pipeline so Loki / Tempo see
-   codex / claudecode telemetry directly — no audit OTLP sink
-   configuration required.
+   The receiver also re-emits one OTel log record per accepted batch via the
+   gateway's own OTel pipeline so Loki / Tempo see connector telemetry
+   directly — no audit OTLP sink configuration required.
 
 3. **Codex notify** — codex calls `notify-bridge.sh` after every
    agent turn. The bridge POSTs codex's raw JSON arg to

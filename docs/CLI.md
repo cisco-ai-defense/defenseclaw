@@ -107,7 +107,9 @@ at the matching profile. See
 
 | Command | Description |
 |---------|-------------|
-| `codeguard install-skill` | Install the CodeGuard skill into the OpenClaw workspace |
+| `codeguard status --connector <name> --target skill\|rule` | Inspect optional native CodeGuard assets |
+| `codeguard install --connector <name> --target skill\|rule [--replace]` | Explicitly install a CodeGuard skill/rule asset |
+| `codeguard install-skill` | Backward-compatible alias for `codeguard install --target skill` |
 
 ### upgrade
 

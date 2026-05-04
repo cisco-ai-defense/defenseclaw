@@ -122,8 +122,6 @@ def cli(ctx: click.Context) -> None:
                       "'defenseclaw doctor --fix' to auto-repair.", err=True)
             raise SystemExit(1)
 
-    _ensure_codeguard_skill(app.cfg)
-
     try:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
@@ -174,14 +172,8 @@ cli.add_command(version_cmd, "version")
 
 
 def _ensure_codeguard_skill(cfg) -> None:
-    """Install CodeGuard skill if the agent appeared since last init."""
-    try:
-        from defenseclaw.codeguard_skill import ensure_codeguard_skill
-
-        connector = getattr(cfg.guardrail, "connector", "") or ""
-        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file, connector)
-    except Exception:
-        pass
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
 
 
 def _try_launch_tui() -> bool:

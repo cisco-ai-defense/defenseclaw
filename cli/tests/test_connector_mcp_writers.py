@@ -36,10 +36,10 @@ import pytest
 
 from defenseclaw import connector_paths
 from defenseclaw.connector_paths import (
-    HOOK_ONLY_CONNECTORS,
     KNOWN_CONNECTORS,
     MCPWriteUnsupportedError,
     set_mcp_server,
+    restore_managed_mcp_backup,
     unset_mcp_server,
 )
 
@@ -208,6 +208,19 @@ class TestCodexWrites:
         assert "demo" not in data["mcpServers"]
         assert "keep" in data["mcpServers"]
 
+    def test_set_captures_restorable_backup(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / ".mcp.json"
+        path.write_text(json.dumps({"mcpServers": {"old": {"command": "old"}}}))
+
+        set_mcp_server("codex", "demo", {"command": "uvx"})
+        assert (tmp_path / ".defenseclaw-mcp.json.bak").is_file()
+        assert restore_managed_mcp_backup(str(path))
+
+        data = json.loads(path.read_text())
+        assert "demo" not in data["mcpServers"]
+        assert data["mcpServers"]["old"]["command"] == "old"
+
 
 # ---------------------------------------------------------------------------
 # Round-trip: set → mcp_servers() → unset → mcp_servers()
@@ -285,11 +298,16 @@ class TestCoverage:
                 # Requires injected setter — assert it raises without one.
                 with pytest.raises(RuntimeError):
                     set_mcp_server(name, "x", {"command": "y"})
-            elif name == "zeptoclaw" or name in HOOK_ONLY_CONNECTORS:
+            elif name == "zeptoclaw":
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
+            elif name == "windsurf":
+                with pytest.MonkeyPatch.context() as m:
+                    m.setenv("HOME", str(tmp_path / "isolated-home"))
+                    with pytest.raises(MCPWriteUnsupportedError):
+                        set_mcp_server(name, "x", {"command": "y"})
             else:
-                # claudecode / codex write succeeds without raising.
+                # All other connectors have a documented MCP write path.
                 # Use chdir + isolated HOME so the test doesn't trash
                 # the developer's real config files.
                 with pytest.MonkeyPatch.context() as m:

@@ -46,7 +46,10 @@ from defenseclaw.paths import (
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option(
     "--connector",
-    type=click.Choice(["codex", "claudecode", "claude-code", "zeptoclaw", "openclaw"], case_sensitive=False),
+    type=click.Choice([
+        "codex", "claudecode", "claude-code", "zeptoclaw", "openclaw",
+        "hermes", "cursor", "windsurf", "geminicli", "copilot",
+    ], case_sensitive=False),
     default=None,
     help="Agent connector to configure.",
 )
@@ -287,10 +290,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         click.echo("  'defenseclaw setup guardrail' to enable the guardrail proxy.")
 
     ux.banner("Skills")
-    if cfg.openshell.is_standalone():
-        click.echo("  CodeGuard:     " + ux.dim("deferred (installed during sandbox setup)"))
-    else:
-        _install_codeguard_skill(cfg, logger)
+    click.echo("  CodeGuard:     skipped (opt in with 'defenseclaw codeguard install --target skill')")
 
     cfg.save()
 
@@ -533,7 +533,10 @@ def _prompt_first_run(
         "This wizard writes config.yaml, then runs targeted readiness checks.",
     )
     click.echo()
-    connector_choices = ["codex", "claudecode", "zeptoclaw", "openclaw"]
+    connector_choices = [
+        "codex", "claudecode", "zeptoclaw", "openclaw",
+        "hermes", "cursor", "windsurf", "geminicli", "copilot",
+    ]
     connector = _normalize_connector_arg(connector) if connector else click.prompt(
         "  " + ux.bold("Connector"),
         type=click.Choice(connector_choices, case_sensitive=False),
@@ -1008,24 +1011,10 @@ def _install_with_uv(pkg: str) -> bool:
 
 
 def _install_codeguard_skill(cfg, logger) -> None:
-    """Install the CodeGuard proactive skill into the OpenClaw skills directory."""
-    from defenseclaw.codeguard_skill import install_codeguard_skill
-
-    click.echo("  CodeGuard:     " + ux.dim("installing..."), nl=False)
-    status = install_codeguard_skill(cfg)
-    # ``status`` is a free-form string from the installer; color-code
-    # the well-known signals (installed/already/skipped/failed) and
-    # leave anything unfamiliar in the default fg.
-    lower = status.lower()
-    if "fail" in lower or "error" in lower:
-        click.echo(" " + ux._style(status, fg="red", bold=True))
-    elif "already" in lower or "preserved" in lower or "skip" in lower:
-        click.echo(" " + ux.dim(status))
-    elif lower:
-        click.echo(" " + ux._style(status, fg="green"))
-    else:
-        click.echo(f" {status}")
-    logger.log_action("install-skill", "codeguard", f"status={status}")
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
+    _ = logger
+    click.echo("  CodeGuard:     skipped (explicit opt-in required)")
 
 
 def _setup_guardrail_inline(app, cfg, logger) -> bool:

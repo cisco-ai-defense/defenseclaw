@@ -60,7 +60,7 @@ var modePickerChoices = []modeChoice{
 // panel. It lets the operator switch the active claw connector
 // without leaving the TUI; the chosen wire name is dispatched to
 // `defenseclaw setup mode <wire>` by the owning Model so the same
-// inheritance rules (hook-only connectors → observability-first,
+// inheritance rules (hook-first connectors → observability-first,
 // openclaw↔zeptoclaw → inherit) that the CLI command implements
 // apply uniformly.
 //

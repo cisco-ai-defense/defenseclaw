@@ -27,12 +27,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type agentHookRequest struct {
 	ConnectorName string
 	HookEventName string
 	SessionID     string
+	TurnID        string
 	CWD           string
 	ToolName      string
 	ToolArgs      json.RawMessage
@@ -86,6 +89,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		t0 := time.Now()
 		resp := a.evaluateAgentHook(ctx, req)
 		elapsed := time.Since(t0)
+		enrichAgentHookSpan(ctx, req, resp, elapsed)
 
 		if a.health != nil {
 			a.health.RecordConnectorRequest()
@@ -105,6 +109,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 			a.otel.RecordInspectEvaluation(ctx, connectorName+":"+req.HookEventName, resp.Action, resp.Severity)
 			a.otel.RecordInspectLatency(ctx, connectorName+":"+req.HookEventName, float64(elapsed.Milliseconds()))
+			a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "ok", 1, int64(len(b)),
+				fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
+					connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
 		}
 
 		if a.logger != nil {
@@ -125,6 +132,32 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	return ctx
 }
 
+func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHookResponse, elapsed time.Duration) {
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("defenseclaw.connector", req.ConnectorName),
+		attribute.String("defenseclaw.telemetry.source", "hook"),
+		attribute.String("defenseclaw.hook.event", req.HookEventName),
+		attribute.String("defenseclaw.tool.name", req.ToolName),
+		attribute.String("defenseclaw.workspace", req.CWD),
+		attribute.String("defenseclaw.decision", resp.Action),
+		attribute.String("defenseclaw.raw_action", resp.RawAction),
+		attribute.Bool("defenseclaw.would_block", resp.WouldBlock),
+		attribute.String("defenseclaw.mode", resp.Mode),
+		attribute.Int64("defenseclaw.duration_ms", elapsed.Milliseconds()),
+	}
+	if req.SessionID != "" {
+		attrs = append(attrs, attribute.String("gen_ai.conversation.id", req.SessionID))
+	}
+	if req.TurnID != "" {
+		attrs = append(attrs, attribute.String("gen_ai.operation.id", req.TurnID))
+	}
+	span.SetAttributes(attrs...)
+}
+
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
 	event := firstString(payload,
 		"hook_event_name",
@@ -136,7 +169,8 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 	if event == "" {
 		event = inferAgentHookEvent(payload)
 	}
-	sessionID := firstString(payload, "session_id", "sessionId", "task_id", "conversation_id")
+	sessionID := firstString(payload, "session_id", "sessionId", "task_id", "conversation_id", "conversationId", "thread_id", "threadId")
+	turnID := firstString(payload, "turn_id", "turnId", "execution_id", "executionId", "generation_id", "generationId", "tool_call_id", "toolCallId")
 	cwd := firstString(payload, "cwd", "working_directory", "workingDirectory")
 	if cwd == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
@@ -203,6 +237,7 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		ConnectorName: connectorName,
 		HookEventName: event,
 		SessionID:     sessionID,
+		TurnID:        turnID,
 		CWD:           cwd,
 		ToolName:      toolName,
 		ToolArgs:      json.RawMessage(argBytes),
@@ -293,6 +328,7 @@ func (a *APIServer) hookCapabilities(name string) connector.HookCapability {
 	}
 	return hp.HookCapabilities(connector.SetupOpts{
 		DataDir:      a.configDataDir(),
+		APIAddr:      a.apiAddrForCapabilities(),
 		WorkspaceDir: currentWorkingDir(),
 	})
 }
@@ -302,6 +338,13 @@ func (a *APIServer) configDataDir() string {
 		return a.scannerCfg.DataDir
 	}
 	return ""
+}
+
+func (a *APIServer) apiAddrForCapabilities() string {
+	if a != nil && strings.TrimSpace(a.addr) != "" {
+		return strings.TrimSpace(a.addr)
+	}
+	return "127.0.0.1:18970"
 }
 
 func currentWorkingDir() string {

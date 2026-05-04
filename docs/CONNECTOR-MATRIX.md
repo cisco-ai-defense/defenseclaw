@@ -19,17 +19,19 @@ For the historical change log of how each row got to its current state, see
 | Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     |
 | Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse |
 | Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills |
+| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
 
-The Hermes, Cursor, Windsurf, Gemini CLI, and Copilot CLI connectors are
-hook-only in v1. They install vendor-native hook config and send hook payloads
-to DefenseClaw, but they do not redirect LLM traffic through the proxy.
+The Hermes, Cursor, Windsurf, Gemini CLI, and Copilot CLI connectors do not
+redirect LLM traffic through the proxy in v1. They are still first-class
+connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
+telemetry capability rows where the vendor has documented local surfaces.
 
 ## Hook Capability Matrix
 
@@ -44,6 +46,31 @@ to DefenseClaw, but they do not redirect LLM traffic through the proxy.
 `confirm` verdicts are rendered as native ask only when the event is listed in
 `ask_events`. Unsupported `confirm` decisions are downgraded explicitly while
 preserving `raw_action: "confirm"` in the hook response.
+
+## Local Surface Matrix
+
+| Connector | MCP | Skills | Rules | Plugins / extensions | Agents | CodeGuard native assets |
+| --------- | --- | ------ | ----- | -------------------- | ------ | ----------------------- |
+| Hermes | `~/.hermes/config.yaml` | `~/.hermes/skills` | unsupported | `~/.hermes/plugins` (`.hermes/plugins` discovery only) | unsupported | opt-in skill |
+| Cursor | `.cursor/mcp.json`, `~/.cursor/mcp.json` | `.cursor/skills`, `.agents/skills`, user equivalents | `.cursor/rules`, `AGENTS.md` | unsupported | unsupported | opt-in skill or rule |
+| Windsurf | existing documented/user MCP paths only | unsupported | existing documented/user rules paths only | unsupported | unsupported | opt-in rule only when a rules path exists |
+| Gemini CLI | `~/.gemini/settings.json` | `.gemini/skills`, `.agents/skills` | represented through skills/agents | `.gemini/extensions`, `~/.gemini/extensions` | `.gemini/agents`, `~/.gemini/agents` | opt-in skill |
+| Copilot CLI | `~/.copilot/mcp-config.json`, `.github/mcp.json`, `.mcp.json` | `.github/skills`, `.agents/skills`, `~/.copilot/skills` | `.github/instructions` | CLI marketplace/plugin flow | `.github/agents`, `~/.copilot/agents` | opt-in skill or rule |
+
+CodeGuard native assets are never installed by CLI startup, `init`, sandbox
+setup, or sidecar setup. Operators must run `defenseclaw codeguard install`
+explicitly. Existing valid CodeGuard assets are skipped, and existing
+non-CodeGuard paths require `--replace`.
+
+## Telemetry Matrix
+
+| Connector | Native telemetry | DefenseClaw auth | Hook telemetry |
+| --------- | ---------------- | ---------------- | -------------- |
+| Codex | native OTLP HTTP from config.toml | header token | notify/hook telemetry |
+| Claude Code | native OTLP env in settings.json | header token | hook telemetry |
+| Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
+| Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
+| Hermes / Cursor / Windsurf | no documented native OTLP | n/a | hook-generated logs, spans, counters |
 
 ---
 

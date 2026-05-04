@@ -2028,9 +2028,15 @@ func (p *Provider) EmitConnectorTelemetryLog(ctx context.Context, signal, source
 		rec.SetSeverity(otellog.SeverityInfo)
 		rec.SetSeverityText("INFO")
 	}
-	rec.SetBody(otellog.StringValue("connector telemetry ingest"))
+	eventName := "defenseclaw.otel.ingest"
+	body := "connector telemetry ingest"
+	if signal == "hook" {
+		eventName = "defenseclaw.hook.invocation"
+		body = "connector hook invocation"
+	}
+	rec.SetBody(otellog.StringValue(body))
 	rec.AddAttributes(
-		otellog.String("event.name", "defenseclaw.otel.ingest"),
+		otellog.String("event.name", eventName),
 		otellog.String("event.domain", "defenseclaw.connector"),
 		otellog.String("defenseclaw.otel.ingest.signal", signal),
 		otellog.String("defenseclaw.otel.ingest.source", source),

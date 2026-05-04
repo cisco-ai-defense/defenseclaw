@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+	yaml "gopkg.in/yaml.v3"
 )
 
 // tomlUnmarshal is a thin alias kept private to this package — it
@@ -112,13 +113,23 @@ func (c *Config) ReadMCPServers() ([]MCPServerEntry, error) {
 
 // ReadMCPServersForConnector returns MCP servers for a specific connector.
 func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry, error) {
-	switch connector {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
 		return readMCPServersClaudeCode()
 	case "codex":
 		return readMCPServersCodex()
 	case "zeptoclaw":
 		return readMCPServersZeptoClaw()
+	case "hermes":
+		return readMCPServersHermes()
+	case "cursor":
+		return readMCPServersCursor()
+	case "windsurf":
+		return readMCPServersWindsurf()
+	case "geminicli":
+		return readMCPServersGeminiCLI()
+	case "copilot":
+		return readMCPServersCopilot()
 	default:
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
@@ -376,7 +387,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
 
-	switch strings.TrimSpace(connector) {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
 		return dedup([]string{
 			filepath.Join(home, ".claude", "skills"),
@@ -392,6 +403,28 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			filepath.Join(home, ".zeptoclaw", "skills"),
 			filepath.Join(cwd, ".zeptoclaw", "skills"),
 		})
+	case "hermes":
+		return []string{filepath.Join(home, ".hermes", "skills")}
+	case "cursor":
+		return dedup([]string{
+			filepath.Join(cwd, ".cursor", "skills"),
+			filepath.Join(cwd, ".agents", "skills"),
+			filepath.Join(home, ".cursor", "skills"),
+			filepath.Join(home, ".agents", "skills"),
+		})
+	case "windsurf":
+		return nil
+	case "geminicli":
+		return dedup([]string{
+			filepath.Join(cwd, ".gemini", "skills"),
+			filepath.Join(cwd, ".agents", "skills"),
+		})
+	case "copilot":
+		return dedup([]string{
+			filepath.Join(cwd, ".github", "skills"),
+			filepath.Join(cwd, ".agents", "skills"),
+			filepath.Join(home, ".copilot", "skills"),
+		})
 	default:
 		return c.skillDirsOpenClaw()
 	}
@@ -402,8 +435,9 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 // fall through to the OpenClaw extensions layout.
 func (c *Config) PluginDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 
-	switch strings.TrimSpace(connector) {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
 		return []string{
 			filepath.Join(home, ".claude", "plugins"),
@@ -416,6 +450,18 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 		return []string{
 			filepath.Join(home, ".zeptoclaw", "plugins"),
 		}
+	case "hermes":
+		return dedup([]string{
+			filepath.Join(home, ".hermes", "plugins"),
+			filepath.Join(cwd, ".hermes", "plugins"),
+		})
+	case "geminicli":
+		return dedup([]string{
+			filepath.Join(cwd, ".gemini", "extensions"),
+			filepath.Join(home, ".gemini", "extensions"),
+		})
+	case "cursor", "windsurf", "copilot":
+		return nil
 	default:
 		return c.pluginDirsOpenClaw()
 	}
@@ -536,6 +582,59 @@ func readMCPServersZeptoClaw() ([]MCPServerEntry, error) {
 	return dedupMCPEntries(entries), nil
 }
 
+func readMCPServersHermes() ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	return readMCPFromYAMLPath(filepath.Join(home, ".hermes", "config.yaml"), []string{"mcp", "servers"}, []string{"mcpServers"})
+}
+
+func readMCPServersCursor() ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	var entries []MCPServerEntry
+	if e, err := readMCPFromDotMCPJSON(filepath.Join(cwd, ".cursor", "mcp.json")); err == nil {
+		entries = append(entries, e...)
+	}
+	if e, err := readMCPFromDotMCPJSON(filepath.Join(home, ".cursor", "mcp.json")); err == nil {
+		entries = append(entries, e...)
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+func readMCPServersWindsurf() ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	var entries []MCPServerEntry
+	for _, path := range []string{
+		filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
+		filepath.Join(home, ".codeium", "windsurf", "mcp.json"),
+	} {
+		if e, err := readMCPFromDotMCPJSON(path); err == nil {
+			entries = append(entries, e...)
+		}
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+func readMCPServersGeminiCLI() ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	return readMCPFromJSONPath(filepath.Join(home, ".gemini", "settings.json"), []string{"mcpServers"})
+}
+
+func readMCPServersCopilot() ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	var entries []MCPServerEntry
+	for _, path := range []string{
+		filepath.Join(home, ".copilot", "mcp-config.json"),
+		filepath.Join(cwd, ".github", "mcp.json"),
+		filepath.Join(cwd, ".mcp.json"),
+	} {
+		if e, err := readMCPFromDotMCPJSON(path); err == nil {
+			entries = append(entries, e...)
+		}
+	}
+	return dedupMCPEntries(entries), nil
+}
+
 func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -565,37 +664,86 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
+func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, paths...)
+}
+
+func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, paths...)
+}
+
+func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
+	var entries []MCPServerEntry
+	for _, path := range paths {
+		cursor := doc
+		for _, key := range path {
+			obj, ok := cursor.(map[string]any)
+			if !ok {
+				cursor = nil
+				break
+			}
+			cursor = obj[key]
+			if cursor == nil {
+				break
+			}
+		}
+		if cursor == nil {
+			continue
+		}
+		data, err := json.Marshal(cursor)
+		if err != nil {
+			continue
+		}
+		trimmed := bytes.TrimSpace(data)
+		if len(trimmed) == 0 {
+			continue
+		}
+		var parsed []MCPServerEntry
+		switch trimmed[0] {
+		case '{':
+			parsed, err = parseMCPServersJSON(trimmed)
+		case '[':
+			parsed, err = parseMCPServersJSONArray(trimmed)
+		default:
+			continue
+		}
+		if err == nil {
+			entries = append(entries, parsed...)
+		}
+	}
+	return dedupMCPEntries(entries), nil
+}
+
 func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var dotMCP struct {
-		MCPServers map[string]struct {
-			Command   string            `json:"command"`
-			Args      []string          `json:"args"`
-			Env       map[string]string `json:"env"`
-			URL       string            `json:"url"`
-			Transport string            `json:"transport"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(data, &dotMCP); err != nil {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-
-	entries := make([]MCPServerEntry, 0, len(dotMCP.MCPServers))
-	for name, s := range dotMCP.MCPServers {
-		entries = append(entries, MCPServerEntry{
-			Name:      name,
-			Command:   s.Command,
-			Args:      s.Args,
-			Env:       s.Env,
-			URL:       s.URL,
-			Transport: s.Transport,
-		})
+	if _, ok := raw["mcpServers"]; ok {
+		return readMCPFromAnyPaths(raw, []string{"mcpServers"})
 	}
-	return entries, nil
+	return readMCPFromAnyPaths(map[string]any{"mcpServers": raw}, []string{"mcpServers"})
 }
 
 func readMCPFromZeptoConfig(path string) ([]MCPServerEntry, error) {

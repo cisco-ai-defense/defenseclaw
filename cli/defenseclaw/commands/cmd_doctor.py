@@ -1362,6 +1362,11 @@ _CONNECTOR_LABELS = {
     "claudecode": "Claude Code",
     "codex": "Codex",
     "zeptoclaw": "ZeptoClaw",
+    "hermes": "Hermes",
+    "cursor": "Cursor",
+    "windsurf": "Windsurf",
+    "geminicli": "Gemini CLI",
+    "copilot": "GitHub Copilot CLI",
 }
 
 

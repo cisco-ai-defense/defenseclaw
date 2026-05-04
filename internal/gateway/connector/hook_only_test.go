@@ -61,6 +61,45 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
+	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
+	cases := []struct {
+		conn             *hookOnlyConnector
+		codeGuardTargets []string
+		nativeOTLP       bool
+		pluginsSupported bool
+	}{
+		{NewHermesConnector(), []string{"skill"}, false, true},
+		{NewCursorConnector(), []string{"skill", "rule"}, false, false},
+		{NewWindsurfConnector(), []string{"rule"}, false, false},
+		{NewGeminiCLIConnector(), []string{"skill"}, true, true},
+		{NewCopilotConnector(), []string{"skill", "rule"}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.conn.Name(), func(t *testing.T) {
+			caps := tc.conn.Capabilities(opts)
+			if !caps.MCP.Supported {
+				t.Fatal("MCP.Supported = false, want true")
+			}
+			if caps.CodeGuard.Supported != (len(tc.codeGuardTargets) > 0) {
+				t.Fatalf("CodeGuard.Supported = %v", caps.CodeGuard.Supported)
+			}
+			if strings.Join(caps.CodeGuard.InstallTargets, ",") != strings.Join(tc.codeGuardTargets, ",") {
+				t.Fatalf("CodeGuard.InstallTargets = %v, want %v", caps.CodeGuard.InstallTargets, tc.codeGuardTargets)
+			}
+			if caps.CodeGuard.AutoInstall {
+				t.Fatal("CodeGuard.AutoInstall = true, want explicit opt-in")
+			}
+			if caps.Telemetry.NativeOTLP != tc.nativeOTLP {
+				t.Fatalf("Telemetry.NativeOTLP = %v, want %v", caps.Telemetry.NativeOTLP, tc.nativeOTLP)
+			}
+			if caps.Plugins.Supported != tc.pluginsSupported {
+				t.Fatalf("Plugins.Supported = %v, want %v", caps.Plugins.Supported, tc.pluginsSupported)
+			}
+		})
+	}
+}
+
 func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 	dir := t.TempDir()
 	configDir := t.TempDir()
@@ -111,6 +150,35 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 				t.Fatalf("stat config after teardown: %v", err)
 			}
 		})
+	}
+}
+
+func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "settings.json")
+	prev := GeminiSettingsPathOverride
+	GeminiSettingsPathOverride = cfgPath
+	t.Cleanup(func() { GeminiSettingsPathOverride = prev })
+
+	conn := NewGeminiCLIConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read gemini settings: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"target": "otlp"`) || !strings.Contains(text, `/otlp/geminicli/tok-test`) {
+		t.Fatalf("gemini settings missing managed telemetry path-token config:\n%s", text)
+	}
+	if !strings.Contains(text, `"managedBy": "defenseclaw"`) {
+		t.Fatalf("gemini settings missing managed marker:\n%s", text)
 	}
 }
 

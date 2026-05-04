@@ -264,6 +264,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/logs", a.handleOTLPLogs)
 	mux.HandleFunc("/v1/metrics", a.handleOTLPMetrics)
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
+	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
 	// Codex agent-turn-complete notifier. The notify-bridge.sh shim
 	// installed by the codex connector POSTs codex's JSON arg here
 	// after every turn (see https://developers.openai.com/codex/
@@ -348,12 +349,13 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		reg = connector.NewDefaultRegistry()
 	}
 	type connectorEntry struct {
-		Name               string                    `json:"name"`
-		Description        string                    `json:"description"`
-		Source             string                    `json:"source"`
-		ToolInspectionMode string                    `json:"tool_inspection_mode"`
-		SubprocessPolicy   string                    `json:"subprocess_policy"`
-		HookCapabilities   *connector.HookCapability `json:"hook_capabilities,omitempty"`
+		Name               string                           `json:"name"`
+		Description        string                           `json:"description"`
+		Source             string                           `json:"source"`
+		ToolInspectionMode string                           `json:"tool_inspection_mode"`
+		SubprocessPolicy   string                           `json:"subprocess_policy"`
+		HookCapabilities   *connector.HookCapability        `json:"hook_capabilities,omitempty"`
+		Capabilities       *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
 	}
 	avail := reg.Available()
 	entries := make([]connectorEntry, len(avail))
@@ -366,12 +368,21 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			SubprocessPolicy:   string(info.SubprocessPolicy),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
+			opts := connector.SetupOpts{
+				DataDir:      a.configDataDir(),
+				APIAddr:      a.apiAddrForCapabilities(),
+				WorkspaceDir: currentWorkingDir(),
+			}
+			if cp, ok := conn.(connector.ConnectorCapabilityProvider); ok {
+				caps := cp.Capabilities(opts)
+				entry.Capabilities = &caps
+				entry.HookCapabilities = &caps.Hooks
+			}
 			if hp, ok := conn.(connector.HookCapabilityProvider); ok {
-				caps := hp.HookCapabilities(connector.SetupOpts{
-					DataDir:      a.configDataDir(),
-					WorkspaceDir: currentWorkingDir(),
-				})
-				entry.HookCapabilities = &caps
+				if entry.HookCapabilities == nil {
+					caps := hp.HookCapabilities(opts)
+					entry.HookCapabilities = &caps
+				}
 			}
 		}
 		entries[i] = entry
@@ -1962,6 +1973,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		if token == "" {
+			if pathToken, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) &&
+				subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -2020,6 +2038,15 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if _, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
+				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		// CORS preflights legitimately have no body / Content-Type but
 		// browsers always set Origin and Sec-Fetch-Site=cross-site for them.
@@ -2042,7 +2069,13 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		}
 
 		ct := r.Header.Get("Content-Type")
-		if !strings.Contains(ct, "application/json") {
+		if isOTLPEndpointPath(r.URL.Path) {
+			if !isOTLPContentType(ct) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
+				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				return
+			}
+		} else if !strings.Contains(ct, "application/json") {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
 			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
