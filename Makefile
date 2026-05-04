@@ -66,30 +66,43 @@ path:
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
 quickstart:
-	@connector="$${CONNECTOR:-codex}"; \
-	profile="$${PROFILE:-observe}"; \
+	@profile="$${PROFILE:-observe}"; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
 		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
-	elif [ "$$connector" = "none" ]; then \
+	elif [ "$${CONNECTOR:-}" = "none" ]; then \
 		echo "CONNECTOR=none set — skipping first-run setup"; \
 		echo "  Run later: defenseclaw init"; \
-	elif [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
-		"$(INSTALL_DIR)/defenseclaw" init --non-interactive --yes \
-			--connector "$$connector" \
-			--profile "$$profile" \
-			--scanner-mode "$${SCANNER_MODE:-local}" \
-			--no-start-gateway --verify \
-			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
-	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
-		"$(VENV)/bin/defenseclaw" init --non-interactive --yes \
-			--connector "$$connector" \
-			--profile "$$profile" \
-			--scanner-mode "$${SCANNER_MODE:-local}" \
-			--no-start-gateway --verify \
-			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 	else \
-		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
-		exit 1; \
+		if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+			dc_bin="$(INSTALL_DIR)/defenseclaw"; \
+		elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+			dc_bin="$(VENV)/bin/defenseclaw"; \
+		else \
+			echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
+			exit 1; \
+		fi; \
+		if [ -n "$${CONNECTOR:-}" ]; then \
+			if ! "$$dc_bin" init --non-interactive --yes \
+				--connector "$${CONNECTOR}" \
+				--profile "$$profile" \
+				--scanner-mode "$${SCANNER_MODE:-local}" \
+				--no-start-gateway --verify; then \
+				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+			fi; \
+		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
+			if ! "$$dc_bin" init \
+				--scanner-mode "$${SCANNER_MODE:-local}" \
+				--no-start-gateway --verify; then \
+				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+			fi; \
+		else \
+			if ! "$$dc_bin" init --non-interactive --yes \
+				--profile "$$profile" \
+				--scanner-mode "$${SCANNER_MODE:-local}" \
+				--no-start-gateway --verify; then \
+				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+			fi; \
+		fi; \
 	fi
 
 # Post-install interactive prompt for DEFENSECLAW_LLM_KEY + llm.model.

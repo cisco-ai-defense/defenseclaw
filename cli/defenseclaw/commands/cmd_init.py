@@ -29,7 +29,9 @@ import subprocess
 import click
 
 from defenseclaw import ux
+from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
     bundled_local_observability_dir,
@@ -44,6 +46,7 @@ from defenseclaw.paths import (
 @click.option("--sandbox", is_flag=True, help="Set up sandbox mode (Linux only: creates sandbox user and directories)")
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
+@click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
 @click.option(
     "--connector",
     type=click.Choice([
@@ -130,6 +133,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     sandbox: bool,
     non_interactive: bool,
     yes: bool,
+    rescan_agents: bool,
     connector: str | None,
     profile: str | None,
     scanner_mode: str,
@@ -185,6 +189,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             sandbox=sandbox,
             non_interactive=non_interactive,
             yes=yes,
+            rescan_agents=rescan_agents,
             connector=connector,
             profile=profile,
             scanner_mode=scanner_mode,
@@ -423,6 +428,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     sandbox: bool,
     non_interactive: bool,
     yes: bool,
+    rescan_agents: bool,
     connector: str | None,
     profile: str | None,
     scanner_mode: str,
@@ -467,9 +473,14 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             hilt_min_severity=hilt_min_severity,
             start_gateway=start_gateway,
             verify=verify,
+            rescan_agents=rescan_agents,
         )
 
-    connector = _normalize_connector_arg(connector)
+    connector = _normalize_connector_arg(
+        connector,
+        discover_default=True,
+        refresh_agents=rescan_agents,
+    )
     if profile is None:
         profile = "observe"
     if start_gateway is None:
@@ -527,22 +538,28 @@ def _prompt_first_run(
     hilt_min_severity: str | None,
     start_gateway: bool | None,
     verify: bool | None,
+    rescan_agents: bool,
 ) -> tuple[str, str, str, bool, str, bool | None, str | None, bool, bool]:
     ux.section("DefenseClaw First-Run Setup")
     ux.subhead(
         "This wizard writes config.yaml, then runs targeted readiness checks.",
     )
     click.echo()
-    connector_choices = [
-        "codex", "claudecode", "zeptoclaw", "openclaw",
-        "hermes", "cursor", "windsurf", "geminicli", "copilot",
-    ]
-    connector = _normalize_connector_arg(connector) if connector else click.prompt(
-        "  " + ux.bold("Connector"),
-        type=click.Choice(connector_choices, case_sensitive=False),
-        default="codex",
-        show_choices=True,
-    )
+    connector_choices = list(KNOWN_CONNECTORS)
+    if connector:
+        connector = _normalize_connector_arg(connector)
+    else:
+        disc = agent_discovery.discover_agents(refresh=rescan_agents)
+        table = agent_discovery.render_discovery_table(disc).rstrip()
+        if table:
+            click.echo(table)
+            click.echo()
+        connector = click.prompt(
+            "  Connector",
+            type=click.Choice(connector_choices, case_sensitive=False),
+            default=agent_discovery.first_installed(disc, "codex"),
+            show_choices=True,
+        )
     if profile is None:
         profile = click.prompt(
             "  " + ux.bold("Protection profile"),
@@ -629,7 +646,18 @@ def _prompt_first_run(
     )
 
 
-def _normalize_connector_arg(connector: str | None) -> str:
+def _normalize_connector_arg(
+    connector: str | None,
+    *,
+    discover_default: bool = False,
+    refresh_agents: bool = False,
+) -> str:
+    if connector is None and discover_default:
+        try:
+            disc = agent_discovery.discover_agents(refresh=refresh_agents)
+            connector = agent_discovery.first_installed(disc, "codex")
+        except Exception:
+            connector = "codex"
     value = (connector or "codex").strip().lower()
     if value in {"claude-code", "claude_code", "claude"}:
         return "claudecode"

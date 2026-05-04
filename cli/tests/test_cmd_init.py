@@ -16,20 +16,22 @@
 
 """Tests for 'defenseclaw init' command."""
 
-import os
 import json
+import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import ANY, patch, MagicMock
+from unittest.mock import ANY, MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_init import init_cmd
+from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext
+from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 
 class TestInitCommand(unittest.TestCase):
@@ -108,6 +110,23 @@ class TestInitFirstRunBackend(unittest.TestCase):
             args,
             obj=AppContext(),
             env={"DEFENSECLAW_HOME": self.tmp_dir},
+        )
+
+    def _discovery(self, installed):
+        return AgentDiscovery(
+            scanned_at="2026-05-04T18:21:00Z",
+            agents={
+                name: AgentSignal(
+                    name=name,
+                    installed=name in installed,
+                    config_path=f"/tmp/{name}.config" if name in installed else "",
+                    binary_path="",
+                    version="",
+                    error="",
+                )
+                for name in KNOWN_CONNECTORS
+            },
+            cache_hit=False,
         )
 
     def test_json_summary_codex_does_not_default_to_openclaw(self):
@@ -210,6 +229,104 @@ class TestInitFirstRunBackend(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["scanner_mode"], "remote")
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_noninteractive_no_connector_uses_codex_discovery(self, mock_discover):
+        mock_discover.return_value = self._discovery({"codex"})
+
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "codex")
+        mock_discover.assert_called_once_with(refresh=False)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["connector"], "codex")
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_noninteractive_no_connector_uses_claudecode_discovery(self, mock_discover):
+        mock_discover.return_value = self._discovery({"claudecode"})
+
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "claudecode")
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["connector"], "claudecode")
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_explicit_connector_wins_without_discovery(self, mock_discover):
+        mock_discover.side_effect = AssertionError("explicit connector should not discover")
+
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "codex")
+        mock_discover.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_rescan_agents_passes_refresh_to_discovery(self, mock_discover):
+        mock_discover.return_value = self._discovery({"claudecode"})
+
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--rescan-agents",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        mock_discover.assert_called_once_with(refresh=True)
 
 class TestInitVersionDisplay(unittest.TestCase):
     """Tests for version info in init Environment section."""
