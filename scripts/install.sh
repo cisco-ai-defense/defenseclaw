@@ -553,6 +553,10 @@ print_success() {
     if [[ "${INSTALL_SANDBOX}" == true ]] && [[ "${OS}" == "linux" ]]; then
         printf "  Get started:\n\n"
         printf "    ${CYAN}defenseclaw init --sandbox${NC}\n"
+    elif [[ "${RUN_QUICKSTART}" == true ]]; then
+        printf "  Quickstart has already run. Review its output above to confirm whether\n"
+        printf "  the guardrail was activated or still needs OpenClaw configuration.\n\n"
+        printf "    ${CYAN}defenseclaw doctor${NC}\n"
     else
         printf "  Get started:\n\n"
         printf "    ${CYAN}defenseclaw init --enable-guardrail${NC}\n"
@@ -584,7 +588,7 @@ while [[ $# -gt 0 ]]; do
         # Run ``defenseclaw quickstart --non-interactive`` after the
         # binaries land. This gives a single-command install→bootstrap
         # path: everything a user needs to go from ``curl | bash`` to a
-        # working guardrail without touching the CLI themselves.
+        # attempted guardrail activation without touching the CLI themselves.
         --quickstart) RUN_QUICKSTART=true; shift ;;
         --quickstart-mode)
             [[ $# -lt 2 ]] && die "--quickstart-mode requires a value (observe|action)"

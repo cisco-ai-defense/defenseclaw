@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 
@@ -35,6 +34,7 @@ import click
 
 from defenseclaw import __version__
 from defenseclaw.context import AppContext
+from defenseclaw.gateway import canonical_install_path, resolve_gateway_binary
 
 
 @click.command("quickstart")
@@ -252,9 +252,11 @@ def _render_bootstrap_report(report) -> None:
 
 def _start_sidecar(cfg, guardrail_ok: bool) -> None:
     """Start ``defenseclaw-gateway`` and optionally restart after guardrail patch."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = resolve_gateway_binary()
     if gw is None:
-        click.echo("        ⚠ defenseclaw-gateway not on PATH — run 'make gateway-install'")
+        click.echo("        ⚠ defenseclaw-gateway not found")
+        click.echo(f"          Expected on PATH or at {canonical_install_path()}")
+        click.echo("          Install it with 'make gateway-install' or set DEFENSECLAW_GATEWAY_BIN.")
         return
 
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")

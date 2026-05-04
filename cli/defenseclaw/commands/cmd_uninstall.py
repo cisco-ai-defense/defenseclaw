@@ -33,6 +33,7 @@ from dataclasses import dataclass
 import click
 
 from defenseclaw import config as config_module
+from defenseclaw.gateway import resolve_gateway_binary
 
 
 @dataclass
@@ -186,9 +187,9 @@ def _execute_plan(plan: UninstallPlan) -> None:
 
 
 def _stop_gateway() -> None:
-    gw = shutil.which("defenseclaw-gateway")
+    gw = resolve_gateway_binary()
     if gw is None:
-        click.echo("  · sidecar not on PATH — nothing to stop")
+        click.echo("  · sidecar binary not found — nothing to stop")
         return
     try:
         subprocess.run([gw, "stop"], capture_output=True, text=True, timeout=15)

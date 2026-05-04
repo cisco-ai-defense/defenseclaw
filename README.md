@@ -104,9 +104,14 @@ make all
 ### Install with the release script
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
-defenseclaw init --enable-guardrail
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash -s -- --quickstart
+defenseclaw doctor
 ```
+
+`--quickstart` creates the default config, seeds local policies, and starts
+the sidecar when the gateway binary is available. If OpenClaw is not installed
+yet, DefenseClaw is installed but the guardrail activation step remains a
+follow-up.
 
 For platform-specific steps, see [docs/INSTALL.md](docs/INSTALL.md).
 

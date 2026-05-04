@@ -798,7 +798,7 @@ class TestInitStartsGateway(unittest.TestCase):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None):
+        with patch("defenseclaw.commands.cmd_init.resolve_gateway_binary", return_value=None):
             app = AppContext()
             result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
             self.assertEqual(result.exit_code, 0, result.output)
@@ -812,7 +812,7 @@ class TestInitStartsGateway(unittest.TestCase):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None):
+        with patch("defenseclaw.commands.cmd_init.resolve_gateway_binary", return_value=None):
             app = AppContext()
             result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
             self.assertEqual(result.exit_code, 0, result.output)
@@ -827,7 +827,7 @@ class TestInitStartsGateway(unittest.TestCase):
         cfg.data_dir = self.tmp_dir
         logger = MagicMock()
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None):
+        with patch("defenseclaw.commands.cmd_init.resolve_gateway_binary", return_value=None):
             _start_gateway(cfg, logger)
             logger.log_action.assert_not_called()
 
@@ -843,7 +843,7 @@ class TestInitStartsGateway(unittest.TestCase):
         with open(pid_file, "w") as f:
             f.write(str(os.getpid()))
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value="/usr/bin/defenseclaw-gateway"):
+        with patch("defenseclaw.commands.cmd_init.resolve_gateway_binary", return_value="/usr/bin/defenseclaw-gateway"):
             _start_gateway(cfg, logger)
             logger.log_action.assert_not_called()
 
@@ -860,10 +860,15 @@ class TestInitStartsGateway(unittest.TestCase):
         mock_result.stderr = ""
         mock_result.stdout = ""
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-             patch("defenseclaw.commands.cmd_init.subprocess.run", return_value=mock_result), \
-             patch("defenseclaw.commands.cmd_init._check_sidecar_health"):
+        with patch(
+            "defenseclaw.commands.cmd_init.resolve_gateway_binary",
+            return_value="/usr/bin/defenseclaw-gateway",
+        ), patch(
+            "defenseclaw.commands.cmd_init.subprocess.run",
+            return_value=mock_result,
+        ) as run_mock, patch("defenseclaw.commands.cmd_init._check_sidecar_health"):
             _start_gateway(cfg, logger)
+            self.assertEqual(run_mock.call_args.args[0], ["/usr/bin/defenseclaw-gateway", "start"])
             logger.log_action.assert_called_once()
             self.assertIn("init-sidecar", logger.log_action.call_args[0])
 
@@ -880,9 +885,13 @@ class TestInitStartsGateway(unittest.TestCase):
         mock_result.stderr = "connection refused"
         mock_result.stdout = ""
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
-             patch("defenseclaw.commands.cmd_init.subprocess.run", return_value=mock_result), \
-             patch("defenseclaw.commands.cmd_init._check_sidecar_health"):
+        with patch(
+            "defenseclaw.commands.cmd_init.resolve_gateway_binary",
+            return_value="/usr/bin/defenseclaw-gateway",
+        ), patch(
+            "defenseclaw.commands.cmd_init.subprocess.run",
+            return_value=mock_result,
+        ), patch("defenseclaw.commands.cmd_init._check_sidecar_health"):
             _start_gateway(cfg, logger)
             logger.log_action.assert_not_called()
 

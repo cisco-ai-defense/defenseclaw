@@ -158,7 +158,7 @@ class VersionCommandTests(unittest.TestCase):
 
     def test_missing_gateway_reports_missing_status(self):
         runner = CliRunner()
-        with patch("defenseclaw.commands.cmd_version.shutil.which", return_value=None), \
+        with patch("defenseclaw.commands.cmd_version.resolve_gateway_binary", return_value=None), \
              patch("defenseclaw.commands.cmd_version._plugin_component") as pl:
             pl.return_value = cmd_version.Component(
                 name="plugin", version=__version__, origin="~/.openclaw",
@@ -167,6 +167,21 @@ class VersionCommandTests(unittest.TestCase):
             payload = json.loads(result.output)
             gw = next(c for c in payload["components"] if c["name"] == "gateway")
             self.assertEqual(gw["status"], "missing")
+
+    def test_gateway_component_uses_resolver_path(self):
+        with patch(
+            "defenseclaw.commands.cmd_version.resolve_gateway_binary",
+            return_value="/custom/defenseclaw-gateway",
+        ), patch(
+            "defenseclaw.commands.cmd_version.subprocess.check_output",
+            return_value="defenseclaw-gateway version 0.2.0",
+        ) as check_output:
+            component = cmd_version._gateway_component()
+
+        check_output.assert_called_once()
+        self.assertEqual(check_output.call_args.args[0][0], "/custom/defenseclaw-gateway")
+        self.assertEqual(component.version, "0.2.0")
+        self.assertEqual(component.origin, "/custom/defenseclaw-gateway")
 
 
 if __name__ == "__main__":

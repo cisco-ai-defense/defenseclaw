@@ -23,9 +23,12 @@ for full details.
 ### Install DefenseClaw
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
-defenseclaw init --enable-guardrail
+curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash -s -- --quickstart
+defenseclaw doctor
 ```
+
+If OpenClaw is not installed yet, quickstart still installs DefenseClaw and
+prints the guardrail follow-up step instead of claiming the proxy is active.
 
 ## 2. Scan
 

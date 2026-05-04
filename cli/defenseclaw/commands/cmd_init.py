@@ -28,6 +28,7 @@ import subprocess
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.gateway import canonical_install_path, resolve_gateway_binary
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
     bundled_local_observability_dir,
@@ -596,9 +597,10 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
 
 def _start_gateway(cfg, logger) -> None:
     """Start the defenseclaw-gateway sidecar and verify it is running."""
-    gw_bin = shutil.which("defenseclaw-gateway")
+    gw_bin = resolve_gateway_binary()
     if not gw_bin:
         click.echo("  Sidecar:       not found (binary not installed)")
+        click.echo(f"                 expected on PATH or at {canonical_install_path()}")
         click.echo("                 install with: make gateway-install")
         return
 
@@ -612,7 +614,7 @@ def _start_gateway(cfg, logger) -> None:
     click.echo("  Sidecar:       starting...", nl=False)
     try:
         result = subprocess.run(
-            ["defenseclaw-gateway", "start"],
+            [gw_bin, "start"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -644,7 +646,7 @@ def _start_gateway(cfg, logger) -> None:
 
 def _get_gateway_version() -> str | None:
     """Try to get the gateway binary version."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = resolve_gateway_binary()
     if not gw:
         return None
     try:
@@ -660,7 +662,7 @@ def _get_gateway_version() -> str | None:
 
 def _restart_gateway_quiet() -> None:
     """Restart the gateway sidecar silently (used after guardrail setup during init)."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = resolve_gateway_binary()
     if not gw:
         return
     try:
@@ -750,4 +752,3 @@ def _print_health_summary(health: dict | None) -> None:
         click.echo(f"  Health:        {', '.join(parts)}")
     else:
         click.echo("  Health:        ok ✓")
-
