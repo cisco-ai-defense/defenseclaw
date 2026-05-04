@@ -433,7 +433,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	_ = ctx
-	path := c.configPath(opts)
+	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path)
 	if err != nil {
 		return fmt.Errorf("%s restore config backup: %w", c.name, err)
@@ -450,7 +450,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 }
 
 func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
-	path := c.configPath(opts)
+	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -571,7 +571,9 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 	switch c.name {
 	case "hermes":
 		return removeHermesHooks(path, hookScript)
-	case "cursor", "windsurf", "geminicli", "copilot":
+	case "geminicli":
+		return removeGeminiConfigEntries(path, hookScript)
+	case "cursor", "windsurf", "copilot":
 		return removeJSONHookReferences(path, hookScript)
 	default:
 		return nil
@@ -1020,6 +1022,40 @@ func removeJSONHookReferences(path, hookScript string) error {
 		pruned = map[string]interface{}{}
 	}
 	return writeJSONObject(path, pruned)
+}
+
+func removeGeminiConfigEntries(path, hookScript string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	if pruned == nil {
+		pruned = map[string]interface{}{}
+	}
+	removeManagedGeminiTelemetry(pruned)
+	return writeJSONObject(path, pruned)
+}
+
+func removeManagedGeminiTelemetry(cfg map[string]interface{}) {
+	telemetry, ok := cfg["telemetry"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	managedBy, _ := telemetry["managedBy"].(string)
+	endpoint, _ := telemetry["otlpEndpoint"].(string)
+	if !strings.EqualFold(strings.TrimSpace(managedBy), "defenseclaw") && !strings.Contains(endpoint, "/otlp/geminicli/") {
+		return
+	}
+	for _, key := range []string{"enabled", "target", "otlpEndpoint", "protocol", "logPrompts", "managedBy"} {
+		delete(telemetry, key)
+	}
+	if len(telemetry) == 0 {
+		delete(cfg, "telemetry")
+	}
 }
 
 func removeHookScriptReferences(raw interface{}, hookScript string) interface{} {

@@ -18,6 +18,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,6 +180,105 @@ func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
 	}
 	if !strings.Contains(text, `"managedBy": "defenseclaw"`) {
 		t.Fatalf("gemini settings missing managed marker:\n%s", text)
+	}
+}
+
+func TestGeminiTeardown_DriftedConfigRemovesManagedTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "settings.json")
+	prev := GeminiSettingsPathOverride
+	GeminiSettingsPathOverride = cfgPath
+	t.Cleanup(func() { GeminiSettingsPathOverride = prev })
+
+	conn := NewGeminiCLIConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read setup config: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse setup config: %v", err)
+	}
+	cfg["userSetting"] = "keep"
+	telemetry, _ := cfg["telemetry"].(map[string]interface{})
+	if telemetry == nil {
+		t.Fatal("setup did not create telemetry object")
+	}
+	telemetry["userTelemetrySetting"] = "keep"
+	drifted, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal drifted config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(drifted, '\n'), 0o600); err != nil {
+		t.Fatalf("write drifted config: %v", err)
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	restored, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config after teardown: %v", err)
+	}
+	text := string(restored)
+	for _, forbidden := range []string{"geminicli-hook.sh", "/otlp/geminicli/", `"managedBy": "defenseclaw"`} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("teardown left managed Gemini residue %q:\n%s", forbidden, text)
+		}
+	}
+	for _, want := range []string{`"userSetting": "keep"`, `"userTelemetrySetting": "keep"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("teardown did not preserve user edit %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestHookOnlyTeardown_UsesBackedUpConfigPathWhenWorkspaceChanges(t *testing.T) {
+	dir := t.TempDir()
+	prevHooks := CopilotHooksPathOverride
+	prevWorkspace := CopilotWorkspaceDirOverride
+	CopilotHooksPathOverride = ""
+	CopilotWorkspaceDirOverride = ""
+	t.Cleanup(func() {
+		CopilotHooksPathOverride = prevHooks
+		CopilotWorkspaceDirOverride = prevWorkspace
+	})
+
+	oldWorkspace := filepath.Join(dir, "old-workspace")
+	newWorkspace := filepath.Join(dir, "new-workspace")
+	conn := NewCopilotConnector()
+	setupOpts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		WorkspaceDir: oldWorkspace,
+	}
+	if err := conn.Setup(context.Background(), setupOpts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	oldPath := filepath.Join(oldWorkspace, ".github", "hooks", "defenseclaw.json")
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("expected old workspace hook config after setup: %v", err)
+	}
+
+	teardownOpts := setupOpts
+	teardownOpts.WorkspaceDir = newWorkspace
+	if err := conn.Teardown(context.Background(), teardownOpts); err != nil {
+		t.Fatalf("Teardown with changed workspace: %v", err)
+	}
+	if _, err := os.Stat(oldPath); err == nil {
+		t.Fatalf("old workspace hook config survived teardown: %s", oldPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat old workspace hook config: %v", err)
 	}
 }
 
