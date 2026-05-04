@@ -1343,10 +1343,7 @@ func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, resu
 	}
 	sessionID := codexNotifySessionID(p)
 	if sessionID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.conversation.id", sessionID),
-			attribute.String("defenseclaw.session_id", sessionID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", sessionID))
 	}
 	span.SetAttributes(attribute.String("gen_ai.agent.name", "codex"))
 	if p.TurnID != "" {

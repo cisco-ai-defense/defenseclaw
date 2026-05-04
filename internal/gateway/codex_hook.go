@@ -163,10 +163,7 @@ func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 		return
 	}
 	if req.SessionID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.conversation.id", req.SessionID),
-			attribute.String("defenseclaw.session_id", req.SessionID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", req.SessionID))
 	}
 	agentName := strings.TrimSpace(req.AgentType)
 	if agentName == "" {

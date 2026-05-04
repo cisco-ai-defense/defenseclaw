@@ -431,7 +431,7 @@ func enrichHTTPSpanFromContext(ctx context.Context) {
 		span.SetAttributes(attribute.String("defenseclaw.request_id", id))
 	}
 	if sid := SessionIDFromContext(ctx); sid != "" {
-		span.SetAttributes(attribute.String("defenseclaw.session_id", sid))
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", sid))
 	}
 	aid := AgentIdentityFromContext(ctx)
 	if aid.AgentID != "" {

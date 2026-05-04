@@ -213,13 +213,13 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		attrs = append(attrs, log.String("defenseclaw.trace_id", e.TraceID))
 	}
 	if e.AgentID != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_id", e.AgentID))
+		attrs = append(attrs, log.String("gen_ai.agent.id", e.AgentID))
 	}
 	if e.AgentName != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_name", e.AgentName))
+		attrs = append(attrs, log.String("gen_ai.agent.name", e.AgentName))
 	}
 	if e.AgentType != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_type", e.AgentType))
+		attrs = append(attrs, log.String("gen_ai.agent.type", e.AgentType))
 	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))

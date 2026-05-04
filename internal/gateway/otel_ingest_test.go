@@ -120,7 +120,6 @@ func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"gen_ai.conversation.id": "session-123",
-		"defenseclaw.session_id": "session-123",
 	} {
 		got, ok := attrByKey(s.Attributes, key)
 		if !ok || got.AsString() != want {
