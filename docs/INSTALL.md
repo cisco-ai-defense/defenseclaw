@@ -64,6 +64,7 @@ Scope guardrails for the local Splunk preset:
   account page before it auto-enters the app without asking for credentials
 - to use full Splunk Enterprise features later, apply a valid Splunk
   Enterprise license
+- for a higher indexing limit, a free Splunk Developer License with a 10 GB/day limit is available at [dev.splunk.com](https://dev.splunk.com)
 - assume existing Splunk license limits still apply
 - do not treat it as an endorsed path to multi-instance or long-term
   deployment
