@@ -1215,21 +1215,31 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--block-message", result.output)
 
-    def test_interactive_advanced_configures_hilt(self):
+    def test_interactive_action_mode_prompts_hilt_inline(self):
+        """HILT is asked inline (not under advanced options) whenever
+        the operator selects action mode, regardless of whether they
+        opt into advanced options afterward.
+
+        Replaces the previous ``test_interactive_advanced_configures_hilt``
+        test from before HILT was hoisted out of advanced. The previous
+        wiring buried HILT under "Configure advanced options? [y/N]"
+        which defaulted to N — so first-time operators never saw the
+        prompt unless they discovered HILT existed and explicitly opted
+        into advanced. The new contract is: in action mode, every
+        guardrail setup asks about HILT.
+        """
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
         user_input = "\n".join([
             "",          # enable guardrail
             "2",         # action mode
+            "",          # hook fail-mode (default = open)
+            "y",         # human approval — INLINE PROMPT (mode == action)
+            "MEDIUM",    # approval min severity
             "",          # local scanner
             "n",         # no LLM judge
-            "y",         # configure advanced options
-            "",          # default port
-            "",          # no custom block message
-            "y",         # enable human approval
-            "MEDIUM",    # approval min severity
-            "n",         # keep redaction on
+            "n",         # decline advanced options — HILT is no longer there
             "",
         ])
         result = self.runner.invoke(
@@ -1242,6 +1252,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Human Approval (HILT)", result.output)
         self.assertIn("guardrail.hilt.enabled", result.output)
+        # Sanity: the inline-HILT prompt must run BEFORE the scanner
+        # engine, not after the advanced-options gate. We compare
+        # output offsets to lock in the intended ordering — if a
+        # future refactor shuffles sections, this test fires.
+        hilt_pos = result.output.index("Human Approval (HILT)")
+        scanner_pos = result.output.index("Scanner engine")
+        self.assertLess(hilt_pos, scanner_pos,
+            "HILT prompt must appear before the scanner engine "
+            "section in action mode (it was previously buried under "
+            "advanced options).")
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
@@ -1257,12 +1277,15 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         user_input = "\n".join([
             "",       # enable guardrail
             "2",      # action mode
+            "",       # hook fail-mode (default = open)
+            "n",      # human approval (inline) — declined
             "",       # local scanner
             "n",      # no LLM judge
             "y",      # configure advanced options
             "",       # default port
             "",       # no custom block message
-            "n",      # no human approval
+            # HILT was previously here; now hoisted inline so there
+            # is one fewer prompt under advanced.
             "y",      # disable redaction
             "y",      # acknowledge raw-content warning
             "",
@@ -1283,13 +1306,31 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["privacy"]["disable_redaction"])
         self.assertFalse(raw["guardrail"]["hilt"]["enabled"])
 
-    def test_interactive_advanced_observe_reports_hilt_inactive(self):
+    def test_interactive_observe_mode_skips_hilt_entirely(self):
+        """In observe mode the HILT prompt is skipped entirely.
+
+        Replaces the previous
+        ``test_interactive_advanced_observe_reports_hilt_inactive``
+        test which expected the ``Human approval is action-mode only``
+        short-circuit message under advanced options. With HILT now
+        hoisted inline AND gated on ``gc.mode == "action"``, observe-
+        mode operators see no HILT prompt and no inactive-mode message
+        at all — the wizard just moves on to the scanner engine.
+
+        This is intentional: the inactive-mode message made sense when
+        the call lived under "Advanced options" and the operator had
+        explicitly opted in (so ``never mind`` was useful feedback);
+        in the always-on inline placement, asking-then-immediately-
+        cancelling would look like a wizard bug.
+        """
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
         user_input = "\n".join([
             "",      # enable guardrail
-            "",      # observe mode
+            "",      # observe mode (default)
+            "",      # hook fail-mode (default = open)
+            # NO HILT prompt here — observe mode skips it entirely.
             "",      # local scanner
             "n",     # no LLM judge
             "y",     # configure advanced options
@@ -1305,7 +1346,13 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Human approval is action-mode only", result.output)
+        # Neither the active-HILT prompt nor the action-mode-only
+        # short-circuit message should appear.
+        self.assertNotIn("Human Approval (HILT)", result.output)
+        self.assertNotIn("Human approval is action-mode only", result.output)
+        self.assertNotIn("Human approval for risky actions?", result.output)
+        # HILT toggle persists at whatever it was before — since this
+        # fresh-config path starts with default False, it stays False.
         self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
 
 
