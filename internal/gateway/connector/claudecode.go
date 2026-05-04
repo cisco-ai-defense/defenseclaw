@@ -279,7 +279,7 @@ func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSig
 
 // AgentPaths reports the on-disk footprint Claude Code's connector
 // touches. The connector patches ~/.claude/settings.json (hooks
-// table), backs it up via claudecode_backup.json, and writes the
+// table), backs it up via managed + legacy backup files, and writes the
 // inspect-* + claude-code-hook.sh scripts under <DataDir>/hooks/.
 // Legacy env files (claudecode_env.sh / claudecode.env) are
 // surfaced for audit completeness even though they are scoped to
@@ -292,9 +292,12 @@ func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	}
 	return AgentPaths{
 		PatchedFiles: []string{claudeCodeSettingsPath()},
-		BackupFiles:  []string{filepath.Join(opts.DataDir, "claudecode_backup.json")},
-		HookScripts:  hooks,
-		CreatedDirs:  []string{filepath.Join(opts.DataDir, "shims")},
+		BackupFiles: []string{
+			managedFileBackupPath(opts.DataDir, c.Name(), "settings.json"),
+			filepath.Join(opts.DataDir, "claudecode_backup.json"),
+		},
+		HookScripts: hooks,
+		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }
 

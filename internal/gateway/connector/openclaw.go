@@ -551,8 +551,9 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 // AgentPaths reports the on-disk footprint OpenClaw's connector
 // touches. The connector patches ~/.openclaw/openclaw.json (allow
 // list + plugin entry) and writes the embedded extension into
-// ~/.openclaw/extensions/defenseclaw/. Hook scripts under
-// <DataDir>/hooks/ are written for proxy-side tool inspection.
+// ~/.openclaw/extensions/defenseclaw/. A managed pristine backup under
+// <DataDir>/connector_backups backs the config restore path. Hook scripts
+// under <DataDir>/hooks/ are written for proxy-side tool inspection.
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	ocHome := openClawHome()
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -562,7 +563,7 @@ func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	}
 	return AgentPaths{
 		PatchedFiles: []string{filepath.Join(ocHome, "openclaw.json")},
-		BackupFiles:  nil, // openclaw.json edits are reversible without a backup file
+		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
 		HookScripts:  hooks,
 		CreatedDirs: []string{
 			filepath.Join(ocHome, "extensions", "defenseclaw"),
