@@ -15,6 +15,7 @@ DIST_DIR    := dist
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
@@ -424,6 +425,30 @@ tui-test:
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
 
+connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
+
+go-connector-matrix-test: sync-openclaw-extension
+	go test -count=1 \
+		./internal/cli \
+		./internal/config \
+		./internal/gateway \
+		./internal/gateway/connector \
+		./internal/tui \
+		./test/e2e \
+		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
+
+py-connector-matrix-test:
+	$(VENV)/bin/python -m pytest -q \
+		cli/tests/test_agent_discovery.py \
+		cli/tests/test_cmd_guardrail_matrix.py \
+		cli/tests/test_cmd_init.py \
+		cli/tests/test_cmd_setup_mode.py \
+		cli/tests/test_codeguard_opt_in.py \
+		cli/tests/test_connector_mcp_writers.py \
+		cli/tests/test_connector_paths.py \
+		cli/tests/test_install_smoke.py \
+		cli/tests/test_scan_ux_connector_matrix.py
+
 ts-test:
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && \
@@ -473,7 +498,12 @@ check-provider-coverage:
 	@echo "==> provider coverage (Go)"
 	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
 	@echo "==> provider coverage (TS)"
-	@cd extensions/defenseclaw && npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
+	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cd $(PLUGIN_DIR) && \
+		if [ ! -x node_modules/.bin/vitest ]; then \
+			NODE_ENV=development npm ci --include=dev; \
+		fi && \
+		npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
 
 # ---------------------------------------------------------------------------

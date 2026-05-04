@@ -1708,9 +1708,9 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 # behavior for aliased options.
 @click.option("--connector", "--agent", "agent_name",
               type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False), default=None,
-              help="Agent framework connector (openclaw, claudecode, codex, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot). "
-                   "Alias: --agent. Defaults to <data_dir>/picked_connector when set "
-                   "by the installer, else filesystem auto-detection, else openclaw.")
+              help=("Agent framework connector. Alias: --agent. Defaults to "
+                    "<data_dir>/picked_connector when set by the installer, "
+                    "else filesystem auto-detection, else openclaw."))
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
 @click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None,

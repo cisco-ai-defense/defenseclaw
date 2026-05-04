@@ -44,14 +44,24 @@ EXPECTED_PROVENANCE_FIELDS = {
     "schema_version", "content_hash", "generation", "binary_version",
 }
 
-# Connector names emitted by Connector.Name() in
-# internal/gateway/connector/{openclaw,zeptoclaw,claudecode,codex}.go.
+# Connector names emitted by Connector.Name() in internal/gateway/connector.
 # The empty string is a legal "no connector picked yet" placeholder
 # emitted by the gateway before `defenseclaw setup connector` has run.
-# These four names are the contract every downstream consumer
+# These names are the contract every downstream consumer
 # (Splunk APM dashboards, OTLP collector validation, audit drill-down)
 # pivots on; drift here is a multi-week diagnostic rabbit-hole.
-EXPECTED_CLAW_MODE_ENUM = {"openclaw", "zeptoclaw", "claudecode", "codex", ""}
+EXPECTED_CLAW_MODE_ENUM = {
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "",
+}
 
 
 def load_json(path: Path) -> dict:

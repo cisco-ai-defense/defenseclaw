@@ -58,12 +58,24 @@ def codeguard_status(cfg, connector: str | None = None, target: str = "skill") -
         if _is_codeguard_skill_dir(path):
             return CodeGuardAssetStatus(connector, target, path, "installed")
         if os.path.exists(path):
-            return CodeGuardAssetStatus(connector, target, path, "conflict", "existing path is not recognizable as CodeGuard")
+            return CodeGuardAssetStatus(
+                connector,
+                target,
+                path,
+                "conflict",
+                "existing path is not recognizable as CodeGuard",
+            )
         return CodeGuardAssetStatus(connector, target, path, "missing")
     if _is_codeguard_rule_file(path):
         return CodeGuardAssetStatus(connector, target, path, "installed")
     if os.path.exists(path):
-        return CodeGuardAssetStatus(connector, target, path, "conflict", "existing file is not recognizable as CodeGuard")
+        return CodeGuardAssetStatus(
+            connector,
+            target,
+            path,
+            "conflict",
+            "existing file is not recognizable as CodeGuard",
+        )
     return CodeGuardAssetStatus(connector, target, path, "missing")
 
 
@@ -191,7 +203,11 @@ def _is_codeguard_rule_file(path: str) -> bool:
 
 
 def _looks_like_codeguard(text: str) -> bool:
-    return "CodeGuard" in text and ("CG-CRED-" in text or "Project CodeGuard" in text or "defenseclaw:codeguard" in text)
+    return "CodeGuard" in text and (
+        "CG-CRED-" in text
+        or "Project CodeGuard" in text
+        or "defenseclaw:codeguard" in text
+    )
 
 
 def _find_skill_source() -> str | None:
