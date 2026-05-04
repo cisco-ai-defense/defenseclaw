@@ -238,6 +238,7 @@ func TestEmitScanResult_RedactsFindingDescriptionAndLocation(t *testing.T) {
 	}
 	if findingRec == nil {
 		t.Fatalf("scan.finding record not emitted")
+		return
 	}
 
 	loc := attrValue(*findingRec, "defenseclaw.finding.location")

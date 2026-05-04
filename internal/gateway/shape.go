@@ -194,17 +194,22 @@ func isKnownSafeDomain(rawURL string) bool {
 	return false
 }
 
-// isPrivateHost returns true when host (a bare IP literal or
-// host:port form) resolves to an RFC 1918 / RFC 4193 / loopback /
+// isPrivateHost returns true when host (a bare IP literal, host:port
+// form, or hostname) resolves to an RFC 1918 / RFC 4193 / loopback /
 // link-local address — the SSRF short list. Accepted inputs:
 //   - bare IP literal:  "10.0.0.1", "::1", "fe80::1%eth0"
 //   - host:port form:   "10.0.0.1:8080"
 //   - bracketed v6:     "[::1]:8080"
+//   - hostname:         "internal.corp", "metadata.google.internal:80"
 //
-// Returns false for hostnames so we don't over-block legitimate LLM
-// endpoints with non-registered TLDs. DNS resolution happens at a
-// separate egress layer (future enhancement); callers must not rely
-// on this function alone as their SSRF defense.
+// PR #141 audit M1: hostnames are now resolved via net.LookupHost and
+// every returned address is checked. The previous "skip hostnames"
+// path was a DNS-rebinding hole — an attacker-controlled DNS record
+// could resolve to 169.254.169.254 (cloud metadata) or 127.0.0.1
+// (gateway loopback) and fly under the IP-literal guard. On lookup
+// failure we fail-open (return false) to preserve over-block prevention
+// for legitimate LLM endpoints; callers that need a hard guarantee
+// must layer a network-level egress allowlist on top.
 //
 // NOTE: a separate isPrivateIP(net.IP) exists in webhook.go for the
 // webhook SSRF allowlist. This function is the URL-string flavour.
@@ -221,14 +226,30 @@ func isPrivateHost(host string) bool {
 	} else if h2, _, err := net.SplitHostPort(h); err == nil {
 		h = h2
 	}
-	ip := net.ParseIP(h)
-	if ip == nil {
+	if ip := net.ParseIP(h); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return true
+		}
 		return false
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-		return true
+	// Hostname — resolve and check every returned address. A single
+	// private result is enough to flag the host: an attacker who
+	// returns multiple A records (one public, one 127.0.0.1) is
+	// trying exactly the rebinding trick this branch closes.
+	addrs, err := net.LookupHost(h)
+	if err != nil {
+		return false
 	}
-	// Cloud metadata & link-local v4 (169.254.0.0/16) are covered by IsLinkLocalUnicast.
+	for _, addr := range addrs {
+		resolved := net.ParseIP(addr)
+		if resolved == nil {
+			continue
+		}
+		if resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast() ||
+			resolved.IsLinkLocalMulticast() || resolved.IsUnspecified() {
+			return true
+		}
+	}
 	return false
 }

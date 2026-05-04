@@ -47,6 +47,7 @@ func stampEnvelope(e *gatewaylog.Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = gatewaylog.SidecarInstanceID()
 	}
+	gatewaylog.StampAgentWatchContext(e)
 }
 
 // RecordGatewayEvent derives metric observations from a single
@@ -217,11 +218,20 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 	if e.AgentName != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_name", e.AgentName))
 	}
+	if e.AgentType != "" {
+		attrs = append(attrs, log.String("defenseclaw.agent_type", e.AgentType))
+	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))
 	}
 	if e.SidecarInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.sidecar_instance_id", e.SidecarInstanceID))
+	}
+	if e.UserID != "" {
+		attrs = append(attrs, log.String("defenseclaw.user_id", e.UserID))
+	}
+	if e.UserName != "" {
+		attrs = append(attrs, log.String("defenseclaw.user_name", e.UserName))
 	}
 	if e.PolicyID != "" {
 		attrs = append(attrs, log.String("defenseclaw.policy_id", e.PolicyID))
@@ -234,6 +244,21 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 	}
 	if e.ToolID != "" {
 		attrs = append(attrs, log.String("defenseclaw.tool_id", e.ToolID))
+	}
+	if e.TenantID != "" {
+		attrs = append(attrs, log.String("defenseclaw.tenant_id", e.TenantID))
+	}
+	if e.WorkspaceID != "" {
+		attrs = append(attrs, log.String("defenseclaw.workspace_id", e.WorkspaceID))
+	}
+	if e.Environment != "" {
+		attrs = append(attrs, log.String("defenseclaw.environment", e.Environment))
+	}
+	if e.DeploymentMode != "" {
+		attrs = append(attrs, log.String("defenseclaw.deployment_mode", e.DeploymentMode))
+	}
+	if e.DiscoverySource != "" {
+		attrs = append(attrs, log.String("defenseclaw.discovery_source", e.DiscoverySource))
 	}
 	// Provenance quartet — lets downstream consumers filter by config
 	// generation / schema version without scraping the JSON body.
@@ -304,6 +329,47 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		if d := e.Diagnostic; d != nil {
 			attrs = append(attrs,
 				log.String("defenseclaw.diagnostic.component", d.Component))
+		}
+	case gatewaylog.EventLLMPrompt:
+		if p := e.LLMPrompt; p != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.llm.prompt_id", p.PromptID),
+				log.String("defenseclaw.llm.source", p.Source),
+			)
+			if p.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", p.TurnID))
+			}
+		}
+	case gatewaylog.EventLLMResponse:
+		if r := e.LLMResponse; r != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.llm.response_id", r.ResponseID),
+				log.String("defenseclaw.llm.reply_to_prompt_id", r.ReplyToPromptID),
+				log.String("defenseclaw.llm.source", r.Source),
+			)
+			if r.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", r.TurnID))
+			}
+			if len(r.FinishReasons) > 0 {
+				attrs = append(attrs, log.String("defenseclaw.llm.finish_reasons", strings.Join(r.FinishReasons, ",")))
+			}
+		}
+	case gatewaylog.EventToolInvocation:
+		if t := e.Tool; t != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.tool.phase", t.Phase),
+				log.String("defenseclaw.tool.call_id", t.ToolCallID),
+				log.String("defenseclaw.tool.source", t.Source),
+			)
+			if t.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", t.TurnID))
+			}
+			if t.ReplyToPromptID != "" {
+				attrs = append(attrs, log.String("defenseclaw.llm.reply_to_prompt_id", t.ReplyToPromptID))
+			}
+			if t.ExitCode != nil {
+				attrs = append(attrs, log.Int("defenseclaw.tool.exit_code", *t.ExitCode))
+			}
 		}
 	}
 

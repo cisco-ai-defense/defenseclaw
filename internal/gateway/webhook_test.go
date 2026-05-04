@@ -887,6 +887,7 @@ func TestCooldownNilDefaultsTo300(t *testing.T) {
 	})
 	if d == nil {
 		t.Fatal("expected non-nil dispatcher")
+		return
 	}
 	ep := &d.endpoints[0]
 	if ep.cooldown != 300*time.Second {

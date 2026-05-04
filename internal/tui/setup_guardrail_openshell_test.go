@@ -72,6 +72,7 @@ func TestSetupSections_GuardrailCoversNewRows(t *testing.T) {
 	}
 	if gr == nil {
 		t.Fatal("Guardrail section missing")
+		return
 	}
 	want := []string{
 		"guardrail.host",
@@ -198,6 +199,7 @@ func TestSetupSections_OpenShellHasTristates(t *testing.T) {
 	}
 	if os == nil {
 		t.Fatal("OpenShell section missing")
+		return
 	}
 	// Each tristate must be a kind=choice with exactly the three
 	// options "", "true", "false"; anything else means the edit

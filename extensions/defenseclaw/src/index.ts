@@ -76,6 +76,44 @@ import { loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
+type InspectVerdict = {
+  action: string;
+  raw_action?: string;
+  severity: string;
+  reason: string;
+  mode: string;
+  approval_timeout_ms?: number;
+};
+
+function approvalSeverity(severity: string): "info" | "warning" | "critical" {
+  return severity.toUpperCase() === "CRITICAL" ? "critical" : severity.toUpperCase() === "NONE" ? "info" : "warning";
+}
+
+function approvalDescription(toolName: string, verdict: InspectVerdict): string {
+  const text = `DefenseClaw flagged ${toolName}: ${verdict.reason || "matched guardrail policy"}`;
+  return text.length <= 256 ? text : `${text.slice(0, 253)}...`;
+}
+
+function approvalTimeoutMs(verdict: InspectVerdict): number | undefined {
+  const timeout = verdict.approval_timeout_ms;
+  return typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? timeout : undefined;
+}
+
+function buildApprovalRequest(toolName: string, verdict: InspectVerdict) {
+  return {
+    requireApproval: {
+      title: "DefenseClaw approval required",
+      description: approvalDescription(toolName, verdict),
+      severity: approvalSeverity(verdict.severity),
+      timeoutMs: approvalTimeoutMs(verdict),
+      timeoutBehavior: "deny" as const,
+      onResolution: (decision: string) => {
+        console.log(`[defenseclaw] approval:${decision} tool:${toolName} severity:${verdict.severity}`);
+      },
+    },
+  };
+}
+
 async function readPluginAgentSection(api: PluginApi): Promise<{
   id?: string;
   name?: string;
@@ -148,7 +186,9 @@ export default function (api: DefenseClawPluginHost) {
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   const SIDECAR_TOKEN = sidecarConfig.token;
-  const INSPECT_TIMEOUT_MS = 2_000;
+  const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
+    ? Math.max(2_000, (sidecarConfig.approvalTimeoutS + 5) * 1_000)
+    : 2_000;
 
   let identityCache: BootstrapPluginIdentityResult | undefined;
   let pluginAgentExtras: { name?: string; policyId?: string } = {};
@@ -292,30 +332,34 @@ export default function (api: DefenseClawPluginHost) {
   async function inspectTool(
     payload: Record<string, unknown>,
     toolCtx?: ToolContext,
-  ): Promise<{ action: string; severity: string; reason: string; mode: string }> {
+  ): Promise<InspectVerdict> {
+    const sessionId = toolCtx?.sessionId ?? toolCtx?.sessionKey;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), INSPECT_TIMEOUT_MS);
     const started = performance.now();
     try {
       const base = await daemonClient.buildOutboundHeaders({
         runId: toolCtx?.runId,
-        sessionId: toolCtx?.sessionId ?? toolCtx?.sessionKey,
+        sessionId,
       });
       const headers: Record<string, string> = {
         ...base,
         [HEADER_HTTP_CONTENT_TYPE]: "application/json",
       };
+      const bodyPayload = sessionId
+        ? { ...payload, session_id: sessionId, approval_surface: "native" }
+        : { ...payload, approval_surface: "native" };
       const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
         method: "POST",
         headers,
-        body: JSON.stringify(payload),
+        body: JSON.stringify(bodyPayload),
         signal: controller.signal,
       });
       daemonClient.applyStickyFromHttpResponse(res);
       const duration_ms = Math.round(performance.now() - started);
       logOutboundRequest({
         runId: toolCtx?.runId,
-        sessionId: toolCtx?.sessionId ?? toolCtx?.sessionKey,
+        sessionId,
         agentId: identityCache?.agentId ?? "unknown",
         status_code: res.status,
         duration_ms,
@@ -323,17 +367,12 @@ export default function (api: DefenseClawPluginHost) {
       if (!res.ok) {
         return { action: "allow", severity: "NONE", reason: `sidecar returned ${res.status}`, mode: "observe" };
       }
-      return (await res.json()) as {
-        action: string;
-        severity: string;
-        reason: string;
-        mode: string;
-      };
+      return (await res.json()) as InspectVerdict;
     } catch {
       const duration_ms = Math.round(performance.now() - started);
       logOutboundRequest({
         runId: toolCtx?.runId,
-        sessionId: toolCtx?.sessionId ?? toolCtx?.sessionKey,
+        sessionId,
         agentId: identityCache?.agentId ?? "unknown",
         status_code: 0,
         duration_ms,
@@ -374,6 +413,9 @@ export default function (api: DefenseClawPluginHost) {
       if (verdict.action === "block" && verdict.mode === "action") {
         return { block: true, blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}` };
       }
+      if (verdict.action === "confirm" && verdict.mode === "action") {
+        return buildApprovalRequest("outbound message", verdict);
+      }
       return;
     }
 
@@ -391,6 +433,9 @@ export default function (api: DefenseClawPluginHost) {
 
     if (verdict.action === "block" && verdict.mode === "action") {
       return { block: true, blockReason: `DefenseClaw: ${verdict.reason}` };
+    }
+    if (verdict.action === "confirm" && verdict.mode === "action") {
+      return buildApprovalRequest(event.toolName, verdict);
     }
   });
 

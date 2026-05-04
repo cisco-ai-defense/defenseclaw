@@ -172,6 +172,35 @@ audit_sinks:
     ca_cert:    /etc/ssl/certs/splunk-ca.pem
 ```
 
+For an existing remote Splunk Enterprise deployment, use the
+`splunk-enterprise` preset or the `setup splunk --enterprise` shortcut.
+The Splunk administrator must already have enabled HEC, created an active HEC
+token, and allowed the index.
+
+```bash
+defenseclaw setup splunk --enterprise \
+  --hec-endpoint https://splunk.example.com:8088/services/collector/event \
+  --hec-token "$SPLUNK_HEC_TOKEN" \
+  --index defenseclaw \
+  --non-interactive
+
+# Equivalent lower-level preset:
+defenseclaw setup observability add splunk-enterprise \
+  --endpoint https://splunk.example.com:8088/services/collector/event \
+  --token "$SPLUNK_HEC_TOKEN" \
+  --index defenseclaw \
+  --non-interactive
+```
+
+DefenseClaw does not create Splunk indexes, HEC tokens, output groups, or
+Splunk apps for this path. Client certificates/mTLS and HEC indexer
+acknowledgment tokens are out of scope for this preset.
+
+`setup splunk --enterprise` sends one best-effort live HEC probe after the
+config write. The probe creates a small synthetic event in the configured
+index and reports `200`, auth failures, or network errors without rolling back
+the config. Add `--skip-test` when configuring ahead of firewall or VPN access.
+
 ### 3.3 `otlp_logs`
 
 ```yaml
@@ -394,15 +423,42 @@ the store.
 
 ## 6. Health
 
-`defenseclaw-gateway status` reports a `Sinks` subsystem that aggregates
-every configured audit sink:
+`defenseclaw-gateway status` reports a `Sinks` subsystem with one
+human-readable line per configured sink so operators can tell at a
+glance which destinations are wired and which are toggled off.
+
+When at least one sink is enabled:
 
 ```
-Sinks:   running — 2 sinks (splunk_hec, otlp_logs)
+  Sinks:     RUNNING (since 2026-04-28T13:39:10-04:00)
+             count: 1
+             sink_01: local-otlp-logs (otlp_logs) -> 127.0.0.1:4317 [enabled]
+             summary: 1 of 1 enabled
 ```
 
-Per-sink health and failure counters are exposed on the gateway
-`/health` endpoint under `sinks.details.sinks[]`.
+When entries are configured but all toggled off:
+
+```
+  Sinks:     DISABLED (since 2026-04-28T13:39:10-04:00)
+             count: 0
+             sink_01: splunk-prod (splunk_hec) -> https://splunk.example.com:8088/services/collector/event [disabled]
+             sink_02: local-otlp-logs (otlp_logs) -> 127.0.0.1:4317 [disabled]
+             summary: 0 of 2 sink(s) enabled — flip one on with 'defenseclaw setup observability enable <name>'
+```
+
+When nothing is configured at all:
+
+```
+  Sinks:     DISABLED (since 2026-04-28T13:39:10-04:00)
+             hint: run 'defenseclaw setup local-observability' or 'defenseclaw setup observability add <preset>' to enable audit forwarding
+             summary: no audit sinks configured
+```
+
+The structured per-sink array is still exposed on the gateway
+`/health` endpoint under `sinks.details.sinks[]` for dashboards and
+the TUI; the terminal renderer skips it because the
+`sink_<NN>` scalar lines above already carry the same information in
+a one-line-per-sink shape.
 
 ---
 
@@ -626,3 +682,147 @@ Operational controls:
   cp schemas/*.json internal/gatewaylog/schemas/
   ```
   before shipping.
+
+## 9. Connector observability (codex / claudecode)
+
+DefenseClaw runs codex and Claude Code in **observability mode** by
+default: enforcement is gated off, and three telemetry channels feed
+audit events + Prometheus counters + Grafana panels without modifying
+either tool's traffic plane.
+
+### 9.1 Channels
+
+1. **Hooks** — codex `notify-bridge.sh` and Claude Code `~/.claude/
+   settings.json` `hooks` post structured JSON to
+   `/api/v1/codex/hook` and `/api/v1/claude-code/hook`. The gateway
+   persists each event under audit `action=tool-call` /
+   `action=tool-result`.
+
+2. **Native OTel** — both connectors emit OTLP-JSON over HTTP. The
+   gateway's local OTLP receiver accepts:
+   - `POST /v1/logs`     → `audit.action=otel.ingest.logs`
+   - `POST /v1/metrics`  → `audit.action=otel.ingest.metrics`
+   - `POST /v1/traces`   → `audit.action=otel.ingest.traces`
+   - Malformed body      → `audit.action=otel.ingest.malformed` (WARN)
+
+   The receiver also re-emits one OTel log record per accepted batch
+   via the gateway's own OTel pipeline so Loki / Tempo see
+   codex / claudecode telemetry directly — no audit OTLP sink
+   configuration required.
+
+3. **Codex notify** — codex calls `notify-bridge.sh` after every
+   agent turn. The bridge POSTs codex's raw JSON arg to
+   `/api/v1/codex/notify`; the gateway derives a sanitized action
+   key and persists `audit.action=codex.notify.<sanitized-type>`
+   (e.g. `codex.notify.agent-turn-complete`). Sanitization is
+   `[a-z0-9._-]{1,64}`; the schema treats this as a curated dynamic
+   suffix family (see `schemas/audit-event.json`).
+
+### 9.2 SIEM consumer guidance
+
+Audit events emitted from the new ingest paths carry the same envelope
+shape as every other audit row but expose three new top-level
+attributes worth indexing in your SIEM:
+
+| Field           | Type   | Meaning                                                                 |
+|-----------------|--------|-------------------------------------------------------------------------|
+| `action`        | enum   | One of `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
+| `actor`         | string | Self-asserted `x-defenseclaw-source` header (validated by tokenAuth before reaching the receiver). One of `codex`, `claudecode`, `unknown`. |
+| `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
+
+The matching gateway envelope events (`gateway-event-envelope.json`)
+add an `agent_telemetry` payload block (`event_type=agent_telemetry`)
+with `channel`, `source`, `result`, `records`, `bytes`, and notify
+fields. SIEM rules should join on `agent_telemetry.source` to break
+down telemetry rate per connector.
+
+### 9.3 Connector dashboard + alerts
+
+Provisioned in `bundles/local_observability_stack/`:
+
+- **DefenseClaw — Connectors** dashboard
+  (`bundles/local_observability_stack/grafana/dashboards/
+  defenseclaw-connectors.json`, uid `defenseclaw-connectors`):
+  per-connector OTLP request rate, leaf-record volume, byte rate,
+  malformed ratio, hook-vs-OTel drift, GenAI tokens / latency, and
+  the live ingest log stream.
+
+- **Recording rules** (`prometheus/rules/recording.yml` →
+  `defenseclaw.connectors` group):
+  `connector:defenseclaw_otel_ingest_requests:rate5m`,
+  `connector:defenseclaw_otel_ingest_records:rate5m`,
+  `connector:defenseclaw_otel_ingest_bytes:rate5m`,
+  `connector:defenseclaw_otel_ingest_malformed:ratio_5m`,
+  `connector:defenseclaw_otel_ingest_silence:seconds`,
+  `connector:defenseclaw_codex_notify:rate5m`,
+  `connector:defenseclaw_hooks:rate5m`,
+  `connector:defenseclaw_otel_logs:rate5m`.
+
+- **Alerts** (`prometheus/rules/alerts.yml` →
+  `defenseclaw.connectors` group):
+  - `DefenseClawConnectorTelemetrySilent` — fires when a connector
+    that has previously emitted telemetry goes silent for >10
+    minutes. Gated on `last_seen_ts` existing so a never-used
+    connector doesn't page.
+  - `DefenseClawConnectorTelemetryMalformed` — fires when >10% of
+    inbound OTLP-HTTP bodies fail to parse for 10m, indicating
+    schema drift or a misconfigured exporter.
+
+### 9.4 Toggling enforcement
+
+Observability mode keeps codex/claudecode enforcement code intact —
+the proxy simply doesn't bind. To re-enable enforcement once the
+guardrail policy is ready:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+guardrail:
+  codex_enforcement_enabled: true        # codex
+  claude_code_enforcement_enabled: true  # claude code
+```
+
+Restart the gateway. The connector setup logic re-patches
+`~/.codex/config.toml` / `~/.claude/settings.json` to point traffic
+through the proxy and persists snapshots in
+`~/.defenseclaw/state/{codex,claudecode}-config.json` so a future
+mode flip cleanly reverts both the guardrail wiring AND the OTel /
+notify glue. See `internal/gateway/connector/{codex,claudecode}.go`
+for the full backup/restore contract.
+
+### 9.5 One-shot setup aliases
+
+For operators who only want telemetry (no enforcement, no proxy
+listener), DefenseClaw exposes two dedicated CLI aliases that wrap the
+observability-only branch of `setup guardrail` and additionally pin
+`claw.mode` so the rest of the CLI/TUI surfaces the matching
+connector's source-of-truth files (`~/.codex/` or `~/.claude/`):
+
+```bash
+# Codex: hooks + native OTel + notify-bridge.sh
+defenseclaw setup codex --yes
+
+# Claude Code: hooks + native OTel exporter
+defenseclaw setup claude-code --yes
+
+# Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
+# the same step:
+defenseclaw setup codex --yes --with-local-stack
+```
+
+Both aliases persist:
+
+| Field                                         | Value             | Why                                                                    |
+|-----------------------------------------------|-------------------|------------------------------------------------------------------------|
+| `claw.mode`                                   | `codex` / `claudecode` | TUI / scanners read from `~/.codex/` or `~/.claude/` instead of the OpenClaw layout. |
+| `guardrail.connector`                         | `codex` / `claudecode` | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
+| `guardrail.codex_enforcement_enabled`         | `false`           | Keeps the proxy out of the data path even though `guardrail.enabled=true`. |
+| `guardrail.claudecode_enforcement_enabled`    | `false`           | Same as above for Claude Code.                                         |
+| `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
+| `guardrail.mode`                              | `observe`         | Sensible if-flipped-on-later default.                                  |
+| `<data_dir>/picked_connector`                 | `codex` / `claudecode` | So `defenseclaw setup guardrail` and `defenseclaw quickstart` default to the same connector on subsequent runs. |
+
+After both aliases run, the gateway is restarted (unless `--no-restart`
+is passed) so its connector setup hook scripts, OTel block, and
+(codex only) notify bridge are reconciled with the running sidecar.
+To revert and restore direct LLM access, run
+`defenseclaw setup guardrail --disable`.

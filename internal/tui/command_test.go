@@ -97,6 +97,93 @@ func TestBuildRegistry(t *testing.T) {
 	})
 }
 
+func TestBuildRegistryIncludesEnterpriseSetupSurfaces(t *testing.T) {
+	registry := BuildRegistry()
+	seen := make(map[string]CmdEntry, len(registry))
+	for _, entry := range registry {
+		seen[entry.TUIName] = entry
+	}
+
+	required := []string{
+		"init first-run",
+		"quickstart",
+		"doctor run",
+		"doctor --fix",
+		"keys set",
+		"setup redaction",
+		"setup observability add",
+		"setup local-observability reset",
+		"setup webhook add",
+		"skill search",
+		"uninstall dry-run",
+		"uninstall --all --yes",
+		"reset --yes",
+		"connector verify",
+		"connector teardown",
+		"gateway provenance show",
+	}
+	for _, name := range required {
+		if _, ok := seen[name]; !ok {
+			t.Errorf("BuildRegistry missing %q", name)
+		}
+	}
+
+	if entry := seen["doctor --fix"]; !containsArg(entry.CLIArgs, "--fix") || !containsArg(entry.CLIArgs, "--yes") {
+		t.Fatalf("doctor --fix should route to doctor --fix --yes, got %v", entry.CLIArgs)
+	}
+	if entry := seen["setup redaction"]; !entry.NeedsArg || entry.ArgHint == "" {
+		t.Fatalf("setup redaction should prompt for status/on/off, got %+v", entry)
+	}
+}
+
+func TestBuildRegistryIncludesCLINativeAliases(t *testing.T) {
+	registry := BuildRegistry()
+	seen := make(map[string]CmdEntry, len(registry))
+	for _, entry := range registry {
+		seen[entry.TUIName] = entry
+	}
+
+	required := []string{
+		"setup",
+		"setup webhook",
+		"setup observability",
+		"skill block",
+		"skill allow",
+		"skill install",
+		"mcp set",
+		"mcp unset",
+		"plugin quarantine",
+		"plugin remove",
+		"tool block",
+		"policy edit",
+		"keys",
+		"config",
+		"reset",
+		"uninstall",
+	}
+	for _, name := range required {
+		if _, ok := seen[name]; !ok {
+			t.Errorf("BuildRegistry missing CLI-native alias %q", name)
+		}
+	}
+
+	if entry := seen["mcp set"]; entry.CLIBinary != "defenseclaw" || strings.Join(entry.CLIArgs, " ") != "mcp set" {
+		t.Fatalf("mcp set should route to defenseclaw mcp set, got %+v", entry)
+	}
+	if entry := seen["skill block"]; entry.CLIBinary != "defenseclaw" || strings.Join(entry.CLIArgs, " ") != "skill block" {
+		t.Fatalf("skill block should route to defenseclaw skill block, got %+v", entry)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestMatchCommand(t *testing.T) {
 	registry := BuildRegistry()
 
@@ -154,6 +241,18 @@ func TestMatchCommand(t *testing.T) {
 			wantExtra: "evil-skill",
 		},
 		{
+			name:      "noun_first_skill_block_with_target",
+			input:     "skill block evil-skill",
+			wantTUI:   "skill block",
+			wantExtra: "evil-skill",
+		},
+		{
+			name:      "noun_first_mcp_set_with_flags",
+			input:     `mcp set context7 --url https://example.com/mcp`,
+			wantTUI:   "mcp set",
+			wantExtra: "context7 --url https://example.com/mcp",
+		},
+		{
 			name:      "daemon_start",
 			input:     "start",
 			wantTUI:   "start",
@@ -175,6 +274,12 @@ func TestMatchCommand(t *testing.T) {
 			name:      "doctor",
 			input:     "doctor",
 			wantTUI:   "doctor",
+			wantExtra: "",
+		},
+		{
+			name:      "doctor_run_alias",
+			input:     "doctor run",
+			wantTUI:   "doctor run",
 			wantExtra: "",
 		},
 		{
@@ -204,6 +309,7 @@ func TestMatchCommand(t *testing.T) {
 
 			if entry == nil {
 				t.Fatalf("expected entry for %q, got nil", tt.input)
+				return
 			}
 			if entry.TUIName != tt.wantTUI {
 				t.Errorf("TUIName = %q, want %q", entry.TUIName, tt.wantTUI)
@@ -258,6 +364,7 @@ func TestMatchCommandCLIMapping(t *testing.T) {
 			entry, extra := MatchCommand(tt.input, registry)
 			if entry == nil {
 				t.Fatalf("no match for %q", tt.input)
+				return
 			}
 			if entry.CLIBinary != tt.wantBin {
 				t.Errorf("CLIBinary = %q, want %q", entry.CLIBinary, tt.wantBin)

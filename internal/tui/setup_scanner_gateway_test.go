@@ -140,6 +140,7 @@ func TestSetupSections_ScannerShape(t *testing.T) {
 	}
 	if scanner == nil {
 		t.Fatal("Scanners section missing")
+		return
 	}
 	// Expect at least one field per scanner category.
 	want := []string{

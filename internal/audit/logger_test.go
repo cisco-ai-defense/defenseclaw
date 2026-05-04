@@ -39,7 +39,6 @@ import (
 type captureSink struct {
 	mu              sync.Mutex
 	events          []sinks.Event
-	flushImmediate  []string
 	immediateFlushC chan struct{}
 }
 
@@ -314,10 +313,7 @@ func TestLoggerSinkFlushesWatchStartImmediately(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if len(cs.snapshot()) > 0 || time.Now().After(deadline) {
-			break
-		}
+	for len(cs.snapshot()) == 0 && !time.Now().After(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 

@@ -190,3 +190,67 @@ func TestBuildWizardArgs_GuardrailSendsJudgeModelWhenChanged(t *testing.T) {
 			wantModel, args)
 	}
 }
+
+func TestGuardrailWizardFields_ExposeAdvancedApprovalAndRedaction(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.HILT.Enabled = true
+	cfg.Guardrail.HILT.MinSeverity = "MEDIUM"
+	cfg.Privacy.DisableRedaction = true
+
+	fields := (&SetupPanel{cfg: cfg}).guardrailWizardFields()
+	want := map[string]string{
+		"Human Approval":        "yes",
+		"Approval Min Severity": "MEDIUM",
+		"Disable Redaction":     "yes",
+	}
+	for label, value := range want {
+		var found *wizardFormField
+		for i := range fields {
+			if fields[i].Label == label {
+				found = &fields[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("guardrail wizard missing %q field", label)
+		}
+		if found.Value != value {
+			t.Fatalf("%s Value=%q want %q", label, found.Value, value)
+		}
+	}
+}
+
+func TestBuildWizardArgs_GuardrailPassesAdvancedApprovalAndRedaction(t *testing.T) {
+	cfg := &config.Config{}
+	p := &SetupPanel{cfg: cfg}
+	p.wizRunIdx = wizardGuardrail
+	p.wizFormFields = p.guardrailWizardFields()
+
+	for i := range p.wizFormFields {
+		switch p.wizFormFields[i].Label {
+		case "Human Approval":
+			p.wizFormFields[i].Value = "yes"
+		case "Approval Min Severity":
+			p.wizFormFields[i].Value = "MEDIUM"
+		case "Disable Redaction":
+			p.wizFormFields[i].Value = "yes"
+		}
+	}
+
+	args := p.buildWizardArgs(wizardGuardrail)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"--human-approval",
+		"--hilt-min-severity MEDIUM",
+		"--disable-redaction",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in guardrail wizard args, got %v", want, args)
+		}
+	}
+	for _, unexpected := range []string{"--no-human-approval", "--enable-redaction"} {
+		if strings.Contains(joined, unexpected) {
+			t.Fatalf("did not expect %q in guardrail wizard args, got %v", unexpected, args)
+		}
+	}
+}

@@ -94,6 +94,7 @@ func TestWebhookWizardFields_URLIsRequired(t *testing.T) {
 			}
 			if urlField == nil {
 				t.Fatalf("channel %s: no --url field", channel)
+				return
 			}
 			if !urlField.Required {
 				t.Errorf("channel %s: --url should be Required", channel)

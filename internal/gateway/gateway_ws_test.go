@@ -243,6 +243,7 @@ func TestClientConnectSuccess(t *testing.T) {
 	hello := client.Hello()
 	if hello == nil {
 		t.Fatal("Hello() should not be nil after connect")
+		return
 	}
 	if hello.Protocol != 3 {
 		t.Errorf("Protocol = %d, want 3", hello.Protocol)

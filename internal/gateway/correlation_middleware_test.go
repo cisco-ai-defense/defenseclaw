@@ -39,13 +39,14 @@ func TestContextHelpers_RoundTrip(t *testing.T) {
 // TestContextHelpers_NilSafe guards panic paths for tests that pass
 // nil contexts (we explicitly document nil is tolerated).
 func TestContextHelpers_NilSafe(t *testing.T) {
-	if got := SessionIDFromContext(nil); got != "" {
+	var nilCtx context.Context
+	if got := SessionIDFromContext(nilCtx); got != "" {
 		t.Errorf("nil ctx SessionID = %q", got)
 	}
-	if got := TraceIDFromContext(nil); got != "" {
+	if got := TraceIDFromContext(nilCtx); got != "" {
 		t.Errorf("nil ctx TraceID = %q", got)
 	}
-	if got := AgentIdentityFromContext(nil); got != (AgentIdentity{}) {
+	if got := AgentIdentityFromContext(nilCtx); got != (AgentIdentity{}) {
 		t.Errorf("nil ctx AgentIdentity = %+v", got)
 	}
 }

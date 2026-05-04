@@ -152,7 +152,7 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-ENV-DUMP
-    pattern: '(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b'
+    pattern: '(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\s+-p)\b'
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80

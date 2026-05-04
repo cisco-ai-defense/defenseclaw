@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/time/rate"
 )
 
@@ -157,6 +158,14 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 		dataDir:   t.TempDir(),
 		inspector: insp,
 		mode:      mode,
+		// Plan B2 / S0.2: production paths fail closed when the
+		// gateway token is empty. The legacy fixtures in this file
+		// construct a proxy directly without going through
+		// NewGuardrailProxy (no token synthesis), so flip the
+		// test-only bypass; the auth behavior itself is covered by
+		// dedicated TestTokenAuth_* / TestProxyAuth_* tests that
+		// leave skipAuthForTest false.
+		skipAuthForTest: true,
 	}
 	// Inject the mock provider — bypasses header-based resolution.
 	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return prov }
@@ -166,6 +175,7 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 func postChat(t *testing.T, proxy *GuardrailProxy, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	proxy.handleChatCompletion(rec, req)
@@ -983,6 +993,9 @@ func TestProxyEdgeCases(t *testing.T) {
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
 		proxy.masterKey = "secret-key-123"
+		// This sub-test specifically exercises the auth path, so
+		// undo the test-only bypass that newTestProxy installs.
+		proxy.skipAuthForTest = false
 
 		reqBody := mustJSON(t, map[string]interface{}{
 			"model":    "gpt-4",
@@ -3107,5 +3120,321 @@ func TestResponsesTextFromContent_PrettyPrintedArray(t *testing.T) {
 	got := responsesTextFromContent(content)
 	if got != "hello" {
 		t.Errorf("responsesTextFromContent with leading whitespace = %q, want %q", got, "hello")
+	}
+}
+
+// hydrateConnectorSignals must let a native-binary connector (zeptoclaw —
+// no fetch interceptor) supply the upstream URL and provider key that the
+// rest of the proxy's header-based resolver needs. Returning empty strings
+// means "leave req.TargetURL / req.TargetAPIKey alone", so fetch-interceptor
+// paths are not affected.
+func TestHydrateConnectorSignals_UsesConnectorRoute(t *testing.T) {
+	conn := connector.NewZeptoClawConnector()
+	conn.SetProviderSnapshot(map[string]connector.ZeptoClawProviderEntry{
+		"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-test"},
+	})
+
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"anthropic/claude-sonnet-4.5"}`)))
+	body := []byte(`{"model":"anthropic/claude-sonnet-4.5"}`)
+
+	upstream, key := hydrateConnectorSignals(conn, r, body)
+	if upstream != "https://openrouter.ai/api/v1" {
+		t.Errorf("upstream = %q, want openrouter fallback", upstream)
+	}
+	if key != "sk-or-test" {
+		t.Errorf("key = %q, want openrouter snapshot key", key)
+	}
+}
+
+func TestHydrateConnectorSignals_NilConnectorIsNoOp(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{}`)))
+	upstream, key := hydrateConnectorSignals(nil, r, []byte(`{}`))
+	if upstream != "" || key != "" {
+		t.Errorf("nil connector should return empty, got upstream=%q key=%q", upstream, key)
+	}
+}
+
+func TestHydrateConnectorSignals_NoSnapshotIsNoOp(t *testing.T) {
+	// OpenClaw uses fetch-interceptor headers; its Route() does not emit
+	// RawUpstream. Hydration must leave req.TargetURL alone in that case.
+	conn := connector.NewOpenClawConnector()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"gpt-4"}`)))
+	upstream, key := hydrateConnectorSignals(conn, r, []byte(`{"model":"gpt-4"}`))
+	if upstream != "" || key != "" {
+		t.Errorf("fetch-interceptor connector should emit no upstream, got upstream=%q key=%q", upstream, key)
+	}
+}
+
+// TestHydrateConnectorSignals_PerConnector — plan E1 / item 2.
+//
+// Closes the four-cell hydration matrix the plan called for:
+//
+//   - openclaw   — fetch-interceptor; Route() does not emit RawUpstream.
+//   - claudecode — fetch-interceptor; Route() does not emit RawUpstream.
+//   - zeptoclaw  — native binary; Route() resolves upstream from the
+//     provider snapshot captured at Setup.
+//   - codex      — native binary; Route() resolves upstream from the
+//     provider snapshot captured at Setup.
+//
+// The snapshot-vs-fetch-interceptor split is a per-connector contract,
+// not a runtime negotiation, so this test pins the four cells in one
+// place to keep regressions loud (e.g. someone removing
+// resolveUpstream() from a connector that used to need it would
+// silently fall through to "let the OpenAI-compat default fire" and
+// hit the wrong upstream).
+func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
+	cases := []struct {
+		name     string
+		build    func() connector.Connector
+		wantURL  string
+		wantKey  string
+		wantHas  bool // true → expect non-empty upstream + key
+		bodyJSON string
+	}{
+		{
+			name:     "openclaw_fetch_interceptor_no_snapshot",
+			build:    func() connector.Connector { return connector.NewOpenClawConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"gpt-4"}`,
+		},
+		{
+			name:     "claudecode_fetch_interceptor_no_snapshot",
+			build:    func() connector.Connector { return connector.NewClaudeCodeConnector() },
+			wantHas:  false,
+			bodyJSON: `{"model":"claude-3-5-sonnet-20241022"}`,
+		},
+		{
+			name: "zeptoclaw_snapshot_drives_upstream",
+			build: func() connector.Connector {
+				c := connector.NewZeptoClawConnector()
+				c.SetProviderSnapshot(map[string]connector.ZeptoClawProviderEntry{
+					"openrouter": {APIBase: "https://openrouter.ai/api/v1", APIKey: "sk-or-zc"},
+				})
+				return c
+			},
+			wantURL:  "https://openrouter.ai/api/v1",
+			wantKey:  "sk-or-zc",
+			wantHas:  true,
+			bodyJSON: `{"model":"anthropic/claude-sonnet-4.5"}`,
+		},
+		{
+			name: "codex_snapshot_drives_upstream",
+			build: func() connector.Connector {
+				c := connector.NewCodexConnector()
+				c.SetProviderSnapshot(map[string]connector.CodexProviderEntry{
+					"openai": {
+						BaseURL: "https://api.openai.com/v1",
+						APIKey:  "sk-codex-snap",
+					},
+				})
+				return c
+			},
+			wantURL:  "https://api.openai.com/v1",
+			wantKey:  "sk-codex-snap",
+			wantHas:  true,
+			bodyJSON: `{"model":"gpt-5"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.build()
+			r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(tc.bodyJSON)))
+			upstream, key := hydrateConnectorSignals(conn, r, []byte(tc.bodyJSON))
+			if tc.wantHas {
+				if upstream != tc.wantURL {
+					t.Errorf("upstream = %q, want %q", upstream, tc.wantURL)
+				}
+				if key != tc.wantKey {
+					t.Errorf("key = %q, want %q", key, tc.wantKey)
+				}
+			} else {
+				if upstream != "" || key != "" {
+					t.Errorf("fetch-interceptor connector %q should emit no upstream, got upstream=%q key=%q",
+						conn.Name(), upstream, key)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectorPrefixStripper(t *testing.T) {
+	reg := connector.NewDefaultRegistry()
+
+	cases := []struct {
+		path       string
+		want       string
+		wantStatus int
+	}{
+		{"/c/claudecode/v1/messages", "/v1/messages", 0},
+		{"/c/zeptoclaw/v1/chat/completions", "/v1/chat/completions", 0},
+		{"/c/codex/v1/responses", "/v1/responses", 0},
+		{"/c/openclaw/v1/messages", "/v1/messages", 0},
+		{"/v1/messages", "/v1/messages", 0},
+		{"/v1/chat/completions", "/v1/chat/completions", 0},
+		{"/health", "/health", 0},
+		{"/c/", "/c/", 0},
+		{"/c/claudecode", "/c/claudecode", 0},
+		{"/c/unknown/v1/messages", "", http.StatusNotFound},
+		{"/c/../v1/messages", "", http.StatusBadRequest},
+		{"/c//claudecode/v1/messages", "", http.StatusBadRequest},
+		{"/c/foo%2f..%2fadmin", "", http.StatusBadRequest},
+		{"/c/claudecode%2f..%2fadmin/v1/messages", "", http.StatusBadRequest},
+	}
+
+	for _, tc := range cases {
+		var got string
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+		})
+		handler := connectorPrefixStripper(inner, reg)
+		req, _ := http.NewRequest("POST", "http://localhost"+tc.path, nil)
+		rec := httptest.NewRecorder()
+		got = ""
+		handler.ServeHTTP(rec, req)
+		if tc.wantStatus != 0 {
+			if rec.Code != tc.wantStatus {
+				t.Errorf("connectorPrefixStripper(%q) status = %d, want %d", tc.path, rec.Code, tc.wantStatus)
+			}
+		} else if got != tc.want {
+			t.Errorf("connectorPrefixStripper(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
+	if !connector.OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+
+	// Start with codex as the active connector.
+	codexConn, _ := reg.Get("codex")
+	codexConn.SetCredentials("tok", "mk")
+
+	p := &GuardrailProxy{
+		connector:    codexConn,
+		registry:     reg,
+		gatewayToken: "tok",
+		masterKey:    "mk",
+		setupOpts: connector.SetupOpts{
+			DataDir:   dir,
+			ProxyAddr: "127.0.0.1:4000",
+			APIAddr:   "127.0.0.1:18970",
+		},
+		health: NewSidecarHealth(),
+	}
+
+	if p.connector.Name() != "codex" {
+		t.Fatalf("initial connector = %q, want codex", p.connector.Name())
+	}
+
+	// Switch to openclaw via runtime config.
+	p.switchConnectorLocked("openclaw")
+
+	if p.connector.Name() != "openclaw" {
+		t.Errorf("connector after switch = %q, want openclaw", p.connector.Name())
+	}
+
+	saved := connector.LoadActiveConnector(dir)
+	if saved != "openclaw" {
+		t.Errorf("persisted state = %q, want openclaw", saved)
+	}
+}
+
+func TestSwitchConnectorLocked_SameConnectorIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+	}
+
+	// No state file should be written for a no-op switch.
+	p.switchConnectorLocked("codex")
+
+	if saved := connector.LoadActiveConnector(dir); saved != "" {
+		t.Errorf("no-op switch should not write state, got %q", saved)
+	}
+}
+
+func TestSwitchConnectorLocked_UnknownConnectorIgnored(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+	}
+
+	p.switchConnectorLocked("nonexistent")
+
+	if p.connector.Name() != "codex" {
+		t.Errorf("connector should remain codex after unknown switch, got %q", p.connector.Name())
+	}
+}
+
+func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
+	if !connector.OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, _ := reg.Get("codex")
+	codexConn.SetCredentials("tok", "mk")
+
+	p := &GuardrailProxy{
+		connector:    codexConn,
+		registry:     reg,
+		gatewayToken: "tok",
+		masterKey:    "mk",
+		setupOpts: connector.SetupOpts{
+			DataDir:   dir,
+			ProxyAddr: "127.0.0.1:4000",
+			APIAddr:   "127.0.0.1:18970",
+		},
+		health:    NewSidecarHealth(),
+		inspector: NewGuardrailInspector("local", nil, nil, ""),
+	}
+
+	cfg := map[string]string{"connector": "openclaw"}
+	p.applyRuntime(cfg)
+
+	if p.connector.Name() != "openclaw" {
+		t.Errorf("connector after applyRuntime = %q, want openclaw", p.connector.Name())
+	}
+}
+
+func TestIsValidConnectorName(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"claudecode", true},
+		{"codex", true},
+		{"a-b-c", true},
+		{"abc123", true},
+		{"", false},
+		{"UPPERCASE", false},
+		{"foo/bar", false},
+		{"foo..bar", false},
+		{"foo%2fbar", false},
+		{strings.Repeat("a", 65), false},
+		{strings.Repeat("a", 64), true},
+	}
+	for _, tt := range tests {
+		got := isValidConnectorName(tt.name)
+		if got != tt.valid {
+			t.Errorf("isValidConnectorName(%q) = %v, want %v", tt.name, got, tt.valid)
+		}
 	}
 }

@@ -267,3 +267,51 @@ groups:
           description: |
             A recent config reload failed. The previous config is still
             active, but the operator-facing change did not take effect.
+
+  - name: defenseclaw.connectors
+    rules:
+      # Pages when a connector that *was* emitting OTLP-HTTP telemetry
+      # has been silent for >10 minutes. Gated on the last_seen series
+      # existing — never-used connectors don't have a series, so
+      # `connector:defenseclaw_otel_ingest_silence:seconds` returns no
+      # rows and the alert stays quiet. This is the difference
+      # between "connector was set up and broke" (page) and "connector
+      # was never set up" (don't page).
+      - alert: DefenseClawConnectorTelemetrySilent
+        expr: connector:defenseclaw_otel_ingest_silence:seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+          surface: connectors
+        annotations:
+          summary: "Connector {{ $labels.source }} silent on {{ $labels.signal }} for >10m"
+          description: |
+            The OTLP-HTTP receiver hasn't seen a {{ $labels.signal }}
+            batch from {{ $labels.source }} in over 10 minutes despite
+            having received one previously this process lifetime.
+            Either the connector process exited, the user disabled
+            observability mode, or the gateway token / CSRF header
+            mapping drifted. Open the Connector Telemetry dashboard
+            and inspect the audit log for `otel.ingest.malformed`
+            events around the silence window.
+
+      # Pages when malformed payloads dominate a signal/source pair —
+      # i.e. codex or claudecode is sending broken bodies and the
+      # gateway is dropping them. The ratio recording rule includes
+      # the implicit floor (clamp_min on denominator) so quiet sources
+      # don't trigger.
+      - alert: DefenseClawConnectorTelemetryMalformed
+        expr: connector:defenseclaw_otel_ingest_malformed:ratio_5m > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          surface: connectors
+        annotations:
+          summary: "Connector {{ $labels.source }} {{ $labels.signal }} malformed-rate >10%"
+          description: |
+            More than 10% of {{ $labels.signal }} batches from
+            {{ $labels.source }} failed JSON parsing in the last 5
+            minutes. This usually means a connector upgrade introduced
+            schema drift or the operator set a non-OTLP exporter
+            endpoint by mistake. Inspect Loki for matching
+            `defenseclaw.otel.ingest.malformed` log records.

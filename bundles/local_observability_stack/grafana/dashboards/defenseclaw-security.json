@@ -166,7 +166,7 @@
       "description": "OTel GenAI semconv: gen_ai.client.token.usage",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 49, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_tokens_sum[$__rate_interval]))", "legendFormat": "{{gen_ai_request_model}} {{gen_ai_token_type}}", "refId": "A"}]
+      "targets": [{"expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_sum[$__rate_interval]))", "legendFormat": "{{gen_ai_request_model}} {{gen_ai_token_type}}", "refId": "A"}]
     },
     {
       "type": "timeseries",

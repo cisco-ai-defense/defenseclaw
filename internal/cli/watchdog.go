@@ -151,7 +151,11 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	}
 	defer func() {
 		if tel != nil {
-			if err := tel.Shutdown(context.Background()); err != nil {
+			// Filter the "collector unreachable" flavours so a
+			// half-configured OTel block (the most common case) does
+			// not produce a stderr banner every time the watchdog
+			// exits. See isTransientOTelShutdownError for the rationale.
+			if err := tel.Shutdown(context.Background()); err != nil && !isTransientOTelShutdownError(err) {
 				fmt.Fprintf(os.Stderr, "[watchdog] warn: otel shutdown: %v\n", err)
 			}
 		}

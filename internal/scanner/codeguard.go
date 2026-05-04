@@ -103,7 +103,7 @@ func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 
 func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
-	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
+	_, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
 	exitCode := 0
 	var scanErr error
 	var result *ScanResult

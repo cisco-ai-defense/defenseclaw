@@ -99,12 +99,14 @@ def scan(
       defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml\n
       defenseclaw plugin scan /path/to/plugin --profile strict --lenient
     """
+    from defenseclaw.commands import _scan_ui
     from defenseclaw.scanner.plugin import PluginScannerWrapper
 
-    scan_dir = _resolve_plugin_dir(name_or_path, app.cfg.plugin_dir)
+    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    scan_dir = _resolve_plugin_dir(name_or_path, app.cfg.plugin_dir, connector)
     if not scan_dir:
         click.echo(f"error: plugin not found: {name_or_path}", err=True)
-        click.echo("  Provide a path, a DefenseClaw plugin name, or an OpenClaw plugin name.", err=True)
+        click.echo(f"  Provide a path, a DefenseClaw plugin name, or a {connector} plugin name.", err=True)
         raise SystemExit(1)
 
     # Build scan options from CLI flags + config
@@ -117,6 +119,21 @@ def scan(
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+
+    # S6.2 — surface the connector and the concrete category list
+    # before kicking off the scan, so operators see what's being
+    # checked instead of an opaque "[plugin] scanning..." line.
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    ctx = _scan_ui.ScanContext.for_plugin(
+        connector=connector,
+        paths=[scan_dir],
+        as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=1)
     if not as_json:
         flags = []
         if policy_name:
@@ -126,8 +143,8 @@ def scan(
             flags.append(f"llm={model}")
         if profile:
             flags.append(f"profile={profile}")
-        flag_str = f" ({', '.join(flags)})" if flags else ""
-        click.echo(f"[plugin] scanning {scan_dir}{flag_str}...")
+        if flags:
+            click.echo(f"  Options: {', '.join(flags)}")
 
     try:
         result = scanner.scan(scan_dir, **scan_options)
@@ -141,25 +158,51 @@ def scan(
         app.logger.log_scan(result)
 
     if as_json:
+        # JSON contract is locked: ScanResult.to_json() — automation
+        # parses it. Don't reshape via render_json_payload here.
         click.echo(result.to_json())
-    elif result.is_clean():
-        click.secho(f"  Plugin: {os.path.basename(scan_dir)}", bold=True)
-        click.secho("  Verdict: CLEAN", fg="green")
-    else:
-        sev = result.max_severity()
-        color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
-        click.secho(f"  Plugin:   {os.path.basename(scan_dir)}", bold=True)
-        click.echo(f"  Duration: {result.duration.total_seconds():.2f}s")
-        click.secho(f"  Verdict:  {sev} ({len(result.findings)} findings)", fg=color)
-        click.echo()
-        for f in result.findings:
-            sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
-            click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
-            click.echo(f" {f.title}")
-            if f.location:
-                click.echo(f"      Location: {f.location}")
-            if f.remediation:
-                click.echo(f"      Fix: {f.remediation}")
+        return
+
+    target_name = os.path.basename(scan_dir)
+    if result.is_clean():
+        _scan_ui.render_per_target_status(
+            ctx,
+            target=target_name,
+            verdict=_scan_ui.VERDICT_CLEAN,
+            findings=0,
+        )
+        _scan_ui.render_summary(
+            ctx,
+            clean=1, blocked=0, errored=0, total=1,
+            duration_ms=int(result.duration.total_seconds() * 1000),
+        )
+        return
+
+    sev = result.max_severity()
+    _scan_ui.render_per_target_status(
+        ctx,
+        target=target_name,
+        verdict=_scan_ui.VERDICT_BLOCKED,
+        detail=f"max severity: {sev}",
+        findings=len(result.findings),
+    )
+    click.echo()
+    for f in result.findings:
+        sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
+        click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+        click.echo(f" {f.title}")
+        if f.location:
+            click.echo(f"      Location: {f.location}")
+        if f.remediation:
+            click.echo(f"      Fix: {f.remediation}")
+    _scan_ui.render_summary(
+        ctx,
+        clean=0,
+        blocked=1,
+        errored=0,
+        total=1,
+        duration_ms=int(result.duration.total_seconds() * 1000),
+    )
 
 
 def _build_scan_options(
@@ -269,6 +312,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
             name=plugin_name,
             source_path=pre_install_source,
             fallback_actions=app.cfg.plugin_actions,
+            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            asset_policy=app.cfg.asset_policy,
         )
 
     # --- Block list check ---
@@ -363,6 +408,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
                     source_path=provenance_path,
                     scan_result=result,
                     fallback_actions=app.cfg.plugin_actions,
+                    connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+                    asset_policy=app.cfg.asset_policy,
                 )
 
                 if post_decision.verdict == "allowed":
@@ -459,28 +506,46 @@ def _print_install_result(name: str, result) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @pass_ctx
 def list_plugins(app: AppContext, as_json: bool) -> None:
-    """List installed plugins (DefenseClaw + OpenClaw) with scan severity."""
-    plugins = _merge_all_plugins(app.cfg.plugin_dir)
+    """List installed plugins for the active connector with scan severity."""
+    # Use ``active_connector()`` (guardrail.connector → claw.mode → openclaw)
+    # so the connector string used for phantom-row gating matches what the
+    # data layer (``cfg.plugin_dirs()``) is actually walking. The legacy
+    # ``guardrail.connector``-only read missed installs configured solely
+    # via ``claw.mode``.
+    connector = (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+    )
+    # Plan C6: pass the full cfg so _merge_all_plugins can consult
+    # cfg.plugin_dirs() for host-side plugin enumeration. Falls back
+    # to None for callers that have not migrated.
+    plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
     scan_map = _build_plugin_scan_map(app.store)
     actions_map = _build_plugin_actions_map(app.store)
 
-    if not plugins and not scan_map:
-        click.echo("No plugins found. Is openclaw installed?")
+    if not plugins and (connector != "openclaw" or not scan_map):
+        click.echo(f"No plugins found. Check your {connector} installation and plugin directories.")
         return
 
     known_ids = {p["id"] for p in plugins}
-    for scan_id in scan_map:
-        if scan_id not in known_ids:
-            plugins.append({
-                "id": scan_id,
-                "name": scan_id,
-                "description": "",
-                "version": "",
-                "origin": "scan-history",
-                "enabled": False,
-                "source": "scan-history",
-            })
-            known_ids.add(scan_id)
+    # Phantom scan-history rows are connector-untagged in the shared audit
+    # DB and were historically OpenClaw-owned. Showing them on a
+    # non-OpenClaw connector would leak OpenClaw plugins into the Codex /
+    # Claude Code / ZeptoClaw view (the bug users reported on the Skills
+    # tab also applies to Plugins). Only inject them when the active
+    # connector is OpenClaw.
+    if connector == "openclaw":
+        for scan_id in scan_map:
+            if scan_id not in known_ids:
+                plugins.append({
+                    "id": scan_id,
+                    "name": scan_id,
+                    "description": "",
+                    "version": "",
+                    "origin": "scan-history",
+                    "enabled": False,
+                    "source": "scan-history",
+                })
+                known_ids.add(scan_id)
 
     if as_json:
         _print_plugin_list_json(plugins, scan_map, actions_map)
@@ -492,11 +557,23 @@ def list_plugins(app: AppContext, as_json: bool) -> None:
     hint("Scan a plugin:  defenseclaw plugin scan <name>")
 
 
-def _merge_all_plugins(plugin_dir: str) -> list[dict[str, Any]]:
-    """Build a unified plugin list from DefenseClaw + OpenClaw sources.
+def _merge_all_plugins(
+    plugin_dir: str,
+    connector: str = "",
+    *,
+    cfg: Any = None,
+) -> list[dict[str, Any]]:
+    """Build a unified plugin list from DefenseClaw + connector sources.
 
     Each entry carries both ``id`` (directory basename, matches scan DB
-    targets) and ``name`` (human-readable display name from OpenClaw).
+    targets) and ``name`` (human-readable display name).
+
+    Plan C6: when *cfg* is provided AND the active connector is not
+    OpenClaw, host-agent plugins are enumerated via cfg.plugin_dirs()
+    and tagged ``source: "host:<connector>"`` so the merged list
+    distinguishes managed-by-DefenseClaw plugins from host-owned
+    ones. cfg=None is supported for back-compat with existing tests
+    that mock _list_openclaw_plugins directly.
     """
     plugins: list[dict[str, Any]] = []
 
@@ -511,7 +588,7 @@ def _merge_all_plugins(plugin_dir: str) -> list[dict[str, Any]]:
             "source": "defenseclaw",
         })
 
-    for p in _list_openclaw_plugins():
+    for p in _list_openclaw_plugins(connector):
         plugins.append({
             "id": p.get("id", ""),
             "name": p.get("name") or p.get("id", "unknown"),
@@ -521,6 +598,17 @@ def _merge_all_plugins(plugin_dir: str) -> list[dict[str, Any]]:
             "enabled": p.get("enabled", False),
             "source": "openclaw",
         })
+
+    # Plan C6: matrix §5 — surface host-owned plugins for non-OpenClaw
+    # connectors. We de-dup by id against DefenseClaw-managed plugins:
+    # a DefenseClaw plugin with the same id wins (it's our copy).
+    if cfg is not None:
+        seen_ids = {p["id"] for p in plugins}
+        for hp in _list_host_plugins(connector, cfg):
+            if hp["id"] in seen_ids:
+                continue
+            seen_ids.add(hp["id"])
+            plugins.append(hp)
 
     return plugins
 
@@ -646,13 +734,13 @@ def _print_plugin_list_table(
     console.print(table)
 
 
-def _resolve_plugin_dir(name_or_path: str, plugin_dir: str) -> str | None:
+def _resolve_plugin_dir(name_or_path: str, plugin_dir: str, connector: str = "") -> str | None:
     """Resolve a plugin name or path to a directory on disk.
 
     Resolution order:
       1. Literal path (already a directory)
       2. Subdirectory under DefenseClaw's plugin_dir
-      3. OpenClaw plugin by name (``openclaw plugins info <name> --json``)
+      3. Connector plugin by name (openclaw CLI or filesystem)
     """
     if os.path.isdir(name_or_path):
         return name_or_path
@@ -662,7 +750,7 @@ def _resolve_plugin_dir(name_or_path: str, plugin_dir: str) -> str | None:
         return candidate
 
     for lookup in dict.fromkeys([name_or_path, name_or_path.lower()]):
-        info = _get_openclaw_plugin_info(lookup)
+        info = _get_openclaw_plugin_info(lookup, connector)
         if info:
             root = info.get("rootDir") or info.get("source", "")
             if root:
@@ -681,47 +769,50 @@ def _resolve_plugin_dir(name_or_path: str, plugin_dir: str) -> str | None:
     return None
 
 
-def _get_openclaw_plugin_info(name: str) -> dict | None:
-    """Run ``openclaw plugins info <name> --json`` and return the plugin dict."""
-    try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
-        proc = subprocess.run(
-            [*prefix, openclaw_bin(), "plugins", "info", name, "--json"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-
-    if proc.returncode != 0:
-        return None
-
-    for stream in (proc.stdout, proc.stderr):
-        text = (stream or "").strip()
-        if not text:
-            continue
+def _get_openclaw_plugin_info(name: str, connector: str = "") -> dict | None:
+    """Get plugin info — uses openclaw CLI for OpenClaw, filesystem for others."""
+    if connector in ("", "openclaw"):
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            idx = text.find("{")
-            if idx < 0:
+            from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+            prefix = openclaw_cmd_prefix()
+            proc = subprocess.run(
+                [*prefix, openclaw_bin(), "plugins", "info", name, "--json"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+
+        if proc.returncode != 0:
+            return None
+
+        for stream in (proc.stdout, proc.stderr):
+            text = (stream or "").strip()
+            if not text:
                 continue
             try:
-                data = json.loads(text[idx:])
-            except (json.JSONDecodeError, ValueError):
-                continue
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                idx = text.find("{")
+                if idx < 0:
+                    continue
+                try:
+                    data = json.loads(text[idx:])
+                except (json.JSONDecodeError, ValueError):
+                    continue
 
-        if isinstance(data, dict):
-            return data.get("plugin", data)
+            if isinstance(data, dict):
+                return data.get("plugin", data)
+
+        return None
 
     return None
 
 
-def _resolve_openclaw_plugin_id(name: str) -> str:
-    """Resolve a user-provided plugin name to the actual OpenClaw plugin ID.
+def _resolve_openclaw_plugin_id(name: str, connector: str = "") -> str:
+    """Resolve a user-provided plugin name to the actual plugin ID.
 
-    Handles formats like ``@openclaw/xai-plugin`` → ``xai``,
-    ``xai-plugin`` → ``xai``, or returns the name unchanged if already valid.
+    Handles formats like ``@openclaw/xai-plugin`` -> ``xai``,
+    ``xai-plugin`` -> ``xai``, or returns the name unchanged if already valid.
     """
     bare = name
     if "/" in bare:
@@ -732,7 +823,7 @@ def _resolve_openclaw_plugin_id(name: str) -> str:
         if bare.endswith(suffix):
             candidates.append(bare[: -len(suffix)])
 
-    plugins = _list_openclaw_plugins()
+    plugins = _list_openclaw_plugins(connector)
     ids = {p.get("id", "") for p in plugins}
     names_to_id = {p.get("name", ""): p.get("id", "") for p in plugins}
 
@@ -745,10 +836,10 @@ def _resolve_openclaw_plugin_id(name: str) -> str:
     return bare
 
 
-def _plugin_runtime_candidates(name: str) -> list[str]:
+def _plugin_runtime_candidates(name: str, connector: str = "") -> list[str]:
     bare = os.path.basename(name)
     candidates: list[str] = []
-    for candidate in (bare, _resolve_openclaw_plugin_id(name)):
+    for candidate in (bare, _resolve_openclaw_plugin_id(name, connector)):
         if candidate and candidate not in candidates:
             candidates.append(candidate)
     for suffix in ("-plugin", "-provider"):
@@ -784,8 +875,135 @@ def _list_defenseclaw_plugins(plugin_dir: str) -> list[str]:
     )
 
 
-def _list_openclaw_plugins() -> list[dict]:
-    """Query ``openclaw plugins list --json`` for the active OpenClaw plugins."""
+# _HOST_PLUGIN_MANIFEST_FILES — plan C6 / matrix #3. Each host agent
+# declares a plugin via one of these manifest filenames inside the
+# plugin directory. We try each in order; the first hit wins. Keep
+# this list narrow — adding a globbed extension here invites both
+# false positives (treating a config file as a plugin) and DoS
+# (large directory walks during ``plugin list``).
+_HOST_PLUGIN_MANIFEST_FILES = (
+    "plugin.json",
+    "plugin.yaml",
+    "plugin.yml",
+    "package.json",
+    "manifest.json",
+)
+
+
+def _read_host_plugin_manifest(plugin_path: str) -> dict[str, Any] | None:
+    """Try each known manifest filename inside *plugin_path*.
+
+    Returns a dict with at least ``id`` populated, or None if no
+    manifest exists. We never raise on a malformed manifest — a
+    broken plugin should not break ``defenseclaw plugin list`` for
+    the rest of the host's plugins.
+    """
+    for fname in _HOST_PLUGIN_MANIFEST_FILES:
+        manifest_path = os.path.join(plugin_path, fname)
+        if not os.path.isfile(manifest_path):
+            continue
+        try:
+            with open(manifest_path) as fh:
+                if fname.endswith((".yaml", ".yml")):
+                    import yaml as _yaml
+
+                    raw = _yaml.safe_load(fh) or {}
+                else:
+                    raw = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        return raw
+    return None
+
+
+def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
+    """Walk one level under *host_dir* and emit one dict per plugin.
+
+    Only one level — host-agent plugin directories are conventionally
+    flat (``~/.claude/plugins/<name>/plugin.json``). Recursing risks
+    picking up unrelated nested package.json files (e.g. a plugin's
+    own node_modules tree).
+    """
+    if not os.path.isdir(host_dir):
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        entries = sorted(os.listdir(host_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        plugin_path = os.path.join(host_dir, entry)
+        if not os.path.isdir(plugin_path):
+            continue
+        manifest = _read_host_plugin_manifest(plugin_path) or {}
+        plugin_id = manifest.get("id") or entry
+        plugin_name = manifest.get("name") or plugin_id
+        out.append({
+            "id": str(plugin_id),
+            "name": str(plugin_name),
+            "description": str(manifest.get("description", "")),
+            "version": str(manifest.get("version", "")),
+            "origin": str(manifest.get("origin", "host")),
+            "enabled": bool(manifest.get("enabled", True)),
+            # Provenance label per plan C6 — the merged list MUST
+            # disambiguate "managed by DefenseClaw" from "owned by the
+            # host agent" so policy hooks (block/quarantine) only
+            # touch the right side.
+            "source": f"host:{connector}",
+            "host_path": plugin_path,
+        })
+    return out
+
+
+def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
+    """Enumerate host-agent-owned plugins for the active connector.
+
+    Plan C6: matrix §5 marks zeptoclaw / claudecode / codex as ⚠️ for
+    ``plugin list`` because the host's own plugin directory was
+    silently skipped. This pulls each entry through cfg.plugin_dirs(),
+    which is already connector-aware (see config.plugin_dirs() →
+    connector_paths.plugin_dirs()), and tags each result with
+    ``source: "host:<connector>"`` so the merged list keeps
+    provenance even when the host directory contains plugins with
+    the same id as a DefenseClaw-managed one.
+    """
+    name = (connector or "").lower()
+    if name in ("", "openclaw"):
+        # OpenClaw has its own enumeration path via the openclaw
+        # binary (see _list_openclaw_plugins). Don't double-count.
+        return []
+    try:
+        dirs = cfg.plugin_dirs()
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for d in dirs:
+        for entry in _scan_plugin_dir(d, name):
+            pid = entry["id"]
+            if pid in seen_ids:
+                # First occurrence wins. Two plugin dirs (e.g.
+                # ``~/.claude/plugins`` + ``./.claude/plugins``) may
+                # legitimately ship the same plugin id; we prefer the
+                # earlier (typically user-scoped) source.
+                continue
+            seen_ids.add(pid)
+            out.append(entry)
+    return out
+
+
+def _list_openclaw_plugins(connector: str = "") -> list[dict]:
+    """Query plugins from the active connector.
+
+    For OpenClaw, shells out to ``openclaw plugins list --json``.
+    For other connectors, returns an empty list (plugins are discovered
+    from the filesystem via ``cfg.plugin_dirs()`` in ``_merge_all_plugins``).
+    """
+    if connector not in ("", "openclaw"):
+        return []
+
     try:
         from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
         prefix = openclaw_cmd_prefix()
@@ -915,7 +1133,8 @@ def allow(app: AppContext, name: str, reason: str) -> None:
 
     entry = pe.get_action("plugin", plugin_name)
     runtime_entry = entry
-    for candidate in _plugin_runtime_candidates(name):
+    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    for candidate in _plugin_runtime_candidates(name, connector):
         resolved_entry = pe.get_action("plugin", candidate)
         if resolved_entry is not None and resolved_entry.actions.runtime == "disable":
             runtime_entry = resolved_entry
@@ -957,7 +1176,7 @@ def allow(app: AppContext, name: str, reason: str) -> None:
 @click.option("--reason", default="", help="Reason for disabling")
 @pass_ctx
 def disable(app: AppContext, name: str, reason: str) -> None:
-    """Disable a plugin at runtime via the OpenClaw gateway.
+    """Disable a plugin at runtime via the gateway.
 
     Sends an RPC to prevent the agent from using the plugin until
     re-enabled. This is runtime-only — it does not block install or
@@ -967,7 +1186,8 @@ def disable(app: AppContext, name: str, reason: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    plugin_name = _resolve_openclaw_plugin_id(name)
+    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    plugin_name = _resolve_openclaw_plugin_id(name, connector)
 
     client = _sidecar_client(app)
     try:
@@ -1000,13 +1220,14 @@ def disable(app: AppContext, name: str, reason: str) -> None:
 @click.argument("name")
 @pass_ctx
 def enable(app: AppContext, name: str) -> None:
-    """Enable a previously disabled plugin via the OpenClaw gateway.
+    """Enable a previously disabled plugin via the gateway.
 
     This is a runtime-only action.
     """
     from defenseclaw.enforce import PolicyEngine
 
-    plugin_name = _resolve_openclaw_plugin_id(name)
+    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    plugin_name = _resolve_openclaw_plugin_id(name, connector)
 
     client = _sidecar_client(app)
     try:

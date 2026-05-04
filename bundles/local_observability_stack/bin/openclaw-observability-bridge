@@ -188,7 +188,7 @@ EOF
 case "${ACTION}" in
   up)
     require_docker
-    compose up -d "${PASSTHROUGH[@]}"
+    compose up -d ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     if [[ "${DO_WAIT}" == "true" ]]; then
       if ! wait_for_ready; then
         if [[ "${OUTPUT}" == "json" ]]; then
@@ -205,11 +205,11 @@ case "${ACTION}" in
     ;;
   down)
     require_docker
-    compose down "${PASSTHROUGH[@]}"
+    compose down ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     ;;
   reset)
     require_docker
-    compose down -v "${PASSTHROUGH[@]}"
+    compose down -v ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     ;;
   status)
     require_docker
@@ -247,9 +247,9 @@ case "${ACTION}" in
       args+=(-f)
     fi
     if [[ -n "${SERVICE}" ]]; then
-      compose logs "${args[@]}" "${SERVICE}" "${PASSTHROUGH[@]}"
+      compose logs ${args[@]+"${args[@]}"} "${SERVICE}" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     else
-      compose logs "${args[@]}" "${PASSTHROUGH[@]}"
+      compose logs ${args[@]+"${args[@]}"} ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     fi
     ;;
   url)
@@ -283,6 +283,6 @@ EOF
     # users retain the original "pass-through to compose" behaviour
     # they had with run.sh.
     require_docker
-    compose "${ACTION}" "${PASSTHROUGH[@]}"
+    compose "${ACTION}" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
     ;;
 esac

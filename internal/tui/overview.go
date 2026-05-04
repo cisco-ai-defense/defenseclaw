@@ -170,10 +170,36 @@ func (p *OverviewPanel) buildNotices() {
 	// by the "first time?" info notice, and spamming both would
 	// be noise.
 	if p.doctor != nil && !p.doctor.IsEmpty() {
-		if p.doctor.Failed > 0 {
+		// Count failures that live /health doesn't already disprove.
+		// This is the same reconciliation renderDoctorBox does so the
+		// "Doctor found N failure(s)" notice and the DOCTOR summary
+		// agree. A common case: the user restarted the sidecar after
+		// yesterday's probe, and the cached "[FAIL] Sidecar API" no
+		// longer reflects reality. Without this, we'd shout about a
+		// failure that the SERVICES box right below shows as RUNNING.
+		_, contradicted := partitionDoctorChecks(p.doctor.Checks, p.health)
+		effectiveFailed := p.doctor.Failed
+		for _, ck := range contradicted {
+			if ck.Status == "fail" {
+				effectiveFailed--
+			}
+		}
+		if effectiveFailed < 0 {
+			effectiveFailed = 0
+		}
+
+		if effectiveFailed > 0 {
 			p.notices = append(p.notices, notice{
 				"error",
-				fmt.Sprintf("Doctor found %d failure(s) — see the DOCTOR panel or run: defenseclaw doctor", p.doctor.Failed),
+				fmt.Sprintf("Doctor found %d failure(s) — see the DOCTOR panel or run: defenseclaw doctor", effectiveFailed),
+			})
+		} else if len(contradicted) > 0 {
+			// All cached failures are now contradicted by /health —
+			// the world recovered since the last probe. Nudge the
+			// user to refresh the cache so the panel can go green.
+			p.notices = append(p.notices, notice{
+				"info",
+				fmt.Sprintf("Doctor cache shows %d stale failure(s) that /health disagrees with — press [d] to refresh", len(contradicted)),
 			})
 		} else if p.doctor.IsStale() {
 			// Only nudge about staleness if there are zero
@@ -203,6 +229,67 @@ func (p *OverviewPanel) buildNotices() {
 			p.notices = append(p.notices, notice{"error", msg})
 		}
 	}
+
+	// Connector drift / no-traffic notices. Both rely on a live
+	// /health snapshot, so skip when health is nil — the operator
+	// is already seeing "(configured, not connected)" on the Agent
+	// row and we don't want to double-warn.
+	if p.health != nil && p.health.Connector != nil && p.cfg != nil {
+		live := strings.TrimSpace(p.health.Connector.Name)
+		configured := strings.TrimSpace(string(p.cfg.Claw.Mode))
+		if live != "" && configured != "" && live != configured {
+			p.notices = append(p.notices, notice{
+				"warn",
+				fmt.Sprintf(
+					"Connector drift: configured %s but gateway is routing for %s — restart the sidecar after editing claw.mode",
+					FriendlyConnectorName(configured),
+					FriendlyConnectorName(live),
+				),
+			})
+		}
+		// Quiet-channel detector: if the gateway has been up for
+		// over a minute and the active connector hasn't seen a
+		// single request, the agent is probably not actually
+		// connecting through us. Common causes: wrong port in the
+		// agent config, an env var that bypasses the proxy, or a
+		// dropped websocket. Surface as info — this is informational
+		// for the typical "I configured DefenseClaw but my agent
+		// keeps talking to the upstream directly" debug path.
+		uptime := time.Duration(p.health.UptimeMS) * time.Millisecond
+		if p.health.Connector.Requests == 0 && uptime > 60*time.Second {
+			p.notices = append(p.notices, notice{
+				"info",
+				zeroConnectorRequestsNotice(p.cfg, live, uptime),
+			})
+		}
+	}
+}
+
+func zeroConnectorRequestsNotice(cfg *config.Config, connectorName string, uptime time.Duration) string {
+	name := FriendlyConnectorName(connectorName)
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "codex":
+		if cfg != nil && !cfg.Guardrail.CodexEnforcementEnabled {
+			return fmt.Sprintf(
+				"%s connector has seen 0 hook events after %s — normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists",
+				name,
+				formatDuration(uptime),
+			)
+		}
+	case "claudecode":
+		if cfg != nil && !cfg.Guardrail.ClaudeCodeEnforcementEnabled {
+			return fmt.Sprintf(
+				"%s connector has seen 0 hook events after %s — normal until Claude Code emits a hook event; verify Claude Code hooks if this persists",
+				name,
+				formatDuration(uptime),
+			)
+		}
+	}
+	return fmt.Sprintf(
+		"%s connector has seen 0 requests after %s — verify your agent is dialing the gateway port (gateway.port)",
+		name,
+		formatDuration(uptime),
+	)
 }
 
 // keysOverflowSuffix renders a compact " (+N more)" tail when the
@@ -308,6 +395,7 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 
 	services := []struct{ name, key string }{
 		{"Gateway", "gateway"},
+		{"Agent", "agent"},
 		{"Watchdog", "watcher"},
 		{"Guardrail", "guardrail"},
 		{"API", "api"},
@@ -327,6 +415,8 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 		switch svc.key {
 		case "gateway":
 			detail = p.gatewayDetail()
+		case "agent":
+			detail = p.agentDetail()
 		case "watcher":
 			detail = p.watchdogDetail()
 		case "guardrail":
@@ -366,10 +456,21 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 	content.WriteString(title + "\n")
 
 	dimLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	const labelWidth = 17
 
 	if p.cfg != nil {
+		modeRaw := string(p.cfg.Claw.Mode)
+		modeLabel := FriendlyConnectorName(modeRaw)
+		if modeRaw != "" && !strings.EqualFold(modeRaw, modeLabel) {
+			modeLabel = fmt.Sprintf("%s (%s)", modeLabel, modeRaw)
+		}
 		rows := [][2]string{
-			{"Mode", string(p.cfg.Claw.Mode)},
+			{"Agent", modeLabel},
+			{"Redaction", p.redactionStatusText()},
+			{"Policy posture", p.policyPostureText()},
+			{"Enforcement", p.connectorEnforcementText()},
+			{"Human approval", p.hiltStatusText()},
+			{"Approval support", p.hiltSupportText()},
 			{"Environment", p.cfg.Environment},
 			{"Policy dir", p.cfg.PolicyDir},
 			{"Data dir", p.cfg.DataDir},
@@ -398,13 +499,156 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 			rows = append(rows, [2]string{"AI Defense", p.cfg.CiscoAIDefense.Endpoint})
 		}
 		for _, r := range rows {
-			fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-14s", r[0])), r[1])
+			fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-*s", labelWidth, r[0])), r[1])
 		}
 	} else {
 		content.WriteString(dimLabel.Render(" (config not loaded)") + "\n")
+		fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-*s", labelWidth, "Redaction")), p.redactionStatusText())
+		fmt.Fprintf(&content, " %s  %s\n", dimLabel.Render(fmt.Sprintf("%-*s", labelWidth, "Human approval")), p.hiltStatusText())
 	}
 
 	return box.Render(content.String())
+}
+
+func (p *OverviewPanel) redactionStatusText() string {
+	if p.redactionDisabled() {
+		return p.theme.Critical.Render("OFF (RAW)")
+	}
+	return p.theme.Clean.Render("ON (redacted)")
+}
+
+func (p *OverviewPanel) redactionDisabled() bool {
+	if redactionDisabledForLogsBadge() {
+		return true
+	}
+	return p.cfg != nil && p.cfg.Privacy.DisableRedaction
+}
+
+func (p *OverviewPanel) hiltStatusText() string {
+	if p.cfg == nil || !p.cfg.Guardrail.HILT.Enabled {
+		return p.theme.Dimmed.Render("OFF")
+	}
+
+	minSeverity := strings.ToUpper(strings.TrimSpace(p.cfg.Guardrail.HILT.MinSeverity))
+	if minSeverity == "" {
+		minSeverity = "HIGH"
+	}
+	mode := strings.ToLower(strings.TrimSpace(p.cfg.Guardrail.Mode))
+	if mode == "" {
+		mode = "observe"
+	}
+	confirmRange := minSeverity
+	if minSeverity != "HIGH" {
+		confirmRange += "+"
+	}
+	label := fmt.Sprintf("ON %s", confirmRange)
+	if mode != "action" {
+		return p.theme.Medium.Render(label + " (inactive)")
+	}
+	return p.theme.High.Render(label + " (CRIT blocks)")
+}
+
+func (p *OverviewPanel) policyPostureText() string {
+	if p.cfg == nil {
+		return p.theme.Dimmed.Render("unknown")
+	}
+
+	profile := guardrailProfileName(p.cfg.Guardrail.RulePackDir)
+	switch profile {
+	case "strict":
+		return p.theme.High.Render("strict: block MEDIUM+")
+	case "permissive":
+		return p.theme.Clean.Render("permissive: block CRITICAL")
+	default:
+		return p.theme.Medium.Render("balanced: block CRIT, alert MED+")
+	}
+}
+
+func guardrailProfileName(rulePackDir string) string {
+	profile := strings.ToLower(strings.TrimSpace(rulePackDir))
+	if profile == "" {
+		return "balanced"
+	}
+	parts := strings.FieldsFunc(profile, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) > 0 {
+		profile = parts[len(parts)-1]
+	}
+	if profile == "default" {
+		return "balanced"
+	}
+	return profile
+}
+
+func (p *OverviewPanel) connectorEnforcementText() string {
+	if p.cfg == nil {
+		return p.theme.Dimmed.Render("unknown")
+	}
+	if !p.cfg.Guardrail.Enabled {
+		return p.theme.Dimmed.Render("disabled")
+	}
+
+	connector := p.activeConnectorName()
+	switch connector {
+	case "codex":
+		if p.cfg.Guardrail.CodexEnforcementEnabled {
+			return p.theme.High.Render("Codex proxy enforcement")
+		}
+		return p.theme.Medium.Render("Codex observe-only hooks")
+	case "claudecode":
+		if p.cfg.Guardrail.ClaudeCodeEnforcementEnabled {
+			return p.theme.High.Render("Claude Code proxy enforcement")
+		}
+		return p.theme.Medium.Render("Claude Code observe-only hooks")
+	case "zeptoclaw":
+		return p.theme.High.Render("ZeptoClaw proxy-gated")
+	case "openclaw":
+		return p.theme.High.Render("OpenClaw proxy enforcement")
+	default:
+		return p.theme.Medium.Render(FriendlyConnectorName(connector) + " connector")
+	}
+}
+
+func (p *OverviewPanel) hiltSupportText() string {
+	if p.cfg == nil || !p.cfg.Guardrail.HILT.Enabled {
+		return p.theme.Dimmed.Render("disabled")
+	}
+
+	var label string
+	switch p.activeConnectorName() {
+	case "openclaw":
+		label = "supported: tools/outbound"
+	case "claudecode":
+		label = "supported: PreToolUse ask"
+	case "codex":
+		label = "partial: PermissionRequest"
+	case "zeptoclaw":
+		label = "partial: proxy-gated"
+	default:
+		label = "unknown connector support"
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(p.cfg.Guardrail.Mode), "action") {
+		label += " (inactive)"
+	}
+	if strings.HasPrefix(label, "supported:") {
+		return p.theme.Clean.Render(label)
+	}
+	return p.theme.Medium.Render(label)
+}
+
+func (p *OverviewPanel) activeConnectorName() string {
+	if p.cfg == nil {
+		return "openclaw"
+	}
+	if name := strings.ToLower(strings.TrimSpace(p.cfg.Guardrail.Connector)); name != "" {
+		return name
+	}
+	if mode := strings.ToLower(strings.TrimSpace(string(p.cfg.Claw.Mode))); mode != "" {
+		return mode
+	}
+	return "openclaw"
 }
 
 func (p *OverviewPanel) renderStatsBox(w int) string {
@@ -572,6 +816,33 @@ func (p *OverviewPanel) renderDoctorBox(w int) string {
 		return box.Render(content.String())
 	}
 
+	// Reconcile the cached doctor numbers against the live /health
+	// snapshot. When the cache is older than the world (the user
+	// brought the sidecar back up since the last `defenseclaw doctor`
+	// run) we don't want a red "3 fail" claiming the sidecar is down
+	// while the SERVICES box right next to it shows it RUNNING. We
+	// reclassify those rows as STALE and subtract them from the fail
+	// count so the summary tells the truth.
+	_, contradicted := partitionDoctorChecks(p.doctor.Checks, p.health)
+	contradictedFails := 0
+	contradictedWarns := 0
+	for _, ck := range contradicted {
+		switch ck.Status {
+		case "fail":
+			contradictedFails++
+		case "warn":
+			contradictedWarns++
+		}
+	}
+	effectiveFailed := p.doctor.Failed - contradictedFails
+	if effectiveFailed < 0 {
+		effectiveFailed = 0
+	}
+	effectiveWarned := p.doctor.Warned - contradictedWarns
+	if effectiveWarned < 0 {
+		effectiveWarned = 0
+	}
+
 	// Summary line with colored counts so the eye can triage at
 	// a glance. Keep units plain-text to avoid relying on emoji
 	// or icons that don't render uniformly across terminals.
@@ -579,11 +850,15 @@ func (p *OverviewPanel) renderDoctorBox(w int) string {
 	if p.doctor.Passed > 0 {
 		parts = append(parts, ok.Render(fmt.Sprintf("%d pass", p.doctor.Passed)))
 	}
-	if p.doctor.Failed > 0 {
-		parts = append(parts, crit.Render(fmt.Sprintf("%d fail", p.doctor.Failed)))
+	if effectiveFailed > 0 {
+		parts = append(parts, crit.Render(fmt.Sprintf("%d fail", effectiveFailed)))
 	}
-	if p.doctor.Warned > 0 {
-		parts = append(parts, warn.Render(fmt.Sprintf("%d warn", p.doctor.Warned)))
+	if effectiveWarned > 0 {
+		parts = append(parts, warn.Render(fmt.Sprintf("%d warn", effectiveWarned)))
+	}
+	staleCount := contradictedFails + contradictedWarns
+	if staleCount > 0 {
+		parts = append(parts, dim.Render(fmt.Sprintf("%d stale", staleCount)))
 	}
 	if p.doctor.Skipped > 0 {
 		parts = append(parts, dim.Render(fmt.Sprintf("%d skip", p.doctor.Skipped)))
@@ -594,6 +869,12 @@ func (p *OverviewPanel) renderDoctorBox(w int) string {
 	staleSuffix := ""
 	if p.doctor.IsStale() {
 		staleSuffix = warn.Render(" (stale — [d] to rerun)")
+	} else if staleCount > 0 {
+		// Cache is fresh enough by clock standards but live /health
+		// disagrees with it — the sidecar likely came back up since
+		// the last probe. Tell the user explicitly so they don't
+		// chase a phantom failure.
+		staleSuffix = dim.Render(" (live state recovered — [d] to refresh)")
 	}
 	fmt.Fprintf(&content, " %s %s%s\n", summary, dim.Render("· "+age), staleSuffix)
 
@@ -604,10 +885,17 @@ func (p *OverviewPanel) renderDoctorBox(w int) string {
 		content.WriteString(" " + dim.Render("─────────────────────────") + "\n")
 		for _, ck := range top {
 			var badge string
-			switch ck.Status {
-			case "fail":
+			isStale := liveHealthContradicts(ck, p.health)
+			switch {
+			case isStale:
+				// Don't paint contradicted rows red — that was
+				// the regression. Render them dim with a STALE
+				// badge so the user can still see what doctor
+				// thinks but knows /health disagrees.
+				badge = dim.Render("[STALE]")
+			case ck.Status == "fail":
 				badge = crit.Render("[FAIL]")
-			case "warn":
+			case ck.Status == "warn":
 				badge = warn.Render("[WARN]")
 			default:
 				badge = dim.Render("[" + strings.ToUpper(ck.Status) + "]")
@@ -621,9 +909,17 @@ func (p *OverviewPanel) renderDoctorBox(w int) string {
 				if budget < 8 {
 					budget = 8
 				}
-				detail = dim.Render("  " + truncate(ck.Detail, budget))
+				detailText := ck.Detail
+				if isStale {
+					detailText += " (live state OK)"
+				}
+				detail = dim.Render("  " + truncate(detailText, budget))
 			}
-			fmt.Fprintf(&content, " %s %s%s\n", badge, label, detail)
+			rowLabel := label
+			if isStale {
+				rowLabel = dim.Render(label)
+			}
+			fmt.Fprintf(&content, " %s %s%s\n", badge, rowLabel, detail)
 		}
 	} else {
 		content.WriteString(" " + ok.Render("all green") + dim.Render(" — safe to proceed") + "\n")
@@ -641,15 +937,20 @@ func (p *OverviewPanel) renderQuickActions(width int) string {
 
 	key := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62"))
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	dangerKey := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	dangerText := lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 
 	actions := []string{
 		key.Render("[s]") + dim.Render(" Scan all"),
 		key.Render("[d]") + dim.Render(" Doctor"),
 		key.Render("[i]") + dim.Render(" Inventory"),
 		key.Render("[g]") + dim.Render(" Guardrail"),
+		key.Render("[m]") + dim.Render(" Mode"),
 		key.Render("[p]") + dim.Render(" Policy"),
 		key.Render("[l]") + dim.Render(" Logs"),
+		key.Render("[R]") + dim.Render(" Redaction"),
 		key.Render("[u]") + dim.Render(" Upgrade"),
+		dangerKey.Render("[X]") + dangerText.Render(" Uninstall"),
 		key.Render("[?]") + dim.Render(" Help"),
 	}
 
@@ -658,6 +959,11 @@ func (p *OverviewPanel) renderQuickActions(width int) string {
 
 // quickActionDefs defines the overview quick actions in display order.
 // Each entry is (key-char, label-plaintext-width-including-brackets-and-space).
+//
+// The width column has to match the rendered "[x] Label" string
+// exactly because QuickActionHitTest walks left-to-right summing
+// these widths to map a click x-coordinate back to a key. If you
+// change the label, recount the width.
 var quickActionDefs = []struct {
 	key   string
 	width int // len("[x] Label")
@@ -666,9 +972,12 @@ var quickActionDefs = []struct {
 	{"d", 10}, // "[d] Doctor"
 	{"i", 13}, // "[i] Inventory"
 	{"g", 13}, // "[g] Guardrail"
+	{"m", 8},  // "[m] Mode"
 	{"p", 10}, // "[p] Policy"
 	{"l", 8},  // "[l] Logs"
+	{"R", 13}, // "[R] Redaction"
 	{"u", 11}, // "[u] Upgrade"
+	{"X", 13}, // "[X] Uninstall"
 	{"?", 8},  // "[?] Help"
 }
 
@@ -727,6 +1036,20 @@ func (p *OverviewPanel) subsystemState(h *HealthSnapshot, name string) string {
 	switch name {
 	case "gateway":
 		return h.Gateway.State
+	case "agent":
+		// Live connector reported by the sidecar's /health → connector
+		// block. When the sidecar has not yet initialised a connector
+		// (guardrail disabled, proxy not booted) we still want the
+		// row to render — fall back to the configured mode in
+		// agentDetail() and signal "unknown" here so the dot is
+		// neutral rather than green.
+		if h.Connector != nil {
+			if h.Connector.State == "" {
+				return "unknown"
+			}
+			return h.Connector.State
+		}
+		return "unknown"
 	case "watcher":
 		return h.Watcher.State
 	case "guardrail":
@@ -781,6 +1104,42 @@ func (p *OverviewPanel) gatewayDetail() string {
 		return fmt.Sprintf("up %s", formatDuration(uptime))
 	}
 	return ""
+}
+
+// agentDetail renders the CONNECTED-AGENT row detail in the SERVICES
+// box: a friendly connector name plus a compact tool-inspection /
+// request-count summary. When the sidecar hasn't initialised a
+// connector yet we fall back to the *configured* mode and append
+// "(configured, not connected)" so operators know the row reflects
+// intent, not live state.
+func (p *OverviewPanel) agentDetail() string {
+	configuredMode := ""
+	if p.cfg != nil {
+		configuredMode = string(p.cfg.Claw.Mode)
+	}
+
+	if p.health == nil || p.health.Connector == nil {
+		if configuredMode == "" {
+			return ""
+		}
+		return FriendlyConnectorName(configuredMode) + " (configured, not connected)"
+	}
+
+	c := p.health.Connector
+	parts := []string{FriendlyConnectorName(c.Name)}
+	if c.ToolInspectionMode != "" {
+		parts = append(parts, c.ToolInspectionMode)
+	}
+	if c.Requests > 0 {
+		parts = append(parts, fmt.Sprintf("%d req", c.Requests))
+	}
+	if c.ToolBlocks > 0 {
+		parts = append(parts, fmt.Sprintf("%d tool blocks", c.ToolBlocks))
+	}
+	if c.SubprocessBlocks > 0 {
+		parts = append(parts, fmt.Sprintf("%d subprocess blocks", c.SubprocessBlocks))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (p *OverviewPanel) watchdogDetail() string {

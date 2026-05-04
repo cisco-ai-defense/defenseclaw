@@ -79,6 +79,7 @@ func TestSetupSections_ConfigVersionIsReadOnly(t *testing.T) {
 	}
 	if gen == nil {
 		t.Fatal("General section missing")
+		return
 	}
 	var found configField
 	for _, f := range gen.Fields {

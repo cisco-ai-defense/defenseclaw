@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -55,15 +56,17 @@ type activeAgent struct {
 // EventRouter dispatches gateway events to the appropriate handlers and logs
 // everything to the audit store.
 type EventRouter struct {
-	client   *Client
-	store    *audit.Store
-	logger   *audit.Logger
-	policy   *enforce.PolicyEngine
-	otel     *telemetry.Provider
-	notify   *NotificationQueue
-	judge    *LLMJudge
-	rp       *guardrail.RulePack
-	judgeSem chan struct{} // bounds concurrent active tool-judge executions
+	client       *Client
+	store        *audit.Store
+	logger       *audit.Logger
+	policy       *enforce.PolicyEngine
+	otel         *telemetry.Provider
+	notify       *NotificationQueue
+	judge        *LLMJudge
+	rp           *guardrail.RulePack
+	guardrailCfg *config.GuardrailConfig
+	hilt         *HILTApprovalManager
+	judgeSem     chan struct{} // bounds concurrent active tool-judge executions
 
 	autoApprove      bool
 	activeToolSpans  map[string][]*activeSpan
@@ -100,6 +103,14 @@ func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, au
 		judgeSem:         make(chan struct{}, 16),
 		contextTracker:   NewContextTracker(0, 0),
 	}
+}
+
+func (r *EventRouter) SetHILTApprovalManager(m *HILTApprovalManager) {
+	r.hilt = m
+}
+
+func (r *EventRouter) SetGuardrailConfig(cfg *config.GuardrailConfig) {
+	r.guardrailCfg = cfg
 }
 
 // getActiveAgentCtx returns the context from the currently active agent span,
@@ -167,6 +178,9 @@ const maxActiveSessions = 500
 func (r *EventRouter) trackSession(sessionKey string) {
 	if sessionKey == "" {
 		return
+	}
+	if r.hilt != nil {
+		r.hilt.TrackSession(sessionKey)
 	}
 	r.activeSessionsMu.Lock()
 	r.activeSessions[sessionKey] = time.Now()
@@ -570,6 +584,28 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		readLoopLogf("[bifrost] session.message: role=%s msgId=%s seq=%d session=%s content=(%d chars) %q",
 			msg.Role, envelope.MessageID, envelope.MessageSeq, envelope.SessionKey, len(contentStr), contentPreview)
 
+		msgCtx := ContextWithSessionID(context.Background(), envelope.SessionKey)
+		msgMeta := streamLLMEventMeta(r, envelope.SessionKey, envelope.RunID, msg.Provider, msg.Model, "")
+		msgMeta.TurnID = firstNonEmpty(envelope.MessageID, intString(envelope.MessageSeq))
+		switch msg.Role {
+		case "user":
+			msgMeta.PromptID = promptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq, envelope.MessageID)
+			emitLLMPromptEvent(msgCtx, msgMeta, contentStr, envelope.Message)
+		case "assistant":
+			msgMeta.PromptID = replyPromptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq)
+			msgMeta.ResponseID = stableLLMEventID("response", "openclaw", envelope.SessionKey, envelope.MessageID, intString(envelope.MessageSeq))
+			finishReasons := []string{}
+			if msg.StopReason != "" {
+				finishReasons = []string{msg.StopReason}
+			}
+			emitLLMResponseEvent(msgCtx, msgMeta, contentStr, string(msg.Content), finishReasons)
+		}
+
+		if r.hilt != nil && r.hilt.ResolveFromMessage(envelope.SessionKey, msg.Role, contentStr) {
+			readLoopLogf("[bifrost] session.message: resolved HILT approval session=%s", envelope.SessionKey)
+			return
+		}
+
 		if msg.StopReason == "error" || msg.ErrorMessage != "" {
 			// Provider error messages have repeatedly shipped
 			// echoed user prompts ("rate limit: request was
@@ -606,13 +642,15 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				system, msg.Model, msg.Provider,
 				0, 0.0,
 			)
+			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
+			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
 			r.otel.EndLLMSpan(
 				span, msg.Model,
 				promptTokens, completionTokens,
 				finishReasons, toolCallCount,
 				"none", "",
 				system, now,
-				"openclaw",
+				r.defaultAgentName,
 				SharedAgentRegistry().AgentID(),
 			)
 
@@ -633,7 +671,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// messages observed via the WebSocket. Unlike the proxy path
 		// this is observational — by the time we see session.message
 		// the prompt has already been sent to the LLM, so bad verdicts
-		// raise an audit row + notification but cannot block. Without
+		// raise audit rows but cannot block or confirm. Without
 		// this hook, prompts that bypass the guardrail HTTP proxy
 		// (e.g. OpenClaw shelling out to a separate CLI subprocess
 		// whose fetch is not monkey-patched) are logged to
@@ -719,7 +757,12 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		}
 	}
 
-	if verdict == nil || verdict.Action == "" || verdict.Action == "allow" {
+	if verdict == nil || verdict.Severity == "" || verdict.Severity == "NONE" {
+		return
+	}
+
+	verdict.Action = guardrailRuntimeActionForGuardrail(r.guardrailCfg, verdict.Severity, false)
+	if verdict.Action == guardrailActionAllow {
 		return
 	}
 
@@ -750,17 +793,6 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 			messageID, model, verdict.Action, verdict.Severity,
 			len(verdict.Findings), scrubbedReason))
 
-	if r.notify != nil {
-		r.notify.Push(SecurityNotification{
-			SubjectType: "prompt",
-			SkillName:   truncate(sessionKey, 32),
-			Severity:    verdict.Severity,
-			Findings:    len(verdict.Findings),
-			Actions:     []string{"alert"},
-			Reason:      scrubbedReason,
-		})
-	}
-
 	if r.otel != nil {
 		r.otel.EmitRuntimeAlert(
 			telemetry.AlertPromptInjection, verdict.Severity, telemetry.SourceLocalPattern,
@@ -770,7 +802,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 				"message_id": messageID,
 				"model":      model,
 			},
-			map[string]string{"action_taken": "alert"},
+			map[string]string{"action_taken": verdict.Action},
 			"", "",
 		)
 	}
@@ -1113,6 +1145,10 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 
 	r.logStreamToolAction(payload.SessionID, "gateway-tool-call", payload.Tool, payload.ID,
 		fmt.Sprintf("status=%s args_length=%d", payload.Status, len(payload.Args)))
+	meta := streamLLMEventMeta(r, payload.SessionID, payload.RunID, "builtin", "", payload.AgentName)
+	meta.ToolID = payload.ID
+	meta.ToolName = payload.Tool
+	emitToolInvocationEvent(context.Background(), meta, "call", payload.Tool, stringFromJSONRaw(payload.Args), "", nil)
 
 	// Static block list — checked before any pattern scanning.
 	if r.policy != nil {
@@ -1250,6 +1286,10 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 
 	r.logStreamToolAction(payload.SessionID, "gateway-tool-result", payload.Tool, payload.ID,
 		fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
+	meta := streamLLMEventMeta(r, payload.SessionID, payload.RunID, "builtin", "", payload.AgentName)
+	meta.ToolID = payload.ID
+	meta.ToolName = payload.Tool
+	emitToolInvocationEvent(context.Background(), meta, "result", payload.Tool, "", payload.Output, &exitCode)
 
 	r.inspectToolResult(payload)
 
@@ -1266,6 +1306,7 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 		r.spanMu.Unlock()
 
 		if as != nil {
+			r.otel.SetRawSpanString(as.span, "defenseclaw.tool.output", payload.Output)
 			r.otel.EndToolSpan(as.span, exitCode, len(payload.Output), as.startTime, as.tool, as.provider)
 		}
 	}

@@ -177,7 +177,7 @@ def _classify_llm_exception(exc: BaseException) -> str:
     try:
         import requests  # noqa: PLC0415 — optional, same as litellm
 
-        if isinstance(exc, (requests.Timeout, requests.ConnectTimeout, requests.ReadTimeout)):
+        if isinstance(exc, requests.Timeout | requests.ConnectTimeout | requests.ReadTimeout):
             return "timeout"
         if isinstance(exc, requests.ConnectionError):
             return "network_error"

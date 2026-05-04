@@ -60,21 +60,77 @@ func wantsReveal(r *http.Request) bool {
 // A single endpoint handles both general tool policy checks and message
 // content inspection — the handler branches on the Tool field.
 type ToolInspectRequest struct {
-	Tool      string          `json:"tool"`
-	Args      json.RawMessage `json:"args,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	Direction string          `json:"direction,omitempty"`
+	Tool            string          `json:"tool"`
+	Args            json.RawMessage `json:"args,omitempty"`
+	Content         string          `json:"content,omitempty"`
+	Direction       string          `json:"direction,omitempty"`
+	SessionID       string          `json:"session_id,omitempty"`
+	ApprovalSurface string          `json:"approval_surface,omitempty"`
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
+//
+// Observe-mode contract:
+//
+//   - Action is the value the hook script consumes. When the operator
+//     has set guardrail.mode=observe (or the per-component mode is
+//     not "action"), Action is downgraded to "allow" by applyMode()
+//     so the hook script does not exit non-zero, mirroring the
+//     evaluate{Codex,ClaudeCode}Hook handlers.
+//   - RawAction preserves what the rule scanner would have decided
+//     before the mode downgrade, so audit, OTel, and dashboards can
+//     still see the latent verdict.
+//   - WouldBlock=true means rawAction was "block" but mode≠"action"
+//     suppressed the kill switch. Operators reading the response can
+//     surface "we would have blocked this" without actually killing
+//     the agent's request.
+//
+// This shape is deliberately the same observe-aware schema the codex
+// and claude-code hook responses use so a future generic inspect
+// hook script can read .raw_action / .would_block uniformly.
 type ToolInspectVerdict struct {
-	Action           string        `json:"action"`
-	Severity         string        `json:"severity"`
-	Confidence       float64       `json:"confidence"`
-	Reason           string        `json:"reason"`
-	Findings         []string      `json:"findings"`
-	DetailedFindings []RuleFinding `json:"detailed_findings,omitempty"`
-	Mode             string        `json:"mode"`
+	Action            string        `json:"action"`
+	RawAction         string        `json:"raw_action,omitempty"`
+	Severity          string        `json:"severity"`
+	Confidence        float64       `json:"confidence"`
+	Reason            string        `json:"reason"`
+	Findings          []string      `json:"findings"`
+	DetailedFindings  []RuleFinding `json:"detailed_findings,omitempty"`
+	Mode              string        `json:"mode"`
+	WouldBlock        bool          `json:"would_block,omitempty"`
+	ApprovalTimeoutMS int           `json:"approval_timeout_ms,omitempty"`
+}
+
+// applyMode stamps the active guardrail mode onto the verdict and,
+// when mode is anything other than "action" (typically "observe"),
+// downgrades a "block", "confirm", or "alert" verdict to "allow" while preserving
+// the original decision in RawAction and setting WouldBlock for
+// "block" downgrades.
+//
+// The hook scripts at internal/gateway/connector/hooks/inspect-*.sh
+// inspect the .action field and exit 2 when it is "block"; the codex
+// and claude-code hook handlers already perform an equivalent
+// downgrade. Without this helper, operators who configured
+// guardrail.mode=observe were silently still being blocked because
+// the OpenClaw inspect handlers (handleInspect{Tool,Request,Response,
+// ToolResponse}) emitted action=block regardless of mode.
+func (v *ToolInspectVerdict) applyMode(mode string) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "observe"
+	}
+	v.Mode = mode
+	v.RawAction = v.Action
+	if mode == "action" {
+		return
+	}
+	switch v.Action {
+	case "block":
+		v.WouldBlock = true
+		v.Action = "allow"
+	case "confirm", "alert":
+		v.Action = "allow"
+	}
 }
 
 // inspectToolPolicy runs all rule categories against the tool args.
@@ -123,10 +179,7 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 		}
 	}
 
-	action := "alert"
-	if severity == "HIGH" || severity == "CRITICAL" {
-		action = "block"
-	}
+	action := guardrailRuntimeAction(a.scannerCfg, severity, true)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {
@@ -209,12 +262,7 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	// Outbound messages with any findings default to block —
-	// content is about to leave the system boundary.
-	action := "block"
-	if severity == "LOW" {
-		action = "alert"
-	}
+	action := guardrailRuntimeAction(a.scannerCfg, severity, strings.EqualFold(req.Direction, "outbound"))
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {
@@ -250,31 +298,40 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stderr is operator-facing: honor the Reveal flag via the
-	// Reveal-aware String/MessageContent helpers. Args are
-	// MessageContent-shaped (raw tool inputs, often containing the
-	// offending value), Content is exactly an LLM message body.
+	ctx, cancel := context.WithTimeout(r.Context(), inspectScanTimeout)
+	defer cancel()
+
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
 		req.Tool, redaction.MessageContent(string(req.Args)), len(req.Content), req.Direction)
 
 	t0 := time.Now()
 
+	type verdictResult struct {
+		v *ToolInspectVerdict
+	}
+	ch := make(chan verdictResult, 1)
+	go func() {
+		var v *ToolInspectVerdict
+		if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
+			v = a.inspectMessageContent(&req)
+		} else {
+			v = a.inspectToolPolicy(&req)
+		}
+		ch <- verdictResult{v}
+	}()
+
 	var verdict *ToolInspectVerdict
-
-	if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
-		verdict = a.inspectMessageContent(&req)
-	} else {
-		verdict = a.inspectToolPolicy(&req)
+	select {
+	case res := <-ch:
+		verdict = res.v
+	case <-ctx.Done():
+		fmt.Fprintf(os.Stderr, "[inspect] tool scan timeout after %s\n", time.Since(t0))
+		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+		return
 	}
 
-	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = a.scannerCfg.Guardrail.Mode
-	}
-	if mode == "" {
-		mode = "observe"
-	}
-	verdict.Mode = mode
+	verdict.applyMode(inspectMode(a.scannerCfg))
+	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 
 	elapsed := time.Since(t0)
 
@@ -284,23 +341,34 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// the rule-id allow-list — we still route through the helper
 	// so any future reason-building logic that embeds literals
 	// picks up the scrub automatically.
-	fmt.Fprintf(os.Stderr, "[inspect] <<< tool=%q action=%s severity=%s mode=%s confidence=%.2f elapsed=%s reason=%q findings=%v\n",
-		req.Tool, verdict.Action, verdict.Severity, verdict.Mode, verdict.Confidence, elapsed,
+	fmt.Fprintf(os.Stderr, "[inspect] <<< tool=%q action=%s raw_action=%s severity=%s mode=%s would_block=%v confidence=%.2f elapsed=%s reason=%q findings=%v\n",
+		req.Tool, verdict.Action, verdict.RawAction, verdict.Severity, verdict.Mode, verdict.WouldBlock,
+		verdict.Confidence, elapsed,
 		redaction.Reason(verdict.Reason), verdict.Findings)
 
 	switch verdict.Action {
 	case "block":
 		fmt.Fprintf(os.Stderr, "[inspect] BLOCKED tool=%q severity=%s reason=%q\n",
 			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
+	case "confirm":
+		fmt.Fprintf(os.Stderr, "[inspect] CONFIRM tool=%q severity=%s reason=%q\n",
+			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
 	case "alert":
 		fmt.Fprintf(os.Stderr, "[inspect] ALERT tool=%q severity=%s reason=%q\n",
 			req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
+	default:
+		if verdict.WouldBlock {
+			fmt.Fprintf(os.Stderr, "[inspect] OBSERVED tool=%q severity=%s reason=%q (would-block in action mode)\n",
+				req.Tool, verdict.Severity, redaction.Reason(verdict.Reason))
+		}
 	}
 
 	var auditAction string
 	switch verdict.Action {
 	case "block":
 		auditAction = "inspect-tool-block"
+	case "confirm":
+		auditAction = "inspect-tool-confirm"
 	case "alert":
 		auditAction = "inspect-tool-alert"
 	default:
@@ -308,10 +376,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
-		a.otel.RecordInspectEvaluation(context.Background(), req.Tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), req.Tool, elapsedMs)
-		a.otel.RecordGuardrailEvaluation(context.Background(), "policy-rules", verdict.Action)
-		a.otel.RecordGuardrailLatency(context.Background(), "policy-rules", elapsedMs)
+		tool := a.connectorName() + ":" + req.Tool
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
+		a.otel.RecordGuardrailEvaluation(context.Background(), a.connectorName()+":policy-rules", verdict.Action)
+		a.otel.RecordGuardrailLatency(context.Background(), a.connectorName()+":policy-rules", elapsedMs)
 		// Inspect span is emitted for its side effect on the span
 		// exporter — trace_id is now pulled from r.Context() by
 		// LogActionCtx (the gateway CorrelationMiddleware seeded
@@ -320,8 +389,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID := RequestIDFromContext(r.Context())
-	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
-		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode)
+	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
+		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction)
+	if req.Content != "" {
+		auditDetails = appendRawTelemetryDetails(auditDetails, "raw_content", []byte(req.Content))
+	}
+	if len(req.Args) > 0 {
+		auditDetails = appendRawTelemetryDetails(auditDetails, "raw_args", req.Args)
+	}
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
@@ -349,6 +424,43 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 				redaction.ForSinkReason(verdict.Reason)))
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
+}
+
+func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *ToolInspectRequest, verdict *ToolInspectVerdict) {
+	if verdict == nil || verdict.Action != guardrailActionConfirm {
+		return
+	}
+	verdict.RawAction = guardrailActionConfirm
+	timeout := 60 * time.Second
+	if a.scannerCfg != nil && a.scannerCfg.Gateway.ApprovalTimeout > 0 {
+		timeout = time.Duration(a.scannerCfg.Gateway.ApprovalTimeout) * time.Second
+	}
+	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
+
+	if !strings.EqualFold(a.connectorName(), "openclaw") {
+		verdict.Action = guardrailActionAlert
+		verdict.Reason = appendVerdictReason(verdict.Reason, "human approval unsupported on this connector surface")
+		if a.logger != nil {
+			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
+		}
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(req.ApprovalSurface), "native") {
+		return
+	}
+
+	verdict.Action = guardrailActionAlert
+	verdict.Reason = appendVerdictReason(verdict.Reason, "human approval requires native OpenClaw approval; audited as alert")
+	if a.logger != nil {
+		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
+	}
+}
+
+func appendVerdictReason(reason, suffix string) string {
+	if strings.TrimSpace(reason) == "" {
+		return suffix
+	}
+	return reason + "; " + suffix
 }
 
 // sanitizeForResponse returns a copy of v suitable for the HTTP

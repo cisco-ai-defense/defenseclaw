@@ -68,6 +68,25 @@ describe("loadSidecarConfig", () => {
     );
   });
 
+  it("reads approval timeout and hilt flag from config.yaml", () => {
+    mockReadFileSync.mockReturnValue(
+      "gateway:\n  approval_timeout_s: 45\nguardrail:\n  hilt:\n    enabled: true\n"
+    );
+
+    const cfg = loadSidecarConfig();
+    expect(cfg.approvalTimeoutS).toBe(45);
+    expect(cfg.hiltEnabled).toBe(true);
+  });
+
+  it("accepts hitl as an alias for hilt", () => {
+    mockReadFileSync.mockReturnValue(
+      "guardrail:\n  hitl:\n    enabled: true\n"
+    );
+
+    const cfg = loadSidecarConfig();
+    expect(cfg.hiltEnabled).toBe(true);
+  });
+
   it("uses default host when only api_port is set", () => {
     mockReadFileSync.mockReturnValue("gateway:\n  api_port: 8080\n");
 

@@ -21,8 +21,9 @@ import rego.v1
 
 _guardrail_data := {
 	"severity_rank": {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4},
-	"block_threshold": 3,
+	"block_threshold": 4,
 	"alert_threshold": 2,
+	"hilt": {"enabled": false, "min_severity": "HIGH"},
 	"cisco_trust_level": "full",
 }
 
@@ -42,7 +43,7 @@ test_allow_when_no_findings if {
 	result.severity == "NONE"
 }
 
-test_block_on_high_local if {
+test_alert_on_high_local_balanced if {
 	result := guardrail with input as {
 		"direction": "prompt",
 		"model": "test-model",
@@ -54,8 +55,56 @@ test_block_on_high_local if {
 	}
 		with data.guardrail as _guardrail_data
 
-	result.action == "block"
+	result.action == "alert"
 	result.severity == "HIGH"
+}
+
+test_block_on_critical_local_balanced if {
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "block", "severity": "CRITICAL", "findings": ["private key"], "reason": "matched: private key"},
+		"cisco_result": null,
+		"content_length": 200,
+	}
+		with data.guardrail as _guardrail_data
+
+	result.action == "block"
+	result.severity == "CRITICAL"
+}
+
+test_confirm_on_high_when_hilt_enabled if {
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "block", "severity": "HIGH", "findings": ["ignore previous"], "reason": "matched: ignore previous"},
+		"cisco_result": null,
+		"content_length": 200,
+	}
+		with data.guardrail as object.union(_guardrail_data, {"hilt": {"enabled": true, "min_severity": "HIGH"}})
+
+	result.action == "confirm"
+	result.severity == "HIGH"
+}
+
+test_strict_blocks_medium_before_hilt if {
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "alert", "severity": "MEDIUM", "findings": ["sk-"], "reason": "matched: sk-"},
+		"cisco_result": null,
+		"content_length": 150,
+	}
+		with data.guardrail as object.union(_guardrail_data, {"block_threshold": 2, "alert_threshold": 1, "hilt": {"enabled": true, "min_severity": "HIGH"}})
+
+	result.action == "block"
+	result.severity == "MEDIUM"
 }
 
 test_alert_on_medium_local if {
@@ -135,7 +184,7 @@ test_observe_mode_clean_stays_allow if {
 	result.severity == "NONE"
 }
 
-test_cisco_only_block if {
+test_cisco_only_high_alerts_balanced if {
 	result := guardrail with input as {
 		"direction": "prompt",
 		"model": "test-model",
@@ -147,7 +196,7 @@ test_cisco_only_block if {
 	}
 		with data.guardrail as _guardrail_data
 
-	result.action == "block"
+	result.action == "alert"
 	result.severity == "HIGH"
 }
 
@@ -163,7 +212,7 @@ test_both_mode_cisco_escalates if {
 	}
 		with data.guardrail as _guardrail_data
 
-	result.action == "block"
+	result.action == "alert"
 	result.severity == "HIGH"
 }
 
@@ -180,7 +229,7 @@ test_both_mode_combined_reasons if {
 		with data.guardrail as _guardrail_data
 
 	result.severity == "HIGH"
-	result.action == "block"
+	result.action == "alert"
 	contains(result.reason, "matched: sk-")
 	contains(result.reason, "cisco: Data Leak")
 }

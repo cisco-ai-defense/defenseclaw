@@ -35,13 +35,14 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup_observability import observability as observability_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.observability import (
@@ -103,6 +104,18 @@ def _read_dotenv(tmp: str) -> dict[str, str]:
     return out
 
 
+class _FakeHTTPResponse:
+    def __init__(self, status: int = 200, reason: str = "OK") -> None:
+        self.status = status
+        self.reason = reason
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Preset registry shape
 # ---------------------------------------------------------------------------
@@ -119,6 +132,7 @@ class PresetRegistryTests(unittest.TestCase):
     EXPECTED_PRESET_IDS = {
         "splunk-o11y",
         "splunk-hec",
+        "splunk-enterprise",
         "datadog",
         "honeycomb",
         "newrelic",
@@ -217,6 +231,20 @@ class WriterOTelPresetTests(unittest.TestCase):
         dotenv = _read_dotenv(tmp)
         self.assertEqual(dotenv.get(PRESETS["datadog"].token_env), "dd-key-abc")
 
+    def test_local_otlp_marks_collector_transport_insecure(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "local-otlp",
+            {"endpoint": "127.0.0.1:4317"},
+            tmp,
+        )
+
+        doc = _read_yaml(tmp)
+        otel = doc.get("otel") or {}
+        self.assertTrue((otel.get("tls") or {}).get("insecure"))
+        self.assertEqual(otel.get("traces", {}).get("protocol"), "grpc")
+        self.assertEqual(otel.get("traces", {}).get("endpoint"), "127.0.0.1:4317")
+
     def test_dry_run_does_not_write(self) -> None:
         _, tmp = _make_tmp_ctx()
         before = _read_yaml(tmp)
@@ -278,6 +306,34 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         self.assertIn("existing-webhook", names, "existing sink dropped by writer")
         self.assertIn("splunk-hec-prod", names)
 
+    def test_splunk_enterprise_uses_endpoint_token_env_and_tls_verify(self) -> None:
+        _, tmp = _make_tmp_ctx()
+        apply_preset(
+            "splunk-enterprise",
+            {
+                "endpoint": "https://splunk.example.com:8088/services/collector/event",
+                "index": "defenseclaw",
+            },
+            tmp,
+            secret_value="hec-token",
+        )
+
+        doc = _read_yaml(tmp)
+        sinks = doc.get("audit_sinks") or []
+        self.assertEqual(len(sinks), 1)
+        sink = sinks[0]
+        self.assertEqual(sink.get("kind"), "splunk_hec")
+        self.assertEqual(sink.get("name"), "splunk-enterprise-splunk-example-com")
+        hec = sink.get("splunk_hec") or {}
+        self.assertEqual(
+            hec.get("endpoint"),
+            "https://splunk.example.com:8088/services/collector/event",
+        )
+        self.assertEqual(hec.get("token_env"), "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        self.assertEqual(hec.get("index"), "defenseclaw")
+        self.assertTrue(hec.get("verify_tls"))
+        self.assertEqual(_read_dotenv(tmp).get("DEFENSECLAW_SPLUNK_HEC_TOKEN"), "hec-token")
+
     def test_set_destination_enabled_roundtrip(self) -> None:
         _, tmp = _make_tmp_ctx()
         apply_preset(
@@ -302,6 +358,51 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         remove_destination("generic-webhook", tmp)
         names = {d.name for d in list_destinations(tmp)}
         self.assertNotIn("generic-webhook", names)
+
+    def test_otlp_preset_target_override_audit_sinks(self) -> None:
+        """The generic ``otlp`` preset declares target=otel and
+        sink_kind=None. ``target_override="audit_sinks"`` must mint a
+        valid ``otlp_logs`` audit sink — the writer is responsible for
+        coercing the missing sink_kind. Drives the same path that
+        ``defenseclaw setup local-observability`` uses to add a
+        loopback ``otlp_logs`` sink alongside the OTel exporter.
+        """
+        _, tmp = _make_tmp_ctx()
+        result = apply_preset(
+            "otlp",
+            {"endpoint": "127.0.0.1:4317", "protocol": "grpc", "insecure": "true"},
+            tmp,
+            name="local-otlp-logs",
+            target_override="audit_sinks",
+        )
+        self.assertEqual(result.target, "audit_sinks")
+
+        doc = _read_yaml(tmp)
+        sinks = doc.get("audit_sinks") or []
+        self.assertEqual(len(sinks), 1)
+        sink = sinks[0]
+        self.assertEqual(sink.get("name"), "local-otlp-logs")
+        self.assertEqual(sink.get("kind"), "otlp_logs")
+        self.assertTrue(sink.get("enabled"))
+        block = sink.get("otlp_logs") or {}
+        # ``_strip_scheme`` keeps host:port intact (no leading ``http://``).
+        self.assertEqual(block.get("endpoint"), "127.0.0.1:4317")
+        self.assertEqual(block.get("protocol"), "grpc")
+        self.assertTrue(block.get("insecure"))
+
+        # And re-applying with the same name must update in place
+        # rather than appending a duplicate — the writer's shallow
+        # merge contract is what makes ``setup local-observability up``
+        # idempotent across re-invocations.
+        apply_preset(
+            "otlp",
+            {"endpoint": "127.0.0.1:4317", "protocol": "grpc", "insecure": "true"},
+            tmp,
+            name="local-otlp-logs",
+            target_override="audit_sinks",
+        )
+        doc = _read_yaml(tmp)
+        self.assertEqual(len(doc.get("audit_sinks") or []), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +450,25 @@ class ObservabilityCLITests(unittest.TestCase):
             "--signals", "traces,metrics",
         ])
         self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Redaction: ON (redacted telemetry)", result.output)
+        self.assertIn("defenseclaw setup redaction off --yes", result.output)
         doc = _read_yaml(self.tmp)
         self.assertTrue(doc.get("otel", {}).get("enabled"))
+
+    def test_add_reports_raw_redaction_status_without_prompting(self) -> None:
+        self.app.cfg.privacy.disable_redaction = True
+        result = self._invoke([
+            "add", "otlp",
+            "--non-interactive",
+            "--target", "audit_sinks",
+            "--endpoint", "collector.example.com:4317",
+            "--protocol", "grpc",
+            "--name", "lab-otlp",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Redaction: OFF (RAW telemetry; privacy.disable_redaction=true)", result.output)
+        self.assertIn("defenseclaw setup redaction on", result.output)
+        self.assertNotIn("Disable redaction?", result.output)
 
     def test_add_splunk_hec_then_disable(self) -> None:
         r1 = self._invoke([
@@ -368,6 +486,76 @@ class ObservabilityCLITests(unittest.TestCase):
         dests = list_destinations(self.tmp)
         hec = next(d for d in dests if d.name == "splunk-hec-local")
         self.assertFalse(hec.enabled)
+
+    def test_add_splunk_enterprise_non_interactive(self) -> None:
+        result = self._invoke([
+            "add", "splunk-enterprise",
+            "--non-interactive",
+            "--endpoint", "https://splunk.example.com:8088/services/collector/event",
+            "--token", "hec-token",
+            "--index", "defenseclaw",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        dests = list_destinations(self.tmp)
+        hec = next(d for d in dests if d.name == "splunk-enterprise-splunk-example-com")
+        self.assertTrue(hec.enabled)
+        self.assertEqual(hec.preset_id, "splunk-enterprise")
+        self.assertEqual(_read_dotenv(self.tmp).get("DEFENSECLAW_SPLUNK_HEC_TOKEN"), "hec-token")
+
+    def _add_enterprise_sink(self) -> None:
+        result = self._invoke([
+            "add", "splunk-enterprise",
+            "--non-interactive",
+            "--endpoint", "https://splunk.example.com:8088/services/collector/event",
+            "--token", "hec-token",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_splunk_enterprise_probe_success(self) -> None:
+        self._add_enterprise_sink()
+        with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse(200, "OK")):
+            result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Splunk Enterprise (HEC)", result.output)
+        self.assertIn("HEC responded 200 OK", result.output)
+
+    def test_splunk_enterprise_probe_auth_failure(self) -> None:
+        self._add_enterprise_sink()
+        err = urllib.error.HTTPError(
+            "https://splunk.example.com:8088/services/collector/event",
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("HTTP 401 Unauthorized", result.output)
+        self.assertIn("check token/index permissions", result.output)
+
+    def test_splunk_enterprise_probe_forbidden(self) -> None:
+        self._add_enterprise_sink()
+        err = urllib.error.HTTPError(
+            "https://splunk.example.com:8088/services/collector/event",
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("HTTP 403 Forbidden", result.output)
+        self.assertIn("check token/index permissions", result.output)
+
+    def test_splunk_enterprise_probe_unreachable(self) -> None:
+        self._add_enterprise_sink()
+        with patch("urllib.request.urlopen", side_effect=OSError("network down")):
+            result = self._invoke(["test", "splunk-enterprise-splunk-example-com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("network down", result.output)
 
     def test_add_webhook_dry_run_does_not_persist(self) -> None:
         result = self._invoke([

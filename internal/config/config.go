@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -34,6 +35,8 @@ import (
 // ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
 // Nil in binaries/tests that do not install the hook.
 var ReportConfigLoadError func(ctx context.Context, reason string)
+
+var privacyDisableRedactionWarnOnce sync.Once
 
 // DefenseClawLLMKeyEnv is the canonical environment variable holding the
 // unified LLM API key that powers every LLM-using component in DefenseClaw
@@ -59,7 +62,15 @@ type ClawMode string
 
 const (
 	ClawOpenClaw ClawMode = "openclaw"
-	// Future: ClawNemoClaw, ClawOpenCode, ClawClaudeCode
+	// Other recognised connector names (kept in sync with
+	// Connector.Name() in internal/gateway/connector and with the
+	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
+	// "zeptoclaw", "claudecode", "codex". Constants for those modes
+	// are intentionally not introduced here yet — they're used as
+	// raw strings by Config.activeConnector() (see internal/config/
+	// claw.go) which dispatches to per-connector readers. Promoting
+	// them to typed constants is part of S1.2 and tracked in the
+	// claw-agnostic refactor plan.
 )
 
 type ClawConfig struct {
@@ -144,32 +155,69 @@ type Config struct {
 	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
 	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
 
-	DataDir        string               `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB        string               `mapstructure:"audit_db"         yaml:"audit_db"`
-	QuarantineDir  string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir      string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir      string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment    string               `mapstructure:"environment"      yaml:"environment"`
-	Claw           ClawConfig           `mapstructure:"claw"             yaml:"claw"`
-	Agent          AgentConfig          `mapstructure:"agent"            yaml:"agent,omitempty"`
-	InspectLLM     InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
-	CiscoAIDefense CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners       ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell      OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
-	Watch          WatchConfig          `mapstructure:"watch"            yaml:"watch"`
-	Firewall       FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail      GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway        GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
-	SkillActions   SkillActionsConfig   `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions     MCPActionsConfig     `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions  PluginActionsConfig  `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	OTel           OTelConfig           `mapstructure:"otel"             yaml:"otel"`
+	DataDir         string                     `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB         string                     `mapstructure:"audit_db"         yaml:"audit_db"`
+	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment     string                     `mapstructure:"environment"      yaml:"environment"`
+	TenantID        string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
+	WorkspaceID     string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
+	DeploymentMode  string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
+	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
+	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
+	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell       OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
+	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
+	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
+	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
+	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
 	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
 	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
+	Privacy    PrivacyConfig   `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+}
+
+// PrivacyConfig groups privacy/redaction toggles. Today it carries
+// only the redaction kill-switch; future fields (per-sink redaction
+// scope, custom redactor profiles) land here so operators have a
+// single section to audit.
+//
+// Scope: this is a deliberate, persistent operator decision.
+// Defaults match the existing redacting-by-default behavior so a
+// fresh install or a config without a `privacy:` block keeps the
+// historical contract documented in OBSERVABILITY.md.
+type PrivacyConfig struct {
+	// DisableRedaction, when true, instructs the sidecar to bypass
+	// every ForSink* redaction helper at startup — including
+	// persistent sinks (SQLite audit, OTel log exporters, Splunk
+	// HEC, webhooks). Equivalent to setting
+	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
+	// the choice survives restarts and TUI invocations without
+	// per-shell env-var ceremony.
+	//
+	// WARNING: this violates the unconditional-redaction contract
+	// documented in OBSERVABILITY.md. Only enable on single-tenant
+	// installs where every downstream sink already lives inside
+	// the same trust boundary (e.g. lab / prompt-engineering use).
+	// The CLI emits a loud warning on flip-on, and config loaders emit
+	// a once-per-process warning when they observe the setting so the
+	// runtime state stays auditable without spamming reload loops.
+	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -591,6 +639,42 @@ func (c *WebhookConfig) ResolvedSecret() string {
 	return ""
 }
 
+type AgentHookConfig struct {
+	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
+	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
+	FailMode                     string   `mapstructure:"fail_mode"                       yaml:"fail_mode,omitempty"`
+	ScanOnSessionStart           bool     `mapstructure:"scan_on_session_start"           yaml:"scan_on_session_start,omitempty"`
+	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
+	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
+	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
+}
+
+// EffectiveFailMode returns the fail mode, defaulting to "closed".
+func (c AgentHookConfig) EffectiveFailMode() string {
+	if c.FailMode == "open" {
+		return "open"
+	}
+	return "closed"
+}
+
+// ConnectorHookConfig returns the AgentHookConfig for a named connector.
+// It checks ConnectorHooks first, then falls back to the legacy
+// ClaudeCode/Codex top-level fields for backward compatibility.
+func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
+	if c.ConnectorHooks != nil {
+		if h, ok := c.ConnectorHooks[name]; ok {
+			return h
+		}
+	}
+	switch name {
+	case "claudecode", "claude_code":
+		return c.ClaudeCode
+	case "codex":
+		return c.Codex
+	}
+	return AgentHookConfig{}
+}
+
 type WatchConfig struct {
 	DebounceMs          int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
 	AutoBlock           bool `mapstructure:"auto_block"             yaml:"auto_block"`
@@ -767,12 +851,30 @@ func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 	return c.APIKey
 }
 
+type HILTConfig struct {
+	Enabled     bool   `mapstructure:"enabled"      yaml:"enabled"`
+	MinSeverity string `mapstructure:"min_severity" yaml:"min_severity"`
+}
+
 type GuardrailConfig struct {
 	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
 	Mode        string `mapstructure:"mode"                 yaml:"mode"`
 	ScannerMode string `mapstructure:"scanner_mode"         yaml:"scanner_mode"`
 	Host        string `mapstructure:"host"                 yaml:"host,omitempty"`
 	Port        int    `mapstructure:"port"                 yaml:"port"`
+
+	// Connector selects the active agent framework adapter. Written by
+	// `defenseclaw setup` and read by the sidecar at boot. When empty,
+	// defaults to "openclaw" for backward compatibility.
+	Connector string `mapstructure:"connector"            yaml:"connector,omitempty"`
+
+	// AllowEmptyProviders bypasses the boot-time ProviderProbe refusal
+	// (plan A4 / S0.12). The default behavior is to fail-closed when the
+	// active connector reports zero usable upstream providers — this
+	// catches half-installed deployments where the gateway would accept
+	// traffic with no LLM to forward to. Test harnesses that intentionally
+	// run with stub upstreams opt in by setting this to true.
+	AllowEmptyProviders bool `mapstructure:"allow_empty_providers" yaml:"allow_empty_providers,omitempty"`
 
 	// LLM overrides the top-level llm: block for the guardrail upstream
 	// (the model that DefenseClaw proxies client traffic to). Prefer
@@ -797,6 +899,7 @@ type GuardrailConfig struct {
 	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
 	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// Detection strategy: "regex_only" (default), "regex_judge", "judge_first".
 	// Per-direction overrides take precedence over the global setting.
@@ -827,6 +930,45 @@ type GuardrailConfig struct {
 	// proxy never fails open. The request is still inspected, audited,
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
+
+	// CodexEnforcementEnabled gates the proxy-redirect / blocking
+	// path for the Codex connector. When false (the default),
+	// codex talks DIRECTLY to its native upstream
+	// (api.openai.com/v1/responses for OPENAI_API_KEY mode,
+	// chatgpt.com/backend-api/codex/responses for chatgpt mode);
+	// the DefenseClaw proxy is NOT in the data path and no
+	// reserved-id strip / openai_base_url rewrite is performed.
+	// Observability still runs end-to-end via three independent
+	// channels: hooks (UserPromptSubmit / PreToolUse / PostToolUse /
+	// Stop) post to /api/v1/codex/hook, the [otel] block in
+	// config.toml exports OTLP-HTTP to /v1/logs and /v1/metrics,
+	// and the notify bridge POSTs agent-turn-complete to
+	// /api/v1/codex/notify.
+	//
+	// When true, the existing guardrail enforcement code in
+	// patchCodexConfig() runs (openai_base_url rewrite, reserved-id
+	// strip, model_providers rewrite, subprocess sandbox) and the
+	// proxy port binds. Designed to be flipped on later by an
+	// operator who wants the proxy in path; the enforcement code
+	// stays intact behind this flag rather than being removed, so
+	// re-enabling is a single-line config change with no rebuild.
+	CodexEnforcementEnabled bool `mapstructure:"codex_enforcement_enabled" yaml:"codex_enforcement_enabled,omitempty"`
+
+	// ClaudeCodeEnforcementEnabled is the parallel flag for the
+	// Claude Code connector. When false (the default), claude code
+	// talks DIRECTLY to api.anthropic.com; no
+	// ANTHROPIC_BASE_URL/claudecode_env.sh override is written and
+	// the proxy port does NOT bind. Observability runs via hooks
+	// (settings.json hook entries) and Claude Code's native OTel
+	// stack — including OTEL_LOG_RAW_API_BODIES=file: which writes
+	// the full Anthropic Messages API request/response JSON to disk
+	// alongside a body_ref pointer in each event, the closest thing
+	// to proxy-level body capture without sitting in the data path.
+	//
+	// When true, writeEnvOverride and SetupSubprocessEnforcement
+	// run as before. Designed for the same flip-on-later workflow
+	// as CodexEnforcementEnabled.
+	ClaudeCodeEnforcementEnabled bool `mapstructure:"claudecode_enforcement_enabled" yaml:"claudecode_enforcement_enabled,omitempty"`
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -853,13 +995,21 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
-	Enabled       bool    `mapstructure:"enabled"         yaml:"enabled"`
-	Injection     bool    `mapstructure:"injection"       yaml:"injection"`
-	PII           bool    `mapstructure:"pii"             yaml:"pii"`
-	PIIPrompt     bool    `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
-	PIICompletion bool    `mapstructure:"pii_completion"  yaml:"pii_completion"`
-	ToolInjection bool    `mapstructure:"tool_injection"  yaml:"tool_injection"`
-	Timeout       float64 `mapstructure:"timeout"         yaml:"timeout"`
+	Enabled       bool `mapstructure:"enabled"         yaml:"enabled"`
+	Injection     bool `mapstructure:"injection"       yaml:"injection"`
+	PII           bool `mapstructure:"pii"             yaml:"pii"`
+	PIIPrompt     bool `mapstructure:"pii_prompt"      yaml:"pii_prompt"`
+	PIICompletion bool `mapstructure:"pii_completion"  yaml:"pii_completion"`
+	ToolInjection bool `mapstructure:"tool_injection"  yaml:"tool_injection"`
+	// Exfil enables the data-exfiltration judge that explicitly asks the
+	// LLM whether the prompt is trying to read or exfiltrate sensitive
+	// files, credentials, secrets, or system data. Distinct from the
+	// injection judge (which asks "is this prompt overriding my
+	// instructions?") and the PII judge (which only fires on substring
+	// PII). The exfil judge catches polite-tone /etc/passwd-shaped
+	// prompts where neither category alone would block.
+	Exfil   bool    `mapstructure:"exfil"           yaml:"exfil"`
+	Timeout float64 `mapstructure:"timeout"         yaml:"timeout"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
@@ -941,19 +1091,30 @@ type WatchdogConfig struct {
 	Debounce int  `mapstructure:"debounce" yaml:"debounce"` // consecutive failures before alert, default 2
 }
 
-// defaultOpenClawGatewayTokenEnv matches gateway.auth.token when copied to ~/.defenseclaw/.env.
-const defaultOpenClawGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+// defaultGatewayTokenEnv is the canonical env var for the gateway auth token.
+const defaultGatewayTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
+
+// legacyGatewayTokenEnv is the old env var name, still consulted for
+// backward compatibility with existing .env files.
+const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 
 // ResolvedToken returns the gateway token from the env var (if set) or the direct value.
-// When token_env is empty (legacy configs), OPENCLAW_GATEWAY_TOKEN is still consulted so
-// secrets loaded from ~/.defenseclaw/.env by the sidecar are visible.
+// When token_env is empty (default config), checks DEFENSECLAW_GATEWAY_TOKEN first, then
+// falls back to OPENCLAW_GATEWAY_TOKEN for backward compatibility. When token_env is set
+// to a custom var, only that var is consulted — it does not fall through to the global
+// env vars, preserving operator intent.
 func (g *GatewayConfig) ResolvedToken() string {
 	if g.TokenEnv != "" {
 		if v := os.Getenv(g.TokenEnv); v != "" {
 			return v
 		}
-	} else if v := os.Getenv(defaultOpenClawGatewayTokenEnv); v != "" {
-		return v
+	} else {
+		if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
+			return v
+		}
+		if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
+			return v
+		}
 	}
 	return g.Token
 }
@@ -1104,6 +1265,9 @@ func Load() (*Config, error) {
 			})
 		}
 	}
+	if !viper.IsSet("guardrail.hilt") && viper.IsSet("guardrail.hitl") {
+		viper.Set("guardrail.hilt", viper.Get("guardrail.hitl"))
+	}
 
 	// v3 → v4 hard migration: the `splunk:` block was removed in favor
 	// of audit_sinks. Detect any populated legacy keys and refuse to
@@ -1134,6 +1298,7 @@ func Load() (*Config, error) {
 	}
 
 	migrateConfig(&cfg)
+	warnDisableRedactionConfig(&cfg)
 
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
@@ -1185,6 +1350,20 @@ func Load() (*Config, error) {
 	seedProvenanceOnLoad(configFile, &cfg)
 
 	return &cfg, nil
+}
+
+func warnDisableRedactionConfig(cfg *Config) {
+	if cfg == nil || !cfg.Privacy.DisableRedaction {
+		return
+	}
+	privacyDisableRedactionWarnOnce.Do(func() {
+		fmt.Fprintln(os.Stderr,
+			"warning: privacy.disable_redaction=true — ALL sinks (audit DB, "+
+				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
+				"prompts, judge bodies, and verdict reasons. Disable in "+
+				"shared/multi-tenant deployments via "+
+				"`defenseclaw config set privacy.disable_redaction false`.")
+	})
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the
@@ -1408,9 +1587,7 @@ func migrateConfig(cfg *Config) {
 	// is detected in Load() before unmarshal and produces a hard error,
 	// so reaching this branch with v<4 simply means the file was created
 	// without a splunk block at all — safe to bump the version stamp.
-	if cfg.ConfigVersion < 4 {
-		// no-op: hard migration is enforced at file-load time.
-	}
+	// No in-process field changes are required here.
 
 	// v4 → v5: copy legacy LLM fields into the unified LLMConfig blocks
 	// so ResolveLLM(...) returns the same answers as the pre-v5
@@ -1426,7 +1603,14 @@ func migrateConfig(cfg *Config) {
 	}
 
 	cfg.ConfigVersion = CurrentConfigVersion
-	log.Printf("[config] migrated config from version %d to %d", oldVersion, CurrentConfigVersion)
+	// Intentionally silent: migrateConfig() runs on every Load() because
+	// we don't rewrite the YAML file (that would be a surprising
+	// write-on-read side effect). Logging on every load was just noise
+	// — every CLI invocation, every TUI launch, every sidecar restart.
+	// The migration is idempotent; suppressing the line keeps the TUI's
+	// initial render clean and stops `defenseclaw-gateway status` from
+	// printing a banner above the actual status output.
+	_ = oldVersion
 }
 
 // migrateLLMConfigFields performs the v4→v5 migration: legacy fields
@@ -1589,6 +1773,10 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("plugin_dir", filepath.Join(dataDir, "plugins"))
 	viper.SetDefault("policy_dir", filepath.Join(dataDir, "policies"))
 	viper.SetDefault("environment", string(DetectEnvironment()))
+	viper.SetDefault("tenant_id", "")
+	viper.SetDefault("workspace_id", "")
+	viper.SetDefault("deployment_mode", "")
+	viper.SetDefault("discovery_source", "")
 	viper.SetDefault("claw.mode", string(ClawOpenClaw))
 	viper.SetDefault("claw.home_dir", "~/.openclaw")
 	viper.SetDefault("claw.config_file", "~/.openclaw/openclaw.json")
@@ -1702,20 +1890,44 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("plugin_actions.info.runtime", string(RuntimeEnable))
 	viper.SetDefault("plugin_actions.info.install", string(InstallNone))
 
+	viper.SetDefault("asset_policy.enabled", false)
+	viper.SetDefault("asset_policy.mode", AssetPolicyModeObserve)
+	for _, target := range []string{"mcp", "skill", "plugin"} {
+		viper.SetDefault("asset_policy."+target+".default", "allow")
+		viper.SetDefault("asset_policy."+target+".registry_required", false)
+		viper.SetDefault("asset_policy."+target+".registry", []AssetPolicyRule{})
+		viper.SetDefault("asset_policy."+target+".allowed", []AssetPolicyRule{})
+		viper.SetDefault("asset_policy."+target+".denied", []AssetPolicyRule{})
+	}
+	viper.SetDefault("asset_policy.mcp.runtime_detection.enabled", true)
+	viper.SetDefault("asset_policy.mcp.runtime_detection.terminal_commands", true)
+	viper.SetDefault("asset_policy.mcp.runtime_detection.unknown_terminal_mcp", AssetPolicyModeObserve)
+
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
 	viper.SetDefault("guardrail.scanner_mode", "both")
+	viper.SetDefault("guardrail.connector", "")
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", filepath.Join(dataDir, "policies", "guardrail", "default"))
+	viper.SetDefault("guardrail.hilt.enabled", false)
+	viper.SetDefault("guardrail.hilt.min_severity", "HIGH")
 	viper.SetDefault("guardrail.judge.enabled", false)
 	viper.SetDefault("guardrail.judge.injection", true)
 	viper.SetDefault("guardrail.judge.pii", true)
 	viper.SetDefault("guardrail.judge.pii_prompt", true)
 	viper.SetDefault("guardrail.judge.pii_completion", true)
 	viper.SetDefault("guardrail.judge.tool_injection", true)
+	// guardrail.judge.exfil registers the data-exfiltration judge default
+	// here so existing config.yaml files without an `exfil:` key still get
+	// the judge wired on next reload. Mirrors the Go-side JudgeConfig.Exfil
+	// default in defaults.go and the Python JudgeConfig.exfil default in
+	// cli/defenseclaw/config.py — three sources of truth must agree, so
+	// any of them being missed surfaces as kind=exfil rows never appearing
+	// in the audit JSONL during live tests.
+	viper.SetDefault("guardrail.judge.exfil", true)
 	viper.SetDefault("guardrail.judge.timeout", 30.0)
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
@@ -1743,7 +1955,7 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
-	viper.SetDefault("gateway.token_env", "OPENCLAW_GATEWAY_TOKEN")
+	viper.SetDefault("gateway.token_env", "DEFENSECLAW_GATEWAY_TOKEN")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)

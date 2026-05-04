@@ -128,6 +128,7 @@ func TestDoctorCache_SaveLoadRoundtrip(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatalf("load returned nil cache")
+		return
 	}
 	if got.Passed != c.Passed || got.Failed != c.Failed || got.Warned != c.Warned || got.Skipped != c.Skipped {
 		t.Fatalf("roundtrip counts differ: %+v vs %+v", got, c)

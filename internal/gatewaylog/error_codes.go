@@ -77,6 +77,19 @@ const (
 	// sinks BEFORE the EventError fires; a non-zero rate of this
 	// code indicates a producer bug, not a transient I/O issue.
 	ErrCodeSchemaViolation ErrorCode = "SCHEMA_VIOLATION"
+
+	// Plugin subsystem — connector .so plugin loader (B3 / S0.1).
+	// Each *Rejected code corresponds to a specific validatePlugin*
+	// gate, so dashboards can split "missing manifest field" from
+	// "permission too loose" from "owner mismatch". The plugin is
+	// NEVER loaded when one of these fires; the .so file remains
+	// on disk for forensic inspection.
+	ErrCodePluginManifestInvalid  ErrorCode = "PLUGIN_MANIFEST_INVALID"
+	ErrCodePluginPathRejected     ErrorCode = "PLUGIN_PATH_REJECTED"
+	ErrCodePluginPermissionDenied ErrorCode = "PLUGIN_PERMISSION_DENIED"
+	ErrCodePluginOwnerMismatch    ErrorCode = "PLUGIN_OWNER_MISMATCH"
+	ErrCodePluginHashMismatch     ErrorCode = "PLUGIN_HASH_MISMATCH"
+	ErrCodePluginLoadFailed       ErrorCode = "PLUGIN_LOAD_FAILED"
 )
 
 // Subsystem is the v7 standardized vocabulary for the `subsystem` field
@@ -107,6 +120,10 @@ const (
 	SubsystemSQLite         Subsystem = "sqlite"
 	SubsystemAdmission      Subsystem = "admission"
 	SubsystemConfigMutation Subsystem = "config_mutation"
+	// SubsystemPlugin marks the connector .so plugin loader. Paired
+	// with the ErrCodePlugin* codes for B3 / S0.1 audit-pipeline
+	// emissions when a plugin is rejected pre-load.
+	SubsystemPlugin Subsystem = "plugin"
 	// Gatewaylog subsystem — owned by the structured writer itself
 	// (runtime schema validation, fanout panics, forced drops).
 	SubsystemGatewaylog Subsystem = "gatewaylog"

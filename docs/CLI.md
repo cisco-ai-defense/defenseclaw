@@ -30,7 +30,7 @@ Use `<binary> --help` for any command.
 | `setup mcp-scanner` | Configure MCP scanner analyzers |
 | `setup gateway` | Configure gateway connection settings |
 | `setup guardrail` | Configure LLM guardrail (mode, model, port, API key) |
-| `setup splunk` | Configure Splunk HEC / OTLP / local bridge integration |
+| `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 
 ### skill
 

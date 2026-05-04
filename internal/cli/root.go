@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -73,6 +74,15 @@ Run without arguments to start the sidecar daemon.`,
 		if err != nil {
 			return fmt.Errorf("failed to load config — run 'defenseclaw init' first: %w", err)
 		}
+		// Apply the persisted redaction kill-switch BEFORE any
+		// audit-store / telemetry init so even the very first
+		// log lines emitted during startup honor the operator's
+		// choice. The setter is idempotent and atomic, so a TUI
+		// that flips the flag at runtime can call it directly
+		// without restarting the sidecar — but the canonical
+		// surface is this startup wiring, so a config + restart
+		// gives the same effect with a clearer audit trail.
+		applyPrivacyConfig(cfg)
 		version.SetBinaryVersion(appVersion)
 
 		auditStore, err = audit.NewStore(cfg.AuditDB)
@@ -95,7 +105,15 @@ Run without arguments to start the sidecar daemon.`,
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if otelProvider != nil {
-			if err := otelProvider.Shutdown(context.Background()); err != nil {
+			if err := otelProvider.Shutdown(context.Background()); err != nil && !isTransientOTelShutdownError(err) {
+				// We swallow the common "no collector reachable"
+				// flavours here (see isTransientOTelShutdownError):
+				// the same condition is already surfaced inside the
+				// TUI by cmd_doctor's "OTel (OTLP)" check, and
+				// printing it again to stderr trashes the prompt
+				// the user just got back when they pressed `q` in
+				// the TUI. Genuine SDK failures still print so
+				// real bugs aren't hidden.
 				fmt.Fprintf(os.Stderr, "warning: otel shutdown: %v\n", err)
 			}
 		}
@@ -118,6 +136,27 @@ func Execute() int {
 		return 1
 	}
 	return 0
+}
+
+// applyPrivacyConfig honours the persisted Privacy.DisableRedaction
+// flag at sidecar startup. Two reasons it lives here as a tiny
+// dedicated function rather than inline in PersistentPreRunE:
+//
+//  1. Tests can call it with a synthesized *config.Config to assert
+//     the redaction package picks up the flag without spinning up
+//     a full Cobra root.
+//  2. Future privacy fields (per-sink scope, custom redactor
+//     profiles) land here too, keeping the wiring local to one
+//     auditable touchpoint instead of growing PreRunE.
+//
+// The config loader emits the loud warning when the kill-switch is
+// present, so this startup hook only mirrors the loaded value into
+// the redaction package.
+func applyPrivacyConfig(c *config.Config) {
+	if c == nil {
+		return
+	}
+	redaction.SetDisableAll(c.Privacy.DisableRedaction)
 }
 
 func initOTelProvider() {

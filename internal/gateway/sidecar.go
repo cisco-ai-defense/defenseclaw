@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -39,7 +40,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Sidecar is the long-running process that connects to the OpenClaw gateway,
+// Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
 	cfg      *config.Config
@@ -52,6 +53,7 @@ type Sidecar struct {
 	otel     *telemetry.Provider
 	notify   *NotificationQueue
 	opa      *policy.Engine
+	hilt     *HILTApprovalManager
 	webhooks *WebhookDispatcher
 
 	alertCtx    context.Context
@@ -84,6 +86,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// lockstep with audit.SetProcessAgentInstanceID — the two setters
 	// live in separate packages only to avoid an import cycle.
 	gatewaylog.SetSidecarInstanceID(agentInstanceID)
+	gatewaylog.SetAgentWatchContext(gatewaylog.AgentWatchContext{
+		TenantID:        cfg.TenantID,
+		WorkspaceID:     cfg.WorkspaceID,
+		Environment:     cfg.Environment,
+		DeploymentMode:  cfg.DeploymentMode,
+		DiscoverySource: cfg.DiscoverySource,
+	})
 
 	// Seed run_id so every audit row / gateway.jsonl event / OTel
 	// record in this sidecar run carries a non-empty correlation
@@ -125,7 +134,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	SetRetainJudgeBodies(retainJudge)
 
 	// In standalone sandbox mode the veth link is point-to-point;
-	// TLS is not needed and OpenClaw serves plain WS.
+	// TLS is not needed and the gateway serves plain WS.
 	if !cfg.Gateway.RequiresTLSWithMode(&cfg.OpenShell) {
 		cfg.Gateway.NoTLS = true
 	}
@@ -136,10 +145,21 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] device identity loaded (id=%s)\n", client.device.DeviceID)
 
+	// Plan B6 / S0.10: install the per-boot HMAC seed for telemetry
+	// payload integrity. We feed the ed25519 device-key seed to HKDF
+	// inside SetTelemetryHMACSeed so the HMAC key is derived (not
+	// reused) — the device key never ends up on the wire even
+	// indirectly. Done as early as possible so every event emitted
+	// after this point is HMAC-stamped at the writer choke point.
+	gatewaylog.SetTelemetryHMACSeed(client.device.PrivateKey.Seed())
+
 	notify := NewNotificationQueue()
 
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
+	router.SetGuardrailConfig(&cfg.Guardrail)
+	hilt := NewHILTApprovalManager(client, logger, otel)
+	router.SetHILTApprovalManager(hilt)
 	// Seed defaults for the observability contract so every span /
 	// audit row knows which agent (framework mode) and policy
 	// signed off on the event even when the incoming stream does
@@ -361,6 +381,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		otel:        otel,
 		notify:      notify,
 		webhooks:    webhooks,
+		hilt:        hilt,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -383,7 +404,8 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	})
 	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
 
-	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" {
+	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" &&
+		proxyShouldBindForConfiguredConnector(s.cfg) {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — relying on fetch-interceptor routing.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml only if you need a fixed advertised model name.\n")
 	}
@@ -576,6 +598,84 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	}
 }
 
+// watcherDirSource tags where each dir came from for telemetry / logs.
+// Used by resolveWatcherDirs so callers (and tests) can assert that
+// the priority chain (explicit > connector > config-default) was
+// honoured for the active connector. Plan C4 / S1.3.
+type watcherDirSource string
+
+const (
+	watcherDirsFromConfig    watcherDirSource = "config-explicit"
+	watcherDirsFromConnector watcherDirSource = "connector-discovered"
+	watcherDirsFromDefault   watcherDirSource = "config-default"
+	watcherDirsDisabled      watcherDirSource = "disabled"
+)
+
+// watcherDirSources reports the source of each resolved dir bucket.
+type watcherDirSources struct {
+	Skill  watcherDirSource
+	Plugin watcherDirSource
+}
+
+// resolveWatcherDirs is the pure dir-resolution helper extracted from
+// runWatcher (plan C4 / S1.3). It applies the priority chain:
+//
+//	explicit gateway.watcher.{skill,plugin}.dirs
+//	  > active connector ComponentTargets("")
+//	  > cfg.SkillDirs() / cfg.PluginDirs() (OpenClaw default)
+//
+// Pure: no globals, no I/O, no logging — every input arrives via
+// arguments. The third return value tags the source bucket so the
+// matrix test can prove that, say, claudecode connector's
+// ComponentTargets actually flowed through to the watcher rather
+// than silently falling back to config defaults.
+//
+// `conn` may be nil; that mirrors the runWatcher path where the
+// resolveActiveConnector failure is logged and we fall through to
+// cfg defaults. A nil `conn` skips the connector branch entirely.
+func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs []string, pluginDirs []string, src watcherDirSources) {
+	var compTargets map[string][]string
+	if conn != nil {
+		if scanner, ok := conn.(connector.ComponentScanner); ok && scanner.SupportsComponentScanning() {
+			compTargets = scanner.ComponentTargets("")
+		}
+	}
+
+	if wcfg.Skill.Enabled {
+		switch {
+		case len(wcfg.Skill.Dirs) > 0:
+			skillDirs = append([]string(nil), wcfg.Skill.Dirs...)
+			src.Skill = watcherDirsFromConfig
+		case len(compTargets["skill"]) > 0:
+			skillDirs = append([]string(nil), compTargets["skill"]...)
+			src.Skill = watcherDirsFromConnector
+		default:
+			skillDirs = cfg.SkillDirs()
+			src.Skill = watcherDirsFromDefault
+		}
+	} else {
+		src.Skill = watcherDirsDisabled
+	}
+
+	if wcfg.Plugin.Enabled {
+		switch {
+		case len(wcfg.Plugin.Dirs) > 0:
+			pluginDirs = append([]string(nil), wcfg.Plugin.Dirs...)
+			src.Plugin = watcherDirsFromConfig
+		case len(compTargets["plugin"]) > 0:
+			pluginDirs = append([]string(nil), compTargets["plugin"]...)
+			src.Plugin = watcherDirsFromConnector
+		default:
+			pluginDirs = cfg.PluginDirs()
+			src.Plugin = watcherDirsFromDefault
+		}
+	} else {
+		src.Plugin = watcherDirsDisabled
+	}
+
+	return skillDirs, pluginDirs, src
+}
+
 // runWatcher starts the skill/MCP install watcher if enabled in config.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
 	wcfg := s.cfg.Gateway.Watcher
@@ -587,32 +687,32 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		return nil
 	}
 
-	// Resolve skill dirs: explicit config overrides autodiscovery
-	var skillDirs []string
-	if wcfg.Skill.Enabled {
-		if len(wcfg.Skill.Dirs) > 0 {
-			skillDirs = wcfg.Skill.Dirs
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using configured skill dirs: %v\n", skillDirs)
-		} else {
-			skillDirs = s.cfg.SkillDirs()
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: autodiscovered skill dirs: %v\n", skillDirs)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")
+	// Resolve the active connector to get connector-specific component
+	// directories. Falls back to cfg.SkillDirs()/PluginDirs() (OpenClaw
+	// paths) when the connector does not implement ComponentScanner.
+	// Unlike runGuardrail, the watcher is best-effort discovery: a
+	// misspelled guardrail.connector here should still be caught at
+	// runGuardrail's fail-fast check (see S1.4), so we log the error
+	// and fall back rather than aborting the watcher loop. That keeps
+	// the watcher useful for the OpenClaw default flow even while a
+	// freshly-broken connector name is being debugged.
+	reg := connector.NewDefaultRegistry()
+	conn, err := resolveActiveConnector(reg, configuredConnectorName(s.cfg), "watcher")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
 	}
 
-	// Plugin dirs: explicit config overrides autodiscovery from claw mode
-	var pluginDirs []string
-	if wcfg.Plugin.Enabled {
-		if len(wcfg.Plugin.Dirs) > 0 {
-			pluginDirs = wcfg.Plugin.Dirs
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: using configured plugin dirs: %v\n", pluginDirs)
-		} else {
-			pluginDirs = s.cfg.PluginDirs()
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher: autodiscovered plugin dirs: %v\n", pluginDirs)
-		}
-	} else {
+	skillDirs, pluginDirs, _ := resolveWatcherDirs(s.cfg, conn, wcfg)
+
+	if !wcfg.Skill.Enabled {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")
+	} else if len(skillDirs) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill dirs: %v\n", skillDirs)
+	}
+	if !wcfg.Plugin.Enabled {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin watching disabled\n")
+	} else if len(pluginDirs) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin dirs: %v\n", pluginDirs)
 	}
 
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
@@ -651,9 +751,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	err := w.Run(ctx)
+	runErr := w.Run(ctx)
 	s.health.SetWatcher(StateStopped, "", nil)
-	return err
+	return runErr
 }
 
 // handleAdmissionResult processes watcher verdicts. It only forwards runtime
@@ -914,6 +1014,45 @@ func (s *Sidecar) activeSessionKeys() []string {
 	return s.router.ActiveSessionKeys()
 }
 
+// resolveActiveConnector looks up the active connector in the registry
+// with a strict-but-friendly contract:
+//
+//   - Empty name: log INFO and return the openclaw default. This
+//     preserves backward compatibility with installs that predate the
+//     guardrail.connector field while still announcing the choice in
+//     the log so operators can see what was actually picked.
+//   - Non-empty name that the registry knows: return it.
+//   - Non-empty name that the registry does NOT know: return an error.
+//     This is the operator-typo case the silent "fall back to openclaw"
+//     branch used to mask. Returning an error lets callers decide
+//     whether the failure mode is "abort" (runGuardrail) or "log and
+//     continue with reduced functionality" (the watcher) without
+//     losing the typo signal in either case.
+//
+// surface is a short label included in log messages so operators can
+// tell which subsystem (runGuardrail / watcher / etc.) emitted the
+// resolution event.
+func resolveActiveConnector(reg *connector.Registry, name, surface string) (connector.Connector, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		conn, ok := reg.Get("openclaw")
+		if !ok {
+			// The default connector is registered by NewDefaultRegistry,
+			// so the only way to get here is if a custom registry was
+			// passed in without it. Surface as an error rather than
+			// returning nil to avoid silent behavior downstream.
+			return nil, fmt.Errorf("[%s] no openclaw default in registry; pass an explicit guardrail.connector", surface)
+		}
+		fmt.Fprintf(os.Stderr, "[%s] guardrail.connector unset; defaulting to openclaw\n", surface)
+		return conn, nil
+	}
+	conn, ok := reg.Get(trimmed)
+	if !ok {
+		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw) or remove the field to default to openclaw", surface, trimmed)
+	}
+	return conn, nil
+}
+
 // runGuardrail starts the Go guardrail proxy when guardrail is enabled.
 func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// Reuse the rule pack already loaded by NewSidecar and stored on the
@@ -924,6 +1063,157 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		rp.Validate()
 		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
 	}
+
+	// Load the active connector from the registry. The connector name is
+	// written by `defenseclaw setup` into guardrail.connector. When the
+	// field is empty we treat that as "operator did not pick anything"
+	// and fall back to openclaw for backward compatibility (and log it
+	// at INFO so the operator can see what happened). When the field is
+	// set to a value the registry does not know about, we fail fast
+	// rather than silently substituting openclaw — silent substitution
+	// would let a typo in `guardrail.connector` route Codex / Claude
+	// Code traffic through the OpenClaw connector and patch the wrong
+	// agent's config files. See S1.4 / F7.
+	// Plan B3: route plugin-loader rejections into the audit pipeline
+	// (gatewaylog.EventError + SubsystemPlugin) BEFORE DiscoverPlugins
+	// runs, so a hostile plugin rejected pre-load still surfaces a
+	// structured event to the same sinks as auth failures.
+	wirePluginAuditEmitter()
+
+	registry := connector.NewDefaultRegistry()
+	if s.cfg.PluginDir != "" {
+		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
+		}
+	}
+	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.cfg), "guardrail")
+	if err != nil {
+		// Fail fast: the operator explicitly set a connector that does
+		// not exist. Returning here aborts sidecar boot so the operator
+		// notices the typo immediately instead of seeing a "running but
+		// somehow not blocking anything" sidecar.
+		return err
+	}
+	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+	apiBind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		apiBind = s.cfg.Gateway.APIBind
+	}
+	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
+
+	// Plan B2 / S0.2: synthesize a first-boot gateway token if none is
+	// configured, BEFORE Setup writes hook scripts (which bake the
+	// token into curl headers) and BEFORE the API server starts (which
+	// uses the same token to authenticate inbound hook calls). After
+	// this point, s.cfg.Gateway.Token always has a non-empty value.
+	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
+	apiToken := s.cfg.Gateway.ResolvedToken()
+	if apiToken == "" {
+		tok, err := EnsureGatewayToken(dotenvPath)
+		if err != nil {
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return fmt.Errorf("first-boot gateway token: %w", err)
+		}
+		s.cfg.Gateway.Token = tok
+		apiToken = tok
+		// Also push into the process env so subsequent ResolveAPIKey
+		// calls (e.g. judge LLM init) see the synthesized value.
+		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
+	}
+
+	// S0.12 follow-up: inject credentials into the connector NOW, before
+	// Setup() and before the HasUsableProviders() probe below. Without
+	// this, OpenClaw's probe (which is keyed off the connector's
+	// gatewayToken/masterKey fields) returns a false-negative
+	// "no gateway token or master key configured" error and runGuardrail
+	// aborts even though the token is correctly resolved on disk. The
+	// historical wiring relied on NewGuardrailProxy() to call
+	// SetCredentials, but that runs *after* the probe — leaving the
+	// connector blind during the gate. NewGuardrailProxy() will call
+	// SetCredentials() again with the same values (idempotent restore).
+	masterKey := deriveMasterKey(s.cfg.DataDir)
+	conn.SetCredentials(apiToken, masterKey)
+
+	setupOpts := connector.SetupOpts{
+		DataDir:   s.cfg.DataDir,
+		ProxyAddr: proxyAddr,
+		APIAddr:   apiAddr,
+		// Bake the gateway token into hook scripts so claude-code-hook.sh
+		// and codex-hook.sh can authenticate against the API server's
+		// auth middleware. ResolvedToken checks env vars first, then
+		// config — same source the proxy uses for credential wiring
+		// below, so the baked value and the value accepted by the API
+		// middleware stay in lockstep.
+		APIToken: apiToken,
+		// Per-connector enforcement gates: when false (the default),
+		// the connector's Setup() installs hooks + native OTel
+		// exporters but skips the proxy-redirect path. See
+		// GuardrailConfig.CodexEnforcementEnabled /
+		// ClaudeCodeEnforcementEnabled in internal/config/config.go
+		// for the rationale. Plumbed through SetupOpts so the codex
+		// and claudecode connectors can branch on a single source of
+		// truth without re-reading config from disk.
+		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
+		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
+		HILTEnabled:           s.cfg.Guardrail.HILT.Enabled,
+		InstallCodeGuard:      true,
+	}
+
+	// resolveActiveConnector guarantees a non-nil connector — either the
+	// operator-selected one or the openclaw default. We can therefore
+	// drop the historical nil-guard and treat this as the canonical
+	// path; any "no active connector" condition is now a hard error.
+	fmt.Fprintf(os.Stderr, "[guardrail] active connector: %s (%s)\n", conn.Name(), conn.Description())
+
+	if !s.cfg.Guardrail.Enabled {
+		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
+		if err := conn.Teardown(ctx, setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
+		}
+		if err := conn.VerifyClean(setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
+		}
+		connector.ClearActiveConnector(s.cfg.DataDir)
+	} else {
+		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
+		}
+		if err := conn.Setup(ctx, setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
+			recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
+		} else {
+			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+			}
+		}
+
+		// Plan A4 / S0.12: refuse to start when the connector advertises
+		// no usable upstream provider for a proxy-bound data path.
+		// Without this, the gateway would accept agent traffic and fail
+		// every request once it tries to dial a non-existent upstream —
+		// far better to crash at boot where the operator sees the
+		// misconfiguration immediately.
+		//
+		// Codex and Claude Code observability-only mode is intentionally
+		// different: the proxy listener does not bind and the agent talks
+		// directly to its native SSO/API upstream. There is no DefenseClaw
+		// proxy upstream to validate, so probing here would reject valid
+		// SSO-only installs before telemetry can start.
+		if probe, ok := conn.(connector.ProviderProbe); ok && shouldRunProviderProbeForConnector(conn, &s.cfg.Guardrail) {
+			count, err := probe.HasUsableProviders()
+			if err != nil {
+				s.health.SetGuardrail(StateError, err.Error(), nil)
+				return fmt.Errorf("connector %s reports no usable providers: %w (set guardrail.allow_empty_providers=true to override)", conn.Name(), err)
+			}
+			if count == 0 {
+				s.health.SetGuardrail(StateError, "no usable providers", nil)
+				return fmt.Errorf("connector %s reports zero usable providers; refusing to start (set guardrail.allow_empty_providers=true to override)", conn.Name())
+			}
+			fmt.Fprintf(os.Stderr, "[guardrail] provider probe ok: %s reports %d usable upstream(s)\n", conn.Name(), count)
+		}
+	}
+
+	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
 	proxy, err := NewGuardrailProxy(
 		&s.cfg.Guardrail,
@@ -937,6 +1227,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.notify,
 		rp,
 		s.cfg.ResolveLLM("guardrail.judge"),
+		conn,
 	)
 	if err == nil && s.webhooks != nil {
 		proxy.SetWebhookDispatcher(s.webhooks)
@@ -944,6 +1235,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if err == nil && proxy != nil {
 		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
+		proxy.SetConnectorSwitchState(registry, setupOpts)
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -956,7 +1248,152 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return err
 	}
+
+	// Observability-only short-circuit. When the active connector is
+	// codex or claudecode AND its enforcement flag is false (the
+	// production default), we never bind the proxy listener: the
+	// connector's Setup() has already installed hooks + OTel + notify
+	// for end-to-end telemetry, and the agent talks DIRECTLY to its
+	// native upstream (api.openai.com / chatgpt.com or
+	// api.anthropic.com).
+	//
+	// We still construct the GuardrailProxy above and call Setup
+	// before this gate so:
+	//   - connector lifecycle (provider snapshot, credential wiring)
+	//     stays consistent across modes,
+	//   - the operator can flip enforcement on at runtime by editing
+	//     config.yaml and restarting (no rebuild needed),
+	//   - subsystem health surfaces a single source of truth in the
+	//     CLI status and /api/v1/status JSON.
+	//
+	// The API server (runAPI) runs in a separate goroutine and is
+	// unaffected by this gate — hook ingest and the OTLP-HTTP
+	// receiver added in a follow-up commit continue to accept
+	// telemetry on the API port. Block on ctx.Done() to keep the
+	// goroutine alive until shutdown, mirroring the existing
+	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
+	if !proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
+		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+			"summary":             "observability-only (no proxy binding)",
+			"connector":           conn.Name(),
+			"enforcement_enabled": false,
+			"proxy_port":          "closed",
+			"hint":                fmt.Sprintf("flip on with guardrail.%s_enforcement_enabled: true in config.yaml", conn.Name()),
+		})
+		fmt.Fprintf(os.Stderr, "[guardrail] observability mode: %s talks directly to its native upstream — proxy port intentionally not bound\n", conn.Name())
+		<-ctx.Done()
+		return nil
+	}
 	return proxy.Run(ctx)
+}
+
+// proxyShouldBindForConnector returns true when the active connector
+// requires the proxy listener to be bound — i.e. the agent's data
+// path goes through DefenseClaw. For the observability-default
+// connectors (codex, claudecode) this returns false when their
+// enforcement flag is disabled, so the proxy port stays unbound and
+// the agent talks directly to its native upstream. OpenClaw and
+// ZeptoClaw always return true: those connectors were designed
+// around the fetch-interceptor / api_base redirect from day one and
+// have no observability-only path.
+//
+// Adding a new connector? Default-on (return true) is the
+// conservative choice for guardrail-style adapters; only return
+// false when the connector ships native telemetry comparable to
+// the codex [hooks] table + native OTel exporter.
+func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailConfig) bool {
+	if conn == nil {
+		return true
+	}
+	switch conn.Name() {
+	case "codex":
+		return gc.CodexEnforcementEnabled
+	case "claudecode":
+		return gc.ClaudeCodeEnforcementEnabled
+	default:
+		return true
+	}
+}
+
+func shouldRunProviderProbeForConnector(conn connector.Connector, gc *config.GuardrailConfig) bool {
+	if gc == nil {
+		return true
+	}
+	if gc.AllowEmptyProviders {
+		return false
+	}
+	return proxyShouldBindForConnector(conn, gc)
+}
+
+func configuredConnectorName(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(cfg.Guardrail.Connector); name != "" {
+		return strings.ToLower(name)
+	}
+	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
+}
+
+func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
+	if cfg == nil {
+		return true
+	}
+	switch configuredConnectorName(cfg) {
+	case "codex":
+		return cfg.Guardrail.CodexEnforcementEnabled
+	case "claudecode":
+		return cfg.Guardrail.ClaudeCodeEnforcementEnabled
+	default:
+		return true
+	}
+}
+
+// teardownPreviousConnector checks if a different connector was previously
+// active (persisted in active_connector.json) and runs its Teardown so
+// hooks, env overrides, and config patches from the old connector are
+// cleaned up before the new one is set up. After teardown, VerifyClean
+// confirms no stale artifacts remain. Returns an error if verification
+// fails — the caller can decide whether to proceed with the new setup.
+func teardownPreviousConnector(registry *connector.Registry, newName string, opts connector.SetupOpts, ctx context.Context) error {
+	prev := connector.LoadActiveConnector(opts.DataDir)
+	if prev == "" || prev == newName {
+		return nil
+	}
+	old, ok := registry.Get(prev)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[guardrail] previous connector %q not in registry — skipping teardown\n", prev)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector changed %s → %s — tearing down %s\n", prev, newName, prev)
+	if err := old.Teardown(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, err)
+	}
+
+	if err := old.VerifyClean(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: previous connector %s left stale state: %v\n", prev, err)
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
+	return nil
+}
+
+func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
+	if conn == nil {
+		return
+	}
+	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save partial connector state for %s: %v\n", conn.Name(), err)
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] rolling back partial %s setup\n", conn.Name())
+	if err := conn.Teardown(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: partial %s setup left stale state and will be retried on next connector switch: %v\n", conn.Name(), err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] partial %s setup rolled back cleanly\n", conn.Name())
 }
 
 // runAPI starts the REST API server.
@@ -970,9 +1407,15 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", bind, s.cfg.Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
+	api.SetHILTApprovalManager(s.hilt)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}
+	reg := connector.NewDefaultRegistry()
+	if s.cfg.PluginDir != "" {
+		_ = reg.DiscoverPlugins(s.cfg.PluginDir)
+	}
+	api.SetConnectorRegistry(reg)
 	return api.Run(ctx)
 }
 
@@ -988,7 +1431,7 @@ func (s *Sidecar) subscribeToSessions(ctx context.Context) {
 		return
 	}
 
-	// OpenClaw returns sessions as either an array or an object keyed by
+	// The gateway returns sessions as either an array or an object keyed by
 	// session ID. Try both formats.
 	type sessionEntry struct {
 		ID   string `json:"id"`
@@ -1078,8 +1521,8 @@ func (s *Sidecar) reportSandboxHealth(ctx context.Context) {
 	}
 
 	details := map[string]interface{}{
-		"sandbox_ip":    s.cfg.Gateway.Host,
-		"openclaw_port": s.cfg.Gateway.Port,
+		"sandbox_ip":   s.cfg.Gateway.Host,
+		"gateway_port": s.cfg.Gateway.Port,
 	}
 	s.health.SetSandbox(StateStarting, "", details)
 
@@ -1137,49 +1580,104 @@ func (s *Sidecar) probeSandbox(ctx context.Context, details map[string]interface
 // audit_sinks model is provider-agnostic and operators bring their own
 // collector/SIEM credentials.
 func (s *Sidecar) reportSinksHealth() {
+	total := len(s.cfg.AuditSinks)
+	if total == 0 {
+		// Nothing configured — surface the explicit reason + a hint
+		// pointing operators at the right CLI command. Without this
+		// the CLI status row showed a bare "Sinks: DISABLED" with no
+		// context, leaving operators unsure whether their setup
+		// command had taken effect.
+		s.health.SetSinks(StateDisabled, "", map[string]interface{}{
+			"summary": "no audit sinks configured",
+			"hint":    "run 'defenseclaw setup local-observability' or 'defenseclaw setup observability add <preset>' to enable audit forwarding",
+		})
+		return
+	}
+
 	enabled := 0
-	kinds := make([]string, 0, len(s.cfg.AuditSinks))
-	rows := make([]map[string]interface{}, 0, len(s.cfg.AuditSinks))
-	for _, sink := range s.cfg.AuditSinks {
-		if !sink.Enabled {
-			continue
-		}
-		enabled++
-		kinds = append(kinds, string(sink.Kind))
+	enabledKinds := make([]string, 0, total)
+	rows := make([]map[string]interface{}, 0, total)
+	details := make(map[string]interface{}, total+4)
+
+	for i, sink := range s.cfg.AuditSinks {
 		row := map[string]interface{}{
 			"name":    sink.Name,
 			"kind":    string(sink.Kind),
-			"enabled": true,
+			"enabled": sink.Enabled,
 		}
+		var endpoint string
 		switch sink.Kind {
 		case config.SinkKindSplunkHEC:
 			if sink.SplunkHEC != nil {
-				row["endpoint"] = sink.SplunkHEC.Endpoint
+				endpoint = sink.SplunkHEC.Endpoint
+				row["endpoint"] = endpoint
 				row["index"] = sink.SplunkHEC.Index
 			}
 		case config.SinkKindOTLPLogs:
 			if sink.OTLPLogs != nil {
-				row["endpoint"] = sink.OTLPLogs.Endpoint
+				endpoint = sink.OTLPLogs.Endpoint
+				row["endpoint"] = endpoint
 				row["protocol"] = sink.OTLPLogs.Protocol
 			}
 		case config.SinkKindHTTPJSONL:
 			if sink.HTTPJSONL != nil {
-				row["url"] = sink.HTTPJSONL.URL
+				endpoint = sink.HTTPJSONL.URL
+				row["url"] = endpoint
 			}
 		}
 		rows = append(rows, row)
+
+		state := "disabled"
+		if sink.Enabled {
+			enabled++
+			enabledKinds = append(enabledKinds, string(sink.Kind))
+			state = "enabled"
+		}
+
+		// Per-sink scalar key so the CLI status renderer can show
+		// one human-readable line per sink. Two-digit zero-padded
+		// index keeps the alphabetical key sort matching the config
+		// order (sink_01 before sink_10), so the rendered list
+		// follows config.yaml ordering rather than map iteration.
+		key := fmt.Sprintf("sink_%02d", i+1)
+		if endpoint != "" {
+			details[key] = fmt.Sprintf(
+				"%s (%s) -> %s [%s]", sink.Name, sink.Kind, endpoint, state,
+			)
+		} else {
+			// Sink missing its kind block (validation should reject
+			// this at config-load, but be defensive — health is
+			// strictly read-only and must never panic).
+			details[key] = fmt.Sprintf(
+				"%s (%s) [%s, missing %s block]",
+				sink.Name, sink.Kind, state, sink.Kind,
+			)
+		}
 	}
 
+	// Backward-compatible structured fields preserved for /health
+	// JSON consumers (TUI, dashboards, the regression test in
+	// gateway_test.go::TestHealthEndpointNoSecrets). The CLI
+	// printer's scalar-only filter hides these on the terminal —
+	// the per-sink string keys above carry the human-readable view.
+	details["count"] = enabled
+	details["kinds"] = enabledKinds
+	details["sinks"] = rows
+
 	if enabled == 0 {
-		s.health.SetSinks(StateDisabled, "", nil)
+		// At least one sink is configured but all are disabled —
+		// distinct from "no audit sinks configured" so operators
+		// know they have stale entries to flip on or remove rather
+		// than nothing at all.
+		details["summary"] = fmt.Sprintf(
+			"0 of %d sink(s) enabled — flip one on with 'defenseclaw setup observability enable <name>'",
+			total,
+		)
+		s.health.SetSinks(StateDisabled, "", details)
 		return
 	}
 
-	details := map[string]interface{}{
-		"count": enabled,
-		"kinds": kinds,
-		"sinks": rows,
-	}
+	details["summary"] = fmt.Sprintf("%d of %d enabled", enabled, total)
 	s.health.SetSinks(StateRunning, "", details)
 }
 

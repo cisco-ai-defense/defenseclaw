@@ -57,6 +57,22 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 			t.Errorf("got %q, want fallback", got)
 		}
 	})
+	t.Run("defenseclaw env takes priority over openclaw env", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "new-style")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "old-style")
+		g := GatewayConfig{TokenEnv: "", Token: ""}
+		if got := g.ResolvedToken(); got != "new-style" {
+			t.Errorf("got %q, want new-style", got)
+		}
+	})
+	t.Run("empty defenseclaw env falls back to openclaw env", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "legacy-token")
+		g := GatewayConfig{TokenEnv: "", Token: ""}
+		if got := g.ResolvedToken(); got != "legacy-token" {
+			t.Errorf("got %q, want legacy-token", got)
+		}
+	})
 }
 
 func TestDefaultDataPath(t *testing.T) {
@@ -102,6 +118,7 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
 		t.Fatal("DefaultConfig() returned nil")
+		return
 	}
 
 	if cfg.DataDir == "" {
@@ -176,6 +193,12 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	}
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
+	}
+	if cfg.Guardrail.HILT.Enabled {
+		t.Error("guardrail.hilt.enabled should default false")
+	}
+	if cfg.Guardrail.HILT.MinSeverity != "HIGH" {
+		t.Errorf("guardrail.hilt.min_severity = %q, want HIGH", cfg.Guardrail.HILT.MinSeverity)
 	}
 	if cfg.Guardrail.Host != "" {
 		t.Errorf("expected default guardrail host empty (Viper default), got %q", cfg.Guardrail.Host)
@@ -462,8 +485,8 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 	}
 }
 
-func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
-	dirs := SkillDirsForMode(ClawOpenClaw, "/tmp/nonexistent-home")
+func TestSkillDirsForOpenClaw_NoOpenclawJSON(t *testing.T) {
+	dirs := SkillDirsForOpenClaw("/tmp/nonexistent-home")
 	if len(dirs) < 2 {
 		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
 	}
@@ -475,7 +498,7 @@ func TestSkillDirsForMode_NoOpenclawJSON(t *testing.T) {
 	}
 }
 
-func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
+func TestSkillDirsForOpenClaw_WithOpenclawJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	workspaceDir := filepath.Join(tmpDir, "project-workspace")
 
@@ -498,7 +521,7 @@ func TestSkillDirsForMode_WithOpenclawJSON(t *testing.T) {
 		t.Fatalf("write openclaw.json: %v", err)
 	}
 
-	dirs := SkillDirsForMode(ClawOpenClaw, tmpDir)
+	dirs := SkillDirsForOpenClaw(tmpDir)
 
 	found := false
 	for _, d := range dirs {
@@ -1216,7 +1239,11 @@ func TestConfig_Save_BumpsProvenance(t *testing.T) {
 	// Mutate the config and save again; both hash and generation
 	// must advance. Pinning this guards the "ContentHash stable
 	// across identical saves, fresh per mutation" invariant.
-	cfg.Claw.Mode = "nemoclaw"
+	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw
+	// connector — kept aligned with the canonical four-connector
+	// enum in schemas/otel/resource.schema.json so this test
+	// doesn't bake a stale legacy mode string.
+	cfg.Claw.Mode = "zeptoclaw"
 	if err := cfg.Save(); err != nil {
 		t.Fatalf("Save() (2) returned error: %v", err)
 	}
@@ -1349,6 +1376,7 @@ func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
 		t.Fatal("DefaultConfig() returned nil")
+		return
 	}
 	if cfg.Guardrail.Host != "" {
 		t.Fatalf("Guardrail.Host = %q, want empty string (not localhost); non-empty default breaks EffectiveHost IPv4 fallback", cfg.Guardrail.Host)

@@ -138,3 +138,23 @@ func TestIsPrivateHost(t *testing.T) {
 		}
 	}
 }
+
+// TestIsPrivateHost_HostnameResolvesToLoopback pins PR #141 audit M1.
+// Prior to M1 the function returned false for any non-IP-literal input
+// without consulting DNS — so an attacker-controlled `evil.example`
+// that resolved to 127.0.0.1 (or 169.254.169.254 cloud metadata) would
+// fly under the SSRF guard. We use `localhost` here because it is
+// guaranteed to resolve to a loopback address on every platform's
+// default resolver chain (`/etc/hosts` on Unix, the equivalent on
+// Windows) and does not require live external DNS.
+func TestIsPrivateHost_HostnameResolvesToLoopback(t *testing.T) {
+	cases := []string{
+		"localhost",
+		"localhost:8080",
+	}
+	for _, h := range cases {
+		if !isPrivateHost(h) {
+			t.Errorf("isPrivateHost(%q) = false, want true (DNS-resolved hostname pointing at loopback)", h)
+		}
+	}
+}

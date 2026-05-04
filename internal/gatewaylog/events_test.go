@@ -77,6 +77,42 @@ func TestEventStampProvenanceOverwrites(t *testing.T) {
 	}
 }
 
+func TestStampAgentWatchContext(t *testing.T) {
+	SetAgentWatchContext(AgentWatchContext{
+		TenantID:        "tenant-a",
+		WorkspaceID:     "workspace-1",
+		Environment:     "prod",
+		DeploymentMode:  "managed",
+		DiscoverySource: "registry",
+	})
+	t.Cleanup(func() { SetAgentWatchContext(AgentWatchContext{}) })
+
+	e := Event{EventType: EventLifecycle}
+	StampAgentWatchContext(&e)
+
+	if e.TenantID != "tenant-a" {
+		t.Fatalf("tenant_id=%q, want tenant-a", e.TenantID)
+	}
+	if e.WorkspaceID != "workspace-1" {
+		t.Fatalf("workspace_id=%q, want workspace-1", e.WorkspaceID)
+	}
+	if e.Environment != "prod" {
+		t.Fatalf("environment=%q, want prod", e.Environment)
+	}
+	if e.DeploymentMode != "managed" {
+		t.Fatalf("deployment_mode=%q, want managed", e.DeploymentMode)
+	}
+	if e.DiscoverySource != "registry" {
+		t.Fatalf("discovery_source=%q, want registry", e.DiscoverySource)
+	}
+
+	pinned := Event{TenantID: "caller-tenant"}
+	StampAgentWatchContext(&pinned)
+	if pinned.TenantID != "caller-tenant" {
+		t.Fatalf("caller-supplied tenant_id was overwritten: %q", pinned.TenantID)
+	}
+}
+
 // TestEventMarshalOmitsEmptyPayloads pins the contract that each
 // event type only carries its own payload; downstream consumers
 // dispatch on event_type and shouldn't have to tolerate cross-talk.
@@ -104,6 +140,7 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	for _, banned := range []string{
 		`,"verdict":{`, `,"judge":{`, `,"lifecycle":{`,
 		`,"error":{`, `,"diagnostic":{`, `,"scan_finding":{`, `,"activity":{`,
+		`,"llm_prompt":{`, `,"llm_response":{`, `,"tool_invocation":{`,
 	} {
 		if strings.Contains(s, banned) {
 			t.Errorf("marshalled event should not carry %s for EventScan: %s", banned, s)

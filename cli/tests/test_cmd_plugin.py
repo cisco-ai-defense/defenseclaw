@@ -1103,7 +1103,7 @@ class TestResolvePluginDir(unittest.TestCase):
         source = os.path.join(root, "index.ts")
         open(source, "w").close()
 
-        def info_side_effect(name):
+        def info_side_effect(name, connector=""):
             return self._mock_info(source) if name == "whatsapp" else None
 
         mock_info.side_effect = info_side_effect
@@ -1115,6 +1115,199 @@ class TestResolvePluginDir(unittest.TestCase):
     def test_no_fallback_when_lowercase_also_fails(self, mock_info):
         mock_info.return_value = None
         self.assertIsNone(_resolve_plugin_dir("Unknown", self.plugin_dir))
+
+
+# ---------------------------------------------------------------------------
+# Plan C6 / matrix #3 — host-agent plugin enumeration tests.
+#
+# These exercise the new _list_host_plugins + _scan_plugin_dir helpers
+# in cmd_plugin.py. The contract is:
+#
+#   1. For non-OpenClaw connectors, plugins on the host's plugin_dirs()
+#      get surfaced through `defenseclaw plugin list` with provenance
+#      "host:<connector>".
+#   2. A plugin id collision between DefenseClaw-managed and host
+#      directories preserves the DefenseClaw entry (we never mask our
+#      own copy).
+#   3. Malformed manifests do not crash list — the broken plugin is
+#      simply skipped, the rest still surface.
+#   4. OpenClaw connector skips host enumeration (the openclaw binary
+#      already enumerates via _list_openclaw_plugins).
+# ---------------------------------------------------------------------------
+
+
+class HostPluginEnumerationTests(unittest.TestCase):
+    """Plan C6 host-plugin enumeration."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dc-host-plugins-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _seed(self, plugin_name: str, manifest: dict | None) -> str:
+        """Create a host plugin dir with optional manifest."""
+        d = os.path.join(self.tmp_dir, plugin_name)
+        os.makedirs(d, exist_ok=True)
+        if manifest is not None:
+            with open(os.path.join(d, "plugin.json"), "w") as fh:
+                json.dump(manifest, fh)
+        return d
+
+    def test_scan_plugin_dir_picks_up_manifest(self):
+        from defenseclaw.commands.cmd_plugin import _scan_plugin_dir
+
+        self._seed("hello-host", {
+            "id": "hello-host",
+            "name": "Hello Host",
+            "version": "1.2.3",
+            "description": "from claudecode",
+        })
+
+        out = _scan_plugin_dir(self.tmp_dir, "claudecode")
+        self.assertEqual(len(out), 1, out)
+        entry = out[0]
+        self.assertEqual(entry["id"], "hello-host")
+        self.assertEqual(entry["name"], "Hello Host")
+        self.assertEqual(entry["version"], "1.2.3")
+        self.assertEqual(entry["source"], "host:claudecode")
+
+    def test_scan_plugin_dir_falls_back_to_directory_name(self):
+        """No manifest at all — id defaults to the directory name."""
+        from defenseclaw.commands.cmd_plugin import _scan_plugin_dir
+
+        self._seed("bare-plugin", manifest=None)
+
+        out = _scan_plugin_dir(self.tmp_dir, "codex")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["id"], "bare-plugin")
+        self.assertEqual(out[0]["source"], "host:codex")
+
+    def test_scan_plugin_dir_skips_malformed_manifest(self):
+        """A broken manifest must not crash the whole list."""
+        from defenseclaw.commands.cmd_plugin import _scan_plugin_dir
+
+        broken = self._seed("broken-plugin", manifest=None)
+        with open(os.path.join(broken, "plugin.json"), "w") as fh:
+            fh.write("{not valid json")
+
+        self._seed("good-plugin", {"id": "good-plugin", "name": "Good"})
+
+        out = _scan_plugin_dir(self.tmp_dir, "zeptoclaw")
+        ids = sorted(p["id"] for p in out)
+        # Both directories surface — broken-plugin via name fallback,
+        # good-plugin via manifest.
+        self.assertIn("broken-plugin", ids)
+        self.assertIn("good-plugin", ids)
+
+    def test_scan_plugin_dir_returns_empty_for_missing_dir(self):
+        from defenseclaw.commands.cmd_plugin import _scan_plugin_dir
+
+        out = _scan_plugin_dir("/nonexistent/path/that/should/not/exist", "claudecode")
+        self.assertEqual(out, [])
+
+    def test_list_host_plugins_skips_openclaw(self):
+        """OpenClaw enumeration goes through the openclaw binary, not us."""
+        from defenseclaw.commands.cmd_plugin import _list_host_plugins
+
+        class FakeCfg:
+            def plugin_dirs(self):
+                return [self.tmp_dir]  # would normally contain plugins
+
+        out = _list_host_plugins("openclaw", FakeCfg())
+        self.assertEqual(out, [])
+
+        out = _list_host_plugins("", FakeCfg())
+        self.assertEqual(out, [])
+
+    def test_list_host_plugins_dedups_across_dirs(self):
+        """Two plugin dirs with the same id surface only once."""
+        from defenseclaw.commands.cmd_plugin import _list_host_plugins
+
+        a = os.path.join(self.tmp_dir, "user-scope")
+        b = os.path.join(self.tmp_dir, "workspace-scope")
+        os.makedirs(a)
+        os.makedirs(b)
+        for d in (a, b):
+            sub = os.path.join(d, "shared-plugin")
+            os.makedirs(sub)
+            with open(os.path.join(sub, "plugin.json"), "w") as fh:
+                json.dump({"id": "shared-plugin", "name": "Shared"}, fh)
+
+        outer_self = self
+
+        class FakeCfg:
+            def plugin_dirs(self):
+                return [a, b]  # noqa: F823 — closure over outer scope
+
+        out = _list_host_plugins("claudecode", FakeCfg())
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["id"], "shared-plugin")
+
+
+class MergeAllPluginsHostBranchTests(unittest.TestCase):
+    """Plan C6 — _merge_all_plugins integrates host-side plugins."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dc-merge-host-")
+        self.host_dir = os.path.join(self.tmp_dir, "host-plugins")
+        self.dc_plugin_dir = os.path.join(self.tmp_dir, "dc-plugins")
+        os.makedirs(self.host_dir)
+        os.makedirs(self.dc_plugin_dir)
+        # DefenseClaw-managed plugin: just a directory under plugin_dir
+        os.makedirs(os.path.join(self.dc_plugin_dir, "my-managed-plugin"))
+        # Host plugin with a different id
+        sub = os.path.join(self.host_dir, "host-only-plugin")
+        os.makedirs(sub)
+        with open(os.path.join(sub, "plugin.json"), "w") as fh:
+            json.dump(
+                {"id": "host-only-plugin", "name": "Host Only", "version": "0.1"},
+                fh,
+            )
+        # Host plugin that COLLIDES with the managed id
+        clash = os.path.join(self.host_dir, "my-managed-plugin")
+        os.makedirs(clash)
+        with open(os.path.join(clash, "plugin.json"), "w") as fh:
+            json.dump({"id": "my-managed-plugin", "name": "Host Clash"}, fh)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _make_cfg(self):
+        outer = self
+
+        class FakeCfg:
+            def plugin_dirs(self):
+                return [outer.host_dir]
+
+        return FakeCfg()
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_merge_includes_host_plugins_for_claudecode(self, _mock):
+        from defenseclaw.commands.cmd_plugin import _merge_all_plugins
+
+        merged = _merge_all_plugins(
+            self.dc_plugin_dir, "claudecode", cfg=self._make_cfg(),
+        )
+        ids = {p["id"]: p for p in merged}
+        # DefenseClaw-managed entry is present.
+        self.assertIn("my-managed-plugin", ids)
+        self.assertEqual(ids["my-managed-plugin"]["source"], "defenseclaw")
+        # Host-only plugin surfaces with provenance label.
+        self.assertIn("host-only-plugin", ids)
+        self.assertEqual(ids["host-only-plugin"]["source"], "host:claudecode")
+        # The collision did NOT replace the managed entry.
+        self.assertNotEqual(ids["my-managed-plugin"]["source"], "host:claudecode")
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_merge_skips_host_plugins_when_cfg_is_none(self, _mock):
+        """Back-compat: callers without cfg get only DC-managed + openclaw."""
+        from defenseclaw.commands.cmd_plugin import _merge_all_plugins
+
+        merged = _merge_all_plugins(self.dc_plugin_dir, "claudecode")
+        ids = {p["id"] for p in merged}
+        self.assertIn("my-managed-plugin", ids)
+        self.assertNotIn("host-only-plugin", ids)
 
 
 if __name__ == "__main__":

@@ -40,8 +40,8 @@ func TestEnvelopeFromContext_RoundTrip(t *testing.T) {
 // contract: LogEventCtx must never panic when called from a test
 // harness or a background worker that doesn't carry a request ctx.
 func TestEnvelopeFromContext_NilCtxReturnsZero(t *testing.T) {
-	//lint:ignore SA1012 intentionally passing nil context to pin nil-safety
-	got := EnvelopeFromContext(nil)
+	var nilCtx context.Context
+	got := EnvelopeFromContext(nilCtx)
 	if got != (CorrelationEnvelope{}) {
 		t.Fatalf("want zero envelope from nil ctx, got %+v", got)
 	}

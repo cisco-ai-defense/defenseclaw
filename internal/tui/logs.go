@@ -39,21 +39,23 @@ var jsonUnmarshal = json.Unmarshal
 const (
 	logSourceGateway = iota
 	logSourceVerdicts
+	logSourceOTEL
 	logSourceWatchdog
 	logSourceCount
 )
 
-var logSourceNames = [logSourceCount]string{"Gateway", "Verdicts", "Watchdog"}
+var logSourceNames = [logSourceCount]string{"Gateway", "Verdicts", "OTEL", "Watchdog"}
 
 // verdictActionFilters cycle the Verdicts source through structured
 // action filters. Matches the action field of gatewaylog.VerdictPayload.
 // Empty string means "show all actions".
-var verdictActionFilters = []string{"", "block", "alert", "allow"}
+var verdictActionFilters = []string{"", "block", "alert", "confirm", "allow"}
 var verdictActionLabels = map[string]string{
-	"":      "All actions",
-	"block": "Block",
-	"alert": "Alert",
-	"allow": "Allow",
+	"":        "All actions",
+	"block":   "Block",
+	"alert":   "Alert",
+	"confirm": "Confirm",
+	"allow":   "Allow",
 }
 
 // verdictEventTypeFilters cycle the Verdicts source through
@@ -156,7 +158,7 @@ var filterLabels = map[string]string{
 type logPollMsg struct{}
 
 // LogsPanel provides live log tailing for gateway.log, gateway.jsonl
-// (Verdicts tab), and watchdog.log.
+// (Verdicts and OTEL tabs), and watchdog.log.
 type LogsPanel struct {
 	theme      *Theme
 	dataDir    string
@@ -181,15 +183,13 @@ type LogsPanel struct {
 	cursor      [logSourceCount]int
 	cursorMoved [logSourceCount]bool
 
-	// Verdicts-only state: cached structured events and a chip-
-	// filter for action (block/alert/allow). Cardinalities other
-	// than action (category, model) are still queryable via the
-	// existing text-search field to keep the chip bar short. The
-	// three chips we surface as first-class (action, event type,
-	// severity) are the ones operators name when describing an
-	// incident — "show me HIGH judge blocks" — so putting them
-	// one keystroke away materially speeds up triage.
+	// Structured gateway.jsonl state. Verdict rows get first-class
+	// chips because operators triage them by action/type/severity;
+	// OTEL rows use the same cursor/search/detail machinery but stay
+	// in their own source so connector telemetry does not bury guardrail
+	// verdicts.
 	verdicts         []verdictRow
+	otelRows         []verdictRow
 	verdictAction    string // one of verdictActionFilters
 	verdictEventType string // one of verdictEventTypeFilters
 	verdictSeverity  string // one of verdictSeverityFilters
@@ -610,21 +610,21 @@ func severityRank(s string) int {
 // active or the cursor is out of range. Used by the detail modal
 // (Phase 3.2).
 func (p *LogsPanel) SelectedVerdict() *verdictRow {
-	if p.source != logSourceVerdicts {
+	return p.selectedStructuredRow(logSourceVerdicts, p.filteredVerdicts())
+}
+
+// SelectedOTELRow returns the structured OTEL/codex telemetry event
+// under the current cursor, or nil when the OTEL source is inactive.
+func (p *LogsPanel) SelectedOTELRow() *verdictRow {
+	return p.selectedStructuredRow(logSourceOTEL, p.filteredOTELRows())
+}
+
+func (p *LogsPanel) selectedStructuredRow(source int, filtered []verdictRow) *verdictRow {
+	if p.source != source || len(filtered) == 0 {
 		return nil
 	}
-	// filteredVerdicts walks p.verdicts in lockstep with the
-	// rendered-line filter, so indexing into its output is
-	// always safe even with text/preset filters active. Prior
-	// implementations keyed off scroll+visible-1 ("last visible
-	// line") which surprised operators who scrolled up to a
-	// specific row before pressing Enter (B4b).
-	filtered := p.filteredVerdicts()
-	if len(filtered) == 0 {
-		return nil
-	}
-	idx := p.cursor[logSourceVerdicts]
-	if !p.cursorMoved[logSourceVerdicts] {
+	idx := p.cursor[source]
+	if !p.cursorMoved[source] {
 		idx = len(filtered) - 1
 	}
 	if idx < 0 {
@@ -637,11 +637,11 @@ func (p *LogsPanel) SelectedVerdict() *verdictRow {
 	return &row
 }
 
-// SelectedRawLine returns the raw line under the cursor for
-// non-Verdicts sources. Returned empty when there's nothing to
-// open so callers can skip the modal instead of showing a blank.
+// SelectedRawLine returns the raw line under the cursor for free-form
+// sources. Returned empty when there's nothing to open so callers can
+// skip the modal instead of showing a blank.
 func (p *LogsPanel) SelectedRawLine() string {
-	if p.source == logSourceVerdicts {
+	if p.source == logSourceVerdicts || p.source == logSourceOTEL {
 		return ""
 	}
 	filtered := p.filteredLines()
@@ -959,6 +959,28 @@ func (p *LogsPanel) View() string {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
 			fmt.Sprintf("%d lines", totalLines)))
 	}
+
+	// Redaction state indicator. Surfaced inline in the Logs header
+	// rather than buried in a help screen because operators
+	// debugging "why are user prompts showing as <redacted len=…>"
+	// — or, conversely, "why does the audit DB contain raw PII?" —
+	// need to see the current state at a glance. The badge mirrors
+	// the Go `redaction.DisableAll()` check so it reflects either
+	// the persisted ``privacy.disable_redaction`` flag or the
+	// ``DEFENSECLAW_DISABLE_REDACTION`` env override.
+	if redactionDisabledForLogsBadge() {
+		rawBadge := lipgloss.NewStyle().
+			Background(lipgloss.Color("196")). // red — same vocabulary as PAUSED warning
+			Foreground(lipgloss.Color("230")).
+			Bold(true).
+			Padding(0, 1).
+			Render("RAW")
+		b.WriteString("   ")
+		b.WriteString(rawBadge)
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
+			"redaction off — `defenseclaw setup redaction on` to re-enable"))
+	}
 	b.WriteString("\n")
 
 	// Row 1: Filter bar — wider buttons with more padding
@@ -1143,11 +1165,15 @@ func (p *LogsPanel) View() string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
 	if p.source == logSourceVerdicts {
 		b.WriteString(hint.Render(fmt.Sprintf(
-			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · a/t/s chips · J judge history.",
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · a/t/s chips · J judge history · R redaction.",
+			logSourceNames[p.source])))
+	} else if p.source == logSourceOTEL {
+		b.WriteString(hint.Render(fmt.Sprintf(
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · e errors · w warnings · R redaction.",
 			logSourceNames[p.source])))
 	} else {
 		b.WriteString(hint.Render(fmt.Sprintf(
-			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · e errors · w warnings.",
+			"  Streaming %s. ↑/↓ select · Enter detail · Space pause · / search · e errors · w warnings · R redaction.",
 			logSourceNames[p.source])))
 		// Gateway / Watchdog tabs tail free-form stderr logs that
 		// mostly carry startup chatter. Operators looking for
@@ -1159,7 +1185,7 @@ func (p *LogsPanel) View() string {
 		if p.source == logSourceGateway {
 			b.WriteString("\n")
 			b.WriteString(dim.Render(
-				"  (Runtime events live in gateway.jsonl — press → or l to switch to Verdicts.)"))
+				"  (Runtime events live in Verdicts; connector telemetry lives in OTEL — press → or l to switch.)"))
 		}
 	}
 
@@ -1275,21 +1301,30 @@ func (p *LogsPanel) filteredVerdicts() []verdictRow {
 	if p.source != logSourceVerdicts {
 		return nil
 	}
-	all := p.lines[logSourceVerdicts]
-	if len(all) != len(p.verdicts) {
+	return p.filteredStructuredRows(logSourceVerdicts, p.verdicts)
+}
+
+func (p *LogsPanel) filteredOTELRows() []verdictRow {
+	if p.source != logSourceOTEL {
+		return nil
+	}
+	return p.filteredStructuredRows(logSourceOTEL, p.otelRows)
+}
+
+func (p *LogsPanel) filteredStructuredRows(source int, rows []verdictRow) []verdictRow {
+	all := p.lines[source]
+	if len(all) != len(rows) {
 		return nil
 	}
 	if p.filterMode == filterNone && p.searchText == "" {
-		// Copy so callers can safely retain the slice without
-		// aliasing our live buffer.
-		out := make([]verdictRow, len(p.verdicts))
-		copy(out, p.verdicts)
+		out := make([]verdictRow, len(rows))
+		copy(out, rows)
 		return out
 	}
 	out := make([]verdictRow, 0, len(all))
 	for i, line := range all {
 		if p.lineMatchesCurrentFilter(strings.ToLower(line)) {
-			out = append(out, p.verdicts[i])
+			out = append(out, rows[i])
 		}
 	}
 	return out
@@ -1384,17 +1419,19 @@ func (p *LogsPanel) loadFile(source int, path string) {
 // rotation) are silently dropped — the errMsgs slot would flap
 // for operators otherwise.
 //
-// Rendered lines go into p.lines[logSourceVerdicts] so the
-// existing scroll/search machinery works unchanged; verdictRow
-// keeps the parsed shape for the action-chip filter + future
-// detail pane.
+// Verdict/judge/scan rendered lines go into logSourceVerdicts; connector
+// telemetry rendered lines go into logSourceOTEL. Both keep parsed rows
+// alongside rendered lines so search/cursor/detail stay in lockstep.
 func (p *LogsPanel) loadVerdicts(path string) {
 	const maxBytes = 512 * 1024
 	f, err := os.Open(path)
 	if err != nil {
 		p.errMsgs[logSourceVerdicts] = fmt.Sprintf("Cannot open: %v", err)
+		p.errMsgs[logSourceOTEL] = fmt.Sprintf("Cannot open: %v", err)
 		p.lines[logSourceVerdicts] = nil
+		p.lines[logSourceOTEL] = nil
 		p.verdicts = nil
+		p.otelRows = nil
 		return
 	}
 	defer f.Close()
@@ -1402,9 +1439,11 @@ func (p *LogsPanel) loadVerdicts(path string) {
 	info, err := f.Stat()
 	if err != nil {
 		p.errMsgs[logSourceVerdicts] = fmt.Sprintf("Cannot stat: %v", err)
+		p.errMsgs[logSourceOTEL] = fmt.Sprintf("Cannot stat: %v", err)
 		return
 	}
 	p.errMsgs[logSourceVerdicts] = ""
+	p.errMsgs[logSourceOTEL] = ""
 	size := info.Size()
 	readSize := size
 	if readSize > maxBytes {
@@ -1432,6 +1471,8 @@ func (p *LogsPanel) loadVerdicts(path string) {
 
 	rows := make([]verdictRow, 0, len(rawLines))
 	rendered := make([]string, 0, len(rawLines))
+	otelRows := make([]verdictRow, 0, len(rawLines))
+	otelRendered := make([]string, 0, len(rawLines))
 	for _, line := range rawLines {
 		line = strings.TrimSpace(line)
 		if line == "" || !strings.HasPrefix(line, "{") {
@@ -1439,6 +1480,11 @@ func (p *LogsPanel) loadVerdicts(path string) {
 		}
 		row, ok := parseVerdictRow(line)
 		if !ok {
+			continue
+		}
+		if isOTELLogRow(row) {
+			otelRows = append(otelRows, row)
+			otelRendered = append(otelRendered, renderOTELLine(row))
 			continue
 		}
 		if p.verdictEventType != "" {
@@ -1483,6 +1529,8 @@ func (p *LogsPanel) loadVerdicts(path string) {
 	}
 	p.verdicts = rows
 	p.lines[logSourceVerdicts] = rendered
+	p.otelRows = otelRows
+	p.lines[logSourceOTEL] = otelRendered
 }
 
 // parseVerdictRow extracts the typed fields we care about from a
@@ -1655,6 +1703,72 @@ func parseVerdictRow(line string) (verdictRow, bool) {
 		row.action = raw.Activity.Action
 	}
 	return row, true
+}
+
+func isOTELLogRow(r verdictRow) bool {
+	action := strings.ToLower(strings.TrimSpace(r.activityAct))
+	if action == "" && r.lifecycleDetails != nil {
+		action = strings.ToLower(strings.TrimSpace(r.lifecycleDetails["action"]))
+	}
+	if strings.HasPrefix(action, "otel.ingest.") ||
+		strings.HasPrefix(action, "codex.notify.") ||
+		action == "otel.ingest" ||
+		action == "codex.notify" {
+		return true
+	}
+
+	subsystem := strings.ToLower(strings.TrimSpace(r.lifecycleSubsystem))
+	component := strings.ToLower(strings.TrimSpace(r.diagnosticComponent))
+	return subsystem == "otel" ||
+		subsystem == "telemetry" ||
+		component == "otel" ||
+		component == "telemetry"
+}
+
+func renderOTELLine(r verdictRow) string {
+	ts := r.timestamp.Format("15:04:05.000")
+	action := strings.TrimSpace(r.activityAct)
+	target := strings.TrimSpace(r.activityTgt)
+	if action == "" && r.lifecycleDetails != nil {
+		action = strings.TrimSpace(r.lifecycleDetails["action"])
+	}
+	if target == "" && r.lifecycleDetails != nil {
+		target = strings.TrimSpace(r.lifecycleDetails["target"])
+	}
+	stream := "OTEL"
+	if strings.HasPrefix(strings.ToLower(action), "codex.notify") {
+		stream = "CODEX"
+	}
+
+	switch r.eventType {
+	case "lifecycle":
+		return fmt.Sprintf("%s %-6s %-8s subsystem=%s transition=%s %s",
+			ts,
+			stream,
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.lifecycleSubsystem, "-"),
+			nonEmpty(r.lifecycleTransition, "-"),
+			renderDetailsInline(r.lifecycleDetails, 4))
+	case "activity":
+		return fmt.Sprintf("%s %-6s %-8s actor=%s action=%s target=%s %s→%s",
+			ts,
+			stream,
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.activityActor, "-"),
+			nonEmpty(action, "-"),
+			truncateVerdictReason(nonEmpty(target, "-"), 36),
+			nonEmpty(r.verFrom, "∅"),
+			nonEmpty(r.verTo, "∅"))
+	case "diagnostic":
+		return fmt.Sprintf("%s %-6s %-8s component=%s %s",
+			ts,
+			stream,
+			strings.ToUpper(nonEmpty(r.severity, "info")),
+			nonEmpty(r.diagnosticComponent, "-"),
+			truncateVerdictReason(r.diagnosticMessage, 120))
+	default:
+		return fmt.Sprintf("%s %-6s %-8s %s", ts, stream, strings.ToUpper(nonEmpty(r.severity, "info")), r.raw)
+	}
 }
 
 // renderVerdictLine produces the compact single-line view of a

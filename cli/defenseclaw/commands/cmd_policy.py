@@ -344,8 +344,13 @@ def show(app: AppContext, name: str) -> None:
     if guardrail:
         click.echo()
         click.echo("Guardrail:")
-        click.echo(f"  block_threshold:    {guardrail.get('block_threshold', 3)} (severity rank)")
+        click.echo(f"  block_threshold:    {guardrail.get('block_threshold', 4)} (severity rank)")
         click.echo(f"  alert_threshold:    {guardrail.get('alert_threshold', 2)} (severity rank)")
+        hilt = guardrail.get("hilt", {}) or {}
+        click.echo(
+            f"  hilt:               enabled={bool(hilt.get('enabled', False))} "
+            f"min={hilt.get('min_severity', 'HIGH')}"
+        )
         click.echo(f"  cisco_trust_level:  {guardrail.get('cisco_trust_level', 'full')}")
         patterns = guardrail.get("patterns", {})
         if patterns:
@@ -849,8 +854,12 @@ def _default_policy_data() -> dict:
         },
         "scanner_overrides": {},
         "guardrail": {
-            "block_threshold": 3,
+            "block_threshold": 4,
             "alert_threshold": 2,
+            "hilt": {
+                "enabled": False,
+                "min_severity": "HIGH",
+            },
             "cisco_trust_level": "full",
             "patterns": {},
             "severity_mappings": {},

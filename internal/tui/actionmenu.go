@@ -317,23 +317,37 @@ func ToolActions(status string) []ActionItem {
 	return actions
 }
 
-// MCPActions returns the action items for an MCP server based on its current status.
-func MCPActions(status string) []ActionItem {
+// MCPActions returns the action items for an MCP server based on its
+// current status. The connector argument is the active agent framework
+// (openclaw / zeptoclaw / claudecode / codex) so the "Unset" item's
+// description names the right config file (openclaw config, ~/.claude/
+// settings.json, ./.mcp.json, ~/.zeptoclaw/config.json), and so we can
+// surface a clear "read-only" hint for ZeptoClaw which does not
+// support MCP write through the CLI (connector_paths.set_mcp_server
+// raises MCPWriteUnsupportedError for it).
+func MCPActions(status, connector string) []ActionItem {
 	actions := []ActionItem{
 		{Key: "s", Label: "Scan", Description: "Run security scan"},
 		{Key: "i", Label: "Info", Description: "Show full details"},
+	}
+
+	connector = strings.TrimSpace(connector)
+	unsetTarget := mcpUnsetTargetForConnector(connector)
+	unsetDesc := "Remove from " + unsetTarget
+	if connector == "zeptoclaw" {
+		unsetDesc = "Read-only — edit " + unsetTarget + " manually"
 	}
 
 	switch status {
 	case "blocked":
 		actions = append(actions,
 			ActionItem{Key: "u", Label: "Unblock", Description: "Remove from block list"},
-			ActionItem{Key: "x", Label: "Unset", Description: "Remove from OpenClaw config"},
+			ActionItem{Key: "x", Label: "Unset", Description: unsetDesc},
 		)
 	case "allowed":
 		actions = append(actions,
 			ActionItem{Key: "b", Label: "Block", Description: "Add to block list"},
-			ActionItem{Key: "x", Label: "Unset", Description: "Remove from OpenClaw config"},
+			ActionItem{Key: "x", Label: "Unset", Description: unsetDesc},
 		)
 	default:
 		actions = append(actions,
@@ -343,4 +357,17 @@ func MCPActions(status string) []ActionItem {
 	}
 
 	return actions
+}
+
+func mcpUnsetTargetForConnector(connector string) string {
+	switch connector {
+	case "claudecode":
+		return "~/.claude/settings.json"
+	case "codex":
+		return "./.mcp.json"
+	case "zeptoclaw":
+		return "~/.zeptoclaw/config.json"
+	default:
+		return "OpenClaw config"
+	}
 }

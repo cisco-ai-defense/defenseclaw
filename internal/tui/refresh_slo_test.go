@@ -38,6 +38,7 @@ func TestRefreshMsg_RecordsTUIRefreshHistogram(t *testing.T) {
 	h := findTestHistogram(rm, "defenseclaw.slo.tui.refresh")
 	if h == nil {
 		t.Fatal("histogram defenseclaw.slo.tui.refresh not found")
+		return
 	}
 	hist, ok := h.Data.(metricdata.Histogram[float64])
 	if !ok {

@@ -43,10 +43,10 @@ from defenseclaw.paths import bundled_codeguard_dir
 
 
 def install_codeguard_skill(cfg) -> str:
-    """Copy the CodeGuard skill into the OpenClaw workspace skills directory.
+    """Copy the CodeGuard skill into the active connector's skills directory.
 
     Uses ``cfg.skill_dirs()`` to resolve the highest-priority directory
-    (workspace skills dir when configured, otherwise the global skills dir).
+    (connector-aware: works for OpenClaw, ClaudeCode, Codex, ZeptoClaw).
 
     Returns a short status string for CLI output.
     """
@@ -80,19 +80,22 @@ def install_codeguard_skill(cfg) -> str:
                 pass
         return f"skipped ({reason})"
 
-    oc_config = _expand(cfg.claw.config_file)
-    _enable_codeguard_in_openclaw(oc_config)
+    connector = getattr(cfg.guardrail, "connector", "openclaw") or "openclaw"
+    if connector.lower() == "openclaw":
+        oc_config = _expand(cfg.claw.config_file)
+        _enable_codeguard_in_openclaw(oc_config)
 
     return f"installed to {target_dir}"
 
 
-def ensure_codeguard_skill(claw_home: str, openclaw_config: str) -> None:
-    """Lightweight check: install the skill if OpenClaw exists but the skill doesn't.
+def ensure_codeguard_skill(claw_home: str, openclaw_config: str, connector: str = "") -> None:
+    """Lightweight check: install the skill if the agent exists but the skill doesn't.
 
-    Designed to be called on CLI startup so that when a user installs OpenClaw
-    after running ``defenseclaw init``, the skill appears automatically on the
-    next ``defenseclaw`` invocation.
+    Designed to be called on CLI startup so that when a user installs the
+    agent after running ``defenseclaw init``, the skill appears automatically
+    on the next ``defenseclaw`` invocation.
     """
+    connector = (connector or "openclaw").lower()
     claw_home = _expand(claw_home)
     oc_config = _expand(openclaw_config)
 
@@ -105,9 +108,13 @@ def ensure_codeguard_skill(claw_home: str, openclaw_config: str) -> None:
     if os.path.isdir(target_dir):
         return
 
-    oc_binary = shutil.which("openclaw")
-    if not os.path.isfile(oc_config) and not oc_binary:
-        return
+    if connector == "openclaw":
+        oc_binary = shutil.which("openclaw")
+        if not os.path.isfile(oc_config) and not oc_binary:
+            return
+    else:
+        if not os.path.isdir(target_parent):
+            return
 
     source_dir = _find_skill_source()
     if source_dir is None:
@@ -115,7 +122,8 @@ def ensure_codeguard_skill(claw_home: str, openclaw_config: str) -> None:
 
     os.makedirs(target_parent, exist_ok=True)
     shutil.copytree(source_dir, target_dir)
-    _enable_codeguard_in_openclaw(oc_config)
+    if connector == "openclaw":
+        _enable_codeguard_in_openclaw(oc_config)
 
 
 def _resolve_workspace_skills_dir(openclaw_config: str) -> str | None:

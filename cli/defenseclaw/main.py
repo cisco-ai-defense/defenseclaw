@@ -33,6 +33,7 @@ from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_doctor import doctor
+from defenseclaw.commands.cmd_guardrail import guardrail
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_mcp import mcp
@@ -153,6 +154,7 @@ cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(tui)
 cli.add_command(doctor)
+cli.add_command(guardrail)
 cli.add_command(sandbox)
 cli.add_command(upgrade)
 cli.add_command(keys_cmd, "keys")
@@ -164,11 +166,12 @@ cli.add_command(version_cmd, "version")
 
 
 def _ensure_codeguard_skill(cfg) -> None:
-    """Install CodeGuard skill if OpenClaw appeared since last init."""
+    """Install CodeGuard skill if the agent appeared since last init."""
     try:
         from defenseclaw.codeguard_skill import ensure_codeguard_skill
 
-        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file)
+        connector = getattr(cfg.guardrail, "connector", "") or ""
+        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file, connector)
     except Exception:
         pass
 

@@ -81,5 +81,29 @@ func writePretty(w io.Writer, e Event) {
 		}
 		d := e.Diagnostic
 		fmt.Fprintf(w, "%s [%s] %s\n", ts, d.Component, d.Message)
+
+	case EventLLMPrompt:
+		if e.LLMPrompt == nil {
+			return
+		}
+		p := e.LLMPrompt
+		fmt.Fprintf(w, "%s [llm_prompt] model=%s provider=%s prompt_id=%s session=%s\n",
+			ts, e.Model, e.Provider, p.PromptID, e.SessionID)
+
+	case EventLLMResponse:
+		if e.LLMResponse == nil {
+			return
+		}
+		r := e.LLMResponse
+		fmt.Fprintf(w, "%s [llm_response] model=%s provider=%s response_id=%s reply_to=%s\n",
+			ts, e.Model, e.Provider, r.ResponseID, r.ReplyToPromptID)
+
+	case EventToolInvocation:
+		if e.Tool == nil {
+			return
+		}
+		t := e.Tool
+		fmt.Fprintf(w, "%s [tool:%s] phase=%s call_id=%s session=%s\n",
+			ts, t.Tool, t.Phase, t.ToolCallID, e.SessionID)
 	}
 }

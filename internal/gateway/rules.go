@@ -122,7 +122,7 @@ var commandRules = []PatternRule{
 	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
 	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
+	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\s+-p)\b`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +344,9 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 		}
 		var compiled []PatternRule
 		for _, r := range rf.Rules {
+			if r.Enabled != nil && !*r.Enabled {
+				continue
+			}
 			re, err := compileRegexSafe(r.Pattern)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] skip rule %s: bad pattern: %v\n", r.ID, err)
