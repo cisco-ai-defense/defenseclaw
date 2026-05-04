@@ -45,14 +45,39 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "open" for observability-only hooks, "closed" for enforcement
+	FailMode string // "open" (default, response-layer fails allow with a stderr warning) or "closed" (response-layer fails block); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
 }
 
+// defaultHookFailMode is the fail mode injected into the response-
+// layer ({{.FailMode}}) of every hook when the caller doesn't supply
+// an explicit override. It governs ONLY response-layer failures —
+// 4xx, malformed JSON, missing action — where the gateway answered
+// but the answer was wrong (typically misconfiguration). Transport-
+// layer failures (curl exit non-zero, 5xx) are handled by each
+// hook's fail_unreachable helper in _hardening.sh and ALWAYS fail
+// open unless the operator opts into strict availability via
+// DEFENSECLAW_STRICT_AVAILABILITY=1.
+//
+// "open" is the default because a DefenseClaw hook that exits 2 on
+// every gateway hiccup bricks the user's agent for the duration of
+// any DefenseClaw outage, which is strictly worse UX than a brief
+// observability gap. Operators who run a strict policy posture can
+// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
+// or — for connectors that route through
+// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
+// connector enforcement at setup time.
+const defaultHookFailMode = "open"
+
+// normalizeHookFailMode coerces a caller-supplied string to one of
+// the two values the hook scripts understand. Anything other than
+// "closed" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "open" so a typo never accidentally puts
+// the agent into fail-closed mode.
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "open" {
-		return "open"
+	if strings.TrimSpace(mode) == "closed" {
+		return "closed"
 	}
-	return "closed"
+	return "open"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -63,7 +88,7 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: "closed"}
+	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
 
 	for _, name := range shimBinaries {
 		content, err := shimFS.ReadFile("shims/" + name + ".sh")
@@ -190,8 +215,10 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	}
 
 	// Never bake the real token into template output — scripts read
-	// the .token file or the env var at runtime.
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: "closed"}
+	// the .token file or the env var at runtime. FailMode defaults
+	// to "open" so a fresh setup never bricks the agent on a
+	// gateway outage; see defaultHookFailMode for rationale.
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -228,7 +255,7 @@ func WriteAllHookScripts(hookDir, apiAddr string) error {
 // connector that mis-spells a hook name fails loud at setup, never
 // silently ships a hook dir missing its template.
 func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) error {
-	return writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, "closed", extras)
+	return writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, defaultHookFailMode, extras)
 }
 
 func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
@@ -302,23 +329,56 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
-// has access to connector enforcement flags. Observability-only connectors
-// must fail open when their local hook cannot reach the gateway; enforcement
-// setups keep fail-closed semantics.
+// has access to connector enforcement flags AND the operator's
+// chosen response-layer fail mode (opts.HookFailMode).
+//
+// Resolution order for the response-layer FailMode template var
+// (see templateData.FailMode and defaultHookFailMode for the
+// contract):
+//
+//  1. An EXPLICIT operator value in opts.HookFailMode — either
+//     "open" or "closed" — always wins. The operator answered
+//     `defenseclaw setup guardrail`'s fail-mode prompt (or used
+//     `defenseclaw guardrail fail-mode <value>`); silently
+//     overriding their answer would violate the operator-defined
+//     fail-mode contract documented in
+//     ``GuardrailConfig.HookFailMode``.
+//  2. EMPTY/unset opts.HookFailMode falls back to per-connector
+//     enforcement: enabling proxy-redirect enforcement
+//     (CodexEnforcement / ClaudeCodeEnforcement) implies a strict
+//     policy posture, so the response-layer default flips to
+//     "closed" too. This only fires when the operator never made
+//     an explicit choice.
+//  3. Otherwise: defaultHookFailMode ("open").
+//
+// Transport-layer failures (gateway unreachable / 5xx) are NOT
+// governed by FailMode — they always allow unless the operator opts
+// in via DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of which
+// connector, enforcement state, or HookFailMode value.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := "closed"
-	switch c.Name() {
-	case "codex":
-		if !opts.CodexEnforcement {
-			failMode = "open"
-		}
-	case "claudecode":
-		if !opts.ClaudeCodeEnforcement {
-			failMode = "open"
+	// Distinguish "operator did not answer" (empty string — fall
+	// through to enforcement-derived default) from an explicit
+	// "open" answer that must NOT be silently upgraded by the
+	// per-connector enforcement flags below. normalizeHookFailMode
+	// collapses both to "open", so we have to inspect the raw input
+	// here before normalisation to preserve the operator's intent.
+	rawTrimmed := strings.TrimSpace(opts.HookFailMode)
+	explicitChoice := rawTrimmed != ""
+	failMode := normalizeHookFailMode(opts.HookFailMode)
+	if !explicitChoice && failMode != "closed" {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				failMode = "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				failMode = "closed"
+			}
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)

@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -3253,6 +3255,42 @@ func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
 	}
 }
 
+func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "zeptoclaw-config.json")
+	os.WriteFile(configPath, []byte(`{
+		"providers": {
+			"openrouter": {"api_key": "sk-or-test", "api_base": "https://openrouter.ai/api/v1"}
+		}
+	}`), 0o644)
+	ZeptoClawConfigPathOverride = configPath
+	defer func() { ZeptoClawConfigPathOverride = "" }()
+
+	opts := SetupOpts{
+		DataDir:      dir,
+		ProxyAddr:    "127.0.0.1:4000",
+		APIAddr:      "127.0.0.1:18970",
+		HookFailMode: "closed",
+	}
+
+	c := NewZeptoClawConnector()
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(dir, "hooks", "inspect-tool.sh"))
+	if err != nil {
+		t.Fatalf("read inspect-tool.sh: %v", err)
+	}
+	if !strings.Contains(string(body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
+		t.Fatalf("inspect-tool.sh did not render closed fail mode:\n%s", string(body))
+	}
+}
+
 func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
 	// After Setup(), the connector must retain the user's provider table
 	// in memory so Route() can look up upstreams. Otherwise we'd have to
@@ -4824,24 +4862,189 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 	}
 }
 
-func TestHookScript_FailClosed_Default(t *testing.T) {
+// TestHookScript_FailOpenOnUnreachable_Default asserts the post-PR
+// behavior: when the gateway is unreachable (transport failure), the
+// hook ALWAYS allows the agent to proceed by default — regardless of
+// FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
+// Operators who want strict availability must opt in explicitly via
+// DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
+func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:99999", "tok-test"); err != nil {
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
 	// Plan S7.1 sentinel guard: hooks exit 0 fast when DEFENSECLAW_HOME
 	// is missing (operator-uninstall safety). To exercise the
-	// fail-closed branch we must point DEFENSECLAW_HOME at a real
+	// transport-failure branch we must point DEFENSECLAW_HOME at a real
 	// directory with no .disabled marker — otherwise the hook
 	// short-circuits before ever attempting the unreachable gateway
-	// dial and the test sees exit 0 instead of exit 2.
+	// dial.
 	dcHome := t.TempDir()
 
-	// Run hook against an unreachable port — should exit 2 (fail-closed)
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	}
+
+	// Even though the hook allowed, a structured failure record must
+	// still be written so operators can detect the outage in
+	// monitoring. The category MUST be "transport" so a triage
+	// dashboard can tell infrastructure outages apart from
+	// misconfiguration (response-layer 4xx / parse errors).
+	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
+	if err != nil {
+		t.Fatalf("hook failure log missing: %v", err)
+	}
+	logText := string(failureLog)
+	for _, want := range []string{
+		`"connector":"claudecode"`,
+		`"hook":"claude-code-hook"`,
+		`"category":"transport"`,
+		`"fail_mode":"open"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("hook failure log missing %q:\n%s", want, logText)
+		}
+	}
+}
+
+func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	dcHome := t.TempDir()
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+		"DEFENSECLAW_FAIL_MODE=open\"\n,\"forged\":\"yes",
+	)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	}
+
+	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
+	if err != nil {
+		t.Fatalf("hook failure log missing: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(failureLog)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("hook failure log should contain one JSONL record, got %d: %q", len(lines), failureLog)
+	}
+	var record map[string]string
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("hook failure log is not valid JSON: %v\n%s", err, lines[0])
+	}
+	if _, ok := record["forged"]; ok {
+		t.Fatalf("fail_mode injected a forged JSON field: %#v", record)
+	}
+	if got := record["fail_mode"]; !strings.Contains(got, `forged`) || !strings.Contains(got, `"`) {
+		t.Fatalf("fail_mode was not preserved as an escaped string value: %#v", record)
+	}
+}
+
+// TestHookScript_FailClosedOnUnreachable_StrictAvailability covers
+// the operator opt-in for strict availability: when
+// DEFENSECLAW_STRICT_AVAILABILITY=1 is set, the hook MUST exit 2 on
+// transport failures even though the response-layer FAIL_MODE
+// default is "open". This is the escape hatch for sites that prefer
+// to take the agent down rather than miss policy enforcement during
+// a gateway outage.
+//
+// Also pins the operator-facing stderr contract: the verb the hook
+// prints MUST match what it actually does on exit. The pre-fix code
+// always printed "allowing <subject>" even when about to exit 2,
+// which was a real triage hazard — operators tailing stderr during
+// an outage saw "allowing" while the agent was actually being
+// blocked.
+func TestHookScript_FailClosedOnUnreachable_StrictAvailability(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+		"DEFENSECLAW_STRICT_AVAILABILITY=1",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("hook should fail-closed (exit 2) on transport failure with DEFENSECLAW_STRICT_AVAILABILITY=1, but got exit 0")
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (fail-closed)", exitErr.ExitCode())
+		}
+	}
+
+	// The stderr message MUST say "blocking", not "allowing" —
+	// otherwise an operator running tail -F on stderr during a
+	// strict-availability outage will believe DefenseClaw was
+	// permissive when it actually was not. This exact assertion
+	// is what catches the regression we shipped in 0.4.0.
+	stderrText := stderr.String()
+	if !strings.Contains(stderrText, "blocking claude-code tool") {
+		t.Errorf("stderr should announce blocking when about to exit 2, got: %q", stderrText)
+	}
+	if strings.Contains(stderrText, "allowing claude-code tool") {
+		t.Errorf("stderr falsely announces 'allowing' while about to exit 2 (block); message must match exit verb. stderr=%q", stderrText)
+	}
+}
+
+// TestHookScript_FailMode_RespectedOnResponseFailure pins the
+// response-layer behavior: when the gateway answers but the answer
+// is bad (4xx, malformed JSON, missing action field), FAIL_MODE
+// still governs whether the hook allows or blocks. This is the case
+// where strict-availability is irrelevant — the gateway IS reachable,
+// it just gave a bad answer, and the operator's FAIL_MODE preference
+// applies.
+func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+
+	// Stand up a tiny test server that always returns 401 — a
+	// classic auth misconfiguration and a real response-layer failure.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	// Use the explicit-failmode common writer so we can pin the
+	// response-layer behavior without going through the connector
+	// registry.
+	if err := writeHookScriptsCommonWithFailMode(dir, addr, "tok-test", "closed", []string{"claude-code-hook.sh"}); err != nil {
+		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
+	}
+	dcHome := t.TempDir()
+
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
 	cmd.Env = append(os.Environ(),
@@ -4850,30 +5053,182 @@ func TestHookScript_FailClosed_Default(t *testing.T) {
 	)
 	err := cmd.Run()
 	if err == nil {
-		t.Fatal("hook should fail-closed (exit 2) when gateway is unreachable, but got exit 0")
+		t.Fatal("hook should fail-closed (exit 2) on 401 response when FAIL_MODE=closed, but got exit 0")
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		if exitErr.ExitCode() != 2 {
-			t.Errorf("exit code = %d, want 2 (fail-closed)", exitErr.ExitCode())
+			t.Errorf("exit code = %d, want 2 (fail-closed on response failure)", exitErr.ExitCode())
+		}
+	}
+
+	// And the failure log entry must be tagged as a response-layer
+	// failure (not transport) — this is what lets operators tell
+	// outages apart from auth misconfiguration.
+	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
+	if err != nil {
+		t.Fatalf("hook failure log missing: %v", err)
+	}
+	logText := string(failureLog)
+	for _, want := range []string{
+		`"category":"response"`,
+		`"fail_mode":"closed"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("hook failure log missing %q:\n%s", want, logText)
 		}
 	}
 }
 
+// TestHookScript_FailOpen_Override covers the legacy operator
+// override: DEFENSECLAW_FAIL_MODE=open forces the response-layer
+// handler to allow even if the baked-in template default was
+// "closed". Transport failures are NOT routed through this — they
+// have their own DEFENSECLAW_STRICT_AVAILABILITY toggle — but
+// response-layer failures (which won't fire here against an
+// unreachable gateway) would respect this override.
 func TestHookScript_FailOpen_Override(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:99999", "tok-test"); err != nil {
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
-	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"), "DEFENSECLAW_FAIL_MODE=open")
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_FAIL_MODE=open",
+	)
 	err := cmd.Run()
 	if err != nil {
 		t.Errorf("hook should fail-open (exit 0) when DEFENSECLAW_FAIL_MODE=open, got: %v", err)
+	}
+}
+
+// TestSetupOpts_HookFailMode_WinsOverEnforcement validates the
+// resolution rules in WriteHookScriptsForConnectorObjectWithOpts.
+//
+// Contract (also documented at
+// WriteHookScriptsForConnectorObjectWithOpts):
+//
+//   - An EXPLICIT operator value (any non-empty trimmed string)
+//     wins over per-connector enforcement. Both "open" and
+//     "closed" are operator answers and the wizard / TUI / fail-mode
+//     subcommand surface that question explicitly — silently
+//     upgrading "open" to "closed" because enforcement is on would
+//     violate the operator-defined fail-mode contract.
+//   - An EMPTY HookFailMode means "operator never answered" and
+//     enforcement may upgrade the default to "closed".
+//   - Garbage values normalise to "open" (silently fail-open is
+//     strictly safer than silently fail-closed) AND count as an
+//     explicit answer for the purpose of enforcement upgrades —
+//     once we hit normaliseHookFailMode the original intent is
+//     gone, and treating the typo as enforcement-eligible would let
+//     a bad value be silently flipped to closed.
+func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+
+	cases := []struct {
+		name         string
+		opts         SetupOpts
+		connector    Connector // CodexConnector or ClaudeCodeConnector — picks which enforcement flag the resolution rule consults
+		hookFile     string    // hook script the test inspects (codex-hook.sh / claude-code-hook.sh)
+		wantFailMode string
+	}{
+		{
+			name:         "operator_open_no_enforcement",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "open",
+		},
+		{
+			name:         "operator_closed_no_enforcement",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed"},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "operator_open_explicit_wins_over_codex_enforcement",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "open",
+		},
+		{
+			name:         "operator_open_explicit_wins_over_claudecode_enforcement",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open", ClaudeCodeEnforcement: true},
+			connector:    &ClaudeCodeConnector{},
+			hookFile:     "claude-code-hook.sh",
+			wantFailMode: "open",
+		},
+		{
+			name:         "operator_closed_with_codex_enforcement_stays_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "empty_opts_falls_back_to_open_default",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "open",
+		},
+		{
+			name:         "empty_opts_with_codex_enforcement_upgrades_to_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "empty_opts_with_claudecode_enforcement_upgrades_to_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", ClaudeCodeEnforcement: true},
+			connector:    &ClaudeCodeConnector{},
+			hookFile:     "claude-code-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "garbage_opts_value_normalizes_to_open",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "this-is-not-a-real-mode"},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "open",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.opts.APIToken = "tok-test"
+			if err := WriteHookScriptsForConnectorObjectWithOpts(dir, tc.opts, tc.connector); err != nil {
+				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+			}
+
+			body, err := os.ReadFile(filepath.Join(dir, tc.hookFile))
+			if err != nil {
+				t.Fatalf("read %s: %v", tc.hookFile, err)
+			}
+			rendered := string(body)
+
+			// The fail-mode injected into the template appears in
+			// the FAIL_MODE assignment line. We grep the fully-
+			// rendered hook so we're testing the same string the
+			// agent will see at runtime — substitution failures
+			// that leave a literal `{{.FailMode}}` would surface
+			// here, not just in a unit test of the helper.
+			wantLine := "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-" + tc.wantFailMode + "}\""
+			if !strings.Contains(rendered, wantLine) {
+				t.Errorf("rendered hook missing %q\nfull script:\n%s", wantLine, rendered)
+			}
+		})
 	}
 }
 
@@ -4906,7 +5261,17 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		t.Fatalf("hook failure log missing: %v", err)
 	}
 	logText := string(failureLog)
-	for _, want := range []string{`"connector":"codex"`, `"hook":"codex-hook"`, `"reason":"gateway unreachable"`, `"fail_mode":"open"`} {
+	for _, want := range []string{
+		`"connector":"codex"`,
+		`"hook":"codex-hook"`,
+		`"reason":"gateway unreachable"`,
+		// category=transport pins the new contract: a curl exit
+		// non-zero is classified as a transport failure (gateway
+		// down / network error) rather than a response failure
+		// (4xx / parse error). Operators triage these differently.
+		`"category":"transport"`,
+		`"fail_mode":"open"`,
+	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("hook failure log missing %s:\n%s", want, logText)
 		}
@@ -5335,9 +5700,12 @@ func TestZeptoClaw_AgentPaths_Specifics(t *testing.T) {
 	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != cfg {
 		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
 	}
-	wantBackup := filepath.Join(dataDir, "zeptoclaw_backup.json")
-	if len(paths.BackupFiles) != 1 || paths.BackupFiles[0] != wantBackup {
-		t.Errorf("BackupFiles = %v, want [%q]", paths.BackupFiles, wantBackup)
+	wantBackups := []string{
+		filepath.Join(dataDir, "connector_backups", "zeptoclaw", "config.json.json"),
+		filepath.Join(dataDir, "zeptoclaw_backup.json"),
+	}
+	if !slices.Equal(paths.BackupFiles, wantBackups) {
+		t.Errorf("BackupFiles = %v, want %v", paths.BackupFiles, wantBackups)
 	}
 }
 
@@ -5358,6 +5726,7 @@ func TestCodex_AgentPaths_Specifics(t *testing.T) {
 		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
 	}
 	wantBackups := []string{
+		filepath.Join(dataDir, "connector_backups", "codex", "config.toml.json"),
 		filepath.Join(dataDir, "codex_config_backup.json"),
 		filepath.Join(dataDir, "codex_backup.json"),
 	}
@@ -5387,15 +5756,17 @@ func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
 	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != cfg {
 		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
 	}
-	wantBackup := filepath.Join(dataDir, "claudecode_backup.json")
-	if len(paths.BackupFiles) != 1 || paths.BackupFiles[0] != wantBackup {
-		t.Errorf("BackupFiles = %v, want [%q]", paths.BackupFiles, wantBackup)
+	wantBackups := []string{
+		filepath.Join(dataDir, "connector_backups", "claudecode", "settings.json.json"),
+		filepath.Join(dataDir, "claudecode_backup.json"),
+	}
+	if !slices.Equal(paths.BackupFiles, wantBackups) {
+		t.Errorf("BackupFiles = %v, want %v", paths.BackupFiles, wantBackups)
 	}
 }
 
 // TestOpenClaw_AgentPaths_Specifics pins OpenClaw's footprint:
-// openclaw.json patched, no backup file (edits are reversible),
-// extension dir created.
+// openclaw.json patched, managed pristine backup captured, extension dir created.
 func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 	dataDir := t.TempDir()
 	tmpHome := t.TempDir()
@@ -5409,8 +5780,9 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != wantPatched {
 		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, wantPatched)
 	}
-	if len(paths.BackupFiles) != 0 {
-		t.Errorf("BackupFiles = %v, want empty (openclaw.json edits are reversible without a backup)", paths.BackupFiles)
+	wantBackup := filepath.Join(dataDir, "connector_backups", "openclaw", "openclaw.json.json")
+	if len(paths.BackupFiles) != 1 || paths.BackupFiles[0] != wantBackup {
+		t.Errorf("BackupFiles = %v, want [%q]", paths.BackupFiles, wantBackup)
 	}
 	wantDir := filepath.Join(OpenClawHomeOverride, "extensions", "defenseclaw")
 	found := false
@@ -5568,4 +5940,27 @@ func mustNotExist(t *testing.T, path string) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to NOT exist, got err=%v", path, err)
 	}
+}
+
+// stringSlicesEqual is the order-sensitive equivalent of
+// reflect.DeepEqual for two []string. We use it (rather than
+// reflect.DeepEqual) when the test's *intent* is to communicate
+// "compare two ordered string slices"; reflect.DeepEqual would
+// work but obscures the contract for readers. Equality requires
+// identical lengths and pairwise element equality at every index.
+//
+// Defined here as a local helper rather than imported from a util
+// package because the connector test suite is the only consumer
+// today, and adding a public helper would invite the test-only
+// helper to leak into production code.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
