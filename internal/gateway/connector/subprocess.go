@@ -132,6 +132,11 @@ var genericHookScripts = []string{
 var connectorHookScripts = map[string][]string{
 	"claudecode": {"claude-code-hook.sh"},
 	"codex":      {"codex-hook.sh"},
+	"copilot":    {"copilot-hook.sh"},
+	"cursor":     {"cursor-hook.sh"},
+	"geminicli":  {"geminicli-hook.sh"},
+	"hermes":     {"hermes-hook.sh"},
+	"windsurf":   {"windsurf-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all
@@ -290,8 +295,7 @@ func writeHookHelpers(hookDir string) error {
 //   - inspect-request.sh       (pre-request)
 //   - inspect-response.sh      (post-response)
 //   - inspect-tool-response.sh (post-tool)
-//   - claude-code-hook.sh      (Claude Code lifecycle events)
-//   - codex-hook.sh            (Codex lifecycle events)
+//   - connector-specific lifecycle hooks listed in connectorHookScripts
 //
 // Plan B4: the shared _hardening.sh helper is also written so each
 // hook can `source` it at runtime to pick up the rlimit + env
@@ -477,6 +481,14 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 			}
 		case "claudecode":
 			if opts.ClaudeCodeEnforcement {
+				failMode = "closed"
+			}
+		}
+	default:
+		if hp, ok := c.(HookCapabilityProvider); ok {
+			caps := hp.HookCapabilities(opts)
+			failMode = "open"
+			if caps.SupportsFailClosed && strings.TrimSpace(opts.HookFailMode) == "closed" {
 				failMode = "closed"
 			}
 		}

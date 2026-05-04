@@ -65,7 +65,8 @@ const (
 	// Other recognised connector names (kept in sync with
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
-	// "zeptoclaw", "claudecode", "codex". Constants for those modes
+	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
+	// "windsurf", "geminicli", "copilot". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -706,6 +707,12 @@ func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
 		return c.ClaudeCode
 	case "codex":
 		return c.Codex
+	case "gemini-cli", "gemini_cli", "gemini":
+		if c.ConnectorHooks != nil {
+			if h, ok := c.ConnectorHooks["geminicli"]; ok {
+				return h
+			}
+		}
 	}
 	return AgentHookConfig{}
 }

@@ -66,6 +66,11 @@ type SetupOpts struct {
 	APIAddr     string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken    string // gateway bearer token; baked into hook curl -H
 	Interactive bool
+	// WorkspaceDir is the project/workspace root for connectors whose
+	// hook configuration is intentionally repository-scoped (for
+	// example Copilot CLI's .github/hooks/*.json files). When empty,
+	// connectors fall back to the process working directory.
+	WorkspaceDir string
 
 	// CodexEnforcement and ClaudeCodeEnforcement gate the
 	// proxy-redirect / blocking path for the Codex and Claude Code
@@ -107,6 +112,12 @@ type SetupOpts struct {
 	// approval forwarding so approval prompts can reach chat-origin
 	// sessions instead of living only in the native approval queue.
 	HILTEnabled bool
+
+	// HookFailMode is the active connector hook failure policy. Hook-only
+	// connectors default this to "open" unless the operator explicitly
+	// requests "closed" and the vendor surface supports fail-closed
+	// semantics.
+	HookFailMode string
 
 	// InstallCodeGuard enables one-time, native Project CodeGuard
 	// bootstrapping for connectors that have their own extension
@@ -152,6 +163,28 @@ type Connector interface {
 // the route dynamically at boot instead of hardcoding paths in api.go.
 type HookEndpoint interface {
 	HookAPIPath() string
+}
+
+// HookCapability describes the actual lifecycle hook controls a connector
+// can exercise. This is intentionally surface-specific: native human approval
+// is not inferred from a connector name, and "confirm" decisions must consult
+// AskEvents before being rendered as an agent-native ask.
+type HookCapability struct {
+	CanBlock           bool     `json:"can_block"`
+	CanAskNative       bool     `json:"can_ask_native"`
+	AskEvents          []string `json:"ask_events,omitempty"`
+	BlockEvents        []string `json:"block_events,omitempty"`
+	SupportsFailClosed bool     `json:"supports_fail_closed"`
+	Scope              string   `json:"scope"`
+	ConfigPath         string   `json:"config_path,omitempty"`
+}
+
+// HookCapabilityProvider — optional, connectors that install native agent
+// hooks expose their exact action/approval surface here. The gateway decision
+// mapper uses this matrix to avoid treating unsupported "confirm" verdicts as
+// native HITL.
+type HookCapabilityProvider interface {
+	HookCapabilities(opts SetupOpts) HookCapability
 }
 
 // AllowedHostsProvider — optional. Connectors that depend on

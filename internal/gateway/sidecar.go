@@ -1194,6 +1194,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	masterKey := deriveMasterKey(s.cfg.DataDir)
 	conn.SetCredentials(apiToken, masterKey)
 
+	workspaceDir, _ := os.Getwd()
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.cfg.DataDir,
 		ProxyAddr: proxyAddr,
@@ -1204,7 +1205,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// config — same source the proxy uses for credential wiring
 		// below, so the baked value and the value accepted by the API
 		// middleware stay in lockstep.
-		APIToken: apiToken,
+		APIToken:     apiToken,
+		WorkspaceDir: workspaceDir,
 		// Per-connector enforcement gates: when false (the default),
 		// the connector's Setup() installs hooks + native OTel
 		// exporters but skips the proxy-redirect path. See
@@ -1223,7 +1225,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// avoids a partial install accidentally going fail-closed.
 		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
 		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
-		InstallCodeGuard: true,
+		InstallCodeGuard: false,
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the
@@ -1378,6 +1380,8 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		return gc.CodexEnforcementEnabled
 	case "claudecode":
 		return gc.ClaudeCodeEnforcementEnabled
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return false
 	default:
 		return true
 	}

@@ -36,6 +36,7 @@ import pytest
 
 from defenseclaw import connector_paths
 from defenseclaw.connector_paths import (
+    HOOK_ONLY_CONNECTORS,
     KNOWN_CONNECTORS,
     MCPWriteUnsupportedError,
     set_mcp_server,
@@ -276,7 +277,7 @@ class TestAtomicity:
 class TestCoverage:
     def test_every_known_connector_has_explicit_set_behavior(self, tmp_path):
         """Loop over KNOWN_CONNECTORS and assert each branch is reached.
-        Catches the "added a fifth connector but forgot to teach the
+        Catches the "added a connector but forgot to teach the
         writer" bug class.
         """
         for name in KNOWN_CONNECTORS:
@@ -284,11 +285,11 @@ class TestCoverage:
                 # Requires injected setter — assert it raises without one.
                 with pytest.raises(RuntimeError):
                     set_mcp_server(name, "x", {"command": "y"})
-            elif name == "zeptoclaw":
+            elif name == "zeptoclaw" or name in HOOK_ONLY_CONNECTORS:
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
             else:
-                # claudecode / codex — write succeeds without raising.
+                # claudecode / codex write succeeds without raising.
                 # Use chdir + isolated HOME so the test doesn't trash
                 # the developer's real config files.
                 with pytest.MonkeyPatch.context() as m:

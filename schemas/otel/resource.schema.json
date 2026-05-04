@@ -68,17 +68,22 @@
     },
     "defenseclaw.claw.mode": {
       "type": "string",
-      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", ""],
+      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", ""],
       "description": "Active agent framework connector. Matches Connector.Name() in internal/gateway/connector. Empty string is permitted while no connector has been picked yet (fresh install before `defenseclaw setup connector`). Legacy values 'nemoclaw' and 'opencode' were never emitted by a released gateway; they were placeholders that became 'zeptoclaw' and 'claudecode' respectively, and have been dropped from the enum."
     },
     "defenseclaw.claw.home_dir": {
       "type": "string",
-      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex.",
+      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, and copilot is workspace-scoped under .github/hooks.",
       "examples": [
         "/home/user/.openclaw",
         "/home/user/.zeptoclaw",
         "/home/user/.claude",
-        "/home/user/.codex"
+        "/home/user/.codex",
+        "/home/user/.hermes",
+        "/home/user/.cursor",
+        "/home/user/.codeium/windsurf",
+        "/home/user/.gemini",
+        "/home/user/project/.github/hooks"
       ]
     },
     "defenseclaw.device.id": {

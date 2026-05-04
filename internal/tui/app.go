@@ -82,8 +82,7 @@ type HealthSnapshot struct {
 	Telemetry SubsystemHealth  `json:"telemetry"`
 	Sinks     SubsystemHealth  `json:"sinks"`
 	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
-	// Connector mirrors gateway.ConnectorHealth: which agent
-	// framework (openclaw / zeptoclaw / claudecode / codex) is
+	// Connector mirrors gateway.ConnectorHealth: which agent framework is
 	// currently active in the sidecar, plus the live counters.
 	// Nil when no connector has been initialised yet — the TUI
 	// falls back to cfg.Claw.Mode in that case.

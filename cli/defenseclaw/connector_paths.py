@@ -34,7 +34,7 @@ Public surface
 --------------
 
 * :data:`KNOWN_CONNECTORS` — tuple of every name the dispatchers
-  recognize. Adding a fifth connector is a one-line change here plus
+  recognize. Adding a connector is a one-line change here plus
   a matching dispatch arm in each ``*_for_connector`` function below
   and a Go-side ``connector.NewDefaultRegistry`` registration.
 * :func:`normalize` — canonicalize an operator-supplied connector name
@@ -64,6 +64,11 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "codex",
     "claudecode",
     "zeptoclaw",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -72,6 +77,20 @@ OpenClaw". Keeping the list explicit (rather than discovering at
 import time) means a typo in ``guardrail.connector`` surfaces in
 :func:`is_known` and in setup-time validation, instead of silently
 producing wrong paths.
+"""
+
+HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset({
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+})
+"""Connectors that currently expose hook telemetry/control only.
+
+They do not have DefenseClaw-managed skill/plugin/MCP discovery surfaces in
+v1, so the path dispatchers below return empty lists instead of falling back
+to OpenClaw paths.
 """
 
 
@@ -171,6 +190,8 @@ def skill_dirs(
         return _codex_skill_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_skill_dirs()
+    if name in HOOK_ONLY_CONNECTORS:
+        return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -195,6 +216,8 @@ def plugin_dirs(
         return _codex_plugin_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_plugin_dirs()
+    if name in HOOK_ONLY_CONNECTORS:
+        return []
     return _openclaw_plugin_dirs(openclaw_home)
 
 
@@ -227,6 +250,8 @@ def mcp_servers(
         return _codex_mcp_servers()
     if name == "zeptoclaw":
         return _zeptoclaw_mcp_servers()
+    if name in HOOK_ONLY_CONNECTORS:
+        return []
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -659,6 +684,7 @@ def set_mcp_server(
     * Codex        — ``./.mcp.json[mcpServers][name]``
                      via :func:`_atomic_json_merge`.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
+    * Hook-only    — :class:`MCPWriteUnsupportedError`.
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -692,6 +718,11 @@ def set_mcp_server(
             "zeptoclaw does not expose a programmatic MCP write surface. "
             "Add the server inside the ZeptoClaw UI and re-run "
             "`defenseclaw mcp scan` to discover it via the read path.",
+        )
+    if name_n in HOOK_ONLY_CONNECTORS:
+        raise MCPWriteUnsupportedError(
+            f"{name_n} is a hook-only connector in this release and does "
+            "not expose a DefenseClaw-managed MCP write surface.",
         )
     # Anything else — treat as an unknown framework. Refuse rather than
     # silently writing to the OpenClaw config.
@@ -736,6 +767,11 @@ def unset_mcp_server(
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
             "Remove the server inside the ZeptoClaw UI.",
+        )
+    if name_n in HOOK_ONLY_CONNECTORS:
+        raise MCPWriteUnsupportedError(
+            f"{name_n} is a hook-only connector in this release and does "
+            "not expose a DefenseClaw-managed MCP write surface.",
         )
     raise MCPWriteUnsupportedError(
         f"unset_mcp_server: unknown connector {connector!r}; "

@@ -164,6 +164,11 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			mux.HandleFunc("/api/v1/codex/hook", f(a))
 		}
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+			if f, ok := connectorHookHandlerByName[name]; ok {
+				mux.HandleFunc("/api/v1/"+name+"/hook", f(a))
+			}
+		}
 		return
 	}
 
@@ -343,22 +348,33 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		reg = connector.NewDefaultRegistry()
 	}
 	type connectorEntry struct {
-		Name               string `json:"name"`
-		Description        string `json:"description"`
-		Source             string `json:"source"`
-		ToolInspectionMode string `json:"tool_inspection_mode"`
-		SubprocessPolicy   string `json:"subprocess_policy"`
+		Name               string                    `json:"name"`
+		Description        string                    `json:"description"`
+		Source             string                    `json:"source"`
+		ToolInspectionMode string                    `json:"tool_inspection_mode"`
+		SubprocessPolicy   string                    `json:"subprocess_policy"`
+		HookCapabilities   *connector.HookCapability `json:"hook_capabilities,omitempty"`
 	}
 	avail := reg.Available()
 	entries := make([]connectorEntry, len(avail))
 	for i, info := range avail {
-		entries[i] = connectorEntry{
+		entry := connectorEntry{
 			Name:               info.Name,
 			Description:        info.Description,
 			Source:             info.Source,
 			ToolInspectionMode: string(info.ToolInspectionMode),
 			SubprocessPolicy:   string(info.SubprocessPolicy),
 		}
+		if conn, ok := reg.Get(info.Name); ok {
+			if hp, ok := conn.(connector.HookCapabilityProvider); ok {
+				caps := hp.HookCapabilities(connector.SetupOpts{
+					DataDir:      a.configDataDir(),
+					WorkspaceDir: currentWorkingDir(),
+				})
+				entry.HookCapabilities = &caps
+			}
+		}
+		entries[i] = entry
 	}
 	resp := map[string]interface{}{
 		"active":     a.connectorName(),
@@ -445,6 +461,10 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		mode = "observability"
+		intercept = false
+		telemetry = []string{"hooks"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;

@@ -25,13 +25,10 @@ import (
 
 // modeChoice is one row in the picker. Order matches the user-facing
 // presentation order: guardrail-supporting connectors first
-// (openclaw, zeptoclaw), observability-only connectors below
-// (codex, claudecode). The keyboard shortcut is always the connector's
-// initial letter so muscle memory is trivial; `c` is reserved for
-// `codex` and `k` for `claudecode` (the alternative letter on
-// "claude" since c/codex would collide).
+// (openclaw, zeptoclaw), hook/observability connectors below. The keyboard
+// shortcut is stable and unique; collision cases use a memorable alternate.
 type modeChoice struct {
-	wire    string // canonical config value (openclaw / zeptoclaw / codex / claudecode)
+	wire    string // canonical connector config value
 	label   string // user-facing display name
 	hotkey  rune   // single-letter shortcut for this row
 	guardOK bool   // does this connector support enforcement?
@@ -47,13 +44,23 @@ var modePickerChoices = []modeChoice{
 		tagline: "PreToolUse hooks + native OTel + CodeGuard plugin"},
 	{wire: "codex", label: "Codex", hotkey: 'c', guardOK: false,
 		tagline: "hook scripts + native OTel + notify + CodeGuard skill"},
+	{wire: "hermes", label: "Hermes", hotkey: 'h', guardOK: false,
+		tagline: "shell hooks + vendor-native block events"},
+	{wire: "cursor", label: "Cursor", hotkey: 'u', guardOK: false,
+		tagline: "command hooks + event-scoped ask/block"},
+	{wire: "windsurf", label: "Windsurf", hotkey: 'w', guardOK: false,
+		tagline: "Cascade hooks + fail-open block decisions"},
+	{wire: "geminicli", label: "Gemini CLI", hotkey: 'g', guardOK: false,
+		tagline: "settings.json hooks + structured deny responses"},
+	{wire: "copilot", label: "Copilot", hotkey: 'p', guardOK: false,
+		tagline: "workspace hooks + native pre-tool approval"},
 }
 
 // ModePickerModal is the overlay launched by `[m]` on the Overview
 // panel. It lets the operator switch the active claw connector
 // without leaving the TUI; the chosen wire name is dispatched to
 // `defenseclaw setup mode <wire>` by the owning Model so the same
-// inheritance rules (codex/claudecode → observability-only,
+// inheritance rules (hook-only connectors → observability-first,
 // openclaw↔zeptoclaw → inherit) that the CLI command implements
 // apply uniformly.
 //
@@ -242,9 +249,9 @@ func (p *ModePickerModal) View() string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 	if p.theme != nil {
-		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c jump  •  enter confirm  •  esc close"))
+		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c/h/u/w/g/p jump  •  enter confirm  •  esc close"))
 	} else {
-		b.WriteString("↑/↓ move  •  o/z/k/c jump  •  enter confirm  •  esc close")
+		b.WriteString("↑/↓ move  •  o/z/k/c/h/u/w/g/p jump  •  enter confirm  •  esc close")
 	}
 
 	content := b.String()

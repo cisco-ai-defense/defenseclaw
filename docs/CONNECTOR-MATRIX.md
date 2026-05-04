@@ -11,19 +11,39 @@ For the historical change log of how each row got to its current state, see
 
 ## At a glance
 
-| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex |
-| --------------------------- | -------- | --------- | ----------- | ----- |
-| LLM traffic interception    | OK       | OK        | OK          | OK    |
-| Proxy-side response scan    | OK       | OK        | OK          | OK    |
-| Pre-tool gating via hooks   | OK       | n/a*     | OK          | n/a* |
-| Subprocess enforcement      | OK       | OK        | OK          | OK    |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    |
+| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI |
+| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- |
+| LLM traffic interception    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         |
+| Proxy-side response scan    | OK       | OK        | OK          | OK    | n/a    | n/a    | n/a      | n/a        | n/a         |
+| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          |
+| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     |
+| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | PreToolUse |
+| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
+
+The Hermes, Cursor, Windsurf, Gemini CLI, and Copilot CLI connectors are
+hook-only in v1. They install vendor-native hook config and send hook payloads
+to DefenseClaw, but they do not redirect LLM traffic through the proxy.
+
+## Hook Capability Matrix
+
+| Connector | can_block | can_ask_native | ask_events | block_events | supports_fail_closed | scope | config_path |
+| --------- | --------- | -------------- | ---------- | ------------ | -------------------- | ----- | ----------- |
+| Hermes | yes | no | none | `pre_tool_call` | no | user | `~/.hermes/config.yaml` |
+| Cursor | yes | yes | `beforeShellExecution`, `beforeMCPExecution` | documented pre-action hooks | yes | user | `~/.cursor/hooks.json` |
+| Windsurf | yes | no | none | `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` | no | user | `~/.codeium/windsurf/hooks.json` |
+| Gemini CLI | yes | no | none | `BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, `AfterAgent` | yes | user | `~/.gemini/settings.json` |
+| Copilot CLI | yes | yes | `preToolUse` / `PreToolUse` | `PreToolUse`, `PermissionRequest`, stop/failure hooks | no | workspace | `<workspace>/.github/hooks/defenseclaw.json` |
+
+`confirm` verdicts are rendered as native ask only when the event is listed in
+`ask_events`. Unsupported `confirm` decisions are downgraded explicitly while
+preserving `raw_action: "confirm"` in the hook response.
 
 ---
 

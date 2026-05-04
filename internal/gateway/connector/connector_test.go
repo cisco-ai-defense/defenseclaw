@@ -263,7 +263,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -3579,8 +3579,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 6 {
-		t.Errorf("HookScripts() returned %d scripts, want 6", len(scripts))
+	if len(scripts) != 11 {
+		t.Errorf("HookScripts() returned %d scripts, want 11", len(scripts))
 	}
 }
 
@@ -3935,8 +3935,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 4 {
-		t.Errorf("expected 4 built-in connectors, got %d", r.Len())
+	if r.Len() != 9 {
+		t.Errorf("expected 9 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -5501,6 +5501,11 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		{"openclaw", func() Connector { return NewOpenClawConnector() }},
 		{"codex", func() Connector { return NewCodexConnector() }},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
+		{"hermes", func() Connector { return NewHermesConnector() }},
+		{"cursor", func() Connector { return NewCursorConnector() }},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }},
+		{"copilot", func() Connector { return NewCopilotConnector() }},
 	}
 
 	for _, c := range cases {
@@ -5551,6 +5556,11 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		ap, ok := conn.(AgentPathProvider)
@@ -5581,6 +5591,11 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -5621,6 +5636,11 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		// settings.json hooks are sufficient for guardrail
 		// enforcement, so the var is recommended-not-required.
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []EnvScope{EnvScopeNone}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {
@@ -5675,6 +5695,11 @@ func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		if _, ok := conn.(ProviderProbe); !ok {
@@ -5813,6 +5838,11 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	}{
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
 	}

@@ -3044,8 +3044,11 @@ func fmtTristateBool(b *bool) string {
 }
 
 func agentHookModeValue(mode string) string {
-	if mode == "telemetry" {
+	switch mode {
+	case "telemetry":
 		return "observe"
+	case "enforce":
+		return "action"
 	}
 	return mode
 }
@@ -3064,7 +3067,7 @@ func agentHookFields(label, prefix string, h config.AgentHookConfig) []configFie
 		{Label: "── " + label + " ──", Kind: "header"},
 		{Label: "Enabled", Key: prefix + ".enabled", Kind: "bool", Value: fmt.Sprintf("%v", h.Enabled),
 			Hint: label + " hooks master switch."},
-		{Label: "Mode", Key: prefix + ".mode", Kind: "choice", Options: []string{"", "observe", "enforce"}, Value: agentHookModeValue(h.Mode),
+		{Label: "Mode", Key: prefix + ".mode", Kind: "choice", Options: []string{"", "observe", "action"}, Value: agentHookModeValue(h.Mode),
 			Hint: "Hook operating mode. Blank inherits connector defaults."},
 		{Label: "Fail Mode", Key: prefix + ".fail_mode", Kind: "choice", Options: []string{"", "open", "closed"}, Value: h.FailMode,
 			Hint: "open=continue if DefenseClaw is unreachable; closed=block on hook failure."},

@@ -263,10 +263,7 @@ func (a *APIServer) claudeCodeMode() string {
 			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
 		}
 	}
-	if mode != "action" {
-		return "observe"
-	}
-	return mode
+	return normalizeAgentHookMode(mode)
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) claudeCodeHookResponse {
