@@ -1638,6 +1638,29 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		ContentLength: req.ContentLength,
 	}
 
+	// Inject the live HILT configuration so the Rego policy reads
+	// `input.hilt.*` and config.yaml stays the single source of truth.
+	// Without this, the policy would fall back to `data.guardrail.hilt`
+	// in policies/rego/data.json, which historically drifted out of sync
+	// with config.yaml and surfaced HIGH-severity findings as `alert`
+	// instead of `confirm`. See cmd_setup.py:_sync_guardrail_hilt_to_opa
+	// for the legacy mirror — preserved as a fallback for non-gateway
+	// callers (e.g. direct `opa eval`) but no longer authoritative for
+	// requests routed through this endpoint.
+	if a.scannerCfg != nil {
+		a.cfgMu.RLock()
+		hilt := a.scannerCfg.Guardrail.HILT
+		a.cfgMu.RUnlock()
+		minSev := strings.ToUpper(strings.TrimSpace(hilt.MinSeverity))
+		if minSev == "" {
+			minSev = "HIGH"
+		}
+		input.HILT = &policy.GuardrailHILTInput{
+			Enabled:     hilt.Enabled,
+			MinSeverity: minSev,
+		}
+	}
+
 	out, err := a.evaluateGuardrailPolicy(r.Context(), input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] evaluate error: %v\n", err)
@@ -1823,7 +1846,6 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}
 
 	sev := "NONE"
-	action := "allow"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
 		if res == nil {
@@ -1832,13 +1854,13 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 		rank := map[string]int{"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 		if rank[res.Severity] > rank[sev] {
 			sev = res.Severity
-			action = res.Action
 		}
 		if res.Severity != "NONE" {
 			sources = append(sources, "scanner")
 		}
 	}
 
+	action := guardrailFallbackActionForSeverity(sev)
 	if input.Mode == "observe" && action == "block" {
 		action = "alert"
 	}

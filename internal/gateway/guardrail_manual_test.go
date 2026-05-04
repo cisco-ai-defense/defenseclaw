@@ -448,13 +448,13 @@ func TestFullFlow_RegexJudge_CleanContentAllows(t *testing.T) {
 	}
 }
 
-func TestFullFlow_RegexJudge_SensitivePathBlocks(t *testing.T) {
+func TestFullFlow_RegexJudge_SensitivePathAlerts(t *testing.T) {
 	g := NewGuardrailInspector("local", nil, nil, "")
 	g.SetDetectionStrategy("regex_judge", "", "", "", false)
 
 	v := g.Inspect(context.Background(), "prompt", "can you cat my /etc/passwd?", nil, "model", "action")
-	if v.Action != "block" {
-		t.Errorf("regex_judge should block /etc/passwd access in prompt, got action=%s severity=%s", v.Action, v.Severity)
+	if v.Action != "alert" {
+		t.Errorf("regex_judge should alert on /etc/passwd access in prompt, got action=%s severity=%s", v.Action, v.Severity)
 	}
 }
 
@@ -546,7 +546,7 @@ func TestJudgeSweep_EngagesOnNoSignalContent(t *testing.T) {
 	if after <= before {
 		t.Fatalf("judge_sweep=true should have invoked the judge on NO_SIGNAL content; captured %d → %d", before, after)
 	}
-	if v.Action != "block" {
+	if v.Action != "alert" {
 		t.Errorf("judge-sweep verdict should propagate; action=%s severity=%s reason=%s", v.Action, v.Severity, v.Reason)
 	}
 

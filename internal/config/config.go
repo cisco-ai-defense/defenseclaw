@@ -639,6 +639,35 @@ func (c *WebhookConfig) ResolvedSecret() string {
 	return ""
 }
 
+// AgentHookConfig is the per-connector hook policy block (e.g.
+// claude_code.fail_mode, codex.fail_mode). It is independent from
+// the gateway-side hook script fail-mode controlled by
+// GuardrailConfig.HookFailMode.
+//
+// IMPORTANT — disambiguation, both fields are named "fail_mode":
+//
+//   - GuardrailConfig.HookFailMode (yaml: guardrail.hook_fail_mode)
+//     is the SHELL-side fail-mode baked into the generated hook
+//     templates (codex-hook.sh, claude-code-hook.sh, inspect-*).
+//     It governs what those scripts do when the gateway returns a
+//     RESPONSE-LAYER failure (4xx, malformed JSON, missing
+//     `action` field). Its default is "open" because silently
+//     bricking the agent on a transient response error is worse
+//     than allowing one tool call. Transport-layer failures
+//     (gateway unreachable / 5xx) are handled separately and
+//     ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.
+//
+//   - AgentHookConfig.FailMode (yaml: <connector>.fail_mode below)
+//     is a per-connector POLICY-LAYER hint that downstream
+//     connector glue can read to pick a policy posture. It is
+//     NOT consumed by the generated hook scripts. The legacy
+//     default "closed" is preserved here for backward
+//     compatibility with installs that wrote it before
+//     hook_fail_mode existed.
+//
+// Operators who want to change the runtime behavior of the
+// generated hooks should edit guardrail.hook_fail_mode (or run
+// `defenseclaw guardrail fail-mode`), NOT this field.
 type AgentHookConfig struct {
 	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
 	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
@@ -649,7 +678,13 @@ type AgentHookConfig struct {
 	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
 }
 
-// EffectiveFailMode returns the fail mode, defaulting to "closed".
+// EffectiveFailMode returns the per-connector POLICY-LAYER fail
+// mode for AgentHookConfig, defaulting to "closed" for backward
+// compatibility. NOTE: this is NOT what governs the generated
+// hook scripts; see GuardrailConfig.EffectiveHookFailMode for
+// that. Both fields are named "fail_mode" in YAML — the namespace
+// (top-level connector vs guardrail.hook_fail_mode) is what tells
+// them apart.
 func (c AgentHookConfig) EffectiveFailMode() string {
 	if c.FailMode == "open" {
 		return "open"
@@ -969,6 +1004,63 @@ type GuardrailConfig struct {
 	// run as before. Designed for the same flip-on-later workflow
 	// as CodexEnforcementEnabled.
 	ClaudeCodeEnforcementEnabled bool `mapstructure:"claudecode_enforcement_enabled" yaml:"claudecode_enforcement_enabled,omitempty"`
+
+	// HookFailMode is the operator-chosen response-layer fail mode
+	// for every generated hook script (codex-hook, claude-code-hook,
+	// inspect-*). Two values are supported:
+	//
+	//   - "open" (default, recommended): when the gateway answers
+	//     with a 4xx, malformed JSON, or a missing action field, the
+	//     hook ALLOWS the tool/prompt with a stderr warning and an
+	//     entry in $DEFENSECLAW_HOME/logs/hook-failures.jsonl. The
+	//     rationale: a misbehaving gateway that bricks every agent
+	//     interaction is strictly worse UX than a brief observability
+	//     gap, and the operator can detect the problem from the log.
+	//
+	//   - "closed": the same response-layer failures BLOCK the tool/
+	//     prompt (exit 2). Choose when you'd rather take the agent
+	//     offline than miss a policy decision (e.g., regulated
+	//     workflows where every prompt MUST be inspected).
+	//
+	// This field governs ONLY response-layer failures. Transport-
+	// layer failures (gateway unreachable / 5xx) are handled
+	// separately by each hook's fail_unreachable helper and ALWAYS
+	// allow unless the operator opts into strict availability via
+	// DEFENSECLAW_STRICT_AVAILABILITY=1 — regardless of this field's
+	// value. See internal/gateway/connector/hooks/_hardening.sh for
+	// the rationale.
+	//
+	// `defenseclaw setup guardrail` prompts for this when the install
+	// is fresh or when the operator changes guardrail.mode (observe
+	// ↔ action). It can also be flipped standalone via
+	// `defenseclaw guardrail fail-mode <open|closed>` or via
+	// `defenseclaw init --fail-mode <open|closed>` /
+	// `defenseclaw quickstart --fail-mode <open|closed>`.
+	//
+	// IMPORTANT — disambiguation: this is NOT the same field as
+	// AgentHookConfig.FailMode (e.g. claude_code.fail_mode,
+	// codex.fail_mode). That sibling field is a per-connector
+	// POLICY-LAYER hint defaulting to "closed" for backward
+	// compatibility, and it is NOT consumed by the generated hook
+	// scripts. Operators who want to change runtime hook behavior
+	// must edit THIS field (guardrail.hook_fail_mode), not the
+	// per-connector one. See AgentHookConfig docs for the full
+	// rationale.
+	HookFailMode string `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
+}
+
+// EffectiveHookFailMode returns the operator-chosen hook fail mode,
+// defaulting to "open" when unset or set to anything other than the
+// canonical "closed" sentinel. Centralized here so the sidecar and
+// any future config-edit surfaces never disagree on the default.
+func (g *GuardrailConfig) EffectiveHookFailMode() string {
+	if g == nil {
+		return "open"
+	}
+	if g.HookFailMode == "closed" {
+		return "closed"
+	}
+	return "open"
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -1905,6 +1997,12 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
+	// "open" is the user-friendly default — see
+	// GuardrailConfig.HookFailMode for the rationale. Operators who
+	// want strict response-layer enforcement run `defenseclaw setup
+	// guardrail` (which prompts) or `defenseclaw guardrail fail-mode
+	// closed`.
+	viper.SetDefault("guardrail.hook_fail_mode", "open")
 	viper.SetDefault("guardrail.scanner_mode", "both")
 	viper.SetDefault("guardrail.connector", "")
 	viper.SetDefault("guardrail.host", "")

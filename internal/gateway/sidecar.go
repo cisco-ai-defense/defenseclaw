@@ -1155,8 +1155,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// truth without re-reading config from disk.
 		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
 		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
-		HILTEnabled:           s.cfg.Guardrail.HILT.Enabled,
-		InstallCodeGuard:      true,
+		// HookFailMode is the operator-chosen response-layer fail mode
+		// for every generated hook (see GuardrailConfig.HookFailMode
+		// for the contract). Routed via EffectiveHookFailMode so the
+		// default "open" is applied uniformly when the field is unset
+		// — matches the user-friendly default in defaultsFor() and
+		// avoids a partial install accidentally going fail-closed.
+		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
+		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
+		InstallCodeGuard: true,
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the
@@ -1236,6 +1243,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetDefaultAgentName(string(s.cfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
 		proxy.SetConnectorSwitchState(registry, setupOpts)
+		proxy.SetHILTApprovalManager(s.hilt)
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)

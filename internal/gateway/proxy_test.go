@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -128,6 +129,8 @@ func (m *mockInspector) InspectMidStream(ctx context.Context, direction, content
 
 func (m *mockInspector) SetScannerMode(_ string) {}
 
+func (m *mockInspector) SetHILTConfig(_ bool, _ string) {}
+
 func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -189,6 +192,29 @@ func mustJSON(t *testing.T, v interface{}) []byte {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	return b
+}
+
+func hiltIDFromApprovalMessage(t *testing.T, msg string) string {
+	t.Helper()
+	const marker = "approve "
+	idx := strings.Index(msg, marker+"hilt-")
+	if idx < 0 {
+		t.Fatalf("approval message %q does not contain approve hilt-* instruction", msg)
+	}
+	rest := msg[idx+len(marker):]
+	end := 0
+	for end < len(rest) {
+		c := rest[end]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		t.Fatalf("approval message %q does not contain a HILT id", msg)
+	}
+	return rest[:end]
 }
 
 // parseSSEChunks reads SSE data lines from the response body.
@@ -513,6 +539,129 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 		if prov.getLastReq() != nil {
 			t.Error("request should NOT have been forwarded to provider")
+		}
+	})
+
+	t.Run("confirm_without_hilt_alerts_and_forwards", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   guardrailActionConfirm,
+			Severity: "HIGH",
+			Reason:   "approval required",
+			Findings: []string{"high-signal"},
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+
+		var resp ChatResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.ID != "chatcmpl-test" {
+			t.Fatalf("response ID = %q, want provider response", resp.ID)
+		}
+		if prov.getLastReq() == nil {
+			t.Fatal("unsupported HILT confirmation should be audited as alert and forwarded")
+		}
+	})
+
+	t.Run("confirm_with_hilt_but_no_session_alerts_and_forwards", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   guardrailActionConfirm,
+			Severity: "HIGH",
+			Reason:   "approval required",
+			Findings: []string{"high-signal"},
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+		proxy.SetHILTApprovalManager(NewHILTApprovalManager(nil, nil, nil))
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if prov.getLastReq() == nil {
+			t.Fatal("unsupported HILT confirmation should be audited as alert and forwarded")
+		}
+	})
+
+	t.Run("confirm_with_approval_forwards", func(t *testing.T) {
+		received := make(chan receivedRequest, 5)
+		srv := startMockGW(t, rpcRecordingLoop(received))
+		client := connectToMockGW(t, srv)
+		hilt := NewHILTApprovalManager(client, nil, nil)
+		hilt.TrackSession("session-1")
+
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   guardrailActionConfirm,
+			Severity: "HIGH",
+			Reason:   "approval required",
+			Findings: []string{"high-signal"},
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+		proxy.SetHILTApprovalManager(hilt)
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
+		})
+
+		recCh := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+			req.RemoteAddr = "127.0.0.1:12345"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(SessionIDHeader, "session-1")
+			rec := httptest.NewRecorder()
+			proxy.handleChatCompletion(rec, req)
+			recCh <- rec
+		}()
+
+		rpc := drainRPC(t, received)
+		if rpc.Method != "sessions.send" {
+			t.Fatalf("Method = %q, want sessions.send", rpc.Method)
+		}
+		var params map[string]string
+		if err := json.Unmarshal(rpc.Params, &params); err != nil {
+			t.Fatalf("unmarshal params: %v", err)
+		}
+		if params["key"] != "session-1" {
+			t.Fatalf("sessions.send key = %q, want session-1", params["key"])
+		}
+
+		id := hiltIDFromApprovalMessage(t, params["message"])
+		if !hilt.ResolveFromMessage("session-1", "user", "approve "+id) {
+			t.Fatalf("approval %s did not resolve", id)
+		}
+
+		select {
+		case rec := <-recCh:
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if prov.getLastReq() == nil {
+				t.Fatal("approved confirm verdict should be forwarded to provider")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("proxy request did not finish after approval")
 		}
 	})
 
@@ -950,6 +1099,8 @@ func (c *conditionalInspector) InspectMidStream(ctx context.Context, direction, 
 }
 
 func (c *conditionalInspector) SetScannerMode(_ string) {}
+
+func (c *conditionalInspector) SetHILTConfig(_ bool, _ string) {}
 
 // ---------------------------------------------------------------------------
 // e) Edge case tests
@@ -3406,11 +3557,125 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 		inspector: NewGuardrailInspector("local", nil, nil, ""),
 	}
 
-	cfg := map[string]string{"connector": "openclaw"}
+	cfg := map[string]any{"connector": "openclaw"}
 	p.applyRuntime(cfg)
 
 	if p.connector.Name() != "openclaw" {
 		t.Errorf("connector after applyRuntime = %q, want openclaw", p.connector.Name())
+	}
+}
+
+// TestApplyRuntime_HILTHotReload pins the contract that
+// `_write_guardrail_runtime`'s hilt_enabled / hilt_min_severity fields
+// are routed into the inspector via SetHILTConfig. Without this, an
+// operator who flips guardrail.hilt.enabled in config.yaml (and
+// re-runs the wizard or `setup guardrail`) would keep the boot-time
+// HILT view inside the live inspector — the same SSOT staleness the
+// input.hilt change was meant to fix, just relocated to in-memory
+// state.
+func TestApplyRuntime_HILTHotReload(t *testing.T) {
+	dir := t.TempDir()
+	reg := connector.NewDefaultRegistry()
+	codexConn, ok := reg.Get("codex")
+	if !ok {
+		t.Skip("codex connector not registered in this build")
+	}
+
+	insp := newMockInspector()
+	captured := []hiltCall{}
+	mu := sync.Mutex{}
+	wrapper := &hiltCapturingInspector{
+		ContentInspector: insp,
+		onSetHILT: func(enabled bool, minSeverity string) {
+			mu.Lock()
+			defer mu.Unlock()
+			captured = append(captured, hiltCall{enabled: enabled, minSeverity: minSeverity})
+		},
+	}
+
+	p := &GuardrailProxy{
+		connector: codexConn,
+		registry:  reg,
+		setupOpts: connector.SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"},
+		health:    NewSidecarHealth(),
+		inspector: wrapper,
+	}
+
+	t.Run("bool true is forwarded with normalized min severity", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{
+			"hilt_enabled":      true,
+			"hilt_min_severity": "high",
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 1 {
+			t.Fatalf("expected SetHILTConfig to fire once, got %d calls", len(captured))
+		}
+		if !captured[0].enabled || captured[0].minSeverity != "high" {
+			t.Fatalf("forwarded HILT = %+v, want {enabled=true minSeverity=high}", captured[0])
+		}
+	})
+
+	t.Run("string true accepted for forward compatibility", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{
+			"hilt_enabled":      "true",
+			"hilt_min_severity": "MEDIUM",
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 1 || !captured[0].enabled || captured[0].minSeverity != "MEDIUM" {
+			t.Fatalf("forwarded HILT = %+v, want {enabled=true minSeverity=MEDIUM}", captured)
+		}
+	})
+
+	t.Run("absent hilt_enabled does not call SetHILTConfig", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{"mode": "observe"})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 0 {
+			t.Fatalf("SetHILTConfig should not fire when hilt_enabled is absent, got %d calls", len(captured))
+		}
+	})
+
+	t.Run("malformed hilt_enabled value is treated as absent", func(t *testing.T) {
+		mu.Lock()
+		captured = captured[:0]
+		mu.Unlock()
+		p.applyRuntime(map[string]any{"hilt_enabled": 42})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(captured) != 0 {
+			t.Fatalf("SetHILTConfig must reject non-bool/non-string hilt_enabled, got %d calls", len(captured))
+		}
+	})
+}
+
+type hiltCall struct {
+	enabled     bool
+	minSeverity string
+}
+
+// hiltCapturingInspector wraps a ContentInspector and records every
+// SetHILTConfig call so the runtime-reload tests can assert on what
+// the proxy forwarded into the inspector.
+type hiltCapturingInspector struct {
+	ContentInspector
+	onSetHILT func(enabled bool, minSeverity string)
+}
+
+func (h *hiltCapturingInspector) SetHILTConfig(enabled bool, minSeverity string) {
+	h.ContentInspector.SetHILTConfig(enabled, minSeverity)
+	if h.onSetHILT != nil {
+		h.onSetHILT(enabled, minSeverity)
 	}
 }
 

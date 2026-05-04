@@ -4133,8 +4133,8 @@ func TestHandleGuardrailEvaluate_Fallback(t *testing.T) {
 	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Action != "block" {
-		t.Errorf("action = %q, want block", resp.Action)
+	if resp.Action != "alert" {
+		t.Errorf("action = %q, want alert", resp.Action)
 	}
 	if resp.Severity != "HIGH" {
 		t.Errorf("severity = %q, want HIGH", resp.Severity)

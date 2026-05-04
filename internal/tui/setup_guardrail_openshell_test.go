@@ -40,16 +40,31 @@ func TestApplyConfigField_GuardrailNewSurface(t *testing.T) {
 		{"guardrail.api_base", "https://proxy.example.com", func(c *config.Config) bool { return c.Guardrail.APIBase == "https://proxy.example.com" }},
 		{"guardrail.retain_judge_bodies", "true", func(c *config.Config) bool { return c.Guardrail.RetainJudgeBodies }},
 		{"guardrail.retain_judge_bodies_off", "false", func(c *config.Config) bool { return !c.Guardrail.RetainJudgeBodies }},
+		// Hook fail mode round-trip: explicit "closed" persists.
+		{"guardrail.hook_fail_mode", "closed", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "closed" }},
+		// Hook fail mode round-trip: explicit "open" persists.
+		{"guardrail.hook_fail_mode_open", "open", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "open" }},
+		// Hook fail mode garbage normalizes to "open" — the form
+		// MUST NEVER silently put the agent into a stricter posture
+		// than the operator typed. Mirrors the same normalization
+		// rule on both Python and Go config loaders.
+		{"guardrail.hook_fail_mode_garbage", "klosed", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "open" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
 			c := &config.Config{}
-			if tc.key == "guardrail.retain_judge_bodies_off" {
+			switch tc.key {
+			case "guardrail.retain_judge_bodies_off":
 				// Seed true, expect clear to false so boolVal
 				// parsing actually flips the field.
 				c.Guardrail.RetainJudgeBodies = true
 				applyConfigField(c, "guardrail.retain_judge_bodies", tc.val)
-			} else {
+			case "guardrail.hook_fail_mode_open", "guardrail.hook_fail_mode_garbage":
+				// Same field, alternate value. The synthetic key
+				// suffix lets us run multiple sub-cases against
+				// hook_fail_mode without colliding in the table.
+				applyConfigField(c, "guardrail.hook_fail_mode", tc.val)
+			default:
 				applyConfigField(c, tc.key, tc.val)
 			}
 			if !tc.verify(c) {
@@ -80,6 +95,12 @@ func TestSetupSections_GuardrailCoversNewRows(t *testing.T) {
 		"guardrail.original_model",
 		"guardrail.api_base",
 		"guardrail.retain_judge_bodies",
+		// hook_fail_mode must be visible in the Guardrail
+		// section so operators can change response-layer hook
+		// behavior without dropping to YAML. Forgetting to
+		// surface it here is exactly what we shipped in 0.4.0
+		// before this fix.
+		"guardrail.hook_fail_mode",
 	}
 	have := map[string]bool{}
 	for _, f := range gr.Fields {

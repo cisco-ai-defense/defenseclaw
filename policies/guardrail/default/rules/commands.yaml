@@ -124,7 +124,7 @@ rules:
   - id: CMD-SYSTEMCTL
     pattern: '(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b'
     title: "Suspicious systemd persistence enablement"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.82
     tags: [persistence]
   - id: CMD-NETCAT-LISTEN

@@ -890,3 +890,5 @@ func (m *mockInspectorBlockAll) InspectMidStream(ctx context.Context, direction,
 }
 
 func (m *mockInspectorBlockAll) SetScannerMode(_ string) {}
+
+func (m *mockInspectorBlockAll) SetHILTConfig(_ bool, _ string) {}

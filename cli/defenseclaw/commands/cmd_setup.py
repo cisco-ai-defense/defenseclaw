@@ -33,6 +33,11 @@ from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
+# Tasteful TTY-aware color helpers. Imported as a module rather than
+# pulled name-by-name so the wizard call sites read like
+# ``ux.section("Hook fail mode")`` and the source of the color
+# convention is obvious to anybody auditing this file.
+from defenseclaw import ux
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -190,25 +195,25 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
         )
 
     if not legacy_summary:
-        click.echo("  Config already in v5 shape — nothing to migrate.")
+        ux.subhead("Config already in v5 shape — nothing to migrate.")
         # Still scrub the one-shot warning flag so a follow-up load
         # doesn't re-emit it in the same process.
         if hasattr(cfg, "_llm_migration_warned"):
             cfg._llm_migration_warned = False  # type: ignore[attr-defined]
         return
 
-    click.echo("  Legacy v4 LLM fields detected:")
+    ux.section("Legacy v4 LLM fields detected")
     for line in legacy_summary:
-        click.echo(f"    - {line}")
+        click.echo(f"    {ux.dim('-')} {line}")
     click.echo()
-    click.echo("  Unified llm: block (post-migration):")
+    ux.section("Unified llm: block (post-migration)")
     llm = cfg.llm
     click.echo(f"    provider={llm.provider!r}, model={llm.model!r}, api_key_env={llm.api_key_env!r}")
     click.echo(f"    base_url={llm.base_url!r}, timeout={llm.timeout}, max_retries={llm.max_retries}")
     click.echo()
 
     if dry_run:
-        click.echo("  --dry-run: no files modified.")
+        ux.subhead("--dry-run: no files modified.")
         return
 
     # Backup before we mutate. We use the app's configured data_dir
@@ -218,7 +223,7 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     if not no_backup and os.path.exists(cfg_path):
         backup_path = cfg_path + ".bak"
         shutil.copy2(cfg_path, backup_path)
-        click.echo(f"  Backed up {cfg_path} -> {backup_path}")
+        ux.ok(f"Backed up {cfg_path} -> {backup_path}")
 
     # Clear the legacy slots. This mirrors _clear_legacy_llm_fields()
     # but is kept inline so the command has no hidden behavior — an
@@ -242,7 +247,7 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     jc.api_base = ""
 
     cfg.save()
-    click.echo(f"  Wrote {cfg_path} (v5 shape).")
+    ux.ok(f"Wrote {cfg_path} (v5 shape).")
 
 
 # --------------------------------------------------------------------------
@@ -290,38 +295,35 @@ def setup_llm(app: AppContext, show: bool) -> None:
     if show:
         resolved = cfg.resolve_llm("")
         click.echo()
-        click.echo("  Unified LLM configuration")
-        click.echo("  ─────────────────────────")
-        click.echo(f"    provider:    {resolved.provider or '(unset)'}")
-        click.echo(f"    model:       {resolved.model or '(unset)'}")
+        ux.section("Unified LLM configuration")
+        click.echo(f"    {ux.dim('provider:')}    {resolved.provider or '(unset)'}")
+        click.echo(f"    {ux.dim('model:')}       {resolved.model or '(unset)'}")
         key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
         key_val = resolved.resolved_api_key()
         key_state = _mask(key_val) if key_val else "(not set)"
-        click.echo(f"    api_key_env: {key_env} = {key_state}")
+        click.echo(f"    {ux.dim('api_key_env:')} {key_env} = {key_state}")
         if resolved.base_url:
-            click.echo(f"    base_url:    {resolved.base_url}")
-        click.echo(f"    timeout:     {resolved.timeout}s")
-        click.echo(f"    max_retries: {resolved.max_retries}")
-        click.echo()
-        click.echo(
-            "  To change: run 'defenseclaw setup llm' without --show.",
+            click.echo(f"    {ux.dim('base_url:')}    {resolved.base_url}")
+        click.echo(f"    {ux.dim('timeout:')}     {resolved.timeout}s")
+        click.echo(f"    {ux.dim('max_retries:')} {resolved.max_retries}")
+        ux.subhead(
+            "To change: run 'defenseclaw setup llm' without --show.",
         )
         return
 
     click.echo()
-    click.echo("  Unified LLM configuration")
-    click.echo("  ─────────────────────────")
-    click.echo(
-        "  Every LLM-using component (guardrail judge, MCP scanner,"
+    ux.section("Unified LLM configuration")
+    ux.subhead(
+        "Every LLM-using component (guardrail judge, MCP scanner,"
     )
-    click.echo(
-        "  skill scanner, plugin scanner) resolves through this block"
+    ux.subhead(
+        "skill scanner, plugin scanner) resolves through this block"
     )
-    click.echo(
-        "  by default. Per-component overrides live under"
+    ux.subhead(
+        "by default. Per-component overrides live under"
     )
-    click.echo(
-        "  scanners.*.llm / guardrail.{llm,judge.llm}."
+    ux.subhead(
+        "scanners.*.llm / guardrail.{llm,judge.llm}."
     )
     click.echo()
     if llm.model:
@@ -332,9 +334,9 @@ def setup_llm(app: AppContext, show: bool) -> None:
     cfg.save()
 
     click.echo()
-    click.echo(f"  ✓ Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+    ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
     click.echo()
-    click.echo("  Next: defenseclaw doctor       # verify the unified LLM is reachable")
+    ux.subhead("Next: defenseclaw doctor       # verify the unified LLM is reachable")
 
 
 @setup.command("skill-scanner")
@@ -413,7 +415,7 @@ def setup_skill_scanner(
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _check_virustotal, _DoctorResult
-        click.echo("  ── Verifying scanner configuration ──")
+        ux.section("Verifying scanner configuration")
         r = _DoctorResult()
         _check_scanners(app.cfg, r)
         _check_virustotal(app.cfg, r)
@@ -440,9 +442,8 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     """
     data_dir = cfg.data_dir
     click.echo()
-    click.echo("  Skill Scanner Configuration")
-    click.echo("  ────────────────────────────")
-    click.echo(f"  Binary: {sc.binary}")
+    ux.section("Skill Scanner Configuration")
+    click.echo(f"  {ux.dim('Binary:')} {sc.binary}")
     click.echo()
 
     sc.use_behavioral = click.confirm("  Enable behavioral analyzer (dataflow analysis)?", default=sc.use_behavioral)
@@ -852,7 +853,7 @@ def setup_mcp_scanner(
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _DoctorResult
-        click.echo("  ── Verifying scanner configuration ──")
+        ux.section("Verifying scanner configuration")
         r = _DoctorResult()
         _check_scanners(app.cfg, r)
         click.echo()
@@ -878,9 +879,8 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     aid = cfg.cisco_ai_defense
 
     click.echo()
-    click.echo("  MCP Scanner Configuration")
-    click.echo("  ──────────────────────────")
-    click.echo(f"  Binary: {mc.binary}")
+    ux.section("MCP Scanner Configuration")
+    click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
     mc.analyzers = click.prompt(
@@ -1041,24 +1041,24 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     new_token = secrets.token_hex(32)
     _rotate_token_atomic_write(dotenv_path, new_token)
-    click.echo(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
+    ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
 
     active = connector or (app.cfg.guardrail.connector if app.cfg.guardrail.connector else None)
     if not active:
-        click.echo("  (no active connector configured; skipping hook refresh)")
+        ux.subhead("(no active connector configured; skipping hook refresh)")
         return
 
     if no_restart:
-        click.echo("  --no-restart specified; hook .token files were NOT refreshed.")
-        click.echo("  Run `defenseclaw-gateway connector setup` manually to apply the new token.")
+        ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
+        ux.subhead("Run `defenseclaw-gateway connector setup` manually to apply the new token.")
         return
 
     # Bounce the connector so the hook scripts pick up the new token.
-    click.echo(f"  Refreshing hook scripts for connector={active!r}…")
+    click.echo(f"  {ux.dim('Refreshing hook scripts for')} connector={active!r}…")
     rc1, _so, se = _rotate_token_run_gateway(["connector", "teardown"])
     if rc1 != 0:
-        click.echo(
-            "  WARNING: connector teardown returned non-zero; old hook scripts may persist.\n"
+        ux.warn(
+            "connector teardown returned non-zero; old hook scripts may persist.\n"
             f"  stderr: {se.strip()}"
         )
     rc2, _so, se = _rotate_token_run_gateway(["connector", "setup"])
@@ -1068,10 +1068,10 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
             f"stderr: {se.strip()}"
         )
 
-    click.echo("  Hook scripts refreshed.")
+    ux.ok("Hook scripts refreshed.")
     click.echo()
-    click.echo("Next step: restart the agent (claude / codex / openclaw / zeptoclaw) so")
-    click.echo("the new token is picked up by its inspect / hook subprocess invocations.")
+    ux.subhead("Next step: restart the agent (claude / codex / openclaw / zeptoclaw) so")
+    ux.subhead("the new token is picked up by its inspect / hook subprocess invocations.")
 
 
 # ---------------------------------------------------------------------------
@@ -1148,7 +1148,7 @@ def setup_gateway(
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
-        click.echo("  ── Verifying gateway connectivity ──")
+        ux.section("Verifying gateway connectivity")
         r = _DoctorResult()
         _check_openclaw_gateway(app.cfg, r)
         _check_sidecar(app.cfg, r)
@@ -1164,8 +1164,7 @@ def setup_gateway(
 
 def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
     click.echo()
-    click.echo("  Gateway Configuration (local)")
-    click.echo("  ─────────────────────────────")
+    ux.section("Gateway Configuration (local)")
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
@@ -1184,8 +1183,7 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> 
 
 def _interactive_gateway_remote(gw, data_dir: str) -> None:
     click.echo()
-    click.echo("  Gateway Configuration (remote)")
-    click.echo("  ──────────────────────────────")
+    ux.section("Gateway Configuration (remote)")
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
@@ -1511,17 +1509,15 @@ def _hilt_support_note(connector: str) -> str:
 
 def _configure_hilt_interactive(gc) -> None:
     """Prompt for human approval settings from the guardrail advanced section."""
-    click.echo()
-    click.echo("  Human Approval (HILT)")
-    click.echo("  ─────────────────────")
+    ux.section("Human Approval (HILT)")
     if (gc.mode or "observe").lower() != "action":
-        click.echo("  Human approval is action-mode only.")
-        click.echo("  Current mode is observe, so approvals are inactive and no prompts will appear.")
+        ux.subhead("Human approval is action-mode only.")
+        ux.subhead("Current mode is observe, so approvals are inactive and no prompts will appear.")
         return
 
     connector = gc.connector or "openclaw"
-    click.echo(f"  {_hilt_support_note(connector)}")
-    click.echo("  CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
+    ux.subhead(_hilt_support_note(connector))
+    ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
     enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
     gc.hilt.enabled = enabled
     if not enabled:
@@ -1838,6 +1834,7 @@ def setup_guardrail(
     if gc.block_message:
         truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
         rows.append(("guardrail.block_message", truncated))
+    rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
     rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
     rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
@@ -1856,14 +1853,18 @@ def setup_guardrail(
         rows.append(("cisco_ai_defense.endpoint", aid.endpoint))
         rows.append(("cisco_ai_defense.api_key_env", aid.api_key_env))
         rows.append(("cisco_ai_defense.timeout_ms", str(aid.timeout_ms)))
+    # Colored two-column rendering. ``ux.kv`` aligns and dims the
+    # key while keeping the value in the default fg so it pops out.
+    # Empty/missing values render as a dim em-dash so the row still
+    # tracks the column instead of looking truncated.
     for key, val in rows:
-        click.echo(f"    {key + ':':<30s} {val}")
+        ux.kv(key, val)
     click.echo()
 
     if warnings:
-        click.echo("  ── Warnings ──────────────────────────────────────────")
+        ux.section("Warnings", divider_char="─")
         for w in warnings:
-            click.echo(f"  ⚠ {w}")
+            ux.warn(w)
         click.echo()
 
     if restart:
@@ -2408,10 +2409,9 @@ def _apply_connector_mode_switch(
         prev = "openclaw"
 
     if new_connector not in _CONNECTOR_NAMES:
-        click.echo(
-            f"  ✗ unknown connector {new_connector!r} — "
+        ux.err(
+            f"unknown connector {new_connector!r} — "
             f"expected one of {sorted(_CONNECTOR_NAMES)}",
-            err=True,
         )
         return False
 
@@ -2623,18 +2623,18 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
     if action == "status":
         env_override = os.environ.get("DEFENSECLAW_DISABLE_REDACTION", "").strip().lower()
         env_on = env_override in {"1", "true", "yes", "on"}
-        click.echo("  Redaction state:")
+        ux.section("Redaction state")
         click.echo(
-            f"    config (privacy.disable_redaction): "
+            f"    {ux.dim('config (privacy.disable_redaction):')} "
             f"{'OFF (raw passthrough)' if current else 'ON (redacted)'}"
         )
         click.echo(
-            f"    env (DEFENSECLAW_DISABLE_REDACTION): "
+            f"    {ux.dim('env (DEFENSECLAW_DISABLE_REDACTION):')} "
             f"{'set (' + env_override + ')' if env_override else '(unset)'}"
         )
         effective = current or env_on
         click.echo(
-            f"    effective at sidecar boot: "
+            f"    {ux.dim('effective at sidecar boot:')} "
             f"{'OFF — raw content will be persisted to ALL sinks' if effective else 'ON — placeholders only'}"
         )
         return
@@ -2650,15 +2650,21 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
         # privacy implications of the flip. Click.confirm reads
         # from stdin; CI / TUI callers pass --yes to bypass.
         click.echo()
-        click.echo("  ⚠️  TURNING REDACTION OFF")
+        ux.warn("TURNING REDACTION OFF")
         click.echo()
-        click.echo("  This will persistently disable PII redaction in the sidecar.")
-        click.echo("  After restart, EVERY sink (audit DB, OTel logs, Splunk HEC,")
-        click.echo("  webhooks, gateway.log) will receive UNREDACTED prompts,")
-        click.echo("  judge bodies, evidence windows, and verdict reasons.")
+        ux.subhead("This will persistently disable PII redaction in the sidecar.")
+        ux.subhead(
+            "After restart, EVERY sink (audit DB, OTel logs, Splunk HEC,"
+        )
+        ux.subhead(
+            "webhooks, gateway.log) will receive UNREDACTED prompts,"
+        )
+        ux.subhead(
+            "judge bodies, evidence windows, and verdict reasons."
+        )
         click.echo()
-        click.echo("  Only proceed if every downstream sink lives inside the")
-        click.echo("  same trust boundary as this install.")
+        ux.subhead("Only proceed if every downstream sink lives inside the")
+        ux.subhead("same trust boundary as this install.")
         click.echo()
         click.confirm("  Disable redaction?", abort=True)
 
@@ -2667,16 +2673,17 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
     try:
         cfg.save()
     except OSError as exc:
-        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        ux.err(f"Failed to save config: {exc}")
         raise click.ClickException("config save failed") from exc
 
     new_state = "OFF (raw passthrough)" if desired else "ON (redacted)"
-    click.echo(f"  ✓ privacy.disable_redaction set to {desired!s}")
-    click.echo(f"  ✓ Redaction state on next sidecar boot: {new_state}")
+    ux.ok(f"privacy.disable_redaction set to {desired!s}")
+    ux.ok(f"Redaction state on next sidecar boot: {new_state}")
 
     if restart:
-        click.echo()
-        click.echo("  Restarting gateway so the redaction state takes effect...")
+        ux.subhead(
+            "Restarting gateway so the redaction state takes effect..."
+        )
         _restart_services(
             cfg.data_dir,
             cfg.gateway.host,
@@ -2684,10 +2691,11 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
             connector=cfg.active_connector(),
         )
     else:
-        click.echo()
-        click.echo("  ⚠ Skipped restart (--no-restart). The running sidecar still")
-        click.echo("    enforces the previous redaction state. Restart manually:")
-        click.echo("       defenseclaw-gateway restart")
+        ux.warn(
+            "Skipped restart (--no-restart). The running sidecar still "
+            "enforces the previous redaction state. Restart manually:"
+        )
+        ux.subhead("   defenseclaw-gateway restart")
 
     if app.logger:
         app.logger.log_action(
@@ -2726,44 +2734,104 @@ def execute_guardrail_setup(
             tool_display = "pre-execution + response-scan"
         else:
             tool_display = tool_mode
-        click.echo(f"  ✓ Connector: {meta.get('label', connector_name)} ({connector_name})")
-        click.echo(f"  ✓ Tool inspection: {tool_display}")
-        click.echo(f"  ✓ Subprocess policy: {meta['subprocess_policy']}")
+        ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
+        ux.ok(f"Tool inspection: {tool_display}")
+        ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
     else:
-        click.echo(f"  ✓ Connector: {connector_name} (plugin)")
+        ux.ok(f"Connector: {connector_name} (plugin)")
 
-    click.echo("  ✓ Connector setup will run automatically when the gateway starts")
+    ux.ok("Connector setup will run automatically when the gateway starts")
 
     # --- Save DefenseClaw config ---
     if save_config:
         try:
             app.cfg.save()
-            click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+            ux.ok("Config saved to ~/.defenseclaw/config.yaml")
         except OSError as exc:
-            click.echo(f"  ✗ Failed to save config: {exc}")
+            ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
 
     # --- Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
 
+    # --- Mirror HILT into the OPA Rego data file ---
+    # The prompt-side guardrail verdict is computed by Rego, which reads
+    # `hilt.enabled` from policies/rego/data.json — NOT from config.yaml.
+    # Keeping the wizard's `gc.hilt` in sync with that file is what makes
+    # `confirm` actually surface on HIGH-severity prompt findings.
+    _sync_guardrail_hilt_to_opa(app.cfg.policy_dir, gc)
+
     return True, warnings
+
+
+def _prompt_hook_fail_mode(gc) -> None:
+    """Interactive prompt that sets ``gc.hook_fail_mode`` to "open" or
+    "closed" based on operator input.
+
+    Centralized so every entry point (initial setup, mode change,
+    observability-only flow) emits the same wording and the same
+    default-selection rule. The current value drives the default so
+    operators who answer the prompt in past invocations don't have
+    their explicit choice silently rotated by a subsequent mode flip.
+    """
+    ux.section("Hook fail mode")
+    ux.subhead("How hooks behave when the gateway answers but the answer is bad")
+    ux.subhead("(4xx, malformed JSON, missing action).")
+    click.echo()
+    click.echo(
+        "    " + ux.bold("[1] open  ")
+        + " — allow the tool/prompt and log the failure "
+        + ux.dim("(recommended)")
+    )
+    click.echo("                 " + ux.dim("A misbehaving gateway won't brick your agent."))
+    click.echo(
+        "    " + ux.bold("[2] closed")
+        + " — block the tool/prompt on any gateway error"
+    )
+    click.echo("                 " + ux.dim("Choose for regulated workflows where every"))
+    click.echo("                 " + ux.dim("prompt MUST be inspected."))
+    click.echo()
+    click.echo(
+        "  " + ux.dim(
+            "Note: a fully unreachable gateway always allows unless "
+            "DEFENSECLAW_STRICT_AVAILABILITY=1 is set in the agent's "
+            "environment, regardless of this choice."
+        )
+    )
+    current_fail = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    fail_default = "2" if current_fail == "closed" else "1"
+    fail_choice = click.prompt(
+        "  Select hook fail mode", type=click.Choice(["1", "2"]), default=fail_default,
+    )
+    gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
 
 
 def _interactive_guardrail_setup(
     app: AppContext, gc, *, agent_name: str | None = None,
 ) -> None:
+    # Snapshot the entry-point ``gc.enabled`` BEFORE any prompt mutates
+    # it. The wizard flips ``gc.enabled = True`` after the operator
+    # confirms enabling, which means by the time we reach the fail-mode
+    # prompt block below the live value no longer tells us whether we
+    # are configuring this guardrail for the first time. Without this
+    # snapshot the previous ``not bool(gc.mode)`` heuristic was dead
+    # code (mode defaults to "observe", never empty) and a fresh-install
+    # operator who accepted the default observe mode would never be
+    # asked about hook_fail_mode — directly contradicting the
+    # operator-defined fail-mode contract.
+    was_initial_setup = not bool(gc.enabled)
 
+    ux.section("LLM Guardrail Setup")
     click.echo()
-    click.echo("  LLM Guardrail Setup")
-    click.echo("  ────────────────────")
-    click.echo()
-    click.echo("  Scans every LLM prompt and response for:")
-    click.echo("    • Prompt injection and jailbreak attempts")
-    click.echo("    • Secrets, API keys, and credentials")
-    click.echo("    • PII leakage (names, emails, SSNs, credit cards)")
+    click.echo("  " + ux.bold("Scans every LLM prompt and response for:"))
+    click.echo("    • " + ux.dim("Prompt injection and jailbreak attempts"))
+    click.echo("    • " + ux.dim("Secrets, API keys, and credentials"))
+    click.echo("    • " + ux.dim("PII leakage (names, emails, SSNs, credit cards)"))
     click.echo(
-        "    • Data exfiltration: credential-file reads (/etc/passwd, "
-        "~/.ssh, ~/.aws), out-of-band channels"
+        "    • " + ux.dim(
+            "Data exfiltration: credential-file reads (/etc/passwd, "
+            "~/.ssh, ~/.aws), out-of-band channels"
+        )
     )
     click.echo()
 
@@ -2832,6 +2900,17 @@ def _interactive_guardrail_setup(
             gc.detection_strategy = "regex_only"
             gc.detection_strategy_completion = "regex_only"
             _set_connector_enforcement(gc, gc.connector, False)
+
+            # Observability-only generates the same hook scripts as the
+            # full guardrail flow (codex-hook.sh / claude-code-hook.sh
+            # both render ``FAIL_MODE`` from this field), so we must
+            # surface the choice on first-time setup. Skipping it here
+            # would leave operators with no opportunity to set
+            # ``hook_fail_mode`` until they discover
+            # ``defenseclaw guardrail fail-mode``.
+            if was_initial_setup:
+                _prompt_hook_fail_mode(gc)
+
             click.echo()
             click.echo("  ✓ Observability mode enabled (no traffic interception)")
             click.echo("  ✓ Hooks + OTel + notify telemetry will be wired automatically at gateway boot")
@@ -2858,21 +2937,63 @@ def _interactive_guardrail_setup(
 
     gc.enabled = True
 
-    click.echo()
-    click.echo("  Enforcement mode:")
-    click.echo("    [1] observe — log and alert only, never block (recommended to start)")
-    click.echo("    [2] action  — block requests that match security policies")
+    ux.section("Enforcement mode")
+    click.echo("    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)"))
+    click.echo("    " + ux.bold("[2] action ") + " — block requests that match security policies")
     current_mode = gc.mode or "observe"
     mode_default = "1" if current_mode == "observe" else "2"
     mode_choice = click.prompt(
         "  Select mode", type=click.Choice(["1", "2"]), default=mode_default,
     )
-    gc.mode = "observe" if mode_choice == "1" else "action"
+    new_mode = "observe" if mode_choice == "1" else "action"
+    mode_changed = new_mode != current_mode
+    gc.mode = new_mode
 
-    click.echo()
-    click.echo("  Scanner engine:")
-    click.echo("    [1] local  — built-in pattern matching, no network calls (fastest)")
-    click.echo("    [2] remote — Cisco AI Defense cloud API (higher accuracy, requires API key)")
+    # Hook fail-mode prompt. Asked on initial setup OR when the
+    # operator just flipped between observe and action — those are
+    # the moments where the operator is actively making policy-
+    # posture decisions and most likely to want to revisit the
+    # response-layer fallback. Otherwise we leave the existing value
+    # alone (operator can change it later via
+    # `defenseclaw guardrail fail-mode <open|closed>`).
+    #
+    # ``was_initial_setup`` is sampled at the very top of this function
+    # (snapshot of ``gc.enabled`` before the wizard flips it true) — we
+    # cannot use the live ``gc.mode`` value here because the dataclass
+    # default is "observe" rather than empty, which made the previous
+    # detection dead code on every realistic fresh install.
+    if was_initial_setup or mode_changed:
+        _prompt_hook_fail_mode(gc)
+
+    # Human-In-the-Loop (HILT). Hoisted out of the "Configure
+    # advanced options?" branch so operators see the question on
+    # every guardrail setup that *can* fire approvals — i.e.,
+    # action mode. The previous wiring buried HILT under an opt-in
+    # "advanced" gate (default N), which meant first-time users
+    # who walked through the wizard never got asked unless they
+    # already knew HILT existed and discovered it from docs.
+    #
+    # Skipped when ``gc.mode == "observe"``: HILT only fires in
+    # action mode, so prompting in observe mode is just noise that
+    # misleads operators about what their answer does. Their
+    # previously-saved ``gc.hilt`` block stays intact for the day
+    # they later flip to action via this same wizard or via
+    # ``defenseclaw setup mode``.
+    #
+    # ``_configure_hilt_interactive`` itself emits the
+    # action-mode-only short-circuit message when called outside
+    # action mode — but we deliberately avoid calling it for
+    # observe so the wizard stays terse for the (common) observe-
+    # mode operator. The verbose "this is action-only" message
+    # was useful when the call lived under "Advanced options" and
+    # the operator had explicitly opted in; here, asking and
+    # immediately printing "never mind" would feel like a bug.
+    if gc.mode == "action":
+        _configure_hilt_interactive(gc)
+
+    ux.section("Scanner engine")
+    click.echo("    " + ux.bold("[1] local ") + "  — built-in pattern matching, no network calls " + ux.dim("(fastest)"))
+    click.echo("    " + ux.bold("[2] remote") + "  — Cisco AI Defense cloud API " + ux.dim("(higher accuracy, requires API key)"))
     sm_current = gc.scanner_mode or "local"
     if sm_current == "both":
         sm_current = "local"
@@ -2883,9 +3004,7 @@ def _interactive_guardrail_setup(
     gc.scanner_mode = "local" if sm_choice == "1" else "remote"
 
     if gc.scanner_mode in ("remote", "both"):
-        click.echo()
-        click.echo("  Cisco AI Defense Configuration")
-        click.echo("  ──────────────────────────────")
+        ux.section("Cisco AI Defense Configuration")
         aid = app.cfg.cisco_ai_defense
         aid.endpoint = click.prompt(
             "  API endpoint", default=aid.endpoint,
@@ -2907,31 +3026,29 @@ def _interactive_guardrail_setup(
     gc.port = proxy_port
 
     # --- LLM Judge section ---
+    ux.section("LLM Judge (reduces false positives)")
+    ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
+    ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
     click.echo()
-    click.echo("  LLM Judge (reduces false positives)")
-    click.echo("  ────────────────────────────────────")
-    click.echo("  Uses an LLM to verify detections and catch novel attacks.")
-    click.echo("  Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
-    click.echo()
-    click.echo("  Three judge kinds run on every prompt when enabled:")
-    click.echo("    • injection — overrides / jailbreaks (kind=injection)")
-    click.echo("    • pii       — names, emails, SSNs, secrets (kind=pii)")
+    click.echo("  " + ux.bold("Three judge kinds run on every prompt when enabled:"))
+    click.echo("    • " + ux.dim("injection — overrides / jailbreaks (kind=injection)"))
+    click.echo("    • " + ux.dim("pii       — names, emails, SSNs, secrets (kind=pii)"))
     click.echo(
-        "    • exfil     — credential-file reads & out-of-band channels "
-        "(kind=exfil)"
+        "    • " + ux.dim(
+            "exfil     — credential-file reads & out-of-band channels (kind=exfil)"
+        )
     )
-    click.echo("  Tool calls additionally run the tool_injection judge.")
+    click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
     enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
     gc.judge.enabled = enable_judge
 
     if enable_judge:
-        click.echo()
-        click.echo("  Detection strategy:")
-        click.echo("    [1] regex_only  — regex patterns only, no LLM calls (fastest)")
-        click.echo("    [2] regex_judge — regex triages, LLM verifies ambiguous matches (recommended)")
-        click.echo("    [3] judge_first — LLM runs primary detection, regex as safety net (most accurate)")
+        ux.section("Detection strategy")
+        click.echo("    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls " + ux.dim("(fastest)"))
+        click.echo("    " + ux.bold("[2] regex_judge") + " — regex triages, LLM verifies ambiguous matches " + ux.dim("(recommended)"))
+        click.echo("    " + ux.bold("[3] judge_first") + " — LLM runs primary detection, regex as safety net " + ux.dim("(most accurate)"))
         strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
         current_strat = gc.detection_strategy or "regex_judge"
         strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")
@@ -3097,7 +3214,13 @@ def _interactive_guardrail_setup(
                 gc.block_message = click.prompt("  Block message", default=gc.block_message or "")
             else:
                 gc.block_message = ""
-        _configure_hilt_interactive(gc)
+        # NOTE: HILT was previously asked here. As of the
+        # always-ask-when-action change it lives inline in
+        # ``_interactive_guardrail_setup`` right after the hook
+        # fail-mode prompt, so we don't double-prompt under
+        # advanced. Operators who want to revisit HILT specifically
+        # can re-run ``defenseclaw setup guardrail`` (no flag
+        # needed) and walk through to the action-mode block.
         _configure_redaction_interactive(app)
 
 
@@ -3140,22 +3263,114 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
 
 def _write_guardrail_runtime(data_dir: str, gc) -> None:
-    """Write guardrail_runtime.json so the Python guardrail module can hot-reload settings."""
+    """Write guardrail_runtime.json so the gateway can hot-reload settings.
+
+    Carries every guardrail field whose runtime change should not require
+    a full sidecar restart. The Go side polls this file with a short TTL
+    (see ``GuardrailProxy.reloadRuntimeConfig``) and applies each known
+    key to the live inspector.
+
+    The HILT block is included so an operator who edits
+    ``config.yaml`` (or runs ``defenseclaw config set
+    guardrail.hilt.enabled ...``) and then re-runs the wizard or restart
+    helper has their HILT view pushed into the running gateway via the
+    same hot-reload path the rest of the runtime uses. Without this, the
+    inspector's HILT cache (set once in ``NewGuardrailProxy``) would
+    drift out of sync with ``config.yaml`` until the next bounce — the
+    same SSOT staleness pattern the input.hilt change was meant to
+    eliminate.
+    """
     import json
 
     runtime_file = os.path.join(data_dir, "guardrail_runtime.json")
+    hilt = getattr(gc, "hilt", None)
     payload = {
         "mode": gc.mode,
         "scanner_mode": gc.scanner_mode,
         "block_message": gc.block_message,
+        "hilt_enabled": bool(getattr(hilt, "enabled", False)),
+        "hilt_min_severity": (
+            (getattr(hilt, "min_severity", "") or "HIGH").upper()
+        ),
     }
     try:
         os.makedirs(data_dir, exist_ok=True)
         with open(runtime_file, "w") as f:
             json.dump(payload, f)
-        click.echo(f"  ✓ Guardrail runtime config written to {runtime_file}")
+        ux.ok(f"Guardrail runtime config written to {runtime_file}")
     except OSError as exc:
-        click.echo(f"  ⚠ Failed to write runtime config: {exc}")
+        ux.warn(f"Failed to write runtime config: {exc}")
+
+
+def _sync_guardrail_hilt_to_opa(policy_dir: str, gc) -> None:
+    """Mirror ``gc.hilt`` into the OPA Rego data.json the gateway evaluates.
+
+    NOTE (architecture): As of the input.hilt SSOT change, the Go gateway
+    now passes ``cfg.Guardrail.HILT`` directly into ``policy.GuardrailInput``
+    so the Rego policy reads ``input.hilt.{enabled,min_severity}`` and
+    ``config.yaml`` is the single source of truth for the gateway path.
+    See ``internal/gateway/guardrail.go`` (``SetHILTConfig`` / ``hiltInput``)
+    and ``policies/rego/guardrail.rego`` (``_hilt := input.hilt if {...}
+    else := object.get(data.guardrail, "hilt", {})``).
+
+    This helper is now a **fallback** that keeps non-gateway callers
+    (direct ``opa eval`` invocations, integration tests that build a
+    ``GuardrailInput`` without HILT, third-party tooling) consistent with
+    the wizard's view of HILT. The gateway no longer DEPENDS on it for
+    correctness, but mirroring the value here costs nothing and avoids
+    confusing operators who introspect ``data.json`` directly.
+
+    The HILT toggle has two consumers:
+
+    1. The Go inspector reads ``cfg.Guardrail.HILT`` from ``config.yaml``
+       and injects it into the Rego ``input`` (the gateway path — primary).
+    2. The Rego ``defenseclaw.guardrail`` policy falls back to
+       ``data.guardrail.hilt`` from ``policies/rego/data.json`` when the
+       caller does not populate ``input.hilt`` (legacy / test path).
+
+    Operator-facing wizards (``defenseclaw init``, ``defenseclaw setup
+    guardrail``) persist (1) via ``config.yaml`` and mirror to (2) via
+    this helper as defense-in-depth. The helper is intentionally narrow:
+    it ONLY mirrors the ``guardrail.hilt`` block, leaving thresholds,
+    patterns, severity_mappings, etc. owned by ``defenseclaw policy
+    activate`` (which calls ``_sync_opa_data`` in ``cmd_policy``). That
+    keeps the wizard from accidentally clobbering activated-policy state.
+    """
+    import json
+
+    if gc is None or getattr(gc, "hilt", None) is None:
+        return
+
+    data_json = os.path.join(policy_dir, "rego", "data.json")
+    if not os.path.isfile(data_json):
+        return
+
+    try:
+        with open(data_json) as f:
+            opa_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"  ⚠ Failed to read {data_json}: {exc}")
+        return
+
+    desired = {
+        "enabled": bool(gc.hilt.enabled),
+        "min_severity": (gc.hilt.min_severity or "HIGH").upper(),
+    }
+    guardrail_block = opa_data.setdefault("guardrail", {})
+    if guardrail_block.get("hilt") == desired:
+        return
+
+    guardrail_block["hilt"] = desired
+    try:
+        with open(data_json, "w") as f:
+            json.dump(opa_data, f, indent=2)
+            f.write("\n")
+        click.echo(
+            f"  ✓ HILT synced to OPA: enabled={desired['enabled']} "
+            f"min_severity={desired['min_severity']}"
+        )
+    except OSError as exc:
+        click.echo(f"  ⚠ Failed to write {data_json}: {exc}")
 
 
 def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:
@@ -3239,8 +3454,7 @@ def _restart_services(
     freshly-registered defenseclaw plugin. Other connectors manage
     their own processes; defenseclaw-gateway is the only process we
     always need to bounce."""
-    click.echo("  Restarting services...")
-    click.echo("  ──────────────────────")
+    ux.section("Restarting services")
 
     _restart_defense_gateway(data_dir)
 
@@ -3248,7 +3462,9 @@ def _restart_services(
         _restart_openclaw_gateway()
         _check_openclaw_gateway(oc_host, oc_port)
     else:
-        click.echo(f"  {connector} connector: traffic will route through defenseclaw-gateway proxy.")
+        ux.subhead(
+            f"{connector} connector: traffic will route through defenseclaw-gateway proxy."
+        )
 
     click.echo()
 
@@ -3488,7 +3704,7 @@ def _prompt_env_var_name(default: str) -> str:
 
 def _print_gateway_summary(gw) -> None:
     click.echo()
-    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    ux.ok("Saved to ~/.defenseclaw/config.yaml")
     click.echo()
 
     resolved = gw.resolved_token()
@@ -3500,16 +3716,19 @@ def _print_gateway_summary(gw) -> None:
     ]
 
     for key, val in rows:
-        click.echo(f"    gateway.{key + ':':<12s} {val}")
+        label = (f"gateway.{key}:").ljust(20)
+        click.echo(
+            f"    {ux._style(label, fg='bright_black', bold=True)} {val}"
+        )
     click.echo()
 
     if resolved:
-        click.echo("  Start the sidecar with:")
-        click.echo("    defenseclaw-gateway")
+        ux.subhead("Start the sidecar with:")
+        ux.subhead("  defenseclaw-gateway")
     else:
-        click.echo("  Start the sidecar with:")
-        click.echo("    defenseclaw-gateway")
-        click.echo("  (local mode — ensure OpenClaw is running on this machine)")
+        ux.subhead("Start the sidecar with:")
+        ux.subhead("  defenseclaw-gateway")
+        ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()
 
 

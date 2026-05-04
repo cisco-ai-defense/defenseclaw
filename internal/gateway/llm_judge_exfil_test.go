@@ -207,15 +207,19 @@ func TestExfilRegexFloor_CatchesTypoEvasionWithoutLLM(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// 1) scanLocalPatterns must surface a HIGH/CRITICAL
-			//    block verdict — the regex floor's whole job is
-			//    to be the deterministic safety net.
+			//    verdict — the regex floor's whole job is to be
+			//    the deterministic safety net.
 			v := scanLocalPatterns("prompt", tc.content)
 			if v == nil {
 				t.Fatal("nil verdict")
 				return
 			}
-			if v.Action != "block" {
-				t.Fatalf("scanLocalPatterns action=%q want block (verdict=%+v)", v.Action, v)
+			wantAction := "alert"
+			if v.Severity == "CRITICAL" {
+				wantAction = "block"
+			}
+			if v.Action != wantAction {
+				t.Fatalf("scanLocalPatterns action=%q want %s (verdict=%+v)", v.Action, wantAction, v)
 			}
 			var sawExfilFlag bool
 			for _, f := range v.Findings {
