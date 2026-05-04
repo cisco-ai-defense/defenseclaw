@@ -1,5 +1,7 @@
 # Sandbox Productization Plan
 
+> **Status:** PROPOSAL (designed, not implemented)
+
 ## Overview
 
 This document covers everything required to ship DefenseClaw's OpenShell

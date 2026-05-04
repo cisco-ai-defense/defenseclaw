@@ -2,7 +2,7 @@
 
 The DefenseClaw TUI is a Bubbletea (charmbracelet) dashboard built into the Go
 gateway binary (`defenseclaw-gateway tui`, also reachable as `defenseclaw tui`
-when the gateway is on `PATH`). It exposes every CLI capability through 12
+when the gateway is on `PATH`). It exposes every CLI capability through 13
 keyboard-driven panels backed by the same Python CLI commands an operator
 would run from a shell — the TUI never reimplements business logic, it shells
 out to `defenseclaw` and observes the resulting audit events.
@@ -45,6 +45,7 @@ Panels are addressable by number (1–9, 0 for Setup) and by `Tab` /
 | - | Activity | `activity.go` | Live tail of TUI-launched commands (output stream, exit codes). |
 | - | Tools | `tools.go` | Tool block/allow/unblock surface. |
 | 0 | Setup | `setup.go` | All editable config — scanner endpoints, gateway watcher/watchdog, OTel signals, observability sinks, webhooks, guardrail tuning, OpenShell sandbox. |
+| - | First Run | `first_run.go` | Initial setup wizard shown on first launch — walks through scanner, mode, and sink configuration with safe defaults. |
 
 ---
 
@@ -94,7 +95,7 @@ Why this matters:
 - **Easy automation.** Anything you can click, you can script.
 
 The mapping table is `internal/tui/command.go::BuildRegistry()`. It returns
-96 `CmdEntry` records (TUI label → CLI binary + args). To prevent drift,
+201 `CmdEntry` records (TUI label → CLI binary + args). To prevent drift,
 the test `internal/tui/cli_parity_test.go::TestBuildRegistryParity`
 introspects the live Click tree via `scripts/audit_parity.py` and asserts:
 

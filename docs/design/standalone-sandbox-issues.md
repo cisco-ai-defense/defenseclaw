@@ -1,5 +1,7 @@
 # Standalone Sandbox Mode: Issues for Node.js/TypeScript Workloads
 
+> **Status:** IMPLEMENTED (issue catalog, remediation pending)
+
 This document catalogs known issues when running Node.js or TypeScript tooling (e.g., OpenClaw and its plugins) inside the standalone sandbox binary without the cluster-mode gateway. Each issue includes the relevant source locations and severity.
 
 ## 1. DNS: `getaddrinfo` Fails Inside Network Namespace

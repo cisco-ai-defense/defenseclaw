@@ -1,5 +1,8 @@
 # DefenseClaw — Developer Spec
 
+> **Status:** V1 SHIPPED — Core governance features (scanning, block/allow, guardrail,
+> audit, TUI) are implemented. V2/V3 roadmap items remain planned.
+
 ## What It Is
 
 DefenseClaw is the enterprise governance layer for OpenClaw. It wraps Cisco AI Defense scanners and NVIDIA OpenShell into a CLI that a developer can deploy in under five minutes, and a TUI that security operators use to manage alerts, block/allow lists, and enforcement — without touching YAML or JSON.
