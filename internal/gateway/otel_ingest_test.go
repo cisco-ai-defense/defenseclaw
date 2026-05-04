@@ -22,8 +22,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestOTLPIngest_Logs_AcceptsValidPayload pins the success path: a
@@ -62,6 +65,67 @@ func TestOTLPIngest_Logs_AcceptsValidPayload(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exp),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer otel.SetTracerProvider(prev)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	api := &APIServer{}
+	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleOTLPLogs))
+
+	body := `{
+		"resourceLogs": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "codex-cli"}}]
+			},
+			"scopeLogs": [{
+				"logRecords": [{
+					"attributes": [
+						{"key": "event.name", "value": {"stringValue": "codex.sse_event"}},
+						{"key": "event.kind", "value": {"stringValue": "response.completed"}},
+						{"key": "conversation.id", "value": {"stringValue": "session-123"}},
+						{"key": "input_token_count", "value": {"stringValue": "123"}},
+						{"key": "output_token_count", "value": {"stringValue": "45"}}
+					]
+				}]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "codex")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans want 1", len(spans))
+	}
+	s := spans[0]
+	if s.Name != "POST /v1/logs" {
+		t.Fatalf("span name=%q want POST /v1/logs", s.Name)
+	}
+	for key, want := range map[string]string{
+		"gen_ai.conversation.id": "session-123",
+		"defenseclaw.session_id": "session-123",
+	} {
+		got, ok := attrByKey(s.Attributes, key)
+		if !ok || got.AsString() != want {
+			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
+		}
 	}
 }
 
