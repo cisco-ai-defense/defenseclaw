@@ -388,18 +388,18 @@ func (p *SetupPanel) loadSections() {
 				"Changing this without also migrating content will orphan scans.",
 			Fields: []configField{
 				{Label: "Mode", Key: "claw.mode", Kind: "choice",
-					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex"},
+					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
 					Value:   string(c.Claw.Mode),
-					Hint:    "Active agent framework: openclaw, zeptoclaw, claudecode (Claude Code), codex. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
+					Hint:    "Active agent framework. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
 				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
-					Hint: "Override for the connector's home directory (~/.openclaw, ~/.claude, ~/.codex, ~/.zeptoclaw). Leave empty to use the OS default."},
+					Hint: "Override for the connector's home directory. Leave empty to use the OS/default connector paths."},
 				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
 					Hint: "Path to the connector's primary config file (openclaw.json for OpenClaw; ignored for connectors that locate their own config)."},
 			},
 		},
 		{
 			Name:    "Agent Hooks",
-			Summary: "Codex and Claude Code hook policy: when scans run, fail behavior, and watched paths.",
+			Summary: "Dedicated Codex and Claude Code hook policy: when scans run, fail behavior, and watched paths.",
 			Help:    "mode controls hook behavior; fail_mode=open lets the agent continue if DefenseClaw is unavailable, closed blocks.",
 			Fields: append(agentHookFields("Claude Code", "claude_code", c.ClaudeCode),
 				agentHookFields("Codex", "codex", c.Codex)...),
@@ -468,7 +468,7 @@ func (p *SetupPanel) loadSections() {
 						"Transport failures (gateway unreachable / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."},
 				{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"},
 					Hint: "local=regex+judge only; remote=Cisco AI Defense only; both=chained (local then remote)."},
-				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw"},
+				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
 					Hint: "Connector adapter used by the guardrail sidecar. Blank follows claw.mode/backward-compatible defaults."},
 				{Label: "Allow Empty Providers", Key: "guardrail.allow_empty_providers", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.AllowEmptyProviders),
 					Hint: "Let the sidecar boot when no upstream LLM providers are detected. Useful only for tests/stubs."},
@@ -3083,7 +3083,7 @@ func agentHookFields(label, prefix string, h config.AgentHookConfig) []configFie
 }
 
 func connectorHookMapFields(c *config.Config) []configField {
-	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw"}
+	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	seen := map[string]bool{}
 	if c.ConnectorHooks != nil {
 		for name := range c.ConnectorHooks {

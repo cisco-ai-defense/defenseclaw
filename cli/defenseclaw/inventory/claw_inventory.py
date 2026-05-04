@@ -1235,7 +1235,7 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
 # Non-OpenClaw filesystem adapter (S4.3)
 # ---------------------------------------------------------------------------
 #
-# Codex, Claude Code, and ZeptoClaw don't expose a ``<framework> …
+# Non-OpenClaw connectors don't consistently expose a ``<framework> …
 # --json`` style introspection CLI, so we discover their installed
 # components by walking the directory layouts documented in
 # defenseclaw.connector_paths. Categories that are OpenClaw-only
@@ -1273,6 +1273,8 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     * claudecode — ``~/.claude/agents/*.md`` (sub-agent prompt files)
     * codex      — ``~/.codex/agents/*`` (when present)
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` array
+    * geminicli  — ``.gemini/agents`` and ``~/.gemini/agents``
+    * copilot    — ``.github/agents`` and ``~/.copilot/agents``
     """
     home = os.path.expanduser("~")
     name = (connector or "").lower()
@@ -1284,6 +1286,16 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
         return _agents_from_zeptoclaw_json(
             os.path.join(home, ".zeptoclaw", "agents.json"),
         )
+    if name == "geminicli":
+        return _agents_from_md_dirs([
+            os.path.join(os.getcwd(), ".gemini", "agents"),
+            os.path.join(home, ".gemini", "agents"),
+        ])
+    if name == "copilot":
+        return _agents_from_md_dirs([
+            os.path.join(os.getcwd(), ".github", "agents"),
+            os.path.join(home, ".copilot", "agents"),
+        ])
     return []
 
 
@@ -1407,6 +1419,19 @@ def _agents_from_md_dir(agents_dir: str) -> list[dict[str, Any]]:
             "source": full,
             "kind": "subagent",
         })
+    return rows
+
+
+def _agents_from_md_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for agents_dir in agent_dirs:
+        for row in _agents_from_md_dir(agents_dir):
+            key = str(row.get("source") or row.get("id") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
     return rows
 
 

@@ -169,10 +169,10 @@ type metricsSet struct {
 	guardrailCacheHits    metric.Int64Counter
 	guardrailCacheMisses  metric.Int64Counter
 
-	// Connector OTLP ingest receivers (codex / claudecode native
-	// telemetry posted to /v1/logs, /v1/metrics, /v1/traces). Kept
+	// Connector OTLP ingest receivers (native connector telemetry
+	// posted to /v1/logs, /v1/metrics, /v1/traces). Kept
 	// low-cardinality on purpose — labels are signal (logs|metrics|
-	// traces) and source (codex|claudecode|unknown). Records counts
+	// traces) and source (registered connector name|unknown). Records counts
 	// the per-batch leaf records (logRecords / dataPoints / spans)
 	// the summarizer extracted; used by the connector dashboard to
 	// show "telemetry volume per connector".
@@ -1908,7 +1908,7 @@ func (p *Provider) RecordGuardrailCacheMiss(ctx context.Context, scanner, verdic
 }
 
 // RecordOTelIngest records a single OTLP-HTTP batch the gateway
-// accepted from a connector (codex / claudecode). Emits four
+// accepted from a connector. Emits four
 // time series per call:
 //
 //   - defenseclaw.otel.ingest.requests{signal,source,result} += 1
@@ -1920,8 +1920,8 @@ func (p *Provider) RecordGuardrailCacheMiss(ctx context.Context, scanner, verdic
 // failed to parse (records/bytes are still recorded so volume
 // dashboards stay accurate even during schema drift). Cardinality
 // is bounded: signal ∈ {logs,metrics,traces}, source is the
-// sanitized x-defenseclaw-source header (codex|claudecode|unknown),
-// result ∈ {ok,malformed}.
+// sanitized x-defenseclaw-source header or path-token source, result ∈
+// {ok,malformed}.
 func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result string, records, bodyBytes int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -2001,7 +2001,7 @@ func (p *Provider) RecordCodexNotify(ctx context.Context, kind, status, result s
 // internal/telemetry/provider.go::loggerProvider) and therefore
 // lands in whatever OTel collector the operator has configured —
 // in the local-observability-stack that's the bundled collector
-// → Loki, giving operators direct visibility into codex/claudecode
+// → Loki, giving operators direct visibility into connector
 // telemetry without configuring an additional audit OTLP sink.
 //
 // The log body is short ("connector ingest …") because the
@@ -2009,7 +2009,7 @@ func (p *Provider) RecordCodexNotify(ctx context.Context, kind, status, result s
 // body and labels separately and we don't want to balloon the
 // chunk store with verbose summaries.
 //
-// signal: logs|metrics|traces. source: codex|claudecode|unknown.
+// signal: logs|metrics|traces. source: registered connector name|unknown.
 // result: ok|malformed. records is the leaf-record count the
 // summarizer produced; bodyBytes is the request size; summary
 // is the human-readable summary line the audit row also stores.

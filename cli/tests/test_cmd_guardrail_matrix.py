@@ -9,7 +9,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Plan E2 / item 5 — guardrail enable/disable/status round-trip
-parameterized across all four connectors.
+parameterized across all built-in connectors.
 
 Asserts that:
 
@@ -40,12 +40,20 @@ from defenseclaw.commands.cmd_guardrail import guardrail
 from tests.helpers import cleanup_app, make_app_context
 
 
-_CONNECTORS = ("openclaw", "zeptoclaw", "claudecode", "codex")
+_CONNECTORS = (
+    "openclaw", "zeptoclaw", "claudecode", "codex",
+    "hermes", "cursor", "windsurf", "geminicli", "copilot",
+)
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
     "zeptoclaw": "ZeptoClaw",
     "claudecode": "Claude Code",
     "codex": "Codex",
+    "hermes": "Hermes",
+    "cursor": "Cursor",
+    "windsurf": "Windsurf",
+    "geminicli": "Gemini CLI",
+    "copilot": "GitHub Copilot CLI",
 }
 
 

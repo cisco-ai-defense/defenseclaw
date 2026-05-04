@@ -729,7 +729,7 @@ attributes worth indexing in your SIEM:
 | Field           | Type   | Meaning                                                                 |
 |-----------------|--------|-------------------------------------------------------------------------|
 | `action`        | enum   | One of `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
-| `actor`         | string | Self-asserted `x-defenseclaw-source` header (validated by tokenAuth before reaching the receiver). One of `codex`, `claudecode`, `unknown`. |
+| `actor`         | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
 | `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
 
 The matching gateway envelope events (`gateway-event-envelope.json`)
@@ -772,9 +772,10 @@ Provisioned in `bundles/local_observability_stack/`:
 
 ### 9.4 Toggling enforcement
 
-Observability mode keeps codex/claudecode enforcement code intact —
-the proxy simply doesn't bind. To re-enable enforcement once the
-guardrail policy is ready:
+Observability mode keeps connector enforcement code intact but inactive
+unless explicitly requested. For Codex and Claude Code, the proxy
+simply doesn't bind until the connector-specific enforcement switch is
+enabled:
 
 ```yaml
 # ~/.defenseclaw/config.yaml
@@ -794,10 +795,10 @@ for the full backup/restore contract.
 ### 9.5 One-shot setup aliases
 
 For operators who only want telemetry (no enforcement, no proxy
-listener), DefenseClaw exposes two dedicated CLI aliases that wrap the
+listener), DefenseClaw exposes dedicated setup paths that wrap the
 observability-only branch of `setup guardrail` and additionally pin
 `claw.mode` so the rest of the CLI/TUI surfaces the matching
-connector's source-of-truth files (`~/.codex/` or `~/.claude/`):
+connector's source-of-truth files.
 
 ```bash
 # Codex: hooks + native OTel + notify-bridge.sh

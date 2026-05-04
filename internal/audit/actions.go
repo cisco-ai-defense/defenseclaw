@@ -87,8 +87,8 @@ const (
 	// field on the audit row carries WARN / HIGH / CRITICAL.
 	ActionAlert Action = "alert"
 
-	// Connector observability ingress (codex / claudecode native
-	// telemetry). The OTLP-HTTP receiver in
+	// Connector observability ingress (native OTLP and hook telemetry).
+	// The OTLP-HTTP receiver in
 	// internal/gateway/otel_ingest.go persists one row per
 	// inbound batch so SIEM rollups can answer "is the connector
 	// reporting?" without scanning Loki/Tempo. We split by signal

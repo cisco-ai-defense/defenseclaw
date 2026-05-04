@@ -92,7 +92,7 @@ ACTION_SINK_RESTORED: Final[str] = "sink-restored"
 # Runtime alert
 ACTION_ALERT: Final[str] = "alert"
 
-# Connector observability ingress (codex / claudecode native telemetry).
+# Connector observability ingress (native OTLP and hook telemetry).
 # Mirrors internal/audit/actions.go::ActionOTelIngest*.
 ACTION_OTEL_INGEST_LOGS: Final[str]      = "otel.ingest.logs"
 ACTION_OTEL_INGEST_METRICS: Final[str]   = "otel.ingest.metrics"

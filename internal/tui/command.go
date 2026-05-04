@@ -533,7 +533,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup mcp-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "mcp-scanner"}, Description: "Configure MCP scanner (interactive)", Category: "setup"},
 		{TUIName: "setup codex", CLIBinary: dc, CLIArgs: []string{"setup", "codex", "--yes"}, Description: "Configure Codex observability hooks", Category: "setup"},
 		{TUIName: "setup claude-code", CLIBinary: dc, CLIArgs: []string{"setup", "claude-code", "--yes"}, Description: "Configure Claude Code observability hooks", Category: "setup"},
-		{TUIName: "setup mode", CLIBinary: dc, CLIArgs: []string{"setup", "mode"}, Description: "Switch active connector", Category: "setup", NeedsArg: true, ArgHint: "<openclaw|codex|claudecode|zeptoclaw>"},
+		{TUIName: "setup mode", CLIBinary: dc, CLIArgs: []string{"setup", "mode"}, Description: "Switch active connector", Category: "setup", NeedsArg: true, ArgHint: "<openclaw|codex|claudecode|zeptoclaw|hermes|cursor|windsurf|geminicli|copilot>"},
 		{TUIName: "setup rotate-token", CLIBinary: dc, CLIArgs: []string{"setup", "rotate-token", "--yes"}, Description: "Rotate the gateway token", Category: "setup"},
 		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway"}, Description: "Configure gateway connection (interactive)", Category: "setup"},
 		{TUIName: "setup guardrail", CLIBinary: dc, CLIArgs: []string{"setup", "guardrail"}, Description: "Configure LLM guardrail", Category: "setup"},

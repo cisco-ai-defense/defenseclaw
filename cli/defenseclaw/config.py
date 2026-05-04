@@ -873,7 +873,7 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
-    connector: str = ""  # empty => fall back to claw.mode; otherwise openclaw | zeptoclaw | claudecode | codex
+    connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``codex_enforcement_enabled`` gates the proxy-redirect /
     # blocking path for the Codex connector. Default ``False`` means

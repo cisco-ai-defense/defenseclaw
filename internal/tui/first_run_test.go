@@ -42,6 +42,33 @@ func TestFirstRunPanelArgsUseCanonicalInitBackend(t *testing.T) {
 	}
 }
 
+func TestFirstRunPanelConnectorChoicesCoverBuiltinConnectors(t *testing.T) {
+	p := NewFirstRunPanel(DefaultTheme(), true)
+	var connectors []string
+	for _, field := range p.fields {
+		if field.Label == "Connector" {
+			connectors = field.Options
+			break
+		}
+	}
+	want := []string{
+		"codex",
+		"claudecode",
+		"zeptoclaw",
+		"openclaw",
+		"hermes",
+		"cursor",
+		"windsurf",
+		"geminicli",
+		"copilot",
+	}
+	for _, name := range want {
+		if !containsArg(connectors, name) {
+			t.Fatalf("first-run connector choices missing %q: %v", name, connectors)
+		}
+	}
+}
+
 func TestFirstRunPanelCtrlRAppliesInit(t *testing.T) {
 	p := NewFirstRunPanel(DefaultTheme(), true)
 	run, binary, args, display := p.HandleKey(tea.KeyPressMsg(tea.Key{Code: 'r', Mod: tea.ModCtrl}))
