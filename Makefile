@@ -494,7 +494,7 @@ check-schemas:
 # the two sides — e.g. a new provider added to providers.json but
 # never exercised — would be the exact "silent bypass" failure mode
 # Layer 4 of the robust-guardrail plan is designed to surface.
-check-provider-coverage:
+check-provider-coverage: sync-openclaw-extension
 	@echo "==> provider coverage (Go)"
 	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
 	@echo "==> provider coverage (TS)"
