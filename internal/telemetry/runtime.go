@@ -30,6 +30,45 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
+// spanContextResourceKeys are the deployment/join keys we intentionally
+// mirror from the process resource onto individual spans. Resource
+// attributes remain the canonical emitter context, but repeating these
+// specific keys on spans makes downstream span-row joins and filtering
+// reliable even in backends or export paths that do not preserve
+// resource context alongside every span record.
+var spanContextResourceKeys = map[string]struct{}{
+	"tenant.id":              {},
+	"workspace.id":           {},
+	"deployment.environment": {},
+	"deployment.mode":        {},
+	"discovery.source":       {},
+	"device.id":              {},
+}
+
+func (p *Provider) resourceSpanContextAttrs() []attribute.KeyValue {
+	if p == nil || p.res == nil {
+		return nil
+	}
+	attrs := make([]attribute.KeyValue, 0, len(spanContextResourceKeys))
+	iter := p.res.Iter()
+	for iter.Next() {
+		kv := iter.Attribute()
+		if _, ok := spanContextResourceKeys[string(kv.Key)]; ok {
+			attrs = append(attrs, kv)
+		}
+	}
+	return attrs
+}
+
+func (p *Provider) setSpanResourceContext(span trace.Span) {
+	if span == nil {
+		return
+	}
+	if attrs := p.resourceSpanContextAttrs(); len(attrs) > 0 {
+		span.SetAttributes(attrs...)
+	}
+}
+
 // EmitStartupSpan creates a short-lived span to verify the trace export pipeline
 // is working. Called once at sidecar startup.
 func (p *Provider) EmitStartupSpan(ctx context.Context) {
@@ -40,6 +79,7 @@ func (p *Provider) EmitStartupSpan(ctx context.Context) {
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithTimestamp(time.Now()),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(attribute.String("defenseclaw.event", "sidecar_start"))
 	span.SetStatus(codes.Ok, "")
 	span.End()
@@ -60,6 +100,7 @@ func (p *Provider) StartGuardrailStageSpan(ctx context.Context, stage, direction
 	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail/%s", stage),
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.guardrail.stage", stage),
 		attribute.String("defenseclaw.guardrail.direction", direction),
@@ -107,6 +148,7 @@ func (p *Provider) StartGuardrailPhaseSpan(ctx context.Context, phase string) (c
 	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail.%s", phase),
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.guardrail.phase", phase),
 	)
@@ -147,6 +189,7 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithTimestamp(time.Now().Add(-time.Duration(durationMs)*time.Millisecond)),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.inspect.tool", tool),
 		attribute.String("defenseclaw.inspect.action", action),
@@ -189,6 +232,7 @@ func (p *Provider) StartAgentSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 		attribute.String("gen_ai.agent.name", agentName),
@@ -294,6 +338,7 @@ func (p *Provider) StartToolSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "execute_tool"),
 		attribute.String("gen_ai.tool.name", tool),
@@ -420,6 +465,7 @@ func (p *Provider) StartApprovalSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.approval.id", id),
 		attribute.String("defenseclaw.approval.command_name", baseCommand(command)),
@@ -508,6 +554,7 @@ func (p *Provider) StartLLMSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "chat"),
 		attribute.String("gen_ai.system", system),
@@ -594,6 +641,7 @@ func (p *Provider) StartJudgeSpan(
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(time.Now()),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.system", genAISystem),
 		attribute.String("gen_ai.request.model", model),
@@ -652,6 +700,7 @@ func (p *Provider) StartGuardrailSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "apply_guardrail"),
 		attribute.String("gen_ai.guardrail.name", name),
@@ -706,6 +755,7 @@ func (p *Provider) StartPolicySpan(ctx context.Context, domain, targetType, targ
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.policy.domain", domain),
 		attribute.String("defenseclaw.policy.target_type", targetType),

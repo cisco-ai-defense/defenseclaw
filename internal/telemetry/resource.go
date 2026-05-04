@@ -61,21 +61,21 @@ func buildResource(cfg *config.Config, version string) *resource.Resource {
 		attribute.String("defenseclaw.instance.id", uuid.New().String()),
 	}
 	if cfg.TenantID != "" {
-		attrs = append(attrs, attribute.String("defenseclaw.tenant.id", cfg.TenantID))
+		attrs = append(attrs, attribute.String("tenant.id", cfg.TenantID))
 	}
 	if cfg.WorkspaceID != "" {
-		attrs = append(attrs, attribute.String("defenseclaw.workspace.id", cfg.WorkspaceID))
+		attrs = append(attrs, attribute.String("workspace.id", cfg.WorkspaceID))
 	}
 	if cfg.DeploymentMode != "" {
-		attrs = append(attrs, attribute.String("defenseclaw.deployment.mode", cfg.DeploymentMode))
+		attrs = append(attrs, attribute.String("deployment.mode", cfg.DeploymentMode))
 	}
 	if cfg.DiscoverySource != "" {
-		attrs = append(attrs, attribute.String("defenseclaw.discovery.source", cfg.DiscoverySource))
+		attrs = append(attrs, attribute.String("discovery.source", cfg.DiscoverySource))
 	}
 
 	if cfg.Gateway.DeviceKeyFile != "" {
 		if fp := deviceFingerprint(cfg.Gateway.DeviceKeyFile); fp != "" {
-			attrs = append(attrs, attribute.String("defenseclaw.device.id", fp))
+			attrs = append(attrs, attribute.String("device.id", fp))
 		}
 	}
 

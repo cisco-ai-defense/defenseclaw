@@ -36,6 +36,22 @@
       "enum": ["macos", "dgx-spark", "linux"],
       "description": "Detected runtime environment."
     },
+    "tenant.id": {
+      "type": "string",
+      "description": "Tenant identifier when configured."
+    },
+    "workspace.id": {
+      "type": "string",
+      "description": "Workspace identifier when configured."
+    },
+    "deployment.mode": {
+      "type": "string",
+      "description": "Deployment mode when configured."
+    },
+    "discovery.source": {
+      "type": "string",
+      "description": "Discovery source when configured."
+    },
     "host.name": {
       "type": "string",
       "description": "OS hostname."
@@ -65,9 +81,9 @@
         "/home/user/.codex"
       ]
     },
-    "defenseclaw.device.id": {
+    "device.id": {
       "type": "string",
-      "description": "Hex-encoded SHA-256 fingerprint of the Ed25519 device public key."
+      "description": "Hex-encoded SHA-256 fingerprint of the DefenseClaw Ed25519 device public key. This is DefenseClaw pairing identity, not a host hardware UUID or generic endpoint identifier."
     },
     "defenseclaw.gateway.host": {
       "type": "string",

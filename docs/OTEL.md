@@ -51,19 +51,23 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `service.version` | string | `0.5.0` | build-time `version` var |
 | `service.namespace` | string | `ai-governance` | hardcoded |
 | `deployment.environment` | string | `macos` | `config.Environment` |
-| `defenseclaw.tenant.id` | string | `tenant-a` | `config.tenant_id` when set |
-| `defenseclaw.workspace.id` | string | `workspace-1` | `config.workspace_id` when set |
-| `defenseclaw.deployment.mode` | string | `standalone` | `config.deployment_mode` when set |
-| `defenseclaw.discovery.source` | string | `registry` | `config.discovery_source` when set |
+| `tenant.id` | string | `tenant-a` | `config.tenant_id` when set |
+| `workspace.id` | string | `workspace-1` | `config.workspace_id` when set |
+| `deployment.mode` | string | `standalone` | `config.deployment_mode` when set |
+| `discovery.source` | string | `registry` | `config.discovery_source` when set |
 | `host.name` | string | `dgx-spark-01` | `os.Hostname()` |
 | `host.arch` | string | `arm64` | `runtime.GOARCH` |
 | `os.type` | string | `darwin` | `runtime.GOOS` |
 | `defenseclaw.claw.mode` | string | `openclaw` \| `zeptoclaw` \| `claudecode` \| `codex` (or `""` before `defenseclaw setup connector`) | `config.Claw.Mode` |
 | `defenseclaw.claw.home_dir` | string | `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex` | resolved at startup |
-| `defenseclaw.device.id` | string | `a1b2c3...` | Ed25519 fingerprint |
+| `device.id` | string | `a1b2c3...` | DefenseClaw Ed25519 public-key fingerprint |
 | `defenseclaw.gateway.host` | string | `127.0.0.1` | `config.Gateway.Host` |
 | `defenseclaw.gateway.port` | int | `18789` | `config.Gateway.Port` |
 | `defenseclaw.instance.id` | string | `uuid` | generated at startup |
+
+Notes:
+- `deployment.environment` was already the normalized field and remains unchanged.
+- `device.id` represents the DefenseClaw device-key fingerprint used for sidecar pairing identity. It is not equivalent to `endpoint_id` or a host hardware UUID.
 
 ---
 

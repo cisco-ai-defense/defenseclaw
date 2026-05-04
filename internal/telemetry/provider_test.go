@@ -159,6 +159,7 @@ func TestStartToolSpan_RawArgsOnlyWhenRedactionDisabled(t *testing.T) {
 
 func TestStartToolSpan_EmitsSessionToolPolicyCorrelation(t *testing.T) {
 	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
 	_, span := p.StartToolSpan(context.Background(), "shell", "running",
 		json.RawMessage(`{"cmd":"rg -n observed_agent_session ."}`), false, "", "builtin", "",
 		ToolSpanContext{
@@ -193,6 +194,37 @@ func TestStartToolSpan_EmitsSessionToolPolicyCorrelation(t *testing.T) {
 			t.Fatalf("%s = %q ok=%v, want %q", key, got.AsString(), ok, want)
 		}
 	}
+	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+}
+
+func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
+
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "openai_codex", "openai")
+	p.EndAgentSpan(span, "")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+
+	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+}
+
+func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
+
+	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 2048, 0.1)
+	p.EndLLMSpan(span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "openai_codex")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+
+	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
 }
 
 func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
@@ -931,11 +963,11 @@ func TestBuildResource_AgentWatchContextAttributes(t *testing.T) {
 	}
 
 	for key, want := range map[string]string{
-		"defenseclaw.tenant.id":        "tenant-a",
-		"defenseclaw.workspace.id":     "workspace-1",
-		"deployment.environment":       "test",
-		"defenseclaw.deployment.mode":  "standalone",
-		"defenseclaw.discovery.source": "registry",
+		"tenant.id":              "tenant-a",
+		"workspace.id":           "workspace-1",
+		"deployment.environment": "test",
+		"deployment.mode":        "standalone",
+		"discovery.source":       "registry",
 	} {
 		if got[key] != want {
 			t.Errorf("%s=%q, want %q", key, got[key], want)
