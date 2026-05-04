@@ -75,7 +75,7 @@ func buildResource(cfg *config.Config, version string) *resource.Resource {
 
 	if cfg.Gateway.DeviceKeyFile != "" {
 		if fp := deviceFingerprint(cfg.Gateway.DeviceKeyFile); fp != "" {
-			attrs = append(attrs, attribute.String("device.id", fp))
+			attrs = append(attrs, attribute.String("defenseclaw.device.id", fp))
 		}
 	}
 

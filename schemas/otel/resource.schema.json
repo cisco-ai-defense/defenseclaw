@@ -81,7 +81,7 @@
         "/home/user/.codex"
       ]
     },
-    "device.id": {
+    "defenseclaw.device.id": {
       "type": "string",
       "description": "Hex-encoded SHA-256 fingerprint of the DefenseClaw Ed25519 device public key. This is DefenseClaw pairing identity, not a host hardware UUID or generic endpoint identifier."
     },

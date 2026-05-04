@@ -42,7 +42,7 @@ var spanContextResourceKeys = map[string]struct{}{
 	"deployment.environment": {},
 	"deployment.mode":        {},
 	"discovery.source":       {},
-	"device.id":              {},
+	"defenseclaw.device.id":  {},
 }
 
 func (p *Provider) resourceSpanContextAttrs() []attribute.KeyValue {

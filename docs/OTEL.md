@@ -60,14 +60,14 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `os.type` | string | `darwin` | `runtime.GOOS` |
 | `defenseclaw.claw.mode` | string | `openclaw` \| `zeptoclaw` \| `claudecode` \| `codex` (or `""` before `defenseclaw setup connector`) | `config.Claw.Mode` |
 | `defenseclaw.claw.home_dir` | string | `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex` | resolved at startup |
-| `device.id` | string | `a1b2c3...` | DefenseClaw Ed25519 public-key fingerprint |
+| `defenseclaw.device.id` | string | `a1b2c3...` | DefenseClaw Ed25519 public-key fingerprint |
 | `defenseclaw.gateway.host` | string | `127.0.0.1` | `config.Gateway.Host` |
 | `defenseclaw.gateway.port` | int | `18789` | `config.Gateway.Port` |
 | `defenseclaw.instance.id` | string | `uuid` | generated at startup |
 
 Notes:
 - `deployment.environment` was already the normalized field and remains unchanged.
-- `device.id` represents the DefenseClaw device-key fingerprint used for sidecar pairing identity. It is not equivalent to `endpoint_id` or a host hardware UUID.
+- `defenseclaw.device.id` represents the DefenseClaw device-key fingerprint used for sidecar pairing identity. It is not equivalent to `endpoint_id` or a host hardware UUID.
 
 ---
 
