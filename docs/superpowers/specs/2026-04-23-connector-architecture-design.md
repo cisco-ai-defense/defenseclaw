@@ -1,6 +1,6 @@
 # DefenseClaw Connector Architecture — Tech Spec
 
-> **Status:** PARTIAL (~80% implemented via PR #194)
+> **Status:** PARTIAL (~90% implemented via PR #194). All 4 connectors operational with full Setup/Teardown, authentication, proxy routing, managed backups, and hook event processing. Remaining: PermissionRequest not in Codex hookGroups, InstallScope/FailClosed config fields (#12), test override globals cleanup (#14).
 
 **Date**: 2026-04-23
 **Status**: Draft

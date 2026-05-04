@@ -294,21 +294,75 @@ Allow list? ──YES──▶ skip scan, install, log to DB, audit event
   MEDIUM/LOW ──────▶ install with warning, log to DB, audit event
 ```
 
-## Claw Mode
+## Connector Architecture
 
-DefenseClaw supports multiple agent frameworks ("claw modes"). Currently only
-**OpenClaw** is supported; additional frameworks will be added soon. The active
-mode is set in `~/.defenseclaw/config.yaml`:
+DefenseClaw supports four agent frameworks via its pluggable connector system
+(`internal/gateway/connector/`). Each connector adapts the sidecar to a specific
+agent runtime's authentication, routing, and hook mechanisms.
+
+### Built-in Connectors
+
+| Connector | Framework | ToolInspectionMode | SubprocessPolicy | Hook Events |
+|-----------|-----------|-------------------|-----------------|-------------|
+| `openclaw` | OpenClaw | Both | Sandbox | Plugin-based (fetch interceptor) |
+| `claudecode` | Claude Code | Both | Sandbox | 26 shell hook events |
+| `codex` | Codex | Both | Sandbox | 5 shell hook events |
+| `zeptoclaw` | ZeptoClaw | Both | Sandbox | Proxy-side response-scan only |
+
+### Connector Interface
+
+```go
+type Connector interface {
+    Name() string
+    Description() string
+    ToolInspectionMode() ToolInspectionMode
+    SubprocessPolicy() SubprocessPolicy
+    Setup(ctx context.Context, opts SetupOpts) error
+    Teardown(ctx context.Context, opts SetupOpts) error
+    Authenticate(r *http.Request) bool
+    Route(r *http.Request, body []byte) (*ConnectorSignals, error)
+    SetCredentials(gatewayToken, masterKey string)
+    VerifyClean(opts SetupOpts) error
+}
+```
+
+**Optional interfaces**: `HookEndpoint`, `AllowedHostsProvider`, `ComponentScanner`,
+`StopScanner`, `AgentPathProvider`, `EnvRequirementsProvider`, `HookScriptOwner`,
+`ProviderProbe` (gateway refuses to start with 0 usable providers unless `AllowEmptyProviders` set).
+
+### Connector Registry
+
+`Registry` (`connector/registry.go`) prevents plugin name collisions with built-in connectors.
+`NewDefaultRegistry()` pre-loads all four built-ins. Plugin connectors loaded via
+`DiscoverPlugins(dir)` from `~/.defenseclaw/plugins/*.so`.
+
+### Proxy Routing (per-connector /c/ prefix)
+
+Each connector's Setup configures the agent to use a connector-prefixed URL:
+```
+Claude Code  → ANTHROPIC_BASE_URL=http://proxy:4000/c/claudecode
+Codex        → OPENAI_BASE_URL=http://proxy:4000/c/codex
+ZeptoClaw    → api_base: http://proxy:4000/c/zeptoclaw
+OpenClaw     → Fetch interceptor sets X-DC-Target-URL header (no prefix)
+```
+
+The proxy strips `/c/<name>/`, identifies the connector, calls `Route()` for
+signal extraction, then forwards to the resolved upstream.
+
+### Configuration
 
 ```yaml
 claw:
-  mode: openclaw
-  home_dir: ""            # override auto-detected home (e.g. ~/.openclaw)
+  mode: openclaw            # or: claudecode, codex, zeptoclaw
+  home_dir: ""              # override auto-detected home (e.g. ~/.openclaw)
+
+guardrail:
+  connectors: [claudecode]  # multi-connector list (overrides claw.mode for proxy)
 ```
 
 All skill and MCP directory resolution, watcher paths, scan targets, and install
-candidate lookups derive from the active claw mode. Adding a new framework
-requires only a new case in `internal/config/claw.go`.
+candidate lookups derive from the active claw mode. The connector registry
+resolves implementation by name.
 
 ### OpenClaw Skill Resolution Order
 
@@ -331,6 +385,11 @@ requires only a new case in `internal/config/claw.go`.
 │ (JS/TS) │            │  │Engine  │  │                       │ (OpenAI format)
 └─────────┘            │  └────────┘  │◀──────▶  SQLite DB    │
                         │              │                       ▼
+┌─────────┐   Hooks     │  ┌────────┐  │               ┌──────────────┐
+│ Claude  │───────────▶│  │Connec- │  │               │ LLM Provider │
+│ Code /  │  (shell)    │  │tor Reg │  │               └──────────────┘
+│ Codex   │            │  └────────┘  │
+└─────────┘            │              │
                         │   runs       │               ┌──────────────┐
                         │   ──────────────────────────▶│  Guardrail   │
                         └──────────────┘               │  Proxy       │
