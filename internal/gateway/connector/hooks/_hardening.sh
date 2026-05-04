@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v1
+# defenseclaw-managed-hook v2
 # Plan B4 / S0.4: shell-side hook hardening helpers.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
@@ -14,8 +14,10 @@
 #   defenseclaw_harden_env
 #   defenseclaw_harden_resources
 #
-# All helpers are idempotent and pure — no side effects beyond setting
-# env / ulimit. They MUST NOT call out to the agent or the gateway.
+# All helpers (except defenseclaw_log_hook_failure, which writes to
+# DEFENSECLAW_HOME/logs) are idempotent and pure — no side effects
+# beyond setting env / ulimit. They MUST NOT call out to the agent or
+# the gateway.
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -117,4 +119,125 @@ defenseclaw_resolve_cwd() {
   DEFENSECLAW_HOOK_CWD="$resolved"
   export DEFENSECLAW_HOOK_CWD
   return 0
+}
+
+defenseclaw_json_escape() {
+  {
+    printf '%s' "${1:-}" | tr '\000-\037' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'
+  } 2>/dev/null || printf unavailable
+  return 0
+}
+
+# defenseclaw_log_hook_failure writes a structured JSON line to
+# $DEFENSECLAW_HOME/logs/hook-failures.jsonl. All argument values are
+# escaped before serialization so hostile strings can't smuggle a forged
+# log entry past downstream parsers. Always returns 0 — logging must
+# never fail the hook.
+#
+# Usage:
+#   defenseclaw_log_hook_failure CONNECTOR HOOK_NAME REASON CATEGORY FAIL_MODE
+#
+# CATEGORY is one of: "transport" (gateway unreachable / 5xx) or
+# "response" (4xx / parse error). The category lets operators tell the
+# difference between an outage (infrastructure) and a misconfiguration
+# (auth, bad payload) when triaging hook-failures.jsonl.
+defenseclaw_log_hook_failure() {
+  local connector="${1:-unknown}"
+  local hook_name="${2:-unknown}"
+  local reason="${3:-unknown}"
+  local category="${4:-response}"
+  local fail_mode="${5:-${FAIL_MODE:-open}}"
+  local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"
+  mkdir -p "$log_dir" 2>/dev/null || return 0
+  chmod 700 "$log_dir" 2>/dev/null || true
+  local log_file="${log_dir}/hook-failures.jsonl"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
+  local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode
+  safe_ts="$(defenseclaw_json_escape "$ts")"
+  safe_connector="$(defenseclaw_json_escape "$connector")"
+  safe_hook_name="$(defenseclaw_json_escape "$hook_name")"
+  safe_reason="$(defenseclaw_json_escape "$reason")"
+  safe_category="$(defenseclaw_json_escape "$category")"
+  safe_fail_mode="$(defenseclaw_json_escape "$fail_mode")"
+  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s"}\n' \
+    "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" \
+    >> "$log_file" 2>/dev/null || true
+  chmod 600 "$log_file" 2>/dev/null || true
+  return 0
+}
+
+# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) only
+# when the operator has explicitly opted into strict availability via
+# DEFENSECLAW_STRICT_AVAILABILITY=1. The default is to fail open on
+# transport failures (gateway down / network error / 5xx) regardless
+# of FAIL_MODE — a DefenseClaw outage must NEVER brick the user's
+# coding agent. FAIL_MODE still governs response-layer failures (4xx,
+# bad JSON, missing action) where the gateway answered but its answer
+# was wrong; those represent likely misconfiguration that the operator
+# should be told about loudly.
+defenseclaw_should_fail_closed_on_unreachable() {
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# defenseclaw_emit_unreachable_stderr writes a single stderr line whose
+# verb (allowing/blocking) ACTUALLY matches what the hook is about to
+# do on its next exit. The previous design unconditionally printed
+# "allowing <subject>" and then exited 2 when
+# DEFENSECLAW_STRICT_AVAILABILITY=1 was set, which lied to operators
+# tailing stderr during an outage and made strict-mode incidents
+# harder to triage. Centralizing the verb computation here means the
+# six hook scripts can never drift on this contract.
+#
+# Usage:
+#   defenseclaw_emit_unreachable_stderr SUBJECT REASON
+#
+# SUBJECT is a short noun describing what is allowed/blocked
+# ("codex tool", "claude-code tool", "tool", "request", "response",
+# "tool-response"). REASON is the underlying failure detail
+# (e.g. "gateway unreachable", "gateway returned HTTP 502").
+defenseclaw_emit_unreachable_stderr() {
+  local subject="${1:-tool}"
+  local reason="${2:-unknown}"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    echo "defenseclaw: gateway unreachable, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1): ${reason}" >&2
+  else
+    echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
+  fi
+}
+
+# defenseclaw_handle_missing_token is the shared early-exit branch
+# that codex-hook.sh and claude-code-hook.sh take when neither the
+# companion .token file nor DEFENSECLAW_GATEWAY_TOKEN is present.
+# Without a token the gateway will reject every request with 401, so
+# the historical behaviour was to exit 0 ("can't talk to gateway →
+# don't brick the agent"). That bypassed FAIL_MODE entirely.
+#
+# This helper preserves the historical default (allow-and-warn) but
+# routes the bypass through the same DEFENSECLAW_STRICT_AVAILABILITY
+# escape hatch as transport failures: an operator who explicitly opts
+# into strict availability gets fail-closed even on a missing-token
+# misconfiguration, AND every bypass — strict or not — is recorded in
+# hook-failures.jsonl so the audit log is honest about the missed
+# inspection.
+#
+# Usage:
+#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT
+#
+# Exits 0 (allow) on the historical default path or 2 (block) when
+# strict availability is set. Never returns to the caller.
+defenseclaw_handle_missing_token() {
+  local connector="${1:-unknown}"
+  local hook_name="${2:-unknown}"
+  local subject="${3:-tool}"
+  local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    echo "defenseclaw: ${reason}, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
+    exit 2
+  fi
+  exit 0
 }
