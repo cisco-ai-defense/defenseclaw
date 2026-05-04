@@ -49,12 +49,70 @@ def _migrate_0_3_0(openclaw_home: str) -> None:
     The fetch interceptor introduced in 0.3.0 handles routing transparently,
     so these entries are no longer needed and must be cleaned up on upgrade.
 
-    Plugin registration is preserved.
+    Strategy: restore the pristine backup of openclaw.json that was captured
+    before DefenseClaw first touched the file, then re-apply only the plugin
+    registration that 0.3.0 needs. This is cleaner than surgically patching
+    individual keys and avoids leaving behind stale or unexpected entries.
+
+    Falls back to surgical removal if no pristine backup exists (e.g.
+    guardrail was never enabled, or the backup was deleted).
     """
     oc_json = os.path.join(openclaw_home, "openclaw.json")
     if not os.path.isfile(oc_json):
         return
 
+    from defenseclaw.guardrail import pristine_backup_path
+
+    data_dir = os.path.expanduser("~/.defenseclaw")
+    pristine = pristine_backup_path(oc_json, data_dir)
+
+    if pristine:
+        _migrate_0_3_0_from_pristine(oc_json, pristine)
+    else:
+        _migrate_0_3_0_surgical(oc_json)
+
+
+def _migrate_0_3_0_from_pristine(oc_json: str, pristine: str) -> None:
+    """Restore pristine openclaw.json and re-apply plugin registration."""
+    import shutil
+
+    try:
+        with open(pristine) as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"    pristine backup unreadable ({exc}), falling back to surgical fix")
+        _migrate_0_3_0_surgical(oc_json)
+        return
+
+    # Re-apply the minimal plugin registration that 0.3.0 needs.
+    plugins = cfg.setdefault("plugins", {})
+    allow = plugins.setdefault("allow", [])
+    if "defenseclaw" not in allow:
+        allow.append("defenseclaw")
+    entries = plugins.setdefault("entries", {})
+    if "defenseclaw" not in entries:
+        entries["defenseclaw"] = {"enabled": True}
+    else:
+        entries["defenseclaw"]["enabled"] = True
+    install_path = os.path.join(os.path.dirname(oc_json), "extensions", "defenseclaw")
+    load = plugins.setdefault("load", {})
+    paths = load.setdefault("paths", [])
+    if install_path not in paths:
+        paths.append(install_path)
+
+    # Write the restored + patched config
+    shutil.copy2(oc_json, oc_json + ".pre-0.3.0-migration")
+
+    with open(oc_json, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    click.echo(f"    restored openclaw.json from pristine backup ({os.path.basename(pristine)})")
+    click.echo("    re-applied plugin registration for 0.3.0")
+
+
+def _migrate_0_3_0_surgical(oc_json: str) -> None:
+    """Fallback: surgically remove legacy entries when no pristine backup exists."""
     try:
         with open(oc_json) as f:
             cfg = json.load(f)
@@ -64,7 +122,6 @@ def _migrate_0_3_0(openclaw_home: str) -> None:
     changed = False
     changes = []
 
-    # Remove legacy provider entries
     providers = cfg.get("models", {}).get("providers", {})
     for key in ("defenseclaw", "litellm"):
         if key in providers:
@@ -72,11 +129,9 @@ def _migrate_0_3_0(openclaw_home: str) -> None:
             changes.append(f"removed providers.{key}")
             changed = True
 
-    # Restore model.primary if it was redirected through defenseclaw/litellm
     model = cfg.get("agents", {}).get("defaults", {}).get("model", {})
     primary = model.get("primary", "")
     if primary.startswith(("defenseclaw/", "litellm/")):
-        # Strip the defenseclaw/ or litellm/ prefix to restore the real model
         restored = primary.split("/", 1)[1]
         model["primary"] = restored
         changes.append(f"restored model.primary: {primary} → {restored}")
@@ -92,6 +147,7 @@ def _migrate_0_3_0(openclaw_home: str) -> None:
 
     for c in changes:
         click.echo(f"    {c}")
+    click.echo("    (no pristine backup found — applied surgical fix)")
 
 
 # ---------------------------------------------------------------------------
