@@ -205,6 +205,24 @@ func (p *GuardrailProxy) postCallContext(parent context.Context) (context.Contex
 }
 
 func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, verdict *ScanVerdict, direction, model, mode string) {
+	// Prompt-surface UX contract: confirm verdicts on the prompt
+	// direction have no native approval surface on any current
+	// connector. The chat-message HITL fallback that used to fire
+	// here is unusable (operators couldn't reply in the right
+	// format; the message itself re-triggered scanners), so we
+	// demote prompt confirms to alert before any HILT call. We
+	// deliberately scope this guard to confirm — block verdicts on
+	// the prompt direction are already demoted upstream in the
+	// inspector chokepoint, and tests that construct synthetic
+	// block verdicts directly should not be intercepted here.
+	if verdict != nil && isPromptDirection(direction) && verdict.Action == guardrailActionConfirm {
+		original := verdict.Action
+		verdict.Action = guardrailActionAlert
+		verdict.Reason = appendVerdictReason(verdict.Reason,
+			fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
+		return
+	}
+
 	if verdict == nil || mode != "action" || verdict.Action != guardrailActionConfirm {
 		return
 	}

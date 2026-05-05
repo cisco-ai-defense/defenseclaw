@@ -142,6 +142,10 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	verdict := a.buildVerdict(ruleFindings, "prompt", false)
+	// Apply the prompt-surface UX contract before mode handling so
+	// "action" mode operators see alert (instead of block) and "observe"
+	// mode operators see the same audit reason explaining the demotion.
+	clampPromptDirectionToolVerdict(verdict, "prompt")
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)

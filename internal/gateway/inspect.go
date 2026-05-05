@@ -133,6 +133,31 @@ func (v *ToolInspectVerdict) applyMode(mode string) {
 	}
 }
 
+// clampPromptDirectionToolVerdict mirrors clampPromptDirectionVerdict for the
+// tool-inspect verdict shape used by the connector hook handlers. Done before
+// applyMode so the "would-block" telemetry in observe mode reflects the
+// already-clamped policy (alert), not the pre-clamp (block/confirm). The
+// pre-clamp action is preserved in the verdict's Reason for audit.
+//
+// CRITICAL severity is exempt from the demotion — see the matching rationale
+// on clampPromptDirectionVerdict.
+func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction string) {
+	if verdict == nil {
+		return
+	}
+	if guardrailSeverityRank(verdict.Severity) >= severityCritical {
+		return
+	}
+	clamped, demoted := clampPromptDirectionAction(direction, verdict.Action)
+	if !demoted {
+		return
+	}
+	original := strings.TrimSpace(verdict.Action)
+	verdict.Action = clamped
+	verdict.Reason = appendVerdictReason(verdict.Reason,
+		fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
+}
+
 // inspectToolPolicy runs all rule categories against the tool args.
 // No tool-name gating — every pattern fires on every tool.
 func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdict {

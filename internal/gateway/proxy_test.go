@@ -601,7 +601,18 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 	})
 
-	t.Run("confirm_with_approval_forwards", func(t *testing.T) {
+	t.Run("confirm_on_prompt_skips_hilt_and_forwards", func(t *testing.T) {
+		// Prompt-surface UX contract (see resolveConfirm in proxy.go):
+		// confirm verdicts on the prompt direction must NOT trigger a
+		// HILT chat message. The chat-HITL fallback that used to fire
+		// here was unusable in practice — operators couldn't reply in
+		// the rigid `approve <id>` format because OpenClaw wraps user
+		// messages with metadata, and the approval card itself
+		// contained patterns that re-triggered the scanners. The
+		// contract is now: prompt-direction confirms degrade to alert
+		// immediately, the request is forwarded to the LLM, and if
+		// the LLM attempts a dangerous tool call the tool-call gate
+		// raises the native modal at that surface instead.
 		received := make(chan receivedRequest, 5)
 		srv := startMockGW(t, rpcRecordingLoop(received))
 		client := connectToMockGW(t, srv)
@@ -624,44 +635,30 @@ func TestProxyPreCallInspection(t *testing.T) {
 			"messages": []map[string]interface{}{{"role": "user", "content": "please inspect this high-risk request"}},
 		})
 
-		recCh := make(chan *httptest.ResponseRecorder, 1)
-		go func() {
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
-			req.RemoteAddr = "127.0.0.1:12345"
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(SessionIDHeader, "session-1")
-			rec := httptest.NewRecorder()
-			proxy.handleChatCompletion(rec, req)
-			recCh <- rec
-		}()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(SessionIDHeader, "session-1")
+		rec := httptest.NewRecorder()
+		proxy.handleChatCompletion(rec, req)
 
-		rpc := drainRPC(t, received)
-		if rpc.Method != "sessions.send" {
-			t.Fatalf("Method = %q, want sessions.send", rpc.Method)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
 		}
-		var params map[string]string
-		if err := json.Unmarshal(rpc.Params, &params); err != nil {
-			t.Fatalf("unmarshal params: %v", err)
+		if prov.getLastReq() == nil {
+			t.Fatal("prompt-direction confirm should alert and forward to provider, not block on absent HITL")
 		}
-		if params["key"] != "session-1" {
-			t.Fatalf("sessions.send key = %q, want session-1", params["key"])
-		}
-
-		id := hiltIDFromApprovalMessage(t, params["message"])
-		if !hilt.ResolveFromMessage("session-1", "user", "approve "+id) {
-			t.Fatalf("approval %s did not resolve", id)
-		}
-
+		// Critical: NO sessions.send RPC must be emitted for a
+		// prompt-direction confirm. We give the channel a brief
+		// settling window because the proxy's enqueue/notify paths
+		// run asynchronously, then assert nothing showed up.
 		select {
-		case rec := <-recCh:
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200", rec.Code)
-			}
-			if prov.getLastReq() == nil {
-				t.Fatal("approved confirm verdict should be forwarded to provider")
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("proxy request did not finish after approval")
+		case rpc := <-received:
+			t.Fatalf("prompt-surface contract violation: HILT RPC emitted for prompt-direction confirm: method=%q params=%s",
+				rpc.Method, string(rpc.Params))
+		case <-time.After(150 * time.Millisecond):
+			// Expected: no RPC fired — the clamp demoted confirm to
+			// alert before resolveConfirm called into hilt.Request.
 		}
 	})
 
@@ -1438,6 +1435,13 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 
 func TestProxyWithLocalInspector(t *testing.T) {
 	t.Run("local_scanner_blocks_injection_prompt", func(t *testing.T) {
+		// "ignore previous instructions" matches a CRITICAL-severity
+		// injection rule, so the prompt-surface clamp does not apply
+		// and the proxy still writes the [DefenseClaw] block message.
+		// HIGH-and-below prompts take the demote-to-alert path —
+		// covered by the clampPromptDirectionVerdict unit tests and
+		// the TestProxyPreCallInspection/confirm_*_alerts_and_forwards
+		// subtests.
 		prov := &mockProvider{}
 		insp := NewGuardrailInspector("local", nil, nil, "")
 		proxy := newTestProxy(t, prov, insp, "action")
@@ -1453,9 +1457,11 @@ func TestProxyWithLocalInspector(t *testing.T) {
 		}
 
 		var resp ChatResponse
-		json.Unmarshal(rec.Body.Bytes(), &resp)
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
 		if resp.ID != "chatcmpl-blocked" {
-			t.Errorf("expected blocked, got id=%q", resp.ID)
+			t.Errorf("expected blocked (CRITICAL bypasses prompt-surface clamp), got id=%q", resp.ID)
 		}
 	})
 

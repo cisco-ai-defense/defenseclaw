@@ -347,6 +347,12 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	latencyMs := time.Since(start).Milliseconds()
 
+	// Apply the prompt-surface UX contract before any caller observes the
+	// verdict. Done here (rather than in each call site) so the clamp is
+	// applied uniformly across regex-only / regex+judge / judge-first
+	// strategies and across pre-call, post-call, and mid-stream paths.
+	clampPromptDirectionVerdict(verdict, direction)
+
 	if endSpan != nil {
 		var action, sev, reason string
 		if verdict != nil {
@@ -373,6 +379,35 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		)
 	}
 	return verdict
+}
+
+// clampPromptDirectionVerdict applies the prompt-surface UX contract to a
+// ScanVerdict in place. Returns silently for nil verdicts, non-prompt
+// directions, or actions that are already allow/alert. When a demotion occurs
+// the original action is preserved in the verdict's Reason so the audit trail
+// keeps the policy's original decision visible.
+//
+// CRITICAL severity is exempt from the demotion: those verdicts represent
+// "no question, this is bad" (clear credential exfil, known prompt-injection
+// chains, leaked PII in user input) and operators expect a hard reject even
+// without a modal. HIGH and below are the cases where the chat-HITL fallback
+// produced unusable UX, so those still demote to alert and let the tool-call
+// gate handle enforcement.
+func clampPromptDirectionVerdict(verdict *ScanVerdict, direction string) {
+	if verdict == nil {
+		return
+	}
+	if guardrailSeverityRank(verdict.Severity) >= severityCritical {
+		return
+	}
+	clamped, demoted := clampPromptDirectionAction(direction, verdict.Action)
+	if !demoted {
+		return
+	}
+	original := strings.TrimSpace(verdict.Action)
+	verdict.Action = clamped
+	verdict.Reason = appendVerdictReason(verdict.Reason,
+		fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
 }
 
 // categoriesOf returns deduped finding identifiers in insertion
@@ -405,7 +440,9 @@ func categoriesOf(findings []string) []string {
 // content (sensitive paths, dangerous commands, critical injection patterns)
 // and block the stream immediately without waiting for an LLM round-trip.
 func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
-	return g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+	verdict := g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+	clampPromptDirectionVerdict(verdict, direction)
+	return verdict
 }
 
 // inspectRegexOnly is the original flow: regex patterns produce verdicts,

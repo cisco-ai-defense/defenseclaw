@@ -137,3 +137,41 @@ func normalizedGuardrailAction(action string) string {
 		return guardrailActionAllow
 	}
 }
+
+// isPromptDirection reports whether the supplied direction string identifies
+// the user → LLM prompt surface. Comparison is case-insensitive and ignores
+// surrounding whitespace.
+func isPromptDirection(direction string) bool {
+	return strings.EqualFold(strings.TrimSpace(direction), "prompt")
+}
+
+// promptSurfaceClampReason is the canonical operator-facing explanation appended
+// to a verdict's reason when the prompt-surface UX contract demotes a non-allow
+// action to alert. Connector hooks today (Claude Code PreToolUse, OpenClaw
+// before_tool_call) only expose a native modal at the tool-call surface, so
+// blocking or asking for human approval on the raw user prompt has no usable UI
+// — the runtime falls back to chat-message HITL that is impossible for users to
+// answer correctly. The cleaner contract is: prompts are scanned and reported
+// (audit/observability), and enforcement happens when the LLM actually attempts
+// the dangerous action via a tool call.
+const promptSurfaceClampReason = "demoted to alert (prompt surface has no modal; enforcement deferred to tool-call gate)"
+
+// clampPromptDirectionAction enforces the prompt-surface UX contract on an
+// action string: any block/confirm decision becomes alert, allow/alert are
+// returned unchanged. The boolean reports whether a demotion occurred so the
+// caller can append a reason or emit a "would-have-blocked" telemetry record.
+//
+// This helper accepts the raw action string (rather than mutating a verdict
+// struct) so it composes cleanly with both ScanVerdict (proxy + inspector
+// surfaces) and ToolInspectVerdict (inspect-hook surfaces) without tying the
+// two type hierarchies together.
+func clampPromptDirectionAction(direction, action string) (string, bool) {
+	if !isPromptDirection(direction) {
+		return action, false
+	}
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case guardrailActionBlock, guardrailActionConfirm:
+		return guardrailActionAlert, true
+	}
+	return action, false
+}

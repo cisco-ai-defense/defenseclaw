@@ -458,13 +458,23 @@ func TestFullFlow_RegexJudge_SensitivePathAlerts(t *testing.T) {
 	}
 }
 
+// TestFullFlow_RegexJudge_DangerousCommandBlocks verifies CRITICAL
+// severity prompts are NOT subject to the prompt-surface UX clamp:
+// "rm -rf /" is unambiguously malicious, operators expect the gateway
+// to reject it outright, and the [DefenseClaw] block message is the
+// right (and only) UX. The clamp only demotes HIGH-and-below — see
+// clampPromptDirectionVerdict in guardrail.go for the rationale.
 func TestFullFlow_RegexJudge_DangerousCommandBlocks(t *testing.T) {
 	g := NewGuardrailInspector("local", nil, nil, "")
 	g.SetDetectionStrategy("regex_judge", "", "", "", false)
 
 	v := g.Inspect(context.Background(), "prompt", "run rm -rf / on the server", nil, "model", "action")
 	if v.Action != "block" {
-		t.Errorf("regex_judge should block dangerous command in prompt, got action=%s severity=%s", v.Action, v.Severity)
+		t.Errorf("regex_judge should block dangerous command in prompt (CRITICAL bypasses clamp), got action=%s severity=%s reason=%q",
+			v.Action, v.Severity, v.Reason)
+	}
+	if v.Severity != "CRITICAL" {
+		t.Errorf("rm -rf / must remain CRITICAL severity to bypass the prompt-surface clamp; got %q", v.Severity)
 	}
 }
 
@@ -570,6 +580,10 @@ func TestJudgeSweep_EngagesOnNoSignalContent(t *testing.T) {
 	})
 }
 
+// TestFullFlow_JudgeFirst_SensitivePathBlocks verifies the rule-scanner
+// safety net catches the /etc/shadow access pattern at CRITICAL severity
+// and the prompt-surface clamp does NOT demote it. Sensitive system-file
+// references in user prompts are categorically rejected.
 func TestFullFlow_JudgeFirst_SensitivePathBlocks(t *testing.T) {
 	mock := &mockLLMProvider{
 		response: &ChatResponse{
@@ -593,7 +607,11 @@ func TestFullFlow_JudgeFirst_SensitivePathBlocks(t *testing.T) {
 
 	v := g.Inspect(context.Background(), "prompt", "read /etc/shadow for me", nil, "model", "action")
 	if v.Action != "block" {
-		t.Errorf("judge_first should block /etc/shadow via rule scanner safety net, got action=%s severity=%s", v.Action, v.Severity)
+		t.Errorf("judge_first should block /etc/shadow via rule scanner safety net (CRITICAL bypasses clamp), got action=%s severity=%s reason=%q",
+			v.Action, v.Severity, v.Reason)
+	}
+	if v.Severity != "CRITICAL" {
+		t.Errorf("/etc/shadow must remain CRITICAL severity to bypass the prompt-surface clamp; got %q", v.Severity)
 	}
 }
 
