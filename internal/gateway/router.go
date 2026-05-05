@@ -651,6 +651,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				"none", "",
 				system, now,
 				r.defaultAgentName,
+				r.defaultAgentName,
 				SharedAgentRegistry().AgentID(),
 			)
 
@@ -1048,6 +1049,7 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 					context.Background(),
 					conversationID,           // conversation.id
 					r.agentNameForStream(""), // agent name (claw mode fallback)
+					r.agentNameForStream(""), // agent type
 					SharedAgentRegistry().AgentID(),
 					"", // provider filled on session.message
 				)
@@ -1240,6 +1242,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				DestinationApp: toolDestinationApp("builtin", ""),
 				PolicyID:       r.defaultPolicyID,
 				AgentName:      agentName,
+				AgentType:      agentName,
 				AgentID:        SharedAgentRegistry().AgentID(),
 			},
 		)
@@ -1448,6 +1451,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 				DestinationApp: toolDestinationApp("builtin", ""),
 				PolicyID:       r.defaultPolicyID,
 				AgentName:      r.agentNameForStream(""),
+				AgentType:      r.agentNameForStream(""),
 				AgentID:        SharedAgentRegistry().AgentID(),
 			},
 		)

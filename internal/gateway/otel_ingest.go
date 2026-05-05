@@ -165,6 +165,9 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		source = "unknown"
 	}
 	ctx := r.Context()
+	if id := agentIdentityForOTLPSource(source); id != (AgentIdentity{}) {
+		ctx = ContextWithAgentIdentity(ctx, id)
+	}
 	sessionID := extractOTLPSessionID(body, signal)
 	if sessionID != "" {
 		ctx = ContextWithSessionID(ctx, sessionID)
@@ -235,6 +238,24 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
 	writeOTLPSuccess(w)
+}
+
+func agentIdentityForOTLPSource(source string) AgentIdentity {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" || source == "unknown" {
+		return AgentIdentity{}
+	}
+	id := AgentIdentity{
+		AgentName: source,
+		AgentType: source,
+	}
+	if reg := SharedAgentRegistry(); reg != nil {
+		id.AgentID = reg.AgentID()
+		if name := reg.AgentName(); name != "" {
+			id.AgentName = name
+		}
+	}
+	return id
 }
 
 func enrichOTLPIngestSpan(ctx context.Context, sessionID string) {
@@ -1343,10 +1364,7 @@ func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, resu
 	}
 	sessionID := codexNotifySessionID(p)
 	if sessionID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.conversation.id", sessionID),
-			attribute.String("defenseclaw.session_id", sessionID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", sessionID))
 	}
 	span.SetAttributes(attribute.String("gen_ai.agent.name", "codex"))
 	if p.TurnID != "" {
