@@ -201,7 +201,7 @@ func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	p, exp := newTracingProvider(t)
 	attachTraceTestResourceContext(t, p)
 
-	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "openai_codex", "openai")
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
 	p.EndAgentSpan(span, "")
 
 	spans := exp.GetSpans()
@@ -210,6 +210,9 @@ func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	}
 
 	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+	if got, ok := attrByKey(spans[0].Attributes, "gen_ai.agent.type"); !ok || got.AsString() != "codex" {
+		t.Fatalf("gen_ai.agent.type=%q ok=%v want codex", got.AsString(), ok)
+	}
 }
 
 func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
@@ -217,7 +220,7 @@ func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	attachTraceTestResourceContext(t, p)
 
 	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 2048, 0.1)
-	p.EndLLMSpan(span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "openai_codex")
+	p.EndLLMSpan(span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
 
 	spans := exp.GetSpans()
 	if len(spans) != 1 {

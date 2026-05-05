@@ -1641,7 +1641,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		agentName := p.agentNameForRequest(r.Header.Get("X-Agent-Name"))
 		agentCtx, agentSpan = p.otel.StartAgentSpan(
 			context.Background(),
-			conversationID, agentName, p.agentIDForRequest(), "",
+			conversationID, agentName, agentName, p.agentIDForRequest(), "",
 		)
 	}
 	if agentCtx == nil {
@@ -1761,7 +1761,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return
@@ -1844,7 +1844,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 					promptTok = int(resp.Usage.PromptTokens)
 					completionTok = int(resp.Usage.CompletionTokens)
 				}
-				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+				p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, "blocked", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 			}
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "completion", aliasModel)
@@ -1865,7 +1865,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 						promptTok = int(resp.Usage.PromptTokens)
 						completionTok = int(resp.Usage.CompletionTokens)
 					}
-					p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+					p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, "local", "blocked", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 				}
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
@@ -1893,7 +1893,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			promptTok = int(resp.Usage.PromptTokens)
 			completionTok = int(resp.Usage.CompletionTokens)
 		}
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, finishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2093,7 +2093,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			fmt.Sprintf("upstream stream error: %v", err), err)
 		fmt.Fprintf(os.Stderr, "[guardrail] stream error: %v\n", err)
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, []string{"error"}, 0, "none", "", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 			llmSpan = nil
 		}
 	}
@@ -2108,7 +2108,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		blockedMeta.ResponseID = stableLLMEventID("response", blockedMeta.Source, blockedMeta.SessionID, blockedMeta.RequestID, req.Model, "blocked")
 		emitLLMResponseEvent(r.Context(), blockedMeta, accumulated.String(), accumulated.String(), append(streamFinishReasons, "blocked"))
 		if p.otel != nil && llmSpan != nil {
-			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+			p.otel.EndLLMSpan(llmSpan, aliasModel, 0, 0, append(streamFinishReasons, "blocked"), 0, "local", "block", system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 		}
 		msg := blockMessage(customBlockMsg, "completion", "content blocked mid-stream by guardrail")
 		blockChunk := StreamChunk{
@@ -2214,7 +2214,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.response.content", accumulated.String())
 		p.otel.SetRawSpanString(llmSpan, "defenseclaw.llm.tool_calls", string(assembledTC))
-		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.agentIDForRequest())
+		p.otel.EndLLMSpan(llmSpan, aliasModel, promptTok, completionTok, streamFinishReasons, toolCallCount, guardrail, guardrailResult, system, llmStartTime, p.connectorName(), p.connectorName(), p.agentIDForRequest())
 	}
 
 	// Flush buffered tool-call chunks only when inspection passed.
@@ -3887,6 +3887,7 @@ func (p *GuardrailProxy) emitToolCallSpans(reqCtx, llmCtx context.Context, raw j
 				DestinationApp: "builtin",
 				PolicyID:       p.defaultPolicyID,
 				AgentName:      agentName,
+				AgentType:      agentName,
 				AgentID:        p.agentIDForRequest(),
 			},
 		)

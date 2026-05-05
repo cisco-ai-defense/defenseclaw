@@ -494,6 +494,7 @@ func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
 	for key, want := range map[string]string{
 		"gen_ai.conversation.id":         "session-123",
 		"gen_ai.agent.name":              "codex",
+		"gen_ai.agent.type":              "codex",
 		"gen_ai.agent.id":                "openai_codex",
 		"defenseclaw.codex.hook.event":   "PreToolUse",
 		"defenseclaw.turn_id":            "turn-123",

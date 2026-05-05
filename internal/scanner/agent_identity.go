@@ -15,6 +15,7 @@ package scanner
 type AgentIdentity struct {
 	AgentID           string
 	AgentName         string
+	AgentType         string
 	AgentInstanceID   string
 	SidecarInstanceID string
 

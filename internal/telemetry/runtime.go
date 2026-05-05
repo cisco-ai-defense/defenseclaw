@@ -216,7 +216,7 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 // DefenseClaw-specific defenseclaw.agent.instance_id attribute.
 func (p *Provider) StartAgentSpan(
 	ctx context.Context,
-	conversationID, agentName, agentID, provider string,
+	conversationID, agentName, agentType, agentID, provider string,
 ) (context.Context, trace.Span) {
 	if !p.TracesEnabled() {
 		return ctx, nil
@@ -240,6 +240,9 @@ func (p *Provider) StartAgentSpan(
 	)
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
+	}
+	if agentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", agentType))
 	}
 	if agentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", agentID))
@@ -303,6 +306,10 @@ type ToolSpanContext struct {
 	// Derived from the incoming stream event (if present) or from
 	// cfg.Claw.Mode.
 	AgentName string
+
+	// AgentType is the stable category/runtime type for the agent
+	// when known. It maps to gen_ai.agent.type.
+	AgentType string
 
 	// AgentID is the logical agent identity when known. Unlike
 	// AgentInstanceID, this is stable across restarts and sessions.
@@ -374,6 +381,9 @@ func (p *Provider) StartToolSpan(
 	}
 	if cor.AgentName != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
+	}
+	if cor.AgentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", cor.AgentType))
 	}
 	if cor.AgentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", cor.AgentID))
@@ -500,6 +510,9 @@ func (p *Provider) StartApprovalSpan(
 	if cor.AgentName != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
 	}
+	if cor.AgentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", cor.AgentType))
+	}
 	if cor.AgentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", cor.AgentID))
 	}
@@ -581,6 +594,7 @@ func (p *Provider) EndLLMSpan(
 	providerName string,
 	startTime time.Time,
 	agentName string,
+	agentType string,
 	agentID string,
 ) {
 	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
@@ -611,6 +625,9 @@ func (p *Provider) EndLLMSpan(
 	// so we do too — keeps span attribute noise bounded.
 	if agentName != "" {
 		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.name", agentName))
+	}
+	if agentType != "" {
+		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.type", agentType))
 	}
 	if agentID != "" {
 		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.id", agentID))

@@ -205,6 +205,7 @@ func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID s
 	id := AgentIdentity{
 		AgentID:           logicalID,
 		AgentName:         logicalName,
+		AgentType:         logicalName,
 		SidecarInstanceID: r.SidecarInstanceID(),
 	}
 	if sessionID != "" {
@@ -225,6 +226,7 @@ func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID s
 type AgentIdentity struct {
 	AgentID           string
 	AgentName         string
+	AgentType         string
 	AgentInstanceID   string
 	SidecarInstanceID string
 }

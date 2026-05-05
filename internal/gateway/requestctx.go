@@ -437,6 +437,9 @@ func enrichHTTPSpanFromContext(ctx context.Context) {
 	if aid.AgentID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent_id", aid.AgentID))
 	}
+	if aid.AgentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", aid.AgentType))
+	}
 	if aid.AgentInstanceID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent_instance_id", aid.AgentInstanceID))
 	}
