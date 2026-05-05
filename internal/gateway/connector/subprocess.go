@@ -162,9 +162,97 @@ var hookHelperScripts = []string{
 	"_hardening.sh",
 }
 
+// hookSchemaVersionMarker is the line-2 prefix every generated hook
+// (and the hooks/_hardening.sh helper) carries. The version digit
+// after the prefix is parsed by parseHookSchemaVersion to drive the
+// downgrade-safety check in writeHookHelpers. Kept as its own const
+// (rather than reused from claudecode.go's hookMarker) so the
+// subprocess writer doesn't pull a dependency on connector-specific
+// teardown internals.
+const hookSchemaVersionMarker = "# defenseclaw-managed-hook v"
+
+// parseHookSchemaVersion returns the schema version digit that
+// follows hookSchemaVersionMarker on line 2 of a defenseclaw-managed
+// hook script. Returns 0 when the marker is absent, the digit is
+// missing, or the file is too short to contain it — the zero is the
+// "older than any tagged version" sentinel so writeHookHelpers will
+// always overwrite a malformed helper on disk.
+//
+// Only the first 512 bytes are scanned; the marker MUST appear
+// near the top of the file (line 2 by contract). Refusing to scan
+// the whole file caps the cost of inspecting an attacker-supplied
+// path and matches the bound used by claudecode.go::scriptHasMarker.
+func parseHookSchemaVersion(content []byte) int {
+	if len(content) > 512 {
+		content = content[:512]
+	}
+	idx := bytesIndex(content, hookSchemaVersionMarker)
+	if idx < 0 {
+		return 0
+	}
+	rest := content[idx+len(hookSchemaVersionMarker):]
+	v := 0
+	consumed := 0
+	for consumed < len(rest) {
+		c := rest[consumed]
+		if c < '0' || c > '9' {
+			break
+		}
+		// Cap the version width so a hostile file with a long
+		// digit run can't pin the helper at int-overflow.
+		if consumed >= 6 {
+			return 0
+		}
+		v = v*10 + int(c-'0')
+		consumed++
+	}
+	if consumed == 0 {
+		return 0
+	}
+	return v
+}
+
+// bytesIndex is a stdlib-light alternative to bytes.Index — kept
+// inline so subprocess.go doesn't grow another import for one
+// call site. Returns the first index where needle appears in hay,
+// or -1 when absent.
+func bytesIndex(hay []byte, needle string) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	if len(needle) > len(hay) {
+		return -1
+	}
+	limit := len(hay) - len(needle)
+	for i := 0; i <= limit; i++ {
+		if string(hay[i:i+len(needle)]) == needle {
+			return i
+		}
+	}
+	return -1
+}
+
 // writeHookHelpers writes the helper scripts (_hardening.sh, etc.) into
 // hookDir at mode 0o600. Helpers are sourced — never executed
 // directly — so they don't need the executable bit.
+//
+// Downgrade safety: if a helper is already on disk and carries a
+// schema version GREATER than the one embedded in this binary, the
+// existing file is left in place. This closes the "hook artifact
+// drift on re-setup" bug: when `defenseclaw setup guardrail` ends
+// with `defenseclaw-gateway restart`, the binary that boots and
+// runs Connector.Setup may be older than the templates the operator
+// has freshly installed (typical when an older `defenseclaw-gateway`
+// shadows a newer one on $PATH). Without this check the older
+// binary unconditionally clobbers the helper with its v2 embed,
+// dropping the new `category` arg from `defenseclaw_log_hook_failure`
+// and leaving hook-failures.jsonl entries without the field —
+// even though the just-rendered hook scripts pass it.
+//
+// Equal versions still rewrite (idempotent overwrite, lets a same-
+// version bug-fix patch land); strictly-newer disk content is
+// preserved. Bumping the embedded `# defenseclaw-managed-hook vN`
+// marker is the explicit signal to roll forward.
 func writeHookHelpers(hookDir string) error {
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -172,6 +260,18 @@ func writeHookHelpers(hookDir string) error {
 			return fmt.Errorf("read hook helper %s: %w", name, err)
 		}
 		helperPath := filepath.Join(hookDir, name)
+		if existing, err := os.ReadFile(helperPath); err == nil {
+			diskV := parseHookSchemaVersion(existing)
+			embedV := parseHookSchemaVersion(content)
+			if diskV > 0 && embedV > 0 && diskV > embedV {
+				// Newer-on-disk wins. Skip silently so a
+				// repeat-setup with an older binary doesn't
+				// noisily report "downgraded" when the
+				// operator's intent was to keep the newer
+				// helper installed by a more recent build.
+				continue
+			}
+		}
 		if err := os.WriteFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}

@@ -5928,6 +5928,154 @@ func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
 	})
 }
 
+// TestParseHookSchemaVersion pins the digit-extraction contract used
+// by writeHookHelpers' downgrade gate. The function is the seam
+// between "operator's installed _hardening.sh schema" and "this
+// binary's embedded schema"; getting it wrong means either silently
+// downgrading newer helpers (the original bug) or refusing to
+// upgrade older ones.
+func TestParseHookSchemaVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"v2_helper", "#!/bin/bash\n# defenseclaw-managed-hook v2\n# rest", 2},
+		{"v3_helper", "#!/bin/bash\n# defenseclaw-managed-hook v3\n# rest", 3},
+		{"v17_double_digit", "#!/bin/bash\n# defenseclaw-managed-hook v17\n", 17},
+		{"missing_marker", "#!/bin/bash\n# unrelated comment\n", 0},
+		{"truncated_no_digit", "#!/bin/bash\n# defenseclaw-managed-hook v\n", 0},
+		{"empty_file", "", 0},
+		// A hostile helper with a giant digit run must not pin the
+		// downgrade gate at MaxInt — parseHookSchemaVersion caps
+		// the width and falls back to "unparseable" (==0), so the
+		// embed wins on the next setup.
+		{"oversized_digit_clamps_to_zero", "#!/bin/bash\n# defenseclaw-managed-hook v9999999\n", 0},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseHookSchemaVersion([]byte(tc.content))
+			if got != tc.want {
+				t.Errorf("parseHookSchemaVersion(%q) = %d, want %d", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteHookHelpers_RefusesDowngrade closes the "hook artifact
+// drift on re-setup" bug: a freshly-installed `_hardening.sh` (with
+// a newer schema version than this binary's embed) MUST survive a
+// `WriteHookScriptsWithToken` call. Without this guarantee, an older
+// `defenseclaw-gateway` binary on $PATH silently overwrites the
+// newer helper during `defenseclaw-gateway restart` and the rendered
+// hook scripts (which pass the v3 `category` arg to
+// defenseclaw_log_hook_failure) end up calling a v2 helper that
+// drops the field — hook-failures.jsonl entries then lack the
+// transport/response category they're documented to carry.
+func TestWriteHookHelpers_RefusesDowngrade(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Plant a v99 helper on disk — strictly newer than any version
+	// this binary embeds, so the downgrade gate must preserve it.
+	newer := []byte("#!/bin/bash\n# defenseclaw-managed-hook v99\n# operator-installed\n")
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, newer, 0o600); err != nil {
+		t.Fatalf("seed helper: %v", err)
+	}
+
+	if err := writeHookHelpers(dir); err != nil {
+		t.Fatalf("writeHookHelpers: %v", err)
+	}
+
+	got, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read helper after write: %v", err)
+	}
+	if !bytes.Equal(got, newer) {
+		t.Fatalf("downgrade gate failed — newer-on-disk helper was clobbered.\n"+
+			"want preserved:\n%s\n\ngot:\n%s", newer, got)
+	}
+}
+
+// TestWriteHookHelpers_RewritesOlder is the symmetric assertion to
+// TestWriteHookHelpers_RefusesDowngrade: an older helper on disk
+// (or one with no parseable schema version) MUST be rolled forward
+// to the binary's embedded copy. Otherwise an operator stuck with a
+// pre-v3 helper would never get the new category-emitting log
+// behaviour even after upgrading defenseclaw-gateway.
+func TestWriteHookHelpers_RewritesOlder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// v1 marker is older than the embedded v3 helper.
+	older := []byte("#!/bin/bash\n# defenseclaw-managed-hook v1\n# stale\n")
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, older, 0o600); err != nil {
+		t.Fatalf("seed helper: %v", err)
+	}
+
+	if err := writeHookHelpers(dir); err != nil {
+		t.Fatalf("writeHookHelpers: %v", err)
+	}
+
+	embed, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	got, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read helper after write: %v", err)
+	}
+	if !bytes.Equal(got, embed) {
+		t.Fatalf("embed should overwrite older on-disk helper.\n"+
+			"want (embed):\n%s\n\ngot:\n%s", embed, got)
+	}
+	// And the embed itself must declare a version >= v3 — the
+	// commit that introduced the `category` arg pinned the helper
+	// to v3, so any future regression that drops it back to v2
+	// re-opens the original drift bug.
+	if v := parseHookSchemaVersion(embed); v < 3 {
+		t.Fatalf("embedded _hardening.sh declared schema v%d; the category-aware "+
+			"defenseclaw_log_hook_failure contract requires v>=3", v)
+	}
+}
+
+// TestWriteHookScriptsWithToken_PreservesNewerHelper exercises the
+// full setup-time path operators actually hit. Even when the entry
+// is `WriteHookScriptsWithToken` (used by the OpenClaw connector
+// via the back-compat `WriteHookScript` shim), a newer-on-disk
+// `_hardening.sh` survives the call. Catches a regression where a
+// future caller bypasses writeHookHelpers and reaches for the embed
+// directly.
+func TestWriteHookScriptsWithToken_PreservesNewerHelper(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	newer := []byte("#!/bin/bash\n# defenseclaw-managed-hook v99\n# operator-installed\n")
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, newer, 0o600); err != nil {
+		t.Fatalf("seed helper: %v", err)
+	}
+
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+
+	got, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read helper after write: %v", err)
+	}
+	if !bytes.Equal(got, newer) {
+		t.Fatalf("setup-time write path clobbered a newer on-disk helper.\n"+
+			"want preserved:\n%s\n\ngot:\n%s", newer, got)
+	}
+}
+
 func mustExist(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {

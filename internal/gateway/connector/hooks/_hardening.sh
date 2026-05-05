@@ -1,6 +1,21 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # Plan B4 / S0.4: shell-side hook hardening helpers.
+#
+# Schema versions:
+#   v2 — initial hardening helpers (rlimit, env sanitization,
+#        defenseclaw_handle_missing_token, plain
+#        defenseclaw_log_hook_failure CONNECTOR HOOK REASON FAIL_MODE).
+#   v3 — defenseclaw_log_hook_failure grew a CATEGORY argument
+#        (transport|response) that lets operators tell infra outages
+#        apart from misconfiguration in hook-failures.jsonl. Hook
+#        scripts in this directory (claude-code-hook.sh, codex-hook.sh,
+#        inspect-*.sh) pass the new arg in slot 4; older helpers
+#        misroute it into FAIL_MODE, dropping the category field. The
+#        version digit is therefore load-bearing: writeHookHelpers
+#        compares it against the on-disk file and refuses to downgrade
+#        so an older `defenseclaw-gateway restart` can't silently
+#        clobber a newer install.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
