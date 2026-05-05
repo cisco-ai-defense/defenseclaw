@@ -193,7 +193,7 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		attrs = append(attrs, log.String("defenseclaw.request_id", e.RequestID))
 	}
 	if e.SessionID != "" {
-		attrs = append(attrs, log.String("defenseclaw.session_id", e.SessionID))
+		attrs = append(attrs, log.String("gen_ai.conversation.id", e.SessionID))
 	}
 	if e.Provider != "" {
 		attrs = append(attrs, log.String("defenseclaw.llm.provider", e.Provider))
@@ -213,13 +213,13 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		attrs = append(attrs, log.String("defenseclaw.trace_id", e.TraceID))
 	}
 	if e.AgentID != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_id", e.AgentID))
+		attrs = append(attrs, log.String("gen_ai.agent.id", e.AgentID))
 	}
 	if e.AgentName != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_name", e.AgentName))
+		attrs = append(attrs, log.String("gen_ai.agent.name", e.AgentName))
 	}
 	if e.AgentType != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_type", e.AgentType))
+		attrs = append(attrs, log.String("gen_ai.agent.type", e.AgentType))
 	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))
@@ -243,22 +243,22 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		attrs = append(attrs, log.String("defenseclaw.tool_name", e.ToolName))
 	}
 	if e.ToolID != "" {
-		attrs = append(attrs, log.String("defenseclaw.tool_id", e.ToolID))
+		attrs = append(attrs, log.String("gen_ai.tool.call.id", e.ToolID))
 	}
 	if e.TenantID != "" {
-		attrs = append(attrs, log.String("defenseclaw.tenant_id", e.TenantID))
+		attrs = append(attrs, log.String("tenant.id", e.TenantID))
 	}
 	if e.WorkspaceID != "" {
-		attrs = append(attrs, log.String("defenseclaw.workspace_id", e.WorkspaceID))
+		attrs = append(attrs, log.String("workspace.id", e.WorkspaceID))
 	}
 	if e.Environment != "" {
-		attrs = append(attrs, log.String("defenseclaw.environment", e.Environment))
+		attrs = append(attrs, log.String("deployment.environment", e.Environment))
 	}
 	if e.DeploymentMode != "" {
-		attrs = append(attrs, log.String("defenseclaw.deployment_mode", e.DeploymentMode))
+		attrs = append(attrs, log.String("deployment.mode", e.DeploymentMode))
 	}
 	if e.DiscoverySource != "" {
-		attrs = append(attrs, log.String("defenseclaw.discovery_source", e.DiscoverySource))
+		attrs = append(attrs, log.String("discovery.source", e.DiscoverySource))
 	}
 	// Provenance quartet — lets downstream consumers filter by config
 	// generation / schema version without scraping the JSON body.
