@@ -747,6 +747,24 @@ modifying the agent traffic plane unless the connector explicitly supports it.
    commands, process arguments, prompt text, file contents, local
    endpoint URLs, and env var values are not emitted.
 
+   The AI signature catalog is extensible. DefenseClaw always loads the
+   built-in catalog first, then merges operator-managed packs from
+   `<data-dir>/signature-packs/*.json`, explicit files/directories/globs
+   listed in `ai_discovery.signature_packs`, and workspace-local
+   `.defenseclaw/ai-signatures.json` files only when
+   `ai_discovery.allow_workspace_signatures=true`. Duplicate signature
+   IDs fail closed at catalog load time, and
+   `ai_discovery.disabled_signature_ids` suppresses individual built-in or
+   custom signatures without editing the pack. Operators can manage packs
+   with `defenseclaw agent signatures list|validate|install|disable|enable`.
+   Pack JSON uses the same schema as `internal/inventory/ai_signatures.json`:
+   `version: 1` plus a `signatures` array with `id`, `name`, `vendor`,
+   `category`, `confidence`, and optional evidence fields such as
+   `binary_names`, `process_names`, `application_names`, `config_paths`,
+   `extension_ids`, `mcp_paths`, `package_names`, `env_var_names`,
+   `domain_patterns`, `history_patterns`, and loopback-only
+   `local_endpoints`.
+
 ### 9.2 SIEM consumer guidance
 
 Audit events emitted from the new ingest paths carry the same envelope

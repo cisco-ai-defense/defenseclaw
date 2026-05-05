@@ -949,6 +949,9 @@ class AIDiscoveryConfig:
     scan_interval_min: int = 5
     process_interval_s: int = 60
     scan_roots: list[str] = field(default_factory=lambda: ["~"])
+    signature_packs: list[str] = field(default_factory=list)
+    allow_workspace_signatures: bool = False
+    disabled_signature_ids: list[str] = field(default_factory=list)
     include_shell_history: bool = True
     include_package_manifests: bool = True
     include_env_var_names: bool = True
@@ -1982,6 +1985,9 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
         scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
+        signature_packs=list(raw.get("signature_packs", []) or []),
+        allow_workspace_signatures=bool(raw.get("allow_workspace_signatures", False)),
+        disabled_signature_ids=list(raw.get("disabled_signature_ids", []) or []),
         include_shell_history=bool(raw.get("include_shell_history", True)),
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),

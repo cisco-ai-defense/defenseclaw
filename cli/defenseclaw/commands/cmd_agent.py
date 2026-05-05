@@ -23,6 +23,8 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import click
@@ -30,7 +32,7 @@ import requests
 
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
-from defenseclaw.inventory import agent_discovery
+from defenseclaw.inventory import agent_discovery, ai_signatures
 
 
 @click.group()
@@ -145,6 +147,149 @@ def usage(
         return
 
     click.echo(_render_ai_usage_table(payload).rstrip())
+
+
+@agent.group("signatures")
+def signatures() -> None:
+    """Manage AI discovery signature packs."""
+
+
+@signatures.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Output merged signatures as JSON.")
+@click.option("--include-disabled", is_flag=True, help="Include configured disabled signatures.")
+@pass_ctx
+def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
+    """List the merged AI discovery signature catalog."""
+    cfg = _load_config_best_effort(app)
+    disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    try:
+        sigs = ai_signatures.load_ai_signatures(
+            data_dir=cfg.data_dir,
+            signature_packs=cfg.ai_discovery.signature_packs,
+            allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
+            scan_roots=cfg.ai_discovery.scan_roots,
+            disabled_signature_ids=disabled,
+        )
+    except ai_signatures.SignaturePackError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
+        return
+    click.echo(_render_signatures_table(sigs).rstrip())
+
+
+@signatures.command("validate")
+@click.argument("pack_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--json", "as_json", is_flag=True, help="Output validation details as JSON.")
+def signatures_validate(pack_path: Path, as_json: bool) -> None:
+    """Validate a signature pack without installing it."""
+    try:
+        sigs = ai_signatures.validate_signature_pack(pack_path)
+    except ai_signatures.SignaturePackError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        payload = {"ok": True, "path": str(pack_path), "signatures": [asdict(sig) for sig in sigs]}
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    click.echo(f"Signature pack valid: {pack_path} ({len(sigs)} signatures)")
+
+
+@signatures.command("install")
+@click.argument("pack_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--replace", is_flag=True, help="Replace an installed pack with the same pack id.")
+@pass_ctx
+def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
+    """Install a validated pack into the managed signature-pack directory."""
+    cfg = _load_config_best_effort(app)
+    try:
+        dest = ai_signatures.install_signature_pack(pack_path, data_dir=cfg.data_dir, replace=replace)
+    except ai_signatures.SignaturePackError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Installed signature pack: {dest}")
+
+
+@signatures.command("disable")
+@click.argument("signature_id")
+@pass_ctx
+def signatures_disable(app: AppContext, signature_id: str) -> None:
+    """Disable one signature id in ai_discovery.disabled_signature_ids."""
+    cfg = _load_config_best_effort(app)
+    normalized = ai_signatures.normalize_signature_id(signature_id)
+    if not normalized:
+        raise click.ClickException("signature id must not be empty")
+    disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    if normalized not in disabled:
+        disabled.append(normalized)
+        cfg.ai_discovery.disabled_signature_ids = sorted(disabled)
+        cfg.save()
+    click.echo(f"Disabled AI signature: {normalized}")
+
+
+@signatures.command("enable")
+@click.argument("signature_id")
+@pass_ctx
+def signatures_enable(app: AppContext, signature_id: str) -> None:
+    """Re-enable one signature id previously disabled in config."""
+    cfg = _load_config_best_effort(app)
+    normalized = ai_signatures.normalize_signature_id(signature_id)
+    disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    if normalized in disabled:
+        cfg.ai_discovery.disabled_signature_ids = [s for s in disabled if s != normalized]
+        cfg.save()
+    click.echo(f"Enabled AI signature: {normalized}")
+
+
+def _load_config_best_effort(app: AppContext):
+    cfg = getattr(app, "cfg", None)
+    if cfg is not None:
+        return cfg
+    from defenseclaw import config as cfg_mod
+
+    try:
+        cfg = cfg_mod.load()
+    except Exception:
+        cfg = cfg_mod.default_config()
+    app.cfg = cfg
+    return cfg
+
+
+def _render_signatures_table(sigs: list[ai_signatures.AISignature]) -> str:
+    try:
+        from rich.console import Console
+        from rich.table import Table
+    except Exception:
+        return _render_signatures_plain(sigs)
+
+    from io import StringIO
+
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, color_system=None, width=120)
+    table = Table(title=f"AI discovery signatures ({len(sigs)})")
+    table.add_column("ID")
+    table.add_column("Category")
+    table.add_column("Product")
+    table.add_column("Vendor")
+    table.add_column("Confidence")
+    table.add_column("Source")
+    for sig in sorted(sigs, key=lambda s: (s.category, s.id)):
+        table.add_row(sig.id, sig.category, sig.name, sig.vendor, f"{sig.confidence:.2f}", _source_label(sig.source))
+    console.print(table)
+    return stream.getvalue()
+
+
+def _render_signatures_plain(sigs: list[ai_signatures.AISignature]) -> str:
+    lines = [f"AI discovery signatures ({len(sigs)})"]
+    for sig in sorted(sigs, key=lambda s: (s.category, s.id)):
+        parts = [sig.id, sig.category, sig.name, sig.vendor, f"{sig.confidence:.2f}", _source_label(sig.source)]
+        lines.append(" | ".join(parts))
+    return "\n".join(lines) + "\n"
+
+
+def _source_label(source: str) -> str:
+    if source == "builtin":
+        return source
+    return os.path.basename(source)
 
 
 def _emit_discovery_report(

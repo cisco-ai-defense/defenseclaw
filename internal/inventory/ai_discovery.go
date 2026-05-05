@@ -95,21 +95,24 @@ var allowedAISignalCategories = map[string]bool{
 
 // AIDiscoveryOptions is the sidecar-local runtime view of config.AIDiscoveryConfig.
 type AIDiscoveryOptions struct {
-	Enabled                 bool
-	Mode                    string
-	ScanInterval            time.Duration
-	ProcessInterval         time.Duration
-	ScanRoots               []string
-	IncludeShellHistory     bool
-	IncludePackageManifests bool
-	IncludeEnvVarNames      bool
-	IncludeNetworkDomains   bool
-	MaxFilesPerScan         int
-	MaxFileBytes            int64
-	EmitOTel                bool
-	StoreRawLocalPaths      bool
-	DataDir                 string
-	HomeDir                 string
+	Enabled                  bool
+	Mode                     string
+	ScanInterval             time.Duration
+	ProcessInterval          time.Duration
+	ScanRoots                []string
+	SignaturePacks           []string
+	AllowWorkspaceSignatures bool
+	DisabledSignatureIDs     []string
+	IncludeShellHistory      bool
+	IncludePackageManifests  bool
+	IncludeEnvVarNames       bool
+	IncludeNetworkDomains    bool
+	MaxFilesPerScan          int
+	MaxFileBytes             int64
+	EmitOTel                 bool
+	StoreRawLocalPaths       bool
+	DataDir                  string
+	HomeDir                  string
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -211,7 +214,7 @@ func NewContinuousDiscoveryService(cfg *config.Config, otel *telemetry.Provider,
 	if cfg == nil || !cfg.AIDiscovery.Enabled {
 		return nil, nil
 	}
-	catalog, err := LoadAISignatures()
+	catalog, err := LoadAISignaturesForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -235,21 +238,24 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 	home, _ := os.UserHomeDir()
 	ad := cfg.AIDiscovery
 	return normalizeAIDiscoveryOptions(AIDiscoveryOptions{
-		Enabled:                 ad.Enabled,
-		Mode:                    ad.Mode,
-		ScanInterval:            time.Duration(ad.ScanIntervalMin) * time.Minute,
-		ProcessInterval:         time.Duration(ad.ProcessIntervalSec) * time.Second,
-		ScanRoots:               append([]string{}, ad.ScanRoots...),
-		IncludeShellHistory:     ad.IncludeShellHistory,
-		IncludePackageManifests: ad.IncludePackageManifests,
-		IncludeEnvVarNames:      ad.IncludeEnvVarNames,
-		IncludeNetworkDomains:   ad.IncludeNetworkDomains,
-		MaxFilesPerScan:         ad.MaxFilesPerScan,
-		MaxFileBytes:            int64(ad.MaxFileBytes),
-		EmitOTel:                ad.EmitOTel,
-		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
-		DataDir:                 cfg.DataDir,
-		HomeDir:                 home,
+		Enabled:                  ad.Enabled,
+		Mode:                     ad.Mode,
+		ScanInterval:             time.Duration(ad.ScanIntervalMin) * time.Minute,
+		ProcessInterval:          time.Duration(ad.ProcessIntervalSec) * time.Second,
+		ScanRoots:                append([]string{}, ad.ScanRoots...),
+		SignaturePacks:           append([]string{}, ad.SignaturePacks...),
+		AllowWorkspaceSignatures: ad.AllowWorkspaceSignatures,
+		DisabledSignatureIDs:     append([]string{}, ad.DisabledSignatureIDs...),
+		IncludeShellHistory:      ad.IncludeShellHistory,
+		IncludePackageManifests:  ad.IncludePackageManifests,
+		IncludeEnvVarNames:       ad.IncludeEnvVarNames,
+		IncludeNetworkDomains:    ad.IncludeNetworkDomains,
+		MaxFilesPerScan:          ad.MaxFilesPerScan,
+		MaxFileBytes:             int64(ad.MaxFileBytes),
+		EmitOTel:                 ad.EmitOTel,
+		StoreRawLocalPaths:       ad.StoreRawLocalPaths,
+		DataDir:                  cfg.DataDir,
+		HomeDir:                  home,
 	})
 }
 

@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
@@ -40,6 +42,133 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
+	}
+}
+
+func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
+	tmp := t.TempDir()
+	packDir := filepath.Join(tmp, "signature-packs")
+	mustWrite(t, filepath.Join(packDir, "custom.json"), `{
+  "version": 1,
+  "signatures": [{
+    "id": "custom-ai",
+    "name": "Custom AI",
+    "vendor": "Example",
+    "category": "ai_cli",
+    "confidence": 0.7,
+    "binary_names": ["custom-ai"]
+  }]
+}`)
+
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		DataDir:              tmp,
+		DisabledSignatureIDs: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("LoadAISignaturesWithOptions: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, sig := range sigs {
+		seen[sig.ID] = true
+	}
+	if !seen["custom-ai"] {
+		t.Fatalf("custom pack signature missing")
+	}
+	if seen["codex"] {
+		t.Fatalf("disabled built-in signature still present")
+	}
+}
+
+func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "dup.json"), `{
+  "version": 1,
+  "signatures": [{
+    "id": "codex",
+    "name": "Codex Duplicate",
+    "vendor": "Example",
+    "category": "ai_cli",
+    "confidence": 0.7
+  }]
+}`)
+
+	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{DataDir: tmp})
+	if err == nil || !strings.Contains(err.Error(), "duplicate id") {
+		t.Fatalf("expected duplicate id error, got %v", err)
+	}
+}
+
+func TestLoadAISignaturesWorkspacePackRequiresOptIn(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "workspace")
+	mustWrite(t, filepath.Join(workspace, ".defenseclaw", "ai-signatures.json"), `{
+  "version": 1,
+  "signatures": [{
+    "id": "workspace-ai",
+    "name": "Workspace AI",
+    "vendor": "Example",
+    "category": "workspace_artifact",
+    "confidence": 0.6,
+    "config_paths": [".workspace-ai"]
+  }]
+}`)
+
+	without, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{ScanRoots: []string{workspace}})
+	if err != nil {
+		t.Fatalf("without workspace opt-in: %v", err)
+	}
+	for _, sig := range without {
+		if sig.ID == "workspace-ai" {
+			t.Fatalf("workspace signature loaded without opt-in")
+		}
+	}
+	with, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		ScanRoots:                []string{workspace},
+		AllowWorkspaceSignatures: true,
+	})
+	if err != nil {
+		t.Fatalf("with workspace opt-in: %v", err)
+	}
+	var found bool
+	for _, sig := range with {
+		found = found || sig.ID == "workspace-ai"
+	}
+	if !found {
+		t.Fatalf("workspace signature not loaded with opt-in")
+	}
+}
+
+func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "custom.json"), `{
+  "version": 1,
+  "signatures": [{
+    "id": "custom-sidecar-ai",
+    "name": "Custom Sidecar AI",
+    "vendor": "Example",
+    "category": "ai_cli",
+    "confidence": 0.8
+  }]
+}`)
+	cfg := &config.Config{
+		DataDir: tmp,
+		AIDiscovery: config.AIDiscoveryConfig{
+			Enabled: true,
+		},
+	}
+	svc, err := NewContinuousDiscoveryService(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewContinuousDiscoveryService: %v", err)
+	}
+	if svc == nil {
+		t.Fatal("service nil")
+	}
+	var found bool
+	for _, sig := range svc.catalog {
+		found = found || sig.ID == "custom-sidecar-ai"
+	}
+	if !found {
+		t.Fatalf("configured signature pack not loaded into service catalog")
 	}
 }
 

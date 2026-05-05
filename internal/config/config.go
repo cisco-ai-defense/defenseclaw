@@ -227,19 +227,22 @@ type PrivacyConfig struct {
 // telemetry is sanitized by the inventory service; this config only controls
 // which local metadata sources are inspected.
 type AIDiscoveryConfig struct {
-	Enabled                 bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode                    string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin         int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec      int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots               []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
-	IncludeShellHistory     bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames      bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains   bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
-	MaxFilesPerScan         int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
-	MaxFileBytes            int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
-	EmitOTel                bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
-	StoreRawLocalPaths      bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	Enabled                  bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                     string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin          int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec       int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots                []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan          int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -2049,6 +2052,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.scan_interval_min", 5)
 	viper.SetDefault("ai_discovery.process_interval_s", 60)
 	viper.SetDefault("ai_discovery.scan_roots", []string{"~"})
+	viper.SetDefault("ai_discovery.signature_packs", []string{})
+	viper.SetDefault("ai_discovery.allow_workspace_signatures", false)
+	viper.SetDefault("ai_discovery.disabled_signature_ids", []string{})
 	viper.SetDefault("ai_discovery.include_shell_history", true)
 	viper.SetDefault("ai_discovery.include_package_manifests", true)
 	viper.SetDefault("ai_discovery.include_env_var_names", true)

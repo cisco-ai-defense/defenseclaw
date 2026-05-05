@@ -388,6 +388,12 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.AIDiscovery.ProcessIntervalSec = intVal
 	case "ai_discovery.scan_roots":
 		c.AIDiscovery.ScanRoots = splitCSV(val)
+	case "ai_discovery.signature_packs":
+		c.AIDiscovery.SignaturePacks = splitCSV(val)
+	case "ai_discovery.allow_workspace_signatures":
+		c.AIDiscovery.AllowWorkspaceSignatures = boolVal
+	case "ai_discovery.disabled_signature_ids":
+		c.AIDiscovery.DisabledSignatureIDs = splitCSV(val)
 	case "ai_discovery.include_shell_history":
 		c.AIDiscovery.IncludeShellHistory = boolVal
 	case "ai_discovery.include_package_manifests":

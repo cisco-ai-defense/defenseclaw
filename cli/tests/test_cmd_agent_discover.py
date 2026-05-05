@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
@@ -231,6 +232,56 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + result.stderr)
         self.assertEqual(calls, ["scan"])
         self.assertIn("Codex", result.output)
+
+    def test_signatures_validate_and_install(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / ".defenseclaw-signatures")
+        pack = Path(tmp_dir) / "pack.json"
+        pack.write_text(
+            json.dumps({
+                "version": 1,
+                "id": "custom-pack",
+                "signatures": [{
+                    "id": "custom-cli-ai",
+                    "name": "Custom CLI AI",
+                    "vendor": "Example",
+                    "category": "ai_cli",
+                    "confidence": 0.7,
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        try:
+            valid = self.runner.invoke(agent, ["signatures", "validate", str(pack)], obj=app, catch_exceptions=False)
+            installed = self.runner.invoke(agent, ["signatures", "install", str(pack)], obj=app, catch_exceptions=False)
+            listed = self.runner.invoke(agent, ["signatures", "list", "--json"], obj=app, catch_exceptions=False)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(valid.exit_code, 0, valid.output)
+        self.assertIn("Signature pack valid", valid.output)
+        self.assertEqual(installed.exit_code, 0, installed.output)
+        self.assertIn("custom-pack.json", installed.output)
+        payload = json.loads(listed.output)
+        self.assertIn("custom-cli-ai", {sig["id"] for sig in payload})
+
+    def test_signatures_disable_updates_config(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / ".defenseclaw-signatures")
+        try:
+            result = self.runner.invoke(
+                agent,
+                ["signatures", "disable", "Custom_AI"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("custom-ai", result.output)
+        self.assertIn("custom-ai", app.cfg.ai_discovery.disabled_signature_ids)
 
 
 if __name__ == "__main__":
