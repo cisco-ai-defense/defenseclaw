@@ -33,14 +33,21 @@ from defenseclaw.context import AppContext
 
 
 def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
-             model: str = "openai/gpt-4o", llm_model: str = ""):
-    """Build a minimal AppContext that the guardrail commands can drive."""
+             model: str = "openai/gpt-4o", llm_model: str = "",
+             hook_fail_mode: str = "open"):
+    """Build a minimal AppContext that the guardrail commands can drive.
+
+    ``hook_fail_mode`` mirrors the v3 ``guardrail.hook_fail_mode`` field
+    (defaults to "open" so fixtures without explicit fail-mode wiring
+    behave like a fresh, user-friendly install).
+    """
     guardrail_cfg = SimpleNamespace(
         enabled=enabled,
         connector=connector,
         mode="observe",
         port=4000,
         model=model,
+        hook_fail_mode=hook_fail_mode,
     )
     cfg = SimpleNamespace(
         guardrail=guardrail_cfg,
@@ -101,6 +108,120 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("enabled:    no", result.output)
         self.assertIn("Codex (codex)", result.output)
         self.assertIn("Enable with", result.output)
+
+    def test_status_surfaces_hook_fail_mode(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="openclaw", hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # The fail mode is the most-asked-about UX knob now that hooks
+        # default open: status MUST surface it so operators can sanity-
+        # check their posture without grep-ing config.yaml.
+        self.assertIn("fail mode:  closed", result.output)
+
+
+class FailModeCommandTests(unittest.TestCase):
+    def test_show_current_value_open(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, hook_fail_mode="open")
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("guardrail.hook_fail_mode: open", result.output)
+        # Must explain the on-call-friendly behavior so an operator
+        # reading the output understands what "open" means without
+        # leaving the terminal.
+        self.assertIn("ALLOW", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_show_current_value_closed(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("guardrail.hook_fail_mode: closed", result.output)
+        self.assertIn("BLOCK", result.output)
+
+    def test_set_open_to_closed_persists_and_restarts(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex", hook_fail_mode="open")
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+        # Active connector must propagate so hooks for the right
+        # connector get rewritten.
+        kwargs = restart_mock.call_args.kwargs
+        self.assertEqual(kwargs.get("connector"), "codex")
+
+    def test_set_same_value_is_noop(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, hook_fail_mode="closed")
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("already 'closed'", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_set_with_no_restart_skips_gateway(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, hook_fail_mode="open")
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--yes", "--no-restart"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
+        restart_mock.assert_not_called()
+
+    def test_set_when_guardrail_disabled_persists_without_restart(self):
+        """Operator can pre-stage a fail-mode choice while the
+        guardrail is disabled. The value persists; the actual hook
+        scripts get regenerated whenever the operator re-enables the
+        guardrail."""
+        runner = CliRunner()
+        app = make_ctx(enabled=False, hook_fail_mode="open")
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
+        # Restart was skipped because guardrail is disabled — the
+        # config write is the value-add here, not the gateway bounce.
+        restart_mock.assert_not_called()
+        self.assertIn("currently disabled", result.output)
+
+    def test_set_save_failure_aborts(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, hook_fail_mode="open")
+        app.cfg.save.side_effect = OSError("disk full")
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        # Config write failed → must NOT restart the gateway, or the
+        # sidecar would re-render hooks from the on-disk old value
+        # while we believe we just changed it.
+        restart_mock.assert_not_called()
+
+    def test_set_declined_aborts(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, hook_fail_mode="open")
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd, ["closed"], input="n\n", obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        # Must not have flipped or saved.
+        self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
+        app.cfg.save.assert_not_called()
 
 
 class DisableCommandTests(unittest.TestCase):
@@ -210,9 +331,14 @@ class EnableCommandTests(unittest.TestCase):
 
 
 class CommandRegistrationTests(unittest.TestCase):
-    def test_guardrail_group_exposes_three_subcommands(self):
+    def test_guardrail_group_exposes_subcommands(self):
         names = set(cmd_guardrail.guardrail.commands.keys())
-        self.assertEqual(names, {"enable", "disable", "status"})
+        # status / enable / disable are the day-1 lifecycle controls;
+        # fail-mode was added in v3 to let operators flip response-
+        # layer fail behavior without re-running the full setup
+        # wizard. Keep this assertion exact so accidental command
+        # removal (e.g. a careless `del`) is caught immediately.
+        self.assertEqual(names, {"enable", "disable", "status", "fail-mode"})
 
 
 if __name__ == "__main__":

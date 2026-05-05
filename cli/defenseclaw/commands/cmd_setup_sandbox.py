@@ -10,6 +10,7 @@ import subprocess
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands.cmd_init_sandbox import (
     _ensure_sudo_cache,
     _fix_data_dir_ownership,
@@ -259,7 +260,7 @@ def setup_sandbox(
     data_dir = app.cfg.data_dir
 
     click.echo()
-    click.echo("  Configuring sandbox mode ...")
+    ux.section("Configuring sandbox mode")
 
     # 1. Validate prerequisites
     _validate_sandbox_prerequisites(sandbox_home)
@@ -285,15 +286,17 @@ def setup_sandbox(
     app.cfg.claw.home_dir = os.path.join(sandbox_home, ".openclaw")
     app.cfg.claw.config_file = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
 
-    click.echo("    openshell.mode:       standalone")
-    click.echo(f"    openshell.sandbox_home: {sandbox_home}")
-    click.echo(f"    openshell.host_networking: {app.cfg.openshell.host_networking}")
-    click.echo(f"    gateway.host:         {sandbox_ip}")
+    click.echo(f"    {ux.bold('openshell.mode:')}       standalone")
+    click.echo(f"    {ux.bold('openshell.sandbox_home:')} {sandbox_home}")
+    click.echo(f"    {ux.bold('openshell.host_networking:')} {app.cfg.openshell.host_networking}")
+    click.echo(f"    {ux.bold('gateway.host:')}         {sandbox_ip}")
     if app.cfg.guardrail.enabled:
-        click.echo(f"    guardrail.host:       {host_ip}")
+        click.echo(f"    {ux.bold('guardrail.host:')}       {host_ip}")
     else:
-        click.echo("    guardrail:            disabled (use 'defenseclaw setup guardrail' to enable)")
-    click.echo(f"    claw.home_dir:        {app.cfg.claw.home_dir}")
+        click.echo(
+            f"    {ux.bold('guardrail:')}            disabled (use 'defenseclaw setup guardrail' to enable)"
+        )
+    click.echo(f"    {ux.bold('claw.home_dir:')}        {app.cfg.claw.home_dir}")
 
     # 3. Read OpenClaw config (token resolution deferred to after pairing — step 9b).
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
@@ -301,14 +304,16 @@ def setup_sandbox(
 
     # 4. Install policy template
     _install_policy_template(data_dir, policy)
-    click.echo(f"    policy template:      {policy}")
+    click.echo(f"    {ux.bold('policy template:')}      {policy}")
 
     # 5. Generate DNS resolv.conf (only when host networking is active)
     if app.cfg.openshell.host_networking:
         _generate_resolv_conf(data_dir, dns)
-        click.echo(f"    dns nameservers:      {dns}")
+        click.echo(f"    {ux.bold('dns nameservers:')}      {dns}")
     else:
-        click.echo("    dns:                  managed by openshell-sandbox (host networking disabled)")
+        click.echo(
+            f"    {ux.bold('dns:')}                  managed by openshell-sandbox (host networking disabled)"
+        )
 
     # 6. Patch sandbox-side OpenClaw config (port + bind + guardrail baseUrl)
     if oc_json is not None:
@@ -394,16 +399,13 @@ def setup_sandbox(
     #     scripts, config) should be owned by the invoking user.
     _fix_data_dir_ownership(data_dir)
 
-    click.echo()
-    click.echo("  ── Summary ───────────────────────────────────────────")
-    click.echo()
-    click.echo("  Sandbox mode configured successfully.")
-    click.echo()
+    ux.banner("Summary")
+    ux.ok("Sandbox mode configured successfully.")
 
     if installed:
-        click.echo("  ✓ Systemd units installed and daemon reloaded")
+        ux.ok("Systemd units installed and daemon reloaded")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Start the sandbox:")
         click.echo("       sudo systemctl start defenseclaw-sandbox.target")
         click.echo()
@@ -418,10 +420,10 @@ def setup_sandbox(
         click.echo(f"       {data_dir}/gateway.log")
         click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     elif has_systemd:
-        click.echo("  ⚠ Systemd units were generated but could not be installed automatically.")
-        click.echo(f"    Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
+        ux.warn("Systemd units were generated but could not be installed automatically.")
+        ux.subhead(f"Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Install systemd units manually (requires root):")
         click.echo(f"       sudo cp {data_dir}/systemd/*.service /etc/systemd/system/")
         click.echo(f"       sudo cp {data_dir}/systemd/*.target /etc/systemd/system/")
@@ -444,9 +446,9 @@ def setup_sandbox(
         click.echo(f"       {data_dir}/gateway.log")
         click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     else:
-        click.echo("  ℹ No systemd detected (container/minimal environment).")
+        ux.subhead("No systemd detected (container/minimal environment).")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Start the sandbox manually:")
         click.echo(f"       sudo {data_dir}/scripts/run-sandbox.sh")
         click.echo()
@@ -685,7 +687,7 @@ def _add_user_to_sandbox_group() -> None:
     )
     if result.returncode == 0:
         click.echo(f"    group membership:    {sudo_user} added to sandbox group")
-        msg = click.style("(log out and back in for this to take effect)", fg="green")
+        msg = ux.dim("(log out and back in for this to take effect)")
         click.echo(f"                         {msg}")
     else:
         click.echo(f"    group membership:    failed ({result.stderr.strip()})", err=True)

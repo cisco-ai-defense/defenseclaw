@@ -320,7 +320,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 				inspector: NewGuardrailInspector("local", nil, nil, ""),
 			}
 
-			p.applyRuntime(map[string]string{"connector": target})
+			p.applyRuntime(map[string]any{"connector": target})
 
 			if p.connector.Name() != target {
 				t.Errorf("applyRuntime({connector=%q}) -> %q",

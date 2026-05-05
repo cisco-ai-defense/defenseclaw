@@ -459,7 +459,13 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Enabled", Key: "guardrail.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Enabled),
 					Hint: "Master switch. Off = gateway passes LLM traffic through without inspection."},
 				{Label: "Mode", Key: "guardrail.mode", Kind: "choice", Value: c.Guardrail.Mode, Options: []string{"observe", "action"},
-					Hint: "observe=log only (no blocking); action=return block_message on hit."},
+					Hint: "observe=log only (no blocking); action=return block_message on hit. " +
+						"Flipping this is also the right moment to revisit Hook Fail Mode (next field) — " +
+						"action-mode posture often pairs with a stricter response-layer fail mode."},
+				{Label: "Hook Fail Mode", Key: "guardrail.hook_fail_mode", Kind: "choice", Value: c.Guardrail.EffectiveHookFailMode(), Options: []string{"open", "closed"},
+					Hint: "What generated hooks (codex-hook, claude-code-hook, inspect-*) do when the gateway returns a 4xx, malformed JSON, or missing action. " +
+						"open=allow the tool/prompt and log to ~/.defenseclaw/logs/hook-failures.jsonl (recommended); closed=block. " +
+						"Transport failures (gateway unreachable / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."},
 				{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"},
 					Hint: "local=regex+judge only; remote=Cisco AI Defense only; both=chained (local then remote)."},
 				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw"},

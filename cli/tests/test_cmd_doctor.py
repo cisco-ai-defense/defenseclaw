@@ -29,6 +29,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_guardrail_proxy,
     _check_hilt_support,
     _check_llm_api_key,
+    _check_sidecar,
     _DoctorResult,
     _probe_splunk_hec,
     _verify_bedrock,
@@ -58,6 +59,112 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.passed, 1)
         warn_checks = [c for c in result.checks if c["status"] == "warn"]
         self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_sidecar_check_surfaces_disabled_summary(self, mock_probe):
+        """When the sidecar publishes details.summary on a disabled
+        subsystem (today: gateway standalone-mode short-circuit in
+        runGatewayLoop), doctor must include that summary in its
+        skip-row detail. The pre-fix generic message
+        "disabled (reported by sidecar)" gave operators no way to
+        tell apart "intentionally disabled" (codex+loopback) from
+        "broken but the sidecar quietly gave up", which is what
+        made the codex+standalone reconnect-spam regression so
+        hard to diagnose.
+        """
+        import json as _json
+
+        health_body = _json.dumps({
+            "gateway": {
+                "state": "disabled",
+                "details": {
+                    "summary": "no OpenClaw fleet configured (standalone mode)",
+                    "connector": "codex",
+                    "host": "127.0.0.1",
+                    "port": 18789,
+                    "hint": "set gateway.host to a real OpenClaw upstream and restart",
+                },
+            },
+            "watcher": {"state": "running"},
+            "guardrail": {"state": "running", "details": {"mode": "observe"}},
+            "api": {"state": "running"},
+        })
+        mock_probe.return_value = (200, health_body)
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "codex"
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        gateway_rows = [
+            c for c in result.checks
+            if c.get("label", "").strip().endswith("gateway")
+        ]
+        self.assertEqual(
+            len(gateway_rows), 1,
+            f"expected exactly one gateway row, got {gateway_rows!r}",
+        )
+        row = gateway_rows[0]
+        # Skip (not warn) — gateway has no on/off config knob, so
+        # _subsystem_expected_enabled returns None and we fall to
+        # the "skip" branch; the post-fix change appends the summary.
+        self.assertEqual(row["status"], "skip")
+        self.assertIn(
+            "no OpenClaw fleet configured (standalone mode)",
+            row["detail"],
+            f"summary should be surfaced in detail; got: {row['detail']!r}",
+        )
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_sidecar_check_falls_back_to_generic_message_without_summary(self, mock_probe):
+        """An older sidecar build (or a different subsystem with no
+        publishable summary) must still produce the generic "disabled
+        (reported by sidecar)" message — the post-fix code only adds
+        the summary when one is present and is otherwise unchanged.
+        """
+        import json as _json
+
+        health_body = _json.dumps({
+            "gateway": {"state": "disabled"},  # no details
+            "watcher": {"state": "running"},
+            "guardrail": {"state": "running"},
+            "api": {"state": "running"},
+        })
+        mock_probe.return_value = (200, health_body)
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "codex"
+        result = _DoctorResult()
+        _check_sidecar(cfg, result)
+        gateway_rows = [
+            c for c in result.checks
+            if c.get("label", "").strip().endswith("gateway")
+        ]
+        self.assertEqual(len(gateway_rows), 1)
+        self.assertEqual(gateway_rows[0]["status"], "skip")
+        self.assertEqual(
+            gateway_rows[0]["detail"],
+            "disabled (reported by sidecar)",
+        )
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_codex_observability_mode_skips_proxy_port_probe(self, mock_probe):

@@ -189,6 +189,27 @@ func TestConnectorListBackups_FindsAllKnownNames(t *testing.T) {
 	}
 }
 
+func TestConnectorListBackups_FindsManagedBackups(t *testing.T) {
+	dir := t.TempDir()
+	defer withConnectorState(t, dir, "openclaw")()
+
+	managed := filepath.Join(dir, "connector_backups", "codex", "config.toml.json")
+	if err := os.MkdirAll(filepath.Dir(managed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managed, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, exitCode := runConnectorCmd(t, "list-backups")
+	if exitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", exitCode)
+	}
+	if !strings.Contains(stdout, "codex") || !strings.Contains(stdout, "connector_backups") {
+		t.Fatalf("expected managed codex backup in output, got: %s", stdout)
+	}
+}
+
 func TestConnectorListBackups_FindsOpenClawPristine(t *testing.T) {
 	dir := t.TempDir()
 	clawCfg := filepath.Join(dir, "claw.config.json")
@@ -301,8 +322,8 @@ func TestConnectorVerify_CleanOpenClaw(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit 0 (clean), got %d (stdout=%q stderr=%q)", exitCode, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "[clean]") {
-		t.Fatalf("expected [clean] glyph in stdout; got %q", stdout)
+	if !strings.Contains(stdout, "no residual DefenseClaw state") {
+		t.Fatalf("expected clean verdict in stdout; got %q", stdout)
 	}
 }
 
@@ -366,8 +387,8 @@ func TestConnectorVerify_CleanPerConnector(t *testing.T) {
 				t.Fatalf("connector=%s: expected exit 0 (clean), got %d (stdout=%q stderr=%q)",
 					tc.connector, exitCode, stdout, stderr)
 			}
-			if !strings.Contains(stdout, "[clean]") {
-				t.Fatalf("connector=%s: expected [clean] glyph in stdout; got %q",
+			if !strings.Contains(stdout, "no residual DefenseClaw state") {
+				t.Fatalf("connector=%s: expected clean verdict in stdout; got %q",
 					tc.connector, stdout)
 			}
 		})

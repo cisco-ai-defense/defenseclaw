@@ -180,6 +180,9 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev.AgentName == "" {
 		ev.AgentName = id.AgentName
 	}
+	if ev.AgentType == "" {
+		ev.AgentType = id.AgentType
+	}
 	if ev.AgentInstanceID == "" {
 		ev.AgentInstanceID = id.AgentInstanceID
 	}

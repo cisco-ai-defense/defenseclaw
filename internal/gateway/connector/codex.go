@@ -437,7 +437,7 @@ func (c *CodexConnector) Route(r *http.Request, body []byte) (*ConnectorSignals,
 // AgentPaths reports the on-disk footprint Codex's connector
 // touches. The canonical scoped routing primitive is the patch
 // applied to ~/.codex/config.toml's [model_providers.*].base_url,
-// backed up via codex_config_backup.json. Older releases also
+// backed up via managed + legacy backup files. Older releases also
 // wrote codex_env.sh / codex.env into <DataDir>; those are still
 // surfaced here so tools that audit DefenseClaw's footprint find
 // them and Teardown can remove them.
@@ -450,6 +450,7 @@ func (c *CodexConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	return AgentPaths{
 		PatchedFiles: []string{codexConfigPath()},
 		BackupFiles: []string{
+			managedFileBackupPath(opts.DataDir, c.Name(), "config.toml"),
 			filepath.Join(opts.DataDir, "codex_config_backup.json"),
 			filepath.Join(opts.DataDir, "codex_backup.json"),
 		},

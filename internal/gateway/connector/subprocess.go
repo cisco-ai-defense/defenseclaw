@@ -45,14 +45,39 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr  string
 	APIToken string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode string // "open" for observability-only hooks, "closed" for enforcement
+	FailMode string // "open" (default, response-layer fails allow with a stderr warning) or "closed" (response-layer fails block); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
 }
 
+// defaultHookFailMode is the fail mode injected into the response-
+// layer ({{.FailMode}}) of every hook when the caller doesn't supply
+// an explicit override. It governs ONLY response-layer failures —
+// 4xx, malformed JSON, missing action — where the gateway answered
+// but the answer was wrong (typically misconfiguration). Transport-
+// layer failures (curl exit non-zero, 5xx) are handled by each
+// hook's fail_unreachable helper in _hardening.sh and ALWAYS fail
+// open unless the operator opts into strict availability via
+// DEFENSECLAW_STRICT_AVAILABILITY=1.
+//
+// "open" is the default because a DefenseClaw hook that exits 2 on
+// every gateway hiccup bricks the user's agent for the duration of
+// any DefenseClaw outage, which is strictly worse UX than a brief
+// observability gap. Operators who run a strict policy posture can
+// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
+// or — for connectors that route through
+// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
+// connector enforcement at setup time.
+const defaultHookFailMode = "open"
+
+// normalizeHookFailMode coerces a caller-supplied string to one of
+// the two values the hook scripts understand. Anything other than
+// "closed" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "open" so a typo never accidentally puts
+// the agent into fail-closed mode.
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "open" {
-		return "open"
+	if strings.TrimSpace(mode) == "closed" {
+		return "closed"
 	}
-	return "closed"
+	return "open"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -63,7 +88,7 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: "closed"}
+	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
 
 	for _, name := range shimBinaries {
 		content, err := shimFS.ReadFile("shims/" + name + ".sh")
@@ -137,9 +162,97 @@ var hookHelperScripts = []string{
 	"_hardening.sh",
 }
 
+// hookSchemaVersionMarker is the line-2 prefix every generated hook
+// (and the hooks/_hardening.sh helper) carries. The version digit
+// after the prefix is parsed by parseHookSchemaVersion to drive the
+// downgrade-safety check in writeHookHelpers. Kept as its own const
+// (rather than reused from claudecode.go's hookMarker) so the
+// subprocess writer doesn't pull a dependency on connector-specific
+// teardown internals.
+const hookSchemaVersionMarker = "# defenseclaw-managed-hook v"
+
+// parseHookSchemaVersion returns the schema version digit that
+// follows hookSchemaVersionMarker on line 2 of a defenseclaw-managed
+// hook script. Returns 0 when the marker is absent, the digit is
+// missing, or the file is too short to contain it — the zero is the
+// "older than any tagged version" sentinel so writeHookHelpers will
+// always overwrite a malformed helper on disk.
+//
+// Only the first 512 bytes are scanned; the marker MUST appear
+// near the top of the file (line 2 by contract). Refusing to scan
+// the whole file caps the cost of inspecting an attacker-supplied
+// path and matches the bound used by claudecode.go::scriptHasMarker.
+func parseHookSchemaVersion(content []byte) int {
+	if len(content) > 512 {
+		content = content[:512]
+	}
+	idx := bytesIndex(content, hookSchemaVersionMarker)
+	if idx < 0 {
+		return 0
+	}
+	rest := content[idx+len(hookSchemaVersionMarker):]
+	v := 0
+	consumed := 0
+	for consumed < len(rest) {
+		c := rest[consumed]
+		if c < '0' || c > '9' {
+			break
+		}
+		// Cap the version width so a hostile file with a long
+		// digit run can't pin the helper at int-overflow.
+		if consumed >= 6 {
+			return 0
+		}
+		v = v*10 + int(c-'0')
+		consumed++
+	}
+	if consumed == 0 {
+		return 0
+	}
+	return v
+}
+
+// bytesIndex is a stdlib-light alternative to bytes.Index — kept
+// inline so subprocess.go doesn't grow another import for one
+// call site. Returns the first index where needle appears in hay,
+// or -1 when absent.
+func bytesIndex(hay []byte, needle string) int {
+	if len(needle) == 0 {
+		return 0
+	}
+	if len(needle) > len(hay) {
+		return -1
+	}
+	limit := len(hay) - len(needle)
+	for i := 0; i <= limit; i++ {
+		if string(hay[i:i+len(needle)]) == needle {
+			return i
+		}
+	}
+	return -1
+}
+
 // writeHookHelpers writes the helper scripts (_hardening.sh, etc.) into
 // hookDir at mode 0o600. Helpers are sourced — never executed
 // directly — so they don't need the executable bit.
+//
+// Downgrade safety: if a helper is already on disk and carries a
+// schema version GREATER than the one embedded in this binary, the
+// existing file is left in place. This closes the "hook artifact
+// drift on re-setup" bug: when `defenseclaw setup guardrail` ends
+// with `defenseclaw-gateway restart`, the binary that boots and
+// runs Connector.Setup may be older than the templates the operator
+// has freshly installed (typical when an older `defenseclaw-gateway`
+// shadows a newer one on $PATH). Without this check the older
+// binary unconditionally clobbers the helper with its v2 embed,
+// dropping the new `category` arg from `defenseclaw_log_hook_failure`
+// and leaving hook-failures.jsonl entries without the field —
+// even though the just-rendered hook scripts pass it.
+//
+// Equal versions still rewrite (idempotent overwrite, lets a same-
+// version bug-fix patch land); strictly-newer disk content is
+// preserved. Bumping the embedded `# defenseclaw-managed-hook vN`
+// marker is the explicit signal to roll forward.
 func writeHookHelpers(hookDir string) error {
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -147,6 +260,18 @@ func writeHookHelpers(hookDir string) error {
 			return fmt.Errorf("read hook helper %s: %w", name, err)
 		}
 		helperPath := filepath.Join(hookDir, name)
+		if existing, err := os.ReadFile(helperPath); err == nil {
+			diskV := parseHookSchemaVersion(existing)
+			embedV := parseHookSchemaVersion(content)
+			if diskV > 0 && embedV > 0 && diskV > embedV {
+				// Newer-on-disk wins. Skip silently so a
+				// repeat-setup with an older binary doesn't
+				// noisily report "downgraded" when the
+				// operator's intent was to keep the newer
+				// helper installed by a more recent build.
+				continue
+			}
+		}
 		if err := os.WriteFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
@@ -190,8 +315,10 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	}
 
 	// Never bake the real token into template output — scripts read
-	// the .token file or the env var at runtime.
-	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: "closed"}
+	// the .token file or the env var at runtime. FailMode defaults
+	// to "open" so a fresh setup never bricks the agent on a
+	// gateway outage; see defaultHookFailMode for rationale.
+	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode}
 
 	for _, name := range hookScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
@@ -228,7 +355,7 @@ func WriteAllHookScripts(hookDir, apiAddr string) error {
 // connector that mis-spells a hook name fails loud at setup, never
 // silently ships a hook dir missing its template.
 func writeHookScriptsCommon(hookDir, apiAddr, token string, extras []string) error {
-	return writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, "closed", extras)
+	return writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, defaultHookFailMode, extras)
 }
 
 func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string, extras []string) error {
@@ -302,23 +429,56 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
-// has access to connector enforcement flags. Observability-only connectors
-// must fail open when their local hook cannot reach the gateway; enforcement
-// setups keep fail-closed semantics.
+// has access to connector enforcement flags AND the operator's
+// chosen response-layer fail mode (opts.HookFailMode).
+//
+// Resolution order for the response-layer FailMode template var
+// (see templateData.FailMode and defaultHookFailMode for the
+// contract):
+//
+//  1. An EXPLICIT operator value in opts.HookFailMode — either
+//     "open" or "closed" — always wins. The operator answered
+//     `defenseclaw setup guardrail`'s fail-mode prompt (or used
+//     `defenseclaw guardrail fail-mode <value>`); silently
+//     overriding their answer would violate the operator-defined
+//     fail-mode contract documented in
+//     “GuardrailConfig.HookFailMode“.
+//  2. EMPTY/unset opts.HookFailMode falls back to per-connector
+//     enforcement: enabling proxy-redirect enforcement
+//     (CodexEnforcement / ClaudeCodeEnforcement) implies a strict
+//     policy posture, so the response-layer default flips to
+//     "closed" too. This only fires when the operator never made
+//     an explicit choice.
+//  3. Otherwise: defaultHookFailMode ("open").
+//
+// Transport-layer failures (gateway unreachable / 5xx) are NOT
+// governed by FailMode — they always allow unless the operator opts
+// in via DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of which
+// connector, enforcement state, or HookFailMode value.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := "closed"
-	switch c.Name() {
-	case "codex":
-		if !opts.CodexEnforcement {
-			failMode = "open"
-		}
-	case "claudecode":
-		if !opts.ClaudeCodeEnforcement {
-			failMode = "open"
+	// Distinguish "operator did not answer" (empty string — fall
+	// through to enforcement-derived default) from an explicit
+	// "open" answer that must NOT be silently upgraded by the
+	// per-connector enforcement flags below. normalizeHookFailMode
+	// collapses both to "open", so we have to inspect the raw input
+	// here before normalisation to preserve the operator's intent.
+	rawTrimmed := strings.TrimSpace(opts.HookFailMode)
+	explicitChoice := rawTrimmed != ""
+	failMode := normalizeHookFailMode(opts.HookFailMode)
+	if !explicitChoice && failMode != "closed" {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				failMode = "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				failMode = "closed"
+			}
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)

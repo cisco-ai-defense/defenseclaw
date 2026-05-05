@@ -58,6 +58,26 @@ func allowVerdict(scanner string) *ScanVerdict {
 	}
 }
 
+func guardrailFallbackActionForSeverity(severity string) string {
+	switch strings.ToUpper(strings.TrimSpace(severity)) {
+	case "CRITICAL":
+		return "block"
+	case "MEDIUM", "HIGH":
+		return "alert"
+	default:
+		return "allow"
+	}
+}
+
+func fallbackGuardrailVerdict(v *ScanVerdict) *ScanVerdict {
+	if v == nil {
+		return allowVerdict("fallback")
+	}
+	out := *v
+	out.Action = guardrailFallbackActionForSeverity(out.Severity)
+	return &out
+}
+
 func errorVerdict(scanner string) *ScanVerdict {
 	return &ScanVerdict{
 		Action:      "allow",
@@ -111,6 +131,21 @@ type GuardrailInspector struct {
 	strategyComplete  string
 	strategyToolCall  string
 	judgeSweep        bool
+
+	// hiltMu guards hilt — set by SetHILTConfig() at proxy boot and on
+	// every guardrail-config reload, read by finalize() under load. The
+	// guarded value is a small struct, so a sync.RWMutex would actually
+	// be slower than a plain Mutex; we use Mutex to keep the read path
+	// allocation-free (atomic.Value would force a heap pointer per write).
+	hiltMu sync.Mutex
+	hilt   policy.GuardrailHILTInput
+	// hiltSet records whether SetHILTConfig() has ever been called.
+	// When false, finalize() leaves input.HILT == nil so the Rego
+	// policy continues to read `data.guardrail.hilt` — preserving the
+	// behavior of older inspector callers (api.go, tests) that don't
+	// wire config.HILT. New gateway boots set this to true so config.yaml
+	// becomes the single source of truth for prompt-side verdicts.
+	hiltSet bool
 
 	// Rego policy engine — lazily constructed on first finalize() call and
 	// cached for the lifetime of the inspector. Previously policy.New() ran
@@ -207,6 +242,57 @@ func (g *GuardrailInspector) SetDetectionStrategy(global, prompt, completion, to
 	g.judgeSweep = sweep
 }
 
+// SetHILTConfig captures the gateway's live HILT configuration so finalize()
+// can pass it to the Rego policy as `input.hilt.*`. Without this, the policy
+// falls back to `data.guardrail.hilt.*` in policies/rego/data.json — which
+// historically drifted out of sync with config.yaml because the wizard wrote
+// to one place and Rego read from another. Calling this from `NewGuardrailProxy`
+// (and from the guardrail-config reload path) makes config.yaml the single
+// source of truth for confirm/alert decisions on prompt findings.
+//
+// The signature takes primitives (not config.HILTConfig) on purpose: the
+// internal/policy package owns the `policy.GuardrailHILTInput` shape, and
+// taking the values flat keeps internal/gateway/guardrail.go from picking
+// up an internal/config import (which would tighten the package graph for
+// no benefit).
+//
+// minSeverity is normalized to upper-case to match the rank lookup in
+// guardrail.rego (`data.guardrail.severity_rank.HIGH` etc.). Empty
+// minSeverity defaults to "HIGH" — the same default the policy uses
+// when the field is absent from data.json.
+func (g *GuardrailInspector) SetHILTConfig(enabled bool, minSeverity string) {
+	normalized := strings.ToUpper(strings.TrimSpace(minSeverity))
+	if normalized == "" {
+		normalized = "HIGH"
+	}
+	g.hiltMu.Lock()
+	g.hilt = policy.GuardrailHILTInput{
+		Enabled:     enabled,
+		MinSeverity: normalized,
+	}
+	g.hiltSet = true
+	g.hiltMu.Unlock()
+}
+
+// hiltInput returns a pointer to the cached HILT input for the Rego policy,
+// or nil if SetHILTConfig() has never been called. Returning nil rather
+// than a zero-value struct preserves the behavior of older callers (api.go,
+// tests, in-process clients that construct the inspector directly): when
+// `input.hilt` is absent, the policy falls back to `data.guardrail.hilt`,
+// which keeps the existing data.json sync path working.
+//
+// We allocate a fresh copy under the lock so the caller cannot accidentally
+// observe a torn read if the config reloads mid-evaluation.
+func (g *GuardrailInspector) hiltInput() *policy.GuardrailHILTInput {
+	g.hiltMu.Lock()
+	defer g.hiltMu.Unlock()
+	if !g.hiltSet {
+		return nil
+	}
+	cp := g.hilt
+	return &cp
+}
+
 // effectiveStrategy resolves the detection strategy for a given direction.
 func (g *GuardrailInspector) effectiveStrategy(direction string) string {
 	var override string
@@ -261,6 +347,12 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 
 	latencyMs := time.Since(start).Milliseconds()
 
+	// Apply the prompt-surface UX contract before any caller observes the
+	// verdict. Done here (rather than in each call site) so the clamp is
+	// applied uniformly across regex-only / regex+judge / judge-first
+	// strategies and across pre-call, post-call, and mid-stream paths.
+	clampPromptDirectionVerdict(verdict, direction)
+
 	if endSpan != nil {
 		var action, sev, reason string
 		if verdict != nil {
@@ -287,6 +379,35 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		)
 	}
 	return verdict
+}
+
+// clampPromptDirectionVerdict applies the prompt-surface UX contract to a
+// ScanVerdict in place. Returns silently for nil verdicts, non-prompt
+// directions, or actions that are already allow/alert. When a demotion occurs
+// the original action is preserved in the verdict's Reason so the audit trail
+// keeps the policy's original decision visible.
+//
+// CRITICAL severity is exempt from the demotion: those verdicts represent
+// "no question, this is bad" (clear credential exfil, known prompt-injection
+// chains, leaked PII in user input) and operators expect a hard reject even
+// without a modal. HIGH and below are the cases where the chat-HITL fallback
+// produced unusable UX, so those still demote to alert and let the tool-call
+// gate handle enforcement.
+func clampPromptDirectionVerdict(verdict *ScanVerdict, direction string) {
+	if verdict == nil {
+		return
+	}
+	if guardrailSeverityRank(verdict.Severity) >= severityCritical {
+		return
+	}
+	clamped, demoted := clampPromptDirectionAction(direction, verdict.Action)
+	if !demoted {
+		return
+	}
+	original := strings.TrimSpace(verdict.Action)
+	verdict.Action = clamped
+	verdict.Reason = appendVerdictReason(verdict.Reason,
+		fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
 }
 
 // categoriesOf returns deduped finding identifiers in insertion
@@ -319,7 +440,9 @@ func categoriesOf(findings []string) []string {
 // content (sensitive paths, dangerous commands, critical injection patterns)
 // and block the stream immediately without waiting for an LLM round-trip.
 func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
-	return g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+	verdict := g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+	clampPromptDirectionVerdict(verdict, direction)
+	return verdict
 }
 
 // inspectRegexOnly is the original flow: regex patterns produce verdicts,
@@ -371,10 +494,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
-		action := "alert"
-		if severityRank[maxSev] >= severityRank["HIGH"] {
-			action = "block"
-		}
+		action := guardrailFallbackActionForSeverity(maxSev)
 		var ids []string
 		for _, f := range ruleFindings {
 			ids = append(ids, f.RuleID+":"+f.Title)
@@ -396,7 +516,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// attributes reflect what actually influenced the decision.
 	regexVerdictForSpan := ruleVerdict
 	if len(high) > 0 && (regexVerdictForSpan == nil || severityRank["HIGH"] > severityRank[regexVerdictForSpan.Severity]) {
-		regexVerdictForSpan = &ScanVerdict{Action: "block", Severity: "HIGH"}
+		regexVerdictForSpan = &ScanVerdict{Action: guardrailFallbackActionForSeverity("HIGH"), Severity: "HIGH"}
 	}
 	endRegex(phaseAction(regexVerdictForSpan), phaseSeverity(regexVerdictForSpan), time.Since(regexStart).Milliseconds())
 
@@ -427,7 +547,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		return g.finalize(ctx, direction, model, mode, content, verdict, ciscoResult)
 	}
 
-	// If the rule engine found HIGH+ severity, block immediately (covers
+	// If the rule engine found HIGH+ severity, return immediately (covers
 	// sensitive paths, dangerous commands, C2, etc. that triage doesn't have).
 	if ruleVerdict != nil && severityRank[ruleVerdict.Severity] >= severityRank["HIGH"] {
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
@@ -703,16 +823,16 @@ func (g *GuardrailInspector) ReloadPolicies() error {
 	return nil
 }
 
-// finalize runs OPA policy evaluation if available, otherwise returns the
-// merged verdict directly.
+// finalize runs OPA policy evaluation if available, otherwise applies the
+// built-in CRITICAL-only block fallback.
 func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
 	if g.policyDir == "" {
-		return merged
+		return fallbackGuardrailVerdict(merged)
 	}
 
 	engine := g.policyEngine()
 	if engine == nil {
-		return merged
+		return fallbackGuardrailVerdict(merged)
 	}
 
 	input := policy.GuardrailInput{
@@ -721,6 +841,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		Mode:          mode,
 		ScannerMode:   g.scannerMode,
 		ContentLength: len(content),
+		HILT:          g.hiltInput(),
 	}
 
 	if merged != nil && merged.Severity != "NONE" {
@@ -748,7 +869,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return merged
+		return fallbackGuardrailVerdict(merged)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
@@ -982,10 +1103,7 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		severity = maxRuleSev
 	}
 
-	action := "alert"
-	if severity == "HIGH" || severity == "CRITICAL" {
-		action = "block"
-	}
+	action := guardrailFallbackActionForSeverity(severity)
 
 	top := flags
 	if len(top) > 5 {
@@ -1263,10 +1381,7 @@ func signalsToVerdict(signals []TriageSignal, scanner string) *ScanVerdict {
 	}
 	reasons = append(reasons, "triage: "+strings.Join(top, ", "))
 
-	action := "alert"
-	if maxSev == "HIGH" || maxSev == "CRITICAL" {
-		action = "block"
-	}
+	action := guardrailFallbackActionForSeverity(maxSev)
 
 	return &ScanVerdict{
 		Action:   action,
@@ -1639,6 +1754,65 @@ var heartbeatInjectionHintRe = regexp.MustCompile(
 		`JAILBREAK|` +
 		`SUDO\s+RM` +
 		`)\b`)
+
+// isSessionStartupMessage detects OpenClaw's `/new` and `/reset` session
+// startup probe so it bypasses the LLM-judge stage. The probe is a fixed
+// system-issued template (BARE_SESSION_RESET_PROMPT_BASE in OpenClaw) that
+// is delivered as a `role: user` message; in isolation its imperative
+// language ("Execute your Session Startup sequence", "configured persona",
+// "default_model", "Do not mention internal steps") looks indistinguishable
+// from a textbook prompt-injection attack and the injection judge classifies
+// it as JUDGE-INJ-CONTEXT / JUDGE-INJ-INSTRUCT / JUDGE-INJ-SEMANTIC, blocking
+// every new conversation.
+//
+// Same belt-and-suspenders shape as isHeartbeatMessage:
+//
+//  1. Length ≤ maxSessionStartupProbeLen. The canonical probe is ~700 chars
+//     after the gateway prepends the "Current time:" footer; cap generously
+//     so messaging-bridge banners do not break the bypass, but still cap so
+//     an attacker cannot smuggle an arbitrarily large payload.
+//
+//  2. Starts with the canonical anchor "A new session was started via
+//     /new or /reset" (after a leading whitespace trim). Anchoring on the
+//     prefix prevents an attacker from prepending malicious content and
+//     still claiming the probe shape.
+//
+//  3. References the canonical bootstrap filename "BOOTSTRAP.md", which
+//     appears in every variant of the OpenClaw startup template. Pairing
+//     it with the prefix anchor means an attacker would have to copy two
+//     long fixed strings verbatim while ALSO avoiding every injection
+//     keyword in heartbeatInjectionHintRe — a vanishingly small surface.
+//
+//  4. No known injection imperatives appear anywhere (reuses
+//     heartbeatInjectionHintRe). If an attacker manages to satisfy (2)
+//     and (3), this catches the malicious tail.
+//
+// This function is called only from the pre-call prompt inspection sites
+// in handlePassthrough / handleChatCompletion alongside isHeartbeatMessage.
+func isSessionStartupMessage(userText string) bool {
+	const maxSessionStartupProbeLen = 4096
+	if userText == "" || len(userText) > maxSessionStartupProbeLen {
+		return false
+	}
+	trimmed := strings.TrimLeft(userText, " \t\r\n")
+	if !strings.HasPrefix(trimmed, sessionStartupAnchor) {
+		return false
+	}
+	if !strings.Contains(userText, "BOOTSTRAP.md") {
+		return false
+	}
+	if heartbeatInjectionHintRe.MatchString(userText) {
+		return false
+	}
+	return true
+}
+
+// sessionStartupAnchor is the verbatim prefix of OpenClaw's
+// BARE_SESSION_RESET_PROMPT_BASE. Kept as a constant rather than a regex
+// so any divergence from the upstream template (e.g. case change, punctuation
+// drift) forces a deliberate review of the bypass instead of silently
+// expanding the allowlist.
+const sessionStartupAnchor = "A new session was started via /new or /reset"
 
 // ---------------------------------------------------------------------------
 // Secret redaction

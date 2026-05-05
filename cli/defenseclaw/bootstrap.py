@@ -29,14 +29,27 @@ and safe to call from background contexts.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config
     from defenseclaw.logger import Logger
+
+
+# Canonical HITL severity floors. Duplicated here (not imported from
+# cmd_setup.py) so click options on cmd_init / cmd_quickstart can
+# reference it without dragging the entire setup wizard module into
+# the import graph for ``defenseclaw --help``. The list is small and
+# changes rarely; if a fifth severity is ever added, both this and
+# ``cmd_setup._HILT_MIN_SEVERITIES`` must move in lockstep.
+HILT_MIN_SEVERITIES: tuple[str, ...] = ("HIGH", "MEDIUM", "LOW", "CRITICAL")
 
 
 @dataclass
@@ -103,6 +116,40 @@ class FirstRunOptions:
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
+    # hook_fail_mode controls what generated hooks
+    # (codex-hook, claude-code-hook, inspect-*) do when the
+    # gateway returns a *response-layer* failure (4xx, malformed
+    # JSON, missing action). Empty string means "leave the
+    # current cfg.guardrail.hook_fail_mode untouched" so callers
+    # who don't care don't accidentally clobber an operator's
+    # earlier choice. Transport-layer failures (gateway
+    # unreachable / 5xx) ALWAYS allow unless
+    # DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this
+    # value — see _normalize_hook_fail_mode for the canonical
+    # rule.
+    hook_fail_mode: str = ""
+    # human_approval is the operator's HITL (Human-In-the-Loop)
+    # toggle. ``None`` means "leave whatever was loaded alone" —
+    # critical for upgrade flows where the operator already
+    # enabled HITL via ``defenseclaw setup guardrail`` and then
+    # re-runs init for some unrelated reason. ``True`` /
+    # ``False`` set ``cfg.guardrail.hilt.enabled`` explicitly.
+    # NOTE: HITL only fires in action mode (the gateway short-
+    # circuits in observe mode regardless of this flag); we
+    # still persist the operator's choice in observe mode so it
+    # takes effect the moment they later flip to action via
+    # ``defenseclaw setup guardrail``. Mirrors the contract
+    # documented in cmd_setup.py::_configure_hilt_interactive.
+    human_approval: bool | None = None
+    # hilt_min_severity is the lowest finding severity that
+    # triggers a HITL prompt (HIGH / MEDIUM / LOW / CRITICAL).
+    # Empty string means "leave the existing value alone" so
+    # callers who want to flip HITL on without overriding the
+    # severity floor can pass ``human_approval=True`` and an
+    # empty severity. Invalid values normalize to ``"HIGH"`` —
+    # falling back to a stricter posture is safer than silently
+    # promoting a typo into a permissive setting.
+    hilt_min_severity: str = ""
 
 
 @dataclass
@@ -228,8 +275,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     gateway. Secrets supplied as flags are persisted to ``.env`` and the
     config stores only env-var names.
     """
-    import os
-
     from defenseclaw import config as cfg_mod
     from defenseclaw.context import AppContext
     from defenseclaw.db import Store
@@ -334,9 +379,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
-    import os
-    import shutil
-
     steps: list[StepResult] = []
     cfg_path = os.path.join(cfg.data_dir, "config.yaml")
     steps.append(StepResult(
@@ -453,6 +495,45 @@ def _apply_first_run_choices(
     if connector == "claudecode":
         cfg.guardrail.claudecode_enforcement_enabled = profile == "action"
 
+    # Honor an explicit operator choice supplied via flag/prompt.
+    # Empty string means "leave whatever was loaded alone" — usually
+    # the canonical default ("open") seeded by _migrate_0_4_0 or by
+    # default_config(). Anything other than the literal "closed"
+    # sentinel is silently downgraded to "open" because failing-open
+    # on a typo is strictly safer than failing-closed and bricking
+    # the agent. Mirrors normalizeHookFailMode in
+    # internal/gateway/connector/subprocess.go and
+    # _normalize_hook_fail_mode in cli/defenseclaw/config.py.
+    desired = (options.hook_fail_mode or "").strip().lower()
+    if desired:
+        cfg.guardrail.hook_fail_mode = "closed" if desired == "closed" else "open"
+
+    # Human-In-the-Loop (HITL). ``None`` is the no-op sentinel so
+    # init/quickstart reruns don't clobber an operator who already
+    # enabled approvals via ``defenseclaw setup guardrail``.
+    if options.human_approval is not None:
+        cfg.guardrail.hilt.enabled = bool(options.human_approval)
+
+    # Severity floor: empty string preserves; valid value normalizes
+    # to uppercase; anything else falls back to ``"HIGH"``. Mirrors
+    # _apply_guardrail_extra_options in cmd_setup.py so the init
+    # path and the setup path can never disagree on which
+    # severities trigger an approval prompt.
+    severity = (options.hilt_min_severity or "").strip().upper()
+    if severity:
+        cfg.guardrail.hilt.min_severity = (
+            severity if severity in HILT_MIN_SEVERITIES else "HIGH"
+        )
+
+    # Defensive: if we just enabled HITL but the existing
+    # min_severity is empty (default_config seeds "HIGH" but
+    # round-tripped configs from older versions may have lost
+    # it), backfill the canonical "HIGH" floor. Critical for
+    # making sure the prompt actually fires for *something* —
+    # an empty floor would let every finding skip the prompt.
+    if cfg.guardrail.hilt.enabled and not cfg.guardrail.hilt.min_severity:
+        cfg.guardrail.hilt.min_severity = "HIGH"
+
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
     if options.llm_model:
@@ -502,8 +583,6 @@ def _valid_env_name(value: str) -> bool:
 
 
 def _scanner_availability(cfg: Config) -> list[StepResult]:
-    import shutil
-
     scanners = [
         ("Skill scanner", cfg.scanners.skill_scanner.binary, "defenseclaw setup skill-scanner"),
         ("MCP scanner", cfg.scanners.mcp_scanner.binary, "defenseclaw setup mcp-scanner"),
@@ -519,10 +598,6 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
 
 
 def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
-    import contextlib
-    import io
-    import os
-
     from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
     if connector == "openclaw":
@@ -556,16 +631,113 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")
 
 
-def _start_gateway_structured(cfg: Config) -> StepResult:
-    import os
-    import shutil
-    import subprocess
+def _running_connector_from_state_file(data_dir: str) -> str | None:
+    """Return the connector name the running sidecar booted with, or None.
 
+    The sidecar persists its active connector to
+    ``<data_dir>/active_connector.json`` after a successful
+    ``Connector.Setup`` (see ``internal/gateway/connector/
+    connector_state.go::SaveActiveConnector``). Reading that file is
+    the cheapest way to learn what the live gateway is actually
+    serving without going over HTTP — useful when the gateway is
+    healthy but configured to a stale connector because ``init``
+    short-circuited on ``Sidecar already running`` instead of
+    bouncing it.
+
+    Returns:
+        Lowercased, whitespace-trimmed connector name, OR ``None``
+        when the file is absent / unreadable / malformed. ``None``
+        is the "I don't know" sentinel — callers must treat it as
+        "no drift detectable" rather than "drift detected", because
+        an older sidecar binary that pre-dates connector_state.go
+        won't have written this file at all and we'd rather risk a
+        skipped restart than a spurious one that disrupts in-flight
+        sessions.
+    """
+    path = os.path.join(data_dir, "active_connector.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    name = data.get("name") if isinstance(data, dict) else None
+    if not isinstance(name, str):
+        return None
+    name = name.strip().lower()
+    return name or None
+
+
+def _start_gateway_structured(cfg: Config) -> StepResult:
+    """Start (or restart) the defenseclaw-gateway sidecar to match
+    the on-disk config, returning a structured StepResult.
+
+    Three regimes:
+
+    1. **Not running** → spawn ``defenseclaw-gateway start``.
+    2. **Running, configured connector matches the live one** →
+       no-op, return ``"already running"``. The cheapest path and
+       what most reruns of ``defenseclaw init`` end up doing.
+    3. **Running, configured connector differs from the live one** →
+       call ``defenseclaw-gateway restart``. This is the path the
+       fail-mode/connector-switch UX bug used to short-circuit:
+       operators who flipped ``cfg.claw.mode`` from ``codex`` to
+       ``openclaw`` via ``init`` would see ``✓ Sidecar already
+       running`` and ``defenseclaw status`` would keep reporting
+       Codex because the sidecar reads its connector at boot only.
+
+    Drift detection deliberately uses
+    ``active_connector.json`` instead of ``/health`` — the file is
+    written atomically by the sidecar after a successful
+    ``Connector.Setup`` and works even when the gateway is up but
+    not yet listening, or when network namespaces / firewalls block
+    loopback HTTP. When the file is missing (older sidecar binary,
+    fresh post-uninstall reinstall) we conservatively keep the
+    legacy "already running" behavior — see
+    :func:`_running_connector_from_state_file` for the I-don't-know
+    sentinel rule.
+    """
     gw = shutil.which("defenseclaw-gateway")
     if not gw:
         return StepResult("Sidecar", "warn", "defenseclaw-gateway not on PATH", "make gateway-install")
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
     if _pid_file_running(pid_file):
+        # Compare what the live sidecar booted with against what
+        # the just-saved config says it *should* be running. Drift
+        # implies init/quickstart/migration changed the connector
+        # while the gateway was up — restart so the new config
+        # takes effect now instead of "next time the operator
+        # bounces the daemon themselves".
+        desired = cfg.active_connector()
+        running = _running_connector_from_state_file(cfg.data_dir)
+        if running is not None and running != desired:
+            try:
+                result = subprocess.run(
+                    [gw, "restart"], capture_output=True, text=True, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                return StepResult(
+                    "Sidecar", "warn",
+                    f"connector drift detected ({running} → {desired}) but restart timed out",
+                    "defenseclaw-gateway restart",
+                )
+            except OSError as exc:
+                return StepResult(
+                    "Sidecar", "warn",
+                    f"connector drift detected ({running} → {desired}): {exc}",
+                    "defenseclaw-gateway restart",
+                )
+            if result.returncode == 0:
+                return StepResult(
+                    "Sidecar", "pass",
+                    f"restarted (was {running}, now {desired})",
+                )
+            detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
+            return StepResult(
+                "Sidecar", "warn",
+                f"connector drift detected ({running} → {desired}) but restart failed: "
+                f"{detail[0] if detail else 'restart failed'}",
+                "defenseclaw-gateway restart",
+            )
         return StepResult("Sidecar", "pass", "already running")
     try:
         result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=30)
@@ -580,9 +752,6 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 
 def _pid_file_running(pid_file: str) -> bool:
-    import json
-    import os
-
     try:
         with open(pid_file, encoding="utf-8") as fh:
             raw = fh.read().strip()
@@ -600,8 +769,6 @@ def _pid_file_running(pid_file: str) -> bool:
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
-    import os
-
     if connector == "openclaw":
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):

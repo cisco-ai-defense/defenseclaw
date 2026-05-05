@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -41,7 +42,7 @@ def install_skill_cmd(app: AppContext) -> None:
     """
     from defenseclaw.codeguard_skill import install_codeguard_skill
 
-    click.echo("CodeGuard skill: installing...", nl=False)
+    click.echo(f"{ux.bold('CodeGuard skill:')} installing...", nl=False)
     status = install_codeguard_skill(app.cfg)
     click.echo(f" {status}")
 

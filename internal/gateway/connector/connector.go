@@ -88,6 +88,20 @@ type SetupOpts struct {
 	CodexEnforcement      bool
 	ClaudeCodeEnforcement bool
 
+	// HookFailMode is the operator-chosen response-layer fail mode
+	// baked into every hook script we write. Values: "open" (default,
+	// allow on response-layer failures) or "closed" (block on
+	// response-layer failures). The sidecar populates this from
+	// cfg.Guardrail.EffectiveHookFailMode(); per-connector enforcement
+	// flags can still UPGRADE the value to "closed" (because enabling
+	// enforcement signals strict policy posture), but they NEVER
+	// downgrade an explicit "closed" choice to "open". Empty string
+	// is treated as the default ("open"). Transport-layer failures
+	// are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
+	// the hook scripts themselves and are NOT controlled by this
+	// field.
+	HookFailMode string
+
 	// HILTEnabled tells connectors with native approval surfaces to wire
 	// their host approval delivery path. For OpenClaw this enables plugin
 	// approval forwarding so approval prompts can reach chat-origin

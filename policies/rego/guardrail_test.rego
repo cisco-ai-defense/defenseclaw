@@ -266,6 +266,90 @@ test_scanner_sources_populated if {
 	"opa-policy" in result.scanner_sources
 }
 
+# --- input.hilt override (config.yaml -> Rego) ---
+# These tests pin the SSOT-via-input contract introduced when the Go
+# gateway started passing cfg.Guardrail.HILT into policy.GuardrailInput.
+# Without these, a regression where the gateway stops sending input.hilt
+# (or where the policy stops preferring it) would silently fall back to
+# stale data.guardrail.hilt and surface HIGH findings as `alert` instead
+# of `confirm` — exactly the bug this work was meant to eliminate.
+
+test_input_hilt_enabled_overrides_data_disabled if {
+	# data.guardrail.hilt is disabled (legacy / out-of-sync data.json),
+	# but input.hilt enables HILT — Rego must honor the input.
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "block", "severity": "HIGH", "findings": ["ignore previous"], "reason": "matched: ignore previous"},
+		"cisco_result": null,
+		"content_length": 200,
+		"hilt": {"enabled": true, "min_severity": "HIGH"},
+	}
+		with data.guardrail as _guardrail_data
+
+	result.action == "confirm"
+	result.severity == "HIGH"
+}
+
+test_input_hilt_disabled_overrides_data_enabled if {
+	# Inverse: data.guardrail.hilt is enabled, input.hilt disables it.
+	# Rego must honor the input and degrade to plain `alert`.
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "block", "severity": "HIGH", "findings": ["ignore previous"], "reason": "matched: ignore previous"},
+		"cisco_result": null,
+		"content_length": 200,
+		"hilt": {"enabled": false, "min_severity": "HIGH"},
+	}
+		with data.guardrail as object.union(_guardrail_data, {"hilt": {"enabled": true, "min_severity": "HIGH"}})
+
+	result.action == "alert"
+	result.severity == "HIGH"
+}
+
+test_input_hilt_min_severity_critical_skips_high_confirm if {
+	# input.hilt.min_severity raises the bar to CRITICAL; a HIGH finding
+	# must not trigger `confirm` — it falls through to `alert`.
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "block", "severity": "HIGH", "findings": ["ignore previous"], "reason": "matched: ignore previous"},
+		"cisco_result": null,
+		"content_length": 200,
+		"hilt": {"enabled": true, "min_severity": "CRITICAL"},
+	}
+		with data.guardrail as _guardrail_data
+
+	result.action == "alert"
+	result.severity == "HIGH"
+}
+
+test_input_hilt_absent_falls_back_to_data if {
+	# When input.hilt is omitted (legacy callers, e.g. direct opa eval),
+	# the policy must still consult data.guardrail.hilt — preserving
+	# backward compatibility for the `_sync_guardrail_hilt_to_opa` path.
+	result := guardrail with input as {
+		"direction": "prompt",
+		"model": "test-model",
+		"mode": "action",
+		"scanner_mode": "local",
+		"local_result": {"action": "block", "severity": "HIGH", "findings": ["ignore previous"], "reason": "matched: ignore previous"},
+		"cisco_result": null,
+		"content_length": 200,
+	}
+		with data.guardrail as object.union(_guardrail_data, {"hilt": {"enabled": true, "min_severity": "HIGH"}})
+
+	result.action == "confirm"
+	result.severity == "HIGH"
+}
+
 test_cisco_trust_none_ignores_cisco if {
 	result := guardrail with input as {
 		"direction": "prompt",

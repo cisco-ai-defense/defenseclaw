@@ -85,6 +85,46 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "observe")
 
+    def test_help_lists_fail_mode_flag(self):
+        # Quickstart is the headless path most likely to be wired
+        # into installers and CI. If --fail-mode disappears from
+        # help, scripts that opt into fail-closed silently regress.
+        result = self.runner.invoke(quickstart_cmd, ["--help"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--fail-mode", result.output)
+
+    def test_fail_mode_closed_persists_to_config(self):
+        result = self._invoke([
+            "--connector",
+            "codex",
+            "--skip-gateway",
+            "--fail-mode",
+            "closed",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
+
+    def test_omitting_fail_mode_resolves_to_open(self):
+        result = self._invoke([
+            "--connector",
+            "codex",
+            "--skip-gateway",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        from defenseclaw.config import _normalize_hook_fail_mode
+        raw = cfg["guardrail"].get("hook_fail_mode", "open")
+        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
+
 
 if __name__ == "__main__":
     unittest.main()

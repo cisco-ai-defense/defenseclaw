@@ -30,13 +30,65 @@ import urllib.request
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
-_PASS = click.style("PASS", fg="green", bold=True)
-_FAIL = click.style("FAIL", fg="red", bold=True)
-_WARN = click.style("WARN", fg="yellow", bold=True)
-_SKIP = click.style("SKIP", fg="bright_black")
+# Doctor status markers, recomputed per emission so the per-call
+# TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
+# module load froze the gate to whatever the import-time stdout was —
+# fine for normal runs, broken for tests that monkey-patch stdout
+# between invocations and for ``--json-output`` runs that toggle
+# ``_json_mode`` part-way through a process.
+_DOCTOR_MARKERS: dict[str, tuple[str, str]] = {
+    "pass": ("✓", "green"),
+    "fail": ("✗", "red"),
+    "warn": ("⚠", "yellow"),
+    "skip": ("-", "bright_black"),
+}
+
+
+def _doctor_subsection(title: str) -> None:
+    """Print a doctor sub-section divider.
+
+    Format: blank line, then ``  ── <title> ──`` with the title bold
+    and the box-drawing dashes dimmed in TTY mode. Plain mode keeps
+    the legacy uncolored layout so cron logs and log shippers see
+    the same byte stream they always have.
+    """
+    click.echo()
+    if ux._color_enabled():
+        click.echo(
+            "  "
+            + ux.dim("──")
+            + " "
+            + ux._style(title, fg="cyan", bold=True)
+            + " "
+            + ux.dim("──")
+        )
+    else:
+        click.echo(f"  ── {title} ──")
+
+
+def _doctor_marker(tag: str) -> str:
+    """Return the inline marker for ``tag`` (``pass``/``fail``/...).
+
+    Color-on: ``✓`` (or matching glyph) painted in the tag's color.
+    Color-off: legacy 4-char verb in square brackets (``[PASS]``,
+    ``[FAIL]``, ...) so screen scrapers that grep doctor output for
+    ``[PASS]`` keep working unchanged. The width difference between
+    the two formats is intentional and documented — interactive
+    sessions get a tighter glyph, CI logs get a wider verb.
+    """
+    glyph, fg = _DOCTOR_MARKERS.get(tag, ("?", "white"))
+    if ux._color_enabled():
+        return ux._style(glyph, fg=fg, bold=True)
+    # Plain mode → legacy "[VERB]" so existing log pattern matchers
+    # (and any cron job that splits on `[FAIL]`) keep matching.
+    verb = {"pass": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}.get(
+        tag, tag.upper()
+    )
+    return f"[{verb}]"
 
 
 class _DoctorResult:
@@ -143,11 +195,20 @@ _json_mode = False
 
 def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = None) -> None:
     if not _json_mode:
-        icons = {"pass": _PASS, "fail": _FAIL, "warn": _WARN, "skip": _SKIP}
-        icon = icons.get(tag, tag)
-        line = f"  [{icon}] {label}"
+        marker = _doctor_marker(tag)
+        # Marker + label form the row's primary signal. We bold the
+        # label only when color is on so plain-text output keeps its
+        # legacy width. Detail text is intentionally NOT dimmed —
+        # operators read paths, ports, and HTTP codes from there.
+        if ux._color_enabled():
+            line = f"  {marker} {ux.bold(label)}"
+        else:
+            line = f"  {marker} {label}"
         if detail:
-            line += f"  —  {detail}"
+            # Em-dash separator dims so it visually recedes between
+            # the bold label and the detail value without losing the
+            # connection between the two halves.
+            line += "  " + ux.dim("—") + f"  {detail}"
         click.echo(line)
     if r is not None:
         r.record(tag, label, detail)
@@ -335,7 +396,29 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                             )
                             stale_hint_printed = True
                     else:
-                        _emit("skip", f"  └─ {sub}", "disabled (reported by sidecar)", r=r)
+                        # When the sidecar published a `details.summary`
+                        # (today: gateway standalone-mode short-circuit
+                        # in runGatewayLoop), surface it instead of the
+                        # generic "disabled (reported by sidecar)".
+                        # Otherwise an operator reading doctor output
+                        # has no way to tell apart "intentionally
+                        # disabled" from "broken but the sidecar
+                        # quietly gave up". Falls back to the generic
+                        # message when no summary is published, so
+                        # other subsystems (telemetry / sandbox / …)
+                        # are unaffected.
+                        details_obj = info.get("details") or {}
+                        summary = ""
+                        if isinstance(details_obj, dict):
+                            raw = details_obj.get("summary")
+                            if isinstance(raw, str):
+                                summary = raw.strip()
+                        detail_msg = (
+                            f"disabled — {summary}"
+                            if summary
+                            else "disabled (reported by sidecar)"
+                        )
+                        _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):
@@ -1089,8 +1172,8 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     if not json_out:
         click.echo()
-        click.echo("DefenseClaw Doctor")
-        click.echo("══════════════════")
+        click.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
+        click.echo(ux._style("══════════════════", fg="cyan"))
         click.echo()
 
     _check_config(cfg, r)
@@ -1102,8 +1185,7 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     # has stale openclaw.json paths under .openclaw/extensions; a
     # per-connector inventory pass catches that drift.
     if not json_out:
-        click.echo()
-        click.echo("  ── Connector ──")
+        _doctor_subsection("Connector")
     active_connector = _active_connector(cfg)
     _check_connector_inventory(cfg, active_connector, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
@@ -1114,14 +1196,12 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     _check_connector_residue(cfg, active_connector, r)
 
     if not json_out:
-        click.echo()
-        click.echo("  ── Scanners ──")
+        _doctor_subsection("Scanners")
     _check_scanners(cfg, r)
     _check_scan_coverage(cfg, r)
 
     if not json_out:
-        click.echo()
-        click.echo("  ── Services ──")
+        _doctor_subsection("Services")
     _check_sidecar(cfg, r)
     if active_connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
@@ -1134,25 +1214,21 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     _check_hilt_support(cfg, active_connector, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
-        click.echo()
-        click.echo("  ── Credentials ──")
+        _doctor_subsection("Credentials")
     _check_llm_api_key(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
     _check_registry_credentials(cfg, r)
     if not json_out:
-        click.echo()
-        click.echo("  ── Observability ──")
+        _doctor_subsection("Observability")
     _check_observability(cfg, r)
     if not json_out:
-        click.echo()
-        click.echo("  ── Webhooks ──")
+        _doctor_subsection("Webhooks")
     _check_webhooks(cfg, r)
 
     if do_fix:
         if not json_out:
-            click.echo()
-            click.echo("  ── Auto-fix ──")
+            _doctor_subsection("Auto-fix")
         _run_fixers(cfg, r, assume_yes=assume_yes, json_out=json_out)
 
     # Persist the cached snapshot before exit so the Go TUI (and any
@@ -1165,23 +1241,26 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     if json_out:
         click.echo(json.dumps(r.to_dict(), indent=2))
     else:
-        click.echo()
-        click.echo("  ── Summary ──")
+        _doctor_subsection("Summary")
         parts = []
         if r.passed:
-            parts.append(click.style(f"{r.passed} passed", fg="green"))
+            parts.append(ux._style(f"{r.passed} passed", fg="green", bold=True))
         if r.failed:
-            parts.append(click.style(f"{r.failed} failed", fg="red"))
+            parts.append(ux._style(f"{r.failed} failed", fg="red", bold=True))
         if r.warned:
-            parts.append(click.style(f"{r.warned} warnings", fg="yellow"))
+            parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
         if r.skipped:
-            parts.append(click.style(f"{r.skipped} skipped", dim=True))
+            parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
         click.echo("  " + ", ".join(parts))
         click.echo()
 
     if r.failed:
         if not json_out:
-            click.echo("  Fix the failures above, then re-run: defenseclaw doctor")
+            # Surface the remediation hint in yellow — it's the
+            # primary call-to-action when doctor fails. We use
+            # ``ux.warn`` rather than ``ux.err`` because the line
+            # itself isn't a failure; the failures above are.
+            ux.warn("Fix the failures above, then re-run: defenseclaw doctor", indent="  ")
             click.echo()
         raise SystemExit(1)
 
@@ -1359,14 +1438,27 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
 # is X but data_dir contains Y's artifacts, that's residue from a prior
 # install and Connector.Teardown was never invoked for Y.
 #
-# The OpenClaw pristine backup lives at ``<openclaw.json>.pristine``,
-# which is not under data_dir, so it is handled separately by
-# :func:`_check_connector_residue`.
+# OpenClaw can leave either the old ``<openclaw.json>.pristine`` backup
+# next to its config or a managed backup under connector_backups/, so it
+# is handled separately by :func:`_check_connector_residue`.
 _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
-    "claudecode": ("claudecode_backup.json",),
-    "codex": ("codex_backup.json",),
-    "zeptoclaw": ("zeptoclaw_backup.json",),
+    "claudecode": (
+        "claudecode_backup.json",
+        os.path.join("connector_backups", "claudecode", "settings.json.json"),
+    ),
+    "codex": (
+        "codex_backup.json",
+        "codex_config_backup.json",
+        os.path.join("connector_backups", "codex", "config.toml.json"),
+    ),
+    "zeptoclaw": (
+        "zeptoclaw_backup.json",
+        os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
+    ),
 }
+_OPENCLAW_RESIDUE_ARTIFACTS: tuple[str, ...] = (
+    os.path.join("connector_backups", "openclaw", "openclaw.json.json"),
+)
 
 
 def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
@@ -1408,6 +1500,10 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
     # next to openclaw.json, not under data_dir. Only flag it when
     # OpenClaw is *not* the active connector.
     if active.lower() != "openclaw":
+        for filename in _OPENCLAW_RESIDUE_ARTIFACTS:
+            full = os.path.join(data_dir, filename)
+            if os.path.isfile(full):
+                found.append(("openclaw", full))
         oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
         oc_path = os.path.expanduser(oc_path)
         if oc_path:
@@ -1596,17 +1692,13 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
             return ("pass", f"captured pristine backup at {created}")
         return ("warn", "could not capture backup (permissions?)")
 
-    backup_map = {
-        "claudecode": "claudecode_backup.json",
-        "codex": "codex_backup.json",
-        "zeptoclaw": "zeptoclaw_backup.json",
-    }
-    backup_name = backup_map.get(active_connector)
-    if not backup_name:
+    backup_names = _CONNECTOR_RESIDUE_ARTIFACTS.get(active_connector)
+    if not backup_names:
         return ("skip", f"no backup strategy for connector {active_connector}")
-    backup_path = os.path.join(cfg.data_dir, backup_name)
-    if os.path.isfile(backup_path):
-        return ("skip", f"backup exists at {backup_path}")
+    for backup_name in backup_names:
+        backup_path = os.path.join(cfg.data_dir, backup_name)
+        if os.path.isfile(backup_path):
+            return ("skip", f"backup exists at {backup_path}")
     return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
 
 
@@ -1636,6 +1728,8 @@ def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
             inactive_residue.append(name)
 
     if active != "openclaw":
+        if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
+            inactive_residue.append("openclaw")
         oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
         oc_path = os.path.expanduser(oc_path)
         if oc_path and os.path.isfile(oc_path + ".pristine"):

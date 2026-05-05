@@ -151,6 +151,7 @@ func enrichCodexHookContext(ctx context.Context, req codexHookRequest) context.C
 	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
 		AgentID:   strings.TrimSpace(req.AgentID),
 		AgentName: agentName,
+		AgentType: agentName,
 	})
 	enrichHTTPSpanFromContext(ctx)
 	enrichCodexHookSpan(ctx, req)
@@ -163,16 +164,14 @@ func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 		return
 	}
 	if req.SessionID != "" {
-		span.SetAttributes(
-			attribute.String("gen_ai.conversation.id", req.SessionID),
-			attribute.String("defenseclaw.session_id", req.SessionID),
-		)
+		span.SetAttributes(attribute.String("gen_ai.conversation.id", req.SessionID))
 	}
 	agentName := strings.TrimSpace(req.AgentType)
 	if agentName == "" {
 		agentName = "codex"
 	}
 	span.SetAttributes(attribute.String("gen_ai.agent.name", agentName))
+	span.SetAttributes(attribute.String("gen_ai.agent.type", agentName))
 	if req.AgentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", req.AgentID))
 	}

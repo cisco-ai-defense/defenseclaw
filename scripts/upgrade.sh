@@ -168,11 +168,10 @@ CURRENT_VERSION="${CURRENT_VERSION:-unknown}"
 ok "Installed version : ${CURRENT_VERSION}"
 ok "Upgrade target    : ${RELEASE_VERSION}"
 
-# ── Early exit if already at latest ──────────────────────────────────────────
+# ── Same-version repair ──────────────────────────────────────────────────────
 
-if [[ "${CURRENT_VERSION}" == "${RELEASE_VERSION}" && "${YES}" -eq 0 ]]; then
-    printf "\n  Already at version ${RELEASE_VERSION}. Nothing to do.\n\n"
-    exit 0
+if [[ "${CURRENT_VERSION}" == "${RELEASE_VERSION}" ]]; then
+    warn "Already at version ${RELEASE_VERSION}; continuing to re-apply artifacts and same-version migrations"
 fi
 
 # ── Artifact helper ───────────────────────────────────────────────────────────
@@ -241,13 +240,19 @@ BACKUP_DIR="${BACKUP_ROOT}/upgrade-${TIMESTAMP}"
 mkdir -p "${BACKUP_DIR}"
 
 if [[ -d "${DEFENSECLAW_HOME}" ]]; then
-    for f in config.yaml .env guardrail_runtime.json device.key; do
+    for f in config.yaml .env guardrail_runtime.json device.key \
+        active_connector.json codex_backup.json claudecode_backup.json \
+        zeptoclaw_backup.json codex_config_backup.json; do
         src="${DEFENSECLAW_HOME}/$f"
         [[ -f "${src}" ]] && cp "${src}" "${BACKUP_DIR}/" && ok "Backed up: $f"
     done
     if [[ -d "${DEFENSECLAW_HOME}/policies" ]]; then
         cp -r "${DEFENSECLAW_HOME}/policies" "${BACKUP_DIR}/policies"
         ok "Backed up: policies/"
+    fi
+    if [[ -d "${DEFENSECLAW_HOME}/connector_backups" ]]; then
+        cp -r "${DEFENSECLAW_HOME}/connector_backups" "${BACKUP_DIR}/connector_backups"
+        ok "Backed up: connector_backups/"
     fi
 fi
 
@@ -298,13 +303,44 @@ ok "Python CLI installed"
 
 section "Running Migrations"
 
-MIGRATION_COUNT=$(python3 -c "
-from defenseclaw.migrations import run_migrations
-count = run_migrations('${CURRENT_VERSION}', '${RELEASE_VERSION}', '${OPENCLAW_HOME}')
-print(count)
-" 2>/dev/null || echo "0")
+# Run migrations with the freshly-installed CLI environment. The Python
+# helper is intentionally verbose (click.echo); redirect that progress to
+# stderr so command substitution captures only the numeric count.
+MIGRATION_FAILED=0
+if ! MIGRATION_COUNT=$(MIGRATION_FROM_VERSION="${CURRENT_VERSION}" \
+    MIGRATION_TO_VERSION="${RELEASE_VERSION}" \
+    MIGRATION_OPENCLAW_HOME="${OPENCLAW_HOME}" \
+    MIGRATION_DEFENSECLAW_HOME="${DEFENSECLAW_HOME}" \
+    "${VENV_PYTHON}" - <<'PY'
+import contextlib
+import os
+import sys
 
-if [[ "${MIGRATION_COUNT}" -eq 0 ]]; then
+from defenseclaw.migrations import run_migrations
+
+with contextlib.redirect_stdout(sys.stderr):
+    count = run_migrations(
+        os.environ["MIGRATION_FROM_VERSION"],
+        os.environ["MIGRATION_TO_VERSION"],
+        os.environ["MIGRATION_OPENCLAW_HOME"],
+        os.environ["MIGRATION_DEFENSECLAW_HOME"],
+    )
+print(count)
+PY
+); then
+    MIGRATION_FAILED=1
+    MIGRATION_COUNT=0
+fi
+
+if [[ ! "${MIGRATION_COUNT}" =~ ^[0-9]+$ ]]; then
+    warn "Migration runner returned a non-numeric count: ${MIGRATION_COUNT}"
+    MIGRATION_FAILED=1
+    MIGRATION_COUNT=0
+fi
+
+if [[ "${MIGRATION_FAILED}" -eq 1 ]]; then
+    warn "Migration runner failed; upgrade will continue. Run: defenseclaw doctor --fix"
+elif [[ "${MIGRATION_COUNT}" -eq 0 ]]; then
     ok "No migrations needed"
 else
     ok "Applied ${MIGRATION_COUNT} migration(s)"

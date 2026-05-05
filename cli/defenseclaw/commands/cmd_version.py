@@ -39,7 +39,7 @@ from pathlib import Path
 
 import click
 
-from defenseclaw import __version__
+from defenseclaw import __version__, ux
 from defenseclaw.paths import bundled_extensions_dir
 
 
@@ -275,20 +275,28 @@ def _render_table(components: list[Component]) -> None:
     status_w  = max(len("STATUS"),    *(len(c.status) for c in components))
 
     click.echo(
-        f"  {'COMPONENT'.ljust(name_w)}  "
-        f"{'VERSION'.ljust(version_w)}  "
-        f"{'STATUS'.ljust(status_w)}  ORIGIN"
+        f"  {ux.bold('COMPONENT'.ljust(name_w))}  "
+        f"{ux.bold('VERSION'.ljust(version_w))}  "
+        f"{ux.bold('STATUS'.ljust(status_w))}  "
+        f"{ux.bold('ORIGIN')}"
     )
-    click.echo(f"  {'-' * name_w}  {'-' * version_w}  {'-' * status_w}  {'-' * 40}")
+    click.echo(
+        f"  {ux.dim('─' * name_w)}  {ux.dim('─' * version_w)}  "
+        f"{ux.dim('─' * status_w)}  {ux.dim('─' * 40)}"
+    )
     for c in components:
+        st_fg = {"ok": "green", "missing": "yellow", "error": "red"}.get(c.status, "white")
         click.echo(
-            f"  {c.name.ljust(name_w)}  "
+            f"  {ux.bold(c.name.ljust(name_w))}  "
             f"{c.version.ljust(version_w)}  "
-            f"{c.status.ljust(status_w)}  "
+            f"{ux._style(c.status.ljust(status_w), fg=st_fg, bold=True)}  "
             f"{c.origin}"
         )
         if c.detail:
-            click.echo(f"  {' ' * name_w}  {' ' * version_w}  {' ' * status_w}  ↳ {c.detail}")
+            click.echo(
+                f"  {' ' * name_w}  {' ' * version_w}  {' ' * status_w}  "
+                f"{ux.dim('↳')} {c.detail}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -330,17 +338,17 @@ def version_cmd(as_json: bool, no_drift_exit: bool) -> None:
         ))
     else:
         click.echo()
-        click.echo("  DefenseClaw versions")
+        click.echo(ux._style("  DefenseClaw versions", fg="cyan", bold=True))
         click.echo()
         _render_table(components)
         click.echo()
         if drift:
-            click.echo("  Drift detected:")
+            click.echo(f"  {ux.bold('Drift detected:')}")
             for issue in drift:
-                click.echo(f"    ! {issue}")
+                ux.warn(issue, indent="    ")
             click.echo()
         else:
-            click.echo("  All components in sync.")
+            ux.ok("All components in sync.", indent="  ")
             click.echo()
 
     # Non-zero exit on drift so CI pipelines can gate deploys on a

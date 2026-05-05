@@ -129,8 +129,10 @@ func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// (only generic inspect-* scripts apply). It deliberately does
 	// NOT implement HookScriptOwner — the empty-extras path below
 	// flows through writeHookScriptsCommon's generic-only branch.
+	// Use the opts-aware entry so the operator's HookFailMode is
+	// still honored for those generic hooks.
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScriptsForConnectorObject(hookDir, opts.APIAddr, opts.APIToken, c); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("zeptoclaw hook script: %w", err)
 	}
 
@@ -408,9 +410,9 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 
 // AgentPaths reports the on-disk footprint ZeptoClaw's connector
 // touches. ZeptoClaw is a native Rust binary configured entirely
-// through ~/.zeptoclaw/config.json, so only that file is patched.
-// The connector also writes the inspect-* hook scripts into
-// <DataDir>/hooks/ for proxy-side tool inspection.
+// through ~/.zeptoclaw/config.json, so only that file is patched and
+// backed up via managed + legacy backup files. The connector also writes
+// the inspect-* hook scripts into <DataDir>/hooks/ for proxy-side tool inspection.
 func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	hooks := make([]string, 0, len(HookScripts()))
@@ -419,9 +421,12 @@ func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	}
 	return AgentPaths{
 		PatchedFiles: []string{zeptoClawConfigPath()},
-		BackupFiles:  []string{filepath.Join(opts.DataDir, "zeptoclaw_backup.json")},
-		HookScripts:  hooks,
-		CreatedDirs:  []string{filepath.Join(opts.DataDir, "shims")},
+		BackupFiles: []string{
+			managedFileBackupPath(opts.DataDir, c.Name(), "config.json"),
+			filepath.Join(opts.DataDir, "zeptoclaw_backup.json"),
+		},
+		HookScripts: hooks,
+		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }
 

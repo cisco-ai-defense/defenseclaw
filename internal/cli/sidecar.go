@@ -18,12 +18,9 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -40,16 +37,6 @@ var (
 	sidecarPort  int
 )
 
-var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show health of the running sidecar's subsystems",
-	Long: `Query the sidecar's REST API to display the health of all three subsystems:
-gateway connection, skill watcher, and API server.
-
-The sidecar must be running for this command to work.`,
-	RunE: runSidecarStatus,
-}
-
 func init() {
 	rootCmd.Flags().StringVar(&sidecarToken, "token", "",
 		"DEPRECATED: gateway auth token. Passing secrets on the command line exposes them to ps/procfs. "+
@@ -62,7 +49,6 @@ func init() {
 	}
 	rootCmd.Flags().StringVar(&sidecarHost, "host", "", "Gateway host (default: from config)")
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
-	rootCmd.AddCommand(statusCmd)
 }
 
 func runSidecar(_ *cobra.Command, _ []string) error {
@@ -228,265 +214,6 @@ func sidecarDiagEnabled() bool {
 		return true
 	}
 	return false
-}
-
-func runSidecarStatus(_ *cobra.Command, _ []string) error {
-	bind := "127.0.0.1"
-	if cfg.Gateway.APIBind != "" {
-		bind = cfg.Gateway.APIBind
-	} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
-		bind = cfg.Guardrail.Host
-	}
-	addr := fmt.Sprintf("http://%s:%d/health", bind, cfg.Gateway.APIPort)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(addr)
-	if err != nil {
-		fmt.Println("Sidecar Status: NOT RUNNING")
-		fmt.Printf("  Could not reach %s\n", addr)
-		fmt.Println("  Start the sidecar with: defenseclaw-gateway start")
-		return fmt.Errorf("sidecar unreachable")
-	}
-	defer resp.Body.Close()
-
-	var snap gateway.HealthSnapshot
-	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
-		return fmt.Errorf("sidecar status: parse response: %w", err)
-	}
-
-	uptime := time.Duration(snap.UptimeMs) * time.Millisecond
-
-	fmt.Println("DefenseClaw Sidecar Health")
-	fmt.Println("══════════════════════════")
-	fmt.Printf("  Started:  %s\n", snap.StartedAt.Format(time.RFC3339))
-	fmt.Printf("  Uptime:   %s\n", formatDuration(uptime))
-	fmt.Println()
-
-	// Best-effort fetch of /status for the connector_mode block.
-	// Failure is non-fatal — the health view above is the primary
-	// status surface and we don't want a missing /status (e.g.
-	// older sidecars without the field) to fail the whole command.
-	if mode := fetchConnectorMode(client, bind, cfg.Gateway.APIPort); mode != nil {
-		printConnectorMode(mode)
-	}
-
-	printSubsystem("Gateway", snap.Gateway)
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Telemetry", snap.Telemetry)
-	printSubsystem("Sinks", snap.Sinks)
-	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
-	}
-
-	printConnector(snap.Connector)
-
-	return nil
-}
-
-// printConnector renders the active-connector block (which agent
-// framework — OpenClaw / ZeptoClaw / Claude Code / Codex — the sidecar
-// is currently routing for, plus the live tool/subprocess counters).
-// Skipped when the sidecar has not yet initialised a connector
-// (e.g. guardrail disabled or proxy not yet booted).
-func printConnector(c *gateway.ConnectorHealth) {
-	if c == nil {
-		fmt.Println("  Connected: (no active connector)")
-		fmt.Println()
-		return
-	}
-
-	stateStr := strings.ToUpper(string(c.State))
-	fmt.Printf("  Connected: %s (%s) — %s\n", friendlyConnectorName(c.Name), c.Name, stateStr)
-	if !c.Since.IsZero() {
-		fmt.Printf("             since %s\n", c.Since.Format(time.RFC3339))
-	}
-	if c.ToolInspectionMode != "" || c.SubprocessPolicy != "" {
-		fmt.Printf("             tool inspection: %s    subprocess: %s\n",
-			defaultStr(string(c.ToolInspectionMode), "n/a"),
-			defaultStr(string(c.SubprocessPolicy), "n/a"))
-	}
-	fmt.Printf("             requests: %d  errors: %d  tool inspections: %d  tool blocks: %d  subprocess blocks: %d\n",
-		c.Requests, c.Errors, c.ToolInspections, c.ToolBlocks, c.SubprocessBlocks)
-	fmt.Println()
-}
-
-// friendlyConnectorName mirrors internal/tui/connector_label.go::FriendlyConnectorName
-// for the CLI text output. Kept duplicated to avoid pulling the TUI
-// package (and Bubble Tea) into the CLI binary import graph.
-func friendlyConnectorName(name string) string {
-	switch strings.TrimSpace(name) {
-	case "", "openclaw":
-		return "OpenClaw"
-	case "zeptoclaw":
-		return "ZeptoClaw"
-	case "claudecode":
-		return "Claude Code"
-	case "codex":
-		return "Codex"
-	default:
-		s := strings.TrimSpace(name)
-		if s == "" {
-			return name
-		}
-		return strings.ToUpper(s[:1]) + s[1:]
-	}
-}
-
-func defaultStr(s, fallback string) string {
-	if strings.TrimSpace(s) == "" {
-		return fallback
-	}
-	return s
-}
-
-// connectorModeSummary mirrors the JSON shape emitted by
-// APIServer.connectorModeSummary. We keep the type local to the CLI
-// because it's a UI projection — adding an exported type would
-// pollute the gateway package's API surface for a single consumer.
-type connectorModeSummary struct {
-	Connector      string   `json:"connector"`
-	Mode           string   `json:"mode"`
-	Telemetry      []string `json:"telemetry"`
-	ProxyIntercept bool     `json:"proxy_intercept"`
-}
-
-// fetchConnectorMode does a GET /status and pulls out the
-// connector_mode subobject. Returns nil on any error so callers
-// can degrade gracefully (older gateway versions or transient
-// network failures shouldn't fail the whole status command).
-func fetchConnectorMode(client *http.Client, bind string, port int) *connectorModeSummary {
-	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
-	resp, err := client.Get(addr)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	var envelope struct {
-		ConnectorMode *connectorModeSummary `json:"connector_mode"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return nil
-	}
-	return envelope.ConnectorMode
-}
-
-// printConnectorMode renders the per-connector mode banner. Uses the
-// same column alignment as printSubsystem for visual consistency.
-// Mode label color hint:
-//
-//	guardrail     → enforcement (proxy in data path)
-//	observability → observe-only (no proxy intercept)
-//
-// We don't ANSI-color the output here because the CLI honors the
-// surrounding terminal preferences (NO_COLOR, dumb terminals); the
-// state words alone are descriptive enough.
-func printConnectorMode(m *connectorModeSummary) {
-	fmt.Println("  Connector Mode")
-	fmt.Printf("    Connector:       %s\n", m.Connector)
-	fmt.Printf("    Mode:            %s\n", m.Mode)
-	if len(m.Telemetry) > 0 {
-		fmt.Printf("    Telemetry:       %s\n", strings.Join(m.Telemetry, ", "))
-	}
-	intercept := "no (traffic flows directly to upstream)"
-	if m.ProxyIntercept {
-		intercept = "yes (proxy in data path)"
-	}
-	fmt.Printf("    Proxy intercept: %s\n", intercept)
-	fmt.Println()
-}
-
-func printSubsystem(name string, h gateway.SubsystemHealth) {
-	stateStr := strings.ToUpper(string(h.State))
-	fmt.Printf("  %-10s %s", name+":", stateStr)
-	if !h.Since.IsZero() {
-		fmt.Printf(" (since %s)", h.Since.Format(time.RFC3339))
-	}
-	fmt.Println()
-
-	if h.LastError != "" {
-		fmt.Printf("             last error: %s\n", h.LastError)
-	}
-	if len(h.Details) > 0 {
-		keys := make([]string, 0, len(h.Details))
-		for k := range h.Details {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
-				continue
-			}
-			line, ok := formatDetailValue(h.Details[k])
-			if !ok {
-				// Non-scalar value (slice/map/nil). These are kept
-				// in the /health JSON for API consumers (e.g. the
-				// structured ``sinks: [...]`` array under
-				// ``sinks.details``) but render unreadably through
-				// ``%v`` on a terminal, so we skip them here. The
-				// per-sink scalar keys emitted alongside (e.g.
-				// ``sink_01``) carry the human-readable view.
-				continue
-			}
-			fmt.Printf("             %s: %s\n", k, line)
-		}
-	}
-	fmt.Println()
-}
-
-// formatDetailValue renders a single Details map value as a one-line
-// string for the CLI status panel. JSON unmarshalling reduces every
-// numeric value to “float64“; we render whole numbers as integers
-// so a port like “18789“ prints cleanly rather than as “18789“-
-// with-a-trailing-“.0“. Returns “ok=false“ for slice/map/nil
-// values so callers can skip them rather than dumping a Go-style
-// “[map[...]]“ representation onto the terminal.
-func formatDetailValue(v interface{}) (string, bool) {
-	switch val := v.(type) {
-	case string:
-		return val, true
-	case bool:
-		return fmt.Sprintf("%t", val), true
-	case float64:
-		// Whole numbers — render as int. ``math.Trunc`` keeps
-		// fractional values intact for the rare non-integer case
-		// (e.g. uptime fractions) without forcing a dependency on
-		// the math package; an equality check against the integer
-		// truncation of ``val`` is sufficient and avoids importing
-		// math just for this one site.
-		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val)), true
-		}
-		return fmt.Sprintf("%g", val), true
-	case int, int32, int64:
-		// Direct (non-JSON-decoded) callers — e.g. a future in-
-		// process renderer that does not round-trip through JSON.
-		return fmt.Sprintf("%d", val), true
-	case fmt.Stringer:
-		return val.String(), true
-	case nil:
-		return "", false
-	default:
-		return "", false
-	}
-}
-
-func formatDuration(d time.Duration) string {
-	hours := int(d.Hours())
-	mins := int(d.Minutes()) % 60
-	secs := int(d.Seconds()) % 60
-
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm %ds", hours, mins, secs)
-	}
-	if mins > 0 {
-		return fmt.Sprintf("%dm %ds", mins, secs)
-	}
-	return fmt.Sprintf("%ds", secs)
 }
 
 func tokenStatus(token string) string {

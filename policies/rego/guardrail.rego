@@ -33,8 +33,18 @@ import rego.v1
 #   block_threshold               - minimum severity rank to block (default 4 = CRITICAL)
 #   alert_threshold               - minimum severity rank to alert (default 2 = MEDIUM)
 #   hilt.enabled                  - whether HIGH+ can require approval before allow/block
+#                                   (fallback only — see input.hilt below)
 #   hilt.min_severity             - minimum severity for confirmation (default HIGH)
+#                                   (fallback only — see input.hilt below)
 #   cisco_trust_level             - "full" | "advisory" | "none"
+#
+# HILT input override (input.hilt):
+#   The Go gateway injects the live config.yaml HILT settings as
+#   `input.hilt.{enabled, min_severity}`. When present, these take
+#   precedence over `data.guardrail.hilt` so config.yaml is the single
+#   source of truth. When absent (e.g. direct `opa eval` callers, legacy
+#   integrations), the policy falls back to `data.guardrail.hilt` to
+#   preserve backward compatibility.
 
 default severity := "NONE"
 default reason := ""
@@ -89,7 +99,13 @@ action := "alert" if {
 	_highest_sev_rank >= data.guardrail.alert_threshold
 } else := "allow"
 
-_hilt := object.get(data.guardrail, "hilt", {})
+# Prefer the gateway-supplied input.hilt over data.guardrail.hilt so
+# config.yaml drives the verdict without requiring data.json to be
+# kept in sync. The `else` branch keeps non-gateway callers working
+# (direct `opa eval`, legacy integrations that set data only).
+_hilt := input.hilt if {
+	input.hilt
+} else := object.get(data.guardrail, "hilt", {})
 
 _hilt_enabled := object.get(_hilt, "enabled", false)
 
