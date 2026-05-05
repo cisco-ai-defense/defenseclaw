@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestOTLPIngest_Logs_AcceptsValidPayload pins the success path: a
@@ -142,6 +148,127 @@ func TestOTLPIngest_Logs_AcceptsProtobufContentType(t *testing.T) {
 	}
 	if got := w.Body.String(); got != "{}" {
 		t.Errorf("body = %q, want canonical OTLP empty-success body", got)
+	}
+}
+
+func TestOTLPIngest_Logs_DecodesProtobufSessionAndPromotesTokens(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	otelProvider, err := telemetry.NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer otelProvider.Shutdown(context.Background())
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exp),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	defer otel.SetTracerProvider(prev)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	api := &APIServer{}
+	api.SetOTelProvider(otelProvider)
+	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleOTLPLogs))
+	payload := &collectorlogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
+				otlpStringKV("service.name", "copilot-cli"),
+			}},
+			ScopeLogs: []*logspb.ScopeLogs{{
+				LogRecords: []*logspb.LogRecord{{
+					Attributes: []*commonpb.KeyValue{
+						otlpStringKV("event.name", "copilot.sse_event"),
+						otlpStringKV("event.kind", "response.completed"),
+						otlpStringKV("conversation.id", "session-protobuf"),
+						otlpStringKV("model", "gpt-5"),
+						otlpStringKV("gen_ai.agent.name", "copilot"),
+						otlpIntKV("input_tokens", 17),
+						otlpIntKV("output_tokens", 23),
+					},
+				}},
+			}},
+		}},
+	}
+	body, err := proto.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal protobuf OTLP logs: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("x-defenseclaw-source", "copilot")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans want 1", len(spans))
+	}
+	for key, want := range map[string]string{
+		"gen_ai.conversation.id": "session-protobuf",
+		"gen_ai.agent.type":      "copilot",
+	} {
+		got, ok := attrByKey(spans[0].Attributes, key)
+		if !ok || got.AsString() != want {
+			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
+		}
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
+	if tokenMetric == nil {
+		t.Fatal("expected gen_ai.client.token.usage metric from protobuf logs")
+		return
+	}
+	tokenHist, ok := tokenMetric.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("expected Histogram[float64], got %T", tokenMetric.Data)
+	}
+	got := map[string]float64{}
+	for _, dp := range tokenHist.DataPoints {
+		var tokenType, agentName string
+		for _, attr := range dp.Attributes.ToSlice() {
+			switch string(attr.Key) {
+			case "gen_ai.token.type":
+				tokenType = attr.Value.AsString()
+			case "gen_ai.agent.name":
+				agentName = attr.Value.AsString()
+			}
+		}
+		if agentName != "copilot" {
+			t.Fatalf("gen_ai.agent.name = %q, want copilot", agentName)
+		}
+		got[tokenType] = dp.Sum
+	}
+	if got["input"] != 17 || got["output"] != 23 {
+		t.Fatalf("token histogram sums = %#v, want input=17 output=23", got)
+	}
+}
+
+func otlpStringKV(key, value string) *commonpb.KeyValue {
+	return &commonpb.KeyValue{
+		Key: key,
+		Value: &commonpb.AnyValue{
+			Value: &commonpb.AnyValue_StringValue{StringValue: value},
+		},
+	}
+}
+
+func otlpIntKV(key string, value int64) *commonpb.KeyValue {
+	return &commonpb.KeyValue{
+		Key: key,
+		Value: &commonpb.AnyValue{
+			Value: &commonpb.AnyValue_IntValue{IntValue: value},
+		},
 	}
 }
 

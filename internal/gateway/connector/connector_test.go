@@ -2032,11 +2032,12 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	// `otel.exporter`" at codex startup — a regression that would block
 	// the entire CLI from launching, not just OTel export. The value
 	// must match the kebab-case serde tag for OtelHttpProtocol::Json,
-	// and "json" specifically is required because the gateway's OTLP-HTTP
-	// receiver only accepts application/json bodies (415s protobuf).
+	// and "json" specifically keeps Codex telemetry on the gateway's
+	// stable receive path. The receiver can normalize protobuf too, but
+	// Codex requires this explicit field either way.
 	protocol, _ := otlphttp["protocol"].(string)
 	if protocol != "json" {
-		t.Errorf("otlp-http protocol = %q, want %q (codex requires this field; gateway only accepts application/json)",
+		t.Errorf("otlp-http protocol = %q, want %q (codex requires this explicit field)",
 			protocol, "json")
 	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})

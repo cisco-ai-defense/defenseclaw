@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,9 @@ import (
 
 type agentHookRequest struct {
 	ConnectorName string
+	AgentID       string
+	AgentName     string
+	AgentType     string
 	HookEventName string
 	SessionID     string
 	TurnID        string
@@ -127,9 +131,28 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
 	ctx = ContextWithSessionID(ctx, req.SessionID)
-	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{AgentName: req.ConnectorName})
+	ctx = ContextWithAgentIdentity(ctx, agentIdentityForGenericHook(ctx, req))
 	enrichHTTPSpanFromContext(ctx)
 	return ctx
+}
+
+func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) AgentIdentity {
+	agentName := firstNonEmpty(req.AgentName, req.AgentType, req.ConnectorName)
+	agentType := firstNonEmpty(req.AgentType, req.ConnectorName)
+	identity := AgentIdentity{
+		AgentID:   strings.TrimSpace(req.AgentID),
+		AgentName: agentName,
+		AgentType: agentType,
+	}
+	if reg := SharedAgentRegistry(); reg != nil {
+		resolved := reg.Resolve(ctx, req.SessionID, identity.AgentID)
+		if identity.AgentID == "" {
+			identity.AgentID = resolved.AgentID
+		}
+		identity.AgentInstanceID = resolved.AgentInstanceID
+		identity.SidecarInstanceID = resolved.SidecarInstanceID
+	}
+	return identity
 }
 
 func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHookResponse, elapsed time.Duration) {
@@ -152,6 +175,16 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 	if req.SessionID != "" {
 		attrs = append(attrs, attribute.String("gen_ai.conversation.id", req.SessionID))
 	}
+	identity := AgentIdentityFromContext(ctx)
+	if identity.AgentName != "" {
+		attrs = append(attrs, attribute.String("gen_ai.agent.name", identity.AgentName))
+	}
+	if identity.AgentType != "" {
+		attrs = append(attrs, attribute.String("gen_ai.agent.type", identity.AgentType))
+	}
+	if identity.AgentID != "" {
+		attrs = append(attrs, attribute.String("gen_ai.agent.id", identity.AgentID))
+	}
 	if req.TurnID != "" {
 		attrs = append(attrs, attribute.String("gen_ai.operation.id", req.TurnID))
 	}
@@ -169,6 +202,7 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 	if event == "" {
 		event = inferAgentHookEvent(payload)
 	}
+	agentID, agentName, agentType := extractAgentIdentityFromHookPayload(payload)
 	sessionID := firstString(payload, "session_id", "sessionId", "task_id", "conversation_id", "conversationId", "thread_id", "threadId")
 	turnID := firstString(payload, "turn_id", "turnId", "execution_id", "executionId", "generation_id", "generationId", "tool_call_id", "toolCallId")
 	cwd := firstString(payload, "cwd", "working_directory", "workingDirectory")
@@ -235,6 +269,9 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 
 	return agentHookRequest{
 		ConnectorName: connectorName,
+		AgentID:       agentID,
+		AgentName:     agentName,
+		AgentType:     agentType,
 		HookEventName: event,
 		SessionID:     sessionID,
 		TurnID:        turnID,
@@ -245,6 +282,27 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 		Direction:     direction,
 		Payload:       payload,
 	}
+}
+
+func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentID, agentName, agentType string) {
+	agentID = firstHookIdentityString(payload, "agent_id", "agentId", "assistant_id", "assistantId", "client_agent_id", "clientAgentId")
+	agentName = firstHookIdentityString(payload, "agent_name", "agentName", "assistant_name", "assistantName")
+	agentType = firstHookIdentityString(payload, "agent_type", "agentType", "agent_kind", "agentKind", "runtime", "runtime_name")
+	if agentObj := objectAt(payload, "agent"); agentObj != nil {
+		if agentID == "" {
+			agentID = firstHookIdentityString(agentObj, "id", "agent_id", "agentId", "assistant_id", "assistantId")
+		}
+		if agentName == "" {
+			agentName = firstHookIdentityString(agentObj, "name", "agent_name", "agentName", "display_name", "displayName")
+		}
+		if agentType == "" {
+			agentType = firstHookIdentityString(agentObj, "type", "agent_type", "agentType", "kind", "runtime", "runtime_name")
+		}
+	}
+	if agentName == "" {
+		agentName = firstHookIdentityString(payload, "agent")
+	}
+	return agentID, agentName, agentType
 }
 
 func inferAgentHookEvent(payload map[string]interface{}) string {
@@ -556,6 +614,52 @@ func firstString(obj map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstHookIdentityString(obj map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := obj[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch v := value.(type) {
+		case string:
+			if s := sanitizeHookIdentityValue(v); s != "" {
+				return s
+			}
+		case json.Number:
+			if s := sanitizeHookIdentityValue(v.String()); s != "" {
+				return s
+			}
+		case float64:
+			if s := sanitizeHookIdentityValue(strconv.FormatFloat(v, 'f', -1, 64)); s != "" {
+				return s
+			}
+		case bool:
+			if s := sanitizeHookIdentityValue(strconv.FormatBool(v)); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func sanitizeHookIdentityValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+	runes := []rune(value)
+	if len(runes) > 128 {
+		value = string(runes[:128])
+	}
+	return value
 }
 
 func firstValue(obj map[string]interface{}, keys ...string) interface{} {

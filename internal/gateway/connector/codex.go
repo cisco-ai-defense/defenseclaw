@@ -1126,10 +1126,10 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 // schema - omitting it produces `invalid configuration: missing
 // field `protocol` in `otel.exporter``` at codex startup, which
 // blocks the entire CLI from launching (not just OTel export). We
-// hard-code `"json"` because the gateway's OTLP-HTTP receiver
-// (internal/gateway/otel_ingest.go) accepts `application/json` only
-// and 415s any `application/x-protobuf` body - a mismatched
-// protocol would silently drop every batch instead of erroring out.
+// hard-code `"json"` because it is the stable protocol DefenseClaw has
+// used for Codex native telemetry since the first OTLP integration. The
+// gateway also accepts OTLP protobuf, but pinning JSON avoids changing
+// Codex's wire format during setup/teardown upgrades.
 //
 // log_user_prompt = false is the privacy-preserving default: codex's
 // native OTel emits prompt text only when this is true. When redaction
