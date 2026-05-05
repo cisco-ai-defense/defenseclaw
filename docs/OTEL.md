@@ -65,10 +65,6 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `defenseclaw.gateway.port` | int | `18789` | `config.Gateway.Port` |
 | `defenseclaw.instance.id` | string | `uuid` | generated at startup |
 
-Notes:
-- `deployment.environment` was already the normalized field and remains unchanged.
-- `defenseclaw.device.id` represents the DefenseClaw device-key fingerprint used for sidecar pairing identity. It is not equivalent to `endpoint_id` or a host hardware UUID.
-
 ---
 
 ## 3. Asset Lifecycle Events (Logs)
