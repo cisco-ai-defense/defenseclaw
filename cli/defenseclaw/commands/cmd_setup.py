@@ -1581,13 +1581,16 @@ def _hilt_support_note(connector: str) -> str:
     if connector == "codex":
         return "Codex has no native ask surface here; confirm verdicts are downgraded with raw_action preserved."
     if connector == "zeptoclaw":
-        return "ZeptoClaw is partial: proxy-gated confirmations only; unsupported surfaces alert."
+        return "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved."
     if connector == "copilot":
         return "Copilot CLI supports native ask on documented preToolUse hooks."
     if connector == "cursor":
         return "Cursor supports native ask only on documented ask-capable hook events."
     if connector in {"hermes", "windsurf", "geminicli"}:
-        return "This connector can block supported hook events but has no native human approval surface yet."
+        return (
+            "This connector can block supported hook events but has no native human approval surface; "
+            "confirm falls back explicitly."
+        )
     return "Support depends on the connector surface."
 
 
@@ -3043,7 +3046,7 @@ def _interactive_guardrail_setup(
             click.echo()
             click.echo("  Observability-only mode")
             click.echo("  ───────────────────────")
-            click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
+            click.echo(f"  {label} talks DIRECTLY to its native upstream;")
             click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
             click.echo()
             click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")

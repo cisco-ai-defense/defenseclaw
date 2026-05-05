@@ -399,7 +399,7 @@ func (p *SetupPanel) loadSections() {
 		},
 		{
 			Name:    "Agent Hooks",
-			Summary: "Dedicated Codex and Claude Code hook policy: when scans run, fail behavior, and watched paths.",
+			Summary: "Dedicated agent hook policy: when scans run, fail behavior, and watched paths.",
 			Help:    "mode controls hook behavior; fail_mode=open lets the agent continue if DefenseClaw is unavailable, closed blocks.",
 			Fields: append(agentHookFields("Claude Code", "claude_code", c.ClaudeCode),
 				agentHookFields("Codex", "codex", c.Codex)...),
@@ -414,7 +414,7 @@ func (p *SetupPanel) loadSections() {
 		{
 			Name:    "Gateway",
 			Summary: "Sidecar WebSocket gateway: where the active agent connects, TLS/auth, API bind, reconnect tuning.",
-			Help: "gateway.port is the WebSocket the agent (OpenClaw / ZeptoClaw / Claude Code / Codex) dials; api_port is the local REST sidecar. " +
+			Help: "gateway.port is the WebSocket the active connector dials when fleet integration is enabled; api_port is the local REST sidecar. " +
 				"Leave host=localhost for embedded runs — change only when running the gateway on a different box. " +
 				"Token *env* keeps secrets out of YAML; device_key_file is the persistent machine identity.",
 			Fields: []configField{
@@ -646,7 +646,7 @@ func (p *SetupPanel) loadSections() {
 		[]configField{
 			{Label: "── Plugin / CodeGuard ──", Kind: "header"},
 			{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner,
-				Hint: "Command to scan plugins for the active connector (defaults to built-in plugin scanner — handles OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins)."},
+				Hint: "Command to scan plugins for the active connector (defaults to the built-in connector-aware plugin scanner)."},
 		}...)
 	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
 		llmOverrideFields("Plugin Scanner", "scanners.plugin_llm", c.Scanners.PluginScannerLLM)...)
@@ -796,7 +796,7 @@ func (p *SetupPanel) loadSections() {
 		},
 		{
 			Name:    "Plugin Actions",
-			Summary: "Per-severity response matrix for plugins from the active connector (OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins).",
+			Summary: "Per-severity response matrix for plugins from the active connector.",
 			Help:    "Same shape as Skill Actions. Governs the plugin_dir admission gate.",
 			Fields:  actionMatrixFields("plugin_actions", c.PluginActions),
 		},

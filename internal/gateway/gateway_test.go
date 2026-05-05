@@ -262,7 +262,7 @@ func (s *stubConnector) SetCredentials(string, string)         {}
 func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 
 // TestProxyShouldBindForConnector pins the routing decision behind
-// the codex/claudecode observability defaults. proxyShouldBindForConnector
+// the hook-connector observability defaults. proxyShouldBindForConnector
 // gates whether runGuardrail calls proxy.Run() (binding the proxy
 // listener) or short-circuits to ctx.Done() (observability-only,
 // agent talks directly to its native upstream). A regression that
@@ -295,6 +295,12 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"openclaw_default", &stubConnector{name: "openclaw"}, false, false, true},
 		{"openclaw_with_codex_enf_off", &stubConnector{name: "openclaw"}, false, false, true},
 		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, false, false, true},
+		// New hook-only connectors do not bind the proxy listener in v1.
+		{"hermes_observability", &stubConnector{name: "hermes"}, false, false, false},
+		{"cursor_observability", &stubConnector{name: "cursor"}, false, false, false},
+		{"windsurf_observability", &stubConnector{name: "windsurf"}, false, false, false},
+		{"geminicli_observability", &stubConnector{name: "geminicli"}, false, false, false},
+		{"copilot_observability", &stubConnector{name: "copilot"}, false, false, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, false, false, true},
@@ -315,6 +321,46 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 					tc.name, got, tc.expectBind)
 			}
 		})
+	}
+}
+
+func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
+	cases := []struct {
+		name      string
+		connector string
+		codexEnf  bool
+		claudeEnf bool
+		want      bool
+	}{
+		{"codex_observe", "codex", false, false, false},
+		{"codex_action", "codex", true, false, true},
+		{"claudecode_observe", "claudecode", false, false, false},
+		{"claudecode_action", "claudecode", false, true, true},
+		{"openclaw", "openclaw", false, false, true},
+		{"zeptoclaw", "zeptoclaw", false, false, true},
+		{"hermes", "hermes", false, false, false},
+		{"cursor", "cursor", false, false, false},
+		{"windsurf", "windsurf", false, false, false},
+		{"geminicli", "geminicli", false, false, false},
+		{"copilot", "copilot", false, false, false},
+		{"unknown", "frobozz", false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Guardrail: config.GuardrailConfig{
+					Connector:                    tc.connector,
+					CodexEnforcementEnabled:      tc.codexEnf,
+					ClaudeCodeEnforcementEnabled: tc.claudeEnf,
+				},
+			}
+			if got := proxyShouldBindForConfiguredConnector(cfg); got != tc.want {
+				t.Errorf("proxyShouldBindForConfiguredConnector(%q) = %v, want %v", tc.connector, got, tc.want)
+			}
+		})
+	}
+	if got := proxyShouldBindForConfiguredConnector(nil); !got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want true", got)
 	}
 }
 
@@ -413,6 +459,19 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		// a real listener.
 		{"codex_bind_all", "codex", "0.0.0.0", "", true},
 
+		// Hook-only connectors use local hook/native telemetry and should
+		// not dial the OpenClaw fleet WebSocket unless explicitly enabled.
+		{"hermes_loopback", "hermes", "127.0.0.1", "", false},
+		{"hermes_remote", "hermes", "gw.example.com", "", false},
+		{"cursor_loopback", "cursor", "127.0.0.1", "", false},
+		{"cursor_remote", "cursor", "10.0.0.5", "", false},
+		{"windsurf_loopback", "windsurf", "127.0.0.1", "", false},
+		{"windsurf_remote", "windsurf", "192.168.1.10", "", false},
+		{"geminicli_loopback", "geminicli", "127.0.0.1", "", false},
+		{"geminicli_remote", "geminicli", "gw.example.com", "", false},
+		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
+		{"copilot_remote", "copilot", "10.0.0.5", "", false},
+
 		// Empty / unknown connector with no override → DISABLED.
 		// Reconnect spam against an unconfigured upstream is the
 		// worst possible default for a brand-new install.
@@ -424,6 +483,7 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		// to the same boolean so operators can spell it however
 		// they prefer.
 		{"override_enabled_codex_loopback", "codex", "127.0.0.1", "enabled", true},
+		{"override_enabled_copilot", "copilot", "127.0.0.1", "enabled", true},
 		{"override_on_codex_loopback", "codex", "127.0.0.1", "on", true},
 		{"override_true_codex_loopback", "codex", "127.0.0.1", "true", true},
 		{"override_disabled_openclaw_loopback", "openclaw", "127.0.0.1", "disabled", false},
@@ -584,6 +644,7 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 	}{
 		{"codex_loopback_standalone", "codex", "127.0.0.1", "", false},
 		{"codex_remote_fleet", "codex", "10.0.0.5", "", true},
+		{"geminicli_hook_only", "geminicli", "10.0.0.5", "", false},
 		{"openclaw_default", "openclaw", "127.0.0.1", "", true},
 		{"override_disabled_on_openclaw", "openclaw", "127.0.0.1", "disabled", false},
 		{"override_enabled_on_codex_loopback", "codex", "127.0.0.1", "enabled", true},

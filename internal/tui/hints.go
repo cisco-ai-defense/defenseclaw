@@ -52,7 +52,7 @@ type SystemState struct {
 var rotatingTips = []string{
 	"Press Ctrl+K to open the command palette from anywhere. You can run any DefenseClaw command.",
 	"The Audit panel (8) shows every action DefenseClaw has ever taken — blocks, scans, config changes.",
-	"Use \"scan aibom\" to generate a full component inventory of the active connector (OpenClaw / ZeptoClaw / Claude Code / Codex).",
+	"Use \"scan aibom\" to generate a full component inventory of the active connector.",
 	"Skills with policy verdict \"warning\" are installed but have medium/low findings. Review in Skills (3).",
 	"The guardrail proxy can run in \"observe\" mode to log LLM traffic without blocking. Try \"setup guardrail\".",
 	"Press / on any list to filter. Works in Alerts, Skills, MCPs, Plugins, Logs, and Audit.",

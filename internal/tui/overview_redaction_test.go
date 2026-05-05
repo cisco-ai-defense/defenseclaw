@@ -134,7 +134,25 @@ func TestOverview_ConfigurationBox_HILTSupportByConnector(t *testing.T) {
 
 	p.cfg.Guardrail.Connector = "zeptoclaw"
 	out = stripANSI(p.View(132, 44))
-	if !strings.Contains(out, "partial: proxy-gated") {
-		t.Fatalf("expected ZeptoClaw partial HILT support in Overview, got:\n%s", out)
+	if !strings.Contains(out, "no native ask: alert fallback") {
+		t.Fatalf("expected ZeptoClaw non-native HILT support in Overview, got:\n%s", out)
+	}
+
+	p.cfg.Guardrail.Connector = "cursor"
+	out = stripANSI(p.View(132, 44))
+	if !strings.Contains(out, "partial: documented ask events") {
+		t.Fatalf("expected Cursor event-scoped HILT support in Overview, got:\n%s", out)
+	}
+
+	p.cfg.Guardrail.Connector = "copilot"
+	out = stripANSI(p.View(132, 44))
+	if !strings.Contains(out, "supported: preToolUse ask") {
+		t.Fatalf("expected Copilot native HILT support in Overview, got:\n%s", out)
+	}
+
+	p.cfg.Guardrail.Connector = "geminicli"
+	out = stripANSI(p.View(132, 44))
+	if !strings.Contains(out, "no native ask: alert fallback") {
+		t.Fatalf("expected Gemini CLI fallback HILT support in Overview, got:\n%s", out)
 	}
 }

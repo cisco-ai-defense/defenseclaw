@@ -447,7 +447,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
 	// fleet is configured (see gatewayShouldConnectForConfiguredConnector).
-	// In standalone codex/claudecode mode (no fleet, loopback gateway.host)
+	// In standalone hook-connector mode (no fleet, local hooks/native OTLP)
 	// runGatewayLoop short-circuits to StateDisabled and parks on ctx.Done()
 	// instead of spinning ConnectWithRetry against a port nothing is bound
 	// to. The goroutine is still spawned in both cases so shutdown / wg
@@ -556,16 +556,17 @@ func (s *Sidecar) Run(ctx context.Context) error {
 // running until ctx is cancelled.
 //
 // Standalone short-circuit: when the active connector + host pair
-// indicates no OpenClaw fleet is configured (codex/claudecode +
-// loopback gateway.host, or unknown connector), we publish
+// indicates no OpenClaw fleet is configured (hook-only connector,
+// codex/claudecode + loopback gateway.host, or unknown connector), we publish
 // StateDisabled with an explanatory hint and park on ctx.Done()
 // instead of looping ConnectWithRetry. This mirrors the
 // observability-only branch in runGuardrail (sidecar.go::1283-1294)
 // and closes the historical "Gateway: RECONNECTING forever" symptom
-// on codex-only dev boxes where nothing is listening on
+// on hook-only dev boxes where nothing is listening on
 // 127.0.0.1:18789. Operators who actually want fleet integration
-// either pick connector=openclaw/zeptoclaw or point gateway.host at
-// a real upstream — both cases fall through to the dial loop below.
+// either pick connector=openclaw/zeptoclaw, point codex/claudecode at
+// a real upstream, or set gateway.fleet_mode=enabled — those cases fall
+// through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	if !gatewayShouldConnectForConfiguredConnector(s.cfg) {
 		connName := configuredConnectorName(s.cfg)
@@ -1080,8 +1081,8 @@ func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
 // already happened.
 //
 // Returns true when fleet integration is active; false in standalone
-// mode (codex/claudecode + loopback host, or `gateway.fleet_mode:
-// disabled`).
+// mode (hook-only connectors, codex/claudecode + loopback host, or
+// `gateway.fleet_mode: disabled`).
 func (s *Sidecar) fleetRPCsEnabled() bool {
 	return gatewayShouldConnectForConfiguredConnector(s.cfg)
 }
@@ -1379,17 +1380,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 // proxyShouldBindForConnector returns true when the active connector
 // requires the proxy listener to be bound — i.e. the agent's data
 // path goes through DefenseClaw. For the observability-default
-// connectors (codex, claudecode) this returns false when their
-// enforcement flag is disabled, so the proxy port stays unbound and
-// the agent talks directly to its native upstream. OpenClaw and
-// ZeptoClaw always return true: those connectors were designed
-// around the fetch-interceptor / api_base redirect from day one and
-// have no observability-only path.
+// connectors this returns false in observability mode, so the proxy
+// port stays unbound and the agent talks directly to its native upstream.
+// OpenClaw and ZeptoClaw always return true: those connectors were
+// designed around the fetch-interceptor / api_base redirect from day one
+// and have no observability-only path.
 //
 // Adding a new connector? Default-on (return true) is the
 // conservative choice for guardrail-style adapters; only return
-// false when the connector ships native telemetry comparable to
-// the codex [hooks] table + native OTel exporter.
+// false when the connector ships local hook/native telemetry that keeps
+// DefenseClaw visible without a proxy listener.
 func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailConfig) bool {
 	if conn == nil {
 		return true
@@ -1435,6 +1435,8 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 		return cfg.Guardrail.CodexEnforcementEnabled
 	case "claudecode":
 		return cfg.Guardrail.ClaudeCodeEnforcementEnabled
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return false
 	default:
 		return true
 	}
@@ -1454,10 +1456,12 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             skipping it would break every
 //	                             existing OpenClaw install.
 //	codex / claudecode + loopback host
-//	                           → SKIP. Codex/ClaudeCode in either
+//	                           → SKIP. Codex/Claude Code in either
 //	                             observe or action mode emit telemetry
-//	                             through hooks + the local guardrail
-//	                             proxy + local audit. The loopback
+//	                             through hooks/native telemetry +
+//	                             local API/audit; action mode can
+//	                             additionally bind the proxy when
+//	                             enforcement is enabled. The loopback
 //	                             default (127.0.0.1:18789) means the
 //	                             operator never wired in an OpenClaw
 //	                             daemon — nothing is listening there
@@ -1469,6 +1473,12 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
+//	hermes / cursor / windsurf / geminicli / copilot
+//	                           → SKIP. These connectors are local
+//	                             hook/native-telemetry surfaces in
+//	                             this PR and do not use the OpenClaw
+//	                             fleet WebSocket unless the operator
+//	                             explicitly sets fleet_mode=enabled.
 //	empty / unknown            → SKIP. Surfacing DISABLED is safer
 //	                             than reconnect-loop noise against
 //	                             an unconfigured upstream.
@@ -1497,6 +1507,8 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect
 		// spam. An operator who genuinely wants fleet dial will set

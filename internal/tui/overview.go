@@ -148,13 +148,13 @@ func (p *OverviewPanel) buildNotices() {
 
 	// "Broken" means the operator should care: stopped/error/reconnecting
 	// all imply the sidecar tried to bring up the gateway and failed.
-	// "Disabled" is intentional standalone mode (codex/claudecode +
-	// loopback host, or `gateway.fleet_mode: disabled`) — the gateway
+	// "Disabled" is intentional standalone mode (hook-only connectors,
+	// codex/claudecode + loopback host, or `gateway.fleet_mode: disabled`) — the gateway
 	// dial loop short-circuits to StateDisabled by design, and the
 	// rest of the pipeline (proxy, hooks, audit, watcher local
 	// enforcement) is fully functional. Treating disabled as
 	// "offline" produced a misleading red error notice on every
-	// codex-only dev box. See sidecar.go::runGatewayLoop standalone
+	// hook-only dev box. See sidecar.go::runGatewayLoop standalone
 	// short-circuit + gatewayShouldConnectForConfiguredConnector.
 	gatewayBroken := p.health == nil || gatewayHealthIsBroken(p.health.Gateway.State)
 	gatewayStandalone := p.health != nil && strings.EqualFold(p.health.Gateway.State, "disabled")
@@ -303,6 +303,12 @@ func zeroConnectorRequestsNotice(cfg *config.Config, connectorName string, uptim
 				formatDuration(uptime),
 			)
 		}
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return fmt.Sprintf(
+			"%s connector has seen 0 hook events after %s — normal until the agent emits a supported hook; verify connector hook setup if this persists",
+			name,
+			formatDuration(uptime),
+		)
 	}
 	return fmt.Sprintf(
 		"%s connector has seen 0 requests after %s — verify your agent is dialing the gateway port (gateway.port)",
@@ -627,6 +633,8 @@ func (p *OverviewPanel) connectorEnforcementText() string {
 		return p.theme.High.Render("ZeptoClaw proxy-gated")
 	case "openclaw":
 		return p.theme.High.Render("OpenClaw proxy enforcement")
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return p.theme.Medium.Render(FriendlyConnectorName(connector) + " observe-only hooks")
 	default:
 		return p.theme.Medium.Render(FriendlyConnectorName(connector) + " connector")
 	}
@@ -640,13 +648,17 @@ func (p *OverviewPanel) hiltSupportText() string {
 	var label string
 	switch p.activeConnectorName() {
 	case "openclaw":
-		label = "supported: tools/outbound"
+		label = "supported: brokered approval"
 	case "claudecode":
 		label = "supported: PreToolUse ask"
-	case "codex":
-		label = "partial: PermissionRequest"
-	case "zeptoclaw":
-		label = "partial: proxy-gated"
+	case "copilot":
+		label = "supported: preToolUse ask"
+	case "cursor":
+		label = "partial: documented ask events"
+	case "codex", "zeptoclaw":
+		label = "no native ask: alert fallback"
+	case "hermes", "windsurf", "geminicli":
+		label = "no native ask: alert fallback"
 	default:
 		label = "unknown connector support"
 	}
@@ -1169,7 +1181,7 @@ func (p *OverviewPanel) gatewayStandaloneHint() string {
 // `stopped`, `unknown`, etc. Returns false for `running` (healthy) and
 // `disabled` (intentional standalone). The split exists so the TUI's
 // red "Gateway is offline" notice fires only when something is
-// actually broken, not when codex/claudecode is correctly running
+// actually broken, not when a hook connector is correctly running
 // without an OpenClaw fleet. Mirrors the health classification used
 // by `defenseclaw doctor` so the two surfaces don't disagree.
 func gatewayHealthIsBroken(state string) bool {
