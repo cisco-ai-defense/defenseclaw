@@ -51,6 +51,7 @@ def install_cmd(app: AppContext, connector: str, target: str, replace: bool) -> 
     from defenseclaw.codeguard_skill import install_codeguard_asset
 
     status = install_codeguard_asset(app.cfg, connector=connector or None, target=target, replace=replace)
+    _raise_install_error_if_needed(target, status)
     click.echo(f"CodeGuard {target}: {status}")
 
     from defenseclaw.commands import hint
@@ -65,7 +66,13 @@ def install_skill_cmd(app: AppContext) -> None:
 
     click.echo(f"{ux.bold('CodeGuard skill:')} installing...", nl=False)
     status = install_codeguard_skill(app.cfg)
+    _raise_install_error_if_needed("skill", status)
     click.echo(f" {status}")
 
     from defenseclaw.commands import hint
     hint("Scan code now:  defenseclaw scan code <path>")
+
+
+def _raise_install_error_if_needed(target: str, status: str) -> None:
+    if status.startswith("conflict at ") or status.startswith("unsupported"):
+        raise click.ClickException(f"CodeGuard {target}: {status}")

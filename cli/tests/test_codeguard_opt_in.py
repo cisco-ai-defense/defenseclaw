@@ -18,11 +18,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from click.testing import CliRunner
 from defenseclaw.codeguard_skill import (
     codeguard_status,
     ensure_codeguard_skill,
     install_codeguard_asset,
 )
+from defenseclaw.commands.cmd_codeguard import codeguard
+from defenseclaw.context import AppContext
 
 
 def _cfg(active: str, root):
@@ -63,6 +66,26 @@ def test_codeguard_rule_install_conflict_requires_replace(tmp_path, monkeypatch)
     replaced = install_codeguard_asset(cfg, connector="cursor", target="rule", replace=True)
     assert replaced.startswith("installed to ")
     assert "defenseclaw:codeguard" in rule.read_text(encoding="utf-8")
+
+
+def test_codeguard_cli_conflict_exits_nonzero(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = _cfg("cursor", tmp_path)
+    rule = tmp_path / ".cursor" / "rules" / "codeguard.mdc"
+    rule.parent.mkdir(parents=True)
+    rule.write_text("user-owned rule\n", encoding="utf-8")
+    app = AppContext()
+    app.cfg = cfg
+
+    result = CliRunner().invoke(
+        codeguard,
+        ["install", "--connector", "cursor", "--target", "rule"],
+        obj=app,
+    )
+
+    assert result.exit_code != 0
+    assert "conflict at " in result.output
+    assert "use --replace" in result.output
 
 
 def test_ensure_codeguard_skill_is_noop(tmp_path):
