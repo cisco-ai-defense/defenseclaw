@@ -80,10 +80,10 @@ def _is_help_invocation(ctx: click.Context) -> bool:
 @click.version_option(version=__version__, prog_name="defenseclaw")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Enterprise governance layer for OpenClaw.
+    """Enterprise governance layer for AI coding agents.
 
-    Scans skills, MCP servers, and code before they run.
-    Enforces block/allow lists. Provides audit and alerting.
+    Discovers AI usage, scans skills, MCP servers, plugins, and code
+    before they run, and provides audit, telemetry, and enforcement.
     """
     ctx.ensure_object(AppContext)
     app = ctx.obj

@@ -46,7 +46,7 @@ Use `<binary> --help` for any command.
 
 | Command | Description |
 |---------|-------------|
-| `skill list` | List all OpenClaw skills with scan severity and enforcement status |
+| `skill list` | List active agent skills with scan severity and enforcement status |
 | `skill scan <target>` | Scan a skill by name, path, or `all` for all configured skills |
 | `skill install <name>` | Install via clawhub, scan, enforce block/allow list |
 | `skill info <name>` | Show detailed skill metadata, scan results, and enforcement actions |

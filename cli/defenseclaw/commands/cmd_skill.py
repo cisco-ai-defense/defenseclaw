@@ -37,7 +37,7 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def skill() -> None:
-    """Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
+    """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
 
 
 # ---------------------------------------------------------------------------

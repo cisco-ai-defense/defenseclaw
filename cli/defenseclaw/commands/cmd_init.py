@@ -368,7 +368,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     )
     click.echo(
         f"    {ux.accent('defenseclaw skill scan all')}   "
-        + ux.dim("Scan installed OpenClaw skills")
+        + ux.dim("Scan installed agent skills")
     )
     click.echo(
         f"    {ux.accent('defenseclaw mcp scan --all')}   "

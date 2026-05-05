@@ -194,7 +194,10 @@ class BuildPlanConnectorTests(unittest.TestCase):
             guardrail = Guardrail()
             claw = Claw()
 
-        with patch("defenseclaw.commands.cmd_uninstall.config_module.load",
+        with tempfile.TemporaryDirectory() as data_dir, \
+             patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+                   return_value=data_dir), \
+             patch("defenseclaw.commands.cmd_uninstall.config_module.load",
                    return_value=Cfg()):
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,

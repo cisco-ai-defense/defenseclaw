@@ -113,12 +113,6 @@ type SetupOpts struct {
 	// sessions instead of living only in the native approval queue.
 	HILTEnabled bool
 
-	// HookFailMode is the active connector hook failure policy. Hook-only
-	// connectors default this to "open" unless the operator explicitly
-	// requests "closed" and the vendor surface supports fail-closed
-	// semantics.
-	HookFailMode string
-
 	// InstallCodeGuard enables explicit, opt-in native Project CodeGuard
 	// bootstrapping for connectors that have their own extension mechanism.
 	// The sidecar default is false; CLI startup/init/setup must not flip it

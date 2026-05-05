@@ -307,3 +307,40 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 		t.Fatalf("cursor hooks did not enable failClosed when explicitly requested:\n%s", string(data))
 	}
 }
+
+func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
+	cases := []struct {
+		name         string
+		connector    *hookOnlyConnector
+		wantFailMode string
+	}{
+		{name: "cursor_supports_fail_closed", connector: NewCursorConnector(), wantFailMode: "closed"},
+		{name: "geminicli_supports_fail_closed", connector: NewGeminiCLIConnector(), wantFailMode: "closed"},
+		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
+		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := SetupOpts{
+				DataDir:      filepath.Join(dir, "dc"),
+				APIAddr:      "127.0.0.1:18970",
+				APIToken:     "tok-test",
+				HookFailMode: "closed",
+				WorkspaceDir: dir,
+			}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dir, "hooks"), opts, tc.connector); err != nil {
+				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+			}
+			body, err := os.ReadFile(filepath.Join(dir, "hooks", tc.connector.scriptName))
+			if err != nil {
+				t.Fatalf("read hook script: %v", err)
+			}
+			want := `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-` + tc.wantFailMode + `}"`
+			if !strings.Contains(string(body), want) {
+				t.Fatalf("hook script missing %s:\n%s", want, string(body))
+			}
+		})
+	}
+}

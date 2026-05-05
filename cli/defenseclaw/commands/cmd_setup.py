@@ -1699,7 +1699,11 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 # ---------------------------------------------------------------------------
 
 @setup.command("guardrail")
-@click.option("--disable", is_flag=True, help="Disable guardrail and revert OpenClaw config")
+@click.option(
+    "--disable",
+    is_flag=True,
+    help="Disable guardrail and restore connector config where applicable.",
+)
 # ``--connector`` is the canonical name (matches scripts/install.sh and
 # /v1/connectors). ``--agent`` is kept as an alias for backward
 # compatibility with existing scripts and docs. Both bind to the same
@@ -1737,7 +1741,7 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 @click.option("--disable-redaction/--enable-redaction", default=None,
               help="Disable or enable prompt/log redaction")
 @click.option("--restart/--no-restart", default=True,
-              help="Restart gateway and openclaw after setup (default: on)")
+              help="Restart gateway and the active connector after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
               help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", "--accept-defaults", is_flag=True,
@@ -2448,7 +2452,13 @@ def _make_observability_setup_command(connector: str) -> click.Command:
 
     @click.command(
         connector,
-        help=f"Configure DefenseClaw for {label} observability (no enforcement).",
+        help=(
+            f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+            "Pins the active connector so CLI/TUI scanners read that agent's "
+            "documented local surfaces. Enforcement remains opt-in through "
+            "`defenseclaw setup guardrail` or connector hook action mode."
+        ),
+        short_help=f"Configure DefenseClaw for {label} observability.",
     )
     @click.option(
         "--yes", "-y", "yes",
@@ -2703,7 +2713,7 @@ def _apply_connector_mode_switch(
 )
 @pass_ctx
 def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> None:
-    """Switch the active claw connector with smart guardrail inheritance.
+    """Switch the active agent connector with smart guardrail inheritance.
 
     \b
     Inheritance rules:

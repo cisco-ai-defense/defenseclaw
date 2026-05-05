@@ -454,6 +454,10 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     "closed" too. This only fires when the operator never made
 //     an explicit choice.
 //  3. Otherwise: defaultHookFailMode ("open").
+//  4. Hook-only connectors may use explicit "closed" only when their
+//     documented hook surface supports fail-closed behavior. Unsupported
+//     connectors stay fail-open and rely on their config writer to omit
+//     vendor fail-closed fields.
 //
 // Transport-layer failures (gateway unreachable / 5xx) are NOT
 // governed by FailMode — they always allow unless the operator opts
@@ -484,13 +488,11 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 				failMode = "closed"
 			}
 		}
-	default:
-		if hp, ok := c.(HookCapabilityProvider); ok {
-			caps := hp.HookCapabilities(opts)
+	}
+	if hp, ok := c.(HookCapabilityProvider); ok {
+		caps := hp.HookCapabilities(opts)
+		if failMode == "closed" && !caps.SupportsFailClosed {
 			failMode = "open"
-			if caps.SupportsFailClosed && strings.TrimSpace(opts.HookFailMode) == "closed" {
-				failMode = "closed"
-			}
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
