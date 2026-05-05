@@ -146,16 +146,35 @@ func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) error {
 func (p *OverviewPanel) buildNotices() {
 	p.notices = nil
 
-	gatewayOff := p.health == nil || p.health.Gateway.State != "running"
+	// "Broken" means the operator should care: stopped/error/reconnecting
+	// all imply the sidecar tried to bring up the gateway and failed.
+	// "Disabled" is intentional standalone mode (codex/claudecode +
+	// loopback host, or `gateway.fleet_mode: disabled`) — the gateway
+	// dial loop short-circuits to StateDisabled by design, and the
+	// rest of the pipeline (proxy, hooks, audit, watcher local
+	// enforcement) is fully functional. Treating disabled as
+	// "offline" produced a misleading red error notice on every
+	// codex-only dev box. See sidecar.go::runGatewayLoop standalone
+	// short-circuit + gatewayShouldConnectForConfiguredConnector.
+	gatewayBroken := p.health == nil || gatewayHealthIsBroken(p.health.Gateway.State)
+	gatewayStandalone := p.health != nil && strings.EqualFold(p.health.Gateway.State, "disabled")
 	guardrailOff := p.cfg == nil || !p.cfg.Guardrail.Enabled
 	_, scannerErr := exec.LookPath("skill-scanner")
 
-	if gatewayOff && guardrailOff && scannerErr != nil {
+	if gatewayBroken && guardrailOff && scannerErr != nil {
 		p.notices = append(p.notices, notice{"info", "First time? Head to the Setup tab (press 0) to configure DefenseClaw."})
 	}
 
-	if gatewayOff {
+	if gatewayBroken {
 		p.notices = append(p.notices, notice{"error", "Gateway is offline — press : then \"start\" to launch"})
+	} else if gatewayStandalone {
+		// Intentional standalone — surface a single info-level breadcrumb
+		// so an operator who mis-set `gateway.fleet_mode: disabled` on
+		// a fleet box can spot it, but nothing screams "broken".
+		hint := p.gatewayStandaloneHint()
+		if hint != "" {
+			p.notices = append(p.notices, notice{"info", hint})
+		}
 	}
 	if p.cfg != nil && guardrailOff {
 		p.notices = append(p.notices, notice{"warn", "LLM guardrail not configured — press [g] to set up"})
@@ -1099,9 +1118,74 @@ func (p *OverviewPanel) gatewayDetail() string {
 	if p.health == nil {
 		return ""
 	}
+	// In standalone mode (no OpenClaw fleet) we replace the uptime
+	// counter with the human-readable summary the sidecar publishes
+	// in health.Gateway.Details. Showing "up 4m23s" alongside
+	// state=disabled was confusing — operators read it as "the
+	// gateway is up but the sidecar thinks it's disabled, something
+	// is wrong" when the truth is "the dial loop never started by
+	// design". The summary string is set in
+	// runGatewayLoop's standalone branch.
+	if strings.EqualFold(p.health.Gateway.State, "disabled") {
+		if s := stringDetail(p.health.Gateway.Details, "summary"); s != "" {
+			return s
+		}
+	}
 	uptime := time.Duration(p.health.UptimeMS) * time.Millisecond
 	if uptime > 0 {
 		return fmt.Sprintf("up %s", formatDuration(uptime))
+	}
+	return ""
+}
+
+// gatewayStandaloneHint returns a short user-facing breadcrumb shown
+// when the gateway is in StateDisabled. Pulls from health.Gateway.Details
+// so the message is consistent with whatever the sidecar emitted in
+// runGatewayLoop's short-circuit (e.g. "telemetry continues via
+// hooks + local audit; point gateway.host at a real OpenClaw upstream
+// and restart to enable fleet integration"). Returning "" suppresses
+// the notice entirely — used when the snapshot is missing or the
+// sidecar didn't supply a hint, since a bare "Gateway: disabled"
+// row in the SERVICES box already conveys the state.
+func (p *OverviewPanel) gatewayStandaloneHint() string {
+	if p.health == nil {
+		return ""
+	}
+	if hint := stringDetail(p.health.Gateway.Details, "hint"); hint != "" {
+		return hint
+	}
+	return stringDetail(p.health.Gateway.Details, "summary")
+}
+
+// gatewayHealthIsBroken returns true for states that imply the sidecar
+// tried to bring up the gateway and failed — `error`, `reconnecting`,
+// `stopped`, `unknown`, etc. Returns false for `running` (healthy) and
+// `disabled` (intentional standalone). The split exists so the TUI's
+// red "Gateway is offline" notice fires only when something is
+// actually broken, not when codex/claudecode is correctly running
+// without an OpenClaw fleet. Mirrors the health classification used
+// by `defenseclaw doctor` so the two surfaces don't disagree.
+func gatewayHealthIsBroken(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "running", "disabled":
+		return false
+	default:
+		return true
+	}
+}
+
+// stringDetail safely extracts a string field from a SubsystemHealth.Details
+// map. Returns "" on any type mismatch / missing key. Used by the
+// standalone-hint helpers above so a malformed health snapshot can't
+// panic the TUI.
+func stringDetail(details map[string]interface{}, key string) string {
+	if details == nil {
+		return ""
+	}
+	if v, ok := details[key]; ok {
+		if s, ok := v.(string); ok {
+			return strings.TrimSpace(s)
+		}
 	}
 	return ""
 }

@@ -57,7 +57,12 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("DefenseClaw Status", result.output)
         self.assertIn("Environment:", result.output)
-        self.assertIn("Scanners:", result.output)
+        # Section headers in `status` switched from a colon-suffix
+        # ("Scanners:") to an underline-divider style ("Scanners\n  ────────")
+        # to match the rest of the CLI wizard pattern. We assert on
+        # the underlined heading (without colon) so this lock-in
+        # survives a future ANSI-coloring tweak.
+        self.assertIn("Scanners", result.output)
         self.assertIn("Sidecar:", result.output)
         self.assertIn("not running", result.output)
 

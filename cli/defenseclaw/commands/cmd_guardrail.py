@@ -40,7 +40,19 @@ from __future__ import annotations
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+
+# Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
+# intentionally NOT imported at module load. Importing cmd_setup
+# pulls in the heavy ``click`` command tree (every setup subcommand,
+# every connector wizard) which we don't need when the operator runs
+# ``defenseclaw guardrail status`` or any of the no-restart paths
+# below. Each subcommand imports ``_restart_services`` lazily inside
+# its ``if restart`` branch — keeps cmd_guardrail importable in
+# trimmed-down environments and lets tests patch
+# ``cmd_setup._restart_services`` (the canonical lookup target) once
+# rather than per-subcommand.
 
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
@@ -92,18 +104,31 @@ def status_cmd(app: AppContext) -> None:
     """Show whether the guardrail is enabled and which connector is active."""
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
-    click.echo()
-    click.echo("  Guardrail status")
-    click.echo("  ─────────────────")
-    click.echo(f"  • enabled:    {'yes' if gc.enabled else 'no'}")
-    click.echo(f"  • connector:  {_connector_label(connector)} ({connector})")
-    click.echo(f"  • mode:       {gc.mode or 'observe'}")
-    click.echo(f"  • port:       {gc.port}")
+    fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    ux.section("Guardrail status", indent="  ")
+    enabled_txt = "yes" if gc.enabled else "no"
+    enabled_val = (
+        ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
+    )
+    click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+    click.echo(
+        f"  • {ux._style('connector:', fg='bright_black', bold=True)}  "
+        f"{_connector_label(connector)} ({connector})"
+    )
+    click.echo(f"  • {ux._style('mode:', fg='bright_black', bold=True)}       {gc.mode or 'observe'}")
+    fm_display = (
+        ux._style(fail_mode, fg="yellow") if fail_mode == "closed" else fail_mode
+    )
+    click.echo(
+        f"  • {ux._style('fail mode:', fg='bright_black', bold=True)}  {fm_display}  "
+        f"{ux.dim('(hook response-layer failures)')}"
+    )
+    click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
     if gc.enabled:
-        click.echo("  Disable with:  defenseclaw guardrail disable")
+        click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
-        click.echo("  Enable with:   defenseclaw guardrail enable")
+        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
     click.echo()
 
 
@@ -125,45 +150,59 @@ def disable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
     connector = _resolve_active_connector(app.cfg)
 
     if not gc.enabled:
-        click.echo(f"  Guardrail is already disabled ({_connector_label(connector)} connector).")
+        click.echo(
+            f"  {ux.dim('Guardrail is already disabled')} "
+            f"({_connector_label(connector)} connector)."
+        )
         return
 
     click.echo()
-    click.echo(f"  Disabling guardrail for {_connector_label(connector)} ({connector})")
+    click.echo(
+        f"  {ux.bold('Disabling guardrail')} for {_connector_label(connector)} ({connector})"
+    )
     if restart:
-        click.echo("  Will restart the gateway so the connector teardown runs immediately.")
+        ux.subhead(
+            "Will restart the gateway so the connector teardown runs immediately.",
+            indent="  ",
+        )
     else:
-        click.echo("  --no-restart specified: gateway will continue running with the old policy")
-        click.echo("  until you restart it manually ('defenseclaw-gateway restart').")
+        ux.subhead(
+            "--no-restart specified: gateway will continue running with the old policy "
+            "until you restart it manually ('defenseclaw-gateway restart').",
+            indent="  ",
+        )
     click.echo()
 
     if not yes and not click.confirm("  Proceed?", default=True):
-        click.echo("  Cancelled.")
+        click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
     gc.enabled = False
     try:
         app.cfg.save()
-        click.echo("  ✓ Config saved (guardrail.enabled = false)")
+        ux.ok("Config saved (guardrail.enabled = false)", indent="  ")
     except OSError as exc:
-        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
-        click.echo("    Re-run after fixing the underlying I/O error.", err=True)
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
     if restart:
-        # Lazy import: cmd_setup pulls in heavy click trees we don't
-        # need when --no-restart is set, and we want this command to
-        # stay importable in environments where the operator has
-        # disabled some optional providers.
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        _restart_services(
+        # Lazy import: see module-level note. We import the cmd_setup
+        # MODULE rather than the function so test patches that target
+        # ``defenseclaw.commands.cmd_setup._restart_services`` (the
+        # canonical lookup target) intercept the call. ``from
+        # cmd_setup import _restart_services`` would bind a local
+        # name at lazy-import time which still picks up an active
+        # patch, but going through ``cmd_setup._restart_services()``
+        # is the more obviously-correct form for readers.
+        from defenseclaw.commands import cmd_setup
+        cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
         )
-        click.echo(f"  ✓ {_connector_label(connector)} connector teardown complete")
+        ux.ok(f"{_connector_label(connector)} connector teardown complete", indent="  ")
         click.echo()
 
     if app.logger:
@@ -191,7 +230,10 @@ def enable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
     connector = _resolve_active_connector(app.cfg)
 
     if gc.enabled:
-        click.echo(f"  Guardrail is already enabled ({_connector_label(connector)} connector).")
+        click.echo(
+            f"  {ux.dim('Guardrail is already enabled')} "
+            f"({_connector_label(connector)} connector)."
+        )
         return
 
     # Sanity-check that there's enough config for re-enable to actually
@@ -199,48 +241,188 @@ def enable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
     # silently route real traffic through an unconfigured upstream, so
     # we fail fast with a remediation pointer to the full setup flow.
     if not (gc.model or app.cfg.llm.model):
-        click.echo(
-            "  ✗ Cannot enable: guardrail.model is not set.\n"
-            "    Run 'defenseclaw setup guardrail' to configure first.",
-            err=True,
-        )
+        ux.err("Cannot enable: guardrail.model is not set.", indent="  ")
+        ux.subhead("Run 'defenseclaw setup guardrail' to configure first.", indent="    ")
         raise SystemExit(1)
 
     click.echo()
-    click.echo(f"  Enabling guardrail for {_connector_label(connector)} ({connector})")
+    click.echo(
+        f"  {ux.bold('Enabling guardrail')} for {_connector_label(connector)} ({connector})"
+    )
     if restart:
-        click.echo("  Will restart the gateway so the connector setup runs immediately.")
+        ux.subhead(
+            "Will restart the gateway so the connector setup runs immediately.",
+            indent="  ",
+        )
     else:
-        click.echo("  --no-restart specified: enabled flag is persisted but the connector")
-        click.echo("  setup won't run until you restart the gateway manually.")
+        ux.subhead(
+            "--no-restart specified: enabled flag is persisted but the connector "
+            "setup won't run until you restart the gateway manually.",
+            indent="  ",
+        )
     click.echo()
 
     if not yes and not click.confirm("  Proceed?", default=True):
-        click.echo("  Cancelled.")
+        click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
     gc.enabled = True
     try:
         app.cfg.save()
-        click.echo("  ✓ Config saved (guardrail.enabled = true)")
+        ux.ok("Config saved (guardrail.enabled = true)", indent="  ")
     except OSError as exc:
-        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        ux.err(f"Failed to save config: {exc}", indent="  ")
         raise SystemExit(1)
 
     if restart:
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        _restart_services(
+        # Lazy import via module: see disable_cmd above for rationale.
+        from defenseclaw.commands import cmd_setup
+        cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
         )
-        click.echo(f"  ✓ {_connector_label(connector)} connector setup complete")
+        ux.ok(f"{_connector_label(connector)} connector setup complete", indent="  ")
         click.echo()
 
     if app.logger:
         app.logger.log_action(
             "guardrail-enable", "config",
             f"connector={connector} restart={restart}",
+        )
+
+
+@guardrail.command("fail-mode")
+@click.argument("mode", required=False, type=click.Choice(["open", "closed"]))
+@click.option("--restart/--no-restart", default=True,
+              help="Restart the gateway so hooks are regenerated with the new fail mode (default: on).")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def fail_mode_cmd(app: AppContext, mode: str | None, restart: bool, yes: bool) -> None:
+    """Show or change the hook fail mode (response-layer behavior).
+
+    The hook fail mode controls what generated hooks do when the
+    DefenseClaw gateway answers but the answer is bad — a 4xx, an
+    unparseable JSON body, or a missing ``action`` field. Two values
+    are supported:
+
+      \b
+      open   — allow the tool/prompt and log the failure.
+               A misbehaving gateway never bricks your agent.
+               Recommended for almost all installs.
+      closed — block the tool/prompt on any gateway error.
+               Choose for regulated workflows where every prompt
+               MUST be inspected.
+
+    Transport-layer failures (gateway unreachable / 5xx) are NOT
+    governed by this setting — they always allow unless the agent's
+    environment has ``DEFENSECLAW_STRICT_AVAILABILITY=1``. That is
+    the dedicated escape hatch for sites that prefer agent downtime
+    to a missed inspection during a real outage.
+
+    Without an argument this prints the current value. With
+    ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
+    config.yaml and (when --restart is on) restarts the gateway so
+    the regenerated hooks pick up the new value immediately.
+    """
+    gc = app.cfg.guardrail
+    current = (gc.hook_fail_mode or "open").lower()
+    if current not in ("open", "closed"):
+        current = "open"
+
+    if mode is None:
+        click.echo()
+        click.echo(
+            f"  {ux.bold('guardrail.hook_fail_mode:')} "
+            f"{ux.accent(current)}"
+        )
+        click.echo()
+        if current == "open":
+            ux.subhead(
+                "Response-layer failures (4xx, malformed JSON) ALLOW the tool/prompt.",
+                indent="  ",
+            )
+            click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
+        else:
+            ux.subhead(
+                "Response-layer failures (4xx, malformed JSON) BLOCK the tool/prompt.",
+                indent="  ",
+            )
+            click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
+        click.echo()
+        ux.subhead(
+            "Transport-layer failures (gateway unreachable) always allow unless "
+            "DEFENSECLAW_STRICT_AVAILABILITY=1 is set in the agent env.",
+            indent="  ",
+        )
+        click.echo()
+        return
+
+    if mode == current:
+        click.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
+        return
+
+    click.echo()
+    click.echo(
+        f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}"
+    )
+    if mode == "closed":
+        ux.warn(
+            "Response-layer failures will now BLOCK the agent.",
+            indent="  ",
+        )
+        ux.subhead(
+            "A misconfigured gateway response (4xx, bad JSON) will exit 2 from "
+            "every hook. Make sure your gateway is healthy before flipping this.",
+            indent="    ",
+        )
+    else:
+        ux.subhead(
+            "Response-layer failures will now ALLOW the agent and log the failure to "
+            "~/.defenseclaw/logs/hook-failures.jsonl.",
+            indent="  ",
+        )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        # click.Abort routes through Click's exception handler and
+        # cooperates with the result callbacks the setup group
+        # registers (e.g., the auto-restart suppression keyed on
+        # _SETUP_RESTART_HANDLED_KEY in cmd_setup.py); a bare
+        # SystemExit bypasses that machinery.
+        raise click.Abort()
+
+    gc.hook_fail_mode = mode
+    try:
+        app.cfg.save()
+        ux.ok(f"Config saved (guardrail.hook_fail_mode = {mode})", indent="  ")
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise click.Abort()
+
+    if restart and gc.enabled:
+        connector = _resolve_active_connector(app.cfg)
+        # Lazy import via module: see disable_cmd above for rationale.
+        from defenseclaw.commands import cmd_setup
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=connector,
+        )
+        ux.ok("Gateway restarted, hooks regenerated with the new fail mode.", indent="  ")
+        click.echo()
+    elif not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-fail-mode", "config",
+            f"old={current} new={mode} restart={restart}",
         )

@@ -318,6 +318,292 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 	}
 }
 
+// TestIsLoopbackGatewayHost pins the host-classification helper used
+// by gatewayShouldConnectForConfiguredConnector. The string-only
+// (no DNS) contract is load-bearing: resolving names at predicate
+// time would add a failure mode and a startup-time race to a pure
+// decision function. Cases below cover every shape we expect to see
+// in real config.yaml files plus a few bad-input shapes the helper
+// must not panic on.
+func TestIsLoopbackGatewayHost(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		// Empty / canonical defaults.
+		{"", true},
+		{" ", true},
+		{"localhost", true},
+		{"LOCALHOST", true},
+		{"127.0.0.1", true},
+		// Anywhere in 127.0.0.0/8 is loopback per RFC 1122.
+		{"127.0.0.5", true},
+		{"127.255.255.254", true},
+		// IPv6 loopback in plain and bracketed forms.
+		{"::1", true},
+		{"[::1]", true},
+		// Non-loopback IPs (LAN, public).
+		{"0.0.0.0", false},
+		{"10.0.0.5", false},
+		{"192.168.1.10", false},
+		{"172.16.5.20", false},
+		{"203.0.113.1", false},
+		// Hostnames are non-loopback by design — no DNS resolution.
+		{"gw.example.com", false},
+		{"openclaw.fleet", false},
+		// Garbage strings must not panic and must default non-loopback
+		// (so a typo errs on the side of letting the dial loop run
+		// rather than silently disabling fleet integration).
+		{"not-an-ip-or-host:::", false},
+	}
+	for _, tc := range cases {
+		t.Run(strings.ReplaceAll(tc.host, " ", "_space_"), func(t *testing.T) {
+			got := isLoopbackGatewayHost(tc.host)
+			if got != tc.want {
+				t.Errorf("isLoopbackGatewayHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGatewayShouldConnectForConfiguredConnector pins the WS dial
+// gate. Mirror of TestProxyShouldBindForConnector — the two
+// predicates control sibling subsystems (proxy listener vs upstream
+// WS client) and operators expect them to behave consistently
+// across modes. A regression that flipped this matrix would either:
+//
+//   - re-introduce the "Gateway: RECONNECTING forever" symptom on
+//     codex/claudecode dev boxes (pre-fix behavior), or
+//   - silently disable fleet dial for openclaw users on upgrade,
+//     breaking every OpenClaw install.
+//
+// Each row exercises one cell of (connector × host × fleet_mode).
+// FleetMode override cases live at the bottom — they MUST win over
+// the connector + host derivation, so a typo in fleet_mode falls
+// THROUGH (not "default to disabled") to preserve operator intent.
+func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
+	cases := []struct {
+		name      string
+		connector string
+		host      string
+		fleetMode string
+		want      bool
+	}{
+		// openclaw / zeptoclaw always dial — fleet WS is their data path.
+		{"openclaw_loopback", "openclaw", "127.0.0.1", "", true},
+		{"openclaw_remote", "openclaw", "gw.example.com", "", true},
+		{"zeptoclaw_loopback", "zeptoclaw", "127.0.0.1", "", true},
+		{"zeptoclaw_remote", "zeptoclaw", "10.0.0.5", "", true},
+
+		// codex / claudecode + loopback host = standalone (no dial).
+		{"codex_loopback_default", "codex", "127.0.0.1", "", false},
+		{"codex_empty_host", "codex", "", "", false},
+		{"codex_localhost", "codex", "localhost", "", false},
+		{"codex_ipv6_loopback", "codex", "::1", "", false},
+		{"codex_ipv6_loopback_bracketed", "codex", "[::1]", "", false},
+		{"claudecode_loopback_default", "claudecode", "127.0.0.1", "", false},
+
+		// codex / claudecode + non-loopback host = operator wired in
+		// a fleet, dial through.
+		{"codex_lan_host", "codex", "10.0.0.5", "", true},
+		{"codex_fqdn_host", "codex", "gw.example.com", "", true},
+		{"claudecode_lan_host", "claudecode", "192.168.1.10", "", true},
+		// 0.0.0.0 (bind-all) is intentionally treated as non-loopback —
+		// operators using it usually mean "any iface", which implies
+		// a real listener.
+		{"codex_bind_all", "codex", "0.0.0.0", "", true},
+
+		// Empty / unknown connector with no override → DISABLED.
+		// Reconnect spam against an unconfigured upstream is the
+		// worst possible default for a brand-new install.
+		{"empty_connector", "", "127.0.0.1", "", false},
+		{"unknown_connector", "frobozz", "127.0.0.1", "", false},
+
+		// FleetMode override wins over connector + host. Synonyms
+		// (enabled / on / true and disabled / off / false) all map
+		// to the same boolean so operators can spell it however
+		// they prefer.
+		{"override_enabled_codex_loopback", "codex", "127.0.0.1", "enabled", true},
+		{"override_on_codex_loopback", "codex", "127.0.0.1", "on", true},
+		{"override_true_codex_loopback", "codex", "127.0.0.1", "true", true},
+		{"override_disabled_openclaw_loopback", "openclaw", "127.0.0.1", "disabled", false},
+		{"override_off_openclaw", "openclaw", "127.0.0.1", "off", false},
+		{"override_false_openclaw", "openclaw", "127.0.0.1", "false", false},
+		// auto / "" / typos all fall through to derivation.
+		{"override_auto_codex_loopback", "codex", "127.0.0.1", "auto", false},
+		{"override_typo_codex_loopback", "codex", "127.0.0.1", "enabledd", false},
+		{"override_whitespace_codex_remote", "codex", "10.0.0.5", "  Auto  ", true},
+		// Case-insensitive enum comparison.
+		{"override_uppercase_enabled", "codex", "127.0.0.1", "ENABLED", true},
+		{"override_mixed_case_disabled", "openclaw", "127.0.0.1", "Disabled", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Guardrail: config.GuardrailConfig{Connector: tc.connector},
+				Gateway: config.GatewayConfig{
+					Host:      tc.host,
+					FleetMode: tc.fleetMode,
+				},
+			}
+			got := gatewayShouldConnectForConfiguredConnector(cfg)
+			if got != tc.want {
+				t.Errorf("gatewayShouldConnectForConfiguredConnector(connector=%q host=%q fleet_mode=%q) = %v, want %v",
+					tc.connector, tc.host, tc.fleetMode, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("nil_cfg", func(t *testing.T) {
+		if got := gatewayShouldConnectForConfiguredConnector(nil); got != false {
+			t.Errorf("gatewayShouldConnectForConfiguredConnector(nil) = %v, want false", got)
+		}
+	})
+}
+
+// TestRunGatewayLoop_StandaloneShortCircuits is the integration-level
+// pin for the codex+loopback "no OpenClaw fleet" path: when the gate
+// returns false, runGatewayLoop must publish StateDisabled with the
+// summary metadata AND must NOT call ConnectWithRetry. The latter is
+// the bug we're protecting against — pre-fix, this path spun
+// "dialing ws://127.0.0.1:18789" forever, which we still see in
+// some operators' gateway.log files.
+//
+// We exercise the helper directly rather than NewSidecar+Run so the
+// test stays at unit speed (no real WebSocket, no audit DB, no real
+// goroutine fan-out) while still hitting the full short-circuit
+// branch including the lifecycle event emission.
+func TestRunGatewayLoop_StandaloneShortCircuits(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		DataDir: tmp,
+		Guardrail: config.GuardrailConfig{
+			Connector: "codex",
+			Enabled:   true,
+		},
+		Gateway: config.GatewayConfig{
+			Host:      "127.0.0.1",
+			Port:      18789,
+			FleetMode: "auto",
+		},
+		Claw: config.ClawConfig{Mode: "codex"},
+	}
+
+	s := &Sidecar{
+		cfg:    cfg,
+		health: NewSidecarHealth(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.runGatewayLoop(ctx) }()
+
+	// Wait briefly to let the helper publish StateDisabled before
+	// ctx fires. 50ms is generous — the short-circuit is synchronous
+	// up to the <-ctx.Done() park, no I/O involved.
+	time.Sleep(50 * time.Millisecond)
+
+	snap := s.health.Snapshot()
+	if got := snap.Gateway.State; got != StateDisabled {
+		t.Errorf("gateway.State = %q, want %q (standalone short-circuit failed)", got, StateDisabled)
+	}
+	if snap.Gateway.Details == nil {
+		t.Fatalf("gateway.Details = nil, want summary/connector/host metadata")
+	}
+	if got, _ := snap.Gateway.Details["connector"].(string); got != "codex" {
+		t.Errorf("gateway.Details.connector = %q, want %q", got, "codex")
+	}
+	if got, _ := snap.Gateway.Details["host"].(string); got != "127.0.0.1" {
+		t.Errorf("gateway.Details.host = %q, want %q", got, "127.0.0.1")
+	}
+	if got, _ := snap.Gateway.Details["summary"].(string); !strings.Contains(got, "standalone") {
+		t.Errorf("gateway.Details.summary = %q, want substring %q", got, "standalone")
+	}
+	if got, _ := snap.Gateway.Details["hint"].(string); got == "" {
+		t.Errorf("gateway.Details.hint is empty, want non-empty operator-facing hint")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runGatewayLoop returned error %v, want nil", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("runGatewayLoop did not return after ctx cancel — short-circuit branch is leaking the goroutine")
+	}
+}
+
+// TestRunGatewayLoop_StandaloneRespectsFleetModeOverride proves the
+// `gateway.fleet_mode: enabled` escape hatch lets a codex+local-OpenClaw
+// operator force the dial loop on. We can't actually dial in a unit
+// test (no fixture WS server), but we CAN observe that the function
+// did NOT take the standalone short-circuit (state stays at
+// StateReconnecting once the loop enters its first ConnectWithRetry
+// attempt). Capturing that state-transition delta is enough — the
+// branch logic is what we're protecting against regression here.
+func TestRunGatewayLoop_StandaloneRespectsFleetModeOverride(t *testing.T) {
+	cfg := &config.Config{
+		DataDir: t.TempDir(),
+		Guardrail: config.GuardrailConfig{
+			Connector: "codex",
+			Enabled:   true,
+		},
+		Gateway: config.GatewayConfig{
+			Host:      "127.0.0.1",
+			Port:      1, // unreachable port — first dial will fail
+			FleetMode: "disabled",
+		},
+		Claw: config.ClawConfig{Mode: "codex"},
+	}
+	if gatewayShouldConnectForConfiguredConnector(cfg) {
+		t.Fatalf("fleet_mode=disabled override failed: predicate returned true for codex+disabled")
+	}
+	cfg.Gateway.FleetMode = "enabled"
+	if !gatewayShouldConnectForConfiguredConnector(cfg) {
+		t.Fatalf("fleet_mode=enabled override failed: predicate returned false for codex+loopback+enabled")
+	}
+}
+
+// TestSidecarFleetRPCsEnabled pins the watcher-side gate. The three
+// callsites in handleSkill/Plugin/MCP admission paths each guard
+// their s.client.* RPC on s.fleetRPCsEnabled() so the watcher
+// doesn't spam "...failed: gateway: not connected" once per blocked
+// admission in standalone mode. fleetRPCsEnabled MUST track
+// gatewayShouldConnectForConfiguredConnector exactly — drift between
+// the two predicates would re-introduce the noise we just removed.
+func TestSidecarFleetRPCsEnabled(t *testing.T) {
+	cases := []struct {
+		name      string
+		connector string
+		host      string
+		fleetMode string
+		want      bool
+	}{
+		{"codex_loopback_standalone", "codex", "127.0.0.1", "", false},
+		{"codex_remote_fleet", "codex", "10.0.0.5", "", true},
+		{"openclaw_default", "openclaw", "127.0.0.1", "", true},
+		{"override_disabled_on_openclaw", "openclaw", "127.0.0.1", "disabled", false},
+		{"override_enabled_on_codex_loopback", "codex", "127.0.0.1", "enabled", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Sidecar{cfg: &config.Config{
+				Guardrail: config.GuardrailConfig{Connector: tc.connector},
+				Gateway: config.GatewayConfig{
+					Host:      tc.host,
+					FleetMode: tc.fleetMode,
+				},
+			}}
+			if got := s.fleetRPCsEnabled(); got != tc.want {
+				t.Errorf("fleetRPCsEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestShouldRunProviderProbeForConnector(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
@@ -4133,8 +4419,8 @@ func TestHandleGuardrailEvaluate_Fallback(t *testing.T) {
 	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Action != "block" {
-		t.Errorf("action = %q, want block", resp.Action)
+	if resp.Action != "alert" {
+		t.Errorf("action = %q, want alert", resp.Action)
 	}
 	if resp.Severity != "HIGH" {
 		t.Errorf("severity = %q, want HIGH", resp.Severity)

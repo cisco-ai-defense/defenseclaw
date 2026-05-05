@@ -899,6 +899,29 @@ class GuardrailConfig:
     # sandbox. Mirrors
     # ``GuardrailConfig.ClaudeCodeEnforcementEnabled``.
     claudecode_enforcement_enabled: bool = False
+    # ``hook_fail_mode`` is the operator-chosen response-layer fail
+    # mode for every generated hook (codex-hook, claude-code-hook,
+    # inspect-*). Two values are supported:
+    #
+    #   - ``"open"`` (default): when the gateway answers with a 4xx,
+    #     malformed JSON, or a missing action field, hooks ALLOW the
+    #     tool/prompt with a stderr warning and a record in
+    #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. A
+    #     misbehaving gateway that bricks every agent interaction is
+    #     strictly worse UX than a brief observability gap.
+    #
+    #   - ``"closed"``: the same response-layer failures BLOCK the
+    #     tool/prompt. Choose when you'd rather take the agent
+    #     offline than miss a policy decision (regulated workflows
+    #     where every prompt MUST be inspected).
+    #
+    # Transport-layer failures (gateway unreachable / 5xx) are
+    # handled separately by each hook's ``fail_unreachable`` helper
+    # and ALWAYS allow unless the operator opts into strict
+    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
+    # regardless of this field's value. Mirrors
+    # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
+    hook_fail_mode: str = "open"
 
 
 @dataclass
@@ -1502,7 +1525,24 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         hilt=_merge_hilt(hilt_raw),
         codex_enforcement_enabled=raw.get("codex_enforcement_enabled", False),
         claudecode_enforcement_enabled=raw.get("claudecode_enforcement_enabled", False),
+        hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
     )
+
+
+def _normalize_hook_fail_mode(value: Any) -> str:
+    """Coerce a config-loaded value to one of the canonical hook fail-mode
+    sentinels the gateway understands.
+
+    Mirrors ``normalizeHookFailMode`` in
+    ``internal/gateway/connector/subprocess.go``. Anything other than
+    the explicit ``"closed"`` sentinel collapses to ``"open"`` so a
+    typo in config.yaml never accidentally puts the agent into
+    fail-closed mode — silently fail-open is strictly safer than
+    silently fail-closed for response-layer failures.
+    """
+    if isinstance(value, str) and value.strip().lower() == "closed":
+        return "closed"
+    return "open"
 
 
 def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
@@ -1705,16 +1745,44 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
 
 
 def _warn_disable_redaction_config(cfg: Config) -> None:
-    """Emit the persistent redaction kill-switch warning once per process."""
+    """Emit the persistent redaction kill-switch warning once per process.
+
+    Colors the prefix and verb yellow when stderr is a TTY so the
+    operator notices it among the rest of a busy install log. Falls
+    back to plain text on non-TTY (CI logs, ``script``, ``script -a``,
+    redirected stderr) so build tooling that pattern-matches against
+    the message keeps working unchanged. We deliberately do NOT
+    obey ``NO_COLOR`` here because this warning is high-severity —
+    everyone should see it visibly highlighted when they have a TTY,
+    and ``NO_COLOR`` users have a plain-text fallback either way.
+    """
     global _privacy_disable_redaction_warned
     if not cfg.privacy.disable_redaction or _privacy_disable_redaction_warned:
         return
     _privacy_disable_redaction_warned = True
+
+    # Yellow + bold prefix, yellow body. On non-TTY we drop the
+    # ANSI codes entirely so the existing pattern-matchers in
+    # tests/CI keep working. ``click.style`` honors NO_COLOR
+    # implicitly, but for this single high-severity warning we
+    # also want it visible to TTY users who set NO_COLOR for OTHER
+    # reasons (e.g. screen readers that prefer cleaner panels) —
+    # so we manually gate on isatty only.
+    try:
+        is_tty = sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        is_tty = False
+    if is_tty:
+        prefix = "\x1b[1;33m⚠ warning:\x1b[0m \x1b[33m"
+        suffix = "\x1b[0m"
+    else:
+        prefix, suffix = "warning: ", ""
+
     print(
-        "warning: privacy.disable_redaction=true — ALL sinks (audit DB, "
-        "OTel logs, webhooks, Splunk HEC) will receive UNREDACTED prompts, "
-        "judge bodies, and verdict reasons. Disable in shared/multi-tenant "
-        "deployments via `defenseclaw config set privacy.disable_redaction false`.",
+        f"{prefix}privacy.disable_redaction=true — ALL sinks (audit DB, "
+        f"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED prompts, "
+        f"judge bodies, and verdict reasons. Disable in shared/multi-tenant "
+        f"deployments via `defenseclaw config set privacy.disable_redaction false`.{suffix}",
         file=sys.stderr,
     )
 

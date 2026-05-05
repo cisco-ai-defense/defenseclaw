@@ -324,7 +324,7 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 		if pid, err := strconv.Atoi(string(data)); err == nil {
 			if proc, err := os.FindProcess(pid); err == nil {
 				if err := proc.Signal(syscall.Signal(0)); err == nil {
-					fmt.Printf("Watchdog is already running (PID %d)\n", pid)
+					Warn(fmt.Sprintf("Watchdog is already running (PID %d)", pid))
 					return nil
 				}
 			}
@@ -348,8 +348,8 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("watchdog: start background: %w", err)
 	}
 
-	fmt.Printf("Watchdog started (PID %d)\n", cmd.pid)
-	fmt.Printf("  Log file: %s\n", logPath)
+	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)
+	fmt.Printf("  %s %s\n", Style("Log file:", "fg=bright_black", "bold"), logPath)
 	return nil
 }
 
@@ -385,27 +385,27 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
-		fmt.Println("Watchdog is not running")
+		fmt.Println(Dim("Watchdog is not running"))
 		return nil
 	}
 
 	pid, err := strconv.Atoi(string(data))
 	if err != nil {
-		fmt.Println("Watchdog is not running (invalid PID file)")
+		fmt.Println(Dim("Watchdog is not running (invalid PID file)"))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		fmt.Println("Watchdog is not running")
+		fmt.Println(Dim("Watchdog is not running"))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
 	fmt.Printf("Stopping watchdog (PID %d)... ", pid)
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		fmt.Println("already stopped")
+		fmt.Println(Dim("already stopped"))
 		_ = os.Remove(pidPath)
 		return nil
 	}
@@ -424,7 +424,7 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	}
 
 	_ = os.Remove(pidPath)
-	fmt.Println("OK")
+	fmt.Println(Style("OK", "fg=green", "bold"))
 	return nil
 }
 
@@ -438,39 +438,39 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
 		if enabled {
-			fmt.Println("Watchdog: enabled but not running")
-			fmt.Println("  Start with: defenseclaw-gateway watchdog start")
+			Warn("Watchdog: enabled but not running")
+			Subhead("Start with: defenseclaw-gateway watchdog start")
 		} else {
-			fmt.Println("Watchdog: disabled")
-			fmt.Println("  Enable in config: gateway.watchdog.enabled = true")
+			fmt.Println(Dim("Watchdog: disabled"))
+			Subhead("Enable in config: gateway.watchdog.enabled = true")
 		}
 		return nil
 	}
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		fmt.Println("Watchdog: not running (invalid PID file)")
+		fmt.Println(Dim("Watchdog: not running (invalid PID file)"))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		fmt.Printf("Watchdog: not running (PID %d not found)\n", pid)
+		Warn(fmt.Sprintf("Watchdog: not running (PID %d not found)", pid))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		fmt.Printf("Watchdog: not running (PID %d is stale)\n", pid)
+		Warn(fmt.Sprintf("Watchdog: not running (PID %d is stale)", pid))
 		_ = os.Remove(pidPath)
 		return nil
 	}
 
-	fmt.Printf("Watchdog: running (PID %d)\n", pid)
+	fmt.Printf("Watchdog: %s (PID %d)\n", Style("running", "fg=green", "bold"), pid)
 
 	state := loadWatchdogState(dataDir)
-	fmt.Printf("  Last known state: %s\n", state.String())
+	fmt.Printf("  %s %s\n", Style("Last known state:", "fg=bright_black", "bold"), state.String())
 
 	return nil
 }

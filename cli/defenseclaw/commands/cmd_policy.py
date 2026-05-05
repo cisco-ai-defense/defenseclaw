@@ -26,6 +26,7 @@ from pathlib import Path
 import click
 import yaml
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
@@ -226,8 +227,8 @@ def create(
 
     _save_policy(dest, data)
 
-    click.secho(f"Policy '{name}' created at {dest}", fg="green")
-    click.echo(f"  Activate with: defenseclaw policy activate {name}")
+    ux.ok(f"Policy '{name}' created at {dest}")
+    click.echo(f"  {ux.dim('Activate with:')} defenseclaw policy activate {name}")
 
     if app.logger:
         app.logger.log_action("policy-create", name, f"path={dest}")
@@ -244,12 +245,12 @@ def list_policies(app: AppContext) -> None:
     files = _list_policy_files(app)
 
     if not files:
-        click.echo("No policies found.")
+        ux.warn("No policies found.")
         return
 
     active = _get_active_policy_name(app)
 
-    click.echo("Available policies:")
+    click.echo(f"{ux.bold('Available policies:')}")
     click.echo()
     for path in files:
         data = _load_policy(path)
@@ -259,20 +260,20 @@ def list_policies(app: AppContext) -> None:
         is_active = pname == active
 
         prefix = "  * " if is_active else "    "
-        label = click.style(pname, bold=True)
+        label = ux.bold(pname)
         tag = ""
         if is_builtin:
-            tag = click.style(" [built-in]", dim=True)
+            tag += ux.dim(" [built-in]")
         if is_active:
-            tag += click.style(" [active]", fg="green")
+            tag += ux._style(" [active]", fg="green")
 
         click.echo(f"{prefix}{label}{tag}")
         if desc:
-            click.echo(f"      {desc}")
+            click.echo(f"      {ux.dim(desc)}")
 
     click.echo()
-    click.echo("  Activate a policy: defenseclaw policy activate <name>")
-    click.echo("  Show details:      defenseclaw policy show <name>")
+    click.echo(f"  {ux.dim('Activate a policy:')} defenseclaw policy activate <name>")
+    click.echo(f"  {ux.dim('Show details:')}      defenseclaw policy show <name>")
 
 
 # ---------------------------------------------------------------------------
@@ -292,19 +293,25 @@ def show(app: AppContext, name: str) -> None:
     data = _load_policy(path)
     pname = data.get("name", name)
     desc = data.get("description", "")
-
-    click.secho(f"Policy: {pname}", bold=True)
-    if desc:
-        click.echo(f"  {desc}")
-    click.echo()
-
     admission = data.get("admission", {})
-    click.echo("Admission:")
-    click.echo(f"  scan_on_install:        {admission.get('scan_on_install', True)}")
-    click.echo(f"  allow_list_bypass_scan: {admission.get('allow_list_bypass_scan', True)}")
+
+    click.echo(ux.bold(f"Policy: {pname}"))
+    if desc:
+        ux.subhead(desc, indent="  ")
     click.echo()
 
-    click.echo("Severity Actions:")
+    click.echo(ux.bold("Admission:"))
+    click.echo(
+        f"  {ux._style('scan_on_install:', fg='bright_black', bold=True)}"
+        f"        {admission.get('scan_on_install', True)}"
+    )
+    click.echo(
+        f"  {ux._style('allow_list_bypass_scan:', fg='bright_black', bold=True)} "
+        f"{admission.get('allow_list_bypass_scan', True)}"
+    )
+    click.echo()
+
+    click.echo(ux.bold("Severity Actions:"))
     actions = data.get("skill_actions", {})
     for sev in SEVERITIES:
         action = actions.get(sev, {})
@@ -321,8 +328,13 @@ def show(app: AppContext, name: str) -> None:
         else:
             color = "green"
 
-        click.echo(f"  {sev.upper():10s}  ", nl=False)
-        click.secho(f"install={install_a:5s}  file={file_a:10s}  runtime={runtime_a}", fg=color)
+        click.echo(
+            f"  {ux.bold(sev.upper().ljust(10))}  "
+            + ux._style(
+                f"install={install_a:5s}  file={file_a:10s}  runtime={runtime_a}",
+                fg=color,
+            )
+        )
 
     overrides = data.get("scanner_overrides", {})
     if overrides:
@@ -434,7 +446,7 @@ def activate(app: AppContext, name: str) -> None:
 
     _sync_opa_data(app, data)
 
-    click.secho(f"Policy '{name}' activated.", fg="green")
+    ux.ok(f"Policy '{name}' activated.")
     if app.logger:
         app.logger.log_action("policy-activate", name, f"source={path}")
 
@@ -472,7 +484,7 @@ def delete(app: AppContext, name: str) -> None:
         raise SystemExit(1)
 
     os.remove(real_path)
-    click.echo(f"Policy '{name}' deleted.")
+    ux.ok(f"Policy '{name}' deleted.")
     if app.logger:
         app.logger.log_action("policy-delete", name, "")
 
@@ -498,14 +510,14 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
     # 1. Validate data.json
     data_json_path = os.path.join(rd, "data.json")
     if not os.path.isfile(data_json_path):
-        click.secho(f"FAIL: data.json not found at {data_json_path}", fg="red")
+        ux.err(f"FAIL: data.json not found at {data_json_path}")
         raise SystemExit(1)
 
     try:
         with open(data_json_path) as f:
             data = json.load(f)
     except json.JSONDecodeError as exc:
-        click.secho(f"FAIL: data.json is not valid JSON: {exc}", fg="red")
+        ux.err(f"FAIL: data.json is not valid JSON: {exc}")
         raise SystemExit(1)
 
     required_keys = ["config", "actions", "severity_ranking"]
@@ -546,11 +558,11 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
                 errors.append(f"scanner_overrides.{scanner_type}.{sev}.install: invalid '{action['install']}'")
 
     if errors:
-        click.secho("data.json validation errors:", fg="red")
+        ux.err("data.json validation errors:")
         for e in errors:
             click.echo(f"  - {e}")
     else:
-        click.secho("data.json: OK", fg="green")
+        ux.ok("data.json: OK")
 
     # 2. Try to compile Rego
     rego_compiled = _try_rego_compile(rd)
@@ -558,7 +570,7 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
     if errors or not rego_compiled:
         raise SystemExit(1)
 
-    click.secho("All validations passed.", fg="green")
+    ux.ok("All validations passed.")
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +589,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     rd = rego_dir or _rego_dir()
 
     if not os.path.isdir(rd):
-        click.secho(f"error: rego directory not found: {rd}", fg="red", err=True)
+        ux.err(f"error: rego directory not found: {rd}")
         raise SystemExit(1)
 
     cmd = ["opa", "test", rd]
@@ -587,12 +599,15 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
-        click.secho("error: 'opa' binary not found on PATH", fg="red", err=True)
-        click.echo("  Install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa", err=True)
-        click.echo("  Or: brew install opa", err=True)
+        ux.err("error: 'opa' binary not found on PATH")
+        ux.subhead(
+            "Install OPA: https://www.openpolicyagent.org/docs/latest/#running-opa",
+            indent="  ",
+        )
+        ux.subhead("Or: brew install opa", indent="  ")
         raise SystemExit(1)
     except subprocess.TimeoutExpired:
-        click.secho("error: opa test timed out after 60s", fg="red", err=True)
+        ux.err("error: opa test timed out after 60s")
         raise SystemExit(1)
 
     if result.stdout:
@@ -601,10 +616,10 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         click.echo(result.stderr.rstrip(), err=True)
 
     if result.returncode != 0:
-        click.secho("Tests FAILED.", fg="red")
+        ux.err("Tests FAILED.")
         raise SystemExit(result.returncode)
 
-    click.secho("All Rego tests passed.", fg="green")
+    ux.ok("All Rego tests passed.")
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +664,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Updated {severity.upper()}: {', '.join(changed)}", fg="green")
+    ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
 
 
 @edit.command("scanner")
@@ -679,7 +694,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
                 del overrides[scanner_type]
             _save_policy(path, data)
             _sync_opa_data(app, data)
-            click.secho(f"Removed {scanner_type}/{severity.upper()} override.", fg="green")
+            ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
         return
@@ -704,7 +719,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}", fg="green")
+    ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
 
 
 @edit.command("guardrail")
@@ -768,7 +783,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Guardrail updated: {', '.join(changed)}", fg="green")
+    ux.ok(f"Guardrail updated: {', '.join(changed)}")
 
 
 @edit.command("firewall")
@@ -830,7 +845,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
 
     _save_policy(path, data)
     _sync_opa_data(app, data)
-    click.secho(f"Firewall updated: {', '.join(changed)}", fg="green")
+    ux.ok(f"Firewall updated: {', '.join(changed)}")
 
 
 # ---------------------------------------------------------------------------
@@ -939,7 +954,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     - config (admission settings, enforcement)
     - actions (with install field)
     - scanner_overrides
-    - guardrail (thresholds, patterns, severity_mappings)
+    - guardrail (thresholds, HILT, patterns, severity_mappings)
     - firewall (domains, ports, blocked destinations)
     - audit (retention, logging flags)
 
@@ -1023,7 +1038,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     if guardrail:
         opa_data.setdefault("guardrail", {})
         for key in ("block_threshold", "alert_threshold", "cisco_trust_level",
-                     "patterns", "severity_mappings"):
+                     "patterns", "severity_mappings", "hilt"):
             if key in guardrail:
                 opa_data["guardrail"][key] = guardrail[key]
 
@@ -1067,7 +1082,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         json.dump(opa_data, f, indent=2)
         f.write("\n")
 
-    click.echo(f"OPA data.json synced at {data_json_path}")
+    click.echo(ux.dim(f"OPA data.json synced at {data_json_path}"))
 
 
 def _try_rego_compile(rego_dir: str) -> bool:
@@ -1079,16 +1094,16 @@ def _try_rego_compile(rego_dir: str) -> bool:
             if f.endswith(".rego") and not f.endswith("_test.rego")
         ]
         if not rego_files:
-            click.secho("FAIL: no .rego files found", fg="red")
+            ux.err("FAIL: no .rego files found")
             return False
 
         cmd = ["opa", "check", "--strict"] + rego_files
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0:
-            click.secho(f"Rego compilation: OK ({len(rego_files)} modules)", fg="green")
+            ux.ok(f"Rego compilation: OK ({len(rego_files)} modules)")
             return True
         else:
-            click.secho("Rego compilation errors:", fg="red")
+            ux.err("Rego compilation errors:")
             if result.stderr:
                 click.echo(result.stderr.rstrip())
             if result.stdout:
@@ -1099,5 +1114,5 @@ def _try_rego_compile(rego_dir: str) -> bool:
         click.echo("  Install OPA for full validation: brew install opa")
         return True
     except subprocess.TimeoutExpired:
-        click.secho("FAIL: opa check timed out", fg="red")
+        ux.err("FAIL: opa check timed out")
         return False

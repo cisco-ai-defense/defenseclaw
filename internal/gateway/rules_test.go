@@ -132,6 +132,51 @@ func TestSecretRules_HexSecretPrecision(t *testing.T) {
 	}
 }
 
+func TestSecretRules_BlockBoundary(t *testing.T) {
+	criticalCases := []struct {
+		name   string
+		input  string
+		wantID string
+	}{
+		{"Google API key", `AIzaSyD-abcdefghijklmnopqrstuvwxyz12345`, "SEC-GOOGLE"},
+		{"Slack bot token", `xoxb-123456789012-1234567890123-AbCdEfGh`, "SEC-SLACK-TOKEN"},
+		{"Slack webhook", `https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX`, "SEC-SLACK-WEBHOOK"},
+		{"Discord webhook", `https://discord.com/api/webhooks/123456789/abcdef_GHIJKL-12345`, "SEC-DISCORD-WEBHOOK"},
+		{"connection string", `postgres://admin:s3cret@db.prod.internal:5432/maindb`, "SEC-CONNSTR"},
+		{"SendGrid key", `SG.abcdefghijklmnopqrstuv.wxyz1234567890ABCDEFG`, "SEC-SENDGRID"},
+	}
+
+	for _, tc := range criticalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := ScanAllRules(tc.input, "send_message")
+			assertRuleSeverity(t, findings, tc.wantID, "CRITICAL")
+		})
+	}
+
+	highCases := []struct {
+		name   string
+		input  string
+		wantID string
+	}{
+		{"generic bearer", `Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789`, "SEC-BEARER"},
+		// Synthesised Twilio-shaped fixture — assembled at runtime so
+		// the literal "SK<32 hex>" form never appears in source. GitHub
+		// secret scanning flags any committed copy of that exact shape
+		// (even in clearly-fake test fixtures), so we keep the bytes
+		// out of the file. The scanner under test only sees the joined
+		// string, which is what matters for the assertion.
+		{"Twilio key-shaped token", "SK" + "0123456789abcdef0123456789abcdef", "SEC-TWILIO"},
+		{"generic hex secret", `api_key="0123456789abcdef0123456789abcdef"`, "SEC-HEX-SECRET"},
+	}
+
+	for _, tc := range highCases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := ScanAllRules(tc.input, "send_message")
+			assertRuleSeverity(t, findings, tc.wantID, "HIGH")
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Command rules — true positives
 // ---------------------------------------------------------------------------
@@ -289,16 +334,7 @@ func TestCommandRules_SystemctlPrecision(t *testing.T) {
 
 	risky := `systemctl enable backdoor.service`
 	riskyFindings := ScanAllRules(risky, "shell")
-	found := false
-	for _, f := range riskyFindings {
-		if f.RuleID == "CMD-SYSTEMCTL" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected CMD-SYSTEMCTL for suspicious persistence enablement")
-	}
+	assertRuleSeverity(t, riskyFindings, "CMD-SYSTEMCTL", "CRITICAL")
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +382,33 @@ func TestSensitivePathRules(t *testing.T) {
 				t.Errorf("expected rule %s to match, got findings: %v", tc.wantID, findingIDs(findings))
 			}
 		})
+	}
+}
+
+func TestSensitivePathRules_BlockBoundary(t *testing.T) {
+	criticalCases := []struct {
+		name   string
+		input  string
+		wantID string
+	}{
+		{"SSH private key", `read /home/user/.ssh/id_ed25519`, "PATH-SSH-KEY"},
+		{"git credentials", `~/.git-credentials`, "PATH-GIT-CREDS"},
+		{"netrc credentials", `~/.netrc`, "PATH-NETRC"},
+		{"/proc environ", `/proc/1/environ`, "PATH-PROC-ENVIRON"},
+	}
+
+	for _, tc := range criticalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := ScanAllRules(tc.input, "read_file")
+			assertRuleSeverity(t, findings, tc.wantID, "CRITICAL")
+		})
+	}
+
+	findings := ScanAllRules(`/home/user/.ssh/id_rsa.pub`, "read_file")
+	for _, f := range findings {
+		if f.RuleID == "PATH-SSH-KEY" {
+			t.Fatalf("public SSH keys should not trigger private-key blocking: %+v", findings)
+		}
 	}
 }
 
@@ -638,6 +701,19 @@ func filterBySeverity(findings []RuleFinding, severity string) []RuleFinding {
 		}
 	}
 	return out
+}
+
+func assertRuleSeverity(t *testing.T, findings []RuleFinding, ruleID, severity string) {
+	t.Helper()
+	for _, f := range findings {
+		if f.RuleID == ruleID {
+			if f.Severity != severity {
+				t.Fatalf("%s severity = %s, want %s (findings: %v)", ruleID, f.Severity, severity, findingIDs(findings))
+			}
+			return
+		}
+	}
+	t.Fatalf("expected rule %s, got findings: %v", ruleID, findingIDs(findings))
 }
 
 // ---------------------------------------------------------------------------

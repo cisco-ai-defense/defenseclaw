@@ -66,15 +66,15 @@ var secretRules = []PatternRule{
 	{ID: "SEC-GITHUB-TOKEN", Pattern: regexp.MustCompile(`(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36,}`), Title: "GitHub token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-GITHUB-PAT", Pattern: regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{22,}`), Title: "GitHub fine-grained PAT", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-GITLAB", Pattern: regexp.MustCompile(`glpat-[a-zA-Z0-9\-_]{20,}`), Title: "GitLab personal access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-GOOGLE", Pattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`), Title: "Google API key", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-SLACK-TOKEN", Pattern: regexp.MustCompile(`xox[bpors]-[0-9a-zA-Z\-]{10,}`), Title: "Slack token", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-SLACK-WEBHOOK", Pattern: regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+`), Title: "Slack webhook URL", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-DISCORD-WEBHOOK", Pattern: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_\-]+`), Title: "Discord webhook URL", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-GOOGLE", Pattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`), Title: "Google API key", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "SEC-SLACK-TOKEN", Pattern: regexp.MustCompile(`xox[bpors]-[0-9a-zA-Z\-]{10,}`), Title: "Slack token", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "SEC-SLACK-WEBHOOK", Pattern: regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+`), Title: "Slack webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-DISCORD-WEBHOOK", Pattern: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_\-]+`), Title: "Discord webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-PRIVKEY", Pattern: regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----`), Title: "Private key", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential"}},
 	{ID: "SEC-JWT", Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9\-_]{10,}\.eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_.+/=]+`), Title: "JWT token", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"credential"}},
-	{ID: "SEC-CONNSTR", Pattern: regexp.MustCompile(`(?:mongodb|postgres|mysql|redis|amqp)://[^:\s]+:[^@\s]+@`), Title: "Connection string with credentials", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "SEC-CONNSTR", Pattern: regexp.MustCompile(`(?:mongodb|postgres|mysql|redis|amqp)://[^:\s]+:[^@\s]+@`), Title: "Connection string with credentials", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
 	{ID: "SEC-BEARER", Pattern: regexp.MustCompile(`(?i)(?:authorization|bearer)\s*[:=]\s*Bearer\s+[A-Za-z0-9\-_.~+/]+=*`), Title: "Bearer token in header", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
-	{ID: "SEC-SENDGRID", Pattern: regexp.MustCompile(`SG\.[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,}`), Title: "SendGrid API key", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential"}},
+	{ID: "SEC-SENDGRID", Pattern: regexp.MustCompile(`SG\.[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,}`), Title: "SendGrid API key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-TWILIO", Pattern: regexp.MustCompile(`SK[0-9a-fA-F]{32}`), Title: "Twilio API key", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
 	{ID: "SEC-NPM-TOKEN", Pattern: regexp.MustCompile(`npm_[a-zA-Z0-9]{36,}`), Title: "npm access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 	{ID: "SEC-PYPI-TOKEN", Pattern: regexp.MustCompile(`pypi-[A-Za-z0-9\-_]{50,}`), Title: "PyPI API token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
@@ -116,7 +116,7 @@ var commandRules = []PatternRule{
 	// System file manipulation
 	{ID: "CMD-ETC-WRITE", Pattern: regexp.MustCompile(`(?i)>\s*/etc/`), Title: "Write redirect to /etc/", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file"}},
 	{ID: "CMD-CRONTAB", Pattern: regexp.MustCompile(`(?i)\bcrontab\s+(?:-[a-zA-Z]\s+)*(?:-e|-r|-l|/|['"<>|])`), Title: "Crontab modification", Severity: "HIGH", Confidence: 0.75, Tags: []string{"persistence"}},
-	{ID: "CMD-SYSTEMCTL", Pattern: regexp.MustCompile(`(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b`), Title: "Suspicious systemd persistence enablement", Severity: "HIGH", Confidence: 0.82, Tags: []string{"persistence"}},
+	{ID: "CMD-SYSTEMCTL", Pattern: regexp.MustCompile(`(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b`), Title: "Suspicious systemd persistence enablement", Severity: "CRITICAL", Confidence: 0.82, Tags: []string{"persistence"}},
 	// Network reconnaissance
 	{ID: "CMD-NETCAT-LISTEN", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*)*-?l`), Title: "Netcat listener", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "reverse-shell"}},
 	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
@@ -135,7 +135,7 @@ var commandRules = []PatternRule{
 
 var sensitivePathRules = []PatternRule{
 	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?\b`), Title: "SSH key file path", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])`), Title: "SSH private key file path", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-AWS-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.aws/credentials`), Title: "AWS credentials file", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-AWS-CONFIG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.aws/config`), Title: "AWS config file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-KUBE", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.kube/config`), Title: "Kubernetes config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
@@ -143,8 +143,8 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-GNUPG", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.gnupg/`), Title: "GPG keyring access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-NPMRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.npmrc`), Title: "npm config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.git-credentials`), Title: "Git credentials file", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.netrc`), Title: "netrc credentials file", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
+	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
 	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
 	// canonical "/etc/passwd", space-separated "etc passwd", backslash
@@ -158,7 +158,7 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-ETC-PASSWD", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)`), Title: "/etc/passwd access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file"}},
 	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file", "credential"}},
 	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file", "privilege"}},
-	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential"}},
+	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
 	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 }
 

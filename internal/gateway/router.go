@@ -763,6 +763,10 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	}
 
 	verdict.Action = guardrailRuntimeActionForGuardrail(r.guardrailCfg, verdict.Severity, false)
+	// Mirror the proxy/inspector clamp on this independent prompt-scan
+	// path so the session-message surface obeys the same contract:
+	// prompts get audited as alerts; tool-call gate handles enforcement.
+	clampPromptDirectionVerdict(verdict, "prompt")
 	if verdict.Action == guardrailActionAllow {
 		return
 	}

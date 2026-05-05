@@ -54,6 +54,39 @@ import click
     help="Enable the LLM Judge adjudicator (reuses the unified DEFENSECLAW_LLM_KEY).",
 )
 @click.option(
+    "--fail-mode",
+    type=click.Choice(["open", "closed"], case_sensitive=False),
+    default=None,
+    help=(
+        "Hook fail-mode for response-layer failures. 'open' (default) allows + logs; "
+        "'closed' blocks. Transport failures (gateway down / 5xx) ALWAYS allow unless "
+        "DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting. "
+        "Quickstart is non-interactive — pick 'closed' here to opt the agent into a "
+        "stricter posture without later running `defenseclaw guardrail fail-mode`."
+    ),
+)
+@click.option(
+    "--human-approval/--no-human-approval",
+    "human_approval",
+    default=None,
+    help=(
+        "HITL: require operator approval before risky tool actions (action mode "
+        "only — observe mode logs without blocking, regardless of this flag). "
+        "Quickstart is non-interactive: omit the flag to keep whatever the "
+        "current config has."
+    ),
+)
+@click.option(
+    "--hilt-min-severity",
+    type=click.Choice(["HIGH", "MEDIUM", "LOW", "CRITICAL"], case_sensitive=False),
+    default=None,
+    help=(
+        "Lowest finding severity that triggers a HITL approval prompt. Only "
+        "meaningful when --human-approval is on. CRITICAL findings always "
+        "block."
+    ),
+)
+@click.option(
     "--non-interactive",
     is_flag=True,
     help="Never prompt. Same as --yes; kept for install-script compat.",
@@ -91,6 +124,9 @@ def quickstart_cmd(
     mode: str | None,
     scanner_mode: str,
     with_judge: bool,
+    fail_mode: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
     non_interactive: bool,
     yes: bool,
     force: bool,
@@ -127,6 +163,16 @@ def quickstart_cmd(
         start_gateway=not skip_gateway,
         verify=True,
         force=force,
+        # Empty string when --fail-mode is omitted means "leave the
+        # existing cfg.guardrail.hook_fail_mode untouched". Quickstart
+        # is non-interactive so we never prompt — operators flip this
+        # via the flag or via `defenseclaw guardrail fail-mode`.
+        hook_fail_mode=(fail_mode or "").lower(),
+        # HITL: ``None`` preserves the current toggle, so a quickstart
+        # rerun never silently disables HITL on an operator who set
+        # it via ``defenseclaw setup guardrail`` last week.
+        human_approval=human_approval,
+        hilt_min_severity=hilt_min_severity or "",
     ))
     if json_summary:
         click.echo(json.dumps(report.to_dict(), indent=2))

@@ -79,6 +79,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 
 OVERLAY_FILENAME = "custom-providers.json"
@@ -606,44 +607,41 @@ def provider_add(
 
         _write_overlay(path, overlay)
 
-    click.secho(f"provider {clean_name!r} written to {path}", fg="green")
-    click.echo(f"  domains: {', '.join(entry['domains'])}")
+    click.echo()
+    ux.ok(f"provider {clean_name!r} written to {path}")
+    click.echo(f"  {ux.dim('domains:')} {', '.join(entry['domains'])}")
     if entry.get("env_keys"):
-        click.echo(f"  env_keys: {', '.join(entry['env_keys'])}")
+        click.echo(f"  {ux.dim('env_keys:')} {', '.join(entry['env_keys'])}")
     if entry.get("profile_id"):
-        click.echo(f"  profile_id: {entry['profile_id']}")
+        click.echo(f"  {ux.dim('profile_id:')} {entry['profile_id']}")
 
     if no_reload:
-        click.echo("sidecar reload skipped (--no-reload).")
+        ux.subhead("sidecar reload skipped (--no-reload).")
         return
     status = _reload_sidecar(app)
     if status == _RELOAD_OK:
-        click.secho("sidecar reloaded provider registry.", fg="green")
+        ux.ok("sidecar reloaded provider registry.")
     elif status == _RELOAD_UNAUTHORIZED:
-        click.secho(
+        ux.err(
             "sidecar rejected reload: unauthorized. "
             "Set OPENCLAW_GATEWAY_TOKEN (or guardrail.token in config.yaml) "
             "to a value the gateway accepts.",
-            fg="red",
         )
     elif status == _RELOAD_FORBIDDEN:
-        click.secho(
+        ux.err(
             "sidecar rejected reload: forbidden. "
             "The token was accepted but the sidecar declined the request; "
             "check the gateway's access logs.",
-            fg="red",
         )
     elif status == _RELOAD_SERVER_ERROR:
-        click.secho(
+        ux.warn(
             "sidecar returned an error on reload — the overlay is on "
             "disk but not yet live. Check the gateway log.",
-            fg="yellow",
         )
     else:
-        click.secho(
+        ux.warn(
             "sidecar not reachable on guardrail port — restart the "
             "gateway for the overlay to take effect.",
-            fg="yellow",
         )
 
 
@@ -674,11 +672,11 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
             if str(p.get("name", "")).lower() != name.strip().lower()
         ]
         if len(overlay.providers) == before:
-            click.secho(f"no overlay provider named {name!r}", fg="yellow")
+            ux.warn(f"no overlay provider named {name!r}")
             sys.exit(1)
 
         _write_overlay(path, overlay)
-    click.secho(f"removed overlay provider {name!r} from {path}", fg="green")
+    ux.ok(f"removed overlay provider {name!r} from {path}")
 
     if no_reload:
         return
@@ -695,9 +693,9 @@ def provider_list(app: AppContext) -> None:
     path = _overlay_path(app)
     overlay = _read_overlay(path)
     if not overlay.providers and not overlay.ollama_ports:
-        click.echo(f"(no overlay entries) — {path}")
+        click.echo(f"{ux.dim('(no overlay entries)')} — {path}")
         return
-    click.echo(f"overlay: {path}")
+    click.echo(f"{ux.bold('overlay:')} {path}")
     for p in overlay.providers:
         click.echo(f"  - {p.get('name')}: {', '.join(p.get('domains') or [])}")
     if overlay.ollama_ports:

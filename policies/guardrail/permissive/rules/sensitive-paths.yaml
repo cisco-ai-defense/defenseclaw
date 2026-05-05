@@ -8,9 +8,9 @@ rules:
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-SSH-KEY
-    pattern: '(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?\b'
-    title: "SSH key file path"
-    severity: HIGH
+    pattern: '(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])'
+    title: "SSH private key file path"
+    severity: CRITICAL
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CREDS
@@ -58,13 +58,13 @@ rules:
   - id: PATH-GIT-CREDS
     pattern: '(?:~|\$HOME|/home/\w+|/root)/\.git-credentials'
     title: "Git credentials file"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NETRC
     pattern: '(?:~|\$HOME|/home/\w+|/root)/\.netrc'
     title: "netrc credentials file"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
@@ -94,7 +94,7 @@ rules:
   - id: PATH-PROC-ENVIRON
     pattern: '/proc/(?:\d+|self)/environ'
     title: "/proc environ access"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.90
     tags: [credential]
   - id: PATH-HISTORY

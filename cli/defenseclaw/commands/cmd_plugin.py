@@ -734,15 +734,55 @@ def _print_plugin_list_table(
     console.print(table)
 
 
+def _looks_like_explicit_path(value: str) -> bool:
+    """Return ``True`` when ``value`` clearly looks like a filesystem
+    path the operator typed deliberately, rather than a bare plugin
+    name.
+
+    A path qualifies when:
+
+      * It is absolute (``/foo/bar``, ``C:\\plugins\\foo`` on
+        Windows, etc.).
+      * It contains the OS path separator (``./local-plugin``,
+        ``../sibling-plugin``, ``some/dir``).
+      * On platforms with an alternate separator (``os.altsep`` —
+        Windows ``/``), the alternate separator counts too.
+
+    A bare token like ``"my-plugin"`` does NOT qualify, even if it
+    coincidentally matches a directory in the current working
+    directory. That's the entire point of this helper: we don't want
+    plugin resolution to depend on the operator's cwd.
+    """
+    if not value:
+        return False
+    if os.path.isabs(value):
+        return True
+    if os.sep in value:
+        return True
+    if os.altsep and os.altsep in value:
+        return True
+    return False
+
+
 def _resolve_plugin_dir(name_or_path: str, plugin_dir: str, connector: str = "") -> str | None:
     """Resolve a plugin name or path to a directory on disk.
 
     Resolution order:
-      1. Literal path (already a directory)
+      1. Literal path (already a directory) — only when the input
+         clearly looks like a path (absolute, or contains a path
+         separator). A bare token like ``my-plugin`` is intentionally
+         NOT treated as a relative path here, even if a directory of
+         that name happens to exist in the current working directory:
+         operators run this command from anywhere, and a bare name
+         must always resolve via plugin lookup, not via cwd-relative
+         coincidence. Otherwise running the command from a workspace
+         that contains a same-named folder silently mis-resolves to
+         the local folder and skips the OpenClaw / DefenseClaw lookup
+         entirely.
       2. Subdirectory under DefenseClaw's plugin_dir
       3. Connector plugin by name (openclaw CLI or filesystem)
     """
-    if os.path.isdir(name_or_path):
+    if _looks_like_explicit_path(name_or_path) and os.path.isdir(name_or_path):
         return name_or_path
 
     candidate = os.path.join(plugin_dir, name_or_path)

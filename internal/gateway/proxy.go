@@ -72,6 +72,11 @@ type ContentInspector interface {
 	Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
 	InspectMidStream(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
 	SetScannerMode(mode string)
+	// SetHILTConfig pushes the live human-in-the-loop view from
+	// config.yaml into the inspector so the Rego policy reads
+	// ``input.hilt.*`` from the latest values. Implementations that
+	// don't care about HILT (e.g., test doubles) can no-op.
+	SetHILTConfig(enabled bool, minSeverity string)
 }
 
 // GuardrailProxy is a pure Go LLM proxy that accepts OpenAI-compatible
@@ -96,6 +101,7 @@ type GuardrailProxy struct {
 	gatewayToken string // gateway token, accepted in X-DC-Auth
 	notify       *NotificationQueue
 	webhooks     *WebhookDispatcher
+	hilt         *HILTApprovalManager
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -151,6 +157,12 @@ func (p *GuardrailProxy) SetDefaultPolicyID(id string) {
 	p.defaultPolicyID = id
 }
 
+// SetHILTApprovalManager wires the human approval bridge used for guardrail
+// confirm verdicts.
+func (p *GuardrailProxy) SetHILTApprovalManager(m *HILTApprovalManager) {
+	p.hilt = m
+}
+
 // agentNameForRequest picks the most specific agent name available.
 // Stream-provided hints win over the router default.
 func (p *GuardrailProxy) agentNameForRequest(hint string) string {
@@ -192,6 +204,103 @@ func (p *GuardrailProxy) postCallContext(parent context.Context) (context.Contex
 	return context.WithTimeout(detached, timeout)
 }
 
+func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, verdict *ScanVerdict, direction, model, mode string) {
+	// Prompt-surface UX contract: confirm verdicts on the prompt
+	// direction have no native approval surface on any current
+	// connector. The chat-message HITL fallback that used to fire
+	// here is unusable (operators couldn't reply in the right
+	// format; the message itself re-triggered scanners), so we
+	// demote prompt confirms to alert before any HILT call. We
+	// deliberately scope this guard to confirm — block verdicts on
+	// the prompt direction are already demoted upstream in the
+	// inspector chokepoint, and tests that construct synthetic
+	// block verdicts directly should not be intercepted here.
+	if verdict != nil && isPromptDirection(direction) && verdict.Action == guardrailActionConfirm {
+		original := verdict.Action
+		verdict.Action = guardrailActionAlert
+		verdict.Reason = appendVerdictReason(verdict.Reason,
+			fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
+		return
+	}
+
+	if verdict == nil || mode != "action" || verdict.Action != guardrailActionConfirm {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	subject := guardrailApprovalSubject(direction, model)
+	if p == nil || p.hilt == nil {
+		verdict.Action = guardrailActionAlert
+		verdict.Reason = appendVerdictReason(verdict.Reason, "human approval unsupported on this connector surface")
+		if p != nil && p.logger != nil {
+			_ = p.logger.LogActionCtx(ctx, hiltStatusUnsupported, subject, "surface=guardrail-proxy")
+		}
+		return
+	}
+
+	approved, status, err := p.hilt.Request(ctx, hiltSessionID(ctx, r), subject, verdict.Severity, verdict.Reason, 0)
+	if approved {
+		verdict.Action = guardrailActionAllow
+		verdict.Reason = appendVerdictReason(verdict.Reason, "human approved once")
+		return
+	}
+	if status == hiltStatusUnsupported {
+		verdict.Action = guardrailActionAlert
+		verdict.Reason = appendVerdictReason(verdict.Reason, "human approval unsupported on this connector surface")
+		return
+	}
+
+	verdict.Action = guardrailActionBlock
+	verdict.Reason = appendVerdictReason(verdict.Reason, hiltBlockReason(status, err))
+}
+
+func guardrailApprovalSubject(direction, model string) string {
+	surface := "guardrail action"
+	switch strings.TrimSpace(direction) {
+	case "prompt":
+		surface = "LLM prompt"
+	case "completion":
+		surface = "LLM completion"
+	case "tool-call", "tool_call":
+		surface = "LLM tool call"
+	}
+	if strings.TrimSpace(model) == "" {
+		return surface
+	}
+	return surface + " for " + strings.TrimSpace(model)
+}
+
+func hiltSessionID(ctx context.Context, r *http.Request) string {
+	if r != nil {
+		env := audit.EnvelopeFromContext(r.Context())
+		return firstNonEmpty(
+			SessionIDFromContext(r.Context()),
+			r.Header.Get(SessionIDHeader),
+			r.Header.Get("X-Conversation-ID"),
+			env.SessionID,
+		)
+	}
+	env := audit.EnvelopeFromContext(ctx)
+	return firstNonEmpty(SessionIDFromContext(ctx), env.SessionID)
+}
+
+func hiltBlockReason(status string, err error) string {
+	switch status {
+	case hiltStatusDenied:
+		return "human approval denied"
+	case hiltStatusTimeout:
+		return "human approval timed out"
+	case hiltStatusUnsupported:
+		return "human approval unavailable"
+	}
+	if err != nil {
+		return "human approval failed"
+	}
+	return "human approval not granted"
+}
+
 // NewGuardrailProxy constructs and wires a proxy. All provider routing is
 // handled by the fetch interceptor's X-DC-Target-URL and X-AI-Auth headers.
 // The conn parameter is the active connector for the configured agent framework;
@@ -230,6 +339,16 @@ func NewGuardrailProxy(
 		cfg.DetectionStrategyToolCall,
 		cfg.JudgeSweep,
 	)
+	// Make config.yaml the single source of truth for HILT. The Rego policy
+	// previously read `data.guardrail.hilt.*` from policies/rego/data.json,
+	// which silently drifted out of sync with config.yaml whenever the
+	// wizard updated one but not the other (see _sync_guardrail_hilt_to_opa
+	// in cli/defenseclaw/commands/cmd_setup.py). Passing HILT through the
+	// Rego `input` removes that coupling: finalize() now wires the live
+	// config into every evaluation, and the policy prefers `input.hilt`
+	// over `data.guardrail.hilt` (the data path is preserved as a fallback
+	// for non-gateway callers like direct `opa eval` runs).
+	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
 	// Wire OTel span emission when telemetry is enabled. The
 	// inspector only sees a closure, so the telemetry dep stays
 	// localized to the proxy wiring layer.
@@ -766,13 +885,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectionText := promptInspectionText(userText)
-	if userText != "" && !isHeartbeatMessage(inspectionText, partial.Messages) {
+	if userText != "" &&
+		!isHeartbeatMessage(inspectionText, partial.Messages) &&
+		!isSessionStartupMessage(inspectionText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
+		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
 		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, nil, nil,
@@ -975,8 +1097,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			t0 := time.Now()
 			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
-			elapsed := time.Since(t0)
 			postCancel()
+			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
+			elapsed := time.Since(t0)
 			p.logPostCall(label, content, verdict, elapsed, nil)
 			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, nil, nil,
 				rawTelemetryField{key: "raw_response_body", raw: respBody})
@@ -1027,6 +1150,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if accumulated.Len() > 0 {
 				initVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 					[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+				p.resolveConfirm(r.Context(), r, initVerdict, "completion", label, mode)
 				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
 						initVerdict.Severity, redaction.Reason(initVerdict.Reason))
@@ -1095,6 +1219,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
 						midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 							[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+						p.resolveConfirm(r.Context(), r, midVerdict, "completion", label, mode)
 						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
 								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
@@ -1133,8 +1258,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			t0 := time.Now()
 			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
-			elapsed := time.Since(t0)
 			postCancel()
+			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
+			elapsed := time.Since(t0)
 			p.logPostCall(label, content, verdict, elapsed, nil)
 			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, nil, nil,
 				rawTelemetryString("raw_response_content", content))
@@ -1653,7 +1779,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	inspectionText := promptInspectionText(userText)
-	if userText != "" && !isHeartbeatMessage(inspectionText, req.Messages) {
+	if userText != "" &&
+		!isHeartbeatMessage(inspectionText, req.Messages) &&
+		!isSessionStartupMessage(inspectionText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
@@ -1670,6 +1798,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
+		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		elapsed := time.Since(t0)
 
 		// End guardrail span with decision.
@@ -1809,8 +1938,9 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 		postCtx, postCancel := p.postCallContext(r.Context())
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
-		elapsed := time.Since(t0)
 		postCancel()
+		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
+		elapsed := time.Since(t0)
 
 		// End guardrail span with decision.
 		if p.otel != nil && grSpan != nil {
@@ -2019,6 +2149,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
 			midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+			p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
 					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
@@ -2070,6 +2201,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if accumulated.Len() > 0 && mode == "action" {
 			initVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
 					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
@@ -2143,8 +2275,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		postCtx, postCancel := p.postCallContext(r.Context())
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
-		elapsed := time.Since(t0)
 		postCancel()
+		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
+		elapsed := time.Since(t0)
 
 		// End guardrail span with decision.
 		if p.otel != nil && grSpan != nil {
@@ -2855,7 +2988,7 @@ func deriveMasterKey(dataDir string) string {
 
 var (
 	runtimeCacheMu sync.Mutex
-	runtimeCache   map[string]string
+	runtimeCache   map[string]any
 	runtimeCacheTs time.Time
 )
 
@@ -2878,7 +3011,14 @@ func (p *GuardrailProxy) reloadRuntimeConfig() {
 		return
 	}
 
-	var cfg map[string]string
+	// Decode into map[string]any so heterogeneous value types
+	// (string for mode, bool for hilt_enabled, etc.) round-trip
+	// without breaking the whole reload. The Python writer in
+	// cli/defenseclaw/commands/cmd_setup.py::_write_guardrail_runtime
+	// owns the wire schema; per-key extraction below validates each
+	// field independently so a future schema addition can't poison
+	// existing fields.
+	var cfg map[string]any
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		runtimeCache = nil
 		runtimeCacheTs = time.Now()
@@ -2890,21 +3030,77 @@ func (p *GuardrailProxy) reloadRuntimeConfig() {
 	p.applyRuntime(cfg)
 }
 
-func (p *GuardrailProxy) applyRuntime(cfg map[string]string) {
+// runtimeString extracts a string value from the heterogeneous runtime
+// cache and reports whether the caller should treat it as set. We
+// intentionally treat absent keys, non-string values, and empty
+// strings as "not provided" so the caller's `_, ok := cfg["x"]; if ok`
+// logic keeps working even when a future schema bump adds a new key
+// type that isn't representable as a string.
+func runtimeString(cfg map[string]any, key string) (string, bool) {
+	raw, ok := cfg[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := raw.(string)
+	if !ok || s == "" {
+		return "", false
+	}
+	return s, true
+}
+
+// runtimeBool extracts a bool value from the runtime cache. JSON's bool
+// can't decode into a string, so we accept either a real bool or the
+// canonical string forms ("true"/"false") for forward compatibility
+// with future serializers. Anything else is treated as absent so a
+// malformed value can't accidentally flip a sensitive toggle.
+func runtimeBool(cfg map[string]any, key string) (bool, bool) {
+	raw, ok := cfg[key]
+	if !ok {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func (p *GuardrailProxy) applyRuntime(cfg map[string]any) {
 	p.rtMu.Lock()
 	defer p.rtMu.Unlock()
 
-	if m, ok := cfg["mode"]; ok && (m == "observe" || m == "action") {
+	if m, ok := runtimeString(cfg, "mode"); ok && (m == "observe" || m == "action") {
 		p.mode = m
 	}
-	if sm, ok := cfg["scanner_mode"]; ok && (sm == "local" || sm == "remote" || sm == "both") {
+	if sm, ok := runtimeString(cfg, "scanner_mode"); ok && (sm == "local" || sm == "remote" || sm == "both") {
 		p.inspector.SetScannerMode(sm)
 	}
-	if bm, ok := cfg["block_message"]; ok {
+	if bm, ok := runtimeString(cfg, "block_message"); ok {
 		p.blockMessage = bm
 	}
-	if newName, ok := cfg["connector"]; ok {
+	if newName, ok := runtimeString(cfg, "connector"); ok {
 		p.switchConnectorLocked(newName)
+	}
+
+	// HILT hot-reload. The inspector caches the HILT view that the
+	// Rego policy reads as `input.hilt`; without re-applying it here
+	// an operator who flips guardrail.hilt.enabled in config.yaml (or
+	// runs ``defenseclaw config set guardrail.hilt.enabled ...``)
+	// keeps the boot-time value until the next sidecar restart. Both
+	// fields must be present together — a partial update (just one
+	// of the two) would let a half-edited runtime file rotate the
+	// inspector into an unintended state, so we only re-sync when
+	// hilt_enabled is explicitly set.
+	if enabled, ok := runtimeBool(cfg, "hilt_enabled"); ok {
+		minSev, _ := runtimeString(cfg, "hilt_min_severity")
+		p.inspector.SetHILTConfig(enabled, minSev)
 	}
 }
 

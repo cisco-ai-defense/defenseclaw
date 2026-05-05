@@ -57,6 +57,12 @@ def _make_app(connector: str):
         api_key_env="",
         fallbacks=[],
     )
+    # Human-In-the-Loop (HILT) sub-namespace mirrors GuardrailConfig.hilt.
+    # Required because the wizard now asks about HILT inline whenever
+    # the operator picks action mode (was previously buried under
+    # advanced options). Defaulting to ``enabled=False`` matches the
+    # canonical config dataclass default.
+    hilt = SimpleNamespace(enabled=False, min_severity="HIGH")
     gc = SimpleNamespace(
         enabled=False,
         connector=connector,
@@ -71,6 +77,7 @@ def _make_app(connector: str):
         original_model="",
         block_message="",
         judge=judge,
+        hilt=hilt,
         detection_strategy="",
         detection_strategy_prompt="",
         detection_strategy_completion="",
@@ -79,6 +86,7 @@ def _make_app(connector: str):
         rule_pack_dir="",
         codex_enforcement_enabled=False,
         claudecode_enforcement_enabled=False,
+        hook_fail_mode="",
     )
 
     cfg = SimpleNamespace(
@@ -133,6 +141,14 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.detection_strategy, "regex_only")
         self.assertFalse(gc.judge.enabled,
                          "Judge must default off in observability mode (no proxy → no judge)")
+        # The observability-only branch now also surfaces the
+        # hook fail-mode prompt on initial setup. The mocked
+        # ``click.prompt`` returns "1" (open), so the persisted value
+        # must reflect that — confirms the prompt was reached and the
+        # operator's answer was applied. Previously this branch
+        # bypassed the prompt entirely, leaving operators with no
+        # opportunity to set hook_fail_mode at first-time setup.
+        self.assertEqual(gc.hook_fail_mode, "open")
 
     def test_claudecode_observability_flow_sets_enforcement_false(self):
         gc = self._drive_observability("claudecode")
@@ -145,6 +161,10 @@ class TestObservabilityWizard(unittest.TestCase):
                          "claudecode wizard run must not flip codex enforcement")
         self.assertEqual(gc.mode, "observe")
         self.assertFalse(gc.judge.enabled)
+        # See test_codex_observability_flow_sets_enforcement_false
+        # for the rationale: hook_fail_mode prompt now fires in the
+        # observability-only path too on initial setup.
+        self.assertEqual(gc.hook_fail_mode, "open")
 
     def test_observability_decline_disables_connector(self):
         """When the operator declines the single confirm prompt, the
@@ -167,8 +187,27 @@ class TestObservabilityWizard(unittest.TestCase):
     def test_claudecode_action_flow_sets_enforcement_true(self):
         app, gc = _make_app("claudecode")
 
-        prompts = iter(["2", "2", "1"])
-        confirms = iter([True, False, False])
+        # Prompt order in the guardrail-setup branch (integration=2)
+        # for action mode:
+        #   1. integration mode ("2" = guardrail setup w/ proxy)
+        #   2. enforcement mode ("2" = action)
+        #   3. hook fail-mode prompt ("1" = open) — fires because
+        #      gc.mode starts empty (initial setup) AND we flipped
+        #      to action.
+        #   4. NEW (post-HITL-hoist) HILT severity prompt — fires
+        #      only when the prior ``Human approval?`` confirm
+        #      returned True. We answer NO to that confirm below
+        #      so this severity prompt does NOT fire here.
+        #   5. scanner engine ("1" = local)
+        #
+        # Confirms (in order):
+        #   a. "Enable guardrail?" → True
+        #   b. NEW: "Human approval for risky actions?" → False
+        #      (so no HILT severity prompt fires next)
+        #   c. "Enable LLM judge?" → False
+        #   d. "Configure advanced options?" → False
+        prompts = iter(["2", "2", "1", "1"])
+        confirms = iter([True, False, False, False])
 
         with patch("defenseclaw.commands.cmd_setup.click.prompt",
                    side_effect=lambda *args, **kwargs: next(prompts)), \
@@ -187,11 +226,28 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.mode, "action")
         self.assertEqual(gc.scanner_mode, "local")
         self.assertFalse(gc.judge.enabled)
+        # The fail-mode prompt persisted "open" — confirming the
+        # wizard's interactive choice survives without the operator
+        # having to hand-edit YAML afterward.
+        self.assertEqual(gc.hook_fail_mode, "open")
+        # HILT was offered (action mode) and declined — gc.hilt
+        # stays at the fixture default. This pins the new inline-
+        # HILT contract: action-mode runs ALWAYS get a HILT
+        # confirm, but declining it is a no-op rather than a
+        # second prompt cascade.
+        self.assertFalse(gc.hilt.enabled)
 
     def test_codex_guardrail_observe_flow_sets_enforcement_true(self):
         app, gc = _make_app("codex")
 
-        prompts = iter(["2", "1", "1"])
+        # Prompt order in the guardrail-setup branch (integration=2):
+        #   1. integration mode ("2" = guardrail setup w/ proxy)
+        #   2. enforcement mode ("1" = observe)
+        #   3. NEW v3 hook fail-mode prompt ("1" = open) — fires on
+        #      initial setup even when mode stays observe, because
+        #      gc.mode starts empty in the fixture.
+        #   4. scanner engine ("1" = local)
+        prompts = iter(["2", "1", "1", "1"])
         confirms = iter([True, False, False])
 
         with patch("defenseclaw.commands.cmd_setup.click.prompt",
@@ -211,6 +267,7 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.mode, "observe")
         self.assertEqual(gc.scanner_mode, "local")
         self.assertFalse(gc.judge.enabled)
+        self.assertEqual(gc.hook_fail_mode, "open")
 
     def test_openclaw_does_not_use_observability_path(self):
         """OpenClaw must fall through to the full enforcement-prompts

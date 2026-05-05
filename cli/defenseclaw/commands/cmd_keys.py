@@ -31,6 +31,7 @@ import json
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
@@ -67,7 +68,7 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
         return
 
     if not statuses:
-        click.echo("  No credentials to report.")
+        click.echo(f"  {ux.dim('No credentials to report.')}")
         return
 
     _render_table(statuses, show_values=show_values)
@@ -89,10 +90,13 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
 
     spec = lookup(env_name)
     if spec is None:
-        click.echo(f"  ⚠ {env_name} is not in the DefenseClaw registry.")
-        click.echo("    Saving anyway — it will be available via os.environ for custom setups.")
+        ux.warn(f"{env_name} is not in the DefenseClaw registry.")
+        ux.subhead(
+            "Saving anyway — it will be available via os.environ for custom setups.",
+            indent="    ",
+        )
     else:
-        click.echo(f"  {spec.feature}: {spec.description}")
+        click.echo(f"  {ux.bold(spec.feature + ':')} {spec.description}")
 
     if value is None:
         value = click.prompt(
@@ -104,7 +108,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
         )
 
     if not value:
-        click.echo("  ✗ No value provided — nothing saved.")
+        ux.err("No value provided — nothing saved.")
         raise click.Abort()
 
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -137,7 +141,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
                 },
             ],
         )
-    click.echo(f"  ✓ Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env")
+    ux.ok(f"Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env", indent="  ")
 
 
 @keys_cmd.command("fill-missing")
@@ -149,15 +153,18 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
 
     statuses = [s for s in classify(app.cfg) if s.missing]
     if not statuses:
-        click.echo("  ✓ No missing required credentials — you're all set.")
+        ux.ok("No missing required credentials — you're all set.")
         return
 
-    click.echo(f"  {len(statuses)} required credential(s) are unset:")
+    ux.warn(f"{len(statuses)} required credential(s) are unset:")
     for s in statuses:
-        click.echo(f"    • {s.resolution.env_name}  —  {s.spec.description}")
+        click.echo(
+            f"    {ux.dim('•')} {ux.bold(s.resolution.env_name)}  "
+            f"{ux.dim('—')}  {s.spec.description}"
+        )
 
     if not yes and not click.confirm("  Enter values now?", default=True):
-        click.echo("  Skipped. Run 'defenseclaw keys set <ENV>' when you're ready.")
+        ux.subhead("Skipped. Run 'defenseclaw keys set <ENV>' when you're ready.")
         return
 
     saved = 0
@@ -171,15 +178,17 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
             show_default=False,
         )
         if not value:
-            click.echo("      ✗ skipped")
+            ux.err("skipped", indent="      ")
             skipped += 1
             continue
         _save_secret_to_dotenv(s.resolution.env_name, value, app.cfg.data_dir)
-        click.echo(f"      ✓ saved ({mask(value)})")
+        ux.ok(f"saved ({mask(value)})", indent="      ")
         saved += 1
 
     click.echo()
-    click.echo(f"  Result: {saved} saved, {skipped} skipped.")
+    click.echo(
+        f"  {ux.bold('Result:')} {saved} saved, {skipped} skipped."
+    )
 
 
 @keys_cmd.command("check")
@@ -194,15 +203,18 @@ def keys_check(app: AppContext) -> None:
     missing = [s for s in statuses if s.missing]
     total_required = sum(1 for s in statuses if s.requirement is Requirement.REQUIRED)
 
-    click.echo(f"  {total_required - len(missing)}/{total_required} required credentials set.")
+    click.echo(
+        f"  {total_required - len(missing)}/{total_required} "
+        f"{ux.bold('required credentials')} set."
+    )
     if missing:
         for s in missing:
-            click.echo(f"  ✗ {s.resolution.env_name}  —  {s.spec.description}")
+            ux.err(f"{s.resolution.env_name}  —  {s.spec.description}", indent="  ")
         # click.get_current_context().exit(1) — plays nicely with
         # CliRunner (gives us a non-zero exit_code) while remaining
         # consistent with other Click commands in this CLI.
         click.get_current_context().exit(1)
-    click.echo("  ✓ all required credentials present")
+    ux.ok("all required credentials present", indent="  ")
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +235,9 @@ def _render_table(statuses: list[CredentialStatus], show_values: bool) -> None:
 
     # Header
     click.echo()
-    click.echo("  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
-    click.echo("  " + "  ".join("─" * widths[i] for i in range(len(headers))))
+    hdr = "  " + "  ".join(ux.bold(h).ljust(widths[i]) for i, h in enumerate(headers))
+    click.echo(hdr)
+    click.echo("  " + "  ".join(ux.dim("─" * widths[i]) for i in range(len(headers))))
     for r in rows:
         click.echo("  " + "  ".join(r[i].ljust(widths[i]) for i in range(len(headers))))
     click.echo()
@@ -254,8 +267,16 @@ def _format_row(s: CredentialStatus, show_values: bool) -> list[str]:
 
 
 def _render_legend() -> None:
-    click.echo("  Legend:  ● required   ○ optional   · not used by current config")
-    click.echo("           Source: 'env' = process environment, 'dotenv' = ~/.defenseclaw/.env, 'unset' = missing")
+    click.echo(
+        f"  {ux.bold('Legend:')}  ● required   ○ optional   · not used by current config"
+    )
+    click.echo(
+        "           "
+        + ux.dim(
+            "Source: 'env' = process environment, 'dotenv' = ~/.defenseclaw/.env, "
+            "'unset' = missing"
+        )
+    )
 
 
 def _status_to_dict(s: CredentialStatus, include_value: bool) -> dict:

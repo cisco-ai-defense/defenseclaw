@@ -171,6 +171,53 @@ func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
 	}
 }
 
+func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testing.T) {
+	_, selfPath, _, _ := runtime.Caller(0)
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
+
+	criticalIDs := map[string]bool{
+		"SEC-GOOGLE":          true,
+		"SEC-SLACK-TOKEN":     true,
+		"SEC-SLACK-WEBHOOK":   true,
+		"SEC-DISCORD-WEBHOOK": true,
+		"SEC-CONNSTR":         true,
+		"SEC-SENDGRID":        true,
+		"PATH-SSH-KEY":        true,
+		"PATH-GIT-CREDS":      true,
+		"PATH-NETRC":          true,
+		"PATH-PROC-ENVIRON":   true,
+		"CMD-SYSTEMCTL":       true,
+	}
+
+	for _, profile := range []string{"strict", "default", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			if rp == nil {
+				t.Fatalf("LoadRulePack(%s) returned nil", profile)
+			}
+			seen := make(map[string]bool, len(criticalIDs))
+			for _, rf := range rp.RuleFiles {
+				for _, rule := range rf.Rules {
+					if !criticalIDs[rule.ID] {
+						continue
+					}
+					seen[rule.ID] = true
+					if rule.Severity != "CRITICAL" {
+						t.Fatalf("%s/%s severity = %q, want CRITICAL", profile, rule.ID, rule.Severity)
+					}
+				}
+			}
+			for id := range criticalIDs {
+				if !seen[id] {
+					t.Fatalf("%s missing expected critical rule %s", profile, id)
+				}
+			}
+		})
+	}
+}
+
 func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
 	_, selfPath, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
